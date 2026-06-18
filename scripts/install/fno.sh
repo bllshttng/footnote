@@ -14,8 +14,9 @@
 #   2. `uv tool install fno` (the published PyPI platform wheel: the Python CLI
 #      plus the three fno-agents* binaries, bundled),
 #   3. verify the installed package is THIS project's before declaring success,
-#   4. print success + the version verified + a PATH hint if uv's tool bin is
-#      not yet on PATH.
+#   4. print success + the version verified, and when uv's tool bin is not yet
+#      on PATH, run `uv tool update-shell` to add it to the right shell profile
+#      (idempotent; opt out with FNO_NO_MODIFY_PATH to get a manual hint only).
 #
 # This is the shell entry to the same bootstrap core the cargo channel
 # (ab-4040eee8) uses via a Rust shim: ensure uv -> uv tool install fno ->
@@ -24,13 +25,17 @@
 # POSIX sh ONLY (runs unmodified under dash and macOS /bin/sh): no bashisms, no
 # arrays, no `local`, no `set -o pipefail`. Fully non-interactive - it is its own
 # stdin under `curl | sh`, so it can never `read` a prompt. Every configuration
-# is an env var (FNO_VERSION, FNO_INSTALL_WHEEL, FNO_INSTALL_DIR).
+# is an env var (FNO_VERSION, FNO_INSTALL_WHEEL, FNO_INSTALL_DIR,
+# FNO_NO_MODIFY_PATH).
 #
 # Env knobs:
 #   FNO_VERSION        pin an exact release (`FNO_VERSION=1.2.3` -> install fno==1.2.3)
 #   FNO_INSTALL_WHEEL  install from a local wheel / any uv spec instead of by-name
 #                      `fno` (used by the clean-machine smoke before the PyPI publish)
 #   FNO_INSTALL_DIR    forwarded to uv as UV_TOOL_BIN_DIR for the tool-bin location
+#   FNO_NO_MODIFY_PATH set to any non-empty value to skip the `uv tool update-shell`
+#                      profile edit and print a manual PATH hint instead (for people
+#                      who manage their own dotfiles)
 set -eu
 
 # --- output helpers --------------------------------------------------------
@@ -217,24 +222,44 @@ print(md["Version"])'
 }
 
 # --- success report --------------------------------------------------------
-# Report the verified version (AC5-UI) and, if uv's tool bin is not on PATH,
-# print the exact PATH-fix hint so a later `fno`/`fno-agents` call does not 127
-# with no explanation (AC3-UI).
+# Report the verified version (AC5-UI) and, when uv's tool bin is not on PATH,
+# make a later `fno`/`fno-agents` call resolvable rather than a bare 127 (AC3-UI).
 report_success() {
 	say "verified fno $FNO_VERIFIED_VERSION (this project's package)."
-	# Hint when uv's tool-bin dir is not on PATH. Check the DIRECTORY against
-	# PATH, not `have fno`: a pre-existing fno earlier on PATH would otherwise
-	# suppress the hint, yet `fno` would run that other binary instead of the one
-	# just verified here (codex P2). The hint names the exact tool-bin dir so a
-	# later fno / fno-agents call resolves to this install, not a placeholder.
+	# Check the DIRECTORY against PATH, not `have fno`: a pre-existing fno earlier
+	# on PATH would otherwise suppress the fix, yet `fno` would run that other
+	# binary instead of the one just verified here (codex P2).
 	case ":${PATH:-}:" in
-		*":$FNO_TOOL_BIN:"*) : ;;
-		*)
-			say "installed, but $FNO_TOOL_BIN is not on your PATH yet."
-			say "add it for this and future shells, e.g.:"
-			say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
+		*":$FNO_TOOL_BIN:"*)
+			say "done. run 'fno --help' to get started."
+			return 0
 			;;
 	esac
+	# Not on PATH. Prefer to fix it the way uv itself does: `uv tool update-shell`
+	# detects the shell (zsh/bash/fish), edits the right profile, and is
+	# idempotent - no hand-rolled "which rc file / is it a login shell / is the
+	# line already there" detection here, which is exactly the cross-shell
+	# bug-farm uv maintains so we don't have to. FNO_NO_MODIFY_PATH opts out for
+	# people who manage their own dotfiles; they get the manual export hint.
+	if [ -n "${FNO_NO_MODIFY_PATH:-}" ]; then
+		say "installed, but $FNO_TOOL_BIN is not on your PATH yet (FNO_NO_MODIFY_PATH set)."
+		say "add it for this and future shells, e.g.:"
+		say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
+		say "done. run 'fno --help' once $FNO_TOOL_BIN is on PATH."
+		return 0
+	fi
+	# Degrade to the manual hint if this uv predates `tool update-shell` or the
+	# profile edit fails for any reason - never leave the user with no PATH fix.
+	if "$FNO_UV" tool update-shell >/dev/null 2>&1; then
+		_shell_name=$(basename "${SHELL:-sh}")
+		say "added $FNO_TOOL_BIN to your $_shell_name profile (via 'uv tool update-shell')."
+		say "restart your shell, or run this to use fno now:"
+		say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
+	else
+		say "installed, but $FNO_TOOL_BIN is not on your PATH yet."
+		say "add it for this and future shells, e.g.:"
+		say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
+	fi
 	say "done. run 'fno --help' to get started."
 }
 
