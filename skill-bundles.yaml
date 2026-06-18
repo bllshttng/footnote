@@ -1,0 +1,146 @@
+# skill-bundles.yaml - declares which canonical content gets bundled into
+# which skill folders. The generator (scripts/generate-skill-bundles.sh)
+# reads this manifest and populates skills/<name>/<dest> from <source>.
+#
+# Three bundle types are supported per skill, all optional and combinable:
+#
+#   files:        # scripts copied with executable bits preserved (cp -p)
+#     - source: scripts/lib/X.sh           # repo-rooted
+#       dest: scripts/lib/X.sh             # relative to skills/<skill>/
+#
+#   references:   # markdown reused across skills; frontmatter stripped
+#     - source: skills/_shared/auto-merge.md
+#       dest: references/auto-merge.md
+#
+#   agents:       # subagent prompts; frontmatter REWRITTEN with subagent_meta
+#     - source: skills/target/SKILL.md
+#       dest: agents/archer.md
+#       rewrite_frontmatter: subagent      # required
+#       subagent_meta:                     # required
+#         name: archer
+#         description: "TDD-disciplined task executor..."
+#         model: opus
+#         tools: [Read, Write, Edit, Bash]
+#
+# Source paths are relative to repo root. Dest paths are relative to
+# skills/<skill>/. The generator creates parent directories as needed.
+#
+# When a skill needs a script, two valid call shapes exist:
+#   - ${SKILL_DIR}/scripts/X (preferred for portability/self-containment)
+#   - fno <verb> (preferred when the polished CLI surface is the right
+#     abstraction, e.g. cross-skill or cross-tool calls)
+#
+# Both paths trace back to the same canonical source declared here.
+bundles:
+  - skill: blueprint
+    files:
+      - source: scripts/lib/parse-claims-arg.sh
+        dest: scripts/lib/parse-claims-arg.sh
+      - source: scripts/validate-plan.sh
+        dest: scripts/validate-plan.sh
+      - source: scripts/check-product-md.sh
+        dest: scripts/check-product-md.sh
+
+  - skill: target
+    files:
+      # pr-merge.sh + consolidate-artifacts.sh entries removed (ab-d4c98550):
+      # `fno pr merge` was internalized to fno/pr/_merge.py, so the skill no
+      # longer runs pr-merge.sh from its folder. _merge.py's best-effort
+      # per-PR artifact consolidation shells to the CANONICAL
+      # scripts/lib/consolidate-artifacts.sh (private git-rev-parse root),
+      # not a bundled copy, so neither needs to ship in the skill.
+      # config.sh stays: handoff.sh sources the bundled sibling at runtime.
+      - source: scripts/lib/config.sh
+        dest: scripts/lib/config.sh
+      # set-gate.sh entry removed (ab-d0337fbc): gate flips no longer exist.
+      # events-validate.sh stays - emit_event_raw consumers still validate.
+      - source: scripts/lib/events-validate.sh
+        dest: scripts/lib/events-validate.sh
+      # events-schema.yaml: events-validate.sh self-locates the bundled schema
+      # via ../../docs/architecture/events-schema.yaml from its own dir. In the
+      # canonical plugin that climbs to <plugin>/docs/...; in the BUNDLED skill
+      # (scripts/lib/ inside skills/target/) it climbs to skills/target/docs/...,
+      # so co-locate the schema there or the portable-skill `set-gate.sh` path
+      # (no `fno` CLI, foreign cwd) cannot find it (ab-fe825805, Codex on #412).
+      - source: docs/architecture/events-schema.yaml
+        dest: docs/architecture/events-schema.yaml
+      # phase-verifier.sh + blocked-taxonomy.sh entries removed (ab-d0337fbc):
+      # the phase machine and BLOCKED taxonomy died with the wedge.
+      # graph-resolve.sh: sourced from references/init-state.md to
+      # resolve ab-XXXX backlog node IDs to plan_path.
+      - source: scripts/lib/graph-resolve.sh
+        dest: scripts/lib/graph-resolve.sh
+    references:
+      # Bundled from skills/_shared/ so the target folder is self-contained.
+      # SKILL.md and references/* link to these via references/X.md (no path
+      # escapes outside the skill folder).
+      - source: skills/_shared/auto-merge.md
+        dest: references/auto-merge.md
+      - source: skills/_shared/worktree.md
+        dest: references/worktree.md
+
+  - skill: megawalk
+    files:
+      # graph-resolve.sh: sourced from references/argument-parsing.md
+      # to resolve ab-XXXX backlog node IDs to plan_path.
+      - source: scripts/lib/graph-resolve.sh
+        dest: scripts/lib/graph-resolve.sh
+    references:
+      # Bundled from skills/_shared/ so the megawalk folder is self-contained.
+      - source: skills/_shared/auto-merge.md
+        dest: references/auto-merge.md
+      - source: skills/_shared/worktree.md
+        dest: references/worktree.md
+      - source: skills/_shared/megawalk-migration.md
+        dest: references/megawalk-migration.md
+    agents:
+      # Bundled subagent prompt for the per-task worker dispatched from
+      # megawalk's loop. Canonical is the /target SKILL.md body; the
+      # bundler strips skill frontmatter and prepends subagent frontmatter
+      # via rewrite_frontmatter: subagent. This removes the last Skill()
+      # runtime delegation from megawalk (the loop now dispatches via
+      # Task/Agent with this prompt instead of Skill("target", ...)).
+      - source: skills/target/SKILL.md
+        dest: agents/archer.md
+        rewrite_frontmatter: subagent
+        subagent_meta:
+          name: archer
+          description: "TDD-disciplined task executor spawned by megawalk per backlog task. Drives the full target pipeline (plan -> implement -> review -> ship) in isolated context. Returns RESULT: SUCCESS|FAILED|BLOCKED."
+          model: opus
+          tools:
+            - Read
+            - Write
+            - Edit
+            - Grep
+            - Glob
+            - Bash
+
+  # Cluster router: /fix. The default fix loop (SKILL.md) and the investigate
+  # flow (investigate.md) plus their references are canonical in the folder.
+  # Only the shared iteration/verification references come from /target.
+  - skill: fix
+    files:
+      - source: skills/target/references/iteration-loop.md
+        dest: references/iteration-loop.md
+      - source: skills/target/references/verification-patterns.md
+        dest: references/verification-patterns.md
+
+  # Cluster router: /think. Mode bodies (think.md, what-if.md, panel.md) and
+  # their references are canonical in the folder. Shared references come from
+  # /target (iteration/verification) and /blueprint (the discovery protocol).
+  - skill: think
+    files:
+      - source: skills/target/references/iteration-loop.md
+        dest: references/iteration-loop.md
+      - source: skills/target/references/verification-patterns.md
+        dest: references/verification-patterns.md
+      - source: skills/blueprint/references/discovery-gate.md
+        dest: references/discovery-gate.md
+
+  # Cluster router: /do. Mode bodies (flat.md, waves.md), orchestrator.py,
+  # scripts/, and the wave-orchestration references are canonical in the folder.
+  # Only the shared Multi-CLI tool mapping comes from /target.
+  - skill: do
+    files:
+      - source: skills/target/references/cli-tool-mapping.md
+        dest: references/cli-tool-mapping.md

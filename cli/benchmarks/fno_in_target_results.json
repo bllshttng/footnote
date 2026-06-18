@@ -1,0 +1,147 @@
+{
+  "sessions": [
+    {
+      "session_id": "606e89e4-af74-4593-8723-a54ca0fef2e3",
+      "fno_call_count": 19,
+      "fno_wall_seconds": 4.2061,
+      "phase_wall_seconds": 228.0,
+      "ratio": 0.018448,
+      "phases_completed": [
+        "do",
+        "review",
+        "validate",
+        "ship",
+        "external",
+        "docs"
+      ],
+      "title": "Skill Consolidation: Eliminate standalone/, mark internal skills",
+      "methodology_note": "fno_wall_seconds = 19 calls * 221.4ms median; phase_wall_seconds from ledger.json duration_minutes"
+    },
+    {
+      "session_id": "2ccec0b1-6ffb-4a97-bc0d-18a08f79ba36",
+      "fno_call_count": 19,
+      "fno_wall_seconds": 4.2061,
+      "phase_wall_seconds": 7284.0,
+      "ratio": 0.000577,
+      "phases_completed": [
+        "do",
+        "review",
+        "validate",
+        "ship",
+        "external",
+        "docs"
+      ],
+      "title": "Codemap --db: Database Schema Intelligence",
+      "methodology_note": "fno_wall_seconds = 19 calls * 221.4ms median; phase_wall_seconds from ledger.json duration_minutes"
+    },
+    {
+      "session_id": "35e5b2cd-870d-4676-a6ea-a7194b13006b",
+      "fno_call_count": 19,
+      "fno_wall_seconds": 4.2061,
+      "phase_wall_seconds": 1632.0,
+      "ratio": 0.002577,
+      "phases_completed": [
+        "do",
+        "review",
+        "validate",
+        "ship",
+        "external",
+        "docs"
+      ],
+      "title": "Codemap --db: Database Schema Intelligence",
+      "methodology_note": "fno_wall_seconds = 19 calls * 221.4ms median; phase_wall_seconds from ledger.json duration_minutes"
+    },
+    {
+      "session_id": "052febce-2f3f-466a-838e-5bc3aac874af",
+      "fno_call_count": 19,
+      "fno_wall_seconds": 4.2061,
+      "phase_wall_seconds": 522.0,
+      "ratio": 0.008058,
+      "phases_completed": [
+        "do",
+        "review",
+        "validate",
+        "ship",
+        "external",
+        "docs"
+      ],
+      "title": "Codemap --db: Database Schema Intelligence",
+      "methodology_note": "fno_wall_seconds = 19 calls * 221.4ms median; phase_wall_seconds from ledger.json duration_minutes"
+    },
+    {
+      "session_id": "a2235622-199b-45ec-9998-f8f541aa5936",
+      "fno_call_count": 19,
+      "fno_wall_seconds": 4.2061,
+      "phase_wall_seconds": 1656.0,
+      "ratio": 0.00254,
+      "phases_completed": [
+        "do",
+        "review",
+        "validate",
+        "ship",
+        "external",
+        "docs"
+      ],
+      "title": "Codemap --db: Database Schema Intelligence",
+      "methodology_note": "fno_wall_seconds = 19 calls * 221.4ms median; phase_wall_seconds from ledger.json duration_minutes"
+    },
+    {
+      "session_id": "40a23d0c-37ce-43eb-9ef1-de2e64a77aaa",
+      "fno_call_count": 19,
+      "fno_wall_seconds": 4.2061,
+      "phase_wall_seconds": 204.0,
+      "ratio": 0.020618,
+      "phases_completed": [
+        "do",
+        "review",
+        "validate",
+        "ship",
+        "external",
+        "docs"
+      ],
+      "title": "Codemap --db: Database Schema Intelligence",
+      "methodology_note": "fno_wall_seconds = 19 calls * 221.4ms median; phase_wall_seconds from ledger.json duration_minutes"
+    },
+    {
+      "session_id": "1a2ef5d6-c240-420e-bdc8-816322f78f62",
+      "fno_call_count": 19,
+      "fno_wall_seconds": 4.2061,
+      "phase_wall_seconds": 3000.0,
+      "ratio": 0.001402,
+      "phases_completed": [
+        "do",
+        "review",
+        "validate",
+        "ship",
+        "external",
+        "docs"
+      ],
+      "title": "Codemap --db: Database Schema Intelligence",
+      "methodology_note": "fno_wall_seconds = 19 calls * 221.4ms median; phase_wall_seconds from ledger.json duration_minutes"
+    },
+    {
+      "session_id": "dc339774-0824-442b-8183-dc0d007ede7a",
+      "fno_call_count": 19,
+      "fno_wall_seconds": 4.2061,
+      "phase_wall_seconds": 1032.0,
+      "ratio": 0.004076,
+      "phases_completed": [
+        "do",
+        "review",
+        "validate",
+        "ship",
+        "external",
+        "docs"
+      ],
+      "title": "Codemap --db: Database Schema Intelligence",
+      "methodology_note": "fno_wall_seconds = 19 calls * 221.4ms median; phase_wall_seconds from ledger.json duration_minutes"
+    }
+  ],
+  "aggregate_ratio": 0.002163,
+  "decision": "abort_daemon",
+  "median_fno_latency_ms": 221.37,
+  "calls_per_session": 19,
+  "sample_size": 8,
+  "skipped_count": 0,
+  "methodology": "fno_wall_seconds estimated as (calls_per_session * median_fno_latency_ms). phase_wall_seconds from ledger.json duration_minutes field. Verb call count derived from grep of skills/target/ + hooks/ for `fno ` invocations."
+}

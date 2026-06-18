@@ -1,0 +1,258 @@
+"""Typer CliRunner tests for the fno claim CLI surface."""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from fno.claims.cli import cli, _parse_ttl
+
+
+runner = CliRunner()
+
+
+@pytest.fixture
+def cwd_tmp(tmp_path: Path, monkeypatch):
+    """Change cwd to a tmp path so .fno/claims/ does not pollute the worktree.
+
+    Also pin HOME to the same tmp dir (and clear FNO_CLAIMS_ROOT) so the
+    global node-claim root (~/.fno/claims) coincides with cwd. node:<id>
+    keys now auto-resolve the global root (ab-fcf9cec5); pinning HOME=cwd keeps
+    these tests' cwd-relative lock assertions valid for both node and non-node keys.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    yield tmp_path
+
+
+def test_ttl_parser_seconds_no_unit():
+    assert _parse_ttl("60") == 60_000
+
+
+def test_ttl_parser_seconds():
+    assert _parse_ttl("60s") == 60_000
+
+
+def test_ttl_parser_minutes():
+    assert _parse_ttl("5m") == 5 * 60_000
+
+
+def test_ttl_parser_hours():
+    assert _parse_ttl("2h") == 2 * 3_600_000
+
+
+def test_ttl_parser_empty_string_returns_none():
+    assert _parse_ttl("") is None
+
+
+def test_ttl_parser_invalid_raises():
+    with pytest.raises(Exception):
+        _parse_ttl("xyz")
+
+
+def test_help_lists_all_verbs():
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    for verb in ("acquire", "release", "refresh", "status", "list", "force-release"):
+        assert verb in result.output
+
+
+def test_acquire_fresh_key(cwd_tmp):
+    result = runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h1"])
+    assert result.exit_code == 0
+    assert "acquired" in result.output
+    assert (cwd_tmp / ".fno" / "claims" / "node%3Aab-1.lock").exists()
+
+
+def test_acquire_json_output(cwd_tmp):
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["key"] == "k"
+    assert parsed["holder"] == "h"
+
+
+def test_acquire_conflict_exits_1(cwd_tmp):
+    runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h2"])
+    assert result.exit_code == 1
+    assert "held by" in result.output
+
+
+def test_acquire_validation_exits_2(cwd_tmp):
+    """key too long -> exit 2."""
+    result = runner.invoke(cli, ["acquire", "x" * 300, "--holder", "h"])
+    assert result.exit_code == 2
+
+
+def test_acquire_with_ttl(cwd_tmp):
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--ttl", "1h", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["expires_at"] is not None
+
+
+def test_acquire_invalid_ttl_format(cwd_tmp):
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--ttl", "garbage"])
+    assert result.exit_code != 0
+
+
+def test_acquire_pid_flag_anchors_liveness_to_given_pid(cwd_tmp):
+    """--pid pins PID-liveness to a long-lived owner instead of this process
+    (ab-6d5afbde: the daemon's stream-claim shelled `fno claim acquire`, whose
+    ephemeral PID died at once and read the claim stale on write)."""
+    result = runner.invoke(
+        cli, ["acquire", "session:uuid-x", "--holder", "stream:sw7", "--pid", "99999", "--json"]
+    )
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["pid"] == 99999, "the claim must record the explicit --pid, not os.getpid()"
+
+
+def test_release_after_acquire(cwd_tmp):
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    result = runner.invoke(cli, ["release", "k", "--holder", "h"])
+    assert result.exit_code == 0
+    assert "released" in result.output
+
+
+def test_release_strict_mismatch_exits_4(cwd_tmp):
+    runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
+    result = runner.invoke(cli, ["release", "k", "--holder", "h2", "--strict"])
+    assert result.exit_code == 4
+
+
+def test_status_free(cwd_tmp):
+    result = runner.invoke(cli, ["status", "nothing", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["state"] == "free"
+
+
+def test_status_live(cwd_tmp):
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    result = runner.invoke(cli, ["status", "k", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["state"] == "live"
+    assert parsed["holder"] == "h"
+
+
+def test_list_empty(cwd_tmp):
+    result = runner.invoke(cli, ["list", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output) == []
+
+
+def test_list_with_prefix(cwd_tmp):
+    runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h"])
+    runner.invoke(cli, ["acquire", "fleet:m1", "--holder", "h"])
+    result = runner.invoke(cli, ["list", "--prefix", "node:", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    keys = [r["key"] for r in parsed]
+    assert keys == ["node:ab-1"]
+
+
+def test_force_release_succeeds(cwd_tmp):
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    result = runner.invoke(cli, ["force-release", "k", "--reason", "operator override"])
+    assert result.exit_code == 0
+
+
+def test_force_release_empty_reason_exits_2(cwd_tmp):
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    # Typer's BadParameter on empty value goes through option parsing; pass empty string explicitly
+    result = runner.invoke(cli, ["force-release", "k", "--reason", ""])
+    assert result.exit_code == 2
+
+
+def test_refresh_pid_liveness_is_noop(cwd_tmp):
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])  # PID-liveness
+    result = runner.invoke(cli, ["refresh", "k", "--holder", "h"])
+    assert result.exit_code == 0
+    assert "no-op" in result.output or "PID-liveness" in result.output
+
+
+def test_refresh_ttl_extends(cwd_tmp):
+    runner.invoke(cli, ["acquire", "k", "--holder", "h", "--ttl", "1m"])
+    result = runner.invoke(cli, ["refresh", "k", "--holder", "h", "--ttl", "5m", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["expires_at"] is not None
+
+
+def test_refresh_missing_exits_3(cwd_tmp):
+    result = runner.invoke(cli, ["refresh", "missing", "--holder", "h"])
+    assert result.exit_code == 3
+
+
+# ---------------------------------------------------------------------------
+# node: keys auto-resolve the global claims root (ab-fcf9cec5)
+# ---------------------------------------------------------------------------
+
+def test_status_node_key_finds_global_claim_without_env(tmp_path, monkeypatch):
+    """`fno claim status node:<id>` from a project cwd, with no
+    FNO_CLAIMS_ROOT exported, must find a node claim written to the
+    global root (~/.fno/claims) - the operator runbook path."""
+    from fno.claims.core import acquire_claim
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    # Acquire a live node claim at the GLOBAL root (root=home -> home/.fno/claims).
+    acquire_claim(key="node:ab-deadbeef", holder="target-session:s", ttl_ms=3_600_000, root=home)
+
+    # Run the CLI from a DIFFERENT cwd (a project checkout) with no env override.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    r = runner.invoke(cli, ["status", "node:ab-deadbeef", "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert info["state"] == "live", info
+    assert info["holder"] == "target-session:s"
+
+
+def test_list_node_prefix_finds_global_claims_without_env(tmp_path, monkeypatch):
+    """`fno claim list --prefix node:` resolves the global root too."""
+    from fno.claims.core import acquire_claim
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    acquire_claim(key="node:ab-deadbeef", holder="h", ttl_ms=3_600_000, root=home)
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    r = runner.invoke(cli, ["list", "--prefix", "node:", "--json"])
+    assert r.exit_code == 0, r.output
+    keys = [c["key"] for c in json.loads(r.output)]
+    assert "node:ab-deadbeef" in keys
+
+
+def test_non_node_key_uses_cwd_not_global(tmp_path, monkeypatch):
+    """A non-node key keeps the cwd default - a node claim at the global root
+    must NOT leak into a cwd-scoped lookup of a different key."""
+    from fno.claims.core import acquire_claim
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    acquire_claim(key="node:ab-deadbeef", holder="h", ttl_ms=3_600_000, root=home)
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    # walker: key resolves to cwd; nothing acquired there -> free.
+    r = runner.invoke(cli, ["status", "walker:/some/root", "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["state"] == "free"

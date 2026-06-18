@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema",
+  "title": "AgentState (status-v1)",
+  "description": "Per-agent state.json schema (schema v1). Derived from the Rust AgentState struct in crates/fno-agents/src/state.rs.",
+  "type": "object",
+  "required": ["schema_version", "short_id", "status"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version; always 1 for this schema"
+    },
+    "short_id": {
+      "type": "string",
+      "description": "Short opaque agent identifier (e.g. 'wkA')"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "spawning",
+        "ready",
+        "idle",
+        "busy",
+        "live",
+        "restarting",
+        "orphaned",
+        "failed",
+        "exited",
+        "permanent_dead"
+      ],
+      "description": "Agent lifecycle status (snake_case). state.status is canonical; registry.status is a projection."
+    },
+    "ready": {
+      "type": "boolean",
+      "description": "Whether the agent is ready for input. Defaults to false.",
+      "default": false
+    },
+    "last_message_at": {
+      "type": ["string", "null"],
+      "description": "RFC3339 timestamp of last message sent to the agent, or null"
+    },
+    "last_reply": {
+      "type": ["string", "null"],
+      "description": "Last reply text from the agent, or null"
+    },
+    "restart_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of times this agent has been restarted. Defaults to 0.",
+      "default": 0
+    },
+    "last_restart_at": {
+      "type": ["string", "null"],
+      "description": "RFC3339 timestamp of the last restart, or null"
+    },
+    "pty": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "description": "PTY sub-state. Present for PTY-managed agents; null for shellout (claude) agents.",
+          "required": ["active", "drive_active"],
+          "properties": {
+            "active": {
+              "type": "boolean",
+              "description": "Whether the PTY is active"
+            },
+            "drive_active": {
+              "type": "boolean",
+              "description": "Whether an interactive drive window is currently open",
+              "default": false
+            },
+            "drive_session_id": {
+              "type": ["string", "null"],
+              "description": "Drive window session identifier, or null when no drive is active"
+            },
+            "drive_mode": {
+              "type": ["string", "null"],
+              "description": "Drive mode (interactive/watch/step/paranoid), or null"
+            },
+            "last_heartbeat_at_monotonic_ns": {
+              "type": ["integer", "null"],
+              "description": "Monotonic-clock nanosecond baseline of the last drive heartbeat, or null"
+            }
+          },
+          "additionalProperties": false,
+          "if": {
+            "properties": { "drive_active": { "const": true } },
+            "required": ["drive_active"]
+          },
+          "then": {
+            "description": "When a drive window is open, drive_session_id and drive_mode must be present and non-null. The Rust deserializer normalizes this today; the schema now encodes the co-presence invariant. (active and drive_active are unconditionally required by the base object, so they are not re-listed here.)",
+            "required": ["drive_session_id", "drive_mode"],
+            "properties": {
+              "drive_session_id": { "type": "string" },
+              "drive_mode": { "type": "string" }
+            }
+          }
+        }
+      ],
+      "description": "PTY sub-state, or null for shellout agents"
+    }
+  },
+  "additionalProperties": false
+}

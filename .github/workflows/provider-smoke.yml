@@ -1,0 +1,133 @@
+name: provider-smoke
+
+on:
+  schedule:
+    # Nightly, off the top of the hour to avoid the busiest GitHub Actions slot.
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Check Codex smoke secret
+        id: codex_secret
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "OPENAI_API_KEY is not configured; Codex smoke tests skipped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Codex CLI
+        if: steps.codex_secret.outputs.configured == 'true'
+        run: npm install -g @openai/codex
+
+      - name: Verify Codex CLI
+        if: steps.codex_secret.outputs.configured == 'true'
+        run: codex --version
+
+      - name: Install jq
+        if: steps.codex_secret.outputs.configured == 'true'
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Sync CLI
+        if: steps.codex_secret.outputs.configured == 'true'
+        working-directory: cli
+        run: uv sync
+
+      - name: Codex real-binary smoke tests
+        if: steps.codex_secret.outputs.configured == 'true'
+        working-directory: cli
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_SMOKE: "1"
+        run: uv run pytest --tb=short -q tests/agents/test_codex_integration_smoke.py
+
+  gemini:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Check Gemini smoke secret
+        id: gemini_secret
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "GEMINI_API_KEY is not configured; Gemini smoke tests skipped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Gemini CLI shim
+        if: steps.gemini_secret.outputs.configured == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/gemini" <<'EOF'
+          #!/usr/bin/env bash
+          exec npx -y @google/gemini-cli "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/bin/gemini"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Gemini CLI
+        if: steps.gemini_secret.outputs.configured == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: gemini --version
+
+      - name: Sync CLI
+        if: steps.gemini_secret.outputs.configured == 'true'
+        working-directory: cli
+        run: uv sync
+
+      - name: Gemini real-binary smoke tests
+        if: steps.gemini_secret.outputs.configured == 'true'
+        working-directory: cli
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_SMOKE: "1"
+        run: |
+          uv run pytest --tb=short -q -m smoke \
+            tests/agents/test_gemini_integration_smoke.py \
+            tests/agents/test_gemini_from_name_marker.py \
+            tests/agents/test_gemini_signal_handling.py

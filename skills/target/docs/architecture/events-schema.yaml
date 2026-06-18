@@ -1,0 +1,1811 @@
+# docs/architecture/events-schema.yaml
+# Single source of truth for events.jsonl envelope shape across abilities.
+#
+# Both validators load this file:
+#   - cli/src/fno/events/__init__.py (Python; imports raise SchemaUnavailableError if absent)
+#   - scripts/lib/events-validate.sh (bash; caches at /tmp/events-schema-$$.cache via yq or python3 fallback)
+#
+# Adding a new event type:
+#   1. Add an entry under `event_types`.
+#   2. If gate-flipping, add the gate name to `gates`.
+#   3. Add a fixture record to cli/tests/events/parity_corpus.jsonl so
+#      both validators agree on the shape.
+#   4. CI parity test (test_validator_parity.py) runs both validators
+#      against the corpus; both must give the same verdict on every record.
+#
+# Removing an event type:
+#   Add a `deprecated: <UTC ISO8601>` marker to the entry rather than
+#   deleting it outright. test_no_undocumented_deletions enforces the marker
+#   shape; downstream consumers get one release of warning before removal.
+
+version: 1
+
+envelope:
+  required: [ts, type, source, data]
+  properties:
+    ts:
+      type: string
+      format: rfc3339-utc
+      description: "UTC RFC3339 timestamp like 2026-05-07T09:30:42Z"
+    type:
+      type: string
+      description: "Event type name; must match an entry in event_types"
+    source:
+      type: string
+      # W7 additive: 'daemon' added for Rust fno-agents supervisor. 'worker:<id>'
+      # pattern sources (Rust per-agent workers) are validated by events-v3.json
+      # branch B pattern ^(daemon|worker:.+)$; the enum here covers the common
+      # fixed-string sources only. The bash validator builds a regex from this enum,
+      # so worker:<id> is checked at the parity-script layer, not here.
+      enum: [target, megawalk, megatron, abi-loop, hook, subagent, migration, test, backlog, daemon]
+      description: "Producer identity; consumers route on this. See events-v3.json branch B for worker:<id> pattern sources."
+    data:
+      type: object
+      description: "Per-type payload; see event_types[].data"
+
+# Allowed gate names for phase_transition events. Adding a gate without
+# updating set_gate.sh's allowlist will fail the parity test.
+gates:
+  - quality_check_passed
+  - output_validated
+  - ledger_updated
+  - artifact_shipped
+  - external_review_passed
+  - browser_testing_passed
+  - memory_pass_passed
+  - deferrals_captured
+  - frontend_craft_passed
+  - phase_init       # not strictly a gate; retained for back-compat with phase_init events
+  - phase_rolled_back
+
+event_types:
+
+  - name: phase_transition
+    description: "A gate flipped to true (gate_bearing=true) OR an audit-only phase boundary crossed (gate_bearing=false)."
+    sources: [target, megawalk, abi-loop, hook]
+    data:
+      required: [gate_bearing, phase, nonce, session_id]
+      properties:
+        gate_bearing:
+          type: boolean
+          description: "True if this transition flipped a state-file gate bool; false for audit-only phase boundaries."
+        gate:
+          type: string
+          description: "Gate name (e.g. ledger_updated). Required when gate_bearing=true; absent otherwise."
+        phase:
+          type: string
+          description: "Phase identifier (e.g. register, review, ship)."
+        nonce:
+          type: string
+          description: "provenance_nonce from the session's state file. Stop hook matches on this."
+        session_id:
+          type: string
+          description: "target or megawalk session id."
+    consumers: [hooks/target-stop-hook.sh, hooks/megawalk-stop-hook.sh]
+
+  - name: child_promise
+    description: "A target child session emitted <promise> at COMPLETE. Megawalk verifies before advancing."
+    sources: [target]
+    data:
+      required: [session_id, nonce]
+      properties:
+        session_id:
+          type: string
+        nonce:
+          type: string
+    consumers: [hooks/megawalk-stop-hook.sh]
+
+  - name: mission_started
+    description: "Megatron mission entered RUNNING state."
+    sources: [megatron]
+    data:
+      required: [mission_id]
+      properties:
+        mission_id:
+          type: string
+    consumers: [postmortem]
+
+  - name: wave_advanced
+    description: "Megatron mission completed a wave; new wave dispatched."
+    sources: [megatron]
+    data:
+      required: [mission_id, wave, child_session_ids]
+      properties:
+        mission_id:
+          type: string
+        wave:
+          type: integer
+        child_session_ids:
+          type: array
+          items: { type: string }
+    consumers: [postmortem]
+
+  - name: mission_complete
+    description: "Megatron mission reached terminal status (done|failed|cancelled)."
+    sources: [megatron]
+    data:
+      required: [mission_id, status]
+      properties:
+        mission_id:
+          type: string
+        status:
+          type: string
+          enum: [done, failed, cancelled]
+    consumers: [postmortem]
+
+  - name: completion_artifact_write_failed
+    description: "write_mission_complete raised an exception when writing the aggregated completion artifact. The mission status flip already committed; this event is telemetry only."
+    sources: [megatron]
+    data:
+      required: [mission_id, reason]
+      properties:
+        mission_id:
+          type: string
+          description: "The mission whose artifact write failed."
+        reason:
+          type: string
+          description: "str(exception) from the failed write_mission_complete call."
+    consumers: [operator]
+
+  - name: completion_file_corrupt
+    description: "A wave-completion JSON file could not be parsed. The wave is treated as not-yet-complete until the file is fixed or replaced."
+    sources: [megatron]
+    data:
+      required: [path, reason]
+      properties:
+        path:
+          type: string
+          description: "Absolute path to the corrupt completion file."
+        reason:
+          type: string
+          description: "Error message from json.JSONDecodeError or OSError, or a structured note like 'non-mapping json top-level: list'."
+    consumers: [operator]
+
+  - name: completion_schema_unknown
+    description: "A wave-completion JSON record carried a schema_version greater than the consumer understands. The record still parses (additive evolution); telemetry exists so operators can detect producer/consumer drift."
+    sources: [megatron]
+    data:
+      required: [observed_version, known_max, path]
+      properties:
+        mission_id:
+          type: string
+          description: "The mission_id from the completion record (best-effort)."
+        observed_version:
+          type: integer
+          description: "schema_version read from the record."
+        known_max:
+          type: integer
+          description: "Highest schema_version this consumer understands (CURRENT_COMPLETION_SCHEMA_VERSION)."
+        path:
+          type: string
+          description: "Absolute path to the completion file."
+    consumers: [operator]
+
+  - name: completion_schema_invalid
+    description: "A wave-completion JSON record carried a schema_version that is not coercible to an integer (string, null, list, ...). Treated as schema_version: 0 and the record still parses; telemetry exists so operators can detect malformed producers."
+    sources: [megatron]
+    data:
+      required: [observed_raw, path]
+      properties:
+        mission_id:
+          type: string
+          description: "The mission_id from the completion record (best-effort)."
+        observed_raw:
+          type: string
+          description: "repr() of the malformed schema_version value."
+        path:
+          type: string
+          description: "Absolute path to the completion file."
+    consumers: [operator]
+
+  - name: manifest_baselined
+    description: "Megatron stamped the mission's first manifest sha256 baseline (manifest_sha256 transition from None -> sha). Marks the start of dispatching for that mission; subsequent iterations compare fresh sha against this baseline to detect operator mutation. Emitted once per mission via _emit_manifest_event in megatron/loop.py."
+    sources: [megatron]
+    data:
+      required: [mission_id, sha_short]
+      properties:
+        mission_id:
+          type: string
+          description: "The mission_id whose manifest was baselined."
+        sha_short:
+          type: string
+          description: "First 12 hex chars of the manifest sha256 baseline."
+    consumers: [operator]
+
+  - name: manifest_mutated
+    description: "Megatron detected that the manifest's sha256 diverged from the stored baseline (stored_sha != fresh_sha). Mission auto-paused with paused_reason=manifest_mutated:stored_sha=...:fresh_sha=...; operator must reconcile or rebaseline before dispatch resumes."
+    sources: [megatron]
+    data:
+      required: [mission_id, stored_sha_short, fresh_sha_short]
+      properties:
+        mission_id:
+          type: string
+          description: "The mission_id whose manifest mutated mid-run."
+        stored_sha_short:
+          type: string
+          description: "First 12 hex chars of the previously baselined manifest sha256."
+        fresh_sha_short:
+          type: string
+          description: "First 12 hex chars of the manifest sha256 read on the iteration that detected the drift."
+    consumers: [operator]
+
+  - name: mission_complete_emit_failed
+    description: "Stop hook deferred a mission completion emit because a precondition was not yet met (most commonly: pr_url not yet captured in target-state.md after a Phase-6 race). Best-effort forensic event written to hook-events.jsonl; the next stop-hook invocation retries the emit. Pairs with the <help reason=\"mission-pr-url-missing\"> stderr signal."
+    sources: [hook]
+    data:
+      required: [mission_id, reason]
+      properties:
+        mission_id:
+          type: string
+          description: "The mission whose completion emit was deferred."
+        reason:
+          type: string
+          description: "Why the emit deferred (e.g. pr_url_missing). Free-form string scoped to the stop hook's emit_mission_complete_if_needed branch."
+    consumers: [postmortem]
+
+  - name: mission_handoff_unreadable
+    description: "Stop hook attempted to read .fno/HANDOFF.md to seed the discoveries field in the mission completion JSON but could not. Best-effort forensic event written to hook-events.jsonl alongside the completion emit; does not block completion. See plan 2026-05-13-megatron-discoveries-field (ab-bc919f7f)."
+    sources: [hook]
+    data:
+      required: [mission_id, reason]
+      properties:
+        mission_id:
+          type: string
+          description: "The mission whose HANDOFF.md could not yield a discoveries section."
+        reason:
+          type: string
+          enum: [file_not_found, file_unreadable, file_empty, no_sections_found]
+          description: "Why the helper could not extract content."
+    consumers: [postmortem]
+
+  - name: subagent_spawn
+    description: "Existing trust-boundary event; retained verbatim for back-compat."
+    sources: [hook, target, megawalk]
+    data:
+      required: [agent_name, provider_id, cli]
+      properties:
+        agent_name: { type: string }
+        provider_id: { type: string }
+        cli: { type: string }
+    consumers: [fno-agents verify-evidence]
+
+  - name: subagent_complete
+    description: "Existing trust-boundary event; retained verbatim."
+    sources: [hook, target, megawalk]
+    data:
+      required: [agent_name]
+      properties:
+        agent_name: { type: string }
+        exit_code:
+          description: "Subagent process exit code; integer or 'null' string token (jq -e rejects bare null)"
+    consumers: [fno-agents verify-evidence]
+
+  - name: phase_init
+    description: "Existing event from emit-gate-transition.sh / events.sh::emit_event_raw. Retained for back-compat."
+    sources: [target, hook]
+    data:
+      required: [phase, nonce, session_id]
+      properties:
+        phase: { type: string }
+        nonce: { type: string }
+        session_id: { type: string }
+    consumers: [hooks/target-stop-hook.sh]
+
+  - name: phase_rolled_back
+    description: "Existing event from set_gate rollback path. Retained for back-compat."
+    sources: [hook]
+    data:
+      required: [gate, reason, nonce, session_id]
+      properties:
+        gate: { type: string }
+        reason: { type: string }
+        nonce: { type: string }
+        session_id: { type: string }
+    consumers: [postmortem]
+
+  - name: transcript_audit_failed
+    description: "An external-state audit (verify-review-replies, verify-pr-merged) found that a gate's claimed outcome does not match the observable world. Emitted with rc=1 from the verifier; stop hook reads it as belt-and-braces evidence of the flip-back."
+    sources: [hook]
+    data:
+      required: [gate, reason]
+      properties:
+        gate:
+          type: string
+          description: "Gate or audit category (e.g. external_review_passed when verify-review-replies flips a state-file gate back; auto_merge_outcome when verify-pr-merged blocks the promise without flipping a bool)."
+        reason:
+          type: string
+          description: "Short audit-failure reason like missing_reply_to_reviewer or pr_closed_without_merge. Verifier-specific; not enumerated to keep the writer free to surface novel evidence."
+        pr_number:
+          description: "PR number the audit referenced (integer or string)."
+        reviewer:
+          type: string
+          description: "External reviewer login when applicable (verify-review-replies)."
+        last_review_at:
+          type: string
+          format: rfc3339-utc
+          description: "Reviewer's most recent submitted_at timestamp."
+        session_id:
+          type: string
+        nonce:
+          type: string
+    consumers: [postmortem]
+
+  - name: polling_external_review
+    description: "Emitted by /pr check at every external-review check tick. Counted as the fifth thrash-fingerprint signal so polling iterations register as progress and the thrash detector does not force-cancel the loop while waiting for a slow external reviewer."
+    sources: [target, subagent, hook]
+    data:
+      required: [pr_number, reviewer_bot, wait_kind, session_id]
+      properties:
+        pr_number:
+          description: "GitHub PR number being polled. Integer or string accepted."
+        reviewer_bot:
+          type: string
+          description: "Identity of the awaited external reviewer (e.g. gemini-code-assist[bot])."
+        wait_kind:
+          type: string
+          enum: [cron, inline]
+          description: "Whether the tick fired from a CronCreate-scheduled prompt or the immediate inline check."
+        session_id:
+          type: string
+          description: "target session id."
+        next_check_at:
+          type: string
+          format: rfc3339-utc
+          description: "Next scheduled poll time. The 30-minute exemption window in check_no_progress_thrash reads this."
+        nonce:
+          type: string
+          description: "Optional provenance_nonce; tie-back to a session if provided."
+    consumers: [hooks/target-stop-hook.sh]
+
+  - name: reconcile_backfill_wrote
+    description: "fno megatron reconcile --backfill wrote a missing completion JSON for a confirmed-merged PR. Forensic event: the file is the source of truth, this event is best-effort telemetry."
+    sources: [megatron]
+    data:
+      required: [mission_id, wave, project, pr_url, commit_sha]
+      properties:
+        mission_id:
+          type: string
+          description: "Mission whose completion was backfilled."
+        wave:
+          type: integer
+          description: "Wave number the backfilled project belongs to."
+        project:
+          type: string
+          description: "Canonical project name (post-resolve)."
+        pr_url:
+          type: string
+          description: "GitHub PR URL the backfill payload references."
+        commit_sha:
+          type: string
+          description: "Merge commit SHA captured from gh."
+    consumers: [operator]
+
+  - name: cost_subprocess_failed
+    description: |
+      Emitted when register_session_cost's session-cost.py subprocess returns
+      non-zero. The direct-JSON fallback still writes to ledger.json; this
+      event is the forensic trail.
+    sources: [abi-loop, hook]
+    data:
+      required:
+        - session_id
+        - returncode
+        - stderr_snippet
+        - fallback_succeeded
+      properties:
+        session_id:
+          type: string
+          description: "The abilities session ID passed to register_session_cost."
+        returncode:
+          type: integer
+          description: "Exit code (or signal-negated value) returned by session-cost.py subprocess."
+        stderr_snippet:
+          type: string
+          description: "First 4KB of session-cost.py stderr, or empty string if none."
+        fallback_succeeded:
+          type: boolean
+          description: "True when the direct-JSON fallback ledger write succeeded after the subprocess failure."
+        cost_usd:
+          type: number
+          description: "Cost in USD attributed to this session (optional; present when known)."
+        tokens:
+          type: integer
+          description: "Token count for this session (optional; present when known)."
+        provider_id:
+          type: string
+          description: "Provider ID this cost is attributed to (optional)."
+        account_id:
+          type: string
+          description: "Human-friendly account label (optional)."
+    consumers: [operator]
+
+  - name: graph_status_drift
+    description: |
+      Emitted when an Entry is deserialized with a persisted `_status`
+      value that differs from the computed derivation (e.g. legacy
+      graph.json with stale field). The computed value wins; this
+      event records the drift for forensic audit.
+    sources: [abi-loop, migration, subagent]
+    data:
+      required:
+        - entry_id
+        - persisted
+        - computed
+      properties:
+        entry_id:
+          type: string
+          description: "The id field of the Entry whose persisted _status diverged."
+        persisted:
+          type: string
+          description: "The _status value read from disk."
+        computed:
+          type: string
+          description: "The _status value derived from the entry's own fields."
+    consumers: [operator]
+
+  - name: phase_0_decision
+    description: "Phase 0 measurement spike completed; gate decision recorded before any daemon implementation lands."
+    sources: [target, subagent]
+    data:
+      required: [ratio, decision, evidence_path]
+      properties:
+        ratio:
+          type: number
+          description: "Aggregate abi_wall_seconds / phase_wall_seconds ratio across sampled sessions."
+        decision:
+          type: string
+          enum: [abort_daemon, reads_only_v1, full_v1]
+          description: "Gate outcome: abort_daemon (<15%), reads_only_v1 (15-30%), full_v1 (>=30%)."
+        evidence_path:
+          type: string
+          description: "Path to the decision artifact (e.g., .fno/measurements/YYYY-MM-DD-abi-overhead.md)."
+    consumers: [operator]
+
+  - name: graph_reloaded
+    description: |
+      Emitted by the megawalk walker when a mid-loop mtime check detects
+      graph.json or its sha256 sidecar has changed; the entry list has
+      been reloaded.
+    sources: [megawalk]
+    data:
+      required: [old_count, new_count, mtime_ns]
+      properties:
+        old_count:
+          type: integer
+          description: "Number of graph entries before the reload."
+        new_count:
+          type: integer
+          description: "Number of graph entries after the reload."
+        mtime_ns:
+          type: integer
+          description: "st_mtime_ns of graph.json at the time of reload (may be null if file was missing)."
+        sidecar_mtime_ns:
+          type: integer
+          description: "st_mtime_ns of graph.json.sha256 at the time of reload (may be null; optional)."
+    consumers: [operator]
+
+  - name: graph_reload_failed
+    description: |
+      Emitted by the megawalk walker when a mid-loop reload attempt
+      raised GraphCorruptionError, JSONDecodeError, or OSError; cached
+      graph_entries preserved this tick.
+    sources: [megawalk]
+    data:
+      required: [error_kind, mtime_ns]
+      properties:
+        error_kind:
+          type: string
+          description: "Exception class name (GraphCorruptionError, JSONDecodeError, or OSError)."
+        mtime_ns:
+          type: integer
+          description: "st_mtime_ns of graph.json that triggered the failed reload attempt (may be null if missing)."
+        sidecar_mtime_ns:
+          type: integer
+          description: "st_mtime_ns of graph.json.sha256 at the time of the failed reload (may be null; optional)."
+        detail:
+          type: string
+          description: "str(exc) truncated to 200 chars (optional)."
+    consumers: [operator]
+
+  - name: integrity_warning
+    description: "Forensic notice that a gate verification path accepted a degraded input. Non-blocking but auditable."
+    sources: [target, abi-loop, hook]
+    data:
+      required: [kind, phase, session_id, artifact_path]
+      properties:
+        kind:
+          type: string
+          enum: [missing_nonce_legacy_accepted]
+          description: "Which degraded-input variant was accepted."
+        phase:
+          type: string
+          description: "Phase being verified (e.g. ship, review)."
+        session_id:
+          type: string
+          description: "Session ID from the state file at verify time."
+        artifact_path:
+          type: string
+          description: "Absolute or relative path to the artifact that was accepted without a nonce."
+    consumers: [operator]
+
+  - name: done_race_collision
+    description: "Two fno done calls landed on the same node; second saw _status already done."
+    sources: [abi-loop]
+    data:
+      required: [node_id, first_completed_at, second_attempt_at]
+      properties:
+        node_id:
+          type: string
+          description: "The backlog node id that was already done."
+        first_completed_at:
+          type: string
+          description: "The completed_at timestamp already stored in the graph entry."
+        second_attempt_at:
+          type: string
+          description: "UTC ISO8601 timestamp of the second fno done call."
+    consumers: [operator]
+
+  - name: backlog_done_refused
+    description: "fno backlog done refused to close a node because no merged/green-CI evidence was found."
+    sources: [backlog]
+    data:
+      required: [node_id, pr_number, reason]
+      properties:
+        node_id:
+          type: string
+          description: "The backlog node id that was not closed."
+        pr_number:
+          type: integer
+          description: "The first referenced PR number that was checked."
+        reason:
+          type: string
+          description: "Human-readable reason for the refusal (e.g. PR state, CI bucket summary)."
+    consumers: [operator]
+
+  - name: backlog_done_forced
+    description: "fno backlog done closed a node via --force --reason, bypassing the gh cross-check."
+    sources: [backlog]
+    data:
+      required: [node_id, force_reason]
+      properties:
+        node_id:
+          type: string
+          description: "The backlog node id that was force-closed."
+        force_reason:
+          type: string
+          description: "The --reason text provided by the operator."
+        pr_number:
+          type: integer
+          description: "The first referenced PR number (if any)."
+        pr_state:
+          type: string
+          description: "The gh-reported state of the PR at force-close time (OPEN/CLOSED/MERGED/UNKNOWN)."
+    consumers: [operator]
+
+  - name: claim_acquired
+    description: "A work-claim was acquired on a key. First write to .fno/claims/<key>.lock."
+    sources: [abi-loop, target, megawalk, megatron, hook]
+    data:
+      required: [key, holder, pid, host, acquired_at]
+      properties:
+        key:
+          type: string
+          description: "Claim key (e.g. node:ab-1234abcd, fleet:<mission-id>)."
+        holder:
+          type: string
+          description: "Symbolic owner string (e.g. target-session:<sid>)."
+        pid:
+          type: integer
+          description: "Holder process PID at acquire time."
+        host:
+          type: string
+          description: "Host (socket.gethostname) at acquire time."
+        acquired_at:
+          type: integer
+          description: "Epoch milliseconds, UTC."
+        expires_at:
+          type: integer
+          description: "Epoch ms for TTL claims; absent or null for PID-liveness claims."
+        reason:
+          type: string
+          description: "Optional human-readable context (max 512 chars)."
+    consumers: [operator]
+
+  - name: claim_released
+    description: "A claim was released by its owner. Lock file unlinked."
+    sources: [abi-loop, target, megawalk, megatron, hook]
+    data:
+      required: [key, holder, pid, host, acquired_at, duration_held_ms]
+      properties:
+        key:
+          type: string
+        holder:
+          type: string
+        pid:
+          type: integer
+        host:
+          type: string
+        acquired_at:
+          type: integer
+        expires_at:
+          type: integer
+        duration_held_ms:
+          type: integer
+          description: "Milliseconds between acquire and release."
+    consumers: [operator]
+
+  - name: claim_refreshed
+    description: "A TTL claim's expires_at was extended by its owner."
+    sources: [abi-loop, target, megawalk, megatron]
+    data:
+      required: [key, holder, pid, host, acquired_at, expires_at]
+      properties:
+        key:
+          type: string
+        holder:
+          type: string
+        pid:
+          type: integer
+        host:
+          type: string
+        acquired_at:
+          type: integer
+        expires_at:
+          type: integer
+        previous_expires_at:
+          type: integer
+          description: "expires_at before this refresh; null if was PID-liveness."
+    consumers: [operator]
+
+  - name: claim_stale_reclaimed
+    description: "A stale claim was recovered by a new holder. Old file archived to .expired/."
+    sources: [abi-loop, target, megawalk, megatron]
+    data:
+      required: [key, holder, pid, host, acquired_at, previous_holder, previous_pid]
+      properties:
+        key:
+          type: string
+        holder:
+          type: string
+          description: "New holder taking over."
+        pid:
+          type: integer
+        host:
+          type: string
+        acquired_at:
+          type: integer
+        expires_at:
+          type: integer
+        previous_holder:
+          type: string
+          description: "Holder whose claim was reclaimed."
+        previous_pid:
+          type: integer
+          description: "PID of the dead/expired holder."
+    consumers: [operator]
+
+  - name: claim_force_overridden
+    description: "Operator administratively dropped a claim regardless of owner."
+    sources: [abi-loop, hook]
+    data:
+      required: [key, override_reason]
+      properties:
+        key:
+          type: string
+        override_reason:
+          type: string
+          description: "Non-empty rationale for the override."
+        previous_holder:
+          type: string
+          description: "Holder before override; absent if key was already free."
+        previous_pid:
+          type: integer
+          description: "PID before override; absent if key was already free."
+    consumers: [operator]
+
+  - name: claim_idempotent_reacquired
+    description: "Same holder re-acquired a key it already owns (resume/restart path)."
+    sources: [abi-loop, target, megawalk, megatron]
+    data:
+      required: [key, holder, pid, host, acquired_at, previous_acquired_at]
+      properties:
+        key:
+          type: string
+        holder:
+          type: string
+        pid:
+          type: integer
+        host:
+          type: string
+        acquired_at:
+          type: integer
+        expires_at:
+          type: integer
+        previous_acquired_at:
+          type: integer
+          description: "acquired_at on the prior claim - now superseded by the refresh."
+    consumers: [operator]
+
+  - name: claim_clock_skew_rejected
+    description: "A refresh was rejected because computed expires_at landed in the past."
+    sources: [abi-loop, target, megawalk, megatron]
+    data:
+      required: [key, now_ms, expires_at, reason]
+      properties:
+        key:
+          type: string
+        now_ms:
+          type: integer
+        expires_at:
+          type: integer
+        reason:
+          type: string
+    consumers: [operator]
+
+  - name: session_satisfied
+    description: "Signals that a target session's work is complete; alternative to <promise> tag emission. The stop hook scans for these and may auto-release the Stop hook when a fresh event matches the current session and the three-factor gates are still satisfied. Data.source is the constrained subsystem that produced the signal (check_pr, pr_merge, ci_watcher, abi_gate_manual, delegated); envelope source is the producer identity."
+    sources: [target, megawalk, abi-loop, hook]
+    data:
+      required: [source, reason, session_id, gate_state_hash]
+      properties:
+        source:
+          type: string
+          enum: [check_pr, pr_merge, ci_watcher, abi_gate_manual, delegated]
+          description: "Which constrained subsystem emitted this satisfaction signal"
+        reason:
+          type: string
+          description: "Human-readable reason"
+        evidence_url:
+          type: string
+          description: "Optional PR URL, review URL, CI URL"
+        session_id:
+          type: string
+          description: "The target session id this satisfies"
+        gate_state_hash:
+          type: string
+          description: "md5 of target-state.md at emit time. Stop hook ignores stale events whose hash no longer matches. For trigger=delegated this is audit-only: the close mechanism is manifest archival (not hash matching) because target-state.md no longer exists post-handoff."
+    consumers: [hooks/target-stop-hook.sh]
+
+  - name: auto_complete_triggered
+    description: "The stop hook fired the auto-complete path based on a matching session_satisfied event. Audit-only record so the post-hoc review can count which auto-complete signals actually fired."
+    sources: [hook]
+    data:
+      required: [source, session_id]
+      properties:
+        source:
+          type: string
+          enum: [check_pr, pr_merge, ci_watcher, abi_gate_manual, delegated]
+          description: "Which session_satisfied data.source triggered this auto-complete"
+        session_id:
+          type: string
+          description: "The target session id that auto-completed"
+    consumers: [audit]
+
+  - name: capture_add
+    description: "An item was captured into the backlog capture tier (fu-* items below idea nodes; `fno backlog capture add`). Third honesty factor for the deferrals_captured gate: one capture_add OR capture_empty_pass per session satisfies factor 3 (legacy inbox_add/inbox_empty_pass rows also count)."
+    sources: [backlog, target, hook]
+    data:
+      required: [session_id, fu_id]
+      properties:
+        session_id:
+          type: string
+          description: "target session id (or 'manual' when run standalone from a terminal)."
+        fu_id:
+          type: string
+          description: "The minted fu-XXXXXX shortcode."
+        title:
+          type: string
+        priority:
+          type: string
+          description: "p0|p1|p2|p3."
+    consumers: [hooks/target-stop-hook.sh, scripts/lib/gate-audit.sh, scripts/lib/gates-reality.sh]
+
+  - name: capture_empty_pass
+    description: "An honest empty deferrals pass: nothing worth capturing this session. Satisfies the deferrals_captured gate's third factor without fabricating entries."
+    sources: [backlog, target, hook]
+    data:
+      required: [session_id, reason]
+      properties:
+        session_id:
+          type: string
+        reason:
+          type: string
+          description: "Why nothing was captured (mandatory; anti-rubber-stamp)."
+        scan_candidates:
+          type: integer
+          description: "Count of candidate lines the mechanical scan found. >0 with an empty-pass is an auditable yellow flag, not a hard block."
+    consumers: [hooks/target-stop-hook.sh, scripts/lib/gate-audit.sh, scripts/lib/gates-reality.sh]
+
+  - name: capture_scan
+    description: "A mechanical regex pre-filter ran over a transcript and returned candidate deferral snippets. Telemetry; lets the audit record whether a scan preceded an empty-pass."
+    sources: [backlog, target, hook]
+    data:
+      required: [session_id, candidates]
+      properties:
+        session_id:
+          type: string
+        candidates:
+          type: integer
+          description: "Number of candidate lines returned."
+    consumers: [scripts/lib/gate-audit.sh]
+
+  - name: capture_promote
+    description: "A capture-tier fu-* item was promoted to a graph node (idea or full). The checkbox is struck with -> ab-XXXXXXXX."
+    sources: [backlog]
+    data:
+      required: [fu_id, node_id]
+      properties:
+        fu_id:
+          type: string
+        node_id:
+          type: string
+          description: "The ab-XXXXXXXX graph node created by promotion."
+    consumers: [audit]
+
+  - name: capture_dismiss
+    description: "A capture-tier fu-* item was dismissed (struck [-], never deleted, preserving autocorrect provenance)."
+    sources: [backlog]
+    data:
+      required: [fu_id, reason]
+      properties:
+        fu_id:
+          type: string
+        reason:
+          type: string
+    consumers: [audit]
+
+  - name: capture_tidy
+    description: "An `fno backlog capture tidy` pass ran: ejected completed filed nodes to the archive, normalized separators, and rebuilt the pinned digest. Telemetry; lets the audit record when the capture tier was last swept."
+    sources: [backlog]
+    data:
+      required: [session_id, ejected]
+      properties:
+        session_id:
+          type: string
+          description: "target session id (or 'manual' when run standalone from a terminal)."
+        ejected:
+          type: integer
+          description: "Count of completed filed-node lines swept to inbox-archive.md this pass."
+    consumers: [audit]
+
+  - name: inbox_add
+    description: "DEPRECATED, renamed capture_add (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates. An item was captured into the capture tier below idea nodes."
+    sources: [backlog, target, hook]
+    data:
+      required: [session_id, fu_id]
+      properties:
+        session_id:
+          type: string
+          description: "target session id (or 'manual' when run standalone from a terminal)."
+        fu_id:
+          type: string
+          description: "The minted fu-XXXXXX shortcode."
+        title:
+          type: string
+        priority:
+          type: string
+          description: "p0|p1|p2|p3."
+    consumers: [hooks/target-stop-hook.sh, scripts/lib/gate-audit.sh]
+
+  - name: inbox_empty_pass
+    description: "DEPRECATED, renamed capture_empty_pass (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates. An honest empty deferrals pass."
+    sources: [backlog, target, hook]
+    data:
+      required: [session_id, reason]
+      properties:
+        session_id:
+          type: string
+        reason:
+          type: string
+          description: "Why nothing was captured (mandatory; anti-rubber-stamp)."
+        scan_candidates:
+          type: integer
+          description: "Count of candidate lines the mechanical scan found. >0 with an empty-pass is an auditable yellow flag, not a hard block."
+    consumers: [hooks/target-stop-hook.sh, scripts/lib/gate-audit.sh]
+
+  - name: inbox_scan
+    description: "DEPRECATED, renamed capture_scan (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates."
+    sources: [backlog, target, hook]
+    data:
+      required: [session_id, candidates]
+      properties:
+        session_id:
+          type: string
+        candidates:
+          type: integer
+          description: "Number of candidate lines returned."
+    consumers: [scripts/lib/gate-audit.sh]
+
+  - name: inbox_promote
+    description: "DEPRECATED, renamed capture_promote (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates."
+    sources: [backlog]
+    data:
+      required: [fu_id, node_id]
+      properties:
+        fu_id:
+          type: string
+        node_id:
+          type: string
+          description: "The ab-XXXXXXXX graph node created by promotion."
+    consumers: [audit]
+
+  - name: inbox_dismiss
+    description: "DEPRECATED, renamed capture_dismiss (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates."
+    sources: [backlog]
+    data:
+      required: [fu_id, reason]
+      properties:
+        fu_id:
+          type: string
+        reason:
+          type: string
+    consumers: [audit]
+
+  - name: inbox_tidy
+    description: "DEPRECATED, renamed capture_tidy (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates."
+    sources: [backlog]
+    data:
+      required: [session_id, ejected]
+      properties:
+        session_id:
+          type: string
+          description: "target session id (or 'manual' when run standalone from a terminal)."
+        ejected:
+          type: integer
+          description: "Count of completed filed-node lines swept to inbox-archive.md this pass."
+    consumers: [audit]
+
+# ---------------------------------------------------------------------------
+# W7 additive: Rust fno-agents supervisor event kinds.
+# These are emitted by the Rust daemon/workers to events.jsonl with kind
+# (not type) and source daemon or worker:<id>. They are documented here so
+# the Python/bash validators stop treating them as undocumented events.
+# No existing entry above is modified.
+# ---------------------------------------------------------------------------
+
+  - name: daemon_started
+    description: "fno-agents daemon process started and initialized successfully."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        pid:
+          type: integer
+          description: "Daemon process ID."
+        version:
+          type: string
+          description: "Binary version string."
+
+  - name: daemon_exited
+    description: "fno-agents daemon process exited (clean shutdown or crash)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        reason:
+          type: string
+          description: "Exit reason (e.g. 'sigterm', 'idle', 'error')."
+
+  - name: daemon_idle_pending_exit
+    description: "Daemon has no live agents and is counting down to idle exit."
+    sources: [daemon]
+    data:
+      required: []
+      properties: {}
+
+  - name: daemon_shutting_down
+    description: "Daemon received shutdown signal and is winding down."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        reason:
+          type: string
+
+  - name: daemon_state
+    description: "Periodic daemon health snapshot (agent count, memory, etc.)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        state:
+          type: object
+          description: "Arbitrary daemon state snapshot."
+
+  - name: agent_spawned
+    description: "A new PTY-managed agent worker process was spawned."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+        provider:
+          type: string
+        pid:
+          type: integer
+
+  - name: agent_stopped
+    description: "An agent was stopped (graceful SIGTERM sequence completed)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+        reason:
+          type: string
+
+  - name: agent_exited
+    description: "An agent worker process exited (child process exit detected)."
+    sources: [subagent]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+        exit_code:
+          type: integer
+
+  - name: agent_removed
+    description: "An agent registry entry was removed (fno-agents rm)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+
+  - name: agent_inconsistent
+    description: "Agent state is inconsistent (missing state.json, unexpected status, etc.)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+        reason:
+          type: string
+          description: "Inconsistency reason (e.g. missing_state_json, daemon_restart)."
+
+  - name: agent_ask_done
+    description: "An fno-agents ask RPC completed; agent replied."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+        duration_ms:
+          type: integer
+
+  - name: channel_registered
+    description: "An MCP channel was registered for an agent."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        mcp_channel_id:
+          type: string
+        backend:
+          type: string
+
+  - name: drive_attached
+    description: "An interactive drive window was opened for an agent."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+        mode:
+          type: string
+          description: "Drive mode (interactive/watch/step/paranoid)."
+
+  - name: drive_detached
+    description: "An interactive drive window was closed cleanly."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+
+  - name: drive_crashed
+    description: "An interactive drive window was lost unexpectedly (heartbeat timeout, daemon restart, etc.)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+        reason:
+          type: string
+
+  - name: reconcile_error
+    description: "An error occurred during the agent reconcile sweep."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        error:
+          type: string
+        name:
+          type: string
+
+  - name: event_payload_too_large
+    description: "A Rust-emitted event payload exceeded MAX_EVENT_PAYLOAD_BYTES (500). The oversized event is replaced by this meta-event so the intended_kind is still visible to auditors."
+    sources: [daemon, subagent]
+    data:
+      required: []
+      properties:
+        intended_kind:
+          type: string
+          description: "The event kind that would have been emitted."
+        size:
+          type: integer
+          description: "Serialized payload size in bytes."
+
+  # W7 fix: 12 additional kinds found by sigma-review audit (emitted at call
+  # sites in daemon.rs/drive.rs but missing from the initial W7 block).
+
+  - name: agent_create_no_session
+    description: "Worker process spawned but its Unix socket did not appear within 10s; agent was never contactable."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+
+  - name: agent_orphan_reaped
+    description: "An orphaned agent (live PID, no registry entry) was killed during the recovery sweep."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        short_id:
+          type: string
+        pid:
+          type: integer
+
+  - name: agent_orphan_state_archived
+    description: "An orphaned agent's state directory was archived to the orphan archive path before removal."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        short_id:
+          type: string
+        archived_to:
+          type: string
+
+  - name: agent_spawn_failed
+    description: "The agent worker process could not be launched (binary not found, exec error, etc.)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        reason:
+          type: string
+        detail:
+          type: string
+
+  - name: agent_spawn_cwd_fallback
+    description: "A spawn/ask request reached the daemon with no cwd, so the worker was launched in a neutral temp dir instead of the caller's project. Signals a misbehaving client (the client should always forward cwd); the launch lands in /tmp rather than silently adopting the daemon's own start dir."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        fallback:
+          type: string
+        via:
+          type: string
+
+  - name: agent_stream_claim_unavailable
+    description: "The claude stream-json adopt front door could not consult the single-writer claim substrate (no `fno` on PATH / exec error / unparseable output) before spawning, so the adopt proceeded fail-open. The registry one-host re-check under the lock is the authoritative in-daemon guard; this event makes the degraded path greppable (ab-734fcd6c)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        session_uuid:
+          type: string
+        detail:
+          type: string
+
+  - name: agent_deliver_injected
+    description: "A deliver RPC successfully injected a message into an agent's PTY via bracketed paste (US4)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+          description: "Registry name of the target agent."
+        from_name:
+          type: string
+          description: "Sender name as it appears in the provenance container."
+        provider:
+          type: string
+          description: "Provider of the target agent (codex or gemini)."
+
+  - name: agent_deliver_demoted
+    description: "A deliver RPC could not inject into the agent's PTY and demoted delivery to durable (worker unreachable, US4)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+          description: "Registry name of the target agent."
+        from_name:
+          type: string
+          description: "Sender name."
+        provider:
+          type: string
+          description: "Provider of the target agent."
+        reason:
+          type: string
+          description: "Machine-readable reason for the demotion (e.g. worker unreachable error text)."
+
+  - name: agent_stop_error
+    description: "An error occurred while stopping an agent (e.g. registry write failure after SIGTERM)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        error:
+          type: string
+
+  - name: daemon_recovery_error
+    description: "An error occurred during the daemon recovery/orphan-reap sweep."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        op:
+          type: string
+          description: "Operation that failed (e.g. reap_orphans)."
+        error:
+          type: string
+
+  - name: drive_force_close_timeout
+    description: "Drive authority window could not be closed within the timeout during a forced agent stop."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+
+  - name: drive_keystroke_stepped
+    description: "A keystroke was delivered to the agent PTY in step-mode drive."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        agent:
+          type: string
+        session_id:
+          type: string
+
+  - name: drive_takeover_after_stale
+    description: "A new drive session took over from a stale session (heartbeat expired)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        stale_session_id:
+          type: string
+        new_session_id:
+          type: string
+        agent:
+          type: string
+
+  - name: drive_watch_input_rejected
+    description: "Input was rejected in watch-mode drive (watch mode is read-only)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        agent:
+          type: string
+        session_id:
+          type: string
+
+  - name: reconcile_deferred
+    description: "One or more agents were deferred during the reconcile sweep (budget or liveness limit reached)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        remaining_count:
+          type: integer
+
+  - name: reconcile_done
+    description: "The reconcile sweep completed."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        reason:
+          type: string
+
+  # ── loop-check target-stream events (Task 1.1, ab-d0337fbc) ──────────────────
+  # Emitted by the Rust `fno-agents loop-check` verb and (for
+  # loop_check_binary_missing) by the bash stop-hook shim. Source is always
+  # "hook" (the stop hook fires them). These are target-stream events distinct
+  # from the Branch B fno-agents daemon stream (KNOWN_EVENT_KINDS in lib.rs).
+  # The event writer is named `append_loop_event` (not .emit / .emit_fields) to
+  # avoid triggering the agents-schema parity scan.
+
+  - name: loop_check
+    description: "Appended on every stop-hook fire. Carries the 4-component fingerprint, fire count, decision, intent, and external-read summary."
+    sources: [hook]
+    data:
+      required: [session_id, fingerprint, fires, consecutive_unchanged, decision, intent, pr_state, ci, reviewed]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier from the manifest."
+        fingerprint:
+          type: string
+          description: "4-component fingerprint: HEAD sha | pr_state | ci_conclusion | latest_review_or_comment_ts."
+        fires:
+          type: integer
+          description: "Total stop-hook fires for this session (including this one)."
+        consecutive_unchanged:
+          type: integer
+          description: "Consecutive fires with an identical fingerprint (including this one). Reaches N -> backstop."
+        decision:
+          type: string
+          enum: [allow, block]
+          description: "The decision made this fire."
+        intent:
+          type: string
+          enum: [promise, aborted, backstop, none]
+          description: "Intent detected in the transcript."
+        intent_source:
+          type: string
+          enum: [payload, transcript]
+          description: "Optional (ab-223d2dae). Which channel produced the intent read: 'payload' = last_assistant_message from the Stop-hook stdin JSON (race-free, primary); 'transcript' = bounded fallback scan over the transcript file (payload absent: tool-call-only turn, old shim, or non-Claude harness). A fleet of 'transcript' sources after shim rollout signals a harness regression."
+        pr_state:
+          type: string
+          description: "GitHub PR state: OPEN, MERGED, CLOSED, or none (no PR)."
+        ci:
+          type: string
+          description: "CI conclusion: SUCCESS, FAILURE:<name>, PENDING, skipped, none, unknown."
+        reviewed:
+          type: boolean
+          description: "True when every bot in config.review.required_bots has a completed review pass AND no blocking inline finding is unaddressed (step 2, ab-f1c5a9ed)."
+        fp_read_failed:
+          type: boolean
+          description: "Optional. True when the fingerprint pre-read gh call hard-failed this fire (outage). The fingerprint was carried forward from the prior event; step 2 makes these fires transparent to the consecutive-unchanged streak."
+        review_skipped:
+          type: boolean
+          description: "Optional (done-path fires). True when Reads 3+4 were skipped: per-session no_external or the repo declared required_bots: [] (AC3-UI observability)."
+        unaddressed_blocking:
+          type: integer
+          description: "Optional (done-path fires). Count of blocking inline findings (codex P1 / gemini critical|high) whose thread lacks a qualifying ack."
+    consumers: [operator]
+
+  - name: termination
+    description: "Emitted when the loop-check verb produces an allow decision that ends the session. Carries the TerminationReason enum value and (for Budget) the axis."
+    sources: [hook]
+    data:
+      required: [session_id, reason, message]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier."
+        reason:
+          type: string
+          enum: [DonePRGreen, DoneAdvisory, NoWork, Budget, NoProgress, Interrupted, Aborted]
+          description: "TerminationReason enum value."
+        axis:
+          type: string
+          enum: [wall_clock, cost]
+          description: "Budget axis (wall_clock or cost). Present only when reason=Budget."
+        message:
+          type: string
+          description: "Human-readable termination message."
+    consumers: [operator, megawalk]
+
+  - name: loop_check_gh_error
+    description: "Emitted when a gh read fails during a loop-check fire. The fire returns block so the loop retries; this event is the forensic trail."
+    sources: [hook]
+    data:
+      required: [session_id, read, stderr_tail]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier."
+        read:
+          type: string
+          description: "Which gh read failed: pr_view, pr_checks, pr_reviews, pr_reviews_parse, pulls_comments, pulls_comments_parse, pr_commits, pr_commits_parse, etc."
+        stderr_tail:
+          type: string
+          description: "Last few lines of gh stderr, or empty string if unavailable."
+    consumers: [operator]
+
+  - name: loop_advisory_mode
+    description: "Emitted each fire when the loop-check verb runs in advisory mode (gh binary absent, attended session). The verb still runs promise+budget checks but cannot read PR state."
+    sources: [hook]
+    data:
+      required: [session_id, attended]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier."
+        attended:
+          type: boolean
+          description: "True when the manifest declared attended=true."
+    consumers: [operator]
+
+  - name: loop_check_binary_missing
+    description: "Emitted by the bash stop-hook SHIM when the fno-agents binary cannot be found via any resolution path. The shim allows exit rather than creating an unrecoverable block loop."
+    sources: [hook]
+    data:
+      required: [session_id]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier (best-effort; may be empty if manifest unreadable)."
+    consumers: [operator]
+
+  - name: loop_check_legacy_manifest
+    description: "Emitted once when the loop-check verb encounters a pre-wedge state file whose status field is COMPLETE, BLOCKED, or ABORTED. The verb allows exit for back-compat."
+    sources: [hook]
+    data:
+      required: [session_id, status]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier."
+        status:
+          type: string
+          enum: [COMPLETE, BLOCKED, ABORTED]
+          description: "Legacy status value found in the manifest."
+    consumers: [operator]
+
+  - name: loop_unit_dispatched
+    description: "Emitted by the unified loop runtime (fno-agents loop run) before each unit dispatch."
+    sources: [loop]
+    data:
+      required: [session_id, unit_id, iteration]
+      properties:
+        session_id:
+          type: string
+          description: "Correlation key for the dispatched session (matches data.session_id in the termination event)."
+        unit_id:
+          type: string
+          description: "Identifier of the unit being dispatched (e.g. ab-XXXXXXXX for a backlog node)."
+        iteration:
+          type: integer
+          description: "1-based iteration counter across all units in this walk."
+        title:
+          type: string
+          description: "Optional human-readable title of the unit."
+    consumers: [operator, megawalk]
+
+  - name: node_failed
+    description: "Synthesized by the per-unit watchdog when a dispatched session exits without a TerminationReason event. Group-2 walk policy counts these toward the consecutive-failure pause."
+    sources: [loop]
+    data:
+      required: [session_id, unit_id, iteration, exit_code]
+      properties:
+        session_id:
+          type: string
+          description: "Correlation key for the session that exited without a termination event."
+        unit_id:
+          type: string
+          description: "Identifier of the unit whose session exited unexpectedly."
+        iteration:
+          type: integer
+          description: "Walk iteration at which this failure occurred."
+        exit_code:
+          type: integer
+          description: "Exit code returned by the session. When the process died by signal N rather than a clean exit, this field carries 128+N (the shell convention: e.g. SIGTERM=15 -> 143, SIGKILL=9 -> 137)."
+    consumers: [operator, megawalk]
+
+  - name: walk_paused
+    description: "Emitted by the unified loop runtime (run_loop) when walk policy requests a pause before loop_terminated(NoProgress). Carries the policy name and detail so operators can diagnose why the walk stopped early. Always followed by loop_terminated{reason: NoProgress} in the same walk. The legacy walker_paused kind (megawalk.py) maps to this."
+    sources: [loop]
+    data:
+      required: [policy, detail, iterations_used, units_closed]
+      properties:
+        policy:
+          type: string
+          enum: [consecutive_failures, p0_failed]
+          description: "Short tag identifying the walk policy that triggered the pause. consecutive_failures: streak of 3+ non-Done closes. p0_failed: a p0-priority unit closed with a non-Done reason."
+        detail:
+          type: string
+          description: "Human-readable detail. For consecutive_failures: space-separated unit IDs in the streak. For p0_failed: the unit ID."
+        iterations_used:
+          type: integer
+          description: "Walk iteration count at pause time."
+        units_closed:
+          type: integer
+          description: "Number of units that reached the close step before the pause."
+    consumers: [operator, megawalk]
+
+  - name: node_closed
+    description: "Emitted by the unified loop runtime after EVERY queue.close() call, including resume-guard closes (no dispatch occurred), normal termination closes, and per-unit cap parks. Provides per-unit close visibility in the event stream so TUI and progress-line consumers see close outcomes without polling queue state. The legacy node_complete and node_parked kinds (megawalk.py) map to this."
+    sources: [loop]
+    data:
+      required: [unit_id, session_id, reason, close, detail, iterations_used]
+      properties:
+        unit_id:
+          type: string
+          description: "Identifier of the unit that was closed (e.g. ab-XXXXXXXX)."
+        session_id:
+          type: string
+          description: "Correlation key for the session associated with this unit."
+        reason:
+          type: string
+          description: "TerminationReason string from the evidence that drove the close (e.g. DonePRGreen, Budget, NoProgress)."
+        close:
+          type: string
+          enum: [closed, parked, refused]
+          description: "What the queue did: closed (node marked done), parked (deferred for retry), refused (queue rejected the close)."
+        detail:
+          type: string
+          description: "Detail string from the Parked or Refused outcome; empty string for Closed."
+        iterations_used:
+          type: integer
+          description: "Walk iteration count at close time."
+    consumers: [operator, megawalk]
+
+  - name: loop_terminated
+    description: "The loop runtime's walk-level terminal event. Distinct from `termination` (a session's terminal event emitted by loop-check)."
+    sources: [loop]
+    data:
+      required: [reason, iterations_used, units_closed]
+      properties:
+        reason:
+          type: string
+          enum: [DonePRGreen, DoneAdvisory, NoWork, Budget, NoProgress, Interrupted, Aborted]
+          description: "Walk-level TerminationReason value."
+        iterations_used:
+          type: integer
+          description: "Total iteration count consumed across all units in this walk."
+        units_closed:
+          type: integer
+          description: "Number of units that reached the close step during this walk."
+        axis:
+          type: string
+          enum: [iterations, wall_clock, cost]
+          description: "Budget axis. Present only when reason=Budget."
+        session_id:
+          type: string
+          description: "Optional session correlation key (populated when termination is triggered mid-unit)."
+    consumers: [operator, megawalk]
+
+  - name: delegated
+    description: "Emitted by handoff.sh when a target session successfully delegates its remaining pipeline to a fresh successor session. Records the full lineage chain: node, from/to session pair, boundary type, and generation number. The terminal-session resolution rule (sec 2.5) follows these events to judge promise/completion for megawalk pre-advance verification."
+    sources: [target]
+    data:
+      required: [node_id, from_session, to_session, boundary, generation]
+      properties:
+        node_id:
+          type: string
+          description: "The backlog graph node ID being delegated (e.g. ab-XXXXXXXX)."
+        from_session:
+          type: string
+          description: "Session ID of the parent (delegating) session."
+        to_session:
+          type: string
+          description: "Agent name of the spawned successor (e.g. tgt-cc1bf08f-g2). Used by megawalk lineage resolution."
+        child_session:
+          type: string
+          description: "Short session ID returned by fno agents spawn for the spawned child. May be empty if the registry row was confirmed by name lookup rather than by short-id."
+        boundary:
+          type: string
+          description: "Pipeline boundary at which the handoff occurred (e.g. blueprint-do, wave)."
+        generation:
+          type: integer
+          description: "Generation number of the successor session (parent is N-1; first handoff produces generation 2)."
+    consumers: [hooks/megawalk-stop-hook.sh, operator]
+
+  - name: handoff_failed
+    description: "Emitted by handoff.sh when the ordered succession protocol fails after any state mutation. Signals that the parent session has re-acquired its node claim and restored its target-state.md so it can continue in-session. The reason field indicates the failure stage."
+    sources: [target]
+    data:
+      required: [node_id, session_id, reason]
+      properties:
+        node_id:
+          type: string
+          description: "The backlog graph node ID for which the handoff was attempted."
+        session_id:
+          type: string
+          description: "Session ID of the parent session that attempted the handoff."
+        reason:
+          type: string
+          description: "Machine-readable failure reason (e.g. spawn_failed, verify_timeout, release_failed, restore_failed)."
+        detail:
+          type: string
+          description: "Optional human-readable detail about the failure (truncated to 200 chars)."
+    consumers: [operator]
+
+  - name: handoff_probe_unreadable
+    description: "Emitted by handoff.sh when the context-probe.sh exits non-zero (transcript missing, unparseable, or jq unavailable) during precondition evaluation for a pressure boundary. The parent treats this as no-pressure and continues in-session. Observability signal so operators can detect silently-broken context monitoring."
+    sources: [target]
+    data:
+      required: [node_id, session_id]
+      properties:
+        node_id:
+          type: string
+          description: "The backlog graph node ID for which the probe was attempted."
+        session_id:
+          type: string
+          description: "Session ID of the parent session."
+        probe_exit:
+          type: integer
+          description: "Exit code returned by context-probe.sh."
+        transcript_path:
+          type: string
+          description: "Transcript path that was probed (best-effort; may be empty if manifest was unreadable)."
+    consumers: [operator]
+
+  - name: advance_dispatched
+    description: "Emitted by `fno backlog advance` (merge-triggered auto-continue, ab-3cd195b6) when it dispatches a fresh background /target no-merge worker for the next now-unblocked node after a PR merge. Surfaced in the next SessionStart reconcile reminder line."
+    sources: [backlog]
+    data:
+      required: [node_id]
+      properties:
+        node_id:
+          type: string
+          description: "The next backlog node dispatched (e.g. ab-XXXXXXXX)."
+        short_id:
+          type: string
+          description: "Short id of the spawned claude bg worker (from the spawn receipt)."
+        agent_name:
+          type: string
+          description: "Spawned agent name (target-<full-node-id>-<slug>)."
+        closed_node_id:
+          type: string
+          description: "The just-merged node whose close triggered this advance (keying for AC1-RACE)."
+    consumers: [operator]
+
+  - name: advance_skipped
+    description: "Emitted by `fno backlog advance` when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
+    sources: [backlog]
+    data:
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error]
+          description: "Why advance dispatched nothing this run."
+        node_id:
+          type: string
+          description: "The candidate next node, when a reason references one (already-claimed)."
+        closed_node_id:
+          type: string
+          description: "The just-merged node whose close triggered this advance."
+        detail:
+          type: string
+          description: "Optional human-readable detail (e.g. the next-error message), truncated."
+    consumers: [operator]
+
+  - name: advance_failed
+    description: "Emitted by `fno backlog advance` when the worker spawn failed after the dispatch reservation was acquired. advance releases the node's dispatch reservation and the host op (reconcile/post-merge) still completes; the next SessionStart reconcile retries (AC2-FR). Surfaced loudly in the next reconcile reminder."
+    sources: [backlog]
+    data:
+      required: [node_id, error]
+      properties:
+        node_id:
+          type: string
+          description: "The node whose worker spawn failed."
+        error:
+          type: string
+          description: "Failure detail (truncated to 200 chars)."
+        closed_node_id:
+          type: string
+          description: "The just-merged node whose close triggered this advance."
+    consumers: [operator]
+
+  - name: pr_watch_dispatched
+    description: "PR-state watcher successfully fired a headless claude skill for one PR (either /fno:pr merged or /fno:pr check)."
+    sources: [daemon]
+    data:
+      required: [kind, pr]
+      properties:
+        kind:
+          type: string
+          enum: [review, merge]
+          description: "Which skill was fired: 'review' for /fno:pr check, 'merge' for /fno:pr merged."
+        pr:
+          type: integer
+          description: "GitHub PR number."
+
+  - name: pr_watch_skipped
+    description: "PR-state watcher skipped a candidate PR this tick without firing (no local checkout, or a live node/walker claim owns it)."
+    sources: [daemon]
+    data:
+      required: [pr, reason]
+      properties:
+        pr:
+          type: integer
+          description: "GitHub PR number."
+        reason:
+          type: string
+          description: "Why this PR was skipped: 'no-checkout' (repo_dir missing/absent), 'claimed' (live node: or walker: claim)."
+
+  - name: pr_watch_dispatch_failed
+    description: "A headless claude skill fired by the PR-state watcher returned an error (rc != 0, is_error:true, or non-JSON stdout). The PR will be retried on the next tick."
+    sources: [daemon]
+    data:
+      required: [pr, retries]
+      properties:
+        pr:
+          type: integer
+          description: "GitHub PR number."
+        retries:
+          type: integer
+          description: "Consecutive failure count for this PR after this failure (1-based)."
+
+  - name: pr_watch_parked
+    description: "PR-state watcher stopped polling a PR because it was closed, exceeded max age, or exhausted retries."
+    sources: [daemon]
+    data:
+      required: [pr, reason]
+      properties:
+        pr:
+          type: integer
+          description: "GitHub PR number."
+        reason:
+          type: string
+          description: "Why the PR was parked: 'closed', 'max-age', 'retries-exhausted', or decide()'s park reason."
+
+  - name: pr_watch_tick
+    description: "Heartbeat emitted at the end of every PR-state watcher poll interval, including quiet ticks with no actionable PRs."
+    sources: [daemon]
+    data:
+      required: [open_prs, acted]
+      properties:
+        open_prs:
+          type: integer
+          description: "Total number of open-PR candidates discovered from the graph this tick."
+        acted:
+          type: integer
+          description: "Number of PRs for which a skill was successfully dispatched this tick."
+
+# Size cap per Failure Modes (Boundaries): the system rejects events whose
+# data payload exceeds 64KB. Validators enforce this at validate() time.
+limits:
+  max_data_bytes: 65536

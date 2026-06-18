@@ -1,0 +1,5 @@
+title: "Implement parse_duration with edge-case handling"
+tags: [edge-cases]
+budget_usd: 3.0
+max_iterations: 8
+timeout_secs: 1800

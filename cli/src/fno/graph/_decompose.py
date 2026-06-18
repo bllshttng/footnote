@@ -1,0 +1,204 @@
+"""Bounded epic decomposition into group child nodes (ab-e9c81ed3, C1).
+
+A `group child node` bundles 1+ execution waves into a single shippable PR.
+This module holds the pure validation + planning logic; the IO (reading the
+graph, the locked mutation, stdout) lives in the `decompose` CLI command.
+
+Identity of a group child is (parent == epic, plan_path == base#group-<slug>),
+so a re-decomposition with the same slugs upserts in place rather than
+duplicating. See internal/fno/plans/2026-05-24-epic-scoped-execution.md.
+"""
+from __future__ import annotations
+
+import re
+from typing import Optional, TypedDict
+
+# Slug must be filesystem/URL-safe so `#group-<slug>` is a stable plan fragment.
+GROUP_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
+
+
+class NormalizedGroup(TypedDict):
+    """A validated group spec. The four keys are guaranteed present."""
+
+    slug: str
+    title: str
+    waves: str
+    blocked_by_groups: list[str]
+
+
+class DecomposeError(ValueError):
+    """Raised for any invalid decomposition request.
+
+    Carries an `exit_code` so the CLI can map error classes to the graph
+    CLI's documented exit codes (1 user error, 2 bad state/cycle, 3 not found).
+    """
+
+    def __init__(self, message: str, exit_code: int = 1) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def plan_base(plan_path: Optional[str]) -> str:
+    """Strip any `#fragment` from an epic plan_path to get the base doc path."""
+    if not plan_path:
+        raise DecomposeError(
+            "epic has no plan_path; cannot address group fragments", exit_code=1
+        )
+    return plan_path.split("#", 1)[0]
+
+
+def child_plan_path(base: str, slug: str) -> str:
+    return f"{base}#group-{slug}"
+
+
+def is_shipped(node: dict) -> bool:
+    """True when a group child node already has a PR / merge / completion signal.
+
+    Re-decomposing past such a node would orphan shipped work, so the caller
+    refuses unless explicitly forced (plan Errors invariant, line 84).
+    """
+    return bool(
+        node.get("pr_number")
+        or node.get("merge_status")
+        or node.get("completed_at")
+        or node.get("additional_prs")
+    )
+
+
+def find_orphans(
+    entries: list[dict], epic_id: str, base: str, keep_slugs: set[str]
+) -> list[dict]:
+    """Existing group children of the epic whose slug is absent from the new spec.
+
+    A child is a group node when it is parented to the epic and its plan_path
+    is `<base>#group-<slug>`. Returns those whose slug is not in keep_slugs, in
+    graph order, so a re-decomposition can surface or refuse the orphans.
+    """
+    prefix = f"{base}#group-"
+    orphans: list[dict] = []
+    for e in entries:
+        if e.get("parent") != epic_id:
+            continue
+        pp = e.get("plan_path") or ""
+        if not pp.startswith(prefix):
+            continue
+        slug = pp[len(prefix):]
+        if slug and slug not in keep_slugs:
+            orphans.append(e)
+    return orphans
+
+
+def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGroup]:
+    """Validate the group spec; return the normalized list or raise DecomposeError.
+
+    Checks (all before any graph write, so the caller stays atomic):
+      - groups is a non-empty list of objects with `slug` and `title`
+      - max_prs, if given, is >= 1 and >= len(groups) (the ceiling, AC1-ERR)
+      - slugs are well-formed and unique
+      - blocked_by_groups reference declared slugs
+      - the inter-group dependency graph is acyclic
+    """
+    if max_prs is not None and max_prs < 1:
+        raise DecomposeError(
+            f"--max-prs must be >= 1 (got {max_prs}); the ceiling cannot be zero",
+            exit_code=1,
+        )
+    if not isinstance(groups, list) or not groups:
+        raise DecomposeError(
+            "groups must be a non-empty JSON array of {slug, title, ...} objects",
+            exit_code=1,
+        )
+    if max_prs is not None and len(groups) > max_prs:
+        raise DecomposeError(
+            f"{len(groups)} groups exceed the ceiling --max-prs {max_prs}; "
+            "regroup into fewer delivery groups (N is a ceiling, not a quota)",
+            exit_code=1,
+        )
+
+    normalized: list[NormalizedGroup] = []
+    seen_slugs: set[str] = set()
+    for i, grp in enumerate(groups):
+        if not isinstance(grp, dict):
+            raise DecomposeError(f"group #{i + 1} is not an object", exit_code=1)
+        slug = grp.get("slug")
+        title = grp.get("title")
+        if not isinstance(slug, str) or not GROUP_SLUG_RE.match(slug):
+            raise DecomposeError(
+                f"group #{i + 1} has invalid slug {slug!r}; "
+                "use [A-Za-z0-9-] starting alphanumeric",
+                exit_code=1,
+            )
+        if slug in seen_slugs:
+            raise DecomposeError(f"duplicate group slug {slug!r}", exit_code=1)
+        seen_slugs.add(slug)
+        if not isinstance(title, str) or not title.strip():
+            raise DecomposeError(
+                f"group {slug!r} is missing a non-empty title", exit_code=1
+            )
+        deps = grp.get("blocked_by_groups") or []
+        if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+            raise DecomposeError(
+                f"group {slug!r} blocked_by_groups must be a list of slugs",
+                exit_code=1,
+            )
+        normalized.append(
+            {
+                "slug": slug,
+                "title": title.strip(),
+                "waves": str(grp.get("waves", "")).strip(),
+                "blocked_by_groups": list(deps),
+            }
+        )
+
+    # All referenced slugs must be declared in this decomposition.
+    for grp in normalized:
+        for dep in grp["blocked_by_groups"]:
+            if dep not in seen_slugs:
+                raise DecomposeError(
+                    f"group {grp['slug']!r} depends on undeclared slug {dep!r}",
+                    exit_code=1,
+                )
+
+    cycle = _first_cycle(normalized)
+    if cycle:
+        raise DecomposeError(
+            "inter-group dependency cycle: " + " -> ".join(cycle),
+            exit_code=2,
+        )
+
+    return normalized
+
+
+def _first_cycle(groups: list[NormalizedGroup]) -> Optional[list[str]]:
+    """Return a cycle path among groups (by slug) if one exists, else None.
+
+    Precondition: every slug in `blocked_by_groups` is declared in `groups`
+    (enforced by the reference-integrity check in `validate_groups`); calling
+    this standalone with an undeclared dependency raises KeyError.
+    """
+    adj = {g["slug"]: list(g["blocked_by_groups"]) for g in groups}
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {s: WHITE for s in adj}
+    stack: list[str] = []
+
+    def visit(node: str) -> Optional[list[str]]:
+        color[node] = GRAY
+        stack.append(node)
+        for nxt in adj[node]:
+            if color[nxt] == GRAY:
+                idx = stack.index(nxt)
+                return stack[idx:] + [nxt]
+            if color[nxt] == WHITE:
+                found = visit(nxt)
+                if found:
+                    return found
+        stack.pop()
+        color[node] = BLACK
+        return None
+
+    for s in adj:
+        if color[s] == WHITE:
+            found = visit(s)
+            if found:
+                return found
+    return None

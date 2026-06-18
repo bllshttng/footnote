@@ -1,0 +1,352 @@
+name: cli-ci
+
+# Cancel a PR's superseded runs on re-push so iterative pushes don't each run
+# the full matrix (GitHub Actions minutes). Keyed by head_ref so PR re-pushes
+# share a group; non-PR (push) events fall back to a unique run_id, so every
+# main commit keeps its own run (a shared main group could drop an intermediate
+# run - concurrency allows only one pending).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - cli/**
+      - .claude-plugin/**
+      - agents/**
+      - skills/**
+      - hooks/**
+      - scripts/**
+      - docs/architecture/events-schema.yaml
+      - scripts/lib/events-validate.sh
+      - scripts/lib/set-gate.sh
+      - scripts/lib/paths.sh
+      - scripts/ci/check-no-hardcoded-paths.sh
+      - scripts/generate-skill-bundles.sh
+      - scripts/lib/parse-bundle-manifest.py
+      - scripts/lint/**
+      - skill-bundles.yaml
+      - tests/**
+      - .github/workflows/cli-ci.yml
+  pull_request:
+    paths:
+      - cli/**
+      - .claude-plugin/**
+      - agents/**
+      - skills/**
+      - hooks/**
+      - scripts/**
+      - docs/architecture/events-schema.yaml
+      - scripts/lib/events-validate.sh
+      - scripts/lib/set-gate.sh
+      - scripts/lib/paths.sh
+      - scripts/ci/check-no-hardcoded-paths.sh
+      - scripts/generate-skill-bundles.sh
+      - scripts/lib/parse-bundle-manifest.py
+      - scripts/lint/**
+      - skill-bundles.yaml
+      - tests/**
+      - .github/workflows/cli-ci.yml
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Sync + build
+        working-directory: cli
+        run: |
+          uv sync
+          uv build
+
+      - name: Install PyYAML for bundler + marketplace lint
+        # The skill-bundler parser opts into PyYAML when the manifest declares
+        # references: or agents: blocks (nested shapes the stdlib fallback
+        # parser can't handle). The marketplace-readiness lint similarly
+        # imports yaml for frontmatter validation. Install at system level so
+        # the freshness check + lint scripts (run outside the cli venv) can
+        # import yaml from the same python3 that setup-python installed.
+        run: python3 -m pip install --upgrade pyyaml
+
+      - name: Pytest (unit + integration)
+        working-directory: cli
+        run: uv run pytest --tb=short -q
+
+      - name: paths.sh hash gate
+        working-directory: cli
+        run: uv run fno paths verify ../scripts/lib/paths.sh
+
+      - name: Bash events-validate harness
+        run: bash tests/events/test-bash-validator.sh
+
+      - name: frontend-craft gate harness (frontend-craft-gate plan)
+        run: |
+          bash tests/lib/test_frontend_surface.sh
+          bash tests/lib/test_infer_has_ui.sh
+          bash tests/lib/test_resolve_plan_executor.sh
+
+      - name: config global-precedence harness (ab-5d6c3d47)
+        # GLOBAL_SETTINGS must never alias CONFIG_FILE (the active config = the
+        # project-local file when one exists). Each case re-sources config.sh in
+        # a subshell so the source-time resolution - the actual bug - is exercised.
+        run: bash tests/lib/test_config_global_precedence.sh
+
+      - name: cost-accuracy harness (ab-c0f92987)
+        # Transcript dedup by (message.id, requestId) + version-aware opus
+        # pricing + shell/Python pricing parity + ledger/graph backfill +
+        # budget-cap shape-compat (compute_session_cost died with the detectors,
+        # ab-d0337fbc; the loop-check verb owns session-cost reads). Python tests
+        # are standalone (stdlib-only, system python3); the backfill's graph
+        # leg imports fno.graph.store from cli/src directly.
+        run: |
+          python3 tests/lib/test_cost_tracker_pricing.py
+          python3 tests/metrics/test_session_cost_dedup.py
+          python3 tests/metrics/test_backfill_cost_recompute.py
+          bash tests/lib/test_cost_tracker_sh_parity.sh
+
+      - name: loop-check shim + immutable manifest harness (ab-d0337fbc)
+        # Control-plane collapse wedge: the stop hook is a read-only shim over
+        # `fno-agents loop-check` (binary resolution, block/allow translation,
+        # binary-missing event, foreign-session guard, read-only invariant) and
+        # target-state.md is an immutable inputs-only manifest (field set,
+        # write-once plan_path rule). Hermetic; the Rust binary is stubbed.
+        run: |
+          bash tests/hooks/test_loop_check_shim.sh
+          bash tests/hooks/test_manifest_immutable.sh
+          bash tests/hooks/test_init_target_session_id.sh
+
+      - name: docs-before-ship phase-ordering guard (ab-2e4a09f1)
+        # Regression guard: the docs phase must run BEFORE ship so docs ride in
+        # the same PR and are never stranded by an auto-merge firing on external
+        # review. Asserts the ordering across skills/target/SKILL.md (philosophy
+        # table, prior-phase handoff map, pipeline box) and the ship-phase.md
+        # precondition. Previously authored but never wired into CI.
+        run: bash tests/test-docs-before-ship.sh
+
+      - name: .fno/ dir-hygiene harness (ab-d5a984f6)
+        # Janitorial PR: completion-summary fallback routes into .fno/.completed/
+        # (not the root); rotate-append-log.sh bounds convo-signals.jsonl; and
+        # prune-fno-dir.sh refuses --apply against a project state dir.
+        run: |
+          python3 tests/metrics/test_completion_summary_path.py
+          bash tests/lib/test_rotate_append_log.sh
+          bash scripts/tests/test_prune_fno_dir.sh
+
+      - name: Install stable Rust toolchain (for journey tests)
+        # Journey tests (e2e, emission-schema, backstop-subprocess) invoke the
+        # REAL fno-agents binary. Install the toolchain here; the build step
+        # below produces crates/fno-agents/target/debug/fno-agents which the
+        # three bash harnesses resolve via the fixed REAL_BIN path.
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts (journey tests)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/fno-agents/target
+          key: ${{ runner.os }}-cargo-journey-${{ hashFiles('crates/fno-agents/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-journey-
+
+      - name: Build fno-agents debug binary (for journey tests)
+        working-directory: crates/fno-agents
+        run: cargo build
+
+      - name: loop-check journey tests (e2e + emission-schema + backstop-subprocess)
+        # Gap 1+2: real shim+binary e2e (green/block/budget-coherence).
+        # Gap 3: every emitted event validated against events-schema.yaml.
+        # Gap 4: cross-process fingerprint backstop accumulation through disk.
+        run: |
+          bash tests/hooks/test_loop_check_e2e.sh
+          bash tests/events/test-loop-check-emission-schema.sh
+          bash tests/hooks/test_loop_check_backstop_subprocess.sh
+
+      - name: megawalk-walk smoke test (task 2.4, ab-7303e5d7)
+        # Verifies the Rust megawalk driver: happy walk (2 nodes -> NoWork exit 0)
+        # and park-on-done3 (done exits 3 -> node_closed{parked}, walk continues).
+        run: bash tests/smoke-megawalk-walk.sh
+
+      - name: Target self-handoff harness (ab-534bcc55, ab-c2edd785)
+        # The 8-step succession sequence plus the robust graph_node_id body
+        # reader (ab-c2edd785: stray-fence / unterminated-frontmatter / CRLF
+        # false-park regression pins) and the delegated ledger-record path.
+        run: |
+          bash tests/test-handoff.sh
+          bash tests/target/test_handoff_ledger_record.sh
+
+      - name: Plan Mode front door harness (ab-09853cb6)
+        # Mode 1: native Plan Mode -> /target. Capture hook + session-start wipe
+        # + backfill scaffolding + detection/precedence/consume + e2e compose.
+        run: |
+          bash tests/hooks/test_capture_plan_mode.sh
+          bash tests/hooks/test_pending_plan_wipe.sh
+          bash tests/target/test_backfill_plan.sh
+          bash tests/target/test_detect_pending_plan.sh
+          bash tests/target/test_plan_mode_e2e.sh
+
+      - name: bg-dispatch + ready-gated auto-launch harness (ab-e366539f)
+        # Phase 2: US5 targeted bg-dispatch (skills/target/scripts/dispatch-node.sh)
+        # + US6 ready-gated auto-launch (skills/blueprint/scripts/autolaunch-on-ready.sh).
+        # Hermetic (mock fno on PATH + exported get_config stub, so no yq and no
+        # real bg worker). Covers AC5-HP/ERR/UI/EDGE/FR, AC6-HP/ERR/UI/EDGE/FR,
+        # the node:<id> claim double-dispatch guard, the ready/blocked/deferred
+        # gate, and the planning-session-not-mutated invariant.
+        run: bash tests/test-bg-dispatch.sh
+
+      - name: agent skill harness (ab-4940daba)
+        # /fno:agent (spawn verb): phone/runner-less front door. normalize.sh
+        # (smart-quote strip, <verb>-<node-id>-<slug> name, provider deferral, no-merge default)
+        # + spawn.sh honest-receipt core. Hermetic (mock fno on PATH, stub
+        # provider resolver). Covers AC1-HP / AC2-ERR / AC4-EDGE / AC5-FR / AC6-FR
+        # and the cardinal no-fabricated-uuid guard.
+        run: |
+          bash tests/skills/test_agent_normalize.sh
+          bash tests/skills/test_agent_receipt.sh
+          # ab-994222ee: dashless bareword grammar + free-lane confirm posture
+          # (co-located with the skill per the design's verify commands).
+          bash skills/agent/tests/test_normalize.sh
+          bash skills/agent/tests/test_confirm.sh
+
+      - name: mail skill harness (ab-7479fdb2)
+        # /fno:mail (runner-less front door over `fno mail`): normalize.sh
+        # write-verb parse - smart-quote strip, recipient/body split, broadcast
+        # keyword detection, and the empty-recipient/empty-body refusal. Covers
+        # US4 AC4-HP (normalize then run the genuine send) and AC4-ERR (refuse an
+        # empty body before running anything). Hermetic: no fno, no network.
+        run: bash skills/mail/tests/test_normalize.sh
+
+      - name: events-discipline lint
+        run: bash scripts/lint/events-discipline.sh
+
+      - name: events-discipline lint self-test
+        run: bash tests/lint/test-events-discipline.sh
+
+      - name: No quarantined events.invalid.jsonl rows
+        run: bash scripts/lint/no-invalid-events.sh
+
+      - name: ruff + mypy for new path-config modules
+        working-directory: cli
+        run: |
+          uv run ruff check src/fno/paths.py src/fno/config/
+          uv run mypy src/fno/paths.py src/fno/config/
+
+      - name: Smoke tests
+        run: bash cli/tests/smoke/run-all.sh
+
+      - name: no hardcoded paths
+        run: bash scripts/ci/check-no-hardcoded-paths.sh
+
+      - name: No residual old-name patterns (rename guard)
+        run: bash scripts/rename/residual-check.sh
+
+      - name: No stale skill refs (consolidation audit)
+        run: bash scripts/ci/check-no-stale-skill-refs.sh
+
+      - name: No stale /spec refs (blueprint rename audit)
+        run: bash scripts/ci/check-no-stale-spec-refs.sh
+
+      - name: Config schema docs freshness
+        run: bash scripts/ci/check-config-schema-drift.sh
+
+      - name: Skill bundles freshness check
+        run: bash scripts/lint/check-skill-bundles-fresh.sh
+
+      - name: No \${REPO_ROOT}/scripts in skills
+        run: bash scripts/lint/no-repo-root-scripts-in-skills.sh
+
+      - name: Marketplace-readiness lint (no Skill calls, no path escapes, fno declared)
+        run: bash scripts/lint/no-cross-skill-runtime-calls.sh
+
+      - name: No unwrapped lib scripts
+        run: bash scripts/lint/no-unwrapped-lib-scripts.sh
+
+      - name: pin-skill generator self-test (front-door pinning, AC6-FR)
+        run: bash tests/test-pin-skill.sh
+
+      - name: Agent flock-pattern lint
+        working-directory: cli
+        run: uv run fno lint flock-pattern
+
+      - name: Provider stderr-merge lint
+        working-directory: cli
+        run: uv run fno lint provider-stderr-merge
+
+      - name: Repo-root shell-out drift guard (US4, clone-only allowlist)
+        # ab-acbde274: forbid a fno verb shelling out to a resolve_repo_root()/
+        # resolve_plugin_script()-rooted script that is not on the
+        # CLONE_ONLY_SCRIPTS allowlist, and prove each allowlisted verb degrades
+        # on a bare install. uv run so the degrade proof can invoke `fno`.
+        working-directory: cli
+        run: uv run fno lint shellout-drift
+
+      - name: Schema parity self-test
+        # Exercises check-event-schema-parity.sh with synthetic fixtures via
+        # --test-* flags. No Rust binary required. Confirms the script rejects
+        # name collisions, drifted envelopes, and malformed schemas correctly.
+        run: bash scripts/tests/check-event-schema-parity-selftest.sh
+
+      - name: Schema parity check (Python side)
+        # Validates events-v3.json + status-v1.json parse as JSON, runs
+        # python -m fno.events --emit-schema, diffs against on-disk
+        # schemas, and checks for Python/Rust name collisions. The Rust
+        # binary is not required here (WARN+exit-0 if absent); rust-ci.yml
+        # is the gate that builds fno-agents and runs the full parity check.
+        run: bash scripts/check-event-schema-parity.sh
+
+      - name: Registry schema parity selftest (ab-0baecaed)
+        # Proves the parity detector itself detects: drives synthetic
+        # fixtures through match / mismatch / unextractable cases so a
+        # broken grep can't degrade into a silent empty==empty pass.
+        run: bash scripts/ci/check-registry-schema-parity.sh --selftest
+
+      - name: Registry schema parity check (ab-0baecaed)
+        # Asserts Rust REGISTRY_SCHEMA_VERSION (crates/fno-agents/src/state.rs)
+        # == Python SCHEMA_VERSION (cli/src/fno/agents/registry.py). Runs
+        # here so a Python-only bump (cli/** trigger) is caught; rust-ci.yml
+        # runs the same check so a Rust-only bump (crates/** trigger) is caught.
+        run: bash scripts/ci/check-registry-schema-parity.sh
+
+  # TODO: graduate to blocking in the next release - remove continue-on-error
+  prompt-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    # paths: cli/src/fno/review/prompts/**, agents/**
+    # Job runs whenever those paths appear in the changeset (top-level trigger
+    # already gates the whole workflow on cli/** and agents/**).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check prompt drift
+        id: drift
+        run: |
+          bash cli/scripts/check-prompt-drift.sh && echo "drift=false" >> "$GITHUB_OUTPUT" || echo "drift=true" >> "$GITHUB_OUTPUT"
+
+      - name: Note drift in summary
+        if: steps.drift.outputs.drift == 'true'
+        run: |
+          echo "## Prompt Drift Detected" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "One or more bundled CLI agent prompts have drifted from their" >> "$GITHUB_STEP_SUMMARY"
+          echo "canonical plugin agents. Run \`bash cli/scripts/check-prompt-drift.sh\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "locally to see the diff. This check is non-blocking for now." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          bash cli/scripts/check-prompt-drift.sh || true

@@ -1,0 +1,10 @@
+.venv/
+dist/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+# W6: prebuilt fno-agents binary staged here by release CI before the wheel build
+src/fno/_bin/
+# Dogfood e2e runtime outputs
+scripts/dogfood-e2e/.target.json
+scripts/dogfood-e2e/dogfood-driver-*.log

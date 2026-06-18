@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "entries": [
+    {
+      "id": "ab-9728b70b",
+      "title": "Provider rotation: failover",
+      "_status": "ready",
+      "priority": "p1",
+      "domain": "code",
+      "plan_path": "internal/fno/plans/2026-05-05-provider-rotation-failover.md"
+    },
+    {
+      "id": "ab-abcd1111",
+      "title": "Plan with prefix collision A",
+      "_status": "ready",
+      "priority": "p2",
+      "domain": "code",
+      "plan_path": "internal/fno/plans/2026-05-05-collision-a.md"
+    },
+    {
+      "id": "ab-abcd2222",
+      "title": "Plan with prefix collision B",
+      "_status": "ready",
+      "priority": "p2",
+      "domain": "code",
+      "plan_path": "internal/fno/plans/2026-05-05-collision-b.md"
+    },
+    {
+      "id": "ab-cccc0001",
+      "title": "Provider rotation: failover follow-up node",
+      "_status": "ready",
+      "priority": "p3",
+      "domain": "code",
+      "plan_path": "internal/fno/plans/2026-05-05-failover-followup.md"
+    }
+  ]
+}

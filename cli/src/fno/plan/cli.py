@@ -1,0 +1,201 @@
+"""fno plan CLI - plan management verbs.
+
+Verbs:
+    stamp     - mark a plan's frontmatter with ship metadata (status:shipped)
+    graduate  - flip a stamped plan from status:shipped to status:done
+    brief     - generate a scoped task brief from a single-doc plan
+
+stamp and graduate forward all unknown args + propagate exit codes from the
+in-package ``fno.plan._stamp`` module. brief is implemented in fno.plan.brief.
+
+Why a CLI verb at all? It's the polished surface skills can call instead of
+spawning ``python3 -m fno.plan._stamp`` directly.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from enum import Enum
+from pathlib import Path
+from typing import List, Optional
+
+import typer
+
+from fno.paths import resolve_repo_root
+
+
+plan_app = typer.Typer(
+    name="plan",
+    help="Plan management: stamping, graduation, and brief generation",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+def _forward(verb: str, extra_args: List[str]) -> int:
+    """Subprocess into the in-package stamp module with verb + extra_args.
+
+    Runs ``python3 -m fno.plan._stamp`` under the current interpreter so the
+    module is always importable in-package (no repo-root resolution, no
+    script-missing degrade). Returns the module's exit code so callers chain.
+    """
+    cmd = [sys.executable, "-m", "fno.plan._stamp", verb] + extra_args
+    result = subprocess.run(cmd, check=False)
+    return result.returncode
+
+
+@plan_app.command(
+    "stamp",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help="Stamp plan frontmatter with ship metadata. Forwards all args to fno.plan._stamp stamp.",
+)
+def stamp(ctx: typer.Context) -> None:
+    rc = _forward("stamp", list(ctx.args))
+    raise typer.Exit(code=rc)
+
+
+@plan_app.command(
+    "graduate",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help="Graduate a stamped plan (shipped -> done). Forwards all args to fno.plan._stamp graduate.",
+)
+def graduate(ctx: typer.Context) -> None:
+    rc = _forward("graduate", list(ctx.args))
+    raise typer.Exit(code=rc)
+
+
+@plan_app.command(
+    "set-expected",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help=(
+        "Authoritatively set a plan's expected_url_count (count-only). Forwards "
+        "all args to fno.plan._stamp set-expected. Used to record the "
+        "group count on a shared epic-decomposition doc."
+    ),
+)
+def set_expected(ctx: typer.Context) -> None:
+    rc = _forward("set-expected", list(ctx.args))
+    raise typer.Exit(code=rc)
+
+
+# Update the module docstring's verb list when adding verbs above.
+
+
+# ---------------------------------------------------------------------------
+# fno plan brief
+# ---------------------------------------------------------------------------
+
+class _FilterMode(str, Enum):
+    all = "all"
+    relevant = "relevant"
+    none = "none"
+
+
+class _OutputFormat(str, Enum):
+    markdown = "markdown"
+    json = "json"
+
+
+@plan_app.command(
+    "brief",
+    help=(
+        "Generate a scoped task brief from a single-doc plan.\n\n"
+        "Exit codes: 0 success, 1 plan not found, 2 contract violation "
+        "(missing section / unknown task-id), 3 malformed YAML."
+    ),
+)
+def brief(
+    plan_path: str = typer.Argument(..., help="Path to the plan markdown file"),
+    task: str = typer.Option(..., "--task", help="Task id to generate a brief for (e.g. 2.1)"),
+    include_failure_modes: _FilterMode = typer.Option(
+        _FilterMode.relevant,
+        "--include-failure-modes",
+        help="Which Failure Modes entries to include: all | relevant | none",
+    ),
+    include_locked_decisions: _FilterMode = typer.Option(
+        _FilterMode.relevant,
+        "--include-locked-decisions",
+        help="Which Locked Decisions entries to include: all | relevant | none",
+    ),
+    format: _OutputFormat = typer.Option(
+        _OutputFormat.markdown,
+        "--format",
+        help="Output format: markdown | json",
+    ),
+) -> None:
+    """Generate a focused task brief from a single-doc plan file."""
+    from fno.plan._doc import load_plan, FrontmatterError, ParseError
+    from fno.plan.brief import build_brief, BriefError, BriefParseError
+
+    # Resolve path relative to repo root when not absolute.
+    # resolve_repo_root() raises RuntimeError when not inside a git repo;
+    # that's a legitimate "use the bare path" fallback, not an error to
+    # surface. OSError covers filesystem failures around the existence
+    # check. Anything else propagates.
+    resolved = Path(plan_path)
+    if not resolved.is_absolute():
+        try:
+            repo_root = resolve_repo_root()
+            candidate = repo_root / plan_path
+            if candidate.exists():
+                resolved = candidate
+        except (RuntimeError, OSError):
+            pass
+
+    # Exit 1 if plan not found
+    if not resolved.exists():
+        typer.echo(
+            f"fno plan brief: plan file not found: {plan_path}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Load the plan doc
+    try:
+        doc = load_plan(resolved)
+    except FrontmatterError as exc:
+        typer.echo(
+            f"fno plan brief: malformed frontmatter in {resolved}: {exc}",
+            err=True,
+        )
+        raise typer.Exit(code=3)
+    except (OSError, PermissionError) as exc:
+        typer.echo(
+            f"fno plan brief: cannot read {resolved}: {exc}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        typer.echo(
+            f"fno plan brief: unexpected error reading {resolved}: {exc}",
+            err=True,
+        )
+        raise typer.Exit(code=3)
+
+    # Build brief
+    try:
+        result = build_brief(
+            doc,
+            task_id=task,
+            include_failure_modes=include_failure_modes.value,
+            include_locked_decisions=include_locked_decisions.value,
+        )
+    except BriefParseError as exc:
+        typer.echo(
+            f"fno plan brief: malformed Execution Strategy YAML: {exc}",
+            err=True,
+        )
+        raise typer.Exit(code=3)
+    except BriefError as exc:
+        typer.echo(
+            f"fno plan brief: {exc}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # Emit output
+    if format == _OutputFormat.json:
+        typer.echo(json.dumps(result.to_json_dict(), indent=2))
+    else:
+        typer.echo(result.to_markdown())

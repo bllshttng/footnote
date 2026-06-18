@@ -1,0 +1,200 @@
+# Sourced libraries and internal helpers that should NOT get a dedicated fno <verb> wrapper.
+# One basename per line. Blank lines and lines starting with # are ignored.
+
+# Bash sourcing libraries
+common.sh
+config.sh
+flock.sh
+events.sh
+events-validate.sh
+state-parser.sh
+transcript-parser.sh
+worktree-manager.sh
+corrections-lock.sh
+phase-handoff.sh
+target-guard.sh
+spawn-subagent.sh
+hook-events.sh
+blocked-taxonomy.sh
+checkpoint.sh
+graph-resolve.sh
+
+# CLI runtime driver adapters (invoked by the runtime layer, not by users)
+driver-claude-code.sh
+driver-hermes.sh
+driver-openclaw.sh
+driver-codex.sh
+driver-gemini.sh
+
+# Python library modules (not entry points)
+bundle-frontmatter.py
+check-skill-frontmatter.py
+ledger-dedup-lookup.py
+parse-bundle-manifest.py
+codex_utils.sh
+
+# Sourced helpers / library functions (not user-facing entry points).
+# archive-artifacts.sh is sourced by hooks/target-stop-hook.sh to resolve
+# the plan_dir for COMPLETION.md / scratchpad-archive/ at session end.
+# parse-claims-arg.sh is sourced (via eval) by /blueprint to classify the
+# argument as an ab-id claim, so its output is shell assignments, not
+# a CLI-friendly surface.
+archive-artifacts.sh
+parse-claims-arg.sh
+
+# Phase 1 of stop-hook refactor: nine libs lifted out of
+# hooks/target-stop-hook.sh. Each is sourced by the hook (and by tests
+# that exercise the helpers in isolation); none has a standalone CLI
+# entry point because callers go through the hook's normal control flow.
+platform-io.sh
+mission-emit.sh
+handoff-generator.sh
+claim-release.sh
+wake-signals.sh
+state-update.sh
+planning-session.sh
+inbox-check.sh
+
+# Phase 2 of stop-hook refactor: auto-complete helper (session_satisfied
+# event scanner + portable compute_md5) lifted from hooks/target-stop-hook.sh.
+auto-complete.sh
+
+# Phase 3 of stop-hook refactor: five more libs from the stop hook's
+# session-end pipeline + tag detection.
+completion-accounting.sh
+session-register.sh
+aborted-tag.sh
+help-tag.sh
+hook-input.sh
+
+# Phase 4 of stop-hook refactor: thrash detector + external cancel signal
+# detector lifted from hooks/target-stop-hook.sh. Both are sourced by the
+# hook (and by tests that exercise the helpers in isolation). cancel-signal
+# owns the BLOCKED-write path; thrash-detector bundles the no-progress,
+# gate-only, budget, and help-escalation helpers.
+thrash-detector.sh
+cancel-signal.sh
+
+# Orphan target-family detector: blocks exit when /fno:target,
+# or /fno:megawalk was invoked but the
+# corresponding state file was never created (init was skipped). Sourced
+# by hooks/target-stop-hook.sh; not a user-facing entry point.
+orphan-target-detector.sh
+
+# Phase 5 of stop-hook refactor: stub detection + stale-owner detection
+# (transcript-id ladder + back-fill + PID fallback) + archival, lifted
+# from hooks/target-stop-hook.sh. Sourced by the hook; tests source the
+# lib directly. Not a user-facing entry point.
+stale-owner.sh
+
+# Phase 8 of stop-hook refactor: legacy RESULT-line and output-hash
+# circuit breakers lifted from sections 33+34 of the pre-refactor
+# hooks/target-stop-hook.sh. Distinct from thrash-detector.sh (Phase 4
+# structural-fingerprint detector): these are simpler 3-identical-X
+# circuit breakers that coach toward <help>. Sourced by the hook; no
+# user-facing CLI.
+legacy-circuit-breaker.sh
+
+# Phase 8 of stop-hook refactor: gate-audit orchestrator. Holds the
+# 630-line audit_and_complete_or_block() body lifted from the hook's
+# top-level scope. Drives the FAILED_GATES loop + strict-mode + provenance
+# layer + invoked_by render + child_promise emit + status COMPLETE flip.
+# All gate-helper functions it calls live in Phase 7's gates-*.sh libs.
+# Sourced by the hook; not a user-facing entry point.
+gate-audit.sh
+
+# Phase 9 of stop-hook refactor: thrash-detector orchestrator. The
+# threshold-init + STATUS guard + budget/help/thrash/gate-progress
+# call sequence (lines 690-905 of the pre-refactor hook) moved into
+# enforce_thrash_detectors() in this lib. The detector functions themselves
+# (check_no_progress_thrash, check_no_gate_progress,
+# count_consecutive_help_emissions, etc.) still live in thrash-detector.sh
+# (Phase 4). Sourced by the hook; tests source the lib directly for
+# structural greps. Not a user-facing entry point.
+thrash-orchestrator.sh
+
+# Phase 10 of stop-hook refactor: pre-case-statement BLOCKED writer for
+# external cancel signals. Owns the only legitimate hook-authored write
+# to status: BLOCKED (env-cancel, sentinel, or synthetic THRASH_DETECTED).
+# Mutates STATE_FILE + in-memory STATUS, emits user_canceled. Sourced by
+# the hook; tests source the lib directly for structural greps. Not a
+# user-facing entry point.
+cancel-signal-writer.sh
+
+# Phase 11 of stop-hook refactor: BLOCKED-branch handler for the case
+# "$STATUS" switch. Two paths: legitimate cancel-signal honor (graph
+# release, postmortem, sentinel cleanup, exit 0) and LLM-authored BLOCKED
+# revert (revert + escape-hatch hint, exit 2). Sourced by the hook; tests
+# source the lib directly for structural greps. Not a user-facing entry
+# point.
+blocked-handler.sh
+
+# Verified-merge ground truth (ab-f7f8bc53). Sourced by hooks/target-stop-hook.sh;
+# exposes is_verified_merge (the shared rc0/1/2 check, also called from
+# gate-audit.sh) and maybe_softexit_on_verified_merge (the defensive completion).
+# Pure sourcing library; tests source it directly for behavioral + structural
+# checks. No standalone CLI of its own.
+verified-merge.sh
+
+# Phase 12 of stop-hook refactor: budget-display computation. Reads
+# total_cost_usd + budget_cap_usd from STATE_FILE; sets COST_DISPLAY for
+# the resume system message. Pure display logic; the actual budget
+# enforcement (BLOCKED trip) lives in thrash-detector.sh. Sourced by the
+# hook; not a user-facing entry point.
+budget-display.sh
+
+# Advisory body-length lint for gate artifacts. Soft warning only;
+# called from gates-satisfied.sh::gate_satisfied to surface bloat in
+# LLM-authored artifact bodies. Never blocks; emits a single stderr WARN
+# when body > 500 bytes. See skills/target/references/gate-artifacts.md
+# "Body content when an LLM writes the artifact". Not a user-facing entry point.
+check-artifact-body.sh
+
+# Per-PR artifact consolidator. Invoked best-effort by fno/pr/_merge.py
+# (the internalized `fno pr merge`, ab-d4c98550) after a successful merge to
+# collect every phase artifact for the session into one
+# {YYYYMMDD}{SS}-{pr#}-artifact.md file. Internal helper, not a user-facing
+# entry point; degrades to a silent no-op when absent (bare pip install).
+consolidate-artifacts.sh
+
+# Shared throttled-reconcile helper (retro-auto-triage, ab-79165ba1). Sourced
+# by hooks/reconcile-session-start.sh and hooks/megawalk-stop-hook.sh to fire a
+# backgrounded, throttled `fno backlog reconcile` (which IS the wrapped entry
+# point). Pure sourcing library: exposes reconcile_maybe_fire; no standalone CLI.
+reconcile-throttle.sh
+
+# W8 operator-authority enforcement (cv-b36e32b1). Sourced by
+# hooks/target-stop-hook.sh; drive_authority_active() is a thin bash consumer
+# of the EXISTING `fno agents drive-authority` verb (which IS the wrapped entry
+# point). Pure sourcing library; no standalone CLI of its own.
+drive-authority.sh
+
+# Human-gated operator-override close (ab-ae3cc4a8). Sourced by
+# hooks/target-stop-hook.sh; exposes _detect_operator_override_reason and
+# handle_operator_override_if_authorized. The authorization is a genuine
+# user-authored `/target override <reason>` message detected from the
+# transcript, NOT a CLI verb (the LLM must not be able to self-authorize), so
+# there is intentionally no fno wrapper. Pure sourcing library; tests source it
+# directly. No standalone CLI of its own.
+operator-override.sh
+
+# frontend-craft gate (frontend-craft-gate plan). infer-has-ui.sh and
+# resolve-plan-executor.sh are thin CLIs invoked via `bash <path>` from the
+# stop hook / skill bodies. Both delegate the locked surface matcher to the
+# in-package module fno.executor._surface (the SINGLE source of truth, ported
+# from the retired infer-task-executor.sh) and have no user-facing
+# `fno <verb>` surface of their own.
+infer-has-ui.sh
+resolve-plan-executor.sh
+
+# Megawalk lineage-aware pre-advance verification (target self-handoff,
+# ab-534bcc55). resolve_terminal_session implements the terminal-session
+# resolution rule (docs/architecture/target-self-handoff.md). Sourced by
+# hooks/megawalk-stop-hook.sh; tests source the lib directly. Pure sourcing
+# library; no standalone CLI of its own.
+
+# Bounded append-log rotation (.fno/ dir-hygiene, ab-d5a984f6). A thin
+# `bash <path> <file> <max_bytes>` helper invoked by hooks/convo-signal-capture.sh
+# to cap convo-signals.jsonl; tests run it directly. Pure utility, not a
+# user-facing fno verb.
+rotate-append-log.sh

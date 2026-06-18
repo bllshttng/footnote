@@ -1,0 +1,27 @@
+[package]
+name = "fno"
+version = "0.1.0"
+edition = "2021"
+# Low MSRV on purpose: this is an install front door, so `cargo install fno`
+# must work on whatever stable Rust a user already has. The shim uses only
+# long-stable std (exec, OsStrExt, slice strip_suffix), nothing recent - it does
+# NOT inherit fno-agents' 1.89 floor (that crate needs std's File::lock).
+rust-version = "1.74"
+description = "Lazy bootstrapper for the fno CLI. On first run it provisions the fno Python wheel (which bundles the fno-agents binaries) via uv, then forwards every invocation to it. The CLI itself is the `fno` package on PyPI; this crate is only the cargo front door."
+license = "Apache-2.0"
+repository = "https://github.com/bllshttng/footnote"
+homepage = "https://github.com/bllshttng/footnote"
+readme = "README.md"
+keywords = ["fno", "bootstrapper", "installer", "uv"]
+categories = ["command-line-utilities", "development-tools"]
+publish = true
+
+# The published binary is named `fno`: `cargo install fno` lands `~/.cargo/bin/fno`.
+[[bin]]
+name = "fno"
+path = "src/main.rs"
+
+# Intentionally NO external dependencies. A pure-std shim keeps the crates.io
+# publish tiny and compiles in seconds on a clean machine, where the only
+# network the install needs is crates.io fetching this crate itself.
+[dependencies]

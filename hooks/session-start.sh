@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# SessionStart hook for abilities plugin — cross-platform
+# Injects project vision into session context.
+# Wraps existing Claude Code-specific hooks and re-formats output per platform.
+
+set -euo pipefail
+
+# Check for jq dependency — exit silently if missing (enhancement hook)
+if ! command -v jq &> /dev/null; then
+    exit 0
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+STATE_FILE=".fno/target-state.md"
+
+# ── Plugin-root pointer (best-effort, idempotent) ────────────────────
+# Persist the plugin root to ~/.fno/plugin-root so `fno target init` and
+# `fno gate set` can find their plugin scripts when run from a foreign project
+# with no env hint. `fno` is a uv-tool install whose wheel does not carry
+# hooks/, and CLAUDE_PLUGIN_ROOT is not propagated to arbitrary `fno`
+# subprocesses - the pointer is then the only env-less source. PLUGIN_ROOT here
+# is always the real plugin (parent of this hook's dir); the manifest check is
+# a belt-and-suspenders guard. Mirrors fno.paths._persist_plugin_root and
+# is read by fno.paths._read_persisted_plugin_root. errexit-safe.
+prime_plugin_root_pointer() {
+    [[ -f "$PLUGIN_ROOT/.claude-plugin/plugin.json" ]] || return 0
+    local home="${FNO_HOME:-$HOME/.fno}"
+    local ptr="$home/plugin-root"
+    if [[ -f "$ptr" ]] && [[ "$(cat "$ptr" 2>/dev/null)" == "$PLUGIN_ROOT" ]]; then
+        return 0
+    fi
+    mkdir -p "$home" 2>/dev/null || return 0
+    printf '%s\n' "$PLUGIN_ROOT" > "$ptr" 2>/dev/null || true
+}
+prime_plugin_root_pointer || true
+
+# ── Platform detection ─────────────────────────────────────────────────
+detect_platform() {
+    if [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
+        echo "gemini"
+    elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
+        echo "codex"
+    elif [[ -n "${CURSOR_PLUGIN_ROOT:-}" ]]; then
+        echo "cursor"
+    elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+        echo "claude"
+    else
+        echo "generic"
+    fi
+}
+
+PLATFORM=$(detect_platform)
+
+hydrate_state_provider_context() {
+    [[ -f "$STATE_FILE" ]] || return 0
+
+    # Only hydrate state files owned by a live target run. Stale state from a
+    # prior session must not be mutated — the stop hook will archive it.
+    local guard_lib="${PLUGIN_ROOT}/scripts/lib/target-guard.sh"
+    if [[ -f "$guard_lib" ]]; then
+        # shellcheck source=../scripts/lib/target-guard.sh
+        source "$guard_lib"
+        target_is_active "$STATE_FILE" || return 0
+    fi
+
+    local timestamp
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local temp_file
+    temp_file="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
+
+    awk -v provider="$PLATFORM" -v timestamp="$timestamp" '
+        BEGIN { updated_provider=0; updated_context=0; updated_at=0; fm=0 }
+        /^---$/ {
+            fm++
+            if (fm == 2) {
+                if (!updated_provider) print "provider: " provider
+                if (!updated_context) print "session_start_context_loaded: true"
+                if (!updated_at) print "updated_at: " timestamp
+            }
+            print
+            next
+        }
+        fm == 1 && /^provider:/ { print "provider: " provider; updated_provider=1; next }
+        fm == 1 && /^session_start_context_loaded:/ { print "session_start_context_loaded: true"; updated_context=1; next }
+        fm == 1 && /^updated_at:/ { print "updated_at: " timestamp; updated_at=1; next }
+        { print }
+    ' "$STATE_FILE" > "$temp_file"
+
+    mv "$temp_file" "$STATE_FILE"
+}
+
+# ── Collect context from existing hooks ────────────────────────────────
+# Run each hook and extract its context output (ignoring platform-specific
+# wrapping). Each block follows the same pattern: run the Claude-shaped
+# hook, then strip the platform wrapper so we can re-wrap with the
+# cross-CLI shape at the bottom of this script.
+#
+# Order matters here: the resulting combined context is concatenated in
+# the order these blocks fire, which is the order the agent reads at
+# turn one. Keep this aligned with the SessionStart array in hooks.json
+# so the Claude and non-Claude surfaces converge on the same preamble.
+
+# 1. using-abilities preamble — names both surfaces (slash commands + fno
+#    CLI) and the HARD-GATE forbidden writes. Highest priority because
+#    it teaches the agent the verbs the rest of the context will use.
+using_abilities_content=""
+if [[ -f "${SCRIPT_DIR}/session-start-using-abilities.sh" ]]; then
+    raw_using_abilities=$(bash "${SCRIPT_DIR}/session-start-using-abilities.sh" 2>/dev/null || echo "")
+    if [[ -n "$raw_using_abilities" ]]; then
+        using_abilities_content=$(echo "$raw_using_abilities" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // .additionalContext // empty' 2>/dev/null || echo "$raw_using_abilities")
+    fi
+fi
+
+# 2. project vision — what this codebase is and why.
+vision_content=""
+if [[ -f "${SCRIPT_DIR}/inject-project-vision.sh" ]]; then
+    raw_vision=$(bash "${SCRIPT_DIR}/inject-project-vision.sh" 2>/dev/null || echo "")
+    if [[ -n "$raw_vision" ]]; then
+        vision_content=$(echo "$raw_vision" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // empty' 2>/dev/null || echo "$raw_vision")
+    fi
+fi
+
+# 3. fno whoami — operational context for the current session
+#    (fleet → walker → session stack, gates, provider). Helps the agent
+#    re-orient after a fresh start or compaction.
+whoami_content=""
+if [[ -f "${SCRIPT_DIR}/inject-abi-agent-whoami.sh" ]]; then
+    raw_whoami=$(bash "${SCRIPT_DIR}/inject-abi-agent-whoami.sh" 2>/dev/null || echo "")
+    if [[ -n "$raw_whoami" ]]; then
+        whoami_content=$(echo "$raw_whoami" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // empty' 2>/dev/null || echo "$raw_whoami")
+    fi
+fi
+
+# 4. worktree-scope hygiene heads-up — universal, advisory, never blocks.
+#    Consumes the SAME shared verdict as /target, /do, /fix (one rule, no
+#    drift). Emits at most two one-line notes and stays silent on a clean
+#    worktree, a non-git dir, or any git error (the helper degrades to
+#    verdict=ok / nested_count=0). This is the heads-up that today only
+#    /target provides, surfaced for every implementation-capable thread
+#    including `claude --bg`.
+hygiene_content=""
+hygiene_helper="${SCRIPT_DIR}/helpers/check-impl-location.sh"
+if [[ -f "$hygiene_helper" ]]; then
+    loc_out="$(bash "$hygiene_helper" 2>/dev/null || true)"
+    if [[ -n "$loc_out" ]]; then
+        loc_verdict="$(printf '%s\n' "$loc_out" | sed -n 's/^verdict=//p' | head -1)"
+        loc_branch="$(printf '%s\n' "$loc_out" | sed -n 's/^branch=//p' | head -1)"
+        loc_nested="$(printf '%s\n' "$loc_out" | sed -n 's/^nested_count=//p' | head -1)"
+        hygiene_notes=""
+        if [[ "$loc_verdict" == "canonical-protected" ]]; then
+            hygiene_notes="- You are on canonical \`${loc_branch:-main}\` in the shared checkout. Implementation work should run in a worktree under \`~/conductor/workspaces/\` (sibling terminals share \`.fno/\`)."
+        fi
+        if [[ -n "$loc_nested" && "$loc_nested" != "0" ]]; then
+            loc_path="$(printf '%s\n' "$loc_out" | sed -n 's/^nested_path=//p' | head -1)"
+            nested_note="- Nested worktree present at \`${loc_path}\` (${loc_nested} total). \`grep -r\` descends into it; prefer \`rg\` / the Grep tool."
+            if [[ -n "$hygiene_notes" ]]; then
+                hygiene_notes="${hygiene_notes}"$'\n'"${nested_note}"
+            else
+                hygiene_notes="$nested_note"
+            fi
+        fi
+        if [[ -n "$hygiene_notes" ]]; then
+            hygiene_content="## Worktree hygiene"$'\n'"$hygiene_notes"
+        fi
+    fi
+fi
+
+# ── Combine context ───────────────────────────────────────────────────
+# Newline-separate non-empty blocks so the agent sees each preamble as
+# its own section rather than one wall of text.
+combined=""
+append_section() {
+    local section="$1"
+    [[ -z "$section" ]] && return 0
+    if [[ -z "$combined" ]]; then
+        combined="$section"
+    else
+        combined="${combined}"$'\n\n'"${section}"
+    fi
+}
+append_section "$using_abilities_content"
+append_section "$vision_content"
+append_section "$whoami_content"
+append_section "$hygiene_content"
+
+hydrate_state_provider_context
+
+# No context to inject — exit silently
+if [[ -z "$combined" ]]; then
+    exit 0
+fi
+
+# ── Platform-specific output ──────────────────────────────────────────
+# Use jq for safe JSON escaping of the combined context string.
+case "$PLATFORM" in
+    claude)
+        jq -n --arg ctx "$combined" \
+            '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":$ctx}}'
+        ;;
+    *)
+        # Gemini, Codex, Cursor, generic — all use additional_context
+        jq -n --arg ctx "$combined" \
+            '{"additional_context":$ctx}'
+        ;;
+esac

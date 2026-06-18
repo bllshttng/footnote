@@ -1,0 +1,100 @@
+name: crates-publish
+
+# Publish this project's crates to crates.io: `fno-agents` (the PTY/agent +
+# loop substrate) and `fno` (the cargo-install bootstrapper, ab-4040eee8). On
+# PRs touching either crate it runs `cargo publish --dry-run` only (validates
+# the package without uploading). A real publish happens ONLY on manual dispatch
+# with confirm=true AND the CARGO_REGISTRY_TOKEN secret present. crates.io
+# publishes are permanent (a version cannot be re-uploaded), so this is
+# intentionally hard to trigger.
+
+# Cancel a PR's superseded dry-run on re-push (Actions minute conservation).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type true to actually publish the crates to crates.io (permanent)"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - crates/fno-agents/**
+      - crates/fno-bootstrap/**
+      - .github/workflows/crates-publish.yml
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: cargo publish --dry-run (${{ matrix.crate }})
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # crate = the crates.io name; dir = the crate directory.
+        include:
+          - crate: fno-agents
+            dir: crates/fno-agents
+          - crate: fno
+            dir: crates/fno-bootstrap
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Refuse a stale pre-rename crate path (AC5-FR)
+        run: |
+          manifest="${{ matrix.dir }}/Cargo.toml"
+          # Reject the stale untracked pre-rename crate dir so it can never be
+          # packaged; the literal name is an intentional reference. fno-rename-keep
+          stale='abi-agents'  # fno-rename-keep
+          case "$manifest" in
+            *"$stale"*)
+              echo "refusing to use a stale pre-rename crate path: $manifest"; exit 1;;
+          esac
+          test -f "$manifest" || { echo "manifest not found: $manifest"; exit 1; }
+      - name: Dry-run package + verify
+        # Explicit --manifest-path (never a cwd/glob resolution) so the stale
+        # untracked pre-rename crate dir can never be packaged by mistake (AC5-FR).
+        run: cargo publish --dry-run --manifest-path "${{ matrix.dir }}/Cargo.toml"
+
+  publish:
+    name: cargo publish (${{ matrix.crate }}, gated)
+    if: github.event_name == 'workflow_dispatch' && inputs.confirm == true
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # crates.io publishes are independent (fno does not depend on fno-agents
+      # as a cargo dep), so order is irrelevant; serialize for a clean log.
+      max-parallel: 1
+      matrix:
+        include:
+          - crate: fno-agents
+            dir: crates/fno-agents
+          - crate: fno
+            dir: crates/fno-bootstrap
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Refuse a stale pre-rename crate path (AC5-FR)
+        run: |
+          manifest="${{ matrix.dir }}/Cargo.toml"
+          # Reject the stale untracked pre-rename crate dir so it can never be
+          # published; the literal name is an intentional reference. fno-rename-keep
+          stale='abi-agents'  # fno-rename-keep
+          case "$manifest" in
+            *"$stale"*)
+              echo "refusing to use a stale pre-rename crate path: $manifest"; exit 1;;
+          esac
+          test -f "$manifest" || { echo "manifest not found: $manifest"; exit 1; }
+      - name: Publish ${{ matrix.crate }} to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo "CARGO_REGISTRY_TOKEN not set; refusing to publish"; exit 1; }
+          echo "publishing ${{ matrix.crate }} from ${{ matrix.dir }}/Cargo.toml"
+          cargo publish --manifest-path "${{ matrix.dir }}/Cargo.toml"

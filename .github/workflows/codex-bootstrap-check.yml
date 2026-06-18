@@ -1,0 +1,35 @@
+name: Codex Bootstrap Check
+
+# Cancel a PR's superseded runs on re-push (Actions minute conservation). Keyed by head_ref so PR re-pushes share a
+# group; non-PR events use a unique run_id, so every main commit keeps its own
+# run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  codex-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Run Codex setup (no package setup)
+        run: |
+          bash scripts/setup.sh --provider codex --skip-package-setup
+
+      - name: Run doctor checks
+        run: |
+          bash scripts/doctor.sh

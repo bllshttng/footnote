@@ -1,0 +1,22 @@
+{
+  "name": "footnote",
+  "owner": {
+    "name": "Jason Noah Choi",
+    "url": "https://github.com/bllshttng/footnote"
+  },
+  "metadata": {
+    "description": "Set a target and walk away. Say f[no] to mostly done.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "fno",
+      "source": "./",
+      "description": "Set a target and walk away. Say f[no] to mostly done.",
+      "version": "0.1.0",
+      "category": "workflow",
+      "tags": ["workflow", "tdd", "planning", "code-review", "autonomous", "target"],
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+    }
+  ]
+}

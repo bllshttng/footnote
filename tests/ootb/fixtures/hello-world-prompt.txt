@@ -1,0 +1,8 @@
+You are running a smoke test for the abilities target loop wrapper.
+
+Output exactly the following and nothing else, then stop:
+
+<promise>MISSION COMPLETE: smoke test</promise>
+
+Do not explain. Do not emit any other text. The wrapper needs to see
+exactly one promise tag in your response.

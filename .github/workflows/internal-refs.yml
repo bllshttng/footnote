@@ -1,0 +1,43 @@
+name: internal-refs
+
+# The check-no-internal-refs guard scans shipped prose (docs/, agents/,
+# commands/, and top-level AGENTS.md / README.md / CLAUDE.md / GEMINI.md) for
+# `internal/` vault-path leaks - paths that do not resolve in an OSS install.
+# cli-ci deliberately does NOT trigger on docs-only changes (to avoid firing the
+# full matrix on a docs edit), which would let a docs-only leak skip the guard
+# entirely. This minimal workflow runs ONLY the guard, and ONLY on the exact
+# prose paths it scans, so the guard covers its primary regression class without
+# the full matrix. (review #503, codex P2)
+on:
+  push:
+    branches: [main]
+    paths: &prose_paths
+      - docs/**
+      - agents/**
+      - commands/**
+      - AGENTS.md
+      - README.md
+      - CLAUDE.md
+      - GEMINI.md
+      - scripts/ci/check-no-internal-refs.sh
+      - .github/workflows/internal-refs.yml
+  pull_request:
+    paths: *prose_paths
+
+concurrency:
+  group: internal-refs-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-no-internal-refs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: No internal/ vault refs in shipped prose
+        run: bash scripts/ci/check-no-internal-refs.sh

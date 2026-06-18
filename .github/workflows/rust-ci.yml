@@ -1,0 +1,164 @@
+name: rust-ci
+
+# W7: Run Rust tests + schema parity check. This is the job that finally
+# makes flock_interop.rs (the Phase 6 kill criterion) gate on every commit.
+#
+# Also runs scripts/check-event-schema-parity.sh with the built binary so
+# Rust-side schema drift is caught when crates/** or schema files change.
+
+# Cancel a PR's superseded runs on re-push (Actions minute conservation). Keyed by head_ref so PR re-pushes share a
+# group; non-PR events use a unique run_id, so every main commit keeps its own
+# run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/**
+      - docs/architecture/schemas/**
+      - docs/architecture/events-schema.yaml
+      - scripts/check-event-schema-parity.sh
+      - scripts/ci/check-registry-schema-parity.sh
+      - .github/workflows/rust-ci.yml
+  pull_request:
+    paths:
+      - crates/**
+      - docs/architecture/schemas/**
+      - docs/architecture/events-schema.yaml
+      - scripts/check-event-schema-parity.sh
+      - scripts/ci/check-registry-schema-parity.sh
+      - .github/workflows/rust-ci.yml
+
+jobs:
+  fmt:
+    name: cargo fmt --check (pinned)
+    # Pinned-toolchain rustfmt gate (ab-abff720d). The crate had package-wide
+    # rustfmt drift with no gate to catch it, so plain `cargo fmt` polluted
+    # every contributor's diff. The version is PINNED (not @stable) so a future
+    # stable rustfmt that changes formatting cannot fail this gate on untouched
+    # code -- the committed format and the gate's format move together only
+    # when this pin is bumped deliberately. Keep RUSTFMT_TOOLCHAIN in lockstep
+    # with the version used for the next package-wide sweep.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # The toolchain whose rustfmt produced the committed formatting. Bump
+      # this and re-run `cargo +<ver> fmt` over the crate together, never apart.
+      RUSTFMT_TOOLCHAIN: "1.94.1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned rustfmt toolchain
+        # rustup ships on ubuntu-latest runners. Pin the exact toolchain via
+        # rustup (not a floating dtolnay @stable) so the gate is deterministic.
+        run: |
+          rustup toolchain install "$RUSTFMT_TOOLCHAIN" --component rustfmt --profile minimal --no-self-update
+          rustup run "$RUSTFMT_TOOLCHAIN" rustfmt --version
+
+      - name: cargo fmt --check
+        working-directory: crates/fno-agents
+        run: cargo "+$RUSTFMT_TOOLCHAIN" fmt --all --check
+
+  test:
+    name: cargo test + schema parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/fno-agents/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Set up Python (for flock_interop.rs cross-language test)
+        # flock_interop.rs spawns a real python3 subprocess to verify that
+        # Rust flock and Python fcntl.flock serialize correctly. ubuntu-latest
+        # ships with Python 3 on PATH; this step ensures a known version and
+        # installs the abilities package so the parity check can also run.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv + sync cli
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install fno Python package
+        working-directory: cli
+        run: uv sync
+
+      - name: Install PyYAML for the bare python3 (verify_evidence_parity)
+        # verify_evidence.rs shells to a bare-PATH `python3 -c "import yaml,..."`
+        # for byte-parity with the deleted bash oracle. `uv sync` installs pyyaml
+        # only into cli/.venv, which the cargo-test step does not activate, so the
+        # resolved python3 lacks `yaml` and every valid fixture is falsely flagged
+        # "settings.yaml unparseable". Install pyyaml onto the setup-python
+        # interpreter (the one which_python3() resolves) so the parity check sees
+        # the same parser its frozen goldens were captured with.
+        run: python3 -m pip install "pyyaml>=6"
+
+      - name: cargo test --all-targets
+        working-directory: crates/fno-agents
+        run: cargo test --all-targets
+
+      - name: Build fno-agents binary (for parity check)
+        working-directory: crates/fno-agents
+        run: cargo build --bin fno-agents
+
+      - name: Schema parity check
+        # The binary is now on disk; the parity script picks it up from
+        # crates/fno-agents/target/debug/fno-agents. Python runs from the
+        # cli/.venv created by uv sync above.
+        run: bash scripts/check-event-schema-parity.sh
+
+      - name: Registry schema parity check (ab-0baecaed)
+        # Cross-language schema_version lockstep: catches a Rust-only bump of
+        # REGISTRY_SCHEMA_VERSION that forgot the Python SCHEMA_VERSION side.
+        # Pure text extraction; no binary needed (the build above is for the
+        # event-schema check). cli-ci.yml runs the same check for Python-only
+        # bumps and also runs the detector selftest.
+        run: bash scripts/ci/check-registry-schema-parity.sh
+
+  audit:
+    name: cargo audit (RUSTSEC advisories)
+    # Scans Cargo.lock against the RustSec advisory DB. Vulnerabilities fail
+    # the job; informational findings (unmaintained, yanked) warn but stay
+    # green. Known expected warning: `serial` 0.4.0 (RUSTSEC-2017-0008) via
+    # portable-pty 0.8 -- clears when the dep-refresh node ab-e784d8ff bumps
+    # portable-pty to 0.9 (which swaps serial for the maintained serial2).
+    # No cron trigger: advisories on untouched deps surface on the next
+    # crates/** push, which is frequent enough here. Runs locally as
+    # `cargo audit` from crates/fno-agents (cargo install cargo-audit).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit (prebuilt)
+        # Prebuilt binary install; compiling cargo-audit from source costs
+        # ~5 min of CI per run.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        working-directory: crates/fno-agents
+        run: cargo audit

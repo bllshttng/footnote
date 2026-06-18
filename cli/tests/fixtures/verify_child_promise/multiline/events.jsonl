@@ -1,0 +1,3 @@
+{"ts":"2026-05-07T09:30:42Z","type":"phase_init","source":"target","data":{"phase":"register","nonce":"a","session_id":"sX"}}
+{"ts":"2026-05-07T09:30:43Z","type":"child_promise","source":"target","data":{"session_id":"sOther","nonce":"nOther"}}
+{"ts":"2026-05-07T09:30:44Z","type":"child_promise","source":"target","data":{"session_id":"sX","nonce":"nX"}}

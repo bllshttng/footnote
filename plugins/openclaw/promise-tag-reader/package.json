@@ -1,0 +1,11 @@
+{
+  "name": "@fno/openclaw-promise-tag-reader",
+  "version": "0.1.0",
+  "description": "Writes .fno/target-promise.signal when an openclaw assistant response contains a <promise>...</promise> tag.",
+  "main": "index.ts",
+  "type": "module",
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "license": "Apache-2.0"
+}

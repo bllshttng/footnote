@@ -1,0 +1,193 @@
+name: release-wheels
+
+# Phase 6 W6. Build platform wheels that bundle the `fno-agents` Rust binary,
+# then OPTIONALLY publish to PyPI. Nothing here runs on normal pushes/PRs:
+# the build matrix runs only on a version tag or manual dispatch, and the PyPI
+# upload is doubly gated (manual `publish=true` input AND the PYPI_API_TOKEN
+# secret). Until a maintainer pushes a `v*` tag or dispatches with publish=true,
+# this workflow ships nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Upload built wheels to PyPI (requires PYPI_API_TOKEN)"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheels:
+    name: wheel ${{ matrix.target.name }}
+    runs-on: ${{ matrix.target.runs-on }}
+    # Windows is built but not released this phase (release: false). Let its
+    # failure not fail the job, so the gated publish job still runs on the
+    # released macos/linux wheels instead of being skipped by `needs:`.
+    continue-on-error: ${{ matrix.target.name == 'windows-x64' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { name: macos-arm64, runs-on: macos-14, rust-target: aarch64-apple-darwin, wheel-platform: "" }
+          - { name: macos-x64, runs-on: macos-13, rust-target: x86_64-apple-darwin, wheel-platform: "" }
+          - { name: linux-x64, runs-on: ubuntu-latest, rust-target: x86_64-unknown-linux-musl, wheel-platform: manylinux_2_17_x86_64 }
+          - { name: linux-arm64, runs-on: ubuntu-24.04-arm, rust-target: aarch64-unknown-linux-musl, wheel-platform: manylinux_2_17_aarch64 }
+          # Windows builds but is NOT released this phase (POSIX flock + Unix-socket
+          # IPC differ; named-pipe port is a separate spec). Kept in the matrix so
+          # the toolchain stays exercised for the Phase 7+ deferral.
+          - { name: windows-x64, runs-on: windows-latest, rust-target: x86_64-pc-windows-msvc, wheel-platform: "", release: false }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target.rust-target }}
+
+      - name: Install musl tools (linux)
+        if: startsWith(matrix.target.name, 'linux')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build fno-agents binary
+        working-directory: crates/fno-agents
+        run: cargo build --release --target ${{ matrix.target.rust-target }} --bins
+
+      - name: Stage binaries for the wheel build hook
+        shell: bash
+        run: |
+          mkdir -p cli/src/fno/_bin
+          # US6: stage all three binaries (client + daemon + worker) so the wheel
+          # is binary-complete - daemon-backed verbs work on a pip-only box with
+          # no second install. `cargo build --bins` above produced all three; the
+          # build hook hard-fails if any is missing (a partial set never ships).
+          ext=""
+          [ "${{ matrix.target.name }}" = "windows-x64" ] && ext=".exe"
+          for b in fno-agents fno-agents-daemon fno-agents-worker; do
+            cp "crates/fno-agents/target/${{ matrix.target.rust-target }}/release/${b}${ext}" \
+               "cli/src/fno/_bin/${b}${ext}"
+          done
+
+      - name: Build wheel
+        working-directory: cli
+        # FNO_AGENTS_WHEEL_PLATFORM forces the manylinux tag on Linux (PyPI rejects
+        # plain linux_* tags; the musl-static binary is portable enough to claim
+        # manylinux). Empty on mac/windows -> the hook infers the platform tag.
+        env:
+          FNO_AGENTS_WHEEL_PLATFORM: ${{ matrix.target.wheel-platform }}
+        run: uv build --wheel
+
+      - name: Clean-machine smoke (binaries on PATH, verbs run, clone-only verbs degrade)
+        if: matrix.target.name != 'windows-x64'
+        working-directory: cli
+        shell: bash
+        run: |
+          # US5/US6: the freshly built wheel must be binary-complete (all three
+          # binaries), run the internalized/folded verbs from in-package code,
+          # and degrade the clone-only verbs - on a clean machine with no clone.
+          # Per-verb pass/fail; fails the release before PyPI on any miss.
+          wheel="$(ls dist/*.whl | head -1)"
+          bash tests/smoke/clean_machine_smoke.sh "$wheel"
+
+      - name: Cargo-channel smoke (cargo install fno self-bootstraps to the wheel)
+        if: matrix.target.name != 'windows-x64'
+        working-directory: cli
+        shell: bash
+        run: |
+          # ab-4040eee8 US6: the cargo front door must self-bootstrap. cargo
+          # install the shim, then a first `fno` run provisions THIS freshly
+          # built wheel (FNO_BOOTSTRAP_WHEEL - the by-name PyPI path is the
+          # launch gate) and lands all three binaries on PATH. Per-check
+          # pass/fail; fails the release on any miss.
+          wheel="$(ls dist/*.whl | head -1)"
+          bash tests/smoke/cargo_bootstrap_smoke.sh "$wheel"
+
+      - name: fno.sh-channel smoke (curl one-liner provisions the wheel)
+        if: matrix.target.name != 'windows-x64'
+        working-directory: cli
+        shell: bash
+        run: |
+          # ab-f49b54c1 US6: the fno.sh front door must provision end to end.
+          # Run the repo copy of scripts/install/fno.sh against THIS freshly
+          # built wheel (FNO_INSTALL_WHEEL - the by-name PyPI path is the launch
+          # gate) and land all three binaries on the uv tool bin. On the linux
+          # legs the smoke's `sh "$INSTALLER"` is dash (Ubuntu /bin/sh -> dash),
+          # so this also exercises the installer under a strict POSIX sh
+          # (AC6-ERR's dynamic dash execution). Per-check pass/fail; fails the
+          # release on any miss.
+          wheel="$(ls dist/*.whl | head -1)"
+          bash tests/smoke/fno_sh_smoke.sh "$wheel"
+
+      - name: brew-channel smoke (formula installs the wheel, binaries on PATH)
+        if: startsWith(matrix.target.name, 'macos')
+        working-directory: cli
+        shell: bash
+        run: |
+          # ab-d59d219a US5: the brew front door must install end to end. macOS
+          # only (brew is the channel's host). CI=true gates the INSTALL tier on,
+          # so a concrete local-wheel formula (url=file://<this freshly built
+          # wheel>, real sha256, the same explicit fno-agents symlink) is
+          # `brew install`ed, `brew test`ed, its three binaries asserted on the
+          # keg bin, and `brew uninstall`ed clean. The structural tier
+          # (ruby -c + element asserts + brew style) always runs. The by-name
+          # `brew install <owner>/fno/fno` + the full `--new` audit are the
+          # PyPI-publish + tap-creation launch gate. Fails the release on any miss.
+          wheel="$(ls dist/*.whl | head -1)"
+          bash tests/smoke/brew_formula_smoke.sh "$wheel"
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target.name }}
+          path: cli/dist/*.whl
+
+  publish-pypi:
+    name: publish to PyPI (gated)
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    # Doubly gated: manual dispatch with publish=true. A bare tag push builds +
+    # uploads artifacts but does NOT publish unless re-dispatched with the flag.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+    permissions:
+      contents: read
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Drop wheels that must not be published
+        # Windows is not released this phase. Drop it by platform tag (*win*),
+        # AND drop any universal py3-none-any wheel: a release-matrix wheel must
+        # always carry a bundled binary, so a `none-any` artifact means the build
+        # hook no-op'd (e.g. a staging miss) and must never reach PyPI
+        # (codex P2 on PR #351 - filename matching alone is too fragile).
+        run: |
+          rm -f dist/*win*.whl dist/*-none-any.whl
+          ls -1 dist/*.whl >/dev/null 2>&1 || { echo "no publishable wheels remain"; exit 1; }
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Publish
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          test -n "$UV_PUBLISH_TOKEN" || { echo "PYPI_API_TOKEN not set; refusing to publish"; exit 1; }
+          uv publish dist/*.whl

@@ -1,0 +1,506 @@
+"""fno.agents.registry — JSON agent registry with atomic-rename + flocks.
+
+Storage substrate for `fno agents`. Two lock scopes:
+
+- **Per-agent flock** (``_agent_lock_path``): callers in dispatch.py hold
+  this around a single agent's subprocess invocation so two ``ask`` calls
+  for the same name serialize end-to-end (claude -bg + supervisor probe).
+- **Registry-wide flock** (``_registry_lock_path``): held inside
+  ``update_registry`` to make the load-modify-write cycle atomic across
+  different agent names. Without it, two concurrent ``ask`` calls for
+  DIFFERENT agents could both ``load_registry`` -> mutate -> ``write``
+  and the loser's update would be lost (Codex review on PR #288 P1).
+
+Use ``update_registry(name, updater)`` for any production read-modify-write;
+``write_registry`` stays as the low-level primitive (also handy in tests).
+
+``write_registry`` uses an atomic temp-file + ``os.replace`` so a kill -9
+mid-write cannot corrupt the existing file. Schema version is bumped any
+time the on-disk shape changes; loading a registry with a different
+``schema_version`` raises ``RegistryVersionError`` so fno refuses to
+silently misread it. Malformed JSON, non-dict rows, and unknown providers
+all surface as ``RegistryVersionError`` too — callers handle alien shape
+through one exception type.
+"""
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import json
+import os
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Iterator, Literal, Optional
+
+# registry.status is a projection of state.status (LD10), so it can be ANY
+# AgentStatus variant. The daemon writes "live" on spawn and "exited" on child
+# exit (retained until rm), and reconcile writes "orphaned". The earlier
+# {live, orphaned} set was too narrow — it hard-errored every registry read
+# once an exited row was present, bricking all Python `fno agents` commands
+# until the row was rm'd via the Rust binary. This is the full snake_case
+# AgentStatus vocabulary (mirrors crates/fno-agents/src/lib.rs AgentStatus and
+# the status-v1 schema); it accepts every valid projected status while still
+# rejecting garbage. Must stay in lockstep with the Rust strict reader
+# (crates/fno-agents/src/client_verbs.rs::KNOWN_STATUSES).
+AgentStatus = Literal[
+    "spawning",
+    "ready",
+    "idle",
+    "busy",
+    "live",
+    "restarting",
+    "orphaned",
+    "failed",
+    "exited",
+    "permanent_dead",
+]
+KNOWN_STATUSES = frozenset(
+    {
+        "spawning",
+        "ready",
+        "idle",
+        "busy",
+        "live",
+        "restarting",
+        "orphaned",
+        "failed",
+        "exited",
+        "permanent_dead",
+    }
+)
+
+# Valid host_mode values (interactive-drive node). A missing/null key coerces to
+# "exec" in load_registry; any other concrete value is rejected like an alien
+# status, so a typo ("intractive") cannot silently fall back to exec behavior.
+KNOWN_HOST_MODES = frozenset({"exec", "interactive"})
+
+# Single source of truth for "which stored field is a provider's resume
+# target". Consumed by both AgentEntry.session_id (real entries) and
+# resume_cli._session_id_for (duck-typed against test fakes), so the
+# provider -> field mapping lives in exactly one place and cannot drift
+# between the two. Adding a provider here updates both call sites at once.
+PROVIDER_SESSION_ID_FIELDS = {
+    "claude": "claude_short_id",
+    "codex": "codex_session_id",
+    "gemini": "gemini_session_id",
+}
+
+from fno import paths
+
+# v4 (ab-a171ceb2) is the host_mode forward-compat bump. v4 is structurally
+# identical to v3 - host_mode is additive-optional and read version-independently
+# (absent==exec, below) - but stamping v4 makes a pre-host_mode reader (which
+# accepts only {1,2,3} and lacks host_mode code) reject a v4 store instead of
+# silently treating an interactive row as exec and orphaning a live TUI. Reads
+# stay backward-compatible: load_registry accepts 1..=SCHEMA_VERSION.
+SCHEMA_VERSION = 4
+
+
+class RegistryVersionError(RuntimeError):
+    """Raised when a registry file's schema_version != SCHEMA_VERSION."""
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Indirection so AC2-ERR can monkeypatch this symbol to simulate kill -9.
+# Looked up via module attribute at call time, NOT closed over.
+_json_dumps = json.dumps
+
+
+@dataclass
+class AgentEntry:
+    """One row in the registry — a named agent session.
+
+    Schema v2 (US2) adds ``status`` and ``last_message_at``:
+
+    - ``status`` is ``"live"`` while the agent's messaging socket is
+      reachable; flipped to ``"orphaned"`` by US2's follow-up path when
+      ``locate_session`` or the 250 ms liveness probe fails.
+    - ``last_message_at`` is the UTC ISO timestamp of the most recent
+      successful follow-up send (bumped post-send, monotone per
+      ``update_registry`` flock).
+
+    Schema v3 (Phase 5 US6) adds ``mcp_channel_id``:
+
+    - ``mcp_channel_id`` is the server-generated UUIDv4 the fno
+      MCP sidecar uses to route inbound pokes to the session that was
+      launched with ``--channels fno``. ``None`` for legacy
+      (US2/socket-only) sessions; ``str`` for MCP-backed sessions. Only
+      ``register_mcp_channel`` (dispatch.py) writes this field; no other
+      code path mutates it (spec invariant).
+    """
+
+    name: str
+    provider: str
+    cwd: str
+    log_path: str
+    claude_short_id: Optional[str] = None
+    codex_session_id: Optional[str] = None
+    gemini_session_id: Optional[str] = None
+    created_at: str = field(default_factory=_utc_now_iso)
+    status: AgentStatus = "live"
+    last_message_at: Optional[str] = None
+    mcp_channel_id: Optional[str] = None
+    # host_mode: "exec" (one-shot, the default for every existing row) or
+    # "interactive" (a long-lived drivable TUI hosted by the Rust daemon via
+    # `fno agents host`/`promote`). load_registry coerces a missing key or an
+    # explicit null to "exec" before constructing the entry, so a concrete mode
+    # always reaches consumers (never None). The Rust RegistryEntry mirrors this
+    # with #[serde(default, skip_serializing_if = "Option::is_none")], so a row
+    # round-trips between the two languages: Rust omits the key for exec rows and
+    # Python's coercion maps the absence back to "exec". [interactive-drive node]
+    host_mode: Optional[str] = None
+    # The FULL claude session UUID, the stream-json `--resume` target. Distinct
+    # from `claude_short_id` (the 8-hex jobId, a 32-bit prefix used by `claude
+    # attach` + the jobs-dir, not collision-proof as a resume key). None until a
+    # claude session is adopted into the daemon stream-json host lane, which
+    # resolves it via `_claude_session_registry.resolve_session_uuid` and
+    # persists it here. Additive-optional (no schema bump): an absent key reads
+    # as None, and the Rust RegistryEntry mirrors it with `#[serde(default)]`, so
+    # a row round-trips between the two languages. [stream-json host lane node]
+    claude_session_uuid: Optional[str] = None
+
+    # ----------------------------------------------------------------------
+    # Rust-daemon-only PTY fields (ab-b946b59c). A genuine daemon PTY row
+    # (spawn/host/promote) carries a non-empty short_id/project_root + pid +
+    # worker socket, etc. PR #364 made a *round-tripped Python* row omit these
+    # (Rust's skip_serializing_if drops them when empty/None), but a real PTY
+    # row in a MIXED registry still serializes them with values -- and the
+    # earlier AgentEntry, lacking these init fields, made `AgentEntry(**row)`
+    # raise TypeError, which load_registry maps to RegistryVersionError, bricking
+    # EVERY Python `fno agents` read. Mirroring the fields here lets Python read
+    # a Rust PTY row AND preserve it losslessly on write-back (asdict re-emits
+    # them; the Rust struct's #[serde(default)] reads Python's values fine).
+    #
+    # short_id/project_root are Rust `String` (NOT Option), so they default to
+    # "" -- emitting "short_id": null would fail Rust's deserialize (null is not
+    # a String). The Option fields below emit null, which Rust reads as None.
+    short_id: str = ""
+    project_root: str = ""
+    messaging_socket_path: Optional[str] = None
+    cc_session_id: Optional[str] = None
+    pid: Optional[int] = None
+    pid_start_time: Optional[int] = None
+    last_reconciled_at: Optional[str] = None
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """The provider-specific resume-target id.
+
+        Resolves to whichever stored field the resume path consumes:
+        ``claude_short_id`` (``claude attach``), ``codex_session_id``
+        (``codex resume <uuid>``), or ``gemini_session_id``. ``None`` for
+        unknown providers or when the id was never captured.
+
+        The provider -> field mapping comes from the module-level
+        :data:`PROVIDER_SESSION_ID_FIELDS`, which ``resume_cli._session_id_for``
+        also reads, so the two cannot drift. As a ``@property`` this is
+        excluded from ``asdict`` serialization and never becomes an
+        on-disk storage field.
+        """
+        field_name = PROVIDER_SESSION_ID_FIELDS.get(self.provider)
+        return getattr(self, field_name) if field_name else None
+
+
+def _registry_path(path: Optional[Path]) -> Path:
+    if path is not None:
+        return path
+    return paths.agents_registry_path()
+
+
+def _agent_lock_path(name: str, registry_path: Path) -> Path:
+    """Return the flock file for a given agent name under registry's directory.
+
+    Lock files live under ``<registry-dir>/locks/<name>.lock``. Caller is
+    responsible for opening the file and calling ``fcntl.flock``; this
+    function only computes the path. Name is rejected if it contains
+    path separators or ``..``.
+    """
+    if "/" in name or "\\" in name or ".." in name:
+        raise ValueError(
+            f"agent name must not contain path separators or '..': {name!r}"
+        )
+    return registry_path.parent / "locks" / f"{name}.lock"
+
+
+def _registry_lock_path(registry_path: Path) -> Path:
+    """Return the registry-wide flock file alongside the registry."""
+    return registry_path.parent / "locks" / "_registry.lock"
+
+
+@contextlib.contextmanager
+def _hold_registry_lock(registry_path: Path) -> Iterator[None]:
+    """Block-acquire the registry-wide flock for the duration of the with-block."""
+    lock_file = _registry_lock_path(registry_path)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_file, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> None:
+    """Atomically write the registry to disk.
+
+    Serialization happens before the temp file is opened so an exception in
+    ``_json_dumps`` cannot corrupt the existing file. The encoded text is
+    written to ``<path>.tmp`` and renamed into place via ``os.replace``.
+    On a post-serialization failure (e.g. ENOSPC during ``write_text``),
+    the orphan ``.tmp`` is unlinked so it doesn't accumulate on retry.
+    """
+    target = _registry_path(path)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "agents": [asdict(e) for e in entries],
+    }
+    # Bare-name call resolves via module globals at call time, so
+    # ``monkeypatch.setattr(reg_module, "_json_dumps", ...)`` works.
+    text = _json_dumps(payload, indent=2, sort_keys=False)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
+    """Load the registry. Returns ``[]`` if the file does not exist.
+
+    Every alien-shape failure mode raises ``RegistryVersionError`` so
+    callers handle "this file looks wrong" through one exception type:
+    invalid JSON, top-level not-a-dict, ``agents`` not-a-list, row
+    not-a-dict, ``schema_version`` mismatch, unknown provider in a row,
+    and unknown / missing AgentEntry fields all map to that one error.
+    A future fno adding fields without bumping the schema_version must
+    not silently corrupt the in-memory entry.
+    """
+    from fno.agents.providers import KNOWN_PROVIDERS
+
+    target = _registry_path(path)
+    if not target.exists():
+        return []
+
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RegistryVersionError(
+            f"registry at {target} is malformed JSON: {exc}"
+        ) from exc
+
+    if not isinstance(raw, dict):
+        raise RegistryVersionError(
+            f"registry at {target} top-level is not a JSON object "
+            f"(got {type(raw).__name__})"
+        )
+
+    on_disk_version = raw.get("schema_version")
+    # Older schemas are read transparently: missing fields are
+    # synthesized in memory with default values, and the next
+    # write_registry persists the current shape. The on-disk file
+    # is NOT mutated by load. Accepted: v1 (lacks status +
+    # last_message_at + mcp_channel_id), v2 (lacks mcp_channel_id),
+    # v3 (adds mcp_channel_id), and v4 (host_mode forward-compat bump;
+    # structurally identical to v3). The accepted set spans 1..=SCHEMA_VERSION
+    # so a bump never drops back-compat reads (ab-a171ceb2); the synthesis
+    # flags below key off ABSOLUTE version numbers, not SCHEMA_VERSION-relative
+    # offsets, so future bumps don't silently mis-trigger v1/v2 synthesis.
+    # Anything outside the range raises RegistryVersionError.
+    if not (
+        isinstance(on_disk_version, int)
+        and 1 <= on_disk_version <= SCHEMA_VERSION
+    ):
+        raise RegistryVersionError(
+            f"registry at {target} has schema_version={on_disk_version!r}, "
+            f"this fno understands schema_version={SCHEMA_VERSION}. "
+            "Upgrade or downgrade fno to match."
+        )
+    needs_v1_synthesis = on_disk_version == 1
+    needs_v2_synthesis = on_disk_version <= 2
+
+    agents_field = raw.get("agents", [])
+    if not isinstance(agents_field, list):
+        raise RegistryVersionError(
+            f"registry at {target} 'agents' field is not a list "
+            f"(got {type(agents_field).__name__})"
+        )
+
+    entries: list[AgentEntry] = []
+    for index, row in enumerate(agents_field):
+        if not isinstance(row, dict):
+            raise RegistryVersionError(
+                f"registry at {target} row {index} is not a JSON object "
+                f"(got {type(row).__name__})"
+            )
+        provider = row.get("provider")
+        if provider not in KNOWN_PROVIDERS:
+            raise RegistryVersionError(
+                f"registry at {target} row {index} has provider={provider!r}; "
+                f"this fno supports {KNOWN_PROVIDERS}. "
+                "Upgrade or downgrade fno to match."
+            )
+        if needs_v1_synthesis:
+            row = {**row, "status": "live", "last_message_at": None}
+        if needs_v2_synthesis and "mcp_channel_id" not in row:
+            # v2 → v3 synthesis: socket-only agents have no MCP channel.
+            row = {**row, "mcp_channel_id": None}
+        # host_mode: absent key OR explicit null reads as "exec". Version-
+        # independent (the additive field is handled by absence, not a schema
+        # bump) so a Rust-written exec row (which omits the key) and any
+        # pre-host_mode row both materialize a concrete "exec" mode. An explicit
+        # "interactive" passes through unchanged. [interactive-drive node]
+        if row.get("host_mode") is None:
+            row = {**row, "host_mode": "exec"}
+        elif row["host_mode"] not in KNOWN_HOST_MODES:
+            raise RegistryVersionError(
+                f"registry at {target} row {index} has host_mode="
+                f"{row['host_mode']!r}; known values: "
+                f"{sorted(KNOWN_HOST_MODES)}. "
+                "Upgrade or downgrade fno to match."
+            )
+        # v2 entries carry an explicit status — guard against alien
+        # values landing in-memory via a tampered registry file. v1
+        # synthesis above pins "live" so it always passes.
+        if row.get("status", "live") not in KNOWN_STATUSES:
+            raise RegistryVersionError(
+                f"registry at {target} row {index} has status="
+                f"{row.get('status')!r}; known values: "
+                f"{sorted(KNOWN_STATUSES)}. "
+                "Upgrade or downgrade fno to match."
+            )
+        # `session_id` is a computed @property on AgentEntry, not an init field.
+        # A Rust PTY row may serialize it (Rust skips it when None, so this only
+        # fires for a row that recorded one); passing it to AgentEntry(**row)
+        # would TypeError. Drop it -- Python recomputes it from provider + the
+        # *_session_id fields (the identical projection Rust uses), so nothing
+        # recoverable is lost, and asdict re-omits it on write-back. (ab-b946b59c)
+        if "session_id" in row:
+            row = {k: v for k, v in row.items() if k != "session_id"}
+        try:
+            entries.append(AgentEntry(**row))
+        except TypeError as exc:
+            raise RegistryVersionError(
+                f"registry at {target} row {index} has malformed shape "
+                f"(unknown or missing fields): {exc}. "
+                "Upgrade or downgrade fno to match."
+            ) from exc
+    return entries
+
+
+def register_existing_session(
+    *,
+    provider: str,
+    session_id: str,
+    cwd: str,
+    name: Optional[str] = None,
+    log_path: str = "",
+    registry_path: Optional[Path] = None,
+) -> AgentEntry:
+    """Register an operator-started session so peers can address it by name.
+
+    The bus epic's spawn/host paths create registry rows; this is the
+    missing seam for a session a human started by hand (e.g. a ``claude``
+    SessionStart hook). After registration a peer can ``fno mail send``
+    to the row's name; with no live transport the send demotes to the
+    durable queue, which the session's own inbox-wake hook surfaces (US7).
+
+    Idempotent on ``(provider, session_id)``: re-registering the same
+    session (the hook re-fires after a resume/compaction) refreshes the
+    row in place rather than appending a duplicate. A genuinely new
+    session whose derived name collides with a different row gets a
+    numeric suffix, so two sessions in one cwd stay addressable under
+    distinct names (AC7-EDGE).
+
+    Raises on registry I/O failure or bad input; the SessionStart caller
+    (``register_session.main``) fails open and emits a warning event
+    (AC7-ERR), so a locked/unwritable registry never blocks session start.
+    """
+    if provider not in PROVIDER_SESSION_ID_FIELDS:
+        raise ValueError(
+            f"unknown provider for registration: {provider!r}; "
+            f"known: {sorted(PROVIDER_SESSION_ID_FIELDS)}"
+        )
+    if not session_id:
+        raise ValueError("session_id must be non-empty")
+    session_field = PROVIDER_SESSION_ID_FIELDS[provider]
+
+    # A hand-started session has NO live messaging transport (no daemon PTY,
+    # no bg jobId/socket): a peer cannot inject into it. Registering it "live"
+    # would make `resolve_to_project` pick it as an anycast target, and the
+    # default-send live path would then dead-letter the durable fallback under
+    # inbox/<agent-name>/ - which the session's own inbox-wake hook never reads
+    # (it scans inbox/<project>/). So register as "idle": discoverable in
+    # `fno agents list`, excluded from live anycast, so `send --to-project`
+    # queues durable to the PROJECT inbox the session actually drains. Reliable
+    # by-name live delivery to operator sessions waits on the deferred transport
+    # (cv-d54ddd45).
+    _REGISTERED_STATUS: AgentStatus = "idle"
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        for entry in entries:
+            if entry.provider == provider and getattr(entry, session_field) == session_id:
+                # Same session re-registering: refresh, do not duplicate.
+                entry.status = _REGISTERED_STATUS
+                entry.cwd = cwd
+                if log_path:
+                    entry.log_path = log_path
+                return entries
+        base = name or f"{provider}-{session_id[:8]}"
+        taken = {entry.name for entry in entries}
+        chosen, suffix = base, 2
+        while chosen in taken:
+            chosen = f"{base}-{suffix}"
+            suffix += 1
+        fresh = AgentEntry(
+            name=chosen,
+            provider=provider,
+            cwd=cwd,
+            log_path=log_path,
+            status=_REGISTERED_STATUS,
+        )
+        setattr(fresh, session_field, session_id)
+        entries.append(fresh)
+        return entries
+
+    persisted = update_registry(_updater, path=registry_path)
+    for entry in persisted:
+        if entry.provider == provider and getattr(entry, session_field) == session_id:
+            return entry
+    # update_registry returns the persisted entries list (the updater's
+    # output), so the row must be present; a miss means the upsert dropped it.
+    raise RuntimeError(
+        f"registration for {provider} session {session_id!r} did not persist"
+    )
+
+
+def update_registry(
+    updater: Callable[[list[AgentEntry]], list[AgentEntry]],
+    path: Optional[Path] = None,
+) -> list[AgentEntry]:
+    """Atomically load -> apply ``updater`` -> write the registry.
+
+    Holds the registry-wide flock for the full cycle so concurrent
+    invocations for DIFFERENT agent names cannot stomp each other's
+    updates. ``updater`` receives the current entries list and must
+    return the new list to persist (typically by appending, replacing,
+    or filtering the existing entries).
+
+    Returns the freshly-persisted entries.
+
+    Phase 1 callers are tests + Phase 2 dispatch. ``write_registry``
+    remains the low-level primitive for cases that already hold the
+    lock (test fixtures, repair tooling).
+    """
+    target = _registry_path(path)
+    with _hold_registry_lock(target):
+        current = load_registry(path=target)
+        new_entries = updater(list(current))
+        write_registry(new_entries, path=target)
+        return new_entries

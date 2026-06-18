@@ -1,0 +1,98 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fno"
+dynamic = ["version"]
+description = "Autonomous delivery pipeline for AI coding agents: think, plan, do, review, ship - from idea to merged PR."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "Jason Noah Choi"}]
+keywords = ["claude", "claude-code", "ai-agents", "autonomous", "workflow", "tdd", "code-review", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Quality Assurance",
+]
+# click is imported directly (fno/_lazy_group.py, the TyperGroup subclasses);
+# declare it explicitly rather than relying on typer to pull it transitively --
+# typer 0.26+ dropped the hard click dependency, so a fresh wheel install
+# (cli/tests/smoke/test_build.sh) otherwise fails with ModuleNotFoundError: click.
+dependencies = ["typer>=0.12", "click>=8.1", "rich>=13", "pydantic>=2", "filelock>=3.12", "pyyaml>=6", "psutil>=5.9"]
+
+[project.urls]
+Homepage = "https://github.com/bllshttng/footnote"
+Repository = "https://github.com/bllshttng/footnote"
+Issues = "https://github.com/bllshttng/footnote/issues"
+
+[project.scripts]
+fno = "fno.cli:app"
+
+[tool.hatch.version]
+path = "src/fno/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fno"]
+
+# The canonical events schema ships INSIDE the wheel as
+# `fno/events/_schema.yaml` so the Python validator's in-package fallback
+# (events/__init__.py:_resolve_manifest_path) resolves from any cwd in an
+# installed wheel - no `docs/` tree, no env var. Without it a clean install
+# ships a wheel with no schema and `import fno.events` raises
+# SchemaUnavailableError from a foreign cwd (ab-fe825805 change 3).
+#
+# The wheel force-include is injected by hatch_build.py, NOT declared here,
+# because the schema's source path differs between build modes: a direct
+# source build finds it at <repo>/docs/... (one level above this `cli/` build
+# root), but `uv build` does sdist-then-wheel-FROM-sdist where the repo `docs/`
+# tree is absent. A static `../docs/...` force-include breaks that sdist->wheel
+# step (CI runs full `uv build`). The hook probes both locations and HARD-FAILS
+# the build if neither exists, so a schema-less wheel can never ship silently.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+# Vendor the canonical schema + license texts INTO the sdist (at its root) so a
+# wheel built FROM the sdist can still find them (the repo root - `docs/`, the
+# license files - is not inside the sdist). Keeps the sdist self-contained; the
+# wheel hook reads these copies in the from-sdist build mode. See
+# hatch_build.py:schema_source / license_sources. LICENSE + NOTICE live at the
+# repo root (one level above this `cli/` build root), vendored under
+# _license_vendor/ so the wheel ships them (US5; a license-less wheel hard-fails).
+[tool.hatch.build.targets.sdist.force-include]
+"../docs/architecture/events-schema.yaml" = "_schema_vendor.yaml"
+"../LICENSE" = "_license_vendor/LICENSE"
+"../NOTICE" = "_license_vendor/NOTICE"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-cov>=5", "mypy>=1.0", "types-PyYAML>=6", "ruff>=0.4"]
+
+[tool.ruff]
+line-length = 100
+
+[[tool.mypy.overrides]]
+module = [
+    "fno.paths",
+    "fno.config",
+    "fno.config.*",
+    "fno.setup.migrate_paths",
+    "fno.setup.emit_shell",
+]
+strict = true
+
+[tool.pytest.ini_options]
+markers = [
+    "slow_e2e: slow end-to-end integration tests; excluded from per-PR CI via '-m not slow_e2e'",
+    "slow_e2e_25min: very slow e2e tests (up to 25-30 min); run in nightly CI only",
+    "e2e: end-to-end tests requiring slower setup; run explicitly with -m e2e",
+    "smoke: real-binary smoke tests (e.g. against real gemini); gated by GEMINI_SMOKE=1, excluded from CI",
+]

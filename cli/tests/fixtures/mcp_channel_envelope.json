@@ -1,0 +1,35 @@
+{
+  "_comment": "Pinned MCP claude/channel notification envelope per channels-reference.md §Notification format. Wave 1.0 smoke script validates that fno/mcp/channel.py emits this exact structural shape. content body and meta values are user-controlled; only top-level keys + params keys + meta-key character class are pinned. Bump ENVELOPE_VERSION in channel.py in lockstep with any deliberate change here.",
+  "envelope_version": "1",
+  "top_level_keys": ["jsonrpc", "method", "params"],
+  "jsonrpc": "2.0",
+  "method": "notifications/claude/channel",
+  "params_keys": ["content", "meta"],
+  "content_type": "string",
+  "meta_type": "object",
+  "meta_key_pattern": "^[A-Za-z0-9_]+$",
+  "meta_value_type": "string",
+  "doc_source": "internal/claude/docs/code/channels-reference.md#notification-format",
+  "doc_source_anchor_lines": "219-247",
+  "example_minimal": {
+    "jsonrpc": "2.0",
+    "method": "notifications/claude/channel",
+    "params": {
+      "content": "build failed on main",
+      "meta": {}
+    }
+  },
+  "example_with_meta": {
+    "jsonrpc": "2.0",
+    "method": "notifications/claude/channel",
+    "params": {
+      "content": "build failed on main",
+      "meta": {
+        "severity": "high",
+        "run_id": "1234",
+        "chat_id": "abc-123",
+        "from_name": "alice"
+      }
+    }
+  }
+}

@@ -1,0 +1,85 @@
+"""fno pr CLI - in-package gh/git PR operations (ab-d4c98550).
+
+Verbs:
+    merge  - merge a PR with the fno-canonical guards (-> _merge.py)
+    verify - audit an external PR gate, merged|reviews (-> _verify.py)
+    rebase - two-phase rebase with conflict delegation (-> _rebase.py)
+
+The four ``scripts/lib/pr-*.sh`` were ported to in-package Python shelling to
+gh/git, so these verbs run from a bare ``pip install fno`` with no repo-root
+dependency. Each module preserves the bash exit-code / output contract.
+"""
+from __future__ import annotations
+
+import enum
+
+import typer
+
+
+pr_app = typer.Typer(
+    name="pr",
+    help="PR utilities (merge / verify / rebase via gh + git)",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+class VerifyKind(str, enum.Enum):
+    merged = "merged"
+    reviews = "reviews"
+
+
+@pr_app.command(
+    "merge",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help=(
+        "Merge a PR via gh CLI with the fno-canonical guards "
+        "(--invoker=<target|megawalk> <pr_number>). Emits a JSON line "
+        "{pr, outcome, reason, strategy, invoker}; exit 0 merged|queued, "
+        "1 failed, 2 skipped, 127 gh-missing."
+    ),
+)
+def merge(ctx: typer.Context) -> None:
+    from fno.pr import _merge
+
+    rc = _merge.run_merge(list(ctx.args))
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
+    "verify",
+    help=(
+        "Verify an external PR gate. --kind merged audits GitHub merge state "
+        "(with a single bounded remediation); --kind reviews flips the "
+        "external-review gate when a reviewer has no qualifying reply. "
+        "Exit 0 clean/degrade, 1 blocked/flipped, 2 substrate failure."
+    ),
+)
+def verify(
+    kind: VerifyKind = typer.Option(..., help="Gate to verify: merged | reviews"),
+    pr_number: int = typer.Option(..., "--pr-number", help="GitHub PR number"),
+    state_file: str = typer.Option(..., "--state-file", help="Path to target-state.md"),
+) -> None:
+    from fno.pr import _verify
+
+    if kind is VerifyKind.merged:
+        rc = _verify.run_verify_merged(str(pr_number), state_file)
+    else:
+        rc = _verify.run_verify_reviews(str(pr_number), state_file)
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
+    "rebase",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help=(
+        "Rebase the current branch via the conflict-delegation protocol "
+        "(--base=<branch>, --continue). Two-phase: exit 42 means the caller "
+        "must invoke the conflict-resolver agent, then call back --continue."
+    ),
+)
+def rebase(ctx: typer.Context) -> None:
+    from fno.pr import _rebase
+
+    rc = _rebase.run_rebase(list(ctx.args))
+    raise typer.Exit(code=rc)

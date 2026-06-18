@@ -1,0 +1,77 @@
+# Claude Code temp files
+.claude/*.local.md
+.claude/audit-progress.txt
+.claude/plans/
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+.claude/worktrees/
+
+# Top-level scratch plans are personal/working specs (the canonical plans live
+# in the Obsidian vault under internal/). Keep them out of the public tree so
+# they cannot leak machine paths or private project names. Anchored to root so
+# internal/**/plans and .claude/plans are unaffected.
+/plans/
+
+# Ignore auto-generated folder context files
+**/CLAUDE.md
+
+# But keep the root CLAUDE.md if you want
+!/CLAUDE.md
+
+# OS files
+.DS_Store
+**/.DS_Store
+
+# Node modules
+node_modules/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state (planning/execution)
+.fno/
+**/.fno/
+# Legacy state dir (abilities -> fno rename): ignored through the migration window.
+.abilities/
+**/.abilities/
+# But track the example config file - it is documentation, not runtime state
+!.fno/settings.yaml.example
+!**/.fno/settings.yaml.example
+
+# Logs
+*.log
+**/*.log
+
+# Cache
+.cache/
+
+# Other provider configs (local, not distributed).
+# NB: .codex-plugin/ is intentionally NOT here - it's the public Codex plugin
+# manifest (parity with .claude-plugin/), so it must ship.
+.agents/
+.codex/
+.gemini/
+
+# Private/local scripts and docs (environment-specific, not for distribution)
+**/local/
+
+# Symlinks to private vaults/repos
+internal
+
+# Abilities feels
+.fno/feels/observations.jsonl
+.fno/feels/observations.archive/
+.fno/feels/.usage-data-watermark
+
+# CLI package build artifacts
+cli/dist/
+cli/.venv/
+
+# managed by link-skills.py
+.claude/skills/
+.claude/commands/
+.claude/agents/
+.claude/.skill-scoping-state.json

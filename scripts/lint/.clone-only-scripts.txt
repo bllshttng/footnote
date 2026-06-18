@@ -1,0 +1,55 @@
+# CLONE_ONLY_SCRIPTS - the allowlist for `fno lint shellout-drift` (US4, ab-acbde274).
+#
+# Every repo-root script that a `cli/src/fno/` verb still shells out to MUST be
+# listed here, and each entry's verb MUST degrade on a bare `pip install fno`
+# (exit non-zero with a non-empty actionable message, never a 127, a panic, or
+# a silent exit). The guard PROVES the degrade by invoking the verb in a
+# no-script environment - so adding a line here without a real degrade path
+# fails CI (AC4-EDGE), and removing the elimination of a shell-out (or adding a
+# new one) without listing it here fails CI (AC4-ERR).
+#
+# This allowlist is the single source of truth for "what is intentionally
+# clone-only." The correct way to REMOVE an entry is to fold its logic into
+# Rust / internalize it into the package (delete the shell-out), not to relax
+# the guard.
+#
+# Format, one per line:
+#   <repo-relative script path> :: <fno verb + args used to prove it degrades>
+# Blank lines and lines starting with # are ignored. The verb args are passed
+# verbatim to the `fno` CLI in a no-script env (FNO_REPO_ROOT -> empty dir,
+# CLAUDE_PLUGIN_ROOT unset, cwd outside any repo).
+#
+# Scope note: the guard scans for shell-outs whose script path is rooted at the
+# SHARED resolvers `resolve_repo_root()` / `resolve_plugin_script()` (the idiom
+# every plugin-script call site uses). A verb that roots a shell-out via a
+# private `git rev-parse` helper instead is invisible to the guard; the correct
+# fix is to re-root it on the shared resolver and add a degrade branch + an
+# allowlist entry below (as `fno lint flock-pattern` now does), not to leave it
+# private and unlisted.
+
+# fno target init - bootstraps the pipeline session manifest; only meaningful
+# when the plugin's skills + hooks are present.
+hooks/helpers/init-target-state.sh :: target init --input drift-probe
+
+# fno bundle {build,check,lint} - operate on the plugin's skills/ source tree.
+scripts/generate-skill-bundles.sh :: bundle
+scripts/lint/check-skill-bundles-fresh.sh :: bundle check
+scripts/lint/no-cross-skill-runtime-calls.sh :: bundle lint
+
+# fno pr {merge,verify,rebase} - INTERNALIZED (ab-d4c98550). The four pr-*.sh
+# were ported to in-package Python (fno/pr/_merge.py, _verify.py, _rebase.py)
+# shelling to gh/git, so these verbs run from a bare pip install with no
+# repo-root script. No allowlist entry remains; the drift guard now passes
+# without flagging the pr paths.
+
+# fno worktree {status,cleanup,archive} - git worktree lifecycle bookkeeping
+# over the repo's worktree-lifecycle script.
+scripts/lib/worktree-lifecycle.sh :: worktree status
+
+# fno consolidation audit - the stale-skill-reference audit gate; operates on
+# the repo's skills/ source tree.
+scripts/ci/check-no-stale-skill-refs.sh :: consolidation audit
+
+# fno lint flock-pattern - lints the repo's own source for open-coded agent
+# flock + registry re-read patterns; only meaningful in a clone.
+scripts/lint-flock-pattern.sh :: lint flock-pattern

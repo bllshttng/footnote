@@ -1,0 +1,92 @@
+name: release-binaries
+
+# Phase 6 W6. Build standalone `fno-agents` platform binaries and attach them to
+# a GitHub Release, for users who want the supervisor without pip or cargo.
+# Gated: builds only on a `v*` tag or manual dispatch. The release-upload step
+# runs only for an actual tag (a manual dispatch builds + uploads artifacts for
+# inspection but does not create/modify a Release).
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # required only by the upload-to-release step below
+
+jobs:
+  build:
+    name: binary ${{ matrix.target.name }}
+    runs-on: ${{ matrix.target.runs-on }}
+    # Windows is built but not attached to releases this phase. Let its failure
+    # not fail the job, so the release-attach job still runs on the released
+    # macos/linux tarballs instead of being skipped by `needs:`.
+    continue-on-error: ${{ matrix.target.name == 'windows-x64' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { name: macos-arm64, runs-on: macos-14, rust-target: aarch64-apple-darwin }
+          - { name: macos-x64, runs-on: macos-13, rust-target: x86_64-apple-darwin }
+          - { name: linux-x64, runs-on: ubuntu-latest, rust-target: x86_64-unknown-linux-musl }
+          - { name: linux-arm64, runs-on: ubuntu-24.04-arm, rust-target: aarch64-unknown-linux-musl }
+          # windows-x64: built (toolchain exercised) but not attached to releases this phase.
+          - { name: windows-x64, runs-on: windows-latest, rust-target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target.rust-target }}
+
+      - name: Install musl tools (linux)
+        if: startsWith(matrix.target.name, 'linux')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build all three binaries
+        working-directory: crates/fno-agents
+        run: cargo build --release --target ${{ matrix.target.rust-target }} --bins
+
+      - name: Package tarball
+        shell: bash
+        working-directory: crates/fno-agents/target/${{ matrix.target.rust-target }}/release
+        run: |
+          ext=""
+          [ "${{ matrix.target.name }}" = "windows-x64" ] && ext=".exe"
+          tar -czf "fno-agents-${{ matrix.target.name }}.tar.gz" \
+            "fno-agents${ext}" "fno-agents-daemon${ext}" "fno-agents-worker${ext}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target.name }}
+          path: crates/fno-agents/target/${{ matrix.target.rust-target }}/release/fno-agents-${{ matrix.target.name }}.tar.gz
+
+  release:
+    name: attach to GitHub Release (tag only)
+    needs: build
+    runs-on: ubuntu-latest
+    # Only a real tag PUSH creates/updates a Release. Manual dispatch stops at
+    # artifacts so a maintainer can inspect before cutting a release - even a
+    # dispatch targeting an existing v* tag (where github.ref is a tag ref).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all binary tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist
+
+      - name: Drop the non-released windows tarball
+        run: rm -f dist/*windows*.tar.gz
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          fail_on_unmatched_files: true

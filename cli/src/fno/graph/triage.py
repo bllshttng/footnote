@@ -1,0 +1,1071 @@
+"""fno backlog triage - backlog reasoning adviser loop.
+
+Ported from ``scripts/triage.py`` (pre-v2). The deterministic parts live
+here; LLM reasoning happens in the caller (the /triage skill or /target
+wizard).
+
+Subcommands:
+    context [--deep] [--all] [--project NAME] [--roadmap-id ID]
+    propose [--dry-run] [--deep] [--all] [--project NAME] [--roadmap-id ID]
+    validate <proposal.json>
+    apply <proposal.json> [--pick ID1,ID2,...]
+    projects [--roadmap-id ID]
+
+Exit codes:
+    0  success
+    2  runtime error (malformed proposal, unreadable graph)
+    3  validation dropped one or more edges (apply still lands valid ones)
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Optional
+
+import typer
+
+from fno import paths as _paths
+
+
+cli = typer.Typer(
+    name="triage",
+    help="Backlog reasoning adviser loop",
+    no_args_is_help=True,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers (direct port of scripts/triage.py logic onto the v2 package)
+# ---------------------------------------------------------------------------
+
+
+def _graph_path() -> Path:
+    """Return the active graph.json path (monkeypatch-friendly)."""
+    from fno.graph._constants import GRAPH_JSON
+
+    return GRAPH_JSON
+
+
+def _is_pending(entry: dict) -> bool:
+    """Ready or blocked, not done/deferred/claimed/idea/roadmap-row.
+
+    Ideas are intentionally excluded - the LLM should recommend writing a
+    spec for them rather than treating them as claimable work-in-progress.
+    Surface them via ``_is_idea`` instead so they live in their own array.
+
+    Deferred rows are also excluded so triage proposals never re-suggest a
+    paused node. Re-engagement is an explicit user action via
+    ``backlog undefer`` or ``backlog ready --include-deferred``.
+    """
+    if entry.get("type") == "roadmap":
+        return False
+    completed = entry.get("completed_at") or ""
+    if completed:
+        return False
+    status = entry.get("_status", "ready")
+    if status == "deferred":
+        return False
+    return status in ("ready", "blocked")
+
+
+def _is_idea(entry: dict) -> bool:
+    """Idea-stage row: plan-less, not claimed, not blocked, not done."""
+    if entry.get("type") == "roadmap":
+        return False
+    if entry.get("completed_at"):
+        return False
+    return entry.get("_status") == "idea"
+
+
+def _read_plan_excerpt(plan_path: Optional[str], max_lines: int = 150) -> str:
+    if not plan_path:
+        return ""
+    try:
+        p = Path(plan_path)
+        if p.is_dir():
+            index = p / "00-INDEX.md"
+            if index.exists():
+                p = index
+            else:
+                return ""
+        if not p.exists():
+            return ""
+        with p.open() as f:
+            lines: list[str] = []
+            for i, line in enumerate(f):
+                if i >= max_lines:
+                    break
+                lines.append(line)
+            return "".join(lines)
+    except OSError:
+        return ""
+
+
+def _candidate_record(entry: dict, deep: bool) -> dict:
+    # Defensive parsing: legacy/corrupted graph entries may carry a
+    # non-list cost_sessions (e.g. a dict keyed by session id), or
+    # individual sessions where cost_usd is a string, None, or bool.
+    # The triage adviser must not crash on a heterogeneous backlog and
+    # must not silently report wrong-but-numeric values to the LLM, so
+    # we filter to well-formed sessions and align session_count with
+    # the same denominator total_cost_usd uses.
+    raw_sessions = entry.get("cost_sessions")
+    cost_sessions = raw_sessions if isinstance(raw_sessions, list) else []
+    valid_sessions = [
+        s for s in cost_sessions
+        if isinstance(s, dict)
+        and isinstance(s.get("cost_usd"), (int, float))
+        and not isinstance(s.get("cost_usd"), bool)
+    ]
+    cost_total = sum(s["cost_usd"] for s in valid_sessions)
+
+    record = {
+        "id": entry.get("id"),
+        "title": entry.get("title"),
+        "priority": entry.get("priority") or "p2",
+        "blocked_by": list(entry.get("blocked_by", [])),
+        "plan_path": entry.get("plan_path"),
+        "roadmap_id": entry.get("roadmap_id"),
+        "created_at": entry.get("created_at"),
+        "source": entry.get("source"),
+        "status": entry.get("_status"),
+        "size": entry.get("size"),
+        "domain": entry.get("domain"),
+        "details": entry.get("details"),
+        "claim_history": {
+            "session_count": len(valid_sessions),
+            "total_cost_usd": round(cost_total, 2),
+            "last_claimed_at": entry.get("claimed_at"),
+            "compacted": bool(entry.get("compacted")),
+        },
+        "ship_state": {
+            "pr_number": entry.get("pr_number"),
+            "merge_status": entry.get("merge_status"),
+        },
+    }
+    if deep and record["plan_path"]:
+        record["plan_excerpt"] = _read_plan_excerpt(record["plan_path"])
+    return record
+
+
+def _collect_pending(
+    roadmap_id: Optional[str],
+    deep: bool,
+    project: Optional[str],
+    all_projects: bool,
+    entries: Optional[list[dict]] = None,
+) -> list[dict]:
+    """Gather pending nodes, scoped to the current project by default."""
+    from fno.graph._constants import PRIORITY_ORDER
+    from fno.graph._intake import filter_by_project
+    from fno.graph.store import read_graph
+
+    if entries is None:
+        entries = read_graph(_graph_path())
+    if roadmap_id:
+        entries = [e for e in entries if e.get("roadmap_id") == roadmap_id]
+    entries = filter_by_project(entries, project, all_projects)
+    pending = [e for e in entries if _is_pending(e)]
+    pending.sort(
+        key=lambda e: (
+            PRIORITY_ORDER.get(e.get("priority", "p2"), 2),
+            e.get("created_at", ""),
+        )
+    )
+    return [_candidate_record(e, deep) for e in pending]
+
+
+def _collect_ideas(
+    roadmap_id: Optional[str],
+    deep: bool,
+    project: Optional[str],
+    all_projects: bool,
+    entries: Optional[list[dict]] = None,
+) -> list[dict]:
+    """Gather idea-stage nodes scoped the same way as pending candidates."""
+    from fno.graph._constants import PRIORITY_ORDER
+    from fno.graph._intake import filter_by_project
+    from fno.graph.store import read_graph
+
+    if entries is None:
+        entries = read_graph(_graph_path())
+    if roadmap_id:
+        entries = [e for e in entries if e.get("roadmap_id") == roadmap_id]
+    entries = filter_by_project(entries, project, all_projects)
+    ideas = [e for e in entries if _is_idea(e)]
+    ideas.sort(
+        key=lambda e: (
+            PRIORITY_ORDER.get(e.get("priority", "p2"), 2),
+            e.get("created_at", ""),
+        )
+    )
+    return [_candidate_record(e, deep) for e in ideas]
+
+
+def _collect_inbox_items() -> list[dict]:
+    """Gather unchecked fu-* items from the backlog capture tier.
+
+    The two-source picker (AC4-HP): inbox items appear alongside ab-* graph
+    nodes, each labelled with its id type so the reasoning layer can route a
+    selected fu-* item to `fno backlog capture promote`. Best-effort: a missing
+    or unreadable inbox file yields an empty list, never an error.
+    """
+    try:
+        from fno.backlog.capture import parse_items
+        from fno.paths import inbox_path
+
+        path = inbox_path()
+        if not path.exists():
+            return []
+        items = parse_items(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return [
+        {
+            "id": i["id"],
+            "id_type": "fu",
+            "title": i["title"],
+            "priority": i["priority"],
+            "source": "inbox",
+        }
+        for i in items
+    ]
+
+
+def _load_goals() -> list[dict]:
+    """Read project goals from settings.yaml.
+
+    PyYAML is already a dependency of the CLI (used by cli.py, loop.py,
+    megawalk.py) so there's no reason to hand-parse the YAML here — the
+    previous text-walker was brittle on editor quirks like trailing
+    whitespace, flow-style lists, or indentation variants.
+    """
+    import yaml
+
+    candidates = [
+        Path(".fno/settings.yaml"),
+        _paths.config_file(),
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            data = yaml.safe_load(path.read_text())
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        # settings.yaml nests goals under `project.goals`, but older
+        # schemas had a top-level `goals:` block. Accept either so a
+        # mid-migration config still yields useful context.
+        project = data.get("project")
+        goals = None
+        if isinstance(project, dict) and isinstance(project.get("goals"), list):
+            goals = project["goals"]
+        elif isinstance(data.get("goals"), list):
+            goals = data["goals"]
+        if isinstance(goals, list) and goals:
+            # Normalize to only the keys the LLM reasoning prompt uses
+            # (id/goal/status) so downstream consumers stay stable.
+            return [
+                {k: g[k] for k in ("id", "goal", "status") if k in g}
+                for g in goals
+                if isinstance(g, dict)
+            ]
+    return []
+
+
+def _resolve_scope(
+    project: Optional[str],
+    all_projects: bool,
+    entries: Optional[list[dict]] = None,
+) -> str:
+    from fno.graph._intake import detect_project
+    from fno.graph.store import read_graph
+
+    if project:
+        return f"project '{project}'"
+    if all_projects:
+        return "all projects"
+    snapshot = entries if entries is not None else read_graph(_graph_path())
+    detected = detect_project(snapshot)
+    if detected:
+        return f"project '{detected}' (auto-detected)"
+    return "all projects (no project detected - run an intake to register this repo)"
+
+
+def _load_proposal(path: Path) -> dict:
+    """Load a proposal JSON file with a clean error message on malformed input."""
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        typer.echo(f"Error: proposal file not found: {path}", err=True)
+        raise typer.Exit(code=2)
+    except json.JSONDecodeError as e:
+        typer.echo(f"Error: proposal is not valid JSON ({path}): {e}", err=True)
+        raise typer.Exit(code=2)
+
+
+def _build_dependency_map(entries: list[dict]) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for e in entries:
+        eid = e.get("id")
+        if isinstance(eid, str):
+            result[eid] = set(b for b in e.get("blocked_by", []) if isinstance(b, str))
+    return result
+
+
+def _would_cycle(graph: dict[str, set[str]], frm: str, to: str) -> bool:
+    """True if adding edge ``to blocked_by frm`` creates a cycle."""
+    stack = [frm]
+    seen: set[str] = set()
+    while stack:
+        node = stack.pop()
+        if node == to:
+            return True
+        if node in seen:
+            continue
+        seen.add(node)
+        for blocker in graph.get(node, ()):
+            stack.append(blocker)
+    return False
+
+
+def _validate_proposal(
+    proposal: dict,
+    entries: list[dict],
+) -> tuple[dict, list[str]]:
+    """Return (cleaned, errors). Drops cycles and unknown-id entries."""
+    from fno.graph._constants import PRIORITY_ORDER
+
+    errors: list[str] = []
+    valid_ids = {e.get("id") for e in entries if isinstance(e.get("id"), str)}
+
+    deps_in = proposal.get("dependencies", []) or []
+    dep_map = _build_dependency_map(entries)
+    clean_deps: list[dict] = []
+    for edge in deps_in:
+        if not isinstance(edge, dict):
+            errors.append(f"dependency entry is not an object: {edge!r}")
+            continue
+        frm = edge.get("from")
+        to = edge.get("to")
+        if frm not in valid_ids or to not in valid_ids:
+            errors.append(f"dependency references unknown id(s): {frm} -> {to}")
+            continue
+        if frm == to:
+            errors.append(f"self-dependency ignored: {frm}")
+            continue
+        if _would_cycle(dep_map, frm, to):
+            errors.append(
+                f"cycle: adding {to} blocked_by {frm} would cycle - dropping edge"
+            )
+            continue
+        dep_map.setdefault(to, set()).add(frm)
+        clean_deps.append(edge)
+
+    prio_in = proposal.get("priority_changes", []) or []
+    clean_prio: list[dict] = []
+    for pc in prio_in:
+        if not isinstance(pc, dict):
+            errors.append(f"priority_change entry is not an object: {pc!r}")
+            continue
+        pid = pc.get("id")
+        to_p = pc.get("to")
+        if pid not in valid_ids:
+            errors.append(f"priority_change references unknown id: {pid}")
+            continue
+        if to_p not in PRIORITY_ORDER:
+            errors.append(f"priority_change invalid priority: {to_p!r}")
+            continue
+        clean_prio.append(pc)
+
+    dups_in = proposal.get("duplicates", []) or []
+    clean_dups: list[dict] = []
+    for dup in dups_in:
+        if not isinstance(dup, dict):
+            errors.append(f"duplicate entry is not an object: {dup!r}")
+            continue
+        ids = dup.get("ids") or []
+        if not isinstance(ids, list) or len(ids) < 2:
+            errors.append(
+                f"duplicate entry requires ids list with >=2 elements: {dup!r}"
+            )
+            continue
+        bad = [i for i in ids if i not in valid_ids]
+        if bad:
+            errors.append(f"duplicate references unknown id(s): {bad}")
+            continue
+        clean_dups.append(dup)
+
+    # Defer entries: ``{"id": "ab-X", "reason": "..."}``. Reason is required
+    # so a paused node always carries the rationale into the kanban view; an
+    # entry with a blank or missing reason is dropped.
+    defer_in = proposal.get("defer", []) or []
+    clean_defer: list[dict] = []
+    for d in defer_in:
+        if not isinstance(d, dict):
+            errors.append(f"defer entry is not an object: {d!r}")
+            continue
+        did = d.get("id")
+        reason = (d.get("reason") or "").strip()
+        if did not in valid_ids:
+            errors.append(f"defer references unknown id: {did}")
+            continue
+        if not reason:
+            errors.append(f"defer entry missing reason: {did}")
+            continue
+        clean_defer.append({"id": did, "reason": reason})
+
+    cleaned = {
+        "dependencies": clean_deps,
+        "priority_changes": clean_prio,
+        "duplicates": clean_dups,
+        "defer": clean_defer,
+    }
+    return cleaned, errors
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+@cli.command("context")
+def cmd_context(
+    deep: bool = typer.Option(False, "--deep", help="Include plan excerpts"),
+    all_projects: bool = typer.Option(
+        False, "--all", "-A", help="Include pending nodes from all projects"
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", help="Filter by project (default: auto-detect)"
+    ),
+    roadmap_id: Optional[str] = typer.Option(
+        None, "--roadmap-id", help="Filter by roadmap ID"
+    ),
+) -> None:
+    """Emit JSON context for an LLM reasoning subagent."""
+    from fno.graph.store import read_graph
+
+    entries = read_graph(_graph_path())
+    candidates = _collect_pending(roadmap_id, deep, project, all_projects, entries)
+    ideas = _collect_ideas(roadmap_id, deep, project, all_projects, entries)
+    inbox_items = _collect_inbox_items()
+    ctx = {
+        "candidates": candidates,
+        "ideas": ideas,
+        "inbox_items": inbox_items,
+        "goals": _load_goals(),
+        "mode": "deep" if deep else "shallow",
+        "count": len(candidates),
+        "idea_count": len(ideas),
+        "inbox_count": len(inbox_items),
+        "scope": _resolve_scope(project, all_projects, entries),
+    }
+    typer.echo(json.dumps(ctx, indent=2))
+
+
+@cli.command("propose")
+def cmd_propose(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", "-N", help="Heuristic-only, no LLM call"
+    ),
+    deep: bool = typer.Option(False, "--deep", help="Include plan excerpts"),
+    all_projects: bool = typer.Option(
+        False, "--all", "-A", help="Include pending nodes from all projects"
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", help="Filter by project (default: auto-detect)"
+    ),
+    roadmap_id: Optional[str] = typer.Option(
+        None, "--roadmap-id", help="Filter by roadmap ID"
+    ),
+) -> None:
+    """Emit a proposal skeleton or a dry-run candidate summary."""
+    from fno.graph.store import read_graph
+
+    entries = read_graph(_graph_path())
+    scope = _resolve_scope(project, all_projects, entries)
+    candidates = _collect_pending(roadmap_id, deep, project, all_projects, entries)
+    ideas = _collect_ideas(roadmap_id, deep, project, all_projects, entries)
+
+    proposal = {
+        "dependencies": [],
+        "priority_changes": [],
+        "duplicates": [],
+        "defer": [],
+        "candidates": candidates,
+        "ideas": ideas,
+        "scope": scope,
+    }
+
+    if not candidates:
+        typer.echo(f"no pending nodes to triage (scope: {scope})", err=True)
+        typer.echo(json.dumps(proposal, indent=2))
+        return
+
+    if dry_run:
+        header = [
+            f"Proposed triage for {len(candidates)} pending nodes",
+            f"Scope: {scope}",
+            "(dry-run: no LLM call, showing candidates only)",
+            "",
+        ]
+        for c in candidates:
+            header.append(f"  {c['id']} [{c['priority']}] {c['title']}")
+        typer.echo("\n".join(header), err=True)
+
+    typer.echo(json.dumps(proposal, indent=2))
+
+
+@cli.command("validate")
+def cmd_validate(
+    proposal: Path = typer.Argument(..., help="Path to proposal.json"),
+) -> None:
+    """Validate a proposal, drop cycles and unknown-id entries, print cleaned JSON."""
+    from fno.graph.store import read_graph
+
+    data = _load_proposal(proposal)
+    entries = read_graph(_graph_path())
+    cleaned, errors = _validate_proposal(data, entries)
+    for err in errors:
+        typer.echo(err, err=True)
+    cleaned["validation_errors"] = errors
+    typer.echo(json.dumps(cleaned, indent=2))
+    if errors:
+        raise typer.Exit(code=3)
+
+
+@cli.command("apply")
+def cmd_apply(
+    proposal: Path = typer.Argument(..., help="Path to proposal.json"),
+    pick: Optional[str] = typer.Option(
+        None,
+        "--pick",
+        help="Comma-separated edge keys / IDs to apply as a subset",
+    ),
+) -> None:
+    """Apply a validated proposal to the graph under a single locked mutation."""
+    from fno.graph.store import locked_mutate_graph
+
+    data = _load_proposal(proposal)
+
+    pick_ids: Optional[set[str]] = None
+    if pick:
+        pick_ids = set(pick.split(","))
+
+    def _filter_pick(cleaned: dict) -> dict:
+        if pick_ids is None:
+            return cleaned
+        return {
+            "dependencies": [
+                d for d in cleaned["dependencies"]
+                if f"{d['from']}->{d['to']}" in pick_ids
+            ],
+            "priority_changes": [
+                p for p in cleaned["priority_changes"]
+                if p.get("id") in pick_ids
+            ],
+            "duplicates": [
+                d for d in cleaned["duplicates"]
+                if ",".join(d.get("ids", [])) in pick_ids
+            ],
+            "defer": [
+                d for d in cleaned.get("defer", [])
+                if d.get("id") in pick_ids
+            ],
+        }
+
+    applied = {
+        "dependencies": 0,
+        "priority_changes": 0,
+        "duplicates_flagged": 0,
+        "deferred": 0,
+    }
+    locked_errors_holder: list[list[str]] = [[]]
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        # Re-validate against the locked snapshot so TOCTOU races (another
+        # writer adding edges between load and apply) can't sneak cycles in.
+        cleaned_locked, errors_locked = _validate_proposal(data, entries)
+        cleaned_locked = _filter_pick(cleaned_locked)
+        locked_errors_holder[0] = errors_locked
+
+        by_id = {e.get("id"): e for e in entries if isinstance(e.get("id"), str)}
+        for edge in cleaned_locked["dependencies"]:
+            target = by_id.get(edge["to"])
+            if target is None:
+                continue
+            existing = set(target.get("blocked_by", []))
+            if edge["from"] not in existing:
+                target.setdefault("blocked_by", []).append(edge["from"])
+                applied["dependencies"] += 1
+        for pc in cleaned_locked["priority_changes"]:
+            node = by_id.get(pc["id"])
+            if node is None:
+                continue
+            node["priority"] = pc["to"]
+            applied["priority_changes"] += 1
+        # Defer entries land deferred_at + deferred_reason on each target.
+        # The cascade in recompute_statuses derives _status: deferred from
+        # deferred_at after the locked mutation completes.
+        from datetime import datetime, timezone
+        for d in cleaned_locked.get("defer", []):
+            node = by_id.get(d["id"])
+            if node is None:
+                continue
+            # Clear completed_at so the deferred cascade can take effect.
+            # Without this, deferring an already-done node would keep the
+            # row pinned to _status: done because of the `done > deferred`
+            # precedence in recompute_statuses. Symmetric with the direct
+            # cmd_defer verb (cli.py).
+            node["completed_at"] = None
+            node["deferred_at"] = datetime.now(timezone.utc).isoformat()
+            node["deferred_reason"] = d["reason"]
+            node["session_id"] = None
+            node["claimed_at"] = None
+            applied["deferred"] += 1
+        applied["duplicates_flagged"] = len(cleaned_locked["duplicates"])
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+
+    for err in locked_errors_holder[0]:
+        typer.echo(err, err=True)
+
+    typer.echo(
+        json.dumps(
+            {
+                "applied": applied,
+                "dropped_due_to_validation": len(locked_errors_holder[0]),
+            },
+            indent=2,
+        )
+    )
+
+    # Mirror cmd_validate: a non-empty error list signals partial application
+    # and exits 3. A scripted caller (triage skill, run-loop) can then detect
+    # that the proposal didn't fully land and decide whether to retry, log,
+    # or abort. Without this, validate and apply diverge on exit semantics
+    # and silent partial application slips through.
+    if locked_errors_holder[0]:
+        raise typer.Exit(code=3)
+
+
+@cli.command("projects")
+def cmd_projects(
+    roadmap_id: Optional[str] = typer.Option(
+        None, "--roadmap-id", help="Filter by roadmap ID"
+    ),
+) -> None:
+    """List projects that have at least one pending node (alphabetical).
+
+    Shape: ``{"projects": [{"name": str, "pending_count": int}, ...]}``.
+    The ``each`` iteration mode in the /triage skill reads ``pending_count``
+    for its per-project banner, and the legacy ``scripts/triage.py projects``
+    integration test locks this shape in; both would break if this were
+    flattened to a bare list of names.
+    """
+    from fno.graph.store import read_graph
+
+    entries = read_graph(_graph_path())
+    counts: dict[str, int] = {}
+    for e in entries:
+        if roadmap_id and e.get("roadmap_id") != roadmap_id:
+            continue
+        if not _is_pending(e):
+            continue
+        proj = e.get("project")
+        if not proj:
+            # Legacy entries without a project field would produce an
+            # unroutable triage pass; skip rather than grouping under a
+            # sentinel bucket.
+            continue
+        counts[proj] = counts.get(proj, 0) + 1
+    out = [{"name": name, "pending_count": n} for name, n in sorted(counts.items())]
+    typer.echo(json.dumps({"projects": out}, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# health: aggregate "is the backlog healthy?" metrics
+# ---------------------------------------------------------------------------
+
+
+@cli.command("health")
+def cmd_health(
+    project: Optional[str] = typer.Option(None, "--project"),
+    all_projects: bool = typer.Option(False, "--all", "-A"),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+    stale_days: int = typer.Option(
+        30, "--stale-days", help="A ready node older than this counts as stale"
+    ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Evaluate thresholds against the report; exit 4 on breach. Loop-safe.",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        help="Suppress stdout when --check finds no breach (cron/loop-safe).",
+    ),
+) -> None:
+    """Aggregate backlog health: collisions, stale, failure-prone, idea pile.
+
+    The collisions section runs an all-pairs file-overlap check across pending
+    plans and deduplicates so each pair appears once. Severity defaults to
+    medium-and-up so low-signal single-file overlaps do not flood the report.
+
+    Acknowledged-but-now-resolved collisions are surfaced separately so you
+    can verify a deliberately-accepted conflict resolved cleanly.
+    """
+    import sys
+    from datetime import datetime, timezone
+    from pathlib import Path as _Path
+
+    from fno.graph._intake import filter_by_project
+    from fno.graph.collision import (
+        find_collisions,
+        find_acknowledged_collisions,
+        _find_repo_root,
+        _resolve_plan_path,
+    )
+    from fno.graph.store import read_graph
+
+    entries = read_graph(_graph_path())
+    entries = filter_by_project(entries, project, all_projects)
+
+    pending = [e for e in entries if _is_pending(e) or _is_idea(e)]
+    pending_active = [e for e in entries if _is_pending(e)]
+
+    # 1. Idea pile depth
+    idea_count = sum(1 for e in pending if _is_idea(e))
+
+    # 2. Stale ready nodes
+    now = datetime.now(timezone.utc)
+    stale: list[dict] = []
+    for e in pending_active:
+        if e.get("_status") != "ready":
+            continue
+        created = e.get("created_at")
+        if not created:
+            continue
+        try:
+            created_dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+        except ValueError:
+            # A malformed created_at could be the exact node a user wants
+            # flagged as stale; surface it on stderr rather than dropping
+            # silently.
+            print(
+                f"Warning: cannot parse created_at on {e['id']}: {created!r}",
+                file=sys.stderr,
+            )
+            continue
+        age_days = (now - created_dt).days
+        if age_days > stale_days:
+            stale.append({"id": e["id"], "title": e.get("title", ""), "age_days": age_days})
+
+    # 3. Failure-prone nodes: multi-attempt, no PR. The "multi-attempt"
+    # threshold is configurable via config.health_monitor.thresholds.
+    # failure_prone_attempts (defaults to 2). Load lazily so this verb
+    # stays usable even when health_monitor is unavailable.
+    try:
+        from fno.health_monitor import load_config as _load_hm_config
+        _hm_thresh = (_load_hm_config().get("thresholds") or {})
+        _fp_min = int(_hm_thresh.get("failure_prone_attempts", 2))
+        if _fp_min < 1:
+            _fp_min = 2
+    except (ImportError, TypeError, ValueError, AttributeError):
+        # ImportError: module unavailable; TypeError/ValueError: malformed
+        # config value; AttributeError: load_config returned a non-dict
+        # (defensive - would also indicate a programmer error worth seeing).
+        _fp_min = 2
+    failure_prone: list[dict] = []
+    for e in pending_active:
+        sessions = e.get("cost_sessions") or []
+        if len(sessions) >= _fp_min and not e.get("pr_number"):
+            burned = sum(float(s.get("cost_usd") or 0) for s in sessions if isinstance(s, dict))
+            failure_prone.append(
+                {
+                    "id": e["id"],
+                    "title": e.get("title", ""),
+                    "attempts": len(sessions),
+                    "burned_usd": round(burned, 2),
+                }
+            )
+
+    # 4. All-pairs collision check (medium+ only)
+    # Resolve the candidate plan_path against the repo root before passing
+    # it in. Without this, running `triage health` from a non-repo-root
+    # directory would silently produce false negatives because relative
+    # `plan_path` strings would not resolve from CWD. find_collisions
+    # already resolves the OTHER plans' paths via the same helpers; the
+    # candidate path is the caller's responsibility.
+    repo_root = _find_repo_root()
+    collisions: list[dict] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for e in pending_active:
+        plan_path = e.get("plan_path")
+        if not plan_path:
+            continue
+        resolved_path = _resolve_plan_path(plan_path, repo_root)
+        node_collisions = find_collisions(resolved_path, entries, self_id=e["id"])
+        for c in node_collisions:
+            pair = tuple(sorted([e["id"], c.with_node_id]))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            if c.severity in ("medium", "high"):
+                collisions.append(
+                    {
+                        "between": list(pair),
+                        "shared_files": c.shared_files,
+                        "severity": c.severity,
+                        "recommended_action": c.recommended_action,
+                    }
+                )
+
+    # 5. Acknowledged-resolved nudges
+    resolved = find_acknowledged_collisions(entries)
+    resolved_payload = [
+        {
+            "node_id": r.node_id,
+            "node_title": r.node_title,
+            "resolved_via": r.resolved_via,
+            "resolved_via_title": r.resolved_via_title,
+            "resolved_via_status": r.resolved_via_status,
+        }
+        for r in resolved
+    ]
+
+    # 6. project<->cwd mismatch (pending-only, mapped-projects-only)
+    from fno.graph._intake import project_root_from_settings
+    _root_cache: dict[str, str | None] = {}
+    mismatch_ids: list[str] = []
+    for e in pending_active:
+        proj = e.get("project")
+        if not proj:
+            continue
+        if proj not in _root_cache:
+            _root_cache[proj] = project_root_from_settings(proj)
+        root = _root_cache[proj]
+        if root is None:
+            continue  # unmapped = work-map has no opinion; never counted
+        raw_cwd = e.get("cwd")
+        normalized = os.path.abspath(os.path.expanduser(str(raw_cwd))) if raw_cwd else None
+        if normalized != root:
+            mismatch_ids.append(e["id"])
+
+    # 7. Stranded-by-failed-blocker (#34): dependents of an auto-failure-deferred
+    # node that are now unreachable until the blocker is fixed/undeferred. Always
+    # runs (read-only); an empty list means "none stranded", not "not checked".
+    # Dependents are NEVER mutated here - surfacing only (Locked Decision #2).
+    from fno.graph.failure import stranded_dependents as _stranded_dependents
+
+    by_id = {
+        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    stranded_payload: list[dict] = []
+    for blocker_id, dep_ids in _stranded_dependents(entries).items():
+        blocker = by_id.get(blocker_id, {})
+        stranded_payload.append(
+            {
+                "blocker": blocker_id,
+                "blocker_title": blocker.get("title", ""),
+                "deferred_reason": blocker.get("deferred_reason", ""),
+                "dependents": [
+                    {
+                        "id": d,
+                        "title": by_id.get(d, {}).get("title", ""),
+                        "status": by_id.get(d, {}).get("_status"),
+                    }
+                    for d in dep_ids
+                ],
+            }
+        )
+
+    report = {
+        "scope": _resolve_scope(project, all_projects, entries),
+        "idea_pile_depth": idea_count,
+        "stale_ready_nodes": stale,
+        "failure_prone_nodes": failure_prone,
+        "collisions": collisions,
+        "acknowledged_resolved": resolved_payload,
+        "project_cwd_mismatch": len(mismatch_ids),
+        "project_cwd_mismatch_nodes": mismatch_ids,
+        "stranded_by_failed_blocker": stranded_payload,
+        "totals": {
+            "pending": len(pending_active),
+            "ideas": idea_count,
+            "stale": len(stale),
+            "failure_prone": len(failure_prone),
+            "collisions": len(collisions),
+            "acknowledged_resolved": len(resolved_payload),
+            "project_cwd_mismatch": len(mismatch_ids),
+            "stranded_by_failed_blocker": sum(
+                len(s["dependents"]) for s in stranded_payload
+            ),
+        },
+    }
+
+    if quiet and not check:
+        typer.echo(
+            "Note: --quiet has no effect without --check (this command is "
+            "always silent in healthy state when --check is set).",
+            err=True,
+        )
+
+    if check:
+        # --check flips exit-code semantics: 0 healthy, 4 breach. Honors
+        # config thresholds, dispatches notifications, appends history.
+        from fno.health_monitor import (
+            evaluate_thresholds,
+            dispatch_notifications,
+            append_history,
+            load_config,
+        )
+
+        hm_config = load_config()
+        breaches = evaluate_thresholds(report, config=hm_config)
+        history_cfg = hm_config.get("history") or {}
+        if history_cfg.get("enabled", True):
+            # `dict.get(k, default)` returns None when k is present-with-None
+            # in YAML; the `or` fallback covers that case so Path(None)
+            # never raises TypeError. Same shape for retain_days.
+            history_path_str = (
+                history_cfg.get("path")
+                or str(_paths.state_dir() / "health-history.jsonl")
+            )
+            try:
+                retain_days = int(history_cfg.get("retain_days", 90))
+            except (TypeError, ValueError):
+                retain_days = 90
+            append_history(
+                report,
+                breaches,
+                history_path=Path(history_path_str).expanduser(),
+                retain_days=retain_days,
+            )
+        if breaches:
+            dispatch_notifications(report, breaches, config=hm_config)
+            if not quiet:
+                if json_output:
+                    typer.echo(
+                        json.dumps(
+                            {
+                                "status": "breach",
+                                "report": report,
+                                "breaches": [b.to_jsonable() for b in breaches],
+                            },
+                            indent=2,
+                        )
+                    )
+                else:
+                    typer.echo("Backlog health: BREACH")
+                    for b in breaches:
+                        typer.echo(
+                            f"  [{b.severity.upper()}] {b.key}: actual={b.actual} "
+                            f"threshold={b.threshold}"
+                        )
+            raise typer.Exit(code=4)
+        # healthy
+        if not quiet:
+            if json_output:
+                typer.echo(
+                    json.dumps({"status": "healthy", "report": report}, indent=2)
+                )
+            else:
+                typer.echo(
+                    f"Backlog health: OK (no thresholds breached) - {report['scope']}"
+                )
+        return
+
+    if json_output:
+        typer.echo(json.dumps(report, indent=2))
+        return
+
+    typer.echo(f"Backlog health: {report['scope']}")
+    typer.echo(f"  pending: {report['totals']['pending']}")
+    typer.echo(f"  ideas: {report['idea_pile_depth']}")
+    typer.echo(f"  stale (>{stale_days}d ready): {report['totals']['stale']}")
+    typer.echo(f"  failure-prone (>1 attempt, no PR): {report['totals']['failure_prone']}")
+    typer.echo(f"  collisions (medium+): {report['totals']['collisions']}")
+    typer.echo(f"  acknowledged-resolved: {report['totals']['acknowledged_resolved']}")
+    typer.echo(f"  project<->cwd mismatches: {report['totals']['project_cwd_mismatch']}")
+    typer.echo(
+        f"  stranded by failed blocker: "
+        f"{report['totals']['stranded_by_failed_blocker']}"
+    )
+    if collisions:
+        typer.echo("")
+        typer.echo("Plans stepping on each other:")
+        for c in collisions:
+            typer.echo(
+                f"  [{c['severity']}] {' <-> '.join(c['between'])}: "
+                f"{len(c['shared_files'])} shared files; recommend {c['recommended_action']}"
+            )
+    if resolved_payload:
+        typer.echo("")
+        typer.echo("Acknowledged collisions now resolved (verify cleanup):")
+        for r in resolved_payload:
+            typer.echo(
+                f"  {r['node_id']} acknowledged collision with {r['resolved_via']} "
+                f"({r['resolved_via_status']}); review whether the conflict resolved cleanly."
+            )
+    if mismatch_ids:
+        typer.echo("")
+        typer.echo("Pending nodes with project<->cwd mismatch (producer regression):")
+        for node_id in mismatch_ids:
+            typer.echo(f"  {node_id}")
+    if stranded_payload:
+        typer.echo("")
+        typer.echo("Stranded by a failed blocker (recover via undefer or fix the blocker):")
+        for s in stranded_payload:
+            typer.echo(f"  {s['blocker']} deferred ({s['deferred_reason']}) strands:")
+            for d in s["dependents"]:
+                typer.echo(f"    - {d['id']} [{d['status']}] {d['title']}")
+
+
+# ---------------------------------------------------------------------------
+# trend: rolling-window readout of historical health checks
+# ---------------------------------------------------------------------------
+
+
+@cli.command("trend")
+def cmd_trend(
+    days: int = typer.Option(7, "--days", help="Window in days (default 7)"),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Print a backlog-trend summary from health-check history.
+
+    Reads ``~/.fno/health-history.jsonl`` (or the path set via the
+    ``FNO_HEALTH_HISTORY`` env var, used by tests). Emits a
+    first-vs-latest delta per metric over the requested window.
+    """
+    import os
+
+    from fno.health_monitor import read_history, summarize_trend
+
+    override = os.environ.get("FNO_HEALTH_HISTORY")
+    history_path = Path(override).expanduser() if override else None
+    entries = read_history(history_path=history_path, days=days)
+    summary = summarize_trend(entries)
+
+    if json_output:
+        typer.echo(json.dumps({"days": days, "entries": len(entries), "summary": summary}, indent=2))
+        return
+
+    if not entries:
+        typer.echo(f"Backlog trend (last {days} days): no history yet.")
+        return
+
+    typer.echo(f"Backlog trend (last {days} days, {len(entries)} entries):")
+    for key, stats in summary.items():
+        delta = stats["delta"]
+        sign = "+" if delta >= 0 else ""
+        pct = stats["percent_change"]
+        pct_str = f"{sign}{pct}%" if pct is not None else "n/a"
+        typer.echo(
+            f"  {key}: {stats['first']} -> {stats['latest']} ({sign}{delta}, {pct_str})"
+        )

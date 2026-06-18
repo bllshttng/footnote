@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# SessionStart hook: surface the PRIOR `fno backlog reconcile` sweep as a
+# system reminder, then kick off a fresh throttled reconcile in the background.
+#
+# Hook contract: stdout is appended to the session prompt; exit 0 = no error.
+# This hook NEVER blocks session start — the reconcile itself is detached (see
+# scripts/lib/reconcile-throttle.sh). The render step is a cheap file read of
+# the last sweep's result, so the reminder is always one sweep behind, which is
+# the point: session start stays instant.
+set -euo pipefail
+
+REPO_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=scripts/lib/reconcile-throttle.sh
+source "$HOOK_DIR/../scripts/lib/reconcile-throttle.sh" 2>/dev/null || exit 0
+
+RESULT="$REPO_ROOT/.fno/.reconcile-result.json"
+
+# 1. Render the prior sweep's result, exactly once. Only surface when the sweep
+#    actually closed a drifted node — an empty sweep is silent to avoid noise.
+#    Consume-after-show (mv to .shown) so the same result is never re-surfaced
+#    across multiple sessions; the next sweep overwrites RESULT with fresh data.
+if [[ -f "$RESULT" ]] && command -v jq >/dev/null 2>&1; then
+    closed_n=$(jq '.closed | length' "$RESULT" 2>/dev/null || echo 0)
+    if [[ "$closed_n" =~ ^[0-9]+$ ]] && (( closed_n > 0 )); then
+        nodes=$(jq -r '.closed[].node_id' "$RESULT" 2>/dev/null | paste -sd, - 2>/dev/null)
+        echo "reconcile: last sweep closed ${closed_n} drifted node(s) whose PR merged outside the ship gate (${nodes}). Retro sentinels were written; run \`fno backlog queued\` / \`fno backlog pick\` to review captured follow-ups."
+    fi
+    mv -f "$RESULT" "$RESULT.shown" 2>/dev/null || true
+fi
+
+# 2. Kick off a fresh throttled reconcile (mutate mode, detached). Never blocks.
+reconcile_maybe_fire "$REPO_ROOT" || true
+
+exit 0

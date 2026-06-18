@@ -1,0 +1,13 @@
+[package]
+name = "pty-survival-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Wave 0 throwaway smoke prototype: does a portable-pty child survive supervisor SIGKILL? (ab-a09e1eaf Phase 6)"
+
+[[bin]]
+name = "pty-survival-probe"
+path = "src/main.rs"
+
+[dependencies]
+portable-pty = "0.8"

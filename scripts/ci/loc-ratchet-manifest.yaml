@@ -1,0 +1,44 @@
+# loc-ratchet-manifest.yaml
+#
+# Single source of scope for the LOC ratchet CI gate (ab-c9777486).
+# See scripts/ci/loc-ratchet.sh for gate mechanics.
+#
+# Include-entry semantics (all entries are relative to the repo root):
+#   trailing /  = directory prefix: any file whose path starts with this prefix
+#   trailing *  = path-prefix glob: any file whose path starts with the part before *
+#   otherwise   = exact file match
+#
+# Extension whitelist: only files whose extension (after final dot) appears in
+#   the `extensions:` list are counted. Everything else is ignored even if the
+#   path matches an include entry. (.md, .js, .json, etc. never count.)
+#
+# Exclude-glob translation (mechanical, applied AFTER include + extension filter):
+#   Strip leading **/
+#   If remainder ends in /** (e.g. tests/**): path-segment rule -
+#     file is excluded when its path contains /tests/ or starts with tests/
+#   Otherwise (e.g. test_*, *_test.*): basename rule -
+#     file is excluded when its basename matches the pattern as a bash case glob
+#
+# Baseline re-anchor: if the manifest scope materially changes (include paths
+#   added or removed), add a new baseline: block in loc-ratchet-trajectory.yaml
+#   with a dated note explaining the re-anchor. This is an operational rule,
+#   not enforced mechanically. The old baseline block remains for audit trail.
+
+include:
+  - hooks/
+  - scripts/lib/
+  - skills/target/scripts/verifiers/
+  - cli/src/fno/loop.py
+  - cli/src/fno/gates/
+  - cli/src/fno/gate_reality_map.yaml
+  - crates/fno-agents/src/loop*
+extensions:
+  - sh
+  - py
+  - yaml
+  - yml
+  - rs
+exclude:
+  - "**/tests/**"
+  - "**/test_*"
+  - "**/*_test.*"

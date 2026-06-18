@@ -1,0 +1,44 @@
+name: install-script-portability
+
+# ab-f49b54c1 US6 / AC6-ERR: a deploy gate that keeps a non-POSIX or broken
+# scripts/install/fno.sh from ever reaching https://fno.sh. The script is served
+# verbatim and run as `curl -fsSL fno.sh | sh`, so a single bashism is a remote
+# break for every new user. This runs on every PR that touches the installer
+# (the release-wheels smoke only runs on a tag/dispatch, too late to gate a PR).
+#
+# Three static portability checks here; the dynamic "execute under dash" check
+# is the fno_sh_smoke.sh step in release-wheels.yml, whose linux legs run the
+# installer under Ubuntu's /bin/sh (dash).
+
+on:
+  pull_request:
+    paths:
+      - "scripts/install/fno.sh"
+      - ".github/workflows/install-script-portability.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/install/fno.sh"
+      - ".github/workflows/install-script-portability.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  portability:
+    name: POSIX-sh portability gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dash + shellcheck
+        run: sudo apt-get update && sudo apt-get install -y dash shellcheck
+
+      - name: sh -n parse (default runner sh)
+        run: sh -n scripts/install/fno.sh
+
+      - name: dash -n parse (Debian POSIX sh)
+        run: dash -n scripts/install/fno.sh
+
+      - name: shellcheck --shell=sh (no bashisms)
+        run: shellcheck --shell=sh scripts/install/fno.sh

@@ -1,0 +1,6 @@
+{
+  "name": "footnote",
+  "version": "0.1.0",
+  "description": "Set a target and walk away. Say f[no] to mostly done.",
+  "contextFileName": "GEMINI.md"
+}

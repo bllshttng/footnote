@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.user.autocorrect - monthly review of corrections.log
+  Installed to ~/Library/LaunchAgents/ by scripts/install-autocorrect-cron.sh.
+  Tokens {{...}} are substituted by the installer.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.autocorrect</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>{{PACK_SCRIPT}} --severity S1,S2 | {{REVIEW_SCRIPT}} --severity S1,S2 --packet-source monthly-cron</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/autocorrect-monthly.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/autocorrect-monthly.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{HOME}}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

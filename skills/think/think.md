@@ -1,0 +1,602 @@
+
+# Abilities Think
+
+Enhanced brainstorming workflow that generates testable acceptance criteria alongside design. Includes multi-perspective analysis and mandatory failure-mode coverage to catch silent failures and UI state bugs before implementation.
+
+### Session State Initialization
+
+Initialize session state for cost tracking (replaces the PreToolUse hook for portability):
+```bash
+mkdir -p .fno
+# Don't overwrite if target is running (it has its own state)
+if [[ ! -f .fno/target-state.md ]]; then
+  rm -f .fno/.session-registered
+  TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cat > .fno/session-state.md << STEOF
+---
+type: think
+status: IN_PROGRESS
+created_at: ${TIMESTAMP}
+---
+STEOF
+fi
+```
+
+<HARD-GATE>
+Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.
+</HARD-GATE>
+
+## Process
+
+### 1. Understand Context
+- Check current project state (files, docs, recent commits)
+- Review any existing specs (read plan path: `.claude/settings.json` → `plansDirectory`, or `.fno/settings.yaml` → `config.plans.full_path`)
+
+### 1b. Scope Decomposition Check
+Before diving into design, assess scope: if the request describes multiple independent subsystems (e.g., "build a platform with chat, file storage, billing, and analytics"), flag this immediately. Don't spend questions refining details of a project that needs to be decomposed first.
+
+If the project is too large for a single spec, help the user decompose into sub-projects: what are the independent pieces, how do they relate, what order should they be built? Then think through the first sub-project through the normal design flow. Each sub-project gets its own think → plan → do cycle.
+
+### 1c. Discovery Gate (optional)
+
+After reading the project state, surface what the MODEL doesn't know before
+asking the user design questions. This catches architectural ambiguities and
+scope misunderstandings early.
+
+Load the discovery protocol: `${SKILL_DIR}/references/discovery-gate.md`
+
+- Run in **interactive** mode (present questions, wait for answers)
+- 3-5 targeted questions grounded in what you just read from the codebase
+- Feed answers into step 2's design exploration
+
+**Skip if:** Pure greenfield with no existing codebase to read (step 2's
+existing questions are sufficient for new projects).
+
+The discovery gate asks what the MODEL is uncertain about from the code.
+Step 2 below asks what the USER wants from the design. Both are needed.
+
+### 1d. Cross-Project Peer Awareness (fires twice)
+
+If `~/.fno/settings.yaml` declares a `config.inbox.peers` map, a
+single peer-detection check runs at two distinct moments in this flow.
+Both moments share the same anti-patterns and disambiguation rule
+(below). The check is opt-in: with no `peers` block, no `surfaces` map,
+or no surface match, it is a silent no-op.
+
+Resolution mechanic (read once, applies to both moments):
+
+```python
+from fno.inbox.settings import read_peer_surfaces
+peers = read_peer_surfaces()  # {peer: [surface, ...]} or {}
+```
+
+**Sub-condition A — fires NOW, after Step 1c discovery has enumerated
+the unknowns and before Step 2 starts answering them.**
+
+For each unknown surfaced in this discovery cycle, ask: does the unknown
+name a *specific peer-owned surface* (per `peers[<peer>].surfaces`)? If
+yes, send a question to that peer AND append to `messaged_peers:`:
+
+```bash
+if fno mail send --to-project <peer> --kind question \
+     --body "design Q: <CONCRETE — verbatim unknown text or one-line restatement>"; then
+  # Both sub-conditions A and B share the SAME messaged_peers: substrate.
+  # /blueprint's 3a-bis check and /target's ship recap dedup against this list,
+  # so a question to peer X for surface Y MUST register here or /blueprint
+  # will send a redundant heads-up about the same surface.
+  append_peer_to_messaged_peers "<peer>"  # in saved design doc's frontmatter
+else
+  # Send failed (typo'd peer, recipient inbox missing, lock contention).
+  # Record under messaged_peers_failed: so a later recap retry treats it
+  # as "needs send" rather than "already sent". Do NOT block; continue.
+  append_peer_to_messaged_peers_failed "<peer>" "<reason>"
+fi
+```
+
+If no peer surface matches, keep the unknown solo and let Step 2's
+user-question loop work it.
+
+**Sub-condition B — fires later, after Step 8's design doc is saved and
+the Locked Decisions section is finalized.**
+
+For each Locked Decisions entry, ask: does the decision affect a
+peer-owned surface? If yes, send a heads-up once per affected peer (and
+skip peers already in `messaged_peers:` from sub-condition A):
+
+```bash
+if [[ "<peer>" not in messaged_peers ]]; then
+  if fno mail send --to-project <peer> --kind heads-up \
+       --body "locked: <DECISION>; impact: <PEER-FACING DETAIL>; design: <saved-design-path>"; then
+    append_peer_to_messaged_peers "<peer>"
+  else
+    append_peer_to_messaged_peers_failed "<peer>" "<reason>"
+  fi
+fi
+```
+
+The `messaged_peers:` list lives at the top of the saved design doc's
+frontmatter (or, if /think later hands off to /blueprint, in the resulting
+plan's frontmatter). /blueprint's 3a-bis and /target's ship recap both read
+this field for dedup. Skip Locked Decisions entries with no peer-facing
+impact - "internal: refactor X" decisions are not heads-up material.
+
+**Anti-patterns (apply to BOTH sub-conditions):**
+
+- Don't send "FYI considering X" - that is journal mode. Send only
+  questions you genuinely need answered or decisions that change a
+  peer's surface.
+- Don't send to satisfy the prompt - it is conditional, not mandatory.
+  Default is silence.
+- Don't block on the answer. Sending is fire-and-forget; continue the
+  flow.
+- If an unknown or decision might apply to multiple peers and you cannot
+  determine which is canonical, emit
+  `<help reason="cross-project-disambiguation" evidence="<text>">` and
+  continue solo. Never multi-peer blast.
+- Don't send for internal-only changes. If the touched surface is not
+  declared in any peer's `surfaces:` list, the change is internal by
+  definition and no message goes out.
+
+### 1e. Schema Reconciliation (DB-backed repos)
+
+When the repo is database-backed, ground the design against the real schema
+and the backlog BEFORE exploring approaches, so the duplicate-or-not decision
+in Step 2 is made with schema context instead of in the dark. This is the
+phase where schema reconciliation is authored; `/blueprint` only re-does it
+when `/think` was skipped.
+
+**Detect a DB-backed repo.** Run this once; the `.env` clause widens the check
+to repos whose connection lives only in a dev `.env` file (not the shell):
+
+```bash
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+db_env_found=""
+for ef in .env.local .env.development.local .env.development .env; do
+  if [ -f "$REPO_ROOT/$ef" ] && grep -qE '^(export[[:space:]]+)?(DATABASE_URL|POSTGRES_URL|SUPABASE_DB_URL|DIRECT_URL)=' "$REPO_ROOT/$ef"; then
+    db_env_found=1; break
+  fi
+done
+if [ -d "$REPO_ROOT/supabase" ] || [ -f "$REPO_ROOT/prisma/schema.prisma" ] || [ -f "$REPO_ROOT/drizzle/schema.ts" ] || [ -n "$DATABASE_URL" ] || [ -n "$db_env_found" ]; then
+  fno codemap --tokens 2048 --db-schema 2>/dev/null || true
+fi
+```
+
+If none of those hold, skip 1e: the repo has no schema surface, and the saved
+doc records "no schema surface" (AC1-EDGE). The `--db-schema` companion
+discovers the connection from the shell or a dev `.env` file
+(`.env.production` / `.env.staging` are never auto-connected), reads the live
+database read-only, and falls back to parsing migration files for tables/keys
+when no DB is reachable. It never echoes the connection string.
+
+**Reconcile.** Read the `## Database Schema` section from `.fno/codemap.md`:
+
+1. **Backlog dedup.** Run `fno backlog find "<feature keywords>"` (title
+   tokens plus the one-line summary, not the full design text) to surface any
+   existing node that already covers this ground.
+2. **Decide the touched surface.** List the tables / enums / constraints this
+   feature reads or writes. A feature in a DB-backed repo that touches no
+   tables records "no schema surface" and proceeds without a forced citation
+   (AC1-EDGE).
+3. **One-line terminal summary (MANDATORY, AC1-UI).** Print to the session
+   output (not only the file), e.g.
+   `schema: touches user_accounts, sessions | dedup: no existing capability covers this`
+   or `schema: touches billing_events | dedup: overlaps ab-1234 - narrow scope`.
+
+**Record it in the saved doc (Step 8).** The reconciliation becomes a
+top-level section whose heading is exactly `## Schema Reconciliation`
+(`/blueprint` greps for this literal marker to skip re-running schema
+generation, so the spelling is load-bearing). It records the touched
+tables/enums, an explicit dedup verdict ("no existing capability covers this"
+vs "overlaps with ab-XXXX - narrow scope or supersede"), and any constraint
+that shapes the design. If the live DB was unreachable and the schema came
+from the migration parser, flag the section "(parsed from migrations, no live
+DB)" so the reader knows it may be incomplete (AC1-FR).
+
+### 2. Explore the Idea (One Question at a Time)
+Ask questions to refine understanding:
+- What problem does this solve?
+- Who are the users?
+- What are the constraints?
+- What does success look like?
+
+Prefer multiple choice when possible.
+
+### 3. Explore Approaches
+- Propose 2-3 different approaches with trade-offs
+- Lead with recommended option and explain why
+- Get user confirmation before proceeding
+
+### 4. Present Design (200-300 word sections)
+Cover:
+- Architecture and components
+- Data flow
+- Error handling
+- Edge cases
+
+**Check after each section**: "Does this look right so far?"
+
+### 5. Multi-Perspective Challenge
+
+Before finalizing the design, stress-test it from three angles. Present findings to the user for each:
+
+**Perspective A — The Pessimist (What breaks?)**
+- What happens when the API is down?
+- What happens on network timeout mid-action?
+- What if the user's session expires during a form submission?
+- What if the database write succeeds but the response fails?
+
+**Perspective B — The Impatient User (What gets abused?)**
+- What happens if they double-click the submit button?
+- What if they navigate away mid-operation?
+- What if they open the same form in two tabs?
+- What if they paste malformed data?
+
+**Perspective C — The Silent Failure Hunter (What goes unnoticed?)**
+- Which actions could fail with NO visible feedback?
+- Are there fire-and-forget API calls with no error handling?
+- Which state updates could silently not propagate?
+- Where could an optimistic update fail to roll back?
+
+Present a summary table:
+
+```markdown
+| Scenario | Current Handling | Risk |
+|----------|-----------------|------|
+| API returns 500 on save | ??? | User thinks save worked |
+| Double-click submit | ??? | Duplicate records |
+| Session expires mid-form | ??? | Lost work, no feedback |
+```
+
+### 6. CRITICAL: UI State Machine Audit
+
+**For EVERY interactive element in the design**, enumerate its states. No element gets a pass.
+
+**The rule: every user action MUST produce visible feedback.** If an action can complete with zero visual change, that's a bug in the design.
+
+For each interactive element (button, form, toggle, link, etc.):
+
+```markdown
+#### [Element Name] — State Machine
+
+| State | Visual | Trigger In | Trigger Out |
+|-------|--------|------------|-------------|
+| idle | Default appearance | Page load / action complete | User clicks |
+| loading | Spinner + disabled | User clicks | API responds |
+| success | Success indicator | API returns 200 | Auto-reset after 2s |
+| error | Error message + retry | API returns 4xx/5xx | User clicks retry |
+| disabled | Grayed out | Missing prerequisites | Prerequisites met |
+
+**Silent failure check:**
+- [ ] Can this element reach a state where nothing visible happens?
+- [ ] If the API call fails, does the element recover to a usable state?
+- [ ] If the user interrupts (navigates away), is state consistent?
+```
+
+Only elements with simple, well-understood behavior (e.g., a navigation link) can skip the full table — but still need the silent failure check.
+
+### 6b. Failure Modes (MANDATORY - becomes a required section in the saved design doc)
+
+Every design doc MUST include a level-2 heading `## Failure Modes` with four
+required sub-bullets. `/blueprint` grep-scans for this heading and refuses to run
+without it, so the section is not optional even on trivial features.
+
+**Required sub-sections (keep these exact bold labels so /blueprint can parse them).**
+Each sub-section is a bold label followed by a bullet list, not an inline
+list item. Use this structure verbatim:
+
+1. **Boundaries** - limits and edge values. Zero, negative, max, overflow,
+   empty input, input larger than the buffer, pagination cursor at the last
+   page.
+2. **Errors** - failure paths from dependencies. API 500 / 4xx, DB deadlock,
+   disk full, permission denied, malformed response, partial writes.
+3. **Invariants** - rules that must hold. Referential integrity, monotonic
+   counters, ordering guarantees, "at most one active session," balance never
+   negative, hash matches payload.
+4. **Concurrency** - ordering and race hazards. Double-submit, stale-read
+   writes, out-of-order events, interleaved retries, split-brain between
+   nodes, the same operation landing via two code paths.
+
+**Format:** one sentence per bullet in imperative form (**"must handle"**,
+**"must reject"**, or **"must preserve"**) so the language carries a
+testable obligation rather than a vague worry. The example below shows the
+exact structure `/blueprint` will parse: `**Label**` on its own line, then a
+dash-bullet list underneath.
+
+```markdown
+## Failure Modes
+
+**Boundaries**
+- The system must handle a cart with 0 items (render empty state, do not POST)
+- The system must reject line-item quantities above 10,000 with a field error
+
+**Errors**
+- The system must preserve the user's form state when /checkout returns 500
+- The system must reject payment responses whose signature does not verify
+
+**Invariants**
+- The system must preserve the invariant that an order has exactly one primary address
+- The system must reject a submit that would leave the total below $0
+
+**Concurrency**
+- The system must handle two submit clicks within 100ms as a single order
+- The system must preserve ordering when webhook retries arrive out of order
+```
+
+**Trivial features are NOT exempt from the structure.** If failure modes
+truly do not apply (e.g., a single-file pure function with no I/O or
+state), keep all four sub-sections so `/blueprint`'s parser, the reviewer
+subagent, and the imperative-form rule still have content to validate.
+State the "none" case per sub-section in one short imperative bullet:
+
+```markdown
+## Failure Modes
+
+**Boundaries**
+- The system must handle language-level integer range only (no domain bounds).
+
+**Errors**
+- The system must preserve behavior with no external dependencies to fail.
+
+**Invariants**
+- The system must preserve statelessness (no shared mutable state).
+
+**Concurrency**
+- The system must handle concurrent calls safely (pure function, no shared state).
+```
+
+If even one sub-section would force a lie (e.g., "must handle concurrent
+calls" on a function that explicitly cannot be called concurrently), write
+the bullet as "Not applicable: <one-sentence reason>" rather than deleting
+the sub-section. The four bold labels are structural and must always be
+present.
+
+**When to delegate to `/think what-if`:** if the feature has >=3 external
+dependencies OR touches auth / payments / concurrency / distributed state,
+prompt the user to run `/think what-if` before finalizing. Emit a single,
+specific hand-off line so the user can copy-paste it:
+
+```
+Run `/think what-if <domain> <depth> failure-modes "<scope>"` to stress-test: <categories>
+```
+
+Pick `<domain>` (software, product, business, security) from the feature's
+dominant risk surface; `<depth>` is `standard` by default, `deep` for
+high-risk features; the literal `failure-modes` positional modifier tells
+`/think what-if` to emit a top-level `## Failure Modes` section this skill can
+consume; `<scope>` is a one-sentence description of what to stress-test;
+`<categories>` lists the dimensions to explore (e.g. `error_path,
+concurrent, recovery`). Do NOT recommend `/think what-if` on trivial features
+(inline enumeration here is sufficient). When `/think what-if` output is already
+present in the design context, fold its findings into this section without
+duplicating items.
+
+> Red flag: an output that skips the `## Failure Modes` heading is a broken
+> design doc. The saved doc, the reviewer subagent (Step 8b), and `/blueprint`
+> must all treat the missing heading as a hard failure, not a style nit.
+
+### 6.5 Executor Routing (capture as Locked Decision)
+
+By this point the architecture, user stories, and (for non-trivial designs)
+the implied file list are concrete enough to detect surface mix. Capture the
+executor decision now so `/blueprint` can transcribe it into plan frontmatter
+without re-asking. Skipping this step means the runtime resolver falls back
+to surface inference at task time, which is correct but cannot express
+plan-level intent.
+
+Run the surface detector against the design text gathered so far (user
+stories + architecture sections + any files-likely-touched list):
+
+```bash
+HELPER="${SKILL_DIR}/references/detect-surface.sh"
+SURFACE=$(printf '%s' "$DESIGN_TEXT" | bash "$HELPER")
+# SURFACE is one of: frontend-touching | backend-only | mixed | unknown
+```
+
+Resolve the call mode in this priority order. Load
+[references/executor-routing-prompt.md](references/executor-routing-prompt.md)
+for the full rule set, prompt template, and decision-capture format.
+
+1. **CLI flag wins.** If the env var `FNO_EXECUTOR_OVERRIDE` is set
+   (the contract `/target M --executor <value>` uses to plumb intent into
+   /think), write that value to Locked Decisions with provenance
+   `(cli-flag)` and skip detection entirely.
+2. **Target autonomous auto-locks.** If `.fno/target-state.md` exists,
+   /think is running inside an autonomous target session that cannot block
+   on user input. Apply the detection result and lock without prompting.
+   Provenance: `(auto-detected)`. Pure-backend sessions (and `unknown`)
+   never lock; the absence of a lock IS the signal, and surface inference
+   handles backend correctly at runtime.
+3. **Standalone interactive prompts.** No CLI flag, no target context. If
+   the detection result is `frontend-touching` or `mixed`, fire the prompt
+   from the reference doc and capture the user's choice with provenance
+   `(user-confirmed)`. If the detection result is `backend-only` or
+   `unknown`, skip the prompt entirely.
+
+Write the chosen decision as a single Locked Decisions entry using the
+format documented in
+[references/executor-routing-prompt.md](references/executor-routing-prompt.md).
+For `mixed`, the entry must list the surface-inference patterns
+(`**/*.tsx`, `**/*.jsx`, `components/**`, `routes/**`, `src/styles/**`) so
+`/blueprint` can emit per-task `executor: impeccable` overrides on matching
+tasks while the plan default stays `executor: do`.
+
+> **For trivial designs** with no surface signal at all (a refactor of a
+> config loader, a one-line bug fix, a prose-only doc): detection returns
+> `unknown` and this step writes nothing. The runtime resolver picks `do`
+> via surface inference. No ceremony required.
+
+### 7. Generate BDD Acceptance Criteria
+
+**Load the `/bdd-acceptance-criteria` skill** for comprehensive patterns.
+
+For each testable behavior, write Given/When/Then using patterns from `bdd-acceptance-criteria/references/common-criteria.md`.
+
+**MANDATORY: Every user story gets all 5 AC types:**
+
+| Type | Code | Tests | Required? |
+|------|------|-------|-----------|
+| Happy path | AC-HP | Expected behavior works | Always |
+| Error/validation | AC-ERR | Invalid input, API errors | Always |
+| UI state changes | AC-UI | Loading, disabled, feedback | Always |
+| Edge cases | AC-EDGE | Boundaries, empty state, concurrency | Always |
+| **Failure recovery** | **AC-FR** | **Silent failures, state recovery, interrupted operations** | **Always** |
+
+The AC-FR type is new and catches the bugs that slip through:
+
+```markdown
+#### AC1-FR: Failure Recovery - [Description]
+**Given** I click [action button]
+**When** the server returns a 500 error
+**Then** I see an error message describing the failure
+**And** the [button] returns to its idle state (not stuck in loading)
+**And** my form data is preserved (not cleared)
+**And** I can retry the action
+
+#### AC2-FR: Interrupted Operation - [Description]
+**Given** I start [async action]
+**When** I navigate away before it completes
+**Then** either the action completes in the background
+**Or** the action is cancelled cleanly
+**And** no orphaned state remains
+
+#### AC3-FR: Double Action Prevention - [Description]
+**Given** I click [submit button]
+**When** I click it again before the first request completes
+**Then** only one request is sent
+**And** the button is disabled during processing
+```
+
+### 7b. Domain Pitfalls
+
+Before handoff, ask: "What are the known pitfalls for [technology/domain]?"
+
+Document any pitfalls that could affect the implementation plan. Examples:
+- Next.js App Router: server/client boundary, hydration mismatches
+- Supabase RLS: policies don't apply to service_role key
+- React state: stale closures in effects, batching behavior
+
+### 8. Save Design Document
+
+Save to: `{plansDirectory}/YYYY-MM-DD-<feature-name>.md` (read from `.claude/settings.json` → `plansDirectory`, or `.fno/settings.yaml` → `config.plans.full_path`)
+
+Include:
+1. Overview
+2. Architecture
+3. User Stories
+4. **Multi-Perspective Findings** (from Step 5)
+5. **UI State Machines** (from Step 6)
+6. **Failure Modes** (from Step 6b, MANDATORY `## Failure Modes` heading)
+7. **Acceptance Criteria** (BDD format, all 5 types)
+8. **Locked Decisions** (DO NOT revisit in planning/execution)
+9. **Claude's Discretion** (areas open for implementing agent to decide)
+10. **Domain Pitfalls** (from Step 7b)
+11. Open Questions
+12. **Schema Reconciliation** (from Step 1e, when the repo is DB-backed; a
+    top-level `## Schema Reconciliation` heading carrying the touched
+    tables/enums and the dedup verdict)
+
+### Locked Decisions Section (MANDATORY)
+
+Every design output must include:
+
+```markdown
+## Locked Decisions (DO NOT revisit)
+
+These decisions are settled. The planner and executor must not revisit them:
+
+1. [Decision]: [Rationale]
+2. [Decision]: [Rationale]
+
+## Claude's Discretion
+
+These areas are open for the implementing agent to decide:
+
+1. [Area]: [Constraints, if any]
+```
+
+#### Decisions worth locking explicitly
+
+Beyond domain-specific choices, surface these routing/orchestration
+decisions when they apply - the planner needs them as plan frontmatter,
+not as "we'll figure it out at implementation time":
+
+- **Executor routing** (frontend-heavy or mixed-surface work): which
+  executor drives the implementation? `do` (default, archer / TDD) or
+  `impeccable` (frontend-executor + /impeccable craft+critique loop)?
+  Lock plan-level if the whole feature is one surface; lock per-task
+  if mixed. Surface inference is a fallback, not a substitute for the
+  decision. See `docs/guides/per-task-executors.md`.
+- **Cross-project scope**: single-project (default) or `cross-project`
+  with worktrees per repo?
+
+### 8b. Spec Review Loop
+
+After saving the design document, spawn a Haiku reviewer subagent to critique it:
+
+1. Dispatch reviewer with the full design doc text
+2. Reviewer checks for: missing error states, incomplete acceptance criteria, contradictions between sections, vague implementation details, **a missing `## Failure Modes` heading** (hard fail), and missing sub-bullets (Boundaries / Errors / Invariants / Concurrency)
+3. If issues found: fix them, re-dispatch reviewer (max 3 iterations)
+4. If approved (or 3 iterations reached): present to user
+
+> "Design doc written and reviewed (N iteration(s)). Please review and let me know if you want changes before we create the implementation plan."
+
+### 9. Output for Target Pipeline
+
+When invoked as part of a pipeline (check if `.fno/target-state.md` exists - this works standalone without it),
+structure your output with clear sections:
+- **Design Decisions** - with rationale
+- **Constraints Discovered** - technical limits found during exploration
+- **Rejected Alternatives** - what was considered and why not
+- **Failure Modes** - verbatim copy of the `## Failure Modes` section from Step 6b, so `/blueprint` can consume it via the scratchpad as well as the saved design doc
+- **Open Questions** - unresolved items for the plan phase
+
+Target will capture this into the scratchpad for downstream phases.
+
+### 10. Handoff
+
+Ask: "Ready to create the implementation plan with `/blueprint`?"
+
+## Key Principles
+
+- **One question at a time** - Don't overwhelm
+- **YAGNI ruthlessly** - Remove unnecessary features
+- **Test-first thinking** - Always ask "how would we verify this?"
+- **Every action needs feedback** - If a user does something and nothing visible happens, that's a design bug
+- **Multi-perspective challenge** - Stress-test from pessimist, impatient user, and silent failure angles
+- **State machines over checklists** - Enumerate states for interactive elements, don't just list happy paths
+
+## NEVER (Design Thinking Anti-Patterns)
+
+**NEVER skip the "What could go wrong?" perspective:**
+- Optimistic design is incomplete design
+- For every feature: "What happens when this fails?"
+- For every UI state: "What does the user see when data is missing/stale/wrong?"
+
+**NEVER ship a design doc without a `## Failure Modes` section:**
+- The heading is a required output artifact. `/blueprint` refuses to proceed without it.
+- Even trivial features get the heading, with a one-line justification for "none".
+- Omitting the sub-sections (Boundaries / Errors / Invariants / Concurrency) is the same as omitting the section: the downstream parser will not find the content it needs to seed `AC4-EDGE` criteria.
+
+**NEVER design only the happy path:**
+- Empty states, error states, loading states, partial-data states
+- Offline behavior, timeout behavior, race conditions
+- First-time user vs power user vs admin
+
+**NEVER assume the user's mental model matches yours:**
+- "Intuitive" is subjective — what's obvious to you may confuse users
+- Name things from the USER's perspective, not the developer's
+- When in doubt, use the terminology from the domain, not the codebase
+
+**NEVER propose architecture changes without considering migration:**
+- "We should use X instead of Y" requires: how do we get from Y to X?
+- Breaking changes need migration plans, not just target state
+- Existing data, existing users, existing integrations — all must survive
+
+**NEVER conflate "I like this pattern" with "this is better":**
+- Personal preference ≠ technical improvement
+- "Modern" ≠ "better for this project"
+- Justify with concrete benefits: performance, maintainability, safety — not aesthetics
+
+## Session Cost Tracking (AUTO — enforced by stop hook)
+
+Cost is automatically registered by the stop hook when the session exits. The stop hook scans the transcript for `fno:think` Skill tool invocations, calculates cost via `session-cost.py`, and appends to `ledger.json` via `register-task.py`. No manual action needed.

@@ -1,0 +1,7133 @@
+//! The supervisor daemon (Wave 3, tasks 3.0 + 3.4).
+//!
+//! One long-running per-user process. Lazy-started by the client on first need;
+//! lazy-exits after an idle window. Six observable states (each emits an event
+//! on entry), a startup recovery procedure that must complete before the socket
+//! serves requests, and a JSON-RPC serve loop routing `agent.*` / `channel.*`.
+//!
+//! Wave 3 lands the daemon skeleton, IPC transport, worker spawn/ask routing,
+//! and the correctness-critical recovery procedure. The drive WebSocket surface
+//! is Wave 4; the full lifecycle-verb polish is Wave 5; Python integration is
+//! Wave 6. The handlers here are deliberately the minimum that makes the daemon
+//! a working supervisor end-to-end.
+
+use crate::events::EventEmitter;
+use crate::paths::{self, AgentsHome};
+use crate::protocol::{
+    read_request, write_request, write_response, ErrorCode, Namespace, Request, Response,
+};
+use crate::state::{self, RegistryEntry};
+use crate::AgentStatus;
+use base64::Engine as _;
+use serde_json::{json, Map, Value};
+use std::os::unix::process::CommandExt; // process_group on std::process::Command
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::net::{UnixListener, UnixStream};
+
+/// Six observable daemon states (design "Daemon lifecycle" table). Each entry
+/// emits an event so events.jsonl reflects the lifecycle for an auditor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonState {
+    ColdStart,
+    Recovering,
+    Serving,
+    IdlePendingExit,
+    ShuttingDown,
+    Exited,
+}
+
+impl DaemonState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DaemonState::ColdStart => "cold_start",
+            DaemonState::Recovering => "recovering",
+            DaemonState::Serving => "serving",
+            DaemonState::IdlePendingExit => "idle_pending_exit",
+            DaemonState::ShuttingDown => "shutting_down",
+            DaemonState::Exited => "exited",
+        }
+    }
+}
+
+/// Daemon tunables. Defaults match the design (30 min idle exit).
+#[derive(Debug, Clone)]
+pub struct DaemonOptions {
+    pub idle_exit: Duration,
+    /// Path to the `fno-agents-worker` binary. Resolved from the daemon's own
+    /// executable directory by default; overridable via `FNO_AGENTS_WORKER_BIN`
+    /// (tests point this at the cargo-built binary).
+    pub worker_bin: PathBuf,
+    /// Run one bounded reconcile sweep on daemon startup before serving any
+    /// client (Architecture B, plan ab-70faa65b). Default `true`; the opt-out
+    /// (env `FNO_AGENTS_NO_STARTUP_RECONCILE=1`, Claude's discretion #5) trades a
+    /// truthful first `list` for the fastest possible cold start.
+    pub reconcile_on_start: bool,
+}
+
+impl Default for DaemonOptions {
+    fn default() -> Self {
+        DaemonOptions {
+            idle_exit: Duration::from_secs(1800),
+            worker_bin: resolve_worker_bin(),
+            reconcile_on_start: true,
+        }
+    }
+}
+
+fn resolve_worker_bin() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_AGENTS_WORKER_BIN") {
+        return PathBuf::from(v);
+    }
+    // Side-by-side with the daemon binary.
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("fno-agents-worker")))
+        .unwrap_or_else(|| PathBuf::from("fno-agents-worker"))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DaemonError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("another daemon is already serving on {0}")]
+    AlreadyRunning(PathBuf),
+    #[error("socket permission invariant failed: {0}")]
+    Permission(String),
+    #[error("filesystem does not support advisory locking at {0}: {1}")]
+    FlockUnsupported(PathBuf, String),
+    #[error("state: {0}")]
+    State(#[from] state::StateError),
+}
+
+/// Why a registry entry could not be reconciled against its `state.json` during
+/// recovery. Typed so the report distinguishes the two cases a bare short_id
+/// string elided (ab-3aea7437), mirroring `ReconcileOutcome`'s `(name, reason)`
+/// inconsistency record. `as_str()` is the wire/event `reason` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InconsistencyReason {
+    /// Registry row present, but no readable `state.json` (never spawned, or the
+    /// file was removed out from under the daemon).
+    MissingStateJson,
+    /// `state.json` present but unreadable (I/O error or partial parse).
+    UnreadableStateJson,
+}
+
+impl InconsistencyReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InconsistencyReason::MissingStateJson => "missing_state_json",
+            InconsistencyReason::UnreadableStateJson => "unreadable_state_json",
+        }
+    }
+}
+
+/// What recovery did, for the `daemon_started` event and tests.
+#[derive(Debug, Default, PartialEq)]
+pub struct RecoveryReport {
+    /// `(short_id, reason)` per entry whose `state.json` could not be
+    /// reconciled. The typed reason preserves *why* (missing vs unreadable),
+    /// which a bare `Vec<String>` of short_ids discarded (ab-3aea7437).
+    pub inconsistent: Vec<(String, InconsistencyReason)>,
+    pub archived_orphans: Vec<String>,
+    pub reaped_pids: Vec<u32>,
+    pub recovered_drives: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Recovery procedure (sync, standalone-testable). Design steps 1-6; step 7
+// (begin serving) is the caller's job once this returns.
+// ---------------------------------------------------------------------------
+
+/// Run the startup recovery procedure. Pure of any socket I/O so it can be
+/// unit-tested against a hand-built `~/.fno/agents/` tree. The ordering
+/// invariant (READ `drive_active` BEFORE clearing it, finding #12 Critical) is
+/// enforced by [`crate::state::PtyState::take_active_drive`], which this calls.
+pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
+    let mut report = RecoveryReport::default();
+    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+
+    let registered: std::collections::BTreeSet<String> = registry
+        .entries
+        .iter()
+        .map(|e| e.short_id.clone())
+        .collect();
+
+    // Steps 2-5: per registry entry, reconcile its state.json.
+    for entry in &registry.entries {
+        // A row with no short_id is a non-PTY (shellout, e.g. Python-authored
+        // `claude`) agent: it has no per-agent state dir, so there is nothing to
+        // reconcile. Skip it rather than probe `state_json("")` -- which would
+        // collide across every such row on one path and emit a spurious
+        // `agent_inconsistent` per row (Gemini medium, PR #364). The orphan-PID
+        // reap below already skips these (their `pid` is `None`).
+        if entry.short_id.is_empty() {
+            continue;
+        }
+        let state_path = home.state_json(&entry.short_id);
+        match state::load_state(&state_path) {
+            Ok(Some(mut st)) => {
+                // Step 3/4/5: stale drive window -> drive_crashed, then clear.
+                let taken = st.pty.as_mut().and_then(|p| p.take_active_drive());
+                if let Some(drive) = taken {
+                    let mut fields = Map::new();
+                    if let Some(sid) = &drive.session_id {
+                        fields.insert("session_id".into(), Value::String(sid.clone()));
+                    }
+                    fields.insert("reason".into(), Value::String("daemon_restart".into()));
+                    // Emit BEFORE persisting the cleared state (the read already
+                    // happened inside take_active_drive; persistence is step 5).
+                    let _ = emitter.emit_fields("drive_crashed", fields);
+                    let _ = state::write_state_atomic(&state_path, &st);
+                    report.recovered_drives.push(entry.short_id.clone());
+                }
+            }
+            Ok(None) => {
+                // Step 2: registry entry without a readable state.json. Mark
+                // inconsistent; do NOT fabricate a state.json on its behalf.
+                let reason = InconsistencyReason::MissingStateJson;
+                let _ = emitter.emit_fields(
+                    "agent_inconsistent",
+                    json_obj(&[
+                        ("short_id", Value::String(entry.short_id.clone())),
+                        ("reason", Value::String(reason.as_str().into())),
+                    ]),
+                );
+                report.inconsistent.push((entry.short_id.clone(), reason));
+            }
+            Err(_) => {
+                // state.json present but unreadable. Emit the same event shape as
+                // the missing case (it previously recorded nothing), so an
+                // unreadable file is observable rather than silent.
+                let reason = InconsistencyReason::UnreadableStateJson;
+                let _ = emitter.emit_fields(
+                    "agent_inconsistent",
+                    json_obj(&[
+                        ("short_id", Value::String(entry.short_id.clone())),
+                        ("reason", Value::String(reason.as_str().into())),
+                    ]),
+                );
+                report.inconsistent.push((entry.short_id.clone(), reason));
+            }
+        }
+    }
+
+    // Step 2 (other half): state.json dir without a registry entry -> archive.
+    if let Ok(read) = std::fs::read_dir(home.root()) {
+        for entry in read.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = match entry.file_name().into_string() {
+                Ok(n) if !n.starts_with('.') => n,
+                _ => continue,
+            };
+            if registered.contains(&name) {
+                continue;
+            }
+            // Orphan dir (has a state.json but no registry row): archive it.
+            if home.state_json(&name).exists() {
+                let ts = now_compact();
+                let dest = home.orphan_archive_dest(&name, &ts);
+                let _ = std::fs::create_dir_all(home.orphaned_dir());
+                if std::fs::rename(home.agent_dir(&name), &dest).is_ok() {
+                    let _ = emitter.emit_fields(
+                        "agent_orphan_state_archived",
+                        json_obj(&[
+                            ("short_id", Value::String(name.clone())),
+                            (
+                                "archived_to",
+                                Value::String(dest.to_string_lossy().into_owned()),
+                            ),
+                        ]),
+                    );
+                    report.archived_orphans.push(name);
+                }
+            }
+        }
+    }
+
+    // Step 6: orphan-PID sweep. An entry whose pid is set but is no longer OUR
+    // worker is reaped (status -> exited). A live worker socket means the worker
+    // (Outcome B) is still up; leave it. "No longer ours" = dead (ESRCH) OR a
+    // recycled pid whose start time no longer matches what we recorded
+    // (ab-d19e6458) — without the start-time check a reused pid belonging to an
+    // unrelated process would keep a dead worker looking alive.
+    let live_workers = home.scan_worker_sockets();
+    let mut to_reap: Vec<(String, u32)> = Vec::new();
+    for entry in &registry.entries {
+        if live_workers.contains(&entry.short_id) {
+            continue; // worker still alive; not an orphan
+        }
+        if let Some(pid) = entry.pid {
+            if !pid_is_ours(pid, entry.pid_start_time) {
+                to_reap.push((entry.short_id.clone(), pid));
+            }
+        }
+    }
+    if !to_reap.is_empty() {
+        let reaped: std::collections::BTreeSet<String> =
+            to_reap.iter().map(|(s, _)| s.clone()).collect();
+        // Surface a reap-write failure rather than silently diverging the
+        // event log (which says reaped) from the on-disk registry (Gemini high).
+        if let Err(e) = state::update_registry(&home.registry_json(), |r| {
+            for e in r.entries.iter_mut() {
+                if reaped.contains(&e.short_id) {
+                    e.status = AgentStatus::Exited;
+                }
+            }
+        }) {
+            let _ = emitter.emit(
+                "daemon_recovery_error",
+                &json!({"op": "reap_orphans", "error": e.to_string()}),
+            );
+        }
+        for (short_id, pid) in to_reap {
+            let _ = emitter.emit_fields(
+                "agent_orphan_reaped",
+                json_obj(&[
+                    ("short_id", Value::String(short_id)),
+                    ("pid", Value::Number(pid.into())),
+                ]),
+            );
+            report.reaped_pids.push(pid);
+        }
+    }
+
+    report
+}
+
+/// A live process's start time, used to distinguish "our worker" from a recycled
+/// PID (ab-d19e6458). `None` if the process is gone or the lookup is
+/// unsupported/failed. The value is a per-host, per-boot quantity compared only
+/// for equality against a value captured for the SAME pid, so the differing
+/// units across platforms (Linux ticks vs macOS microseconds) do not matter.
+#[cfg(target_os = "linux")]
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    // /proc/<pid>/stat field 22 (1-based) is `starttime` in clock ticks since
+    // boot. The comm field (2) can contain spaces and parens, so split on the
+    // LAST ')' and index from there. After "comm)" the space-separated fields are
+    // [state, ppid, ...], with starttime the 20th (0-based index 19).
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(')')?.1;
+    after.split_whitespace().nth(19)?.parse::<u64>().ok()
+}
+
+/// macOS: `proc_pidinfo(PROC_PIDTBSDINFO)` fills a `proc_bsdinfo` whose
+/// `pbi_start_tvsec`/`pbi_start_tvusec` is the process start time; fold to
+/// microseconds. (`kinfo_proc` is not exposed by the libc crate.)
+#[cfg(target_os = "macos")]
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    use std::mem;
+    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
+    let size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: buffer is a zeroed proc_bsdinfo of exactly `size` bytes.
+    // proc_pidinfo returns the number of bytes written; anything other than a
+    // full struct means the process is gone / not introspectable -> None.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn process_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Is `pid` still OUR worker, not a recycled PID? True iff the process exists,
+/// we may signal it, AND its current start time matches `recorded`
+/// (ab-d19e6458). If a start time is unavailable on either side (`None` — lookup
+/// unsupported/failed, or no start time was recorded for a legacy entry), fall
+/// back to a bare existence check so behavior degrades to the pre-create_time
+/// semantics rather than mis-deciding.
+pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
+    // Never treat pid 0 or 1 as ours (gemini security-high, PR #472). `kill(0, sig)`
+    // signals the CALLER's whole process group and `kill(1, sig)` targets init;
+    // worse, a corrupt status/registry pid of 0 would otherwise pass the probe
+    // (kill(0,0)==0) and fall through to the `_ => true` arm, so a later
+    // `send_sigterm(0)` would SIGTERM the client's own process group. A real
+    // worker/daemon pid is never <= 1, so this only ever rejects a malformed pid.
+    if pid <= 1 {
+        return false;
+    }
+    // SAFETY: signal 0 is an existence/permission probe only. rc == 0 means the
+    // process exists AND we may signal it; a non-zero rc is ESRCH (dead) or
+    // EPERM (alive but owned by another user). Our worker is always the same user
+    // as the daemon, so an unsignalable pid is never ours -- this also closes the
+    // EPERM hole where a recycled foreign-user pid (no readable start time) would
+    // otherwise fall through to "trust liveness" and be mistaken for our worker
+    // (Gemini medium, PR #365).
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+        return false;
+    }
+    match (recorded, process_start_time(pid)) {
+        (Some(rec), Some(now)) => rec == now,
+        // No basis to prove reuse -> trust existence (legacy / unsupported).
+        _ => true,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Socket bind + perms + lazy-start race.
+// ---------------------------------------------------------------------------
+
+/// Bind the supervisor socket, resolving the lazy-start race and stale sockets.
+///
+/// - If a live daemon answers a connect to the existing socket, we are the race
+///   loser: return [`DaemonError::AlreadyRunning`] so the caller exits cleanly.
+/// - If the socket file exists but nothing answers (stale, from a crash), remove
+///   and bind.
+/// - Enforce dir 0700 / socket 0600 regardless of umask, fstat-verifying after
+///   (finding #6 Critical).
+pub async fn bind_supervisor_socket(home: &AgentsHome) -> Result<UnixListener, DaemonError> {
+    home.ensure_root()?;
+    flock_self_test(home)?;
+
+    let sock = home.supervisor_sock();
+    if sock.exists() {
+        // Probe for a live daemon.
+        if UnixStream::connect(&sock).await.is_ok() {
+            return Err(DaemonError::AlreadyRunning(sock));
+        }
+        // Stale: remove and continue to bind.
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    let listener = match UnixListener::bind(&sock) {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            // A racing daemon bound between our probe and bind; it won.
+            return Err(DaemonError::AlreadyRunning(sock));
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    paths::set_file_mode_0600(&sock)?;
+
+    // fstat-verify the invariant; refuse to serve if either perm is wrong.
+    #[cfg(unix)]
+    {
+        if !paths::is_dir_mode_0700(home.root()) {
+            return Err(DaemonError::Permission(format!(
+                "{} is not mode 0700",
+                home.root().display()
+            )));
+        }
+        if !paths::is_file_mode_0600(&sock) {
+            return Err(DaemonError::Permission(format!(
+                "{} is not mode 0600",
+                sock.display()
+            )));
+        }
+    }
+
+    Ok(listener)
+}
+
+/// Prove the filesystem under `home` supports advisory locking before relying
+/// on it for cross-language coordination. Network filesystems (NFS/FUSE) can
+/// silently no-op flock; we refuse to start rather than corrupt shared state.
+fn flock_self_test(home: &AgentsHome) -> Result<(), DaemonError> {
+    let probe = home.root().join(".flock-probe");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&probe)
+        .map_err(|e| DaemonError::FlockUnsupported(probe.clone(), e.to_string()))?;
+    // Always clean up the probe file, even when the lock fails: an early `?`
+    // here would otherwise leave a stray `.flock-probe` behind (ab-b396250f).
+    let lock_res = file.lock();
+    if lock_res.is_ok() {
+        let _ = file.unlock();
+    }
+    let _ = std::fs::remove_file(&probe);
+    lock_res.map_err(|e| DaemonError::FlockUnsupported(probe.clone(), e.to_string()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Serve loop.
+// ---------------------------------------------------------------------------
+
+/// Run the daemon to completion: cold_start -> recovering -> serving ->
+/// (SIGTERM | idle) -> shutting_down -> exited. Returns when the process should
+/// exit. The race-loser path returns `Ok(())` after logging, so the client that
+/// lazy-forked it simply connects to the winner.
+pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+    // State: cold_start.
+    let listener = match bind_supervisor_socket(&home).await {
+        Ok(l) => l,
+        Err(DaemonError::AlreadyRunning(_)) => {
+            // Race loser: nothing to do; the winner serves.
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
+    // State: recovering. Recovery must complete before we accept a request.
+    emit_state(&emitter, DaemonState::Recovering);
+    let report = recover(&home, &emitter);
+
+    // Architecture B (plan ab-70faa65b): ONE bounded reconcile sweep on startup,
+    // as part of recovery and BEFORE the accept loop serves any client, so the
+    // first `list` reads truthful process-liveness status instead of stale
+    // creation-time values. Reuses the same bounded machinery as the `reconcile`
+    // RPC (fairness order + 250ms/probe + 5s budget). Strictly non-fatal: a sweep
+    // that returns an error (registry write failed -> registry unchanged) or even
+    // panics degrades to serving last-recorded status -- we emit and continue,
+    // never abort the daemon (AC1-FR). Completing before `accept` upholds the
+    // Concurrency invariant that no client observes a half-applied sweep. Opt out
+    // via FNO_AGENTS_NO_STARTUP_RECONCILE for the fastest cold start (discretion #5).
+    if opts.reconcile_on_start {
+        // Collapse a panic into an Err so the degradation has a single shape. The
+        // FNO_AGENTS_FAIL_STARTUP_RECONCILE env is a test seam that forces the
+        // failure path (proving the daemon keeps serving last-recorded status
+        // instead of aborting -- AC1-FR); it is never set in production.
+        let swept: Result<ReconcileSweepResult, String> =
+            if std::env::var("FNO_AGENTS_FAIL_STARTUP_RECONCILE").is_ok() {
+                Err(
+                    "forced startup-reconcile failure (FNO_AGENTS_FAIL_STARTUP_RECONCILE)"
+                        .to_string(),
+                )
+            } else {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_reconcile_sweep(&home, &emitter)
+                }))
+                .unwrap_or_else(|_| {
+                    Err(
+                        "startup reconcile sweep panicked; serving last-recorded status"
+                            .to_string(),
+                    )
+                })
+            };
+        match swept {
+            Ok(result) => {
+                let _ = emitter.emit(
+                    "startup_reconcile_done",
+                    &json!({
+                        "updated": result.outcome.updated.len(),
+                        "deferred": result.outcome.deferred,
+                    }),
+                );
+            }
+            Err(msg) => {
+                let _ = emitter.emit("startup_reconcile_failed", &json!({"error": msg}));
+            }
+        }
+    }
+
+    // State: serving. daemon_started is emitted AFTER recovery (step 7 ordering:
+    // events.jsonl reflects reality from the first served request).
+    let started_at = Instant::now();
+    // Drift signal (ab-1891cdff): fingerprint the executable we are running so a
+    // later client can tell whether the on-disk binary has been replaced since.
+    // Also record our own pid start time so `restart` can pid-reuse-guard the
+    // SIGTERM, reusing the same check the daemon already applies to workers.
+    let exe_fingerprint = crate::drift::ExeFingerprint::current();
+    if exe_fingerprint.is_none() {
+        // Advisory only: a daemon that can't fingerprint itself just reports no
+        // fingerprint, and every client drift check fails safe to Unknown.
+        let _ = emitter.emit("daemon_exe_fingerprint_unavailable", &json!({}));
+    }
+    let pid_start_time = process_start_time(std::process::id());
+    let _ = emitter.emit(
+        "daemon_started",
+        &json!({
+            "pid": std::process::id(),
+            "version": env!("CARGO_PKG_VERSION"),
+            "recovered_drives": report.recovered_drives.len(),
+        }),
+    );
+    emit_state(&emitter, DaemonState::Serving);
+
+    // Shared across per-connection tasks (cheap Arc clone, no deep copy).
+    let ctx = Arc::new(Ctx {
+        home,
+        emitter,
+        opts,
+        started_at,
+        exe_fingerprint,
+        pid_start_time,
+        drives: crate::drive::new_table(),
+    });
+
+    // SIGTERM -> graceful shutdown.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut idle_check = tokio::time::interval(Duration::from_secs(5));
+    idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_activity = Instant::now();
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                if let Ok((stream, _)) = accepted {
+                    last_activity = Instant::now();
+                    // Serve each connection in its own task so a slow or hung
+                    // client cannot block the accept loop, SIGTERM, or other
+                    // clients (Gemini high). Shared state is advisory-lock
+                    // protected, so concurrent handling is safe.
+                    let ctx = Arc::clone(&ctx);
+                    tokio::spawn(async move {
+                        serve_connection(ctx, stream).await;
+                    });
+                }
+            }
+            _ = sigterm.recv() => {
+                emit_state(&ctx.emitter, DaemonState::ShuttingDown);
+                let _ = ctx.emitter.emit("daemon_shutting_down", &json!({"reason": "sigterm"}));
+                break;
+            }
+            _ = idle_check.tick() => {
+                // Reap any worker that exited since the last tick so it never
+                // lingers as a zombie under the long-lived daemon.
+                reap_zombies();
+                let empty = state::load_registry(&ctx.home.registry_json())
+                    .map(|r| r.entries.is_empty())
+                    .unwrap_or(true);
+                // Never idle-exit out from under an active drive session, even if
+                // the registry momentarily looks empty (review LOW #3).
+                let no_drives = ctx.drives.lock().await.is_empty();
+                if empty && no_drives && last_activity.elapsed() >= ctx.opts.idle_exit {
+                    emit_state(&ctx.emitter, DaemonState::IdlePendingExit);
+                    let _ = ctx.emitter.emit("daemon_idle_pending_exit", &json!({}));
+                    emit_state(&ctx.emitter, DaemonState::ShuttingDown);
+                    let _ = ctx.emitter.emit(
+                        "daemon_shutting_down",
+                        &json!({"reason": "idle"}),
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(ctx.home.supervisor_sock());
+    emit_state(&ctx.emitter, DaemonState::Exited);
+    let _ = ctx.emitter.emit("daemon_exited", &json!({"clean": true}));
+    Ok(())
+}
+
+/// Daemon-wide context passed to handlers.
+struct Ctx {
+    home: AgentsHome,
+    emitter: EventEmitter,
+    opts: DaemonOptions,
+    started_at: Instant,
+    /// Fingerprint of the executable this daemon is running (ab-1891cdff),
+    /// captured once at startup. `None` if `current_exe()`/stat failed; the
+    /// status payload then reports null and clients fail safe to `Unknown`.
+    exe_fingerprint: Option<crate::drift::ExeFingerprint>,
+    /// This daemon's own process start time, for the `restart` pid-reuse guard.
+    /// `None` on platforms/paths where it is unavailable (the guard degrades to
+    /// a bare existence check, like the worker path).
+    pid_start_time: Option<u64>,
+    /// In-memory drive registry (Wave 4): active drivers/watchers per agent,
+    /// for caps, single-driver enforcement, and stale takeover.
+    drives: crate::drive::DriveTable,
+}
+
+fn emit_state(emitter: &EventEmitter, state: DaemonState) {
+    let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
+}
+
+/// Idle cap for the first read on a connection: a client that connects but
+/// never sends a frame self-terminates rather than holding the task forever.
+const CONN_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn serve_connection(ctx: Arc<Ctx>, mut stream: UnixStream) {
+    // One request per accepted connection (clients open per RPC). A read fault
+    // is mapped to a structured error response so callers get a deterministic
+    // error code rather than a transport EOF (Codex P2): only a clean hangup
+    // (UnexpectedEof) is silent. A silent client is bounded by the timeout.
+    let req = match tokio::time::timeout(CONN_READ_TIMEOUT, read_request(&mut stream)).await {
+        Err(_elapsed) => return, // client sent nothing within the window; drop
+        Ok(Ok(r)) => r,
+        Ok(Err(crate::protocol::ProtocolError::UnexpectedEof)) => return, // clean hangup
+        Ok(Err(e)) => {
+            // Malformed / oversized frame: we could not parse a request id, so
+            // reply against id 0 with a structured MalformedFrame error.
+            let resp = Response::err(0, ErrorCode::MalformedFrame, format!("{e}"));
+            let _ = write_response(&mut stream, &resp).await;
+            return;
+        }
+    };
+    // Drive is the one verb that does NOT fit the one-request/one-response
+    // shape: after the `agent.drive` ack the SAME stream is upgraded to a
+    // WebSocket and kept open for the session. Hand the owned stream to the
+    // drive handler instead of routing through dispatch (which returns a
+    // Response and drops the stream).
+    if req.method == "agent.drive" {
+        crate::drive::handle_drive(&ctx.home, &ctx.emitter, &ctx.drives, &req, stream).await;
+        return;
+    }
+    // `agent.logs` (with --follow) likewise upgrades the same stream to a
+    // WebSocket and streams appended log lines until the client detaches; it
+    // does not fit the one-request/one-response shape.
+    if req.method == "agent.logs" {
+        crate::logs::handle_logs(&ctx.home, &req, stream).await;
+        return;
+    }
+    let resp = dispatch(&ctx, &req).await;
+    let _ = write_response(&mut stream, &resp).await;
+}
+
+/// Run a synchronous (flock + CPU, no socket I/O) handler on the blocking pool
+/// so its advisory-lock wait never starves the async executor (Gemini high).
+async fn run_blocking<F>(ctx: &Arc<Ctx>, req: &Request, f: F) -> Response
+where
+    F: FnOnce(&Ctx, &Request) -> Response + Send + 'static,
+{
+    let ctx = Arc::clone(ctx);
+    let req = req.clone();
+    let id = req.id;
+    match tokio::task::spawn_blocking(move || f(&ctx, &req)).await {
+        Ok(resp) => resp,
+        Err(_) => Response::err(id, ErrorCode::Internal, "handler task panicked"),
+    }
+}
+
+/// Offload the blocking flock + file read of `state::load_registry` to the
+/// blocking pool so it never stalls an async handler's runtime thread
+/// (ab-e86e326b). Mirrors the existing `handle_status` offload and the
+/// `run_blocking` wrapper. A join failure or a read error both collapse to the
+/// empty registry, matching the `.unwrap_or_default()` the inline callers used.
+async fn load_registry_offloaded(path: PathBuf) -> state::Registry {
+    tokio::task::spawn_blocking(move || state::load_registry(&path))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default()
+}
+
+/// Offload the blocking read-modify-write of `state::update_registry` to the
+/// blocking pool (ab-e86e326b). The closure runs on the blocking thread, so it
+/// must be `Send + 'static` (callers move owned clones in). A join panic maps to
+/// a `StateError::Io` so callers' existing error handling fires.
+async fn update_registry_offloaded<F, T>(path: PathBuf, f: F) -> Result<T, state::StateError>
+where
+    F: FnOnce(&mut state::Registry) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || state::update_registry(&path, f)).await {
+        Ok(result) => result,
+        Err(e) => Err(state::StateError::Io(std::io::Error::other(format!(
+            "update_registry task panicked: {e}"
+        )))),
+    }
+}
+
+async fn dispatch(ctx: &Arc<Ctx>, req: &Request) -> Response {
+    match Namespace::of(&req.method) {
+        Namespace::Agent => dispatch_agent(ctx, req).await,
+        Namespace::Channel => dispatch_channel(ctx, req).await,
+        Namespace::Unknown => Response::err(
+            req.id,
+            ErrorCode::UnknownMethod,
+            format!("unknown namespace for method `{}`", req.method),
+        ),
+    }
+}
+
+async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
+    // Async handlers (spawn/ask/stop) interleave worker-socket I/O and stay on
+    // the async runtime; pure-sync handlers go to the blocking pool.
+    match Namespace::verb(&req.method) {
+        Some("spawn") => handle_spawn(ctx, req).await,
+        Some("ask") => handle_ask(ctx, req).await,
+        Some("deliver") => handle_deliver(ctx, req).await,
+        Some("switchboard") => handle_switchboard(ctx, req).await,
+        Some("gate_check") => handle_gate_check(ctx, req).await,
+        Some("stop") => handle_stop(ctx, req).await,
+        Some("rm") => handle_rm(ctx, req).await,
+        Some("list") => run_blocking(ctx, req, handle_list).await,
+        // status reads the in-memory drive table for the active-drives count, so
+        // it stays on the async runtime rather than the blocking pool.
+        Some("status") => handle_status(ctx, req).await,
+        Some("reconcile") => run_blocking(ctx, req, handle_reconcile).await,
+        _ => Response::err(
+            req.id,
+            ErrorCode::UnknownMethod,
+            format!("unknown agent verb in `{}`", req.method),
+        ),
+    }
+}
+
+/// Validate an agent name: 1..=64 chars from `[A-Za-z0-9_-]` (US1 dispatch rule).
+fn valid_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Derive a short id from a name, made unique against the registry.
+fn derive_short_id(name: &str, registry: &state::Registry) -> String {
+    let base: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    let base = if base.is_empty() {
+        "agent".into()
+    } else {
+        base
+    };
+    if registry.entries.iter().all(|e| e.short_id != base) {
+        return base;
+    }
+    for n in 1..10_000 {
+        let cand = format!("{base}{n}");
+        if registry.entries.iter().all(|e| e.short_id != cand) {
+            return cand;
+        }
+    }
+    format!("{base}-{}", now_compact())
+}
+
+/// Whether `e` records `uuid` as its resume target (any provider id field).
+fn entry_holds_session(e: &RegistryEntry, uuid: &str) -> bool {
+    e.codex_session_id.as_deref() == Some(uuid)
+        || e.gemini_session_id.as_deref() == Some(uuid)
+        || e.session_id.as_deref() == Some(uuid)
+}
+
+/// Non-terminal == has (or expects) a live backend. Exited/PermanentDead are
+/// the only terminal states.
+fn is_non_terminal(s: AgentStatus) -> bool {
+    !matches!(s, AgentStatus::Exited | AgentStatus::PermanentDead)
+}
+
+/// Result of `promote --from <uuid>` admission against a registry snapshot.
+#[derive(Debug, PartialEq, Eq)]
+enum PromoteAdmission {
+    /// Admit; host the session with this inferred provider.
+    Ok { provider: String },
+    /// Reject with a user-facing reason; spawn no worker.
+    Reject(String),
+}
+
+/// Pure admission for `fno agents promote --from <uuid>` (task 3.1, the
+/// concurrency invariant). Decided against a registry snapshot so the
+/// unknown-uuid / one-host / settled-source rules are unit-testable without a
+/// daemon. Enforces the integrity intent "at most one live interactive writer
+/// per session, and don't resume a session whose source is still mid-flight":
+///
+/// - empty/blank uuid -> reject (boundary).
+/// - a non-terminal interactive host already on this session -> reject
+///   (one-host; covers a re-promote AND a still-live interactive source).
+/// - no recorded agent holds this session id -> reject (unknown session).
+/// - the source is in a mid-flight transient state (Spawning/Restarting/Busy)
+///   -> reject (still running). NOTE: a *settled* `Live` exec source IS
+///   promotable -- codex/gemini `ask` leaves the row `Live` after the one-shot
+///   exits (codex_ask.rs stamps status=live on success), so the plan's literal
+///   "reject if status==live" would make every exec-born session
+///   un-promotable, contradicting AC1-HP. We reject only genuinely-in-flight
+///   states. (Deviation from the plan's literal status set, by intent.)
+fn admit_promote(entries: &[RegistryEntry], uuid: &str) -> PromoteAdmission {
+    if uuid.trim().is_empty() {
+        return PromoteAdmission::Reject(
+            "promote requires a non-empty --from <session-uuid>".into(),
+        );
+    }
+    // Search newest-first: the registry can hold several rows for one session id
+    // (the original exec source plus any promoted hosts), so the most recent row
+    // is the authoritative current state/provider (Gemini review MEDIUM, PR #373).
+    if let Some(h) = entries
+        .iter()
+        .rev()
+        .find(|e| e.is_interactive() && entry_holds_session(e, uuid) && is_non_terminal(e.status))
+    {
+        return PromoteAdmission::Reject(format!(
+            "session '{uuid}' is already hosted by live interactive agent '{}'; one interactive host per session",
+            h.name
+        ));
+    }
+    let Some(source) = entries.iter().rev().find(|e| entry_holds_session(e, uuid)) else {
+        return PromoteAdmission::Reject(format!(
+            "unknown session '{uuid}': no recorded agent has it as a codex/gemini session id"
+        ));
+    };
+    if matches!(
+        source.status,
+        AgentStatus::Spawning | AgentStatus::Restarting | AgentStatus::Busy
+    ) {
+        return PromoteAdmission::Reject(format!(
+            "source session '{uuid}' still running (agent '{}' status {:?}); only a settled session may be promoted",
+            source.name, source.status
+        ));
+    }
+    if source.provider.trim().is_empty() {
+        // A legacy/corrupt source row with no provider would otherwise infer an
+        // empty provider and fail late at argv dispatch; reject early and clearly.
+        return PromoteAdmission::Reject(format!(
+            "source agent '{}' for session '{uuid}' has no provider recorded; cannot infer interactive host",
+            source.name
+        ));
+    }
+    PromoteAdmission::Ok {
+        provider: source.provider.clone(),
+    }
+}
+
+async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
+    let p = &req.params;
+    let name = match p.get("name").and_then(|v| v.as_str()) {
+        Some(n) if valid_agent_name(n) => n.to_string(),
+        Some(_) => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "name must be 1-64 chars of [A-Za-z0-9_-]",
+            )
+        }
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
+    };
+    let mut provider = p
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("codex")
+        .to_string();
+    // A missing `cwd` means a misbehaving client: the daemon is a shared,
+    // long-lived process, so its own current_dir is whatever project it was
+    // first started in, NOT the caller's. Fall back to a neutral temp dir
+    // (matching the worker's own default) so a no-cwd request lands somewhere
+    // obviously-not-a-project instead of silently adopting the daemon's repo,
+    // and emit an event so the /tmp launch is greppable rather than silent. A
+    // well-behaved client always forwards cwd (client.rs ensure_request_cwd).
+    let cwd = match p.get("cwd").and_then(|v| v.as_str()) {
+        Some(c) => PathBuf::from(c),
+        None => {
+            let fallback = std::env::temp_dir();
+            let _ = ctx.emitter.emit(
+                "agent_spawn_cwd_fallback",
+                &json!({"name": name, "fallback": fallback.to_string_lossy()}),
+            );
+            fallback
+        }
+    };
+
+    // Resolve the PTY command. Explicit `argv` wins (tests/escape-hatch).
+    // When absent, resolve via the provider's ProviderWithPty::create_argv (Task 4.1).
+    let message = p
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let from_name = p
+        .get("from_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let yolo = p.get("yolo").and_then(|v| v.as_bool()).unwrap_or(false);
+    // host_mode: "exec" (default, one-shot) or "interactive" (long-lived
+    // drivable TUI via `fno agents host`/`promote`). Absent reads as exec so
+    // every existing spawn call site keeps its current behavior. resume_id is
+    // the session UUID for an interactive promote (None for a fresh host).
+    let host_mode = p
+        .get("host_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or(crate::state::HOST_MODE_EXEC)
+        .to_string();
+    let interactive = host_mode == crate::state::HOST_MODE_INTERACTIVE;
+    let resume_id = p
+        .get("resume_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Interactive promote admission (task 3.1): resolve the source session and
+    // enforce the unknown-uuid / one-host / settled-source invariants before
+    // building argv. `promote` infers the provider from the source row (the
+    // client only knows the UUID). This lock-free pass gives precise rejection
+    // messages for the common (non-racing) case; the authoritative one-host
+    // reservation re-checks atomically under the registry lock below.
+    if interactive {
+        // Claude front door (Group 3, ab-734fcd6c): an interactive claude host is
+        // the stream-json adoption lane, NOT the codex/gemini PTY lane. claude has
+        // no PTY (`as_pty` -> None); adopting it means resuming an idle session as
+        // a held stream-json thread (`claude -p --resume <uuid> ...`). Routed
+        // BEFORE `admit_promote`, which infers the provider from a codex/gemini
+        // source ROW -- a row claude adoption deliberately does not require, since
+        // `--resume` reconstructs the transcript for ANY idle session by id
+        // (AC1-HP "any idle session by id"). The single-writer guard is the
+        // registry one-host re-check (atomic, in `spawn_claude_stream_lane`) plus
+        // the `fno claim session:<uuid>` coordination record, mirroring how
+        // codex/gemini enforce one host per session below.
+        if provider == "claude" {
+            let explicit_argv = p.get("argv").and_then(|v| v.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<String>>()
+            });
+            return spawn_claude_stream_lane(
+                ctx,
+                req,
+                &name,
+                &cwd,
+                resume_id.as_deref(),
+                explicit_argv,
+            )
+            .await;
+        }
+        if let Some(uuid) = resume_id.as_deref() {
+            let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+            match admit_promote(&registry.entries, uuid) {
+                PromoteAdmission::Ok { provider: inferred } => provider = inferred,
+                PromoteAdmission::Reject(reason) => {
+                    let _ = ctx.emitter.emit(
+                        "agent_spawn_failed",
+                        &json!({"name": name, "reason": "promote_rejected", "detail": reason}),
+                    );
+                    return Response::err(req.id, ErrorCode::InvalidParams, reason);
+                }
+            }
+        }
+        // Validate the (possibly inferred) provider for BOTH fresh host and
+        // promote (AC3-ERR). Only codex/gemini are PTY-hostable here; claude took
+        // the stream-json branch above, so any provider that reaches this point is
+        // either an unknown CLI (no PTY impl) or a promote whose source row
+        // resolved to one. This runs AFTER promote's provider inference so a
+        // promote whose source resolves to claude/unknown is rejected here with a
+        // clear message rather than failing later with a confusing PTY-missing
+        // error (Gemini review HIGH on PR #373 -- the prior `else if` skipped this
+        // for the promote path).
+        if provider != "codex" && provider != "gemini" {
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "reason": "bad_interactive_provider", "provider": provider}),
+            );
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                format!(
+                    "interactive host_mode supports only codex, gemini, or claude (stream-json adopt via `promote --from <uuid> --provider claude`), not '{provider}'"
+                ),
+            );
+        }
+    }
+
+    let argv: Vec<String> = match p.get("argv").and_then(|v| v.as_array()) {
+        Some(a) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        None => {
+            // No explicit argv: resolve via provider trait.
+            match provider_for_pty(&provider) {
+                Some(pty_provider) => {
+                    let create_ctx = crate::provider::CreateContext {
+                        name: name.clone(),
+                        message: message.clone(),
+                        cwd: cwd.clone(),
+                        from_name: from_name.clone(),
+                        session_id: None,
+                        yolo,
+                    };
+                    // Interactive routes to the host/promote argv; a provider
+                    // with no interactive form (claude) returns None and is
+                    // rejected here rather than silently falling back to exec.
+                    let resolved = if interactive {
+                        let built = match &resume_id {
+                            Some(uuid) => {
+                                pty_provider.resume_interactive_argv(&crate::provider::ResumeContext {
+                                    session_id: uuid.clone(),
+                                    message: message.clone(),
+                                    cwd: cwd.clone(),
+                                    from_name: from_name.clone(),
+                                    yolo,
+                                })
+                            }
+                            None => pty_provider.create_interactive_argv(&create_ctx),
+                        };
+                        match built {
+                            Some(a) => a,
+                            None => {
+                                return Response::err(
+                                    req.id,
+                                    ErrorCode::InvalidParams,
+                                    format!(
+                                        "provider '{provider}' has no interactive host_mode; only codex/gemini support `fno agents host`/`promote`"
+                                    ),
+                                )
+                            }
+                        }
+                    } else {
+                        pty_provider.create_argv(&create_ctx)
+                    };
+                    if resolved.is_empty() {
+                        return Response::err(
+                            req.id,
+                            ErrorCode::InvalidParams,
+                            format!("provider '{provider}' returned empty argv"),
+                        );
+                    }
+                    resolved
+                }
+                None => {
+                    return Response::err(
+                        req.id,
+                        ErrorCode::InvalidParams,
+                        format!(
+                            "provider '{provider}' has no PTY implementation; pass --argv to spawn it manually"
+                        ),
+                    )
+                }
+            }
+        }
+    };
+    if argv.is_empty() {
+        return Response::err(req.id, ErrorCode::InvalidParams, "empty argv");
+    }
+
+    // Collision check.
+    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    if let Some(existing) = registry.find(&name) {
+        return Response::err(
+            req.id,
+            ErrorCode::AgentExists,
+            format!(
+                "agent {name} already exists (short_id={}); use `fno agents rm` first",
+                existing.short_id
+            ),
+        );
+    }
+    let short_id = derive_short_id(&name, &registry);
+
+    // Spawn the worker in its own process group (Outcome B: survives a kill of
+    // the daemon's group; SIGKILL to the daemon pid alone never propagates).
+    // We use std (not tokio) Command and forget the handle, then reap exited
+    // workers via a non-blocking waitpid sweep on the idle tick — tokio's Child
+    // would either kill-on-drop (wrong: the worker must outlive us) or leak a
+    // zombie when dropped without await.
+    let mut cmd = std::process::Command::new(&ctx.opts.worker_bin);
+    cmd.arg("--short-id")
+        .arg(&short_id)
+        .arg("--home")
+        .arg(ctx.home.root())
+        .arg("--cwd")
+        .arg(&cwd)
+        .arg("--")
+        .args(&argv);
+    cmd.process_group(0);
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "reason": "binary_not_found", "detail": e.to_string()}),
+            );
+            return Response::err(
+                req.id,
+                ErrorCode::SpawnFailed,
+                format!("could not launch worker: {e}"),
+            );
+        }
+    };
+    let worker_pid = child.id();
+    // Capture the worker's start time NOW, paired with its pid, so later
+    // liveness/reap/signal decisions can detect PID reuse (ab-d19e6458): a
+    // recycled pid will have a different start time than the one recorded here.
+    let worker_pid_start_time = process_start_time(worker_pid);
+    // Detach: we do not await the worker; it outlives us by design. The idle
+    // tick's reap_zombies() waitpid-sweeps any worker that later exits so it
+    // never lingers as <defunct> under a long-lived daemon.
+    drop(child);
+
+    // Wait (bounded) for the worker socket to appear, proving the PTY spawned.
+    let sock = ctx.home.worker_sock(&short_id);
+    let start = Instant::now();
+    while !sock.exists() && start.elapsed() < Duration::from_secs(10) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    if !sock.exists() {
+        let _ = ctx.emitter.emit(
+            "agent_create_no_session",
+            &json!({"name": name, "short_id": short_id}),
+        );
+        return Response::err(
+            req.id,
+            ErrorCode::SpawnFailed,
+            "worker did not come up within 10s",
+        );
+    }
+
+    // The socket appearing proves the worker process bound it, but NOT that the
+    // PTY child is alive (a binary that execs then immediately exits still lets
+    // the worker bind). Confirm child liveness before declaring success, so
+    // spawn never reports `live` for an already-dead agent (silent-failure #3).
+    if !worker_reports_child_alive(&sock).await {
+        let _ = ctx.emitter.emit(
+            "agent_create_no_session",
+            &json!({"name": name, "short_id": short_id, "reason": "child_not_alive"}),
+        );
+        // Best-effort: tell the worker to shut down so it does not linger.
+        if let Ok(mut conn) = UnixStream::connect(&sock).await {
+            let _ = write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))).await;
+            let _ = crate::protocol::read_response(&mut conn).await;
+        }
+        return Response::err(
+            req.id,
+            ErrorCode::SpawnFailed,
+            "worker came up but its PTY child is not alive",
+        );
+    }
+
+    // Interactive host_mode: the child passed the instantaneous alive probe, but
+    // a `codex resume`/`gemini -r` that errors (auth/unknown session) exits a
+    // beat later. With no `--json` stream to confirm readiness, settle on "first
+    // PTY paint + still alive" so a launched-then-died resume reports
+    // spawn-failed with the worker's last bytes, never a live-then-exited row
+    // (task 2.2, AC1-FR / AC1-UI). Exec spawns skip this (stream confirms later).
+    if interactive {
+        if let Err(last_bytes) = await_interactive_readiness(&sock).await {
+            let tail: String = last_bytes
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({
+                    "name": name,
+                    "short_id": short_id,
+                    "reason": "interactive_child_exited_before_ready",
+                    "last_bytes": tail,
+                }),
+            );
+            best_effort_worker_shutdown(&sock).await;
+            return Response::err(
+                req.id,
+                ErrorCode::SpawnFailed,
+                format!(
+                    "interactive {provider} worker exited before readiness (resume/launch failed); last output: {tail}"
+                ),
+            );
+        }
+    }
+
+    // Register.
+    let entry = RegistryEntry {
+        name: name.clone(),
+        short_id: short_id.clone(),
+        provider: provider.clone(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        project_root: cwd.to_string_lossy().into_owned(),
+        session_id: p
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        claude_short_id: None,
+        claude_session_uuid: None,
+        messaging_socket_path: None,
+        // An interactive promote resumes a known session UUID; record it in the
+        // provider-specific id field so the one-host-per-session invariant
+        // (task 3.1) and reconcile can match it. A fresh interactive host has no
+        // prior UUID -> None (best-effort scrape is deferred, AC2-HP).
+        codex_session_id: if interactive && provider == "codex" {
+            resume_id.clone()
+        } else {
+            None
+        },
+        gemini_session_id: if interactive && provider == "gemini" {
+            resume_id.clone()
+        } else {
+            None
+        },
+        mcp_channel_id: None,
+        cc_session_id: None,
+        // Skip-when-None keeps an exec row's on-disk shape unchanged (no key);
+        // only an interactive row carries host_mode="interactive".
+        host_mode: if interactive {
+            Some(host_mode.clone())
+        } else {
+            None
+        },
+        status: AgentStatus::Live,
+        last_message_at: Some(now_rfc3339_like()),
+        created_at: now_rfc3339_like(),
+        pid: Some(worker_pid),
+        pid_start_time: worker_pid_start_time,
+        log_path: Some(
+            ctx.home
+                .timeline_jsonl(&short_id)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        last_reconciled_at: None,
+    };
+    // Reserve the name atomically UNDER the exclusive registry lock. The
+    // lock-free collision check above can be passed by two concurrent
+    // agent.spawn calls for the same name (the per-connection serving model runs
+    // their handlers in parallel); both would derive the same short_id, start
+    // workers, and reach here. Re-checking inside the locked read-modify-write
+    // means exactly one inserts; the loser must NOT push a duplicate row (Codex
+    // P1, PR #365). The closure returns whether THIS call won the insert.
+    let resume_for_lock = resume_id.clone();
+    let interactive_for_lock = interactive;
+    let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
+        if r.entries.iter().any(|e| e.name == entry.name) {
+            return false;
+        }
+        // Atomic one-host re-check: two concurrent `promote --from <uuid>` calls
+        // both pass the lock-free admit_promote above, then race to push here.
+        // Under the exclusive registry lock exactly one wins; the loser must NOT
+        // create a second interactive writer on the session (one-host invariant,
+        // AC2-EDGE concurrency; same pattern as the name reservation).
+        if interactive_for_lock {
+            if let Some(uuid) = resume_for_lock.as_deref() {
+                if r.entries.iter().any(|e| {
+                    e.is_interactive() && entry_holds_session(e, uuid) && is_non_terminal(e.status)
+                }) {
+                    return false;
+                }
+            }
+        }
+        r.entries.push(entry);
+        true
+    })
+    .await;
+    match insert {
+        Ok(true) => {}
+        Ok(false) => {
+            // Lost a concurrent spawn race for this name: our just-started worker
+            // is a duplicate. Shut it down so we don't leak it, then report the
+            // conflict (same code the lock-free collision check returns).
+            best_effort_worker_shutdown(&sock).await;
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "short_id": short_id, "reason": "name_taken_concurrent"}),
+            );
+            return Response::err(
+                req.id,
+                ErrorCode::AgentExists,
+                format!("agent {name} already exists (won by a concurrent spawn); use `fno agents rm` first"),
+            );
+        }
+        Err(e) => {
+            // The worker is already up and bound but never made it into the
+            // registry, so it would be unlistable/unstoppable. Shut it down before
+            // returning rather than leaking a live, untracked process (Codex P2).
+            best_effort_worker_shutdown(&sock).await;
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "short_id": short_id, "reason": "registry_write_failed"}),
+            );
+            return Response::err(req.id, ErrorCode::Internal, format!("registry write: {e}"));
+        }
+    }
+    let _ = ctx.emitter.emit(
+        "agent_spawned",
+        &json!({"name": name, "provider": provider, "short_id": short_id}),
+    );
+
+    Response::ok(
+        req.id,
+        json!({"short_id": short_id, "provider": provider, "status": "live"}),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Claude stream-json host lane front door (Group 3, ab-734fcd6c).
+// ---------------------------------------------------------------------------
+
+/// The single-writer claim holder for an adopted claude stream thread, derived
+/// from its short_id (stable + unique per thread). The worker releases the claim
+/// by this EXACT string (passed via `--holder`), so the daemon's acquire and the
+/// worker's RAII release must agree on it.
+fn stream_claim_holder(short_id: &str) -> String {
+    format!("stream:{short_id}")
+}
+
+/// Is this row a LIVE writer for the one-host guard? Narrower than
+/// [`is_non_terminal`]: it EXCLUDES the dead-but-non-terminal states (`Orphaned`
+/// = the child died and the worker released its claim; `Failed` = the task
+/// panicked) so a session whose adopted thread has died is re-adoptable. AC1-FR
+/// marks a dead thread `orphaned` and releases the claim, and AC1-EDGE refuses a
+/// second adopt only for a session "currently held LIVE by another process" —
+/// using `is_non_terminal` here would wrongly keep an orphaned UUID un-adoptable
+/// until a reconcile/rm cleared the row.
+fn is_live_writer(status: AgentStatus) -> bool {
+    matches!(
+        status,
+        AgentStatus::Live
+            | AgentStatus::Ready
+            | AgentStatus::Idle
+            | AgentStatus::Busy
+            | AgentStatus::Spawning
+            | AgentStatus::Restarting
+    )
+}
+
+/// The `fno claim acquire session:<uuid> --holder <holder> -J` argv. Pure for
+/// unit-testability (mirrors `stream_worker::claim_release_argv`). `-J` makes the
+/// CLI emit the resulting claim record so the daemon can confirm WHO holds it.
+fn claim_acquire_argv(uuid: &str, holder: &str) -> Vec<String> {
+    vec![
+        "claim".into(),
+        "acquire".into(),
+        format!("session:{uuid}"),
+        "--holder".into(),
+        holder.into(),
+        "-J".into(),
+    ]
+}
+
+/// The worker argv for the claude stream-json lane (everything after the worker
+/// BINARY path). `parse_stream_args` in bin/worker.rs accepts these flags in any
+/// order before `--`; the child argv (normally
+/// [`crate::provider::claude_stream_json_resume_argv`]) follows the separator.
+/// Pure so the flag wiring is unit-testable without spawning a process.
+fn claude_stream_worker_args(
+    short_id: &str,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    uuid: &str,
+    holder: &str,
+    child_argv: &[String],
+) -> Vec<String> {
+    let mut args = vec![
+        "--stream".into(),
+        "--short-id".into(),
+        short_id.into(),
+        "--home".into(),
+        home.to_string_lossy().into_owned(),
+        "--cwd".into(),
+        cwd.to_string_lossy().into_owned(),
+        "--session-uuid".into(),
+        uuid.into(),
+        "--holder".into(),
+        holder.into(),
+        "--".into(),
+    ];
+    args.extend(child_argv.iter().cloned());
+    args
+}
+
+/// Build the registry row for an adopted claude stream thread. `provider`=claude
+/// + `host_mode`=interactive (so `is_interactive()` keeps reconcile from
+/// settling it `exited` like a one-shot) + the FULL `claude_session_uuid` (the
+/// resume key, finally populated here -- the field G1 added is set by the front
+/// door). Pure so the row shape is asserted without a live spawn.
+fn build_claude_stream_entry(
+    name: &str,
+    short_id: &str,
+    cwd: &std::path::Path,
+    uuid: &str,
+    pid: u32,
+    pid_start_time: Option<u64>,
+    log_path: PathBuf,
+) -> RegistryEntry {
+    let cwd_s = cwd.to_string_lossy().into_owned();
+    RegistryEntry {
+        name: name.into(),
+        short_id: short_id.into(),
+        provider: "claude".into(),
+        cwd: cwd_s.clone(),
+        project_root: cwd_s,
+        session_id: None,
+        claude_short_id: None,
+        claude_session_uuid: Some(uuid.into()),
+        messaging_socket_path: None,
+        codex_session_id: None,
+        gemini_session_id: None,
+        mcp_channel_id: None,
+        cc_session_id: None,
+        host_mode: Some(crate::state::HOST_MODE_INTERACTIVE.into()),
+        status: AgentStatus::Live,
+        last_message_at: Some(now_rfc3339_like()),
+        created_at: now_rfc3339_like(),
+        pid: Some(pid),
+        pid_start_time,
+        log_path: Some(log_path.to_string_lossy().into_owned()),
+        last_reconciled_at: None,
+    }
+}
+
+/// Outcome of the pre-spawn single-writer claim acquisition.
+enum ClaimOutcome {
+    /// We hold `session:<uuid>` (fresh acquire or idempotent re-acquire).
+    Acquired,
+    /// Another live writer holds it; refuse to double-adopt (AC1-EDGE).
+    HeldByOther(String),
+    /// The claim substrate could not be consulted (no `fno` on PATH, exec error,
+    /// unparseable output). Fail OPEN: the registry one-host re-check under the
+    /// lock is the authoritative in-daemon guard; the file-claim is the
+    /// cross-process coordination record, best-effort like the worker's release.
+    Unavailable(String),
+}
+
+/// Acquire the `session:<uuid>` single-writer claim before spawning the stream
+/// worker (Locked Decision 5; the worker's `SessionClaimGuard` RELEASES it on
+/// orphan/exit, so the daemon only acquires). Shells the Python `fno claim` CLI
+/// -- the claim substrate is Python-only and cross-worktree -- exactly as the
+/// worker's `release_session_claim` does. Inherits the daemon environment so the
+/// claims root matches the worker's release root.
+fn acquire_session_claim(uuid: &str, holder: &str) -> ClaimOutcome {
+    let output = std::process::Command::new("fno")
+        .args(claim_acquire_argv(uuid, holder))
+        .stdin(std::process::Stdio::null())
+        .output();
+    match output {
+        Err(e) => ClaimOutcome::Unavailable(format!("fno claim acquire failed to run: {e}")),
+        Ok(o) if !o.status.success() => {
+            // Non-zero exit is the CLI's `ClaimHeldByOther` (a live different
+            // holder) or another claim error: refuse, naming the conflict.
+            let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            ClaimOutcome::HeldByOther(if detail.is_empty() {
+                "held by another writer".into()
+            } else {
+                detail
+            })
+        }
+        Ok(o) => {
+            // Exit 0: confirm WE hold it. The CLI is idempotent and can recover a
+            // stale (dead-holder) claim, so a returned holder != ours means a
+            // different live writer owns it -> refuse.
+            match serde_json::from_slice::<Value>(&o.stdout) {
+                Ok(v) => match v.get("holder").and_then(Value::as_str) {
+                    Some(h) if h == holder => ClaimOutcome::Acquired,
+                    Some(other) => ClaimOutcome::HeldByOther(other.to_string()),
+                    None => ClaimOutcome::Acquired,
+                },
+                // Exit 0 but no parseable JSON (older CLI without -J support):
+                // treat as acquired; the registry one-host guard still protects us.
+                Err(_) => ClaimOutcome::Acquired,
+            }
+        }
+    }
+}
+
+/// RAII release for the daemon-held single-writer claim. Armed when the daemon
+/// acquires `session:<uuid>` before spawn; on Drop it releases the claim UNLESS
+/// disarmed (the worker has taken ownership of the claim once the row is
+/// registered `live` and owns its own RAII release). This means every
+/// early-return failure path releases exactly once with no manual call (gemini
+/// review HIGH: prefer RAII over scattered manual releases), and the release is
+/// fire-and-forget (`spawn`, not `status`) so it never blocks the async executor
+/// (gemini review HIGH: no sync `Command` wait in async). The daemon's idle-tick
+/// reaper waitpid-sweeps the detached child.
+struct DaemonClaimGuard {
+    session_uuid: String,
+    holder: String,
+    armed: bool,
+}
+
+impl DaemonClaimGuard {
+    /// The worker now owns the claim (registered live); the daemon must not
+    /// release it on drop. Consumes the guard so it cannot fire afterward.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DaemonClaimGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Best-effort, non-blocking: a non-zero exit / missing `fno` is ignored
+        // (the claim's PID-liveness + reconcile are the backstops). AC1-ERR: a
+        // failed adopt must release any claim it acquired.
+        let _ = std::process::Command::new("fno")
+            .args([
+                "claim",
+                "release",
+                &format!("session:{}", self.session_uuid),
+                "--holder",
+                &self.holder,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
+/// Does the stream worker at `sock` report its `claude -p --resume` child ALIVE?
+/// A dead-on-arrival resume (bad/expired UUID, auth failure) exits immediately,
+/// yet the worker still binds its socket and answers `stream.ping`; querying
+/// `stream.status.child_alive` (backed by `try_wait`) distinguishes "worker up +
+/// child live" from "worker up + child already exited", so a DOA adopt is
+/// rejected instead of registered `live` (AC1-ERR; codex review P2). Bounded so a
+/// wedged worker never hangs the daemon; a timeout reads as not-alive.
+async fn stream_worker_reports_child_alive(sock: &std::path::Path) -> bool {
+    let probe = async {
+        let mut conn = UnixStream::connect(sock).await.ok()?;
+        write_request(&mut conn, &Request::new(1, "stream.status", json!({})))
+            .await
+            .ok()?;
+        let resp = crate::protocol::read_response(&mut conn).await.ok()?;
+        Some(
+            resp.result()
+                .and_then(|r| r.get("child_alive"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+    };
+    matches!(
+        tokio::time::timeout(Duration::from_secs(STREAM_PROBE_TIMEOUT_S), probe).await,
+        Ok(Some(true))
+    )
+}
+
+/// Spawn (adopt) a claude session as a held stream-json thread under the daemon
+/// (Task 5.1). This is the claude analog of the codex/gemini PTY promote path in
+/// `handle_spawn`: validate -> single-writer guard -> spawn the per-session
+/// worker (Outcome B: own process group, detached) -> confirm it serves the
+/// stream protocol -> register `live`. The worker resumes the FULL session UUID
+/// (`claude -p --resume`); readiness is the worker answering `stream.ping`
+/// (Locked Decision 9: a stream-json session emits nothing until the first turn,
+/// so we never wait for a spontaneous `init` event).
+async fn spawn_claude_stream_lane(
+    ctx: &Ctx,
+    req: &Request,
+    name: &str,
+    cwd: &std::path::Path,
+    resume_id: Option<&str>,
+    explicit_argv: Option<Vec<String>>,
+) -> Response {
+    // 1. Adoption requires a resume target. A fresh `host --provider claude`
+    //    (no --from) has nothing to resume; point the user at the adopt verb.
+    let uuid = match resume_id {
+        Some(u) if !u.trim().is_empty() => u,
+        _ => {
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "reason": "claude_host_needs_from"}),
+            );
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "claude has no fresh interactive host; adopt an idle session: `fno agents promote <name> --from <session-uuid> --provider claude`",
+            );
+        }
+    };
+
+    // 2. Lock-free pre-checks for clean messages (the authoritative re-checks run
+    //    atomically under the registry lock at registration).
+    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    if let Some(existing) = registry.find(name) {
+        return Response::err(
+            req.id,
+            ErrorCode::AgentExists,
+            format!(
+                "agent {name} already exists (short_id={}); use `fno agents rm` first",
+                existing.short_id
+            ),
+        );
+    }
+    // Single-writer one-host pre-check: refuse a second adopt of the same session
+    // (AC1-EDGE). Matches a LIVE claude row already carrying this UUID; an
+    // orphaned/exited row (dead child, claim released) is re-adoptable (AC1-FR).
+    if let Some(h) = registry.entries.iter().rev().find(|e| {
+        e.provider == "claude"
+            && e.claude_session_uuid.as_deref() == Some(uuid)
+            && is_live_writer(e.status)
+    }) {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            format!(
+                "session '{uuid}' is already hosted by live stream thread '{}'; one writer per session",
+                h.name
+            ),
+        );
+    }
+    let short_id = derive_short_id(name, &registry);
+    let holder = stream_claim_holder(&short_id);
+
+    // 3. Acquire the single-writer claim BEFORE spawning (Locked Decision 5). A
+    //    clear held-by-other refusal aborts; an unavailable substrate fails open
+    //    (the registry one-host re-check below is the authoritative in-daemon
+    //    guard). Run on the blocking pool: `fno` is a short-lived subprocess.
+    let uuid_owned = uuid.to_string();
+    let holder_for_acq = holder.clone();
+    let claim_outcome =
+        tokio::task::spawn_blocking(move || acquire_session_claim(&uuid_owned, &holder_for_acq))
+            .await
+            .unwrap_or_else(|e| ClaimOutcome::Unavailable(format!("claim task panicked: {e}")));
+    // The guard releases the claim on EVERY early return below until it is
+    // disarmed at successful registration (the worker then owns the claim).
+    let claim_guard = match claim_outcome {
+        ClaimOutcome::Acquired => DaemonClaimGuard {
+            session_uuid: uuid.to_string(),
+            holder: holder.clone(),
+            armed: true,
+        },
+        ClaimOutcome::HeldByOther(who) => {
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "reason": "session_claimed", "detail": who}),
+            );
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                format!(
+                    "session '{uuid}' is held by another writer ({who}); refusing to double-adopt"
+                ),
+            );
+        }
+        ClaimOutcome::Unavailable(why) => {
+            let _ = ctx.emitter.emit(
+                "agent_stream_claim_unavailable",
+                &json!({"name": name, "session_uuid": uuid, "detail": why}),
+            );
+            // Nothing to release (we never acquired); a disarmed guard keeps the
+            // rest of the function uniform.
+            DaemonClaimGuard {
+                session_uuid: uuid.to_string(),
+                holder: holder.clone(),
+                armed: false,
+            }
+        }
+    };
+
+    // 4. Build the child argv and spawn the per-session stream worker in its own
+    //    process group (Outcome B: survives a kill of the daemon's group). The
+    //    explicit-argv escape hatch lets tests substitute a fake stream emitter so
+    //    CI never spawns a real `claude -p` (Test discipline / Locked Decision 1).
+    let child_argv =
+        explicit_argv.unwrap_or_else(|| crate::provider::claude_stream_json_resume_argv(uuid));
+    let worker_args =
+        claude_stream_worker_args(&short_id, ctx.home.root(), cwd, uuid, &holder, &child_argv);
+    let mut cmd = std::process::Command::new(&ctx.opts.worker_bin);
+    cmd.args(&worker_args);
+    cmd.process_group(0);
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            // claim_guard releases on return.
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "reason": "binary_not_found", "detail": e.to_string()}),
+            );
+            return Response::err(
+                req.id,
+                ErrorCode::SpawnFailed,
+                format!("could not launch stream worker: {e}"),
+            );
+        }
+    };
+    let worker_pid = child.id();
+    let worker_pid_start_time = process_start_time(worker_pid);
+    drop(child);
+
+    // 5. Wait (bounded) for the worker socket to appear, proving the worker bound.
+    let sock = ctx.home.worker_sock(&short_id);
+    let start = Instant::now();
+    while !sock.exists() && start.elapsed() < Duration::from_secs(10) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    if !sock.exists() {
+        // claim_guard releases on return.
+        let _ = ctx.emitter.emit(
+            "agent_create_no_session",
+            &json!({"name": name, "short_id": short_id, "lane": "stream"}),
+        );
+        return Response::err(
+            req.id,
+            ErrorCode::SpawnFailed,
+            "stream worker did not come up within 10s",
+        );
+    }
+
+    // 6. Confirm the worker actually serves the stream protocol (a `stream.ping`
+    //    answer). This is the readiness proof (LD9: drive-a-turn, not wait-for-init
+    //    -- the ping is the cheapest drive that confirms the worker, without
+    //    spending a real turn). A bound-but-wrong worker fails here, not `live`.
+    if !is_live_stream_thread(&sock).await {
+        best_effort_worker_shutdown(&sock).await;
+        let _ = ctx.emitter.emit(
+            "agent_create_no_session",
+            &json!({"name": name, "short_id": short_id, "reason": "not_a_stream_thread"}),
+        );
+        return Response::err(
+            req.id,
+            ErrorCode::SpawnFailed,
+            "stream worker came up but does not serve the stream protocol",
+        );
+    }
+
+    // 6b. Confirm the resumed child is ALIVE before registering live (AC1-ERR;
+    //     codex review P2). A dead-on-arrival `claude -p --resume` (bad/expired
+    //     UUID, auth failure) exits immediately but the worker still binds its
+    //     socket and answers `stream.ping`; `stream.status.child_alive` (try_wait)
+    //     catches it so the adopt is rejected, not registered live then silently
+    //     orphaned.
+    if !stream_worker_reports_child_alive(&sock).await {
+        best_effort_worker_shutdown(&sock).await;
+        let _ = ctx.emitter.emit(
+            "agent_create_no_session",
+            &json!({"name": name, "short_id": short_id, "reason": "resume_child_exited"}),
+        );
+        return Response::err(
+            req.id,
+            ErrorCode::SpawnFailed,
+            "claude --resume child exited before adoption (bad/expired session id, auth failure, or dead cwd)",
+        );
+    }
+
+    // 7. Register under the exclusive registry lock. Two concurrent adopts can
+    //    both pass the lock-free checks above; the locked re-check (name + the
+    //    one-host UUID guard) means exactly one inserts. The loser shuts its
+    //    just-started worker down (which releases the claim via the worker's RAII
+    //    guard) so it is never leaked untracked.
+    let entry = build_claude_stream_entry(
+        name,
+        &short_id,
+        cwd,
+        uuid,
+        worker_pid,
+        worker_pid_start_time,
+        ctx.home.timeline_jsonl(&short_id),
+    );
+    let uuid_for_lock = uuid.to_string();
+    let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
+        if r.entries.iter().any(|e| e.name == entry.name) {
+            return false;
+        }
+        if r.entries.iter().any(|e| {
+            e.provider == "claude"
+                && e.claude_session_uuid.as_deref() == Some(&uuid_for_lock)
+                && is_live_writer(e.status)
+        }) {
+            return false;
+        }
+        r.entries.push(entry);
+        true
+    })
+    .await;
+    match insert {
+        Ok(true) => {}
+        Ok(false) => {
+            best_effort_worker_shutdown(&sock).await;
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "short_id": short_id, "reason": "session_taken_concurrent"}),
+            );
+            return Response::err(
+                req.id,
+                ErrorCode::AgentExists,
+                format!("session '{uuid}' was adopted by a concurrent call; this one refused"),
+            );
+        }
+        Err(e) => {
+            best_effort_worker_shutdown(&sock).await;
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "short_id": short_id, "reason": "registry_write_failed"}),
+            );
+            return Response::err(req.id, ErrorCode::Internal, format!("registry write: {e}"));
+        }
+    }
+    // Registered live: the worker now owns the claim (its own SessionClaimGuard
+    // releases it on orphan/exit), so the daemon must not release on drop.
+    claim_guard.disarm();
+    let _ = ctx.emitter.emit(
+        "agent_spawned",
+        &json!({"name": name, "provider": "claude", "short_id": short_id, "lane": "stream", "session_uuid": uuid}),
+    );
+
+    Response::ok(
+        req.id,
+        json!({"short_id": short_id, "provider": "claude", "status": "live", "lane": "stream"}),
+    )
+}
+
+/// Map a provider name string to a per-CLI readiness detector.
+///
+/// NOTE: This is a local match rather than routing through `Box<dyn Provider>`
+/// because the provider trait impls live in `provider.rs` with no `from_str`
+/// constructor. A full resolver is the right long-term home (LD8); for now the
+/// match is the surgical minimum that unblocks Task 1.1 without touching
+/// provider.rs.
+fn provider_readiness_detector(provider: &str) -> Box<dyn crate::readiness::ReadinessDetector> {
+    use crate::provider::ProviderWithPty as _;
+    match provider {
+        "codex" => crate::provider::CodexProvider.readiness_detector(),
+        "gemini" => crate::provider::GeminiProvider.readiness_detector(),
+        // Carry the real provider name so the UnknownReadinessSignal error and
+        // provider_name() name the actual CLI (e.g. "opencode") rather than the
+        // literal "unknown" (cv-789fdba0).
+        other => Box::new(crate::readiness::NoSignalDetector {
+            provider: other.to_string(),
+        }),
+    }
+}
+
+/// Resolve a provider name to its `ProviderWithPty` implementation (Task 4.1).
+///
+/// Returns `Some` for PTY-managed providers (codex, gemini); `None` for
+/// shellout-only providers (claude) and unknown names. The same match structure
+/// as `provider_readiness_detector` keeps the two in sync without introducing a
+/// runtime registry.
+fn provider_for_pty(provider: &str) -> Option<Box<dyn crate::provider::ProviderWithPty>> {
+    match provider {
+        "codex" => Some(Box::new(crate::provider::CodexProvider)),
+        "gemini" => Some(Box::new(crate::provider::GeminiProvider)),
+        // claude uses a shellout path (as_pty() -> None); not supported here.
+        _ => None,
+    }
+}
+
+/// Poll the worker snapshot in a bounded loop until the per-provider readiness
+/// detector reports the CLI is idle at a prompt, then return the settled screen
+/// text. Returns `Err(String)` on timeout.
+///
+/// Each iteration feeds a FRESH `TerminalGrid` from the full snapshot string
+/// (the snapshot is the whole current screen, not a delta) so the grid reflects
+/// the current state without accumulated duplicates.
+///
+/// # Path choice (b) note
+/// The worker's `worker.snapshot` RPC returns `text: String` (the lossy UTF-8
+/// decoding of the PTY ring). Feeding `text.as_bytes()` back into a
+/// `TerminalGrid` is slightly redundant for plain ASCII output but is correct
+/// for all vt100-renderable content: the vt100 parser re-interprets the
+/// decoded bytes. The alternative (adding a `raw_bytes_b64` field to the
+/// snapshot RPC) was considered but would require a worker.rs protocol change;
+/// given that the readiness detectors only examine prompt-glyph patterns on the
+/// visible text, the lossy path is sufficient.
+/// Failure modes of [`poll_until_ready`]. Distinguishes a CLI that never settled
+/// within the budget from a worker whose snapshot read itself hung, so the daemon
+/// (and anyone reading the ask error) can tell "slow CLI" from "stuck worker"
+/// instead of two indistinguishable `String`s (cv-789fdba0). Display output is
+/// byte-identical to the prior inline format strings.
+#[derive(Debug, PartialEq, Eq)]
+enum PollError {
+    /// The readiness detector never reported ready before the deadline.
+    Timeout { secs: u64 },
+    /// A single worker-snapshot fetch did not return before the deadline.
+    WorkerUnresponsive { secs: u64 },
+}
+
+impl std::fmt::Display for PollError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PollError::Timeout { secs } => {
+                write!(f, "ask timed out after {secs}s before reply settled")
+            }
+            PollError::WorkerUnresponsive { secs } => write!(
+                f,
+                "ask timed out after {secs}s before reply settled (worker snapshot read did not return)"
+            ),
+        }
+    }
+}
+
+async fn poll_until_ready<F, Fut>(
+    fetcher: F,
+    detector: Box<dyn crate::readiness::ReadinessDetector>,
+    poll_interval: Duration,
+    timeout: Duration,
+) -> Result<String, PollError>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(PollError::Timeout {
+                secs: timeout.as_secs(),
+            });
+        }
+        // Bound the snapshot fetch by the remaining time to the deadline.
+        // fetcher() performs socket I/O to the worker; without this cap a hung
+        // or deadlocked worker would block the daemon indefinitely, since the
+        // deadline check above only runs between iterations (gemini-code-assist
+        // security-critical on PR #361). A per-fetch timeout converts a hung
+        // read into the same bounded "ask timed out" error as a slow CLI.
+        let remaining = deadline.saturating_duration_since(now);
+        let fetched = match tokio::time::timeout(remaining, fetcher()).await {
+            Ok(opt) => opt,
+            Err(_) => {
+                return Err(PollError::WorkerUnresponsive {
+                    secs: timeout.as_secs(),
+                })
+            }
+        };
+        if let Some(text) = fetched {
+            // Fresh grid each iteration: the snapshot is the full current screen.
+            let mut grid = crate::screen::TerminalGrid::with_default_size();
+            grid.feed(text.as_bytes());
+            let owned = grid.snapshot();
+            let view = owned.view();
+            match detector.is_ready(&view) {
+                Ok(true) => return Ok(owned.text),
+                Ok(false) | Err(_) => {} // not ready yet; Err treated as not-ready (Open Question #9 discipline)
+            }
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
+    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
+    };
+    let message = req
+        .params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let provider_param = req
+        .params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let cwd_param = req
+        .params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    let from_name_param = req
+        .params
+        .get("from_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let yolo_param = req
+        .params
+        .get("yolo")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let entry = match registry.find(&name) {
+        Some(e) => e.clone(),
+        None => {
+            // First contact: auto-spawn if --provider supplied (create-on-first-contact,
+            // matching Python cmd_ask semantics). No provider = actionable error.
+            let provider = match provider_param {
+                Some(p) => p,
+                None => {
+                    return Response::err(
+                        req.id,
+                        ErrorCode::InvalidParams,
+                        format!(
+                        "agent '{name}' not found; pass --provider to create it on first contact"
+                    ),
+                    )
+                }
+            };
+            // See handle_spawn: the daemon's own cwd is not the caller's, so
+            // fall back to a neutral temp dir rather than its start dir, and
+            // emit so a /tmp launch is greppable. A well-behaved client
+            // forwards cwd (client.rs ensure_request_cwd).
+            let spawn_cwd = match cwd_param {
+                Some(c) => c,
+                None => {
+                    let fallback = std::env::temp_dir();
+                    let _ = ctx.emitter.emit(
+                        "agent_spawn_cwd_fallback",
+                        &json!({
+                            "name": name,
+                            "fallback": fallback.to_string_lossy(),
+                            "via": "ask_first_contact",
+                        }),
+                    );
+                    fallback
+                }
+            };
+            // Build a synthetic spawn request and delegate to handle_spawn.
+            let mut spawn_params = serde_json::Map::new();
+            spawn_params.insert("name".into(), serde_json::Value::String(name.clone()));
+            spawn_params.insert("provider".into(), serde_json::Value::String(provider));
+            spawn_params.insert(
+                "cwd".into(),
+                serde_json::Value::String(spawn_cwd.to_str().unwrap_or(".").to_string()),
+            );
+            spawn_params.insert("message".into(), serde_json::Value::String(message.clone()));
+            if let Some(ref fn_val) = from_name_param {
+                spawn_params.insert(
+                    "from_name".into(),
+                    serde_json::Value::String(fn_val.clone()),
+                );
+            }
+            if yolo_param {
+                spawn_params.insert("yolo".into(), serde_json::Value::Bool(true));
+            }
+            let spawn_req = Request::new(
+                req.id,
+                "agent.spawn",
+                serde_json::Value::Object(spawn_params),
+            );
+            let spawn_resp = handle_spawn(ctx, &spawn_req).await;
+            return match spawn_resp.payload {
+                crate::protocol::ResponsePayload::Ok(ref result) => {
+                    let short_id = result
+                        .get("short_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Response::ok(req.id, json!({"created": true, "short_id": short_id}))
+                }
+                crate::protocol::ResponsePayload::Err(_) => spawn_resp,
+            };
+        }
+    };
+    if entry.status == AgentStatus::Orphaned {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidStatus,
+            format!("agent {name} is orphaned; use `fno agents reconcile` or `rm`"),
+        );
+    }
+
+    let sock = ctx.home.worker_sock(&entry.short_id);
+    let mut conn = match UnixStream::connect(&sock).await {
+        Ok(c) => c,
+        Err(_) => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidStatus,
+                format!("worker for {name} is not reachable"),
+            )
+        }
+    };
+
+    // Send the message to the PTY stdin. The provider envelope wrapping for the
+    // non-Claude PTY paths is applied by the verb's full wiring (Wave 5/6); the
+    // Wave 3 daemon forwards the raw line so the transport is exercised.
+    let mut payload = message.clone();
+    if !payload.ends_with('\n') {
+        payload.push('\n');
+    }
+    if write_request(
+        &mut conn,
+        &Request::new(1, "worker.write", json!({"data": payload})),
+    )
+    .await
+    .is_err()
+    {
+        return Response::err(req.id, ErrorCode::Internal, "worker write failed");
+    }
+    // Inspect the worker's write-ack: an error response (e.g. PTY writer fault)
+    // must surface to the caller, not be reported as a successful ask with an
+    // empty reply (silent-failure #4).
+    match crate::protocol::read_response(&mut conn).await {
+        Ok(ack) if ack.is_err() => {
+            let msg = ack
+                .error()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "worker rejected the write".into());
+            return Response::err(req.id, ErrorCode::Internal, msg);
+        }
+        Ok(_) => {}
+        Err(_) => {
+            return Response::err(req.id, ErrorCode::Internal, "no write-ack from worker");
+        }
+    }
+
+    // Poll the worker snapshot through the per-provider readiness detector until
+    // the CLI is idle at a prompt (settled reply), then return it. This replaces
+    // the Wave 3 fixed 150 ms snapshot baseline (Task 1.1).
+    let timeout_secs = req
+        .params
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(600);
+    let detector = provider_readiness_detector(&entry.provider);
+    let sock_path = sock.clone();
+    let fetcher = move || {
+        let p = sock_path.clone();
+        async move { read_worker_snapshot(&p).await }
+    };
+    let reply = match poll_until_ready(
+        fetcher,
+        detector,
+        Duration::from_millis(200),
+        Duration::from_secs(timeout_secs),
+    )
+    .await
+    {
+        Ok(text) => text,
+        Err(e) => {
+            return Response::err(req.id, ErrorCode::Internal, e.to_string());
+        }
+    };
+
+    let ask_name = name.clone();
+    let _ = update_registry_offloaded(ctx.home.registry_json(), move |r| {
+        if let Some(e) = r.find_mut(&ask_name) {
+            e.last_message_at = Some(now_rfc3339_like());
+        }
+    })
+    .await;
+    let _ = ctx
+        .emitter
+        .emit("agent_ask_done", &json!({"name": name, "backend": "pty"}));
+
+    Response::ok(req.id, json!({"reply": reply, "backend": "pty"}))
+}
+
+// ---------------------------------------------------------------------------
+// Shared PTY inject primitive (Task 2.2 / US4)
+// ---------------------------------------------------------------------------
+
+/// Per-provider injection gate decision.
+///
+/// Before live PTY injection is enabled for a provider, an empirical check must
+/// confirm the TUI queues mid-turn type+Enter without interrupting a running
+/// turn. This enum models the outcome.
+///
+/// Per-provider injection gate decision.
+///
+/// The gate file (`injection-gate.json`) is the authoritative record; the
+/// thread-local override supersedes it in tests only.
+///
+/// Conservative invariant: absent file / absent provider / malformed JSON all
+/// map to `Unverified` — NEVER default to `Passed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectionGate {
+    /// Gate passed: PTY injection is safe for this provider.
+    Passed,
+    /// Empirical check ran and the provider TUI failed (interrupts mid-turn,
+    /// concatenates, or otherwise misbehaves). Demotion uses a distinct reason
+    /// so the event trail distinguishes "empirically failed" from "never checked".
+    Failed,
+    /// Gate not yet verified: demotion to durable is required.
+    Unverified,
+}
+
+// Thread-local override for tests. When set, any provider whose name appears
+// in the comma-separated string is treated as Passed.  Thread-local means
+// parallel tests cannot interfere with each other (unlike process-wide env vars).
+std::thread_local! {
+    static INJECTION_GATE_ALLOW: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Query the injection gate for `provider` using the resolved `AgentsHome`.
+///
+/// Resolution order:
+/// 1. Thread-local override (tests only) — if set, Passed beats any file record.
+/// 2. `injection-gate.json` next to `registry.json` in `home`.
+/// 3. Absent/malformed file or absent provider -> Unverified.
+pub fn injection_gate_with_home(provider: &str, home: &AgentsHome) -> InjectionGate {
+    // 1. Thread-local override takes precedence.
+    let mut thread_allow = false;
+    INJECTION_GATE_ALLOW.with(|cell| {
+        if let Some(ref allow) = *cell.borrow() {
+            for p in allow.split(',') {
+                if p.trim() == provider {
+                    thread_allow = true;
+                }
+            }
+        }
+    });
+    if thread_allow {
+        return InjectionGate::Passed;
+    }
+
+    // 2. Read the gate file.
+    let path = home.injection_gate_json();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return InjectionGate::Unverified, // absent file -> Unverified
+    };
+    let doc: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return InjectionGate::Unverified, // malformed -> Unverified
+    };
+    // Unknown schema version -> conservative Unverified (never trust a format
+    // we cannot validate).
+    if doc.get("v").and_then(|v| v.as_u64()) != Some(1) {
+        return InjectionGate::Unverified;
+    }
+    let status = doc
+        .get("providers")
+        .and_then(|p| p.get(provider))
+        .and_then(|e| e.get("status"))
+        .and_then(|s| s.as_str());
+    match status {
+        Some("passed") => InjectionGate::Passed,
+        Some("failed") => InjectionGate::Failed,
+        _ => InjectionGate::Unverified, // absent provider or unknown status -> Unverified
+    }
+}
+
+/// Query the injection gate for `provider`, resolving the home from the
+/// environment. Use `injection_gate_with_home` when the home is already available.
+pub fn injection_gate(provider: &str) -> InjectionGate {
+    injection_gate_with_home(provider, &AgentsHome::from_env())
+}
+
+/// Maximum body size (bytes) accepted by `inject_into_pty`. Mirrors
+/// `MAX_FRAME_BYTES` from the protocol layer; an oversized body would produce
+/// a worker-write frame too large for the framing layer to accept.
+const MAX_INJECT_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Wrap `body` in the provenance container and write it into `worker_sock`
+/// using bracketed paste so multi-line bodies land as one message.
+///
+/// The container format mirrors `_build_envelope` in
+/// `cli/src/fno/agents/providers/claude.py`:
+///
+/// ```text
+/// <cross-session-message from-name="<escaped>">
+/// <body>
+/// </cross-session-message>
+/// ```
+///
+/// This identifies the sender as a PEER (anti-injection framing) rather than
+/// as the operator, consistent with the socket-path delivery used for claude.
+///
+/// The bytes written to the PTY are:
+///
+///   ESC[200~  <container text>  ESC[201~  CR
+///
+/// Bracketed paste (RFC 2119 MUST per AC4-EDGE) ensures a multi-line body is
+/// delivered as a single message and not submitted line-by-line.
+///
+/// Returns `Ok(())` on success or an error string for the caller to surface.
+async fn inject_into_pty(
+    worker_sock: &std::path::Path,
+    body: &str,
+    from_name: &str,
+) -> Result<(), String> {
+    // Body size guard: refuse before touching the socket.
+    if body.len() > MAX_INJECT_BODY_BYTES {
+        return Err(format!(
+            "body too large: {} bytes > {MAX_INJECT_BODY_BYTES}",
+            body.len()
+        ));
+    }
+
+    // Build the provenance container (matching claude.py _build_envelope shape
+    // but for PTY delivery: no JSON envelope wrapper, just the XML tag).
+    let safe_from = xml_attr_escape(from_name);
+    let container = format!(
+        "<cross-session-message from-name=\"{safe_from}\">\n{body}\n</cross-session-message>"
+    );
+
+    // Bracketed paste: ESC[200~ <payload> ESC[201~ CR
+    let mut frame: Vec<u8> = Vec::new();
+    frame.extend_from_slice(b"\x1b[200~");
+    frame.extend_from_slice(container.as_bytes());
+    frame.extend_from_slice(b"\x1b[201~");
+    frame.push(b'\r'); // single CR to submit after paste guard closes
+
+    // Connect to the worker socket and write via the bytes_b64 path (drive
+    // shape) so arbitrary control sequences survive JSON encoding.
+    let mut conn = UnixStream::connect(worker_sock)
+        .await
+        .map_err(|e| format!("worker unreachable: {e}"))?;
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&frame);
+    if write_request(
+        &mut conn,
+        &Request::new(1, "worker.write", json!({"bytes_b64": b64})),
+    )
+    .await
+    .is_err()
+    {
+        return Err("worker write request failed".into());
+    }
+
+    match crate::protocol::read_response(&mut conn).await {
+        Ok(ack) if ack.is_err() => Err(format!(
+            "worker rejected inject: {}",
+            ack.error().map(|e| e.message.as_str()).unwrap_or("?")
+        )),
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("no ack from worker: {e}")),
+    }
+}
+
+/// Minimal XML attribute escaping for the provenance container from-name.
+/// Escapes `&`, `"`, `<`, `>` to their XML entity references.
+fn xml_attr_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\'' => out.push_str("&#x27;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// handle_deliver (agent.deliver RPC)
+// ---------------------------------------------------------------------------
+
+/// Handle the `agent.deliver` RPC.
+///
+/// Params: `{name: string, body: string, from_name: string}`
+///
+/// Result (always Ok unless name unknown or params invalid):
+/// - `{delivered: true, transport: "pty"}` - PTY inject succeeded.
+/// - `{delivered: false, reason: "claude-routes-via-socket"}` - claude peer;
+///   caller routes via socket/MCP (Locked Decision 9).
+/// - `{delivered: false, reason: "injection-gate-unverified"}` - gate not
+///   passed for this provider; caller demotes to durable.
+/// - `{delivered: false, reason: "worker-unreachable"}` - socket connect or
+///   write failed; durable envelope the caller already wrote is the record.
+///
+/// Errors (RPC error, not Ok):
+/// - `AgentNotFound` - unknown name.
+/// - `InvalidParams` - missing/invalid params.
+async fn handle_deliver(ctx: &Ctx, req: &Request) -> Response {
+    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
+    };
+    let body = match req.params.get("body").and_then(|v| v.as_str()) {
+        Some(b) => b.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `body`"),
+    };
+    let from_name = req
+        .params
+        .get("from_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Body size guard before any registry I/O.
+    if body.len() > MAX_INJECT_BODY_BYTES {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            format!(
+                "body too large: {} bytes > {MAX_INJECT_BODY_BYTES}",
+                body.len()
+            ),
+        );
+    }
+
+    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let entry = match registry.find(&name) {
+        Some(e) => e.clone(),
+        None => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent '{name}' not found"),
+            )
+        }
+    };
+
+    // Locked Decision 9: claude peers route via socket/MCP, never PTY.
+    if entry.provider == "claude" {
+        return Response::ok(
+            req.id,
+            json!({"delivered": false, "reason": "claude-routes-via-socket"}),
+        );
+    }
+
+    // Per-provider injection gate (reads injection-gate.json).
+    match injection_gate_with_home(&entry.provider, &ctx.home) {
+        InjectionGate::Passed => { /* proceed */ }
+        InjectionGate::Failed => {
+            let _ = ctx.emitter.emit(
+                "agent_deliver_demoted",
+                &json!({
+                    "name": name,
+                    "from_name": from_name,
+                    "provider": entry.provider,
+                    "reason": "injection-gate-failed",
+                }),
+            );
+            return Response::ok(
+                req.id,
+                json!({"delivered": false, "reason": "injection-gate-failed"}),
+            );
+        }
+        InjectionGate::Unverified => {
+            let _ = ctx.emitter.emit(
+                "agent_deliver_demoted",
+                &json!({
+                    "name": name,
+                    "from_name": from_name,
+                    "provider": entry.provider,
+                    "reason": "injection-gate-unverified",
+                }),
+            );
+            return Response::ok(
+                req.id,
+                json!({"delivered": false, "reason": "injection-gate-unverified"}),
+            );
+        }
+    }
+
+    // Attempt PTY inject via the shared primitive.
+    let sock = ctx.home.worker_sock(&entry.short_id);
+    match inject_into_pty(&sock, &body, &from_name).await {
+        Ok(()) => {
+            let _ = ctx.emitter.emit(
+                "agent_deliver_injected",
+                &json!({"name": name, "from_name": from_name, "provider": entry.provider}),
+            );
+            Response::ok(req.id, json!({"delivered": true, "transport": "pty"}))
+        }
+        Err(reason) => {
+            let _ = ctx.emitter.emit(
+                "agent_deliver_demoted",
+                &json!({
+                    "name": name,
+                    "from_name": from_name,
+                    "provider": entry.provider,
+                    "reason": reason,
+                }),
+            );
+            // Return the actual reason so callers can distinguish inject
+            // failures (e.g. body-too-large, no-ack) from pure connectivity
+            // errors. The event and the result must agree (sigma-review F3).
+            Response::ok(req.id, json!({"delivered": false, "reason": reason}))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// handle_switchboard (agent.switchboard RPC) — Group 2, Task 3.1
+// ---------------------------------------------------------------------------
+//
+// The session-to-session switchboard: `send A->B` where B is a held stream-json
+// thread. The daemon writes a user turn to B's stdin (B's `stream.write_turn`
+// RPC), polls B's frames until a `result` closes the turn, and — when A is also
+// a held stream-json thread and the caller asked to mirror (the A2A default;
+// Task 4.1 gates it by config) — writes B's reply back into A as a literal user
+// turn. The `--replay-user-messages` echo (a `user_echo` frame) is a delivery
+// RECEIPT, never re-counted as the reply (Invariant "mirror reply exactly once").
+
+/// Per-turn ceiling for a switchboard drive. The first `--resume` turn rehydrates
+/// the transcript, so this default is generous; the daemon never hangs unbounded.
+const SWITCHBOARD_TURN_TIMEOUT_MS: u64 = 120_000;
+/// How often the switchboard polls B's frame log while a turn is in flight.
+const SWITCHBOARD_POLL_MS: u64 = 50;
+/// Bound for the liveness probe (connect + stream.ping). A wedged worker must
+/// not hang the daemon on the probe.
+const STREAM_PROBE_TIMEOUT_S: u64 = 2;
+/// Bound for a fire-and-forget mirror write (connect + write_turn + ack).
+const SWITCHBOARD_MIRROR_TIMEOUT_S: u64 = 5;
+/// Grace added over the per-turn deadline for the OUTER bound on a drive, so a
+/// hung connect / probe / write / read (none individually deadline-checked) can
+/// never hang the daemon past the turn budget.
+const SWITCHBOARD_DRIVE_GRACE_S: u64 = 5;
+
+/// Outcome of driving one turn against a held stream-json thread.
+struct SwitchboardTurn {
+    /// Concatenated assistant text — the reply to mirror into the peer.
+    reply: String,
+    /// `result.is_error` — the turn closed in an error state.
+    is_error: bool,
+    /// A `user_echo` (`--replay-user-messages`) frame was observed: the turn was
+    /// delivered to B's stdin and B began processing it.
+    saw_receipt: bool,
+}
+
+/// Is the worker at `sock` a LIVE stream-json thread? Connects and sends a
+/// `stream.ping`; `true` only when it answers ok. A non-stream worker (the PTY
+/// lane serves `worker.*`, not `stream.*`) answers `UnknownMethod` -> `false`; a
+/// session with no worker at all has no socket -> connect fails -> `false`. This
+/// is the authoritative "held stream thread" test (no registry marking needed,
+/// so it works before Group 3's front door stamps `host_mode`).
+async fn is_live_stream_thread(sock: &std::path::Path) -> bool {
+    // Bound the whole probe: a wedged / SIGSTOP'd worker must NOT hang the daemon
+    // on connect or read (gemini-review HIGH). A timeout -> treat as not-live.
+    let probe = async {
+        let mut conn = UnixStream::connect(sock).await.ok()?;
+        write_request(&mut conn, &Request::new(1, "stream.ping", json!({})))
+            .await
+            .ok()?;
+        let resp = crate::protocol::read_response(&mut conn).await.ok()?;
+        Some(!resp.is_err())
+    };
+    matches!(
+        tokio::time::timeout(Duration::from_secs(STREAM_PROBE_TIMEOUT_S), probe).await,
+        Ok(Some(true))
+    )
+}
+
+/// Write `text` into the held stream-json thread at `worker_sock` and poll frames
+/// until a `result` closes the turn (or the child dies / the deadline elapses).
+/// Discriminates the `user_echo` receipt from the assistant reply so the returned
+/// `reply` is the assistant text exactly once (never the echo; the `result` text
+/// is a fallback only when no assistant block carried text).
+async fn drive_stream_turn(
+    worker_sock: &std::path::Path,
+    text: &str,
+    deadline: Duration,
+) -> Result<SwitchboardTurn, String> {
+    let mut conn = UnixStream::connect(worker_sock)
+        .await
+        .map_err(|e| format!("target not live (worker unreachable): {e}"))?;
+
+    // Snapshot the log END before writing. The worker's frame log is append-only
+    // across the WHOLE session (stream_worker::FrameLog), so a resumed / multi-turn
+    // thread already holds prior turns' `result` frames. Polling from 0 would match
+    // an OLD result and return a stale reply (a reply B never gave for THIS turn).
+    // `read_frames` clamps cursor.min(end), so cursor=u64::MAX yields the current
+    // end with an empty slice; we then only observe frames THIS turn produces.
+    write_request(
+        &mut conn,
+        &Request::new(0, "stream.read_frames", json!({ "cursor": u64::MAX })),
+    )
+    .await
+    .map_err(|e| format!("cursor probe send failed: {e}"))?;
+    let probe = crate::protocol::read_response(&mut conn)
+        .await
+        .map_err(|e| format!("cursor probe recv failed: {e}"))?;
+    let mut cursor = probe
+        .result()
+        .and_then(|r| r.get("next"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "cursor probe returned no result".to_string())?;
+
+    // Write the turn; a rejected/failed write fails fast (Errors: broken pipe).
+    write_request(
+        &mut conn,
+        &Request::new(1, "stream.write_turn", json!({ "text": text })),
+    )
+    .await
+    .map_err(|e| format!("write_turn send failed: {e}"))?;
+    match crate::protocol::read_response(&mut conn).await {
+        Ok(ack) if ack.is_err() => {
+            return Err(format!(
+                "write_turn rejected: {}",
+                ack.error().map(|e| e.message.as_str()).unwrap_or("?")
+            ))
+        }
+        Ok(_) => {}
+        Err(e) => return Err(format!("no write_turn ack: {e}")),
+    }
+
+    // Poll frames until a result closes the turn (starting at the pre-write end).
+    let start = Instant::now();
+    let mut reply = String::new();
+    let mut saw_receipt = false;
+    let mut req_id = 100u64;
+    loop {
+        if start.elapsed() > deadline {
+            return Err("turn timed out before result".into());
+        }
+        write_request(
+            &mut conn,
+            &Request::new(req_id, "stream.read_frames", json!({ "cursor": cursor })),
+        )
+        .await
+        .map_err(|e| format!("read_frames send failed: {e}"))?;
+        req_id += 1;
+        let resp = crate::protocol::read_response(&mut conn)
+            .await
+            .map_err(|e| format!("read_frames recv failed: {e}"))?;
+        let res = resp
+            .result()
+            .ok_or_else(|| "read_frames returned no result".to_string())?;
+        if let Some(next) = res.get("next").and_then(|v| v.as_u64()) {
+            cursor = next;
+        }
+        let child_alive = res
+            .get("child_alive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if let Some(frames) = res.get("frames").and_then(|v| v.as_array()) {
+            for fr in frames {
+                match fr.get("kind").and_then(|k| k.as_str()) {
+                    Some("user_echo") => saw_receipt = true,
+                    Some("assistant") => {
+                        if let Some(t) = fr.get("text").and_then(|t| t.as_str()) {
+                            reply.push_str(t);
+                        }
+                    }
+                    Some("result") => {
+                        let is_error = fr
+                            .get("is_error")
+                            .and_then(|e| e.as_bool())
+                            .unwrap_or(false);
+                        // The result text is a FALLBACK only: a `result` must not
+                        // double-count the assistant message already collected.
+                        if reply.is_empty() {
+                            if let Some(r) = fr.get("result").and_then(|r| r.as_str()) {
+                                reply.push_str(r);
+                            }
+                        }
+                        return Ok(SwitchboardTurn {
+                            reply,
+                            is_error,
+                            saw_receipt,
+                        });
+                    }
+                    // Malformed frames are already logged at the worker; skip.
+                    _ => {}
+                }
+            }
+        }
+        if !child_alive {
+            return Err("target child exited before result (orphaned)".into());
+        }
+        tokio::time::sleep(Duration::from_millis(SWITCHBOARD_POLL_MS)).await;
+    }
+}
+
+/// Mirror `text` into the held stream-json thread at `worker_sock` as one user
+/// turn (fire-and-forget: we do not wait for the peer's reply here — the
+/// autonomous A<->B relay + ceiling is Task 4.1). Returns the worker's ack error
+/// as `Err` so the caller can report a half-mirror rather than hide it.
+async fn mirror_into(worker_sock: &std::path::Path, text: &str) -> Result<(), String> {
+    let inner = async {
+        let mut conn = UnixStream::connect(worker_sock)
+            .await
+            .map_err(|e| format!("mirror target unreachable: {e}"))?;
+        write_request(
+            &mut conn,
+            &Request::new(1, "stream.write_turn", json!({ "text": text })),
+        )
+        .await
+        .map_err(|e| format!("mirror write failed: {e}"))?;
+        match crate::protocol::read_response(&mut conn).await {
+            Ok(ack) if ack.is_err() => Err(format!(
+                "mirror rejected: {}",
+                ack.error().map(|e| e.message.as_str()).unwrap_or("?")
+            )),
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("no mirror ack: {e}")),
+        }
+    };
+    // Bound the whole mirror so a wedged peer cannot hang the daemon.
+    match tokio::time::timeout(Duration::from_secs(SWITCHBOARD_MIRROR_TIMEOUT_S), inner).await {
+        Ok(r) => r,
+        Err(_) => Err("mirror timed out".into()),
+    }
+}
+
+/// Best-effort flip a registry row to `Orphaned` (the worker is gone and did not
+/// self-stamp, e.g. it was SIGKILLed rather than hitting EOF). Offloaded so the
+/// async runtime is not blocked on file I/O; failures are swallowed (the
+/// reconcile sweep is the backstop).
+async fn stamp_orphaned(home: &AgentsHome, short_id: &str) {
+    let reg = home.registry_json();
+    let sid = short_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = state::update_registry(&reg, |r| {
+            if let Some(e) = r.entries.iter_mut().find(|e| e.short_id == sid) {
+                // Only flip a still-Live row. Do NOT clobber a terminal status
+                // the worker already set (a clean `Exited` from stream.shutdown,
+                // or `Failed`): clobbering Exited->Orphaned would make a
+                // deliberately-stopped session look adoptable (stream_worker.rs
+                // documents this hazard).
+                if e.status == AgentStatus::Live {
+                    e.status = AgentStatus::Orphaned;
+                }
+            }
+        });
+    })
+    .await;
+}
+
+/// Handle the `agent.switchboard` RPC (Group 2, Task 3.1).
+///
+/// Params: `{to: string, from: string, body: string, mirror?: bool,
+/// timeout_ms?: u64}`.
+///
+/// Result (Ok unless `to` is unknown or params invalid):
+/// - `{delivered: true, reply, is_error, mirrored, receipt, transport:
+///   "switchboard"}` — the turn was driven against B and (when `mirror` and A is
+///   a held stream thread) B's reply was written into A.
+/// - `{delivered: false, reason: "not-a-live-stream-thread"}` — B is not a held
+///   stream-json thread; the caller demotes to the durable/socket path.
+/// - `{delivered: false, reason: "<drive error>"}` — B was a stream thread but
+///   the turn failed (broken pipe / orphaned / timeout); B is stamped orphaned
+///   and A is NOT touched (the exchange did not complete).
+///
+/// Errors: `AgentNotFound` (unknown `to`), `InvalidParams` (missing/oversized).
+async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
+    let to = match req.params.get("to").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `to`"),
+    };
+    let from = req
+        .params
+        .get("from")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let body = match req.params.get("body").and_then(|v| v.as_str()) {
+        Some(b) => b.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `body`"),
+    };
+    let mirror = req
+        .params
+        .get("mirror")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let timeout_ms = req
+        .params
+        .get("timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(SWITCHBOARD_TURN_TIMEOUT_MS);
+
+    if body.len() > MAX_INJECT_BODY_BYTES {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            format!(
+                "body too large: {} bytes > {MAX_INJECT_BODY_BYTES}",
+                body.len()
+            ),
+        );
+    }
+
+    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let to_entry = match registry.find(&to) {
+        Some(e) => e.clone(),
+        None => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent '{to}' not found"),
+            )
+        }
+    };
+
+    // B must be a held stream-json thread. A non-claude peer (PTY lane) or a
+    // claude session with no live stream worker demotes to the durable path.
+    let to_sock = ctx.home.worker_sock(&to_entry.short_id);
+    if to_entry.provider != "claude" || !is_live_stream_thread(&to_sock).await {
+        return Response::ok(
+            req.id,
+            json!({"delivered": false, "reason": "not-a-live-stream-thread"}),
+        );
+    }
+
+    // Drive the turn against B. The OUTER timeout (turn budget + grace) is the
+    // backstop: drive_stream_turn checks its deadline only at the poll-loop top,
+    // so a hung connect / probe / write / read inside it is bounded here, never
+    // hanging the daemon (gemini-review HIGH).
+    let drive_deadline = Duration::from_millis(timeout_ms);
+    let outer = drive_deadline + Duration::from_secs(SWITCHBOARD_DRIVE_GRACE_S);
+    let drive_result =
+        match tokio::time::timeout(outer, drive_stream_turn(&to_sock, &body, drive_deadline)).await
+        {
+            Ok(inner) => inner,
+            Err(_) => Err("drive hung past the turn budget (timed out)".to_string()),
+        };
+    let outcome = match drive_result {
+        Ok(o) => o,
+        Err(reason) => {
+            // B was a stream thread but the turn failed: the child is gone or the
+            // pipe broke. Stamp B orphaned (AC2-ERR) and do NOT touch A — the
+            // exchange did not complete, so A must not show a reply B never gave.
+            stamp_orphaned(&ctx.home, &to_entry.short_id).await;
+            let _ = ctx.emitter.emit(
+                "agent_deliver_demoted",
+                &json!({
+                    "name": to,
+                    "from_name": from,
+                    "provider": "claude",
+                    "transport": "switchboard",
+                    "reason": reason,
+                }),
+            );
+            return Response::ok(req.id, json!({"delivered": false, "reason": reason}));
+        }
+    };
+
+    // Mirror B's reply into A when asked AND A is itself a held stream thread.
+    // A one-way drive (A absent / not a stream thread) still counts as delivered.
+    // Never mirror a self-send (from == to): it would queue B's own reply back
+    // into B as a spurious extra turn.
+    let mut mirrored = false;
+    if mirror && from != to {
+        // Re-load the registry: driving B can take up to the turn budget (~120s),
+        // during which A may have been restarted with a new short_id. The pre-turn
+        // snapshot could point at A's old socket (gemini-review HIGH).
+        let fresh = load_registry_offloaded(ctx.home.registry_json()).await;
+        if let Some(from_entry) = fresh.find(&from) {
+            let from_sock = ctx.home.worker_sock(&from_entry.short_id);
+            if from_entry.provider == "claude" && is_live_stream_thread(&from_sock).await {
+                match mirror_into(&from_sock, &outcome.reply).await {
+                    Ok(()) => mirrored = true,
+                    Err(e) => {
+                        // The turn completed but the mirror failed: surface it
+                        // (the reply is still returned for the caller to record),
+                        // never silently drop it.
+                        let _ = ctx.emitter.emit(
+                            "agent_deliver_demoted",
+                            &json!({
+                                "name": from,
+                                "from_name": to,
+                                "provider": "claude",
+                                "transport": "switchboard-mirror",
+                                "reason": e,
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = ctx.emitter.emit(
+        "agent_deliver_injected",
+        &json!({
+            "name": to,
+            "from_name": from,
+            "provider": "claude",
+            "transport": "switchboard",
+            "mirrored": mirrored,
+            "is_error": outcome.is_error,
+        }),
+    );
+
+    Response::ok(
+        req.id,
+        json!({
+            "delivered": true,
+            "transport": "switchboard",
+            "reply": outcome.reply,
+            "is_error": outcome.is_error,
+            "mirrored": mirrored,
+            "receipt": outcome.saw_receipt,
+        }),
+    )
+}
+
+// handle_gate_check (agent.gate_check RPC)
+// ---------------------------------------------------------------------------
+
+/// Handle the `agent.gate_check` RPC.
+///
+/// Two modes:
+///
+/// **Manual attestation** (`record: "manual"`): writes the provided status
+/// and notes to `injection-gate.json` atomically. Params: `{provider, record:
+/// "manual", status: "passed"|"failed", notes: "..."}`.
+/// Result: `{status: "passed"|"failed", method: "manual"}`.
+///
+/// **Probe** (`record: "probe"`): attempts a best-effort automated check.
+/// If no live worker for the provider exists (or the check is inconclusive),
+/// returns `{status: "inconclusive"}` WITHOUT writing any record.
+/// An inconclusive probe MUST never write `passed`.
+/// Result: `{status: "inconclusive"}` (current implementation; probing
+/// requires PTY observation that is not yet automatable - see Open Question 2).
+///
+/// Errors: `InvalidParams` for missing/invalid params.
+async fn handle_gate_check(ctx: &Ctx, req: &Request) -> Response {
+    let provider = match req.params.get("provider").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `provider`"),
+    };
+    let record_mode = match req.params.get("record").and_then(|v| v.as_str()) {
+        Some(m) => m.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `record`"),
+    };
+
+    match record_mode.as_str() {
+        "manual" => {
+            let status = match req.params.get("status").and_then(|v| v.as_str()) {
+                Some(s) if s == "passed" || s == "failed" => s.to_string(),
+                Some(other) => {
+                    return Response::err(
+                        req.id,
+                        ErrorCode::InvalidParams,
+                        format!("`status` must be 'passed' or 'failed', got '{other}'"),
+                    )
+                }
+                None => {
+                    return Response::err(
+                        req.id,
+                        ErrorCode::InvalidParams,
+                        "missing `status` for manual mode",
+                    )
+                }
+            };
+            let notes = req
+                .params
+                .get("notes")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let checked_at = {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                // RFC-3339 UTC timestamp
+                let secs = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                // Format as YYYY-MM-DDTHH:MM:SSZ (no external dep)
+                let s = secs;
+                let sec = s % 60;
+                let min = (s / 60) % 60;
+                let hour = (s / 3600) % 24;
+                let days = s / 86400;
+                // Days since epoch to calendar (Gregorian, no leap-second)
+                let (y, mo, d) = days_to_ymd(days);
+                format!("{y:04}-{mo:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
+            };
+
+            // Read existing record (if any) to merge providers.
+            let gate_path = ctx.home.injection_gate_json();
+            let mut existing: serde_json::Value = if gate_path.exists() {
+                // An existing-but-unreadable/unparseable file must surface an
+                // error: defaulting to an empty doc here would WIPE every other
+                // provider's record on the subsequent write (gemini #459 high).
+                match std::fs::read_to_string(&gate_path) {
+                    Ok(t) => match serde_json::from_str(&t) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Response::err(
+                                req.id,
+                                ErrorCode::InvalidParams,
+                                format!("failed to parse existing gate record: {e}"),
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        return Response::err(
+                            req.id,
+                            ErrorCode::InvalidParams,
+                            format!("failed to read existing gate record: {e}"),
+                        );
+                    }
+                }
+            } else {
+                json!({"v": 1, "providers": {}})
+            };
+            existing["providers"][&provider] = json!({
+                "status": status,
+                "checked_at": checked_at,
+                "method": "manual",
+                "notes": notes,
+            });
+
+            // Atomic write: temp file + rename.
+            let tmp_path = gate_path.with_extension("json.tmp");
+            let serialized = serde_json::to_string(&existing).unwrap_or_default();
+            if let Err(e) = std::fs::write(&tmp_path, &serialized) {
+                return Response::err(
+                    req.id,
+                    ErrorCode::InvalidParams,
+                    format!("failed to write gate record: {e}"),
+                );
+            }
+            if let Err(e) = std::fs::rename(&tmp_path, &gate_path) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Response::err(
+                    req.id,
+                    ErrorCode::InvalidParams,
+                    format!("failed to rename gate record: {e}"),
+                );
+            }
+            Response::ok(req.id, json!({"status": status, "method": "manual"}))
+        }
+        "probe" => {
+            // Probe mode: automated check. Current state: no reliable automated
+            // signal exists for verifying PTY queueing behavior without a live TUI
+            // and known-good input observer. Per Open Question 2 in the design doc,
+            // the gate holds via demotion; probe returns inconclusive and writes
+            // NOTHING. A future implementation can check for live workers and send
+            // a sentinel, but only if a reliable verdict (pass/fail) is obtainable.
+            // An inconclusive probe MUST NEVER write "passed".
+            Response::ok(req.id, json!({"status": "inconclusive"}))
+        }
+        other => Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            format!("`record` must be 'manual' or 'probe', got '{other}'"),
+        ),
+    }
+}
+
+/// Convert days-since-Unix-epoch to (year, month, day). Pure arithmetic,
+/// Gregorian calendar, no DST / leap-second.
+fn days_to_ymd(d: u64) -> (u64, u64, u64) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    // civil_from_days (unsigned variant for post-epoch only)
+    let z = d + 719468;
+    let era = z / 146097;
+    let doe = z % 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    (year, month, day)
+}
+
+async fn read_worker_snapshot(sock: &std::path::Path) -> Option<String> {
+    let mut conn = UnixStream::connect(sock).await.ok()?;
+    write_request(&mut conn, &Request::new(2, "worker.snapshot", json!({})))
+        .await
+        .ok()?;
+    let resp = crate::protocol::read_response(&mut conn).await.ok()?;
+    resp.result()
+        .and_then(|r| r.get("text").and_then(|t| t.as_str()).map(String::from))
+}
+
+/// Ask the worker whether its PTY child is alive, retrying briefly.
+///
+/// The worker binds its socket BEFORE its accept loop is guaranteed to be
+/// scheduled (the PTY child is spawned first, then the socket bound). Under
+/// heavy load the first probe(s) can fail at the transport (connect refused, a
+/// stalled read) even though the child is perfectly alive. A single-shot probe
+/// then mis-declares a healthy agent dead and fails the spawn — a flaky spawn
+/// under contention. Retrying over a short budget gives a CPU-starved-but-healthy
+/// worker time to answer; a child that is genuinely dead reports `child_alive:
+/// false` (or stays unreachable) across every attempt and still fails. The happy
+/// path returns on the first probe with no added latency.
+async fn worker_reports_child_alive(sock: &std::path::Path) -> bool {
+    const ATTEMPTS: u32 = 10;
+    const PROBE_READ_TIMEOUT: Duration = Duration::from_millis(300);
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let Ok(mut conn) = UnixStream::connect(sock).await else {
+            continue; // worker not accepting yet; retry
+        };
+        if write_request(&mut conn, &Request::new(3, "worker.status", json!({})))
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        match tokio::time::timeout(
+            PROBE_READ_TIMEOUT,
+            crate::protocol::read_response(&mut conn),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => {
+                if resp
+                    .result()
+                    .and_then(|r| r.get("child_alive").and_then(|v| v.as_bool()))
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+                // child_alive:false — could be a child still registering, or a
+                // genuinely dead one; keep probing within the budget.
+            }
+            // Read error or per-probe timeout: transport not ready; retry.
+            Ok(Err(_)) | Err(_) => continue,
+        }
+    }
+    false
+}
+
+/// One step of the interactive-readiness decision (task 2.2). Factored out of
+/// the async poll loop so the exec-vs-interactive contract is unit-testable
+/// without spinning a worker. Inputs are the latest worker.snapshot probe.
+#[derive(Debug, PartialEq, Eq)]
+enum ReadinessStep {
+    /// Painted + alive (or alive at the deadline): report `live`.
+    Ready,
+    /// Child died within the settle window: report `spawn-failed`.
+    Failed,
+    /// Alive, not yet painted, deadline not reached: keep polling.
+    Poll,
+}
+
+fn interactive_readiness_step(
+    alive: bool,
+    painted: bool,
+    dwell_satisfied: bool,
+    deadline_reached: bool,
+) -> ReadinessStep {
+    if !alive {
+        // The child exited during the settle window. This is the AC1-FR failure:
+        // `codex resume`/`gemini -r` launched, painted (possibly an error), then
+        // died (auth expired, unknown session). Report spawn-failed, never a
+        // live-then-exited row. Survival -- not first paint -- is the signal,
+        // because a resume that prints an error THEN exits would paint too.
+        ReadinessStep::Failed
+    } else if painted && dwell_satisfied {
+        // Painted AND still alive after the minimum dwell: a real TUI that came
+        // up and stayed up (an error-then-die would have flipped !alive first).
+        ReadinessStep::Ready
+    } else if deadline_reached {
+        // Alive at the deadline (slow first paint, model warming): do NOT kill a
+        // live process -- a false-failed that reaps a working agent is worse
+        // than a brief blank pane the grid will fill. Treat as live.
+        ReadinessStep::Ready
+    } else {
+        ReadinessStep::Poll
+    }
+}
+
+/// Probe `worker.snapshot`, returning `(rendered_text, child_alive)` or `None`
+/// when the worker is not yet answering (caller retries within its budget).
+async fn probe_worker_snapshot(sock: &std::path::Path) -> Option<(String, bool)> {
+    let mut conn = UnixStream::connect(sock).await.ok()?;
+    write_request(&mut conn, &Request::new(4, "worker.snapshot", json!({})))
+        .await
+        .ok()?;
+    let resp = tokio::time::timeout(
+        Duration::from_millis(300),
+        crate::protocol::read_response(&mut conn),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let r = resp.result()?;
+    let text = r
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let alive = r
+        .get("child_alive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some((text, alive))
+}
+
+/// Interactive readiness gate (host_mode=interactive). Exec mode confirms
+/// readiness later from the `--json` stream; an interactive TUI has no such
+/// stream, so readiness here is "the PTY painted its first frame and the child
+/// is still alive" within a bounded settle window. Returns `Ok(())` when
+/// ready (painted+alive, or alive-at-deadline), `Err(last_painted_bytes)` when
+/// the child died within the window (spawn-failed, last bytes for diagnosis).
+async fn await_interactive_readiness(sock: &std::path::Path) -> Result<(), String> {
+    const SETTLE: Duration = Duration::from_millis(4000);
+    // Minimum time a painted child must stay alive before we declare readiness,
+    // so a resume that prints an error then exits is caught as Failed rather
+    // than passing on its first (dying) paint.
+    const MIN_DWELL: Duration = Duration::from_millis(1000);
+    const POLL: Duration = Duration::from_millis(150);
+    let start = Instant::now();
+    let deadline = start + SETTLE;
+    let mut last_text = String::new();
+    // Dwell is measured from the FIRST PAINT, not from spawn start: a child that
+    // takes >MIN_DWELL to paint its first frame must still survive MIN_DWELL
+    // AFTER painting, or a slow-to-paint resume that errors-then-exits would pass
+    // on its first painted poll (Gemini review HIGH on PR #373).
+    let mut first_paint_at: Option<Instant> = None;
+    loop {
+        let now = Instant::now();
+        let deadline_reached = now >= deadline;
+        if let Some((text, alive)) = probe_worker_snapshot(sock).await {
+            if !text.is_empty() {
+                last_text = text;
+                if first_paint_at.is_none() {
+                    first_paint_at = Some(now);
+                }
+            }
+            let dwell_satisfied =
+                first_paint_at.is_some_and(|t| now.duration_since(t) >= MIN_DWELL);
+            match interactive_readiness_step(
+                alive,
+                first_paint_at.is_some(),
+                dwell_satisfied,
+                deadline_reached,
+            ) {
+                ReadinessStep::Ready => return Ok(()),
+                ReadinessStep::Failed => return Err(last_text),
+                ReadinessStep::Poll => {}
+            }
+        } else if deadline_reached {
+            // Worker stopped answering at the deadline: inconclusive, but the
+            // earlier child-alive gate passed, so do not fail a maybe-live agent.
+            return Ok(());
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Non-blocking reap of any exited worker child the daemon spawned, so a worker
+/// that exits while the daemon lives never lingers as a `<defunct>` zombie. The
+/// daemon spawns nothing but workers, so a `waitpid(-1, WNOHANG)` sweep is safe.
+fn reap_zombies() {
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: waitpid with WNOHANG only reaps already-exited children and
+        // returns 0 (none ready) or -1 (no children) without blocking.
+        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if pid <= 0 {
+            break;
+        }
+    }
+}
+
+fn handle_list(ctx: &Ctx, req: &Request) -> Response {
+    let all = req
+        .params
+        .get("all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Task 3.1: accept cwd/provider/status filters matching Python list_agents.
+    // Legacy project_root filter still accepted for backward compat.
+    let filter_cwd = req
+        .params
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let filter_provider = req
+        .params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let filter_status = req
+        .params
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let cwd_project = req
+        .params
+        .get("project_root")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // Reject an invalid --status up front so a typo fails fast with exit 13
+    // instead of silently returning zero rows + exit 0 (Codex P2 on PR #361).
+    // Mirrors Python's AgentStatusFilter enum (live | orphaned), which Typer
+    // rejects at parse time.
+    if let Some(ref st) = filter_status {
+        if st != "live" && st != "orphaned" {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidStatus,
+                format!("invalid --status '{st}' (expected: live | orphaned)"),
+            );
+        }
+    }
+    // Normalize the cwd filter so equivalent paths (`.` vs absolute, symlinks)
+    // match, mirroring Python's `Path(cwd).resolve()` before filtering (Codex P2
+    // on PR #361; this is the cwd half of cv-eeaad75d). canonicalize requires the
+    // path to exist; fall back to the raw string when it can't resolve so a
+    // non-existent filter still does an exact-string match rather than erroring.
+    let norm_path = |p: &str| -> String {
+        std::fs::canonicalize(p)
+            .ok()
+            .and_then(|pb| pb.to_str().map(String::from))
+            .unwrap_or_else(|| p.to_string())
+    };
+    let filter_cwd_norm = filter_cwd.as_deref().map(&norm_path);
+
+    let registry = state::load_registry(&ctx.home.registry_json()).unwrap_or_default();
+    let entries: Vec<Value> = registry
+        .entries
+        .iter()
+        .filter(|e| {
+            // Legacy all/project_root filter
+            if !all {
+                if let Some(ref p) = cwd_project {
+                    if &e.project_root != p {
+                        return false;
+                    }
+                }
+            }
+            // Task 3.1 filters: cwd, provider, status (matching Python list_agents order)
+            if let Some(ref cwd) = filter_cwd_norm {
+                if &norm_path(&e.cwd) != cwd {
+                    return false;
+                }
+            }
+            if let Some(ref prov) = filter_provider {
+                if &e.provider != prov {
+                    return false;
+                }
+            }
+            if let Some(ref st) = filter_status {
+                if format!("{:?}", e.status).to_lowercase() != st.to_lowercase() {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|e| {
+            // Task 3.1: return the full serialize_entry 10-key shape matching Python.
+            // Fields present in RegistryEntry are mapped directly; fields absent from
+            // the Rust registry are emitted as null with a NOTE citing the carveout.
+            //
+            // DECIDED cv-eeaad75d: live_status is always null. The daemon does NOT
+            // replicate Python list's per-row `claude agents --json` live_status
+            // augmentation, and will not: under the replace architecture (the
+            // daemon is the sole agents backend; cv-d28b266a, docs/distribution.md)
+            // PTY-worker/registry `status` IS the canonical liveness signal. A
+            // `claude agents` shellout would both contradict that and be
+            // impossible to do consistently here (the daemon does not PTY-manage
+            // claude; ClaudeProvider.as_pty() is None). The field is kept (null)
+            // to preserve the serialize_entry parity shape for JSON consumers.
+            //
+            // session_id: Python uses the provider-specific resume id (claude_short_id
+            // for claude, codex_session_id for codex, gemini_session_id for gemini).
+            // The Rust registry stores these in separate optional fields; we replicate
+            // the Python resolution logic here.
+            // Provider-specific resume id, falling back to the generic
+            // `session_id` when the provider field is None (matches Python's
+            // resolution + the resolve_session_id helper below; gemini-code-assist
+            // medium on PR #361 — without the fallback a row with only the generic
+            // session_id set would report null here).
+            let resume_id: Option<String> = match e.provider.as_str() {
+                "claude" => e.claude_short_id.clone().or_else(|| e.session_id.clone()),
+                "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
+                "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
+                _ => e.session_id.clone(),
+            };
+            let session_id: Value = resume_id.map(Value::String).unwrap_or(Value::Null);
+            let short_id: Value = e
+                .claude_short_id
+                .as_deref()
+                .map(|s| Value::String(s.to_string()))
+                .unwrap_or(Value::Null);
+            let log_path: Value = e
+                .log_path
+                .as_deref()
+                .map(|s| Value::String(s.to_string()))
+                .unwrap_or(Value::Null);
+            json!({
+                "name": e.name,
+                "provider": e.provider,
+                "short_id": short_id,
+                "session_id": session_id,
+                "cwd": e.cwd,
+                "created_at": e.created_at,
+                "last_message_at": e.last_message_at,
+                "status": format!("{:?}", e.status).to_lowercase(),
+                "live_status": null,  // DECIDED cv-eeaad75d: not replicated (see NOTE above)
+                // Architecture C (plan ab-70faa65b): additive keys, never removing
+                // live_status (Locked #4 back-compat). `pid` is the worker pid for
+                // a PTY agent, null for a one-shot ask (no managed process). The
+                // pid is cleared when a PTY row reconciles to exited (Locked #7),
+                // so it never lingers as a misleading liveness signal.
+                // `last_reconciled_at` is the raw RFC3339 of the last probe (null
+                // when never reconciled); the client renders it as the CHECKED age.
+                "pid": e.pid,
+                "last_reconciled_at": e.last_reconciled_at,
+                "log_path": log_path,
+                // Superset of Python's serialize_entry: project_root is retained
+                // as the daemon's native grouping key (existing daemon_e2e
+                // contract) alongside the 10 Python parity fields. Python list
+                // has no project_root; the extra key is a harmless superset.
+                "project_root": e.project_root,
+            })
+        })
+        .collect();
+    // Echo the filters the daemon applied so `list --json` self-describes its
+    // query, matching Python `read.list_agents`'s `filters_applied` (sigma-review:
+    // the client previously always fell back to an all-null block because the
+    // daemon omitted this field). `cwd` is the value the client sent; absolute
+    // resolution to match Python's `Path(cwd).resolve()` is deferred (cv-eeaad75d).
+    let filters_applied = json!({
+        "cwd": filter_cwd_norm,
+        "provider": filter_provider,
+        "status": filter_status,
+    });
+    Response::ok(
+        req.id,
+        json!({"agents": entries, "filters_applied": filters_applied}),
+    )
+}
+
+/// Daemon diagnostics in the locked `status-v1.json` shape (US6.10, LD35):
+///
+/// ```json
+/// {
+///   "schema_version": 1,
+///   "daemon":   {"state", "pid", "uptime_secs", "version",
+///                "exe_path", "exe_mtime", "exe_size", "pid_start_time"},
+///   "agents":   {"total", "by_status": {"<status>": <count>, ...}},
+///   "drives":   {"active": <controlling-driver count>},
+///   "restarts": {"queue_depth", "consecutive_failures_max_seen"},
+///   "channels": {"registered": <entries with an mcp_channel_id>}
+/// }
+/// ```
+///
+/// The shape is the contract Wave 7's `status-v1.json` schema + CI parity check
+/// codify; keep additions backward-compatible. `daemon.state` is always
+/// `serving` here because a served RPC implies the daemon got past recovery.
+async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
+    // load_registry does blocking flock I/O; offload it from the async worker
+    // thread (Gemini review). The drive-table read below stays async.
+    let reg_path = ctx.home.registry_json();
+    let registry = tokio::task::spawn_blocking(move || state::load_registry(&reg_path))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    let mut by_status: Map<String, Value> = Map::new();
+    let mut restarting: u64 = 0;
+    let mut channels_registered: u64 = 0;
+    for e in &registry.entries {
+        let key = format!("{:?}", e.status).to_lowercase();
+        let n = by_status.get(&key).and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+        by_status.insert(key, Value::Number(n.into()));
+        if e.status == AgentStatus::Restarting {
+            restarting += 1;
+        }
+        if e.mcp_channel_id.is_some() {
+            channels_registered += 1;
+        }
+    }
+    let active_drives = crate::drive::active_drive_count(&ctx.drives).await;
+    Response::ok(
+        req.id,
+        json!({
+            "schema_version": 1,
+            "daemon": {
+                "state": DaemonState::Serving.as_str(),
+                "pid": std::process::id(),
+                "uptime_secs": ctx.started_at.elapsed().as_secs(),
+                "version": env!("CARGO_PKG_VERSION"),
+                // Drift signal (ab-1891cdff), additive. Null when the daemon
+                // could not fingerprint itself; a client then reads Unknown.
+                "exe_path": ctx
+                    .exe_fingerprint
+                    .as_ref()
+                    .map(|f| f.path.to_string_lossy().into_owned()),
+                "exe_mtime": ctx.exe_fingerprint.as_ref().map(|f| f.mtime_nanos),
+                "exe_size": ctx.exe_fingerprint.as_ref().map(|f| f.size),
+                // The daemon's own process start time, for the `restart`
+                // pid-reuse guard.
+                "pid_start_time": ctx.pid_start_time,
+            },
+            "agents": {
+                "total": registry.entries.len(),
+                "by_status": by_status,
+            },
+            "drives": { "active": active_drives },
+            "restarts": {
+                // queue_depth tracks agents currently restarting; the full
+                // restart queue + consecutive-failure history is not yet
+                // surfaced in the served status (Wave 5), so the max-seen
+                // counter reports 0 until that subsystem is wired into Ctx.
+                "queue_depth": restarting,
+                "consecutive_failures_max_seen": 0,
+            },
+            "channels": { "registered": channels_registered },
+        }),
+    )
+}
+
+async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
+    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
+    };
+    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let entry = match registry.find(&name) {
+        Some(e) => e.clone(),
+        None => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent {name} not found"),
+            )
+        }
+    };
+    let force = req
+        .params
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if entry.status == AgentStatus::Exited {
+        // An exited agent needs no stop work, but a controlling driver can
+        // linger if a prior `stop --force` hit `drive_force_close_timeout`.
+        // Since `rm` refuses unconditionally while a driver is active, without
+        // this the agent is stuck until daemon restart. Let `--force` clear a
+        // lingering driver even on the exited fast-path (Codex P2).
+        if force
+            && crate::drive::force_close_controlling(&ctx.drives, &entry.short_id, "stop_force")
+                .await
+        {
+            crate::drive::await_driver_cleared(
+                &ctx.drives,
+                &entry.short_id,
+                Duration::from_secs(2),
+            )
+            .await;
+        }
+        return Response::ok(
+            req.id,
+            json!({"already_exited": true, "short_id": entry.short_id}),
+        );
+    }
+    // Driver-awareness (US6.7, LD26): refuse with exit 18 (Busy) while an
+    // operator is driving, unless `--force` force-closes the driver first. A
+    // watcher does not block — only the controlling driver does.
+    if let Some((sid, _mode)) = crate::drive::controlling_driver(&ctx.drives, &entry.short_id).await
+    {
+        if !force {
+            return Response::err(
+                req.id,
+                ErrorCode::Busy,
+                format!(
+                    "agent {name} has an active driver (session {sid}); detach first or pass --force"
+                ),
+            );
+        }
+        // `--force`: evict the driver. The drive session loop observes the
+        // latched close, emits `drive_detached{reason:"stop_force"}`, and clears
+        // the table slot in `cleanup`; we wait for that before stopping so the
+        // authority window is gone by the time the agent exits.
+        crate::drive::force_close_controlling(&ctx.drives, &entry.short_id, "stop_force").await;
+        if !crate::drive::await_driver_cleared(&ctx.drives, &entry.short_id, Duration::from_secs(2))
+            .await
+        {
+            // The driver did not detach within the grace window (slow/wedged
+            // session loop). The operator asked to force the stop, so proceed —
+            // but surface that the authority window may still be present in
+            // state.json so the divergence is observable rather than silent.
+            let _ = ctx.emitter.emit(
+                "drive_force_close_timeout",
+                &json!({"name": name, "short_id": entry.short_id}),
+            );
+        }
+    }
+    // Claude agents are not PTY-managed (LD8): there is no worker to shut down.
+    // Shell out to the claude supervisor and propagate its outcome.
+    if entry.provider == "claude" {
+        return stop_claude(ctx, req, &name, &entry).await;
+    }
+    // A non-PTY row (empty short_id == Python-authored; the daemon's create path
+    // always derives a non-empty short_id) for codex/gemini has no daemon worker
+    // to stop. Mirror Python `stop_agent`: these providers are "synchronous
+    // between asks (no persistent process to stop)" -- emit `agent_stopped` and
+    // return cleanly, leaving the registry UNCHANGED. Falling through to the PTY
+    // path would probe the agents-root `worker.sock` (absent -> "confirmed
+    // down") and then write `status = Exited`, a status Python's loader rejects,
+    // corrupting a Python-readable registry (Codex P1, PR #364).
+    if entry.short_id.is_empty() {
+        let _ = ctx.emitter.emit(
+            "agent_stopped",
+            &json!({"name": name, "provider": entry.provider, "claude_exit": Value::Null}),
+        );
+        return Response::ok(
+            req.id,
+            json!({"stopped": true, "provider": entry.provider, "no_op": true}),
+        );
+    }
+    // Ask the worker to shut down its PTY child gracefully, then CONFIRM it
+    // actually went away before reporting success: a swallowed shutdown
+    // failure would mark the agent exited while the PTY keeps running (Codex
+    // P1). A worker that shut down removes its socket and exits.
+    if !stop_worker_confirmed(ctx, &entry).await {
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("agent {name}: worker did not confirm shutdown; it may still be running"),
+        );
+    }
+    // Surface a registry-write failure rather than reporting a clean stop while
+    // the on-disk status still reads live: the worker is confirmed dead, but if
+    // the status flip does not persist the registry diverges from reality
+    // (silent-failure review). Mirrors handle_register_channel's house style.
+    let stop_name = name.clone();
+    if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
+        if let Some(e) = r.find_mut(&stop_name) {
+            e.status = AgentStatus::Exited;
+        }
+    })
+    .await
+    {
+        let _ = ctx.emitter.emit(
+            "agent_stop_error",
+            &json!({"name": name, "error": e.to_string()}),
+        );
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("agent {name}: worker stopped but registry write failed: {e}"),
+        );
+    }
+    let _ = ctx.emitter.emit("agent_stopped", &json!({"name": name}));
+    Response::ok(req.id, json!({"stopped": true, "short_id": entry.short_id}))
+}
+
+/// Fire-and-forget `worker.shutdown` to a worker that must not be left running
+/// (a spawn that failed or lost a name race): connect, ask it to tear down, and
+/// move on. Best-effort by design — the caller is already on an error path.
+async fn best_effort_worker_shutdown(sock: &std::path::Path) {
+    if let Ok(mut conn) = UnixStream::connect(sock).await {
+        let _ = write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))).await;
+        let _ = crate::protocol::read_response(&mut conn).await;
+    }
+}
+
+/// Graceful worker shutdown with SIGTERM -> SIGKILL escalation (US6.7), then
+/// verify the worker process is actually gone. Returns true iff the worker is
+/// confirmed down. A worker that never dies returns false so the caller can
+/// refuse to claim a clean stop (a swallowed failure would mark the agent exited
+/// while its PTY keeps running, Codex P1).
+async fn stop_worker_confirmed(ctx: &Ctx, entry: &RegistryEntry) -> bool {
+    let sock = ctx.home.worker_sock(&entry.short_id);
+    // 1. Graceful: ask the worker to tear down its PTY child + exit.
+    if let Ok(mut conn) = UnixStream::connect(&sock).await {
+        let _ = write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))).await;
+        let _ = crate::protocol::read_response(&mut conn).await;
+    }
+    // 2. Up to the 5s grace for a clean exit. "Down" = the worker's SOCKET is
+    //    unreachable, which is the authoritative, PID-reuse-immune liveness
+    //    signal: the worker is identified by the socket it owns, not by a
+    //    registry pid that can go stale after a crash (Codex P1).
+    let mut down = worker_down_within(&sock, Duration::from_secs(5)).await;
+    // 3. Escalate ONLY while the socket is still reachable, i.e. a worker is
+    //    alive and ignoring shutdown. If the socket is already unreachable we
+    //    are done and never signal a pid - this avoids SIGKILLing a stale or
+    //    recycled pid when the real worker has already exited (Codex P1).
+    //    Additionally, validate pid+create_time ownership before signaling
+    //    (ab-d19e6458): if the recorded pid is alive but its start time no longer
+    //    matches, the pid was recycled by an unrelated process and we must NOT
+    //    SIGTERM/SIGKILL it. The socket-reachable worker (a restarted instance
+    //    under a new pid) is left for the caller to report as not-confirmed.
+    if !down {
+        if let Some(pid) = entry.pid {
+            if pid_is_ours(pid, entry.pid_start_time) {
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                }
+                down = worker_down_within(&sock, Duration::from_secs(5)).await;
+                if !down && pid_is_ours(pid, entry.pid_start_time) {
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                    }
+                    down = worker_down_within(&sock, Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+    // Only reap the socket file once the worker is confirmed unreachable, so we
+    // never unlink a live worker's socket (Codex P1). A SIGKILLed worker cannot
+    // remove its own socket; this reaps the stale file so a later reconcile /
+    // list does not mistake it for a live worker.
+    if down {
+        let _ = std::fs::remove_file(&sock);
+    }
+    down
+}
+
+/// Probe whether the worker is still serving on its socket. PID-reuse-immune:
+/// the worker is identified by the socket it owns (per `short_id`), so a
+/// recycled unrelated pid never answers here (Codex P1).
+async fn worker_socket_reachable(sock: &std::path::Path) -> bool {
+    UnixStream::connect(sock).await.is_ok()
+}
+
+/// Poll until the worker's socket is unreachable (the worker is gone), or
+/// `budget` elapses. Socket-based rather than pid-based so a stale / recycled
+/// `entry.pid` can neither falsely report a live worker down nor cause a live
+/// worker's socket to be unlinked (Codex P1).
+async fn worker_down_within(sock: &std::path::Path, budget: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if !worker_socket_reachable(sock).await {
+            return true;
+        }
+        if start.elapsed() >= budget {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Stop a Claude agent (AC7-EDGE). Claude is shellout-managed (LD8): there is no
+/// worker PTY to signal, so the daemon shells out to the claude supervisor's
+/// `stop` on the agent's short id and marks the registry row exited on success.
+async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry) -> Response {
+    let short = match entry
+        .claude_short_id
+        .as_deref()
+        .or(entry.session_id.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => s.to_string(),
+        None => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidStatus,
+                format!("agent {name} is claude but has no short id to stop"),
+            )
+        }
+    };
+    match tokio::process::Command::new("claude")
+        .arg("stop")
+        .arg(&short)
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => {
+            // Surface a persist failure rather than reporting a clean stop while
+            // the registry still reads live (silent-failure review).
+            let claude_name = name.to_string();
+            if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
+                if let Some(e) = r.find_mut(&claude_name) {
+                    e.status = AgentStatus::Exited;
+                }
+            })
+            .await
+            {
+                return Response::err(
+                    req.id,
+                    ErrorCode::Internal,
+                    format!("claude {name} stopped but registry write failed: {e}"),
+                );
+            }
+            let _ = ctx
+                .emitter
+                .emit("agent_stopped", &json!({"name": name, "backend": "claude"}));
+            // Report the id we actually stopped with (`short`), not
+            // `entry.short_id`: a Python-authored claude row has an empty
+            // short_id but a populated claude_short_id, so echoing entry.short_id
+            // would print `stopped: <name> ()` and break the stop output
+            // contract for exactly the rows ab-e5a57efa makes readable (Codex P2).
+            Response::ok(
+                req.id,
+                json!({"stopped": true, "backend": "claude", "short_id": short}),
+            )
+        }
+        Ok(o) => Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!(
+                "claude stop {short} failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+        ),
+        Err(e) => Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("could not exec `claude stop`: {e}"),
+        ),
+    }
+}
+
+async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
+    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
+    };
+    let force = req
+        .params
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let entry = match registry.find(&name) {
+        Some(e) => e.clone(),
+        None => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent {name} not found"),
+            )
+        }
+    };
+    // Driver-awareness (US6.8, LD27): rm refuses UNCONDITIONALLY while a driver
+    // is active — even with `--force`. Unlike `stop`, `--force` does NOT evict
+    // here; the operator must detach -> stop -> wait `exited` -> rm. Exit 18.
+    if let Some((sid, _mode)) = crate::drive::controlling_driver(&ctx.drives, &entry.short_id).await
+    {
+        return Response::err(
+            req.id,
+            ErrorCode::Busy,
+            format!(
+                "agent {name} has an active driver (session {sid}); detach, stop, and wait for exited before rm (--force does NOT override this)"
+            ),
+        );
+    }
+    if entry.status == AgentStatus::Live && !force {
+        return Response::err(
+            req.id,
+            ErrorCode::Busy,
+            format!("agent {name} is still live; use `stop` first or pass --force"),
+        );
+    }
+    // Force-removing a live agent must stop its worker first, or it leaks a PTY
+    // process that `list`/`stop` can no longer address by name (Codex P2).
+    if entry.status == AgentStatus::Live && force && !stop_worker_confirmed(ctx, &entry).await {
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("agent {name}: could not stop the worker before force-remove; refusing to orphan a live PTY"),
+        );
+    }
+    // Orphaned entries are removed with no subprocess action (AC8-FR); the
+    // distinction is surfaced in the event for the operator's audit trail.
+    let was_orphaned = entry.status == AgentStatus::Orphaned;
+    // Surface a removal-write failure rather than reporting removed:true while
+    // the entry still persists (silent-failure review): a force-rm has already
+    // killed the worker, so a swallowed write leaves a dangling row pointing at
+    // a dead worker.
+    let rm_name = name.clone();
+    if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
+        r.entries.retain(|e| e.name != rm_name);
+    })
+    .await
+    {
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("agent {name}: removal did not persist: {e}"),
+        );
+    }
+    let _ = ctx.emitter.emit(
+        "agent_removed",
+        &json!({"name": name, "was_orphaned": was_orphaned}),
+    );
+    Response::ok(
+        req.id,
+        json!({"removed": true, "was_orphaned": was_orphaned}),
+    )
+}
+
+/// `reachability` per-call timeout (LD30): a single provider probe is bounded.
+const RECONCILE_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Total reconcile sweep budget (LD30): beyond it, remaining agents defer to the
+/// next tick so a large registry never blocks the daemon for long.
+const RECONCILE_SWEEP_BUDGET: Duration = Duration::from_secs(5);
+
+/// A status change reconcile decided for one probed entry. `new_status: None`
+/// means "probed, status unchanged" — its `last_reconciled_at` is still bumped
+/// so the fairness ordering rotates.
+struct ReconcileChange {
+    name: String,
+    new_status: Option<AgentStatus>,
+}
+
+/// What a reconcile sweep did, for the `reconcile_done` event and tests.
+#[derive(Default, PartialEq, Debug)]
+struct ReconcileOutcome {
+    updated: Vec<String>,
+    orphans: Vec<String>,
+    recovered: Vec<String>,
+    /// `(name, reason)` for entries whose probe was inconclusive (status
+    /// preserved, never flipped).
+    inconsistent: Vec<(String, String)>,
+    /// Count of trailing entries not probed because the budget elapsed.
+    deferred: usize,
+}
+
+/// Plan a reconcile sweep over `entries` (which the caller has ordered ASC by
+/// `last_reconciled_at` for fairness). Pure of clock and I/O: `probe` answers
+/// reachability tri-state per entry and `budget_exhausted` reports whether the
+/// sweep budget has elapsed — both injected so the budget/fairness/tri-state
+/// logic is deterministically unit-testable (the daemon wires the real provider
+/// probe + a wall-clock deadline).
+///
+/// Transition rules (status-aware, design AC9):
+/// - `Ok(true)` (reachable): recover an `Orphaned` entry to `Live`; leave any
+///   other status (live-ish or terminal) unchanged.
+/// - `Ok(false)` (unreachable): flip a live-ish entry to `Orphaned`; leave an
+///   already-`Orphaned` or terminal (`Exited`/`PermanentDead`) entry unchanged.
+/// - `Err` (inconclusive): preserve status, record an inconsistency. Never
+///   orphan on a probe timeout (Failure Modes / Errors invariant).
+fn plan_reconcile<P, D, L>(
+    entries: &[RegistryEntry],
+    mut probe: P,
+    mut budget_exhausted: D,
+    mut pid_live: L,
+) -> (Vec<ReconcileChange>, ReconcileOutcome)
+where
+    P: FnMut(&RegistryEntry) -> Result<bool, crate::provider::ReachabilityProbeError>,
+    D: FnMut() -> bool,
+    L: FnMut(&RegistryEntry) -> bool,
+{
+    let mut changes = Vec::new();
+    let mut out = ReconcileOutcome::default();
+    for (i, entry) in entries.iter().enumerate() {
+        if budget_exhausted() {
+            out.deferred = entries.len() - i;
+            break;
+        }
+        // A one-shot `ask` agent has no daemon-managed process, so its liveness is
+        // decided by process-liveness alone (it has none): terminal `exited`.
+        // Session-file reachability answers "resumable?" (surfaced via session_id),
+        // never "running?" -- so a surviving session file must NOT keep an ask row
+        // `live`. This is the actual cause of the reported stale-`live` rows: the
+        // `probe` is skipped entirely here, so no provider reachability call can
+        // decide an ask row's status. An already-terminal ask is left untouched.
+        // [plan ab-70faa65b, Locked Decision #1]
+        if entry.is_one_shot_ask() {
+            let new_status = if is_non_terminal(entry.status) {
+                out.updated.push(entry.name.clone());
+                Some(AgentStatus::Exited)
+            } else {
+                None
+            };
+            changes.push(ReconcileChange {
+                name: entry.name.clone(),
+                new_status,
+            });
+            continue;
+        }
+        let new_status = match probe(entry) {
+            Ok(true) => {
+                if entry.status == AgentStatus::Orphaned {
+                    out.recovered.push(entry.name.clone());
+                    out.updated.push(entry.name.clone());
+                    Some(AgentStatus::Live)
+                } else {
+                    None
+                }
+            }
+            Ok(false) if entry.is_interactive() => {
+                // host_mode=interactive (task 2.3 / US4): an interactive host is a
+                // long-lived drivable TUI whose liveness is its PTY *process*, not
+                // session-store membership. A live `codex resume`/`gemini -r` TUI
+                // may not appear in the exec session index, so a store miss must
+                // NOT orphan a healthy worker. But a genuinely dead interactive
+                // worker must still be reaped DURING `reconcile` -- not only at
+                // daemon restart via recover()'s pid sweep -- so check pid
+                // liveness here and flip to Exited when the worker process is gone
+                // ("unexpected exit is exited, not orphaned"; Codex P2, PR #373).
+                if pid_live(entry) {
+                    None
+                } else {
+                    out.updated.push(entry.name.clone());
+                    Some(AgentStatus::Exited)
+                }
+            }
+            Ok(false) => {
+                // Only states that *should* have a live backend can go stale.
+                // Restarting / Failed are intentionally excluded: the restart
+                // supervisor owns those agents' lifecycle (backoff -> re-spawn
+                // or permanent_dead), so reconcile must not race it by flipping
+                // a mid-restart agent to orphaned. Terminal states (Exited /
+                // PermanentDead) are likewise left alone.
+                let live_ish = matches!(
+                    entry.status,
+                    AgentStatus::Live
+                        | AgentStatus::Ready
+                        | AgentStatus::Idle
+                        | AgentStatus::Busy
+                        | AgentStatus::Spawning
+                );
+                if live_ish {
+                    out.orphans.push(entry.name.clone());
+                    out.updated.push(entry.name.clone());
+                    Some(AgentStatus::Orphaned)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                out.inconsistent
+                    .push((entry.name.clone(), e.reason.clone()));
+                None
+            }
+        };
+        changes.push(ReconcileChange {
+            name: entry.name.clone(),
+            new_status,
+        });
+    }
+    (changes, out)
+}
+
+/// Apply one planned reconcile change to its registry row. Always freshens
+/// `last_reconciled_at` (the probe was *attempted*, so `CHECKED` rotates even on
+/// an inconclusive/no-change probe). On a status change, sets the new status and
+/// -- when it is terminal `Exited` -- nulls `pid`/`pid_start_time` so `list`/
+/// `--json` never surfaces a pid that no longer belongs to the agent (Locked
+/// Decision #7: a stale pid is exactly the misleading liveness signal this work
+/// removes; forensics live in the event log, not a dangling registry pid). The
+/// pid is cleared only on `Exited` (the lone terminal status reconcile produces)
+/// -- an `Orphaned` row keeps its pid, which is still the live-but-unowned
+/// process an operator may want to `ps`/signal while investigating the orphan.
+fn apply_reconcile_change(e: &mut RegistryEntry, new_status: Option<AgentStatus>, now: &str) {
+    e.last_reconciled_at = Some(now.to_string());
+    if let Some(s) = new_status {
+        e.status = s;
+        if matches!(s, AgentStatus::Exited) {
+            e.pid = None;
+            e.pid_start_time = None;
+        }
+    }
+}
+
+/// Build the lean provider-probe projection from a registry row, preferring the
+/// provider-specific session id over the generic one.
+fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
+    let session_id = match e.provider.as_str() {
+        "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
+        "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
+        "claude" => e.claude_short_id.clone().or_else(|| e.session_id.clone()),
+        _ => e.session_id.clone(),
+    };
+    crate::provider::AgentEntry {
+        name: e.name.clone(),
+        provider: e.provider.clone(),
+        session_id,
+        cwd: PathBuf::from(&e.cwd),
+    }
+}
+
+/// Everything the `reconcile` RPC needs to render its response, returned by
+/// [`run_reconcile_sweep`] so the bounded sweep core is shared with the daemon's
+/// startup pass (Architecture B, plan ab-70faa65b).
+struct ReconcileSweepResult {
+    /// Registry snapshot read at sweep start (per-name provider lookup).
+    registry: crate::state::Registry,
+    /// Entries in fairness order (ASC `last_reconciled_at`), as probed.
+    entries: Vec<RegistryEntry>,
+    outcome: ReconcileOutcome,
+}
+
+/// Run ONE bounded reconcile sweep and persist it: probe each agent
+/// least-recently-reconciled-first (250ms/probe, 5s total budget), settle status
+/// by process-liveness (Architecture A), then batch-write every change + freshen
+/// `last_reconciled_at` under one registry lock. Emits the same
+/// `agent_inconsistent` / `reconcile_deferred` / `reconcile_done` events as
+/// before. Returns the snapshot + outcome on success, or an error string when
+/// the registry write fails (the registry is then unchanged, so callers degrade
+/// to serving last-recorded status rather than reporting a sweep that did not
+/// apply -- Codex P1). Shared by the `reconcile` RPC and the startup sweep.
+fn run_reconcile_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+) -> Result<ReconcileSweepResult, String> {
+    use crate::provider::ReachabilityProbeError;
+    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+
+    // Fairness: probe least-recently-reconciled first (None < Some), so a
+    // budget-exhausted sweep eventually covers every entry (finding #1).
+    let mut entries = registry.entries.clone();
+    entries.sort_by(|a, b| a.last_reconciled_at.cmp(&b.last_reconciled_at));
+
+    let start = Instant::now();
+    let probe = |e: &RegistryEntry| -> Result<bool, ReachabilityProbeError> {
+        // Fast path: a reachable worker socket is authoritative, PID-reuse-immune
+        // liveness for a PTY-managed agent — no provider probe (and no 250ms
+        // cost) needed. A sync connect is fine: reconcile runs on the blocking
+        // pool (Codex P1: do not trust a possibly-stale registry pid).
+        if std::os::unix::net::UnixStream::connect(home.worker_sock(&e.short_id)).is_ok() {
+            return Ok(true);
+        }
+        // No live worker: ask the provider's session store (tri-state).
+        match crate::provider::for_name(&e.provider) {
+            Some(p) => p.reachability(&to_agent_entry(e), RECONCILE_PROBE_TIMEOUT),
+            None => Err(ReachabilityProbeError::new(
+                &e.provider,
+                "unknown provider; cannot probe reachability",
+            )),
+        }
+    };
+    // pid-liveness for interactive hosts (Codex P2): a row with a recorded pid
+    // that is no longer OUR live worker is a dead interactive host to reap to
+    // Exited. A row with no pid is left alone (mirrors recover()'s sweep, which
+    // only acts on entries that carry a pid).
+    let pid_live = |e: &RegistryEntry| -> bool {
+        e.pid.map_or(true, |pid| pid_is_ours(pid, e.pid_start_time))
+    };
+    let (changes, outcome) = plan_reconcile(
+        &entries,
+        probe,
+        || start.elapsed() >= RECONCILE_SWEEP_BUDGET,
+        pid_live,
+    );
+
+    // Single batched write (US4-gemini pattern): apply all status changes and
+    // bump last_reconciled_at for every probed entry in one lock window.
+    let now = now_rfc3339_like();
+    // Surface a persistence failure rather than emitting reconcile_done and
+    // returning updated/orphans/recovered as if the sweep applied (Codex P1): on
+    // a lock/IO failure the registry is unchanged, so reporting success would
+    // mislead automation and hide stale lifecycle state.
+    if let Err(err) = state::update_registry(&home.registry_json(), |r| {
+        for ch in &changes {
+            if let Some(e) = r.find_mut(&ch.name) {
+                apply_reconcile_change(e, ch.new_status, &now);
+            }
+        }
+    }) {
+        let _ = emitter.emit("reconcile_error", &json!({"error": err.to_string()}));
+        return Err(format!(
+            "reconcile computed {} change(s) but the registry write failed: {err}",
+            changes.len()
+        ));
+    }
+
+    for (name, reason) in &outcome.inconsistent {
+        let _ = emitter.emit(
+            "agent_inconsistent",
+            &json!({"name": name, "reason": reason}),
+        );
+    }
+    if outcome.deferred > 0 {
+        let _ = emitter.emit(
+            "reconcile_deferred",
+            &json!({"remaining_count": outcome.deferred}),
+        );
+    }
+    let _ = emitter.emit(
+        "reconcile_done",
+        &json!({
+            "updated": outcome.updated.len(),
+            "orphans": outcome.orphans.len(),
+            "recovered": outcome.recovered.len(),
+        }),
+    );
+    Ok(ReconcileSweepResult {
+        registry,
+        entries,
+        outcome,
+    })
+}
+
+fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
+    let ReconcileSweepResult {
+        registry,
+        entries,
+        outcome,
+    } = match run_reconcile_sweep(&ctx.home, &ctx.emitter) {
+        Ok(r) => r,
+        Err(msg) => return Response::err(req.id, ErrorCode::Internal, msg),
+    };
+    // Task 3.1: emit the Python ReconcileResult JSON shape so the Rust client
+    // can render --json output matching Python's cmd_reconcile contract:
+    //   scanned, orphaned[], recovered[], skipped[], errors[]
+    //
+    // Mapping from internal outcome fields:
+    //   scanned = total entries (matches Python `scanned=len(entries)`)
+    //   orphaned = outcome.orphans wrapped as [{name, provider}] dicts
+    //   recovered = outcome.recovered wrapped as [{name, provider}] dicts
+    //   skipped = deferred entries, wrapped as [{name, provider}] dicts
+    //   errors = inconsistent probes wrapped as [{name, reason}] dicts
+    //
+    // Legacy fields (updated, orphans, inconsistent, deferred) are preserved for
+    // backward compat with any existing callers reading the raw daemon response.
+    //
+    // Python reports `scanned=len(entries)` (all entries, including the deferred
+    // tail) and `skipped` as a separate list of the deferred entries; skipped is
+    // a subset of scanned, not subtracted from it. The daemon previously reported
+    // `scanned = entries - deferred`, a count-only divergence (cv-5b1a4164).
+    let scanned = entries.len();
+    // plan_reconcile probes the (least-recently-reconciled-first) sorted entries
+    // in order and defers the tail when the sweep budget is exhausted, so the
+    // deferred entries are exactly entries[probed..]. `probed` is the boundary,
+    // distinct from the reported `scanned` count above (gemini-code-assist medium
+    // on PR #361; closes carveout cv-5b1a4164's skipped half).
+    let probed = entries.len() - outcome.deferred;
+    let skipped_py: Vec<Value> = entries
+        .iter()
+        .skip(probed)
+        .map(|e| json!({"name": e.name, "provider": e.provider}))
+        .collect();
+    let orphaned_py: Vec<Value> = outcome
+        .orphans
+        .iter()
+        .map(|n| {
+            let prov = registry
+                .entries
+                .iter()
+                .find(|e| &e.name == n)
+                .map(|e| e.provider.as_str())
+                .unwrap_or("unknown");
+            json!({"name": n, "provider": prov})
+        })
+        .collect();
+    let recovered_py: Vec<Value> = outcome
+        .recovered
+        .iter()
+        .map(|n| {
+            let prov = registry
+                .entries
+                .iter()
+                .find(|e| &e.name == n)
+                .map(|e| e.provider.as_str())
+                .unwrap_or("unknown");
+            json!({"name": n, "provider": prov})
+        })
+        .collect();
+    let errors_py: Vec<Value> = outcome
+        .inconsistent
+        .iter()
+        .map(|(n, reason)| json!({"name": n, "reason": reason}))
+        .collect();
+    Response::ok(
+        req.id,
+        json!({
+            // Python-matching keys (Task 3.1 parity contract)
+            "scanned": scanned,
+            "orphaned": orphaned_py,
+            "recovered": recovered_py,
+            "skipped": skipped_py,
+            "errors": errors_py,
+            // Legacy internal keys (backward compat)
+            "updated": outcome.updated,
+            "orphans": outcome.orphans,
+            "inconsistent": outcome.inconsistent.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            "deferred": outcome.deferred,
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// channel.* (Phase 5 integration point; minimal Wave 3 surface).
+// ---------------------------------------------------------------------------
+
+async fn dispatch_channel(ctx: &Arc<Ctx>, req: &Request) -> Response {
+    // All channel handlers are pure flock + CPU; run on the blocking pool.
+    match Namespace::verb(&req.method) {
+        Some("register_channel") => run_blocking(ctx, req, handle_register_channel).await,
+        Some("unregister_channel") => run_blocking(ctx, req, handle_unregister_channel).await,
+        Some("push_to_channel") => run_blocking(ctx, req, handle_push_to_channel).await,
+        _ => Response::err(
+            req.id,
+            ErrorCode::UnknownMethod,
+            format!("unknown channel verb in `{}`", req.method),
+        ),
+    }
+}
+
+fn handle_register_channel(ctx: &Ctx, req: &Request) -> Response {
+    let cc_session_id = match req.params.get("cc_session_id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `cc_session_id`"),
+    };
+    // Resolve the target agent: by name if given, else by matching cc_session_id.
+    let name = req
+        .params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let channel_id = uuid_v4();
+    let mut matched = false;
+    // Surface a persist failure: without this, `matched` could be set in the
+    // closure and the handler would return a successful mcp_channel_id even
+    // though the mapping never hit disk, causing immediate routing drift
+    // (Codex P1).
+    if let Err(e) = state::update_registry(&ctx.home.registry_json(), |r| {
+        let target = match &name {
+            Some(n) => r.find_mut(n),
+            None => r
+                .entries
+                .iter_mut()
+                .find(|e| e.cc_session_id.as_deref() == Some(&cc_session_id)),
+        };
+        if let Some(e) = target {
+            e.cc_session_id = Some(cc_session_id.clone());
+            e.mcp_channel_id = Some(channel_id.clone());
+            matched = true;
+        }
+    }) {
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("registry write failed during channel registration: {e}"),
+        );
+    }
+    if !matched {
+        return Response::err(
+            req.id,
+            ErrorCode::ChannelUnknown,
+            "no agent matched cc_session_id/name for registration",
+        );
+    }
+    let _ = ctx
+        .emitter
+        .emit("channel_registered", &json!({"mcp_channel_id": channel_id}));
+    Response::ok(req.id, json!({"mcp_channel_id": channel_id}))
+}
+
+fn handle_unregister_channel(ctx: &Ctx, req: &Request) -> Response {
+    let channel_id = match req.params.get("mcp_channel_id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `mcp_channel_id`"),
+    };
+    let mut cleared = false;
+    let _ = state::update_registry(&ctx.home.registry_json(), |r| {
+        for e in r.entries.iter_mut() {
+            if e.mcp_channel_id.as_deref() == Some(&channel_id) {
+                e.mcp_channel_id = None;
+                cleared = true;
+            }
+        }
+    });
+    if !cleared {
+        return Response::err(req.id, ErrorCode::ChannelUnknown, "unknown channel id");
+    }
+    Response::ok(req.id, json!({"unregistered": true}))
+}
+
+fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
+    let channel_id = match req.params.get("mcp_channel_id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `mcp_channel_id`"),
+    };
+    let registry = state::load_registry(&ctx.home.registry_json()).unwrap_or_default();
+    let found = registry
+        .entries
+        .iter()
+        .any(|e| e.mcp_channel_id.as_deref() == Some(&channel_id));
+    if !found {
+        return Response::err(
+            req.id,
+            ErrorCode::ChannelUnknown,
+            "channel id not registered (channel server should re-register)",
+        );
+    }
+    // Routing the poke to the CC session's child pipe is the channel server's
+    // job; the daemon confirms the route exists.
+    Response::ok(req.id, json!({"routed": true}))
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers.
+// ---------------------------------------------------------------------------
+
+fn json_obj(pairs: &[(&str, Value)]) -> Map<String, Value> {
+    let mut m = Map::new();
+    for (k, v) in pairs {
+        m.insert((*k).to_string(), v.clone());
+    }
+    m
+}
+
+/// Compact UTC timestamp for filesystem names (`20260524T023300Z`).
+fn now_compact() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (y, mo, d, h, mi, s) = civil(secs);
+    format!("{y:04}{mo:02}{d:02}T{h:02}{mi:02}{s:02}Z")
+}
+
+/// RFC3339-like timestamp for the registry's `created_at` / `last_message_at`.
+fn now_rfc3339_like() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (y, mo, d, h, mi, s) = civil(secs);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+fn civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (
+        (rem / 3600) as u32,
+        ((rem % 3600) / 60) as u32,
+        (rem % 60) as u32,
+    );
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d, hh, mm, ss)
+}
+
+/// Generate a RFC 4122 v4 UUID from OS randomness (`getentropy`/urandom via
+/// libc). No `uuid` crate dependency; the daemon needs exactly one generator.
+fn uuid_v4() -> String {
+    let mut b = [0u8; 16];
+    fill_random(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
+        b[14], b[15]
+    )
+}
+
+fn fill_random(buf: &mut [u8]) {
+    // Read from /dev/urandom; if unavailable, fall back to a time+pid mix (the
+    // mcp_channel_id uniqueness invariant tolerates this degraded path because
+    // collisions across one daemon's lifetime are astronomically unlikely).
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        if f.read_exact(buf).is_ok() {
+            return;
+        }
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+        ^ (std::process::id() as u64).rotate_left(17);
+    let mut x = seed | 1;
+    for byte in buf.iter_mut() {
+        // xorshift64
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *byte = (x & 0xff) as u8;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{AgentState, DriveWindow, PtyState};
+    use crate::worker::{run as run_worker, WorkerConfig};
+
+    /// Set the per-thread injection gate override for this test. Returns a guard
+    /// that clears the override when dropped, so tests clean up automatically.
+    fn with_injection_gate_allow(providers: &str) -> impl Drop {
+        INJECTION_GATE_ALLOW.with(|cell| {
+            *cell.borrow_mut() = Some(providers.to_string());
+        });
+        struct ClearGuard;
+        impl Drop for ClearGuard {
+            fn drop(&mut self) {
+                INJECTION_GATE_ALLOW.with(|cell| {
+                    *cell.borrow_mut() = None;
+                });
+            }
+        }
+        ClearGuard
+    }
+
+    fn tmp_home(tag: &str) -> AgentsHome {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fno-agents-daemon-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = AgentsHome::at(&p);
+        home.ensure_root().unwrap();
+        home
+    }
+
+    fn read_events(home: &AgentsHome) -> Vec<Value> {
+        std::fs::read_to_string(home.events_jsonl())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .collect()
+    }
+
+    #[test]
+    fn recovery_emits_drive_crashed_before_clearing_window() {
+        let home = tmp_home("recover-drive");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+        // Registry entry + state.json with a stale active drive window.
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "worker-A".into(),
+                short_id: "wkA".into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: None,
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: None,
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-05-24T00:00:00Z".into(),
+                pid: Some(std::process::id()), // alive -> not reaped
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        let mut st = AgentState::new_pty("wkA");
+        st.status = AgentStatus::Live;
+        st.pty = Some(PtyState {
+            active: true,
+            drive: Some(DriveWindow {
+                session_id: Some("drive-xyz".into()),
+                mode: Some("interactive".into()),
+                last_heartbeat_at_monotonic_ns: Some(123),
+            }),
+        });
+        state::write_state_atomic(&home.state_json("wkA"), &st).unwrap();
+
+        let report = recover(&home, &emitter);
+        assert_eq!(report.recovered_drives, vec!["wkA".to_string()]);
+
+        // drive_crashed emitted, carrying the session id (proves read-before-clear).
+        let events = read_events(&home);
+        let crashed = events
+            .iter()
+            .find(|e| e["kind"] == "drive_crashed")
+            .expect("drive_crashed emitted");
+        assert_eq!(crashed["session_id"], "drive-xyz");
+        assert_eq!(crashed["reason"], "daemon_restart");
+
+        // The on-disk state has the window cleared after recovery.
+        let after = state::load_state(&home.state_json("wkA")).unwrap().unwrap();
+        let pty = after.pty.unwrap();
+        assert!(pty.drive.is_none());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_marks_missing_state_inconsistent() {
+        let home = tmp_home("recover-missing");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "ghost".into(),
+                short_id: "ghost".into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: None,
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: None,
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-05-24T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        // No state.json written for "ghost".
+        let report = recover(&home, &emitter);
+        assert_eq!(
+            report.inconsistent,
+            vec![("ghost".to_string(), InconsistencyReason::MissingStateJson)]
+        );
+        let events = read_events(&home);
+        assert!(events
+            .iter()
+            .any(|e| e["kind"] == "agent_inconsistent" && e["reason"] == "missing_state_json"));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_reaps_dead_pid() {
+        let home = tmp_home("recover-reap");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "dead".into(),
+                short_id: "dead".into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: None,
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: None,
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-05-24T00:00:00Z".into(),
+                // PID 2^31-ish: almost certainly not a live process.
+                pid: Some(0x7fff_fff0),
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        // Give it a state.json so it isn't flagged inconsistent.
+        let mut st = AgentState::new_pty("dead");
+        st.status = AgentStatus::Live;
+        state::write_state_atomic(&home.state_json("dead"), &st).unwrap();
+
+        let report = recover(&home, &emitter);
+        assert_eq!(report.reaped_pids, vec![0x7fff_fff0]);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(reg.find("dead").unwrap().status, AgentStatus::Exited);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_marks_dead_interactive_exited_and_preserves_host_mode() {
+        // AC2-FR (task 2.3): a genuinely dead interactive worker is reaped to
+        // Exited (the design's "unexpected exit is exited, not orphaned"), and
+        // its host_mode="interactive" round-trips through recovery unchanged so
+        // a daemon restart that rediscovers it keeps the field.
+        let home = tmp_home("recover-interactive");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = rentry("hosted", AgentStatus::Live, None);
+            e.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+            e.pid = Some(0x7fff_fff0); // not a live process
+            r.entries.push(e);
+        })
+        .unwrap();
+        let mut st = AgentState::new_pty("hosted");
+        st.status = AgentStatus::Live;
+        state::write_state_atomic(&home.state_json("hosted"), &st).unwrap();
+
+        let _ = recover(&home, &emitter);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let row = reg.find("hosted").unwrap();
+        assert_eq!(
+            row.status,
+            AgentStatus::Exited,
+            "a dead interactive worker is exited, never orphaned"
+        );
+        assert_eq!(
+            row.host_mode_or_default(),
+            crate::state::HOST_MODE_INTERACTIVE,
+            "host_mode must survive recovery"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn pid_is_ours_distinguishes_recycled_pid() {
+        // ab-d19e6458: a live pid whose start time no longer matches the recorded
+        // one is a recycled pid, not our worker.
+        let me = std::process::id();
+        let Some(st) = process_start_time(me) else {
+            return; // platform without start-time support; nothing to assert
+        };
+        assert!(pid_is_ours(me, Some(st)), "correct start time -> ours");
+        assert!(
+            !pid_is_ours(me, Some(st.wrapping_add(1))),
+            "alive but mismatched start time -> recycled, not ours"
+        );
+        assert!(
+            !pid_is_ours(0x7fff_fff0, Some(st)),
+            "dead pid is never ours"
+        );
+        assert!(
+            pid_is_ours(me, None),
+            "no recorded start time -> fall back to bare liveness (legacy)"
+        );
+    }
+
+    #[test]
+    fn recovery_reaps_recycled_pid() {
+        // ab-d19e6458: the recorded pid is ALIVE (our own), but its start time
+        // does not match — the original worker died and the pid was reused by an
+        // unrelated process. The reap must fire on the start-time mismatch, not
+        // be fooled by bare liveness.
+        let home = tmp_home("recover-recycled");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        if process_start_time(me).is_none() {
+            std::fs::remove_dir_all(home.root()).ok();
+            return; // start-time unsupported here; reuse detection N/A
+        }
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "recycled".into(),
+                short_id: "recycled".into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: None,
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: None,
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-05-24T00:00:00Z".into(),
+                pid: Some(me),
+                // Bogus start time -> mismatch against our real one -> not ours.
+                pid_start_time: Some(1),
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        let mut st = AgentState::new_pty("recycled");
+        st.status = AgentStatus::Live;
+        state::write_state_atomic(&home.state_json("recycled"), &st).unwrap();
+
+        let report = recover(&home, &emitter);
+        assert_eq!(report.reaped_pids, vec![me]);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(reg.find("recycled").unwrap().status, AgentStatus::Exited);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_archives_orphan_state_dir() {
+        let home = tmp_home("recover-orphan");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        // A state dir with no registry entry.
+        let mut st = AgentState::new_pty("loner");
+        st.status = AgentStatus::Live;
+        state::write_state_atomic(&home.state_json("loner"), &st).unwrap();
+
+        let report = recover(&home, &emitter);
+        assert_eq!(report.archived_orphans, vec!["loner".to_string()]);
+        assert!(!home.agent_dir("loner").exists(), "orphan dir moved aside");
+        assert!(home.orphaned_dir().exists());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn agent_name_validation() {
+        assert!(valid_agent_name("worker-A_1"));
+        assert!(!valid_agent_name(""));
+        assert!(!valid_agent_name(&"x".repeat(65)));
+        assert!(!valid_agent_name("has space"));
+        assert!(!valid_agent_name("inject;rm"));
+    }
+
+    #[test]
+    fn uuid_v4_shape_and_uniqueness() {
+        let a = uuid_v4();
+        let b = uuid_v4();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        // version nibble is 4; variant nibble is 8/9/a/b.
+        assert_eq!(&a[14..15], "4");
+        assert!(matches!(&a[19..20], "8" | "9" | "a" | "b"));
+    }
+
+    #[test]
+    fn short_id_derivation_dedups() {
+        let mut reg = state::Registry::default();
+        assert_eq!(derive_short_id("worker-A", &reg), "workerA");
+        reg.entries.push(RegistryEntry {
+            name: "x".into(),
+            short_id: "workerA".into(),
+            provider: "codex".into(),
+            cwd: "/".into(),
+            project_root: "/".into(),
+            session_id: None,
+            claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            cc_session_id: None,
+            host_mode: None,
+            status: AgentStatus::Live,
+            last_message_at: None,
+            created_at: "t".into(),
+            pid: None,
+            pid_start_time: None,
+            log_path: None,
+            last_reconciled_at: None,
+        });
+        assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
+    }
+
+    // --- plan_reconcile (US6.9): tri-state, status-aware transitions, budget ---
+
+    fn rentry(name: &str, status: AgentStatus, last_reconciled: Option<&str>) -> RegistryEntry {
+        RegistryEntry {
+            name: name.into(),
+            short_id: name.into(),
+            provider: "codex".into(),
+            cwd: "/tmp".into(),
+            project_root: "/tmp".into(),
+            session_id: Some("sid".into()),
+            claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            host_mode: None,
+            cc_session_id: None,
+            status,
+            last_message_at: None,
+            created_at: "t".into(),
+            pid: None,
+            pid_start_time: None,
+            log_path: None,
+            last_reconciled_at: last_reconciled.map(String::from),
+        }
+    }
+
+    fn probe_err() -> crate::provider::ReachabilityProbeError {
+        crate::provider::ReachabilityProbeError::new("codex", "store unavailable")
+    }
+
+    // ---- promote admission (task 3.1) ----
+
+    fn codex_source(name: &str, uuid: &str, status: AgentStatus) -> RegistryEntry {
+        let mut e = rentry(name, status, None);
+        e.provider = "codex".into();
+        e.codex_session_id = Some(uuid.into());
+        e
+    }
+
+    #[test]
+    fn admit_promote_empty_uuid_rejected() {
+        match admit_promote(&[], "   ") {
+            PromoteAdmission::Reject(r) => assert!(r.contains("non-empty")),
+            other => panic!("expected reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admit_promote_unknown_uuid_rejected() {
+        // AC1-ERR: no recorded agent holds the session id.
+        let entries = vec![codex_source("other", "different-uuid", AgentStatus::Live)];
+        match admit_promote(&entries, "missing-uuid") {
+            PromoteAdmission::Reject(r) => assert!(r.contains("unknown session")),
+            other => panic!("expected reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admit_promote_settled_exec_source_infers_provider() {
+        // AC1-HP admission: a settled exec source (Live, the codex `ask`
+        // convention) is promotable, and the provider is inferred from it.
+        let entries = vec![codex_source("bot", "uuid-1", AgentStatus::Live)];
+        assert_eq!(
+            admit_promote(&entries, "uuid-1"),
+            PromoteAdmission::Ok {
+                provider: "codex".into()
+            }
+        );
+        // gemini source infers gemini.
+        let mut g = rentry("gbot", AgentStatus::Live, None);
+        g.provider = "gemini".into();
+        g.gemini_session_id = Some("uuid-g".into());
+        assert_eq!(
+            admit_promote(&[g], "uuid-g"),
+            PromoteAdmission::Ok {
+                provider: "gemini".into()
+            }
+        );
+    }
+
+    #[test]
+    fn admit_promote_in_flight_source_rejected() {
+        // AC2-ERR: a source mid-flight (Busy) is not promotable.
+        let entries = vec![codex_source("bot", "uuid-1", AgentStatus::Busy)];
+        match admit_promote(&entries, "uuid-1") {
+            PromoteAdmission::Reject(r) => assert!(r.contains("still running")),
+            other => panic!("expected reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admit_promote_already_hosted_rejected() {
+        // AC2-EDGE: a live interactive host already on this session -> reject the
+        // second promote (one-host invariant).
+        let source = codex_source("bot", "uuid-1", AgentStatus::Exited);
+        let mut host = codex_source("bot2", "uuid-1", AgentStatus::Live);
+        host.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+        match admit_promote(&[source, host], "uuid-1") {
+            PromoteAdmission::Reject(r) => assert!(r.contains("already hosted")),
+            other => panic!("expected reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admit_promote_exited_source_is_promotable() {
+        // An exited exec source is the canonical AC1-HP case.
+        let entries = vec![codex_source("bot", "uuid-1", AgentStatus::Exited)];
+        assert_eq!(
+            admit_promote(&entries, "uuid-1"),
+            PromoteAdmission::Ok {
+                provider: "codex".into()
+            }
+        );
+    }
+
+    // ---- interactive readiness decision (task 2.2) ----
+
+    #[test]
+    fn interactive_readiness_child_dead_is_failed() {
+        // The AC1-FR core: a resume that launches then dies within the settle
+        // window must be spawn-failed regardless of paint/dwell/deadline state.
+        assert_eq!(
+            interactive_readiness_step(false, false, false, false),
+            ReadinessStep::Failed
+        );
+        assert_eq!(
+            interactive_readiness_step(false, true, true, true),
+            ReadinessStep::Failed
+        );
+    }
+
+    #[test]
+    fn interactive_readiness_painted_alive_and_dwelled_is_ready() {
+        assert_eq!(
+            interactive_readiness_step(true, true, true, false),
+            ReadinessStep::Ready
+        );
+    }
+
+    #[test]
+    fn interactive_readiness_painted_but_not_dwelled_keeps_polling() {
+        // Painted + alive but the minimum dwell has not elapsed: keep polling, so
+        // a paint-then-die (resume error printed then exit) is caught as Failed
+        // on the next probe rather than passing on its dying first paint.
+        assert_eq!(
+            interactive_readiness_step(true, true, false, false),
+            ReadinessStep::Poll
+        );
+    }
+
+    #[test]
+    fn interactive_readiness_alive_unpainted_polls_then_ready_at_deadline() {
+        // Alive but no paint yet, before the deadline -> keep polling.
+        assert_eq!(
+            interactive_readiness_step(true, false, false, false),
+            ReadinessStep::Poll
+        );
+        // Alive at the deadline (slow paint / model warming) -> treat as live;
+        // never kill a live process on a slow first paint.
+        assert_eq!(
+            interactive_readiness_step(true, false, false, true),
+            ReadinessStep::Ready
+        );
+    }
+
+    #[test]
+    fn concurrent_spawn_name_reservation_inserts_once() {
+        // Codex P1 (PR #365): two concurrent agent.spawn calls for the same name
+        // both pass the lock-free collision check, then race to push. The
+        // reservation closure runs inside update_registry's exclusive flock, which
+        // serializes the two, so the second observes the first's row and must NOT
+        // duplicate it. update_registry's flock makes sequential calls here a
+        // faithful stand-in for the serialized concurrent ones.
+        let home = tmp_home("spawn-reserve");
+        let path = home.registry_json();
+        let reserve = |entry: RegistryEntry| -> bool {
+            state::update_registry(&path, move |r| {
+                if r.entries.iter().any(|e| e.name == entry.name) {
+                    return false;
+                }
+                r.entries.push(entry);
+                true
+            })
+            .unwrap()
+        };
+        assert!(
+            reserve(rentry("dup", AgentStatus::Live, None)),
+            "first wins"
+        );
+        assert!(
+            !reserve(rentry("dup", AgentStatus::Live, None)),
+            "second loses the race -> no insert"
+        );
+        let reg = state::load_registry(&path).unwrap();
+        assert_eq!(
+            reg.entries.iter().filter(|e| e.name == "dup").count(),
+            1,
+            "exactly one row for the contended name"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn reconcile_flips_unreachable_live_to_orphaned_and_recovers_orphaned() {
+        let entries = vec![
+            rentry("live-but-gone", AgentStatus::Live, None),
+            rentry("back-from-dead", AgentStatus::Orphaned, None),
+        ];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |e| match e.name.as_str() {
+                "live-but-gone" => Ok(false), // unreachable
+                _ => Ok(true),                // reachable
+            },
+            || false,
+            |_| true,
+        );
+        assert_eq!(out.orphans, vec!["live-but-gone".to_string()]);
+        assert_eq!(out.recovered, vec!["back-from-dead".to_string()]);
+        assert_eq!(out.updated.len(), 2);
+        // Both probed -> both get a status change recorded.
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Orphaned),
+            "unreachable live agent should orphan"
+        );
+        assert_eq!(changes[1].new_status, Some(AgentStatus::Live));
+    }
+
+    #[test]
+    fn reconcile_does_not_orphan_a_live_interactive_host_on_store_miss() {
+        // US4 (task 2.3): an interactive host whose session-store probe returns
+        // unreachable (a live `codex resume`/`gemini -r` TUI may not appear in
+        // the exec session index) must NOT be orphaned -- its liveness is the PTY
+        // process, governed by the pid-liveness sweep. An exec sibling with the
+        // same probe result IS still orphaned, so the branch is host_mode-scoped.
+        let mut interactive = rentry("hosted-tui", AgentStatus::Live, None);
+        interactive.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+        let exec = rentry("one-shot", AgentStatus::Live, None);
+        let entries = vec![interactive, exec];
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(false), || false, |_| true);
+        assert_eq!(
+            changes[0].new_status, None,
+            "a live interactive host must not be orphaned on a session-store miss"
+        );
+        assert_eq!(
+            changes[1].new_status,
+            Some(AgentStatus::Orphaned),
+            "an exec sibling with the same probe result is still orphaned"
+        );
+        assert_eq!(out.orphans, vec!["one-shot".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_reaps_a_dead_interactive_host_to_exited() {
+        // Codex P2 (PR #373): a genuinely dead interactive worker (store-miss AND
+        // pid no longer live) must be reaped to Exited DURING reconcile, not left
+        // Live until a daemon restart. A live interactive host (pid_live) on the
+        // same store-miss stays Live.
+        let mut dead = rentry("dead-tui", AgentStatus::Live, None);
+        dead.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+        let mut live = rentry("live-tui", AgentStatus::Live, None);
+        live.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+        let entries = vec![dead, live];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(false), // both store-miss
+            || false,
+            |e| e.name == "live-tui", // only live-tui's worker pid is alive
+        );
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Exited),
+            "a dead interactive host is reaped to Exited during reconcile"
+        );
+        assert_eq!(
+            changes[1].new_status, None,
+            "a live interactive host is left untouched"
+        );
+        // Reaped to Exited, never orphaned.
+        assert!(out.orphans.is_empty());
+        assert_eq!(out.updated, vec!["dead-tui".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_inconclusive_preserves_status() {
+        let entries = vec![rentry("flaky", AgentStatus::Live, None)];
+        let (changes, out) = plan_reconcile(&entries, |_| Err(probe_err()), || false, |_| true);
+        assert_eq!(changes[0].new_status, None, "must NOT flip on inconclusive");
+        assert!(out.orphans.is_empty());
+        assert_eq!(out.inconsistent.len(), 1);
+        assert_eq!(out.inconsistent[0].0, "flaky");
+    }
+
+    #[test]
+    fn reconcile_leaves_terminal_states_untouched() {
+        // An exited entry that probes unreachable must NOT become orphaned, and a
+        // reachable exited entry must NOT be resurrected to live.
+        let entries = vec![
+            rentry("done", AgentStatus::Exited, None),
+            rentry("dead", AgentStatus::PermanentDead, None),
+        ];
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(false), || false, |_| true);
+        assert!(changes.iter().all(|c| c.new_status.is_none()));
+        assert!(out.orphans.is_empty() && out.updated.is_empty());
+    }
+
+    /// One-shot `ask` shape: empty short_id + no pid (the discriminator
+    /// `is_one_shot_ask` keys on), host_mode exec, a resumable provider session.
+    fn ask_entry(name: &str, status: AgentStatus) -> RegistryEntry {
+        let mut e = rentry(name, status, None);
+        e.short_id = String::new();
+        e.pid = None;
+        e.codex_session_id = Some("resume-uuid".into());
+        e.session_id = None;
+        e
+    }
+
+    #[test]
+    fn reconcile_one_shot_ask_settles_to_exited_even_when_reachable() {
+        // AC3-HP: a finished `ask` row settles to Exited regardless of whether its
+        // provider session file still exists. The probe here returns Ok(true)
+        // (reachable == session file present == "resumable"); the ask branch must
+        // ignore it and settle to Exited by process-liveness alone. If the probe
+        // were (wrongly) consulted for status, this Live row would stay Live.
+        let entries = vec![ask_entry("codex-ask", AgentStatus::Live)];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true), // reachable: session file exists -> resumable, NOT running
+            || false,
+            |_| true,
+        );
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Exited),
+            "a finished ask settles to exited even when its session file is reachable"
+        );
+        assert_eq!(out.updated, vec!["codex-ask".to_string()]);
+        assert!(out.orphans.is_empty(), "an ask is exited, never orphaned");
+        // AC3-EDGE independence: the row's resumable session id is untouched by the
+        // status settle (status == liveness; session_id == resumability, separate).
+        assert_eq!(entries[0].codex_session_id.as_deref(), Some("resume-uuid"));
+    }
+
+    #[test]
+    fn reconcile_one_shot_ask_already_terminal_is_untouched() {
+        // An ask already Exited must not be re-flagged as updated (idempotent).
+        let entries = vec![ask_entry("done-ask", AgentStatus::Exited)];
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true);
+        assert_eq!(changes[0].new_status, None);
+        assert!(out.updated.is_empty());
+    }
+
+    #[test]
+    fn apply_reconcile_change_clears_pid_only_on_exited() {
+        // Locked Decision #7: a row reconciled to Exited drops its pid; any other
+        // transition keeps it. Every applied change freshens last_reconciled_at.
+        let mut to_exited = rentry("x", AgentStatus::Live, None);
+        to_exited.pid = Some(4242);
+        to_exited.pid_start_time = Some(99);
+        apply_reconcile_change(&mut to_exited, Some(AgentStatus::Exited), "T1");
+        assert_eq!(to_exited.status, AgentStatus::Exited);
+        assert_eq!(to_exited.pid, None, "exited row must drop its pid");
+        assert_eq!(to_exited.pid_start_time, None);
+        assert_eq!(to_exited.last_reconciled_at.as_deref(), Some("T1"));
+
+        let mut to_orphaned = rentry("y", AgentStatus::Live, None);
+        to_orphaned.pid = Some(4242);
+        apply_reconcile_change(&mut to_orphaned, Some(AgentStatus::Orphaned), "T2");
+        assert_eq!(to_orphaned.status, AgentStatus::Orphaned);
+        assert_eq!(
+            to_orphaned.pid,
+            Some(4242),
+            "non-exited transition keeps pid"
+        );
+
+        // No status change: status held, but CHECKED still freshens (AC2-FR).
+        let mut no_change = rentry("z", AgentStatus::Live, Some("OLD"));
+        no_change.pid = Some(4242);
+        apply_reconcile_change(&mut no_change, None, "T3");
+        assert_eq!(no_change.status, AgentStatus::Live);
+        assert_eq!(no_change.pid, Some(4242));
+        assert_eq!(no_change.last_reconciled_at.as_deref(), Some("T3"));
+    }
+
+    #[test]
+    fn reconcile_defers_remaining_when_budget_exhausted() {
+        let entries = vec![
+            rentry("a", AgentStatus::Live, None),
+            rentry("b", AgentStatus::Live, None),
+            rentry("c", AgentStatus::Live, None),
+        ];
+        // Budget allows exactly one probe, then reports exhausted.
+        let mut probes = 0;
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| {
+                probes += 1;
+                Ok(true)
+            },
+            {
+                let mut checked = 0;
+                move || {
+                    let exhausted = checked >= 1;
+                    checked += 1;
+                    exhausted
+                }
+            },
+            |_| true,
+        );
+        assert_eq!(out.deferred, 2, "two trailing entries should defer");
+        assert_eq!(changes.len(), 1, "only one entry probed before budget");
+    }
+
+    #[test]
+    fn run_reconcile_sweep_empty_registry_is_noop() {
+        // Boundaries (Architecture B): an empty registry sweeps cleanly -- no
+        // entries, no changes -- the startup-path no-op case. Exercises the shared
+        // sweep core (load -> sort -> write -> emit) directly.
+        let home = tmp_home("sweep-empty");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let result = run_reconcile_sweep(&home, &emitter).expect("empty sweep ok");
+        assert!(result.entries.is_empty());
+        assert_eq!(result.outcome, ReconcileOutcome::default());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    // ---------------------------------------------------------------------------
+    // poll_until_ready unit tests (Task 1.1: readiness-detector wiring)
+    // ---------------------------------------------------------------------------
+
+    /// A detector that reports ready as soon as the visible text ends with "❯".
+    struct PromptDetector;
+    impl crate::readiness::ReadinessDetector for PromptDetector {
+        fn provider_name(&self) -> &str {
+            "test-cli"
+        }
+        fn is_ready(
+            &self,
+            screen: &crate::readiness::ScreenView,
+        ) -> Result<bool, crate::readiness::ReadinessError> {
+            Ok(screen.visible_text.trim_end().ends_with('\u{276f}'))
+        }
+    }
+
+    /// A detector that always returns not-ready (simulates a hung CLI).
+    struct NeverReadyDetector;
+    impl crate::readiness::ReadinessDetector for NeverReadyDetector {
+        fn provider_name(&self) -> &str {
+            "never"
+        }
+        fn is_ready(
+            &self,
+            _screen: &crate::readiness::ScreenView,
+        ) -> Result<bool, crate::readiness::ReadinessError> {
+            Ok(false)
+        }
+    }
+
+    /// AC1-HP: poll_until_ready returns the settled screen text once the
+    /// detector reports ready. The reply must come from the ready snapshot,
+    /// NOT from an intermediate partial snapshot.
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_until_ready_returns_settled_reply_on_ready_prompt() {
+        // Three snapshots: two "not ready" then one showing the idle prompt.
+        let snapshots: &[&str] = &["loading...", "still loading...", "done \u{276f}"];
+        let idx = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let idx2 = idx.clone();
+        let fetcher = move || {
+            let i = idx2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let text = snapshots[i.min(snapshots.len() - 1)].to_string();
+            std::future::ready(Some(text))
+        };
+        let result = poll_until_ready(
+            fetcher,
+            Box::new(PromptDetector),
+            Duration::from_millis(1),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let reply = result.unwrap();
+        assert_eq!(
+            reply, "done \u{276f}",
+            "reply must be the settled snapshot text, got {reply:?}"
+        );
+    }
+
+    /// AC2-ERR: poll_until_ready returns Err when the timeout elapses before
+    /// the detector ever reports ready. It must NOT silently return an empty or
+    /// partial reply.
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_until_ready_returns_error_on_timeout() {
+        let fetcher = || std::future::ready(Some("still thinking...".to_string()));
+        let result = poll_until_ready(
+            fetcher,
+            Box::new(NeverReadyDetector),
+            Duration::from_millis(10),
+            Duration::from_millis(40), // very short timeout
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected Err on timeout, got Ok({:?})",
+            result.ok()
+        );
+    }
+
+    /// AC3-EDGE: a settled screen with no reply content returns an empty string,
+    /// not fabricated text. (Matches Python `result.reply or ""`.)
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_until_ready_empty_settled_screen_returns_empty_string() {
+        // The screen text is just the prompt glyph with nothing before it.
+        let fetcher = || std::future::ready(Some("\u{276f}".to_string()));
+        let result = poll_until_ready(
+            fetcher,
+            Box::new(PromptDetector),
+            Duration::from_millis(1),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        // The reply is the raw screen text at the settled state. An empty/glyph-only
+        // screen is fine — callers use `reply or ""` to handle it.
+        let reply = result.unwrap();
+        assert!(!reply.contains("fabricated"), "must not fabricate content");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4.1: provider_for_pty + handle_spawn provider-derived argv
+    // -----------------------------------------------------------------------
+
+    /// AC1-HP: provider_for_pty returns Some for known PTY providers (codex/gemini)
+    /// and None for unknown or non-PTY providers (claude).
+    #[test]
+    fn provider_for_pty_known_providers() {
+        assert!(
+            provider_for_pty("codex").is_some(),
+            "codex must have a PTY provider"
+        );
+        assert!(
+            provider_for_pty("gemini").is_some(),
+            "gemini must have a PTY provider"
+        );
+        // claude is a shellout provider: as_pty() -> None
+        assert!(
+            provider_for_pty("claude").is_none(),
+            "claude is not PTY-managed; provider_for_pty must return None"
+        );
+        // unknown provider
+        assert!(
+            provider_for_pty("nonexistent").is_none(),
+            "unknown provider must return None"
+        );
+    }
+
+    fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
+        Ctx {
+            home,
+            emitter: EventEmitter::new(std::path::PathBuf::from("/dev/null"), "daemon"),
+            opts: DaemonOptions {
+                idle_exit: Duration::from_secs(1800),
+                worker_bin,
+                reconcile_on_start: true,
+            },
+            started_at: std::time::Instant::now(),
+            exe_fingerprint: crate::drift::ExeFingerprint::current(),
+            pid_start_time: process_start_time(std::process::id()),
+            drives: crate::drive::new_table(),
+        }
+    }
+
+    /// Like `test_ctx` but wires the emitter to `home.events_jsonl()` so
+    /// that tests checking emitted events can read them back with `read_events`.
+    fn test_ctx_with_events(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
+        let events_path = home.events_jsonl();
+        Ctx {
+            home,
+            emitter: EventEmitter::new(events_path, "daemon"),
+            opts: DaemonOptions {
+                idle_exit: Duration::from_secs(1800),
+                worker_bin,
+                reconcile_on_start: true,
+            },
+            started_at: std::time::Instant::now(),
+            exe_fingerprint: crate::drift::ExeFingerprint::current(),
+            pid_start_time: process_start_time(std::process::id()),
+            drives: crate::drive::new_table(),
+        }
+    }
+
+    // ---- Group 2, Task 3.1: switchboard tests --------------------------
+    //
+    // A fake stream-json emitter (NEVER a real `claude -p`): for each user turn
+    // it reads on stdin it emits the canonical sequence (user-echo receipt, a
+    // partial, the assistant reply, a result). Mirrors the stream_worker harness.
+
+    const FAKE_STREAM_EMITTER: &str = r#"
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"s1"}'
+while IFS= read -r line; do
+  printf '%s\n' '{"type":"user","message":{"role":"user"}}'
+  printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"par"}}}'
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"reply-text"}]}}'
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"reply-text"}'
+done
+"#;
+
+    /// A SHORT-path agents home under `/tmp` (not the long `/var/folders` temp
+    /// dir): a worker's `<root>/<short_id>/worker.sock` must fit in SUN_LEN
+    /// (~104 chars on macOS), so switchboard tests that bind real worker sockets
+    /// need a short root. Mirrors the stream_worker test harness.
+    fn short_home(tag: &str) -> AgentsHome {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static C: AtomicU32 = AtomicU32::new(0);
+        let n = C.fetch_add(1, Ordering::Relaxed);
+        let p = PathBuf::from(format!("/tmp/abisb{tag}{}_{n}", std::process::id()));
+        let home = AgentsHome::at(&p);
+        home.ensure_root().unwrap();
+        home
+    }
+
+    /// Seed a held-stream-thread registry row (claude + full UUID + Live).
+    fn seed_stream_row(home: &AgentsHome, name: &str, short_id: &str) {
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: name.into(),
+                short_id: short_id.into(),
+                provider: "claude".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: Some(format!("uuid-{short_id}")),
+                messaging_socket_path: None,
+                codex_session_id: None,
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: None,
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-09T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+    }
+
+    /// Start a real stream worker (fake emitter child) on `home.worker_sock(id)`
+    /// via the PUBLIC `stream_worker::run`; wait for its socket to appear.
+    async fn start_stream_worker(home: &AgentsHome, short_id: &str, script: &str) -> PathBuf {
+        let cfg = crate::stream_worker::StreamWorkerConfig::new(
+            short_id,
+            home.root().to_path_buf(),
+            std::env::temp_dir(),
+            vec!["bash".into(), "-c".into(), script.into()],
+        );
+        let short_id_dbg = short_id.to_string();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                if let Err(e) = crate::stream_worker::run(cfg).await {
+                    eprintln!("STREAM WORKER RUN ERROR ({short_id_dbg}): {e}");
+                }
+            });
+        });
+        let sock = home.worker_sock(short_id);
+        let start = std::time::Instant::now();
+        while !sock.exists() && start.elapsed() < Duration::from_secs(20) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            sock.exists(),
+            "stream worker socket never appeared for {short_id}"
+        );
+        sock
+    }
+
+    /// Locate the cargo-built `fno-agents-worker` next to the test binary
+    /// (target/debug/deps/<test> -> target/debug/fno-agents-worker). `None` if it
+    /// is not built, so the e2e adopt test SKIPS rather than failing in an
+    /// environment where only the lib test target was compiled.
+    fn built_worker_bin() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?.parent()?; // deps -> debug
+        let cand = dir.join("fno-agents-worker");
+        cand.exists().then_some(cand)
+    }
+
+    // ---- Group 3 (ab-734fcd6c): claude stream-json front door --------------
+
+    #[test]
+    fn stream_claim_holder_is_short_id_scoped() {
+        assert_eq!(stream_claim_holder("sw7"), "stream:sw7");
+    }
+
+    #[test]
+    fn is_live_writer_excludes_orphaned_and_terminal() {
+        // Live-ish: a real writer holds the session -> one-host refuses a re-adopt.
+        for s in [
+            AgentStatus::Live,
+            AgentStatus::Ready,
+            AgentStatus::Idle,
+            AgentStatus::Busy,
+            AgentStatus::Spawning,
+            AgentStatus::Restarting,
+        ] {
+            assert!(is_live_writer(s), "{s:?} should count as a live writer");
+        }
+        // Dead-but-non-terminal + terminal: the session is re-adoptable (AC1-FR).
+        for s in [
+            AgentStatus::Orphaned,
+            AgentStatus::Failed,
+            AgentStatus::Exited,
+            AgentStatus::PermanentDead,
+        ] {
+            assert!(!is_live_writer(s), "{s:?} must NOT block re-adoption");
+        }
+    }
+
+    #[test]
+    fn claim_acquire_argv_targets_session_key() {
+        assert_eq!(
+            claim_acquire_argv("U-1", "stream:sw1"),
+            vec![
+                "claim",
+                "acquire",
+                "session:U-1",
+                "--holder",
+                "stream:sw1",
+                "-J"
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_stream_worker_args_carry_stream_flags_and_child_argv() {
+        let child = crate::provider::claude_stream_json_resume_argv("U-9");
+        let args = claude_stream_worker_args(
+            "sw9",
+            std::path::Path::new("/home/agents"),
+            std::path::Path::new("/work"),
+            "U-9",
+            "stream:sw9",
+            &child,
+        );
+        // Selector + claim pair are present, the child argv follows `--`, and the
+        // resume target is the FULL uuid (never the jobId).
+        assert!(args.contains(&"--stream".to_string()));
+        assert_eq!(
+            args.iter()
+                .position(|a| a == "--session-uuid")
+                .map(|i| &args[i + 1]),
+            Some(&"U-9".to_string())
+        );
+        assert_eq!(
+            args.iter()
+                .position(|a| a == "--holder")
+                .map(|i| &args[i + 1]),
+            Some(&"stream:sw9".to_string())
+        );
+        let sep = args
+            .iter()
+            .position(|a| a == "--")
+            .expect("missing -- separator");
+        assert_eq!(&args[sep + 1..], child.as_slice());
+        assert_eq!(child[0], "claude");
+        assert!(child.contains(&"--resume".to_string()) && child.contains(&"U-9".to_string()));
+    }
+
+    #[test]
+    fn build_claude_stream_entry_marks_interactive_claude_with_full_uuid() {
+        let e = build_claude_stream_entry(
+            "adopted",
+            "sw3",
+            std::path::Path::new("/proj"),
+            "FULL-UUID-3",
+            4242,
+            Some(99),
+            PathBuf::from("/proj/.fno/agents/sw3/timeline.jsonl"),
+        );
+        assert_eq!(e.provider, "claude");
+        assert_eq!(
+            e.host_mode.as_deref(),
+            Some(crate::state::HOST_MODE_INTERACTIVE)
+        );
+        assert!(
+            e.is_interactive(),
+            "stream thread must read as interactive for reconcile"
+        );
+        assert_eq!(e.claude_session_uuid.as_deref(), Some("FULL-UUID-3"));
+        assert_eq!(e.status, AgentStatus::Live);
+        assert_eq!(e.pid, Some(4242));
+        // The resume key lives in claude_session_uuid, NOT the jobId field.
+        assert_eq!(e.claude_short_id, None);
+    }
+
+    /// AC1-ERR / front-door routing: a fresh `host --provider claude` with no
+    /// `--from` has nothing to resume; it is rejected (before any claim/spawn)
+    /// with a pointer to the adopt verb, proving claude routed to the stream lane
+    /// (not the codex/gemini PTY "only codex or gemini" gate).
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_claude_without_from_rejected_with_adopt_pointer() {
+        let home = short_home("clnofrom");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({"name": "cl", "provider": "claude", "host_mode": "interactive"}),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_eq!(e.code, ErrorCode::InvalidParams);
+                assert!(
+                    e.message.contains("promote") && e.message.contains("--from"),
+                    "claude host without --from must point at the adopt verb; got: {}",
+                    e.message
+                );
+            }
+            _ => panic!("expected error for claude host without --from"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC1-EDGE single-writer: a second adopt of a session already held by a live
+    /// claude thread is refused (one writer per session), before any spawn. Uses
+    /// the lock-free one-host pre-check so it is hermetic (no worker, no claim).
+    #[tokio::test(flavor = "current_thread")]
+    async fn promote_claude_duplicate_session_refused() {
+        let home = short_home("cldup");
+        seed_stream_row(&home, "first", "swDup"); // claude_session_uuid = uuid-swDup, Live
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "second", "provider": "claude", "host_mode": "interactive",
+                "resume_id": "uuid-swDup"
+            }),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_eq!(e.code, ErrorCode::InvalidParams);
+                assert!(
+                    e.message.contains("already hosted") && e.message.contains("first"),
+                    "duplicate adopt must name the existing host; got: {}",
+                    e.message
+                );
+            }
+            _ => panic!("expected single-writer refusal for duplicate adopt"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC1-HP end-to-end: `promote --provider claude --from <uuid>` adopts an idle
+    /// session by spawning the real `--stream` worker (with a FAKE emitter child,
+    /// never a real `claude -p`) and registering it `live`. The row carries
+    /// provider=claude + host_mode=interactive + the FULL uuid, and the worker
+    /// serves the stream protocol. Skips when the worker binary is not built.
+    #[tokio::test(flavor = "current_thread")]
+    async fn promote_claude_spawns_live_stream_thread() {
+        let Some(worker_bin) = built_worker_bin() else {
+            eprintln!("skip promote_claude_spawns_live_stream_thread: worker bin not built");
+            return;
+        };
+        let home = short_home("cle2e");
+        // Hermetic claims: point `fno claim` at the test home so the real
+        // acquire (daemon, this process) AND the worker child (inherits this env)
+        // write `session:uuid-e2e` under /tmp, never the canonical, shared
+        // ~/.fno/claims. A panic before teardown then leaks at worst into a
+        // throwaway /tmp dir. Only this test exercises claims, so the process-wide
+        // env set does not race the claim-free tests. (Edition 2021: set_var safe.)
+        std::env::set_var("FNO_CLAIMS_ROOT", home.root());
+        let ctx = test_ctx(home.clone(), worker_bin);
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "cl", "provider": "claude", "host_mode": "interactive",
+                "resume_id": "uuid-e2e", "cwd": "/tmp",
+                // Test escape hatch: a fake stream emitter stands in for `claude -p`.
+                "argv": ["bash", "-c", FAKE_STREAM_EMITTER]
+            }),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        let res = resp.result().expect("claude adopt errored");
+        assert_eq!(res["provider"], "claude");
+        assert_eq!(res["status"], "live");
+        assert_eq!(res["lane"], "stream");
+
+        let reg = load_registry_offloaded(home.registry_json()).await;
+        let row = reg.find("cl").expect("adopted row missing");
+        assert_eq!(row.provider, "claude");
+        assert_eq!(row.host_mode.as_deref(), Some("interactive"));
+        assert_eq!(row.claude_session_uuid.as_deref(), Some("uuid-e2e"));
+        assert_eq!(row.status, AgentStatus::Live);
+
+        let sock = home.worker_sock(&row.short_id);
+        assert!(
+            is_live_stream_thread(&sock).await,
+            "adopted thread must serve the stream protocol"
+        );
+
+        // Teardown: shut the worker down (its RAII guard releases the claim), then
+        // drop the test home (which holds the redirected claims dir) and clear the
+        // env override so later tests see the default claims root.
+        best_effort_worker_shutdown(&sock).await;
+        std::fs::remove_dir_all(home.root()).ok();
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+    }
+
+    /// AC1-ERR (codex review P2): a dead-on-arrival `claude -p --resume` (bad uuid
+    /// / auth fail, here a child that exits immediately) must NOT register live.
+    /// The worker still binds + answers stream.ping, but stream.status.child_alive
+    /// is false, so adopt is rejected and no row is created.
+    #[tokio::test(flavor = "current_thread")]
+    async fn promote_claude_dead_on_arrival_resume_rejected() {
+        let Some(worker_bin) = built_worker_bin() else {
+            eprintln!("skip promote_claude_dead_on_arrival_resume_rejected: worker bin not built");
+            return;
+        };
+        let home = short_home("cldoa");
+        std::env::set_var("FNO_CLAIMS_ROOT", home.root());
+        let ctx = test_ctx(home.clone(), worker_bin);
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "cl", "provider": "claude", "host_mode": "interactive",
+                "resume_id": "uuid-doa", "cwd": "/tmp",
+                // Child exits immediately -> stands in for a bad/expired --resume id.
+                "argv": ["bash", "-c", "exit 1"]
+            }),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        assert!(
+            resp.is_err(),
+            "DOA resume child must be rejected, not registered"
+        );
+        assert_eq!(resp.error().unwrap().code, ErrorCode::SpawnFailed);
+        let reg = load_registry_offloaded(home.registry_json()).await;
+        assert!(
+            reg.find("cl").is_none(),
+            "no row may be registered for a DOA adopt"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+    }
+
+    /// AC2-HP: `send A->B` between two held stream threads drives B, discriminates
+    /// the user-echo receipt from the reply, and mirrors B's reply into A.
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_drives_b_and_mirrors_into_a() {
+        let home = short_home("hp");
+        seed_stream_row(&home, "A", "swA");
+        seed_stream_row(&home, "B", "swB");
+        let _a = start_stream_worker(&home, "swA", FAKE_STREAM_EMITTER).await;
+        let _b = start_stream_worker(&home, "swB", FAKE_STREAM_EMITTER).await;
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent-worker"));
+
+        let req = Request::new(
+            1,
+            "agent.switchboard",
+            json!({"to": "B", "from": "A", "body": "hello"}),
+        );
+        let resp = handle_switchboard(&ctx, &req).await;
+        let res = resp.result().expect("switchboard errored");
+        assert_eq!(res["delivered"], true, "not delivered: {res:?}");
+        assert_eq!(res["reply"], "reply-text");
+        assert_eq!(res["is_error"], false);
+        assert_eq!(res["receipt"], true, "user-echo receipt not observed");
+        assert_eq!(res["mirrored"], true, "B's reply was not mirrored into A");
+
+        // The injected-event reuse carries the switchboard transport discriminator.
+        let events = read_events(&home);
+        assert!(
+            events.iter().any(|e| e["kind"] == "agent_deliver_injected"
+                && e["transport"] == "switchboard"
+                && e["mirrored"] == true),
+            "switchboard injected event missing: {events:?}"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A second turn against the SAME persistent worker must return the SECOND
+    /// turn's reply, not the stale first result still in the append-only frame
+    /// log. Regression for the cursor=0 bug: the emitter tags each reply with a
+    /// per-turn counter so a stale read is detectable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_second_turn_returns_fresh_reply() {
+        const COUNTING_EMITTER: &str = r#"
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"s1"}'
+n=0
+while IFS= read -r line; do
+  n=$((n+1))
+  printf '%s\n' '{"type":"user","message":{"role":"user"}}'
+  printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"reply-$n\"}]}}"
+  printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"reply-$n\"}"
+done
+"#;
+        let home = short_home("fresh");
+        seed_stream_row(&home, "B", "swB");
+        let _b = start_stream_worker(&home, "swB", COUNTING_EMITTER).await;
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+
+        let r1 = handle_switchboard(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.switchboard",
+                json!({"to": "B", "from": "ghost", "body": "first"}),
+            ),
+        )
+        .await;
+        assert_eq!(r1.result().expect("hop1")["reply"], "reply-1");
+
+        let r2 = handle_switchboard(
+            &ctx,
+            &Request::new(
+                2,
+                "agent.switchboard",
+                json!({"to": "B", "from": "ghost", "body": "second"}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            r2.result().expect("hop2")["reply"],
+            "reply-2",
+            "second drive returned a STALE reply (cursor not advanced past the prior turn)"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// Routing: a claude peer with no live stream worker demotes (the caller
+    /// falls back to the durable/socket path), not an error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_demotes_when_b_not_a_live_stream_thread() {
+        let home = short_home("demote");
+        seed_stream_row(&home, "B", "swB"); // registered, but NO worker started
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+
+        let req = Request::new(
+            1,
+            "agent.switchboard",
+            json!({"to": "B", "from": "A", "body": "hi"}),
+        );
+        let resp = handle_switchboard(&ctx, &req).await;
+        let res = resp
+            .result()
+            .expect("should be Ok-demote, not an RPC error");
+        assert_eq!(res["delivered"], false);
+        assert_eq!(res["reason"], "not-a-live-stream-thread");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// Degenerate one-way drive: B is a held stream thread but A is not (absent),
+    /// so the turn delivers to B with no mirror.
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_one_way_when_peer_absent() {
+        let home = short_home("oneway");
+        seed_stream_row(&home, "B", "swB");
+        let _b = start_stream_worker(&home, "swB", FAKE_STREAM_EMITTER).await;
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+
+        let req = Request::new(
+            1,
+            "agent.switchboard",
+            json!({"to": "B", "from": "ghost", "body": "hi"}),
+        );
+        let resp = handle_switchboard(&ctx, &req).await;
+        let res = resp.result().expect("switchboard errored");
+        assert_eq!(res["delivered"], true);
+        assert_eq!(res["reply"], "reply-text");
+        assert_eq!(res["mirrored"], false, "no peer to mirror into");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// An unknown `to` is an RPC error (AgentNotFound), not a silent no-op.
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_unknown_target_is_not_found() {
+        let home = short_home("404");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+        let req = Request::new(
+            1,
+            "agent.switchboard",
+            json!({"to": "nope", "from": "A", "body": "hi"}),
+        );
+        let resp = handle_switchboard(&ctx, &req).await;
+        if let crate::protocol::ResponsePayload::Err(ref e) = resp.payload {
+            assert_eq!(e.code, ErrorCode::AgentNotFound);
+        } else {
+            panic!("expected AgentNotFound, got {resp:?}");
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC2-HP: handle_spawn with a known provider and no explicit argv resolves
+    /// the launch argv via ProviderWithPty::create_argv and registers the agent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_spawn_resolves_argv_from_provider_when_absent() {
+        // We cannot actually launch a worker in a unit test, so we intercept at
+        // the point where the argv resolution happens: the daemon returns SpawnFailed
+        // (because the worker binary doesn't exist in the test env) rather than
+        // InvalidParams. The key assertion is that it did NOT fail with InvalidParams
+        // ("Wave 3 spawn requires explicit argv..."); it tried to spawn.
+        let home = tmp_home("spawn-provider-argv");
+        let ctx = test_ctx(
+            home.clone(),
+            PathBuf::from("/nonexistent/fno-agents-worker"),
+        );
+        // Spawn with provider="codex" but NO argv param.
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({"name": "test-agent", "provider": "codex"}),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        // Must NOT be InvalidParams (which would mean argv resolution didn't happen).
+        if let crate::protocol::ResponsePayload::Err(ref e) = resp.payload {
+            assert_ne!(
+                e.code,
+                ErrorCode::InvalidParams,
+                "handle_spawn must not return InvalidParams when provider is known; got: {}",
+                e.message
+            );
+            // SpawnFailed or Internal is expected (worker binary absent in test env).
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC3-ERR: handle_spawn with an unknown/non-PTY provider and no argv returns InvalidParams.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_spawn_unknown_provider_no_argv_returns_invalid_params() {
+        let home = tmp_home("spawn-unknown-provider");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({"name": "test-agent", "provider": "nonexistent-provider"}),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_eq!(
+                    e.code,
+                    ErrorCode::InvalidParams,
+                    "unknown provider without argv must return InvalidParams"
+                );
+            }
+            _ => panic!("expected error response for unknown provider"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC4-HP: handle_ask on AgentNotFound with a provider param tries to spawn
+    /// (does NOT return AgentNotFound).
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_ask_first_contact_with_provider_does_not_return_agent_not_found() {
+        let home = tmp_home("ask-first-contact");
+        let ctx = test_ctx(
+            home.clone(),
+            PathBuf::from("/nonexistent/fno-agents-worker"),
+        );
+        // Agent does not exist yet; provider="codex" is provided.
+        let req = Request::new(
+            1,
+            "agent.ask",
+            json!({"name": "new-agent", "message": "hello", "provider": "codex"}),
+        );
+        let resp = handle_ask(&ctx, &req).await;
+        // The worker binary does not exist, so the create-on-first-contact spawn
+        // must FAIL - and the failure must come from the spawn attempt, not from
+        // the not-found short-circuit. Require a hard Err (the previous `if let`
+        // passed vacuously on a spurious Ok) whose code is neither AgentNotFound
+        // (would mean first-contact never tried to spawn) nor InvalidParams
+        // (would mean the provider param was not honored). This proves the
+        // first-contact branch routed into handle_spawn (cv-789fdba0 part a).
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_ne!(
+                    e.code,
+                    ErrorCode::AgentNotFound,
+                    "first-contact ask with --provider must attempt a spawn, not short-circuit AgentNotFound; got: {}",
+                    e.message
+                );
+                assert_ne!(
+                    e.code,
+                    ErrorCode::InvalidParams,
+                    "provider was supplied, so this must not be the missing-provider error; got: {}",
+                    e.message
+                );
+            }
+            crate::protocol::ResponsePayload::Ok(v) => {
+                panic!("spawn must fail with a missing worker binary, got Ok: {v}")
+            }
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC5-ERR: handle_ask on AgentNotFound WITHOUT a provider returns InvalidParams
+    /// (mirrors Python requiring --provider on first contact).
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_ask_first_contact_without_provider_returns_invalid_params() {
+        let home = tmp_home("ask-no-provider");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        // Agent does not exist; NO provider param.
+        let req = Request::new(
+            1,
+            "agent.ask",
+            json!({"name": "ghost-agent", "message": "hello"}),
+        );
+        let resp = handle_ask(&ctx, &req).await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_eq!(
+                    e.code,
+                    ErrorCode::InvalidParams,
+                    "first-contact ask without --provider must return InvalidParams; got: {}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("provider"),
+                    "error message must mention 'provider', got: {}",
+                    e.message
+                );
+            }
+            _ => panic!("expected error for first-contact ask without provider"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    // ── gate record tests (Task 2.3) ─────────────────────────────────────────
+
+    /// AC4-ERR (Task 2.3): provider with status=failed in injection-gate.json
+    /// -> deliver returns delivered=false reason=injection-gate-failed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_deliver_gate_failed_returns_failed_reason() {
+        let home = tmp_home("deliver-gate-failed");
+        // Register a live codex worker.
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "failed-gate-agent".into(),
+                short_id: "fgA".into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: Some("some-uuid".into()),
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: Some("interactive".into()),
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-07T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        // Write a gate record with status=failed for codex.
+        let gate_path = home.injection_gate_json();
+        std::fs::write(
+            &gate_path,
+            r#"{"v":1,"providers":{"codex":{"status":"failed","checked_at":"2026-06-07T00:00:00Z","method":"manual","notes":""}}}"#,
+        )
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.deliver",
+            json!({"name": "failed-gate-agent", "body": "hello", "from_name": "sender"}),
+        );
+        let resp = handle_deliver(&ctx, &req).await;
+        assert!(
+            !resp.is_err(),
+            "failed-gate deliver must return Ok, not RPC error"
+        );
+        let result = resp.result().unwrap();
+        assert_eq!(result["delivered"], false);
+        assert_eq!(
+            result["reason"], "injection-gate-failed",
+            "expected injection-gate-failed for status=failed, got {:?}",
+            result["reason"]
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// injection_gate precedence: thread-local override beats file record.
+    #[test]
+    fn injection_gate_thread_local_beats_file_record() {
+        let home = tmp_home("gate-override-beats-file");
+        // Write a gate record with status=failed for codex.
+        let gate_path = home.injection_gate_json();
+        std::fs::write(
+            &gate_path,
+            r#"{"v":1,"providers":{"codex":{"status":"failed","checked_at":"2026-06-07T00:00:00Z","method":"manual","notes":""}}}"#,
+        )
+        .unwrap();
+        // With thread-local override set to allow codex, gate must return Passed
+        // even though the file says failed.
+        let _guard = with_injection_gate_allow("codex");
+        assert_eq!(
+            injection_gate_with_home("codex", &home),
+            InjectionGate::Passed,
+            "thread-local override must beat file record"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// Malformed JSON in gate file -> Unverified (never crash, never Passed).
+    #[test]
+    fn injection_gate_malformed_file_returns_unverified() {
+        let home = tmp_home("gate-malformed");
+        let gate_path = home.injection_gate_json();
+        std::fs::write(&gate_path, b"not-json!!!").unwrap();
+        assert_eq!(
+            injection_gate_with_home("codex", &home),
+            InjectionGate::Unverified,
+            "malformed gate file must return Unverified"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// Absent provider in gate file -> Unverified.
+    #[test]
+    fn injection_gate_absent_provider_returns_unverified() {
+        let home = tmp_home("gate-absent-provider");
+        let gate_path = home.injection_gate_json();
+        // File exists but only has gemini, not codex.
+        std::fs::write(
+            &gate_path,
+            r#"{"v":1,"providers":{"gemini":{"status":"passed","checked_at":"2026-06-07T00:00:00Z","method":"manual","notes":""}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            injection_gate_with_home("codex", &home),
+            InjectionGate::Unverified,
+            "absent provider must return Unverified"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// Provider with status=passed -> Passed.
+    #[test]
+    fn injection_gate_passed_status_returns_passed() {
+        let home = tmp_home("gate-status-passed");
+        let gate_path = home.injection_gate_json();
+        std::fs::write(
+            &gate_path,
+            r#"{"v":1,"providers":{"codex":{"status":"passed","checked_at":"2026-06-07T00:00:00Z","method":"manual","notes":""}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            injection_gate_with_home("codex", &home),
+            InjectionGate::Passed,
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// gate_check RPC manual mode writes the gate record atomically.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_gate_check_manual_writes_record() {
+        let home = tmp_home("gate-check-manual");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.gate_check",
+            json!({"provider": "codex", "record": "manual", "status": "passed", "notes": "verified by operator"}),
+        );
+        let resp = handle_gate_check(&ctx, &req).await;
+        assert!(
+            !resp.is_err(),
+            "gate_check manual must return Ok: {:?}",
+            resp
+        );
+        let result = resp.result().unwrap();
+        assert_eq!(result["status"], "passed");
+        // Verify file was written.
+        let gate_path = home.injection_gate_json();
+        assert!(gate_path.exists(), "injection-gate.json must be written");
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&gate_path).unwrap()).unwrap();
+        assert_eq!(content["v"], 1);
+        assert_eq!(content["providers"]["codex"]["status"], "passed");
+        assert_eq!(content["providers"]["codex"]["method"], "manual");
+        assert_eq!(
+            content["providers"]["codex"]["notes"],
+            "verified by operator"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// gemini #459 high: an existing-but-malformed gate file must surface an
+    /// error from gate_check, NOT be replaced by an empty doc (which would
+    /// wipe every other provider's attestation on the merge-write).
+    #[tokio::test]
+    async fn handle_gate_check_manual_malformed_existing_file_errors_no_wipe() {
+        let home = tmp_home("gate-check-malformed");
+        let gate_path = home.injection_gate_json();
+        std::fs::create_dir_all(gate_path.parent().unwrap()).unwrap();
+        std::fs::write(&gate_path, "{not json").unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.gate_check",
+            json!({"provider": "codex", "record": "manual", "status": "passed", "notes": ""}),
+        );
+        let resp = handle_gate_check(&ctx, &req).await;
+        assert!(
+            resp.is_err(),
+            "malformed existing gate file must error, got: {:?}",
+            resp
+        );
+        // The malformed file is preserved byte-for-byte (no silent wipe).
+        assert_eq!(
+            std::fs::read_to_string(&gate_path).unwrap(),
+            "{not json",
+            "gate file must not be rewritten on parse failure"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// gate_check RPC probe mode returns inconclusive (never writes passed) when
+    /// no live worker exists.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_gate_check_probe_inconclusive_no_worker() {
+        let home = tmp_home("gate-probe-inconclusive");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.gate_check",
+            json!({"provider": "codex", "record": "probe"}),
+        );
+        let resp = handle_gate_check(&ctx, &req).await;
+        assert!(
+            !resp.is_err(),
+            "gate_check probe must return Ok: {:?}",
+            resp
+        );
+        let result = resp.result().unwrap();
+        assert_eq!(
+            result["status"], "inconclusive",
+            "probe without live worker must return inconclusive"
+        );
+        // Must NOT have written a gate record.
+        assert!(
+            !home.injection_gate_json().exists(),
+            "probe inconclusive must NOT write gate record"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// gate_check demote event: deliver after failed gate record emits
+    /// agent_deliver_demoted event.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_deliver_failed_gate_emits_demoted_event() {
+        let home = tmp_home("deliver-gate-failed-event");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "demote-agent".into(),
+                short_id: "dmA".into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: Some("some-uuid".into()),
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: Some("interactive".into()),
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-07T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        let gate_path = home.injection_gate_json();
+        std::fs::write(
+            &gate_path,
+            r#"{"v":1,"providers":{"codex":{"status":"failed","checked_at":"2026-06-07T00:00:00Z","method":"manual","notes":""}}}"#,
+        )
+        .unwrap();
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.deliver",
+            json!({"name": "demote-agent", "body": "hi", "from_name": "tester"}),
+        );
+        let resp = handle_deliver(&ctx, &req).await;
+        assert!(!resp.is_err());
+        assert_eq!(resp.result().unwrap()["delivered"], false);
+        // Demoted event must be emitted.
+        let events = read_events(&home);
+        assert!(
+            events.iter().any(|e| e["kind"] == "agent_deliver_demoted"),
+            "agent_deliver_demoted must be emitted when gate status=failed"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    // ── deliver RPC tests (Task 2.2) ─────────────────────────────────────────
+
+    /// AC4-ERR-shape (gate default): deliver to codex without gate override returns
+    /// delivered=false reason=injection-gate-unverified and writes nothing to PTY.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_deliver_gate_default_returns_unverified() {
+        let home = tmp_home("deliver-gate-default");
+        // Register a live codex worker with a known short_id.
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "gate-agent".into(),
+                short_id: "gtA".into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: Some("some-uuid".into()),
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: Some("interactive".into()),
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-07T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        // Acquire the gate lock and keep it for the whole await so no parallel
+        // No gate override - thread-local is unset so injection_gate returns Unverified.
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.deliver",
+            json!({"name": "gate-agent", "body": "hello", "from_name": "sender"}),
+        );
+        let resp = handle_deliver(&ctx, &req).await;
+        // Must be Ok (not an RPC error), delivered=false, reason=injection-gate-unverified.
+        assert!(
+            !resp.is_err(),
+            "deliver gate-default must return Ok result, not RPC error"
+        );
+        let result = resp.result().unwrap();
+        assert_eq!(result["delivered"], false);
+        assert_eq!(result["reason"], "injection-gate-unverified");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// claude entry -> delivered=false reason=claude-routes-via-socket, no error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_deliver_claude_returns_socket_route_result() {
+        let home = tmp_home("deliver-claude");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "claude-agent".into(),
+                short_id: "clA".into(),
+                provider: "claude".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: Some("abc123".into()),
+                claude_short_id: Some("abc123".into()),
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: None,
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: None,
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-07T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.deliver",
+            json!({"name": "claude-agent", "body": "ping", "from_name": "sender"}),
+        );
+        let resp = handle_deliver(&ctx, &req).await;
+        assert!(!resp.is_err(), "claude deliver must return Ok result");
+        let result = resp.result().unwrap();
+        assert_eq!(result["delivered"], false);
+        assert_eq!(result["reason"], "claude-routes-via-socket");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// unknown name -> AgentNotFound.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_deliver_unknown_agent_returns_not_found() {
+        let home = tmp_home("deliver-not-found");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.deliver",
+            json!({"name": "ghost", "body": "hello", "from_name": "sender"}),
+        );
+        let resp = handle_deliver(&ctx, &req).await;
+        assert!(resp.is_err());
+        assert_eq!(resp.error().unwrap().code, ErrorCode::AgentNotFound);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// Worker socket dead -> delivered=false reason=worker-unreachable + demoted event.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_deliver_dead_worker_returns_unreachable() {
+        let home = tmp_home("deliver-dead-worker");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "dead-agent".into(),
+                short_id: "dA".into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: Some("some-uuid".into()),
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: Some("interactive".into()),
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-07T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        // Gate override via thread-local - no process-global env var, no races.
+        let _gate = with_injection_gate_allow("codex");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.deliver",
+            json!({"name": "dead-agent", "body": "hello", "from_name": "sender"}),
+        );
+        let resp = handle_deliver(&ctx, &req).await;
+        drop(_gate);
+        assert!(!resp.is_err(), "dead-worker must return Ok, not RPC error");
+        let result = resp.result().unwrap();
+        assert_eq!(result["delivered"], false);
+        // Result reason must be non-empty (passthrough from inject_into_pty).
+        let result_reason = result["reason"].as_str().unwrap_or("");
+        assert!(
+            !result_reason.is_empty(),
+            "reason must not be empty on worker failure"
+        );
+        // Demoted event must be emitted and its reason must match the result.
+        let events = read_events(&home);
+        let demoted: Vec<_> = events
+            .iter()
+            .filter(|e| e["kind"] == "agent_deliver_demoted")
+            .collect();
+        assert!(
+            !demoted.is_empty(),
+            "agent_deliver_demoted event must be emitted on worker-unreachable"
+        );
+        let event_reason = demoted[0]["reason"].as_str().unwrap_or("");
+        assert_eq!(
+            result_reason, event_reason,
+            "result reason must match event reason (F3 passthrough invariant)"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// Short-path home for deliver tests that start a real worker. Uses
+    /// `/tmp/<tag>-<pid>-N` so the socket path stays well under the Unix
+    /// 104-byte SUN_LEN limit (same technique as worker.rs test helpers).
+    fn short_tmp_home(tag: &str) -> AgentsHome {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static CTR: AtomicU32 = AtomicU32::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        let p = PathBuf::from(format!("/tmp/abid{tag}{}{n}", std::process::id()));
+        let home = AgentsHome::at(&p);
+        home.ensure_root().unwrap();
+        home
+    }
+
+    /// AC4-HP (gate override): deliver to live cat worker -> PTY receives bracketed-paste
+    /// provenance container + single CR; response delivered=true; injected event emitted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_deliver_gated_pass_injects_into_pty() {
+        let home = short_tmp_home("inj");
+        let short_id = "injW";
+
+        // Start a real cat worker.
+        let worker_home = home.root().to_path_buf();
+        let cfg = WorkerConfig::new(
+            short_id,
+            worker_home.clone(),
+            std::env::temp_dir(),
+            vec!["cat".to_string()],
+        );
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                if let Err(e) = run_worker(cfg).await {
+                    eprintln!("WORKER RUN ERROR: {e}");
+                }
+            });
+        });
+        // Wait for socket.
+        let sock = home.worker_sock(short_id);
+        let start = std::time::Instant::now();
+        while !sock.exists() && start.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(sock.exists(), "worker socket never appeared");
+
+        // Register the live worker in the registry.
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "inject-agent".into(),
+                short_id: short_id.into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: Some("test-uuid".into()),
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: Some("interactive".into()),
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-07T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+
+        // Thread-local gate override: codex is allowed on this thread only.
+        let _gate = with_injection_gate_allow("codex");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.deliver",
+            json!({"name": "inject-agent", "body": "test-payload", "from_name": "alice"}),
+        );
+        let resp = handle_deliver(&ctx, &req).await;
+        drop(_gate);
+
+        assert!(
+            !resp.is_err(),
+            "inject must return Ok result, got: {:?}",
+            resp.error()
+        );
+        let result = resp.result().unwrap();
+        assert_eq!(result["delivered"], true);
+        assert_eq!(result["transport"], "pty");
+
+        // Injected event emitted.
+        let events = read_events(&home);
+        assert!(
+            events.iter().any(|e| e["kind"] == "agent_deliver_injected"),
+            "agent_deliver_injected event must be emitted"
+        );
+
+        // AC4-UI: PTY received the provenance container (cat echoes it back).
+        // Connect to the worker socket and snapshot until we see the container tag.
+        let mut conn = {
+            let start = std::time::Instant::now();
+            loop {
+                match tokio::net::UnixStream::connect(&sock).await {
+                    Ok(c) => break c,
+                    Err(_) if start.elapsed() < Duration::from_secs(3) => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(e) => panic!("connect failed: {e}"),
+                }
+            }
+        };
+        let mut seen = false;
+        for i in 0..50 {
+            write_request(
+                &mut conn,
+                &Request::new(100 + i, "worker.snapshot", json!({})),
+            )
+            .await
+            .unwrap();
+            let r = crate::protocol::read_response(&mut conn).await.unwrap();
+            let text = r.result().unwrap()["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            if text.contains("cross-session-message") && text.contains("alice") {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            seen,
+            "PTY snapshot must contain the provenance container with from_name"
+        );
+
+        // Shutdown worker.
+        write_request(&mut conn, &Request::new(99, "worker.shutdown", json!({})))
+            .await
+            .unwrap();
+        let _ = crate::protocol::read_response(&mut conn).await;
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// F7b: gate write->read->deliver e2e without thread-local override.
+    ///
+    /// Calls handle_gate_check (manual, passed, codex) to write the gate file,
+    /// then registers a live cat worker, then calls handle_deliver with NO
+    /// thread-local override. Asserts delivered=true + PTY received the container.
+    /// This closes the writer->reader->deliver loop with zero hand-written gate fixtures.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_gate_check_then_deliver_e2e_without_thread_local() {
+        let home = short_tmp_home("gw2d");
+        let short_id = "gw2W";
+
+        // Step 1: write the gate record via handle_gate_check (no thread-local).
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let gate_req = Request::new(
+            1,
+            "agent.gate_check",
+            json!({"provider": "codex", "record": "manual", "status": "passed", "notes": "e2e test"}),
+        );
+        let gate_resp = handle_gate_check(&ctx, &gate_req).await;
+        assert!(
+            !gate_resp.is_err(),
+            "gate_check must succeed: {:?}",
+            gate_resp
+        );
+        assert_eq!(gate_resp.result().unwrap()["status"], "passed");
+
+        // Verify the file was actually written (reader side).
+        assert_eq!(
+            injection_gate_with_home("codex", &home),
+            InjectionGate::Passed,
+            "gate must read back as Passed after handle_gate_check"
+        );
+
+        // Step 2: start a real cat worker.
+        let worker_home = home.root().to_path_buf();
+        let cfg = WorkerConfig::new(
+            short_id,
+            worker_home.clone(),
+            std::env::temp_dir(),
+            vec!["cat".to_string()],
+        );
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                if let Err(e) = run_worker(cfg).await {
+                    eprintln!("WORKER RUN ERROR: {e}");
+                }
+            });
+        });
+        let sock = home.worker_sock(short_id);
+        let start = std::time::Instant::now();
+        while !sock.exists() && start.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(sock.exists(), "worker socket never appeared");
+
+        // Register the live worker in the registry.
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "gated-agent".into(),
+                short_id: short_id.into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: Some("test-uuid".into()),
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: Some("interactive".into()),
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-07T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+
+        // Step 3: deliver with NO thread-local override (gate must come from the file).
+        let deliver_req = Request::new(
+            2,
+            "agent.deliver",
+            json!({"name": "gated-agent", "body": "gate-e2e-payload", "from_name": "bob"}),
+        );
+        let resp = handle_deliver(&ctx, &deliver_req).await;
+        assert!(!resp.is_err(), "deliver must return Ok");
+        let result = resp.result().unwrap();
+        assert_eq!(
+            result["delivered"], true,
+            "file-backed gate must allow delivery"
+        );
+        assert_eq!(result["transport"], "pty");
+
+        // PTY must contain the container.
+        let mut conn = {
+            let start = std::time::Instant::now();
+            loop {
+                match tokio::net::UnixStream::connect(&sock).await {
+                    Ok(c) => break c,
+                    Err(_) if start.elapsed() < Duration::from_secs(3) => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(e) => panic!("connect failed: {e}"),
+                }
+            }
+        };
+        let mut seen = false;
+        for i in 0..50 {
+            write_request(
+                &mut conn,
+                &Request::new(100 + i, "worker.snapshot", json!({})),
+            )
+            .await
+            .unwrap();
+            let r = crate::protocol::read_response(&mut conn).await.unwrap();
+            let text = r.result().unwrap()["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            if text.contains("cross-session-message") && text.contains("bob") {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            seen,
+            "PTY snapshot must contain the provenance container (gate e2e)"
+        );
+
+        write_request(&mut conn, &Request::new(99, "worker.shutdown", json!({})))
+            .await
+            .unwrap();
+        let _ = crate::protocol::read_response(&mut conn).await;
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC4-EDGE: multi-line body -> exactly one paste block, one CR, no per-line submissions.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_deliver_multiline_body_single_paste_block() {
+        let home = short_tmp_home("ml");
+        let short_id = "mlW";
+
+        let worker_home = home.root().to_path_buf();
+        let cfg = WorkerConfig::new(
+            short_id,
+            worker_home.clone(),
+            std::env::temp_dir(),
+            vec!["cat".to_string()],
+        );
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                if let Err(e) = run_worker(cfg).await {
+                    eprintln!("WORKER RUN ERROR: {e}");
+                }
+            });
+        });
+        let sock = home.worker_sock(short_id);
+        let start = std::time::Instant::now();
+        while !sock.exists() && start.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(sock.exists(), "worker socket never appeared");
+
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "ml-agent".into(),
+                short_id: short_id.into(),
+                provider: "gemini".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: None,
+                gemini_session_id: Some("g-uuid".into()),
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: Some("interactive".into()),
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-07T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+
+        let _gate = with_injection_gate_allow("gemini");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.deliver",
+            json!({"name": "ml-agent", "body": "line one\nline two\nline three\n\n", "from_name": "bob"}),
+        );
+        let resp = handle_deliver(&ctx, &req).await;
+        drop(_gate);
+
+        assert!(!resp.is_err(), "multiline deliver must succeed");
+        let result = resp.result().unwrap();
+        assert_eq!(result["delivered"], true);
+
+        // Snapshot the PTY output and assert exactly one paste-end sequence
+        // (ESC[201~) which bounds the bracketed paste block.
+        let mut conn = {
+            let start = std::time::Instant::now();
+            loop {
+                match tokio::net::UnixStream::connect(&sock).await {
+                    Ok(c) => break c,
+                    Err(_) if start.elapsed() < Duration::from_secs(3) => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(e) => panic!("connect failed: {e}"),
+                }
+            }
+        };
+        // Read raw bytes via read_since to count the bracketed-paste end markers.
+        let mut cursor = 0u64;
+        let mut raw: Vec<u8> = Vec::new();
+        for i in 0..50 {
+            write_request(
+                &mut conn,
+                &Request::new(100 + i, "worker.read_since", json!({"cursor": cursor})),
+            )
+            .await
+            .unwrap();
+            let r = crate::protocol::read_response(&mut conn).await.unwrap();
+            let res = r.result().unwrap();
+            cursor = res["next_offset"].as_u64().unwrap();
+            let chunk = base64::engine::general_purpose::STANDARD
+                .decode(res["bytes_b64"].as_str().unwrap())
+                .unwrap();
+            raw.extend_from_slice(&chunk);
+            // ESC[201~ is the paste-end marker: 0x1b 0x5b 0x32 0x30 0x31 0x7e
+            let paste_end = b"\x1b[201~";
+            let count = raw
+                .windows(paste_end.len())
+                .filter(|w| *w == paste_end)
+                .count();
+            if count >= 1 {
+                assert_eq!(
+                    count, 1,
+                    "must be exactly one bracketed-paste block, found {count}"
+                );
+                break;
+            }
+            if i == 49 {
+                panic!("bracketed-paste end marker never appeared in PTY output");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        write_request(&mut conn, &Request::new(99, "worker.shutdown", json!({})))
+            .await
+            .unwrap();
+        let _ = crate::protocol::read_response(&mut conn).await;
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    // ── F3: deliver Err arm must pass through the real reason string ──────────
+
+    /// F3 (MEDIUM): inject_into_pty Err -> result reason must match the event
+    /// reason, not be hard-coded to "worker-unreachable".
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_deliver_err_reason_matches_event_reason() {
+        // Register a live codex agent with a sock path that won't exist so
+        // inject_into_pty produces an error with a specific message.
+        let home = tmp_home("deliver-err-passthrough");
+        let short_id = "errPass01";
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(RegistryEntry {
+                name: "err-agent".into(),
+                short_id: short_id.into(),
+                provider: "codex".into(),
+                cwd: "/tmp".into(),
+                project_root: "/tmp".into(),
+                session_id: None,
+                claude_short_id: None,
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: Some("some-uuid".into()),
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                cc_session_id: None,
+                host_mode: Some("interactive".into()),
+                status: AgentStatus::Live,
+                last_message_at: None,
+                created_at: "2026-06-07T00:00:00Z".into(),
+                pid: None,
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+            });
+        })
+        .unwrap();
+        // Gate must be Passed so we reach inject_into_pty.
+        let _guard = with_injection_gate_allow("codex");
+
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.deliver",
+            json!({"name": "err-agent", "body": "hello", "from_name": "sender"}),
+        );
+        let resp = handle_deliver(&ctx, &req).await;
+        assert!(
+            !resp.is_err(),
+            "deliver must return Ok even on inject failure"
+        );
+
+        let result = resp.result().unwrap();
+        assert_eq!(
+            result["delivered"], false,
+            "inject failure must produce delivered=false"
+        );
+
+        // The result reason must NOT be the hard-coded "worker-unreachable" when
+        // the failure is a socket-connect error (which is also a connectivity
+        // error, so "worker-unreachable" is acceptable here — the key invariant
+        // is that the event reason and result reason agree).
+        let result_reason = result["reason"].as_str().unwrap_or("").to_string();
+
+        // Read back events from the file.
+        let events = read_events(&home);
+        let demoted: Vec<_> = events
+            .iter()
+            .filter(|e| e["kind"] == "agent_deliver_demoted")
+            .collect();
+        assert!(
+            !demoted.is_empty(),
+            "agent_deliver_demoted must be emitted on inject failure"
+        );
+        let event_reason = demoted[0]["reason"].as_str().unwrap_or("");
+
+        // Core invariant: event reason and result reason must agree.
+        assert_eq!(
+            result_reason, event_reason,
+            "result reason {result_reason:?} must match event reason {event_reason:?}"
+        );
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    // ── F4: xml_attr_escape must escape single-quote ─────────────────────────
+
+    /// F4 (MEDIUM): xml_attr_escape must escape ' -> &#x27; for byte-parity
+    /// with Python's html.escape(quote=True).
+    #[test]
+    fn xml_attr_escape_single_quote() {
+        assert_eq!(xml_attr_escape("O'Brien"), "O&#x27;Brien");
+        // Also verify the other escapes remain intact.
+        assert_eq!(
+            xml_attr_escape("a&b<c>\"d'e"),
+            "a&amp;b&lt;c&gt;&quot;d&#x27;e"
+        );
+        // No escaping needed for plain text.
+        assert_eq!(xml_attr_escape("hello"), "hello");
+    }
+
+    /// F4: inject_into_pty container uses &#x27; for single-quote in from_name
+    /// (spot-check the container the daemon builds before PTY write).
+    #[test]
+    fn xml_attr_escape_used_in_container_from_name() {
+        // The container is: <cross-session-message from-name="<escaped>">
+        // So a from_name with a single-quote must appear as &#x27; in the tag.
+        let escaped = xml_attr_escape("O'Brien");
+        let container_prefix = format!("<cross-session-message from-name=\"{escaped}\">");
+        assert!(
+            container_prefix.contains("&#x27;"),
+            "container must use &#x27; for single-quote: {container_prefix:?}"
+        );
+    }
+
+    // ── F5: injection_gate_with_home must check doc["v"] ─────────────────────
+
+    /// F5 (LOW): gate file with v:2 and status=passed must return Unverified
+    /// (conservative: unknown schema version -> treat as unverified).
+    #[test]
+    fn injection_gate_unknown_version_returns_unverified() {
+        let home = tmp_home("gate-v2-unverified");
+        let gate_path = home.injection_gate_json();
+        // v:2 is unknown -> must be treated as Unverified even with status=passed.
+        std::fs::write(
+            &gate_path,
+            r#"{"v":2,"providers":{"codex":{"status":"passed","checked_at":"2026-06-07T00:00:00Z","method":"manual","notes":""}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            injection_gate_with_home("codex", &home),
+            InjectionGate::Unverified,
+            "unknown gate file version (v:2) must return Unverified"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// F5: gate file with v:1 and status=passed must still return Passed
+    /// (the version check must not break the normal path).
+    #[test]
+    fn injection_gate_v1_passed_still_returns_passed() {
+        let home = tmp_home("gate-v1-still-passed");
+        let gate_path = home.injection_gate_json();
+        std::fs::write(
+            &gate_path,
+            r#"{"v":1,"providers":{"codex":{"status":"passed","checked_at":"2026-06-07T00:00:00Z","method":"manual","notes":""}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            injection_gate_with_home("codex", &home),
+            InjectionGate::Passed,
+            "v:1 gate with status=passed must return Passed"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+}

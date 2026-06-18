@@ -1,0 +1,225 @@
+"""Type definitions for the fno graph module.
+
+Contains Status/Priority enums and the Entry pydantic model.
+"""
+from __future__ import annotations
+
+import math
+from enum import Enum
+from typing import Literal, Optional, Union
+
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+
+
+class Status(str, Enum):
+    ready = "ready"
+    claimed = "claimed"
+    blocked = "blocked"
+    done = "done"
+    superseded = "superseded"  # Fix 2: added to match _derive_status bare-string return
+    idea = "idea"
+    deferred = "deferred"
+
+
+class Priority(str, Enum):
+    p0 = "p0"
+    p1 = "p1"
+    p2 = "p2"
+    p3 = "p3"
+
+
+# Re-export the canonical PRIORITY_ORDER from _constants so this module
+# stays in sync without a parallel literal.
+from fno.graph._constants import PRIORITY_ORDER  # noqa: E402,F401
+
+import datetime as _dt
+
+
+def _ts_now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _derive_status(data: dict) -> str:
+    """Derive single-entry status from a dict of field values.
+
+    Mirrors the single-entry portion of recompute_statuses. Cascade-wide
+    checks (blocked_by sibling completed_at) stay in recompute_statuses
+    because this function cannot see other entries.
+    """
+    if data.get("completed_at"):
+        return "done"
+    if data.get("superseded_by"):
+        return "superseded"
+    if data.get("deferred_at"):
+        return "deferred"
+    if data.get("blocked_by"):
+        return "blocked"
+    if data.get("session_id"):
+        return "claimed"
+    if not data.get("plan_path"):
+        return "idea"
+    return "ready"
+
+
+class Entry(BaseModel):
+    """A single feature graph node, matching the graph.json schema exactly."""
+
+    id: str
+    parent: Optional[str] = None
+    # Derived inverse-of-parent index: compact summaries of direct children,
+    # each {id, title, project, _status}. Recomputed on every write by
+    # store.canonicalize_entries, so it is read-mostly here -- declared so
+    # model_dump round-trips it and old graph.json entries (no children key)
+    # parse without migration.
+    children: list[dict] = Field(default_factory=list)
+    # Title-derived human handle (ab-f82e8083). Additive: leads display, but
+    # `id` stays the canonical key. Assigned once when a node is first persisted
+    # (store.ensure_slugs) and immutable thereafter; null until backfilled.
+    slug: Optional[str] = None
+    title: Optional[str] = None
+    type: str = "feature"
+    project: Optional[str] = None
+    cwd: Optional[str] = None
+    priority: str = "p2"
+    # Optional curated board rank. Nullable float so `--before`/`--after`
+    # insert at a midpoint without renumbering siblings; null = unranked,
+    # ordered after the (priority, created_at) fallback within a lane.
+    rank: Optional[float] = None
+    domain: str = "code"
+    blocked_by: list[str] = Field(default_factory=list)
+    session_id: Optional[str] = None
+    claimed_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    # Defer state. Mutually exclusive with completed_at by cascade
+    # convention: done > deferred. recompute_statuses enforces that
+    # ordering, and cmd_done clears these fields when transitioning
+    # from deferred to done.
+    deferred_at: Optional[str] = None
+    deferred_reason: Optional[str] = None
+    has_brief: bool = False
+    compacted: bool = False
+    roadmap_id: Optional[str] = None
+    vision_path: Optional[str] = None
+    details: Optional[str] = None
+    cost_usd: Optional[float] = None
+    cost_sessions: list[dict] = Field(default_factory=list)
+    size: Optional[str] = None
+    batch: Optional[str] = None
+    plan_path: Optional[str] = None
+    pr_number: Optional[int] = None
+    pr_url: Optional[str] = None
+    # Follow-up PRs shipped against the same node (e.g. wrap-up + review-fix
+    # PRs after the primary). Each entry: {"number": int, "url": str|None,
+    # "note": str|None}. Primary stays in pr_number/pr_url. Empty by default
+    # so old graph.json entries parse without migration.
+    additional_prs: list[dict] = Field(default_factory=list)
+    merge_status: Optional[str] = None
+    artifact_url: Optional[str] = None
+    completion_note: Optional[str] = None
+    created_at: Optional[str] = None
+    # superseded_by is an extra field carried by superseded nodes; declared
+    # here so computed_field can reference it cleanly without going through
+    # model_extra.
+    superseded_by: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+    @field_validator("rank", mode="before")
+    @classmethod
+    def _validate_rank(cls, v: object) -> Optional[float]:
+        """Reject bool / inf / NaN ranks at the model boundary (ab-6603350c).
+
+        Live render/verb paths already guard these (``_rank_band`` finite-check
+        + bool exclusion, ``_is_ranked`` bool exclusion) and the raw-dict path
+        dominates, so this is defensive hardening for the cases that *do*
+        construct an ``Entry``: a non-finite or bool rank fails loudly here
+        rather than silently degrading to "unranked" downstream. ``None``
+        (unranked) and ordinary finite numbers pass through. Runs in
+        ``before`` mode so a bool is caught before pydantic coerces it to 1.0.
+        """
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            raise ValueError("rank must be a real number, not a bool")
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"rank must be a finite number, got {v!r}") from exc
+        if not math.isfinite(f):
+            raise ValueError(f"rank must be finite, got {v!r}")
+        return f
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_status_drift(cls, data: object) -> object:
+        """Drop persisted _status; emit graph_status_drift event if it differs
+        from the computed value so forensic audit can track legacy graph.json.
+
+        Best-effort: event emit failures are swallowed so deserialization
+        never crashes on a telemetry error.
+        """
+        if not isinstance(data, dict):
+            return data
+        persisted = data.pop("_status", None)
+        if persisted is None:
+            return data
+
+        computed = _derive_status(data)
+        if persisted != computed:
+            # Fix 1 (Locked Decision #2): suppress the known single-entry-vs-cascade
+            # approximation gap. recompute_statuses resolves nodes whose blocked_by
+            # siblings are all completed to "ready"/"claimed" and writes that to disk.
+            # On reload, _derive_status still sees a non-empty blocked_by list and
+            # returns "blocked" -- a single-entry approximation, not a real drift.
+            # Emitting graph_status_drift here would be a false positive; the cascade
+            # in recompute_statuses is authoritative for that case.
+            if computed == "blocked" and persisted in {"ready", "claimed", "idea"}:
+                return data
+
+            try:
+                from fno.events import append_event  # local import avoids circularity
+
+                event = {
+                    "ts": _ts_now(),
+                    "type": "graph_status_drift",
+                    "source": "migration",
+                    "data": {
+                        "entry_id": data.get("id", ""),
+                        "persisted": persisted,
+                        "computed": computed,
+                    },
+                }
+                append_event(event)
+            except (OSError, ImportError):
+                # Fix 4: narrowed from broad except Exception. OSError covers transient
+                # filesystem failures writing events.jsonl; ImportError covers installs
+                # where the fno.events module is absent. Real bugs (ValidationError,
+                # SchemaUnavailableError, KeyError, AttributeError) must propagate loudly.
+                pass
+        return data
+
+    @computed_field
+    @property
+    def _status(self) -> str:
+        """Derive entry status from single-entry fields.
+
+        Precedence (mirrors recompute_statuses single-entry portion):
+          completed_at set    -> "done"
+          superseded_by set   -> "superseded"
+          deferred_at set     -> "deferred"
+          non-empty blocked_by -> "blocked"
+              (single-entry cannot verify sibling completed_at -- just
+               a non-empty list is the best approximation here;
+               cascade-wide open-blocker check stays in recompute_statuses)
+          session_id set      -> "claimed"
+          no plan_path        -> "idea"
+          else                -> "ready"
+        """
+        return _derive_status({
+            "completed_at": self.completed_at,
+            "superseded_by": self.superseded_by,
+            "deferred_at": self.deferred_at,
+            "blocked_by": self.blocked_by,
+            "session_id": self.session_id,
+            "plan_path": self.plan_path,
+        })

@@ -1,0 +1,53 @@
+//! `fno-agents-daemon` entrypoint (Wave 3). Argv parsing -> `daemon::run`.
+//!
+//! Usage:
+//! ```text
+//! fno-agents-daemon            # start (foreground); lazy-exits when idle
+//! fno-agents-daemon --once     # run recovery + serve until idle/SIGTERM
+//! ```
+//! The client lazy-starts this detached on first need; running it directly is
+//! for debugging and for the Python wrapper's explicit `daemon` sub-mode.
+
+use fno_agents::daemon::{run, DaemonOptions};
+use fno_agents::paths::AgentsHome;
+use std::time::Duration;
+
+fn main() {
+    // A failed daemon must surface a non-zero exit and a clear stderr line; it
+    // must never panic silently (Silent-Failure-Hunter posture).
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("fno-agents-daemon: cannot build tokio runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let home = AgentsHome::from_env();
+    let mut opts = DaemonOptions::default();
+    // Allow an idle-exit override (seconds) via env for tests / tuning.
+    if let Ok(s) = std::env::var("FNO_AGENTS_IDLE_EXIT_SECS") {
+        if let Ok(secs) = s.parse::<u64>() {
+            opts.idle_exit = Duration::from_secs(secs);
+        }
+    }
+    // Opt out of the startup reconcile sweep for the fastest cold start
+    // (Architecture B, plan ab-70faa65b). Any non-empty value disables it.
+    if std::env::var("FNO_AGENTS_NO_STARTUP_RECONCILE")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        opts.reconcile_on_start = false;
+    }
+
+    match rt.block_on(run(home, opts)) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("fno-agents-daemon: {e}");
+            std::process::exit(1);
+        }
+    }
+}

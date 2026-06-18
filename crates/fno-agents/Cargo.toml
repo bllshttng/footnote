@@ -1,0 +1,82 @@
+[package]
+name = "fno-agents"
+version = "0.1.0"
+edition = "2021"
+# MSRV: std's File::lock/lock_shared/try_lock/unlock stabilized in Rust 1.89
+# (ab-6aff100c), which let this crate drop the fs2 dependency for advisory
+# flocks. Pinning the floor documents that and lets `cargo` warn on an older
+# toolchain instead of failing with a confusing "no method named lock" error.
+rust-version = "1.89"
+description = "PTY supervisor substrate for persistent, attachable multi-CLI coding agents (codex, gemini, claude)"
+license = "Apache-2.0"
+repository = "https://github.com/bllshttng/footnote"
+homepage = "https://github.com/bllshttng/footnote"
+documentation = "https://docs.rs/fno-agents"
+readme = "README.md"
+keywords = ["pty", "agent", "supervisor", "terminal", "cli"]
+categories = ["command-line-utilities", "development-tools", "asynchronous"]
+publish = true
+
+[lib]
+name = "fno_agents"
+path = "src/lib.rs"
+
+# Wave 3 binaries: daemon (supervisor), client (thin verb forwarder), and the
+# per-agent worker shim that owns the PTY master and outlives the daemon
+# (Outcome B). All three compile from this crate.
+[[bin]]
+name = "fno-agents"
+path = "src/bin/client.rs"
+
+[[bin]]
+name = "fno-agents-daemon"
+path = "src/bin/daemon.rs"
+
+[[bin]]
+name = "fno-agents-worker"
+path = "src/bin/worker.rs"
+
+[dependencies]
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+libc = "0.2"
+# Headless VT grid emulator for the readiness seam (screen.rs) and the grid
+# compositor (grid/pane.rs). alacritty_terminal 0.26 is used purely as a
+# parser + grid model via `Term<VoidListener>` + `vte::ansi::Processor` — its
+# transitive tree is `vte` (the same parser vt100 wraps) + parking_lot /
+# polling / rustix-openpty / regex-automata, NOT winit or a GUI stack
+# (windows-sys is cfg-gated FFI, ~nothing off Windows). It gives a richer
+# cell model (Flags, NamedColor/Rgb, Dimensions) than vt100, which the
+# compositor's per-cell render needs. Replaced vt100 crate-wide (ab-3c063856
+# review: the vt100 "dependency weight" rationale was factually wrong for 0.26).
+alacritty_terminal = "0.26"
+# Daemon runtime + IPC (Wave 3 consumers; the substrate stays runtime-agnostic).
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-std", "sync", "time", "signal", "macros", "process"] }
+# Cross-language advisory locking now uses std's stabilized File::lock family
+# (Rust 1.89, ab-6aff100c) -- still flock(2) under the hood, so the interop with
+# Python's fcntl.flock (the load-bearing cross-language coupling, US6.12, proven
+# by tests/flock_interop.rs) is unchanged. The fs2 dependency was dropped.
+# Drive (Wave 4): raw PTY bytes are not guaranteed UTF-8 across the worker RPC
+# (a JSON string field) or WS control frames; base64 keeps the transport
+# text-safe without a bespoke escape scheme.
+base64 = "0.22"
+# Drive (Wave 4): WebSocket upgrade on the supervisor socket after the
+# `agent.drive` JSON-RPC ack (LD21: tokio-tungstenite standard handshake).
+tokio-tungstenite = "0.29"
+# Drive (Wave 4): split the WS stream into independent read/write halves and
+# drive the Sink/Stream traits.
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# trace verb (Python-only port): ISO8601 `--since` parsing with datetime-aware
+# comparison matching Python's `datetime.fromisoformat`. Parsing only -- no
+# system clock needed, so the `clock` default feature is dropped.
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
+# Grid (ab-3c063856): client-side TUI compositor that tiles N watcher panes and
+# promotes one to driver on Enter. Crossterm gives raw-mode, key events, cursor
+# moves, and a SIGWINCH-aware resize event.
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+[dev-dependencies]
+tempfile = "3"

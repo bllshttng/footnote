@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/bllshttng/footnote/security/advisories/new
+    about: Please report security issues privately via a GitHub security advisory, not a public issue. See SECURITY.md.
+  - name: Question or discussion
+    url: https://github.com/bllshttng/footnote/discussions
+    about: For usage questions and open-ended discussion, please use Discussions.
