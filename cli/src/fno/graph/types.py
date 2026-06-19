@@ -129,11 +129,14 @@ class Entry(BaseModel):
     # promoted here to keep this change surgical.
     #   source_node_id      backlog node -> the origin node it was spawned from
     #   source_harness      harness of source_session_id: claude|codex|gemini
+    #   source_cwd          originating SESSION cwd (transcript-resolver key;
+    #                       distinct from the node's durable `cwd` project root)
     #   source_plan_path    plan_path of the originating session, if any
     #   spawned_by_session  parent session id ambient at node birth / spawn
     #   spawned_by_harness  claude | codex | gemini (from env)
     #   spawned_by_cwd      parent cwd, for the transcript-path slug resolver
     source_harness: Optional[str] = None
+    source_cwd: Optional[str] = None
     source_node_id: Optional[str] = None
     source_plan_path: Optional[str] = None
     spawned_by_session: Optional[str] = None

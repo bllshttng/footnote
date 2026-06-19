@@ -18,6 +18,7 @@ Every graph node carries (all nullable, defaulted on read in `cli/src/fno/graph/
 |---|---|---|
 | `source_session_id` | session that created the node | node birth |
 | `source_harness` | harness of that session: `claude` \| `codex` \| `gemini` | node birth |
+| `source_cwd` | originating session cwd (transcript-resolver key; distinct from the node's durable `cwd`) | node birth |
 | `source_node_id` | the origin node that session was working on | node birth (manifest) |
 | `source_plan_path` | plan the origin session was executing, if any | node birth (manifest) |
 | `spawned_by_session` | parent session that spawned the worker | worker spawn |
@@ -53,7 +54,7 @@ fno backlog provenance <node-id>          # human summary
 fno backlog provenance <node-id> --json   # structured: node_id, title, edges[]
 ```
 
-Read-only. For each edge a node carries (node-birth and/or spawn), it runs the resolver and reports the resolved transcript path or the reason it could not resolve. The node-birth edge resolves against the node's own `cwd`; the spawn edge against `spawned_by_cwd`.
+Read-only. For each edge a node carries (node-birth and/or spawn), it runs the resolver and reports the resolved transcript path or the reason it could not resolve. The node-birth edge resolves against `source_cwd` (the originating session's cwd, which claude transcript dirs are slugged by), falling back to the node's durable `cwd` only for legacy pre-`source_cwd` nodes; the spawn edge resolves against `spawned_by_cwd`. Using the durable project `cwd` would point at the wrong `~/.claude/projects/<slug>` whenever a node was filed from a worktree, which is the common mid-pipeline case.
 
 ## Scope and sequencing
 

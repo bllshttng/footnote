@@ -148,10 +148,15 @@ def _session_provenance(running_cwd: Optional[str] = None) -> dict:
     """Ambient parent-edge provenance for a node born inside a live session.
 
     Reads the running session's env + ``.fno/target-state.md`` and returns
-    ``source_session_id`` / ``source_harness`` / ``source_node_id`` /
-    ``source_plan_path``. Capture is AMBIENT, never volunteered (x-30f6): no
-    caller passes anything. Every key degrades to ``None`` and the function
-    NEVER raises (AC-EDGE).
+    ``source_session_id`` / ``source_harness`` / ``source_cwd`` /
+    ``source_node_id`` / ``source_plan_path``. Capture is AMBIENT, never
+    volunteered (x-30f6): no caller passes anything. Every key degrades to
+    ``None`` and the function NEVER raises (AC-EDGE).
+
+    ``source_cwd`` is the originating SESSION's cwd, which is the key claude
+    transcript dirs are slugged by -- distinct from the node's durable ``cwd``
+    (the canonical project root). The read-back resolver needs the session cwd,
+    so it is persisted separately rather than reusing the node's ``cwd``.
 
     Ownership of the manifest is proven exactly as ``whoami.find_held_node``
     does it: the manifest's ``claude_transcript_id`` must equal this process's
@@ -193,6 +198,8 @@ def _session_provenance(running_cwd: Optional[str] = None) -> dict:
     return {
         "source_session_id": session,
         "source_harness": harness,
+        # session cwd is the transcript-resolver key; only meaningful with a session.
+        "source_cwd": cwd if session else None,
         "source_node_id": source_node_id,
         "source_plan_path": source_plan_path,
     }
@@ -256,6 +263,7 @@ def _build_backlog_node(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_session_id": prov["source_session_id"],
         "source_harness": prov["source_harness"],
+        "source_cwd": prov["source_cwd"],
         "source_node_id": prov["source_node_id"],
         "source_plan_path": prov["source_plan_path"],
     }
@@ -1480,7 +1488,7 @@ def cmd_provenance(
 
     Reads two provenance edges stored on the node:
 
-      node-birth edge  source_session_id + source_harness + node's own cwd
+      node-birth edge  source_session_id + source_harness + source_cwd
       spawn edge       spawned_by_session + spawned_by_harness + spawned_by_cwd
 
     For each edge that carries a session id the resolver is run (claude only;
@@ -1499,10 +1507,13 @@ def cmd_provenance(
     e = match.candidates[0]
     node_id = e["id"]
 
-    # node-birth edge: uses the node's own cwd
+    # node-birth edge: resolve against the originating SESSION cwd
+    # (source_cwd), NOT the node's durable project `cwd`. Claude transcript dirs
+    # are slugged by the session cwd, so a node filed from a worktree resolves
+    # only via source_cwd; fall back to `cwd` for legacy pre-source_cwd nodes.
     birth_session = e.get("source_session_id")
     birth_harness = e.get("source_harness")
-    birth_cwd = e.get("cwd")
+    birth_cwd = e.get("source_cwd") or e.get("cwd")
     birth_result = None
     if birth_session:
         birth_result = resolve_transcript(

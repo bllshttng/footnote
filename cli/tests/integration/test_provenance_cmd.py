@@ -117,6 +117,40 @@ def test_ac_hp_source_edge_resolved(tmp_graph, tmp_path, monkeypatch):
     assert str(transcript) in r.output
 
 
+def test_node_birth_resolves_via_source_cwd_not_durable_cwd(tmp_graph, tmp_path, monkeypatch):
+    """gemini review: a node filed from a worktree resolves via source_cwd.
+
+    The node's durable `cwd` is the canonical project root; the transcript dir
+    is slugged by the SESSION cwd (the worktree). Resolution must use source_cwd
+    so the worktree case (the common mid-pipeline case) does not report not-found.
+    """
+    session_id = "abcd1234-0000-0000-0000-000000000000"
+    session_cwd = "/Users/bb16/conductor/workspaces/footnote/wt-feature"  # worktree
+    durable_cwd = "/Users/bb16/code/footnote"                              # canonical root
+
+    slug = session_cwd.replace("/", "-").replace(".", "-")
+    proj_dir = tmp_path / "projects" / slug
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    transcript = proj_dir / f"{session_id}.jsonl"
+    transcript.write_text('{"type":"summary"}\n')
+
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
+
+    node = _base_node(
+        "ab-prov00wt",
+        source_session_id=session_id,
+        source_harness="claude",
+        source_cwd=session_cwd,   # session/worktree cwd
+        cwd=durable_cwd,          # durable project root (would resolve to nothing)
+    )
+    _write_node(tmp_graph, node)
+
+    r = _invoke("backlog", "provenance", "ab-prov00wt")
+    assert r.exit_code == 0, r.output
+    assert str(transcript) in r.output  # resolved via source_cwd, not durable cwd
+
+
 # ---------------------------------------------------------------------------
 # AC-HP: --json flag returns structured object
 # ---------------------------------------------------------------------------

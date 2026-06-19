@@ -275,6 +275,7 @@ def test_ambient_hp_claude_session_node_and_plan(tmp_path, monkeypatch):
     prov = _session_provenance(str(tmp_path))
     assert prov["source_session_id"] == "sess-uuid-123"
     assert prov["source_harness"] == "claude"
+    assert prov["source_cwd"] == str(tmp_path)
     assert prov["source_node_id"] == "ab-origin99"
     assert prov["source_plan_path"] == "internal/p/plan.md"
 
@@ -301,6 +302,7 @@ def test_ambient_edge_no_env_all_none(tmp_path, monkeypatch):
     assert prov == {
         "source_session_id": None,
         "source_harness": None,
+        "source_cwd": None,
         "source_node_id": None,
         "source_plan_path": None,
     }
@@ -358,12 +360,14 @@ def test_build_backlog_node_stamps_ambient(monkeypatch):
     monkeypatch.setattr(gcli, "_session_provenance", lambda cwd=None: {
         "source_session_id": "S",
         "source_harness": "claude",
+        "source_cwd": "/wt/sess",
         "source_node_id": "ab-parent01",
         "source_plan_path": "plan.md",
     })
     node = gcli._build_backlog_node(title="child")
     assert node["source_session_id"] == "S"
     assert node["source_harness"] == "claude"
+    assert node["source_cwd"] == "/wt/sess"
     assert node["source_node_id"] == "ab-parent01"
     assert node["source_plan_path"] == "plan.md"
 
