@@ -123,6 +123,79 @@ def _briefs_dir() -> Path:
 _NodeFields = dict
 
 
+def _scan_md_field(text: str, key: str) -> Optional[str]:
+    """First ``<key>: <value>`` value in a target-state.md, matched-quote-stripped.
+
+    Local mirror of ``fno.agents.whoami._scan_field`` so ``graph`` does not import
+    ``agents`` (avoids an import cycle). ``None`` if the key is absent.
+    """
+    import re
+
+    pattern = re.compile(rf"^{re.escape(key)}:\s*(\S+)")
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if match:
+            value = match.group(1).strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            return value
+    return None
+
+
+def _session_provenance(running_cwd: Optional[str] = None) -> dict:
+    """Ambient parent-edge provenance for a node born inside a live session.
+
+    Reads the running session's env + ``.fno/target-state.md`` and returns
+    ``source_session_id`` / ``source_harness`` / ``source_node_id`` /
+    ``source_plan_path``. Capture is AMBIENT, never volunteered (x-30f6): no
+    caller passes anything. Every key degrades to ``None`` and the function
+    NEVER raises (AC-EDGE).
+
+    Ownership of the manifest is proven exactly as ``whoami.find_held_node``
+    does it: the manifest's ``claude_transcript_id`` must equal this process's
+    ``CLAUDE_CODE_SESSION_ID``, so a stale / reused / foreign worktree manifest
+    never leaks a node this session does not hold. Node + plan resolution is
+    claude-only (the only proven transcript-resolver lane); codex/gemini stamp
+    session + harness and degrade the rest.
+    """
+    cwd = running_cwd if running_cwd is not None else os.getcwd()
+
+    session: Optional[str] = None
+    harness: Optional[str] = None
+    sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    if sid:
+        session, harness = sid, "claude"
+    else:
+        codex_sid = (os.environ.get("CODEX_SESSION_ID") or "").strip()
+        gemini_sid = (os.environ.get("GEMINI_SESSION_ID") or "").strip()
+        if codex_sid:
+            session, harness = codex_sid, "codex"
+        elif gemini_sid:
+            session, harness = gemini_sid, "gemini"
+
+    source_node_id: Optional[str] = None
+    source_plan_path: Optional[str] = None
+    if session and harness == "claude":
+        try:
+            text = (Path(cwd) / ".fno" / "target-state.md").read_text(encoding="utf-8")
+            if _scan_md_field(text, "claude_transcript_id") == session:
+                nid = _scan_md_field(text, "graph_node_id")
+                if nid and nid.lower() != "null":
+                    source_node_id = nid
+                plan = _scan_md_field(text, "plan_path")
+                if plan and plan.lower() != "null":
+                    source_plan_path = plan
+        except OSError:
+            pass
+
+    return {
+        "source_session_id": session,
+        "source_harness": harness,
+        "source_node_id": source_node_id,
+        "source_plan_path": source_plan_path,
+    }
+
+
 def _build_backlog_node(
     *,
     title: str,
@@ -148,6 +221,10 @@ def _build_backlog_node(
     so duplicate-ID checks happen against the live snapshot.
     """
     from fno.graph._constants import ID_PREFIX  # noqa: F401 (kept for symmetry)
+    # Parent-edge provenance (x-30f6): stamped ambiently from the running
+    # session's env + manifest. Centralized here so every creator verb
+    # (add/idea/decompose) self-describes its origin with no caller arg.
+    prov = _session_provenance()
     return {
         "id": None,  # caller fills inside locked mutator
         "parent": parent,
@@ -175,6 +252,10 @@ def _build_backlog_node(
         "pr_url": None,
         "merge_status": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_session_id": prov["source_session_id"],
+        "source_harness": prov["source_harness"],
+        "source_node_id": prov["source_node_id"],
+        "source_plan_path": prov["source_plan_path"],
     }
 
 

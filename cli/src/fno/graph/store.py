@@ -89,9 +89,12 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "source_project",
     "source_session_id",
     # Parent-edge provenance (x-30f6). source_node_id is the backlog->origin-node
-    # edge; spawned_by_* is the ambient parent-session edge stamped at node birth
-    # / worker spawn. All nullable; ambient-captured, never required of a caller.
+    # edge; source_harness/source_plan_path enrich the source_session_id at node
+    # birth; spawned_by_* is the ambient parent-session edge stamped at worker
+    # spawn. All nullable; ambient-captured, never required of a caller.
+    "source_harness",
     "source_node_id",
+    "source_plan_path",
     "source_inbox_msg",
     "spawned_by_session",
     "spawned_by_harness",
@@ -298,7 +301,9 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         e.setdefault("source_session_id", None)
         # Parent-edge provenance (x-30f6): null until ambient-stamped at node
         # birth (graph/cli.py idea/add) or worker spawn (agents dispatch).
+        e.setdefault("source_harness", None)
         e.setdefault("source_node_id", None)
+        e.setdefault("source_plan_path", None)
         e.setdefault("source_inbox_msg", None)
         e.setdefault("spawned_by_session", None)
         e.setdefault("spawned_by_harness", None)

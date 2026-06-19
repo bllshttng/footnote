@@ -59,6 +59,37 @@ def _read_graph(g: Path) -> list[dict]:
     return json.loads(g.read_text()).get("entries", [])
 
 
+# --- x-30f6: ambient provenance stamp at node birth ---
+
+def test_ac_hp_idea_stamps_ambient_session(tmp_graph, tmp_path, monkeypatch):
+    """AC-HP (x-30f6 2.1): `idea` stamps source_session_id + harness from env, no flag."""
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "itest-sess-7")
+    # cwd without an owned manifest -> session+harness stamped, node/plan null.
+    monkeypatch.chdir(tmp_path)
+
+    r = _invoke("graph", "idea", "Ambient idea")
+    assert r.exit_code == 0, r.output
+    entries = _read_graph(tmp_graph)
+    assert entries[0]["source_session_id"] == "itest-sess-7"
+    assert entries[0]["source_harness"] == "claude"
+
+
+def test_ac_edge_idea_no_env_null_provenance(tmp_graph, tmp_path, monkeypatch):
+    """AC-EDGE (x-30f6 2.1): no env -> provenance fields persist as null, no error."""
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    r = _invoke("graph", "idea", "Quiet idea")
+    assert r.exit_code == 0, r.output
+    entries = _read_graph(tmp_graph)
+    assert entries[0]["source_session_id"] is None
+    assert entries[0]["source_harness"] is None
+    assert entries[0]["source_node_id"] is None
+
+
 # --- add ---
 
 def test_ac1_hp_graph_add(tmp_graph):
