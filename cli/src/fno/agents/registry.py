@@ -162,6 +162,20 @@ class AgentEntry:
     # as None, and the Rust RegistryEntry mirrors it with `#[serde(default)]`, so
     # a row round-trips between the two languages. [stream-json host lane node]
     claude_session_uuid: Optional[str] = None
+    # Spawn-time parent edge (Task 2.2, x-30f6). Ambient-captured from the
+    # SPAWNING session's environment; never required of a caller. All three
+    # default to None so pre-existing rows and callers that pass none of them
+    # round-trip safely (additive-optional: the Rust crate has no
+    # deny_unknown_fields, so it ignores these keys on read).
+    #   spawned_by_session — the parent session id (CLAUDE_CODE_SESSION_ID /
+    #                        CODEX_SESSION_ID / GEMINI_SESSION_ID, whichever
+    #                        is set; claude takes precedence if multiple are).
+    #   spawned_by_harness — "claude" | "codex" | "gemini"; None when no
+    #                        session env var is present.
+    #   spawned_by_cwd     — parent $PWD at spawn time.
+    spawned_by_session: Optional[str] = None
+    spawned_by_harness: Optional[str] = None
+    spawned_by_cwd: Optional[str] = None
 
     # ----------------------------------------------------------------------
     # Rust-daemon-only PTY fields (ab-b946b59c). A genuine daemon PTY row
