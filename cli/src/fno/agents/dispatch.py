@@ -1219,9 +1219,11 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     session_id: Optional[str] = None
     harness: Optional[str] = None
 
-    claude_sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or None
-    codex_sid = os.environ.get("CODEX_SESSION_ID") or None
-    gemini_sid = os.environ.get("GEMINI_SESSION_ID") or None
+    # Trim then coerce empty -> None, symmetric with graph.cli._session_provenance,
+    # so a whitespace-only env value reads as unset rather than a bogus pointer.
+    claude_sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip() or None
+    codex_sid = (os.environ.get("CODEX_SESSION_ID") or "").strip() or None
+    gemini_sid = (os.environ.get("GEMINI_SESSION_ID") or "").strip() or None
 
     if claude_sid:
         session_id, harness = claude_sid, "claude"
@@ -1230,7 +1232,7 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     elif gemini_sid:
         session_id, harness = gemini_sid, "gemini"
 
-    parent_cwd: Optional[str] = os.environ.get("PWD") or None
+    parent_cwd: Optional[str] = (os.environ.get("PWD") or "").strip() or None
 
     return session_id, harness, parent_cwd
 
