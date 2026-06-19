@@ -1462,6 +1462,109 @@ def cmd_get(
     raise typer.Exit(code=1)
 
 
+# -- provenance --
+
+@cli.command("provenance")
+def cmd_provenance(
+    id: str = typer.Argument(
+        ...,
+        help="Node ab-id, slug, or bare 8-hex",
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit machine-readable JSON instead of human summary"
+    ),
+) -> None:
+    """Show provenance pointers for a node and resolve transcripts where possible.
+
+    Reads two provenance edges stored on the node:
+
+      node-birth edge  source_session_id + source_harness + node's own cwd
+      spawn edge       spawned_by_session + spawned_by_harness + spawned_by_cwd
+
+    For each edge that carries a session id the resolver is run (claude only;
+    codex/gemini/etc. return resolved=False). Read-only: no graph mutation.
+    """
+    from fno.graph.store import read_graph
+    from fno.graph.fuzzy import resolve_node
+    from fno.provenance.resolver import resolve_transcript, _DEFAULT_PROJECTS_ROOT
+
+    entries = read_graph(_graph_path())
+    match = resolve_node(id, entries)
+    if match.kind != "exact":
+        typer.echo(f"No node matching '{id}' in {_graph_path()}", err=True)
+        raise typer.Exit(code=1)
+
+    e = match.candidates[0]
+    node_id = e["id"]
+
+    # node-birth edge: uses the node's own cwd
+    birth_session = e.get("source_session_id")
+    birth_harness = e.get("source_harness")
+    birth_cwd = e.get("cwd")
+    birth_result = None
+    if birth_session:
+        birth_result = resolve_transcript(
+            birth_harness, birth_session, birth_cwd,
+            projects_root=_DEFAULT_PROJECTS_ROOT,
+        )
+
+    # spawn edge: uses spawned_by_cwd
+    spawn_session = e.get("spawned_by_session")
+    spawn_harness = e.get("spawned_by_harness")
+    spawn_cwd = e.get("spawned_by_cwd")
+    spawn_result = None
+    if spawn_session:
+        spawn_result = resolve_transcript(
+            spawn_harness, spawn_session, spawn_cwd,
+            projects_root=_DEFAULT_PROJECTS_ROOT,
+        )
+
+    if json_out:
+        import dataclasses
+
+        def _edge(label: str, result) -> dict:
+            if result is None:
+                return {"edge": label, "session_id": None, "resolved": False}
+            d = dataclasses.asdict(result)
+            d["edge"] = label
+            return d
+
+        output = {
+            "node_id": node_id,
+            "title": e.get("title"),
+            "edges": [
+                _edge("node_birth", birth_result),
+                _edge("spawn", spawn_result),
+            ],
+        }
+        typer.echo(json.dumps(output, indent=2))
+        return
+
+    # Human-readable summary
+    lines = [f"provenance for {node_id}: {e.get('title', '')}"]
+
+    def _fmt_edge(label: str, result, session: Optional[str], harness: Optional[str]) -> None:
+        if session is None:
+            lines.append(f"  {label}: (none)")
+            return
+        lines.append(f"  {label}:")
+        lines.append(f"    session:  {session}")
+        lines.append(f"    harness:  {harness or '(unknown)'}")
+        if result is None:
+            lines.append("    transcript: (not resolved)")
+        elif result.resolved:
+            ambig = " [ambiguous match]" if result.ambiguous else ""
+            lines.append(f"    transcript: {result.transcript_path}{ambig}")
+        else:
+            reason = result.reason or "not-found"
+            lines.append(f"    transcript: (unresolved - {reason})")
+
+    _fmt_edge("node-birth", birth_result, birth_session, birth_harness)
+    _fmt_edge("spawn", spawn_result, spawn_session, spawn_harness)
+
+    typer.echo("\n".join(lines))
+
+
 # -- backfill-slugs --
 
 @cli.command("backfill-slugs")
