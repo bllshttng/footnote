@@ -1232,7 +1232,10 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     elif gemini_sid:
         session_id, harness = gemini_sid, "gemini"
 
-    parent_cwd: Optional[str] = (os.environ.get("PWD") or "").strip() or None
+    # $PWD may be unset (non-interactive shells, cron, daemonized procs); fall
+    # back to os.getcwd(), which for a `fno agents spawn` subprocess is the
+    # spawning session's cwd (inherited), so the parent cwd is always captured.
+    parent_cwd: Optional[str] = (os.environ.get("PWD") or os.getcwd()).strip() or None
 
     return session_id, harness, parent_cwd
 

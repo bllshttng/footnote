@@ -19,6 +19,7 @@ so tests never touch the real ~/.claude tree.
 from __future__ import annotations
 
 import dataclasses
+import glob as _glob
 from pathlib import Path
 from typing import Optional
 
@@ -118,8 +119,9 @@ def resolve_transcript(
                 transcript_path=str(exact),
             )
 
-        # Glob for prefix match (session_id may be an 8-hex prefix)
-        matches = sorted(proj_dir.glob(f"{session_id}*.jsonl"))
+        # Glob for prefix match (session_id may be an 8-hex prefix). Escape the
+        # id so a stray glob metachar ('*', '?', '[') in it can't widen the match.
+        matches = sorted(proj_dir.glob(f"{_glob.escape(session_id)}*.jsonl"))
         if not matches:
             return ResolvedTranscript(
                 harness=harness,

@@ -279,6 +279,19 @@ def test_ambient_hp_claude_session_node_and_plan(tmp_path, monkeypatch):
     assert prov["source_plan_path"] == "internal/p/plan.md"
 
 
+def test_ambient_plan_path_with_spaces_not_truncated(tmp_path, monkeypatch):
+    """gemini review: a plan_path containing spaces is captured whole, not truncated."""
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-space")
+    _write_manifest(tmp_path, transcript_id="sess-space",
+                    node_id="ab-spaced01", plan_path="internal/p/My Big Plan.md")
+
+    prov = _session_provenance(str(tmp_path))
+    assert prov["source_plan_path"] == "internal/p/My Big Plan.md"
+
+
 def test_ambient_edge_no_env_all_none(tmp_path, monkeypatch):
     """AC-EDGE (2.1): absent env degrades to null, never raises."""
     from fno.graph.cli import _session_provenance

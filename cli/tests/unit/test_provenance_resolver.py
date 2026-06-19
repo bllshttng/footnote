@@ -185,6 +185,23 @@ def test_ac_edge_none_cwd(tmp_path):
     assert result.resolved is False
 
 
+def test_glob_metachar_session_id_does_not_overmatch(tmp_path):
+    """gemini review: a session_id with a glob metachar is escaped, not expanded.
+
+    An unescaped '*' would match every transcript in the dir; with glob.escape
+    the id is a literal prefix, so a real-but-unrelated transcript is not returned.
+    """
+    from fno.provenance.resolver import resolve_transcript
+
+    proj = tmp_path / "-cwd"
+    proj.mkdir()
+    (proj / "real-session.jsonl").write_text("{}", encoding="utf-8")
+
+    result = resolve_transcript("claude", "*", "/cwd", projects_root=tmp_path)
+    assert result.resolved is False
+    assert result.transcript_path is None
+
+
 # ---------------------------------------------------------------------------
 # Return type is JSON-serializable
 # ---------------------------------------------------------------------------

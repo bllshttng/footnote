@@ -131,7 +131,9 @@ def _scan_md_field(text: str, key: str) -> Optional[str]:
     """
     import re
 
-    pattern = re.compile(rf"^{re.escape(key)}:\s*(\S+)")
+    # ^\s* tolerates indentation; (.+) captures the whole value so a path/title
+    # containing spaces is not truncated at the first space (\S+ would).
+    pattern = re.compile(rf"^\s*{re.escape(key)}:\s*(.+)")
     for line in text.splitlines():
         match = pattern.match(line)
         if match:
