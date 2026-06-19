@@ -1026,6 +1026,18 @@ event_types:
           type: string
         pid:
           type: integer
+        # Parent-edge provenance (x-30f6): the spawning session's ambient env,
+        # captured at launch so a worker can be traced BACK to the conversation
+        # that decided to spawn it. All optional; absent for legacy spawns.
+        spawned_by_session:
+          type: string
+          description: "Parent session id (e.g. CLAUDE_CODE_SESSION_ID) ambient at spawn time."
+        spawned_by_harness:
+          type: string
+          description: "Parent harness: claude | codex | gemini (from env)."
+        spawned_by_cwd:
+          type: string
+          description: "Parent cwd, used by the per-harness transcript-path resolver."
 
   - name: agent_stopped
     description: "An agent was stopped (graceful SIGTERM sequence completed)."

@@ -152,6 +152,96 @@ def test_ac4_edge_provenance_survives_save_reload(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# x-30f6 - parent-edge provenance fields (source_node_id + spawned_by_*)
+# ---------------------------------------------------------------------------
+
+
+def test_ac_hp_new_provenance_fields_default_null():
+    """AC (x-30f6): a legacy entry gains source_node_id + spawned_by_* as None."""
+    from fno.graph.store import _apply_graph_defaults
+
+    entries = [
+        {
+            "id": "ab-legacy02",
+            "title": "Old entry",
+            "_status": "ready",
+            "domain": "code",
+            "project": "fno",
+        }
+    ]
+    e = _apply_graph_defaults(entries)[0]
+    assert e["source_node_id"] is None
+    assert e["spawned_by_session"] is None
+    assert e["spawned_by_harness"] is None
+    assert e["spawned_by_cwd"] is None
+
+
+def test_ac_err_existing_parent_edge_preserved():
+    """AC (x-30f6): setdefault is a no-op when the parent-edge fields are set."""
+    from fno.graph.store import _apply_graph_defaults
+
+    entries = [
+        {
+            "id": "ab-edge0001",
+            "title": "Spawned entry",
+            "_status": "ready",
+            "domain": "code",
+            "project": "fno",
+            "source_node_id": "ab-origin01",
+            "spawned_by_session": "4ec8a08b",
+            "spawned_by_harness": "claude",
+            "spawned_by_cwd": "/Users/x/code/footnote",
+        }
+    ]
+    e = _apply_graph_defaults(entries)[0]
+    assert e["source_node_id"] == "ab-origin01"
+    assert e["spawned_by_session"] == "4ec8a08b"
+    assert e["spawned_by_harness"] == "claude"
+    assert e["spawned_by_cwd"] == "/Users/x/code/footnote"
+
+
+def test_ac_edge_parent_edge_survives_save_reload(tmp_path, monkeypatch):
+    """AC (x-30f6): source_node_id + spawned_by_* round-trip through locked_mutate_graph without loss."""
+    g = _make_graph(tmp_path, [
+        {
+            "id": "ab-rt000001",
+            "title": "Round-trip entry",
+            "_status": "ready",
+            "domain": "code",
+            "project": "fno",
+            "source_node_id": "ab-origin02",
+            "spawned_by_session": "deadbeef",
+            "spawned_by_harness": "claude",
+            "spawned_by_cwd": "/Users/x/wt",
+        }
+    ])
+    _patch_graph(monkeypatch, g)
+
+    from fno.graph.store import read_graph, locked_mutate_graph
+
+    def identity(es: list[dict]) -> list[dict]:
+        return es
+
+    locked_mutate_graph(g, identity)
+    reloaded = read_graph(g)
+    assert reloaded[0]["source_node_id"] == "ab-origin02"
+    assert reloaded[0]["spawned_by_session"] == "deadbeef"
+    assert reloaded[0]["spawned_by_harness"] == "claude"
+    assert reloaded[0]["spawned_by_cwd"] == "/Users/x/wt"
+
+
+def test_ac_entry_model_declares_parent_edge_fields():
+    """AC (x-30f6): the Entry model carries the new fields as first-class (typed, default None)."""
+    from fno.graph.types import Entry
+
+    e = Entry(id="ab-model001", title="m")
+    dumped = e.model_dump()
+    for f in ("source_node_id", "spawned_by_session", "spawned_by_harness", "spawned_by_cwd"):
+        assert f in dumped, f"{f} missing from Entry.model_dump()"
+        assert dumped[f] is None
+
+
+# ---------------------------------------------------------------------------
 # Task 1.3 - query_by_source_inbox_msg helper
 # ---------------------------------------------------------------------------
 
