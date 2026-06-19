@@ -35,9 +35,14 @@ class Fno < Formula
   # here instead of falling through to the unfilled on_intel placeholder. Drop
   # this line and fill on_intel below when the x86_64 wheel ships.
   depends_on arch: :arm64
-  # Only macOS wheels are declared below; declaring the requirement keeps a
-  # Linuxbrew user from a confusing "no url" error (Linux rides a future wheel).
-  depends_on :macos
+  # The published wheel is tagged macosx_14_0, so pin the macOS floor to Sonoma:
+  # an arm64 Mac on macOS 11-13 would otherwise pass the formula and then hit an
+  # ugly pip "incompatible wheel" error instead of a clean Homebrew refusal up
+  # front. This also keeps a Linuxbrew user from a confusing "no url" error (it
+  # is a macOS gate). NOTE: when Intel is enabled (drop the arch gate + fill
+  # on_intel), make this floor arch-conditional - the x86_64 wheel targets a
+  # lower deployment floor (macosx_10_12) than the arm64 wheel.
+  depends_on macos: :sonoma
   depends_on "python@3.13"
 
   # Per-arch platform wheels: the wheel carries native Rust binaries, so the URL
@@ -56,7 +61,10 @@ class Fno < Formula
     on_intel do
       # Deferred (x-a6ae): no x86_64 macOS wheel published yet. Unreachable while
       # `depends_on arch: :arm64` is set above; fill when the Intel wheel ships.
-      url "https://files.pythonhosted.org/packages/source/f/fno/fno-0.1.0-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
+      # Placeholder path only: a real PyPI wheel lives under a content-hashed
+      # /packages/<hash>/ path (never /packages/source/, which is sdist-only);
+      # the real url is filled from the PyPI JSON at publish, like the arm64 url.
+      url "https://files.pythonhosted.org/packages/placeholder/fno-0.1.0-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
