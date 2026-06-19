@@ -95,7 +95,7 @@ Skills are portable markdown. Grab pieces without the full plugin: `npx skills a
 
 ## Requirements
 
-macOS (Apple Silicon or Intel) or Linux (x86_64 / arm64). Windows is not supported yet; run under WSL2. Python 3.11+, `jq`, and `gh` (authenticated). Optional: Playwright for browser testing.
+macOS (Apple Silicon or Intel), Linux (x86_64 / arm64), or Windows via [WSL2](docs/getting-started.md#windows-wsl2). Python 3.11+, `jq`, and `gh` (authenticated). Optional: Playwright for browser testing.
 
 ## Companions
 
