@@ -14,13 +14,12 @@
 # source. brew owns the venv + symlinks, so `brew uninstall`/`brew upgrade` are
 # clean (Locked Decisions 2 + 3).
 #
-# LAUNCH GATE (do not ship the tap copy until both are done):
-#   1. The real `fno` package is published to PyPI (over the reserved 0.0.0
-#      placeholder) - the shared gate with cargo + fno.sh.
-#   2. `url` + `sha256` below are filled with the published per-arch wheel URLs
-#      and hashes (kept in lockstep on every release bump).
-# Until then the placeholders below are intentional - the brew smoke exercises a
-# concrete local-wheel formula with the SAME install mechanism (see AC4/AC5).
+# LAUNCH GATE: both satisfied for 0.1.0 (arm64). `fno` 0.1.0 is published to
+# PyPI (the shared gate with cargo + fno.sh), and the arm64 `url` + `sha256`
+# below are the real published wheel (kept in lockstep on every release bump).
+# The on_intel `url` + `sha256` stay placeholders: no x86_64 macOS wheel is
+# published yet (deferred, x-a6ae), and `depends_on arch: :arm64` makes that
+# branch unreachable until it ships.
 #
 # Deps: an own-tap formula installs with network, so `pip install` resolves the
 # Python deps from PyPI at install time. (Vendoring deps as offline `resource`
@@ -31,26 +30,41 @@ class Fno < Formula
   homepage "https://github.com/bllshttng/footnote"
   license "Apache-2.0"
 
-  # Only macOS wheels are declared below; declaring the requirement keeps a
-  # Linuxbrew user from a confusing "no url" error (Linux rides a future wheel).
-  depends_on :macos
+  # 0.1.0 ships an arm64 wheel only; the Intel/x86_64 macOS wheel is deferred
+  # (backlog x-a6ae - the macos-13 runner image is retired). Refuse Intel cleanly
+  # here instead of falling through to the unfilled on_intel placeholder. Drop
+  # this line and fill on_intel below when the x86_64 wheel ships.
+  depends_on arch: :arm64
+  # The published wheel is tagged macosx_14_0, so pin the macOS floor to Sonoma:
+  # an arm64 Mac on macOS 11-13 would otherwise pass the formula and then hit an
+  # ugly pip "incompatible wheel" error instead of a clean Homebrew refusal up
+  # front. This also keeps a Linuxbrew user from a confusing "no url" error (it
+  # is a macOS gate). NOTE: when Intel is enabled (drop the arch gate + fill
+  # on_intel), make this floor arch-conditional - the x86_64 wheel targets a
+  # lower deployment floor (macosx_10_12) than the arm64 wheel.
+  depends_on macos: :sonoma
   depends_on "python@3.13"
 
   # Per-arch platform wheels: the wheel carries native Rust binaries, so the URL
-  # must match the host arch. The release publishes both macosx arm64 + x86_64
-  # wheels; brew selects per arch. url + sha256 are filled at first release (see
-  # LAUNCH GATE above); the 64-zero sha256 is a deliberate placeholder.
+  # must match the host arch. The wheel is also tagged macosx_14_0, so it needs
+  # macOS 14 (Sonoma) or newer. url + sha256 are the published PyPI file URL
+  # (content-hashed path) and its sha256.
   #
   # `using: :nounzip` keeps the wheel a FILE: a .whl is a zip, and an unpacked
   # wheel dir is not pip-installable (no build backend), so the install step
   # below pip-installs the wheel file directly rather than the unpacked tree.
   on_macos do
     on_arm do
-      url "https://files.pythonhosted.org/packages/source/f/fno/fno-VERSION-py3-none-macosx_11_0_arm64.whl", using: :nounzip
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      url "https://files.pythonhosted.org/packages/0f/29/009ccdefc9528fa2acd407b2458c87f3be0ff5424f288fc610120a5c004a/fno-0.1.0-py3-none-macosx_14_0_arm64.whl", using: :nounzip
+      sha256 "0c452f9b2813f35ae5f246c7be087b7ceb5699856e6b2182e5039aadb64e5533"
     end
     on_intel do
-      url "https://files.pythonhosted.org/packages/source/f/fno/fno-VERSION-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
+      # Deferred (x-a6ae): no x86_64 macOS wheel published yet. Unreachable while
+      # `depends_on arch: :arm64` is set above; fill when the Intel wheel ships.
+      # Placeholder path only: a real PyPI wheel lives under a content-hashed
+      # /packages/<hash>/ path (never /packages/source/, which is sdist-only);
+      # the real url is filled from the PyPI JSON at publish, like the arm64 url.
+      url "https://files.pythonhosted.org/packages/placeholder/fno-0.1.0-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end

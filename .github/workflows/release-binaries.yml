@@ -28,6 +28,11 @@ jobs:
       matrix:
         target:
           - { name: macos-arm64, runs-on: macos-14, rust-target: aarch64-apple-darwin }
+          # macos-x64 is cross-compiled on the Apple Silicon runner (the native
+          # Intel macos-13 image is retired). rustup adds the x86_64 target and
+          # the universal macOS SDK links it; packaging only archives the files,
+          # so nothing here executes the x86_64 binaries.
+          - { name: macos-x64, runs-on: macos-14, rust-target: x86_64-apple-darwin }
           - { name: linux-x64, runs-on: ubuntu-latest, rust-target: x86_64-unknown-linux-musl }
           - { name: linux-arm64, runs-on: ubuntu-24.04-arm, rust-target: aarch64-unknown-linux-musl }
           # windows-x64: built (toolchain exercised) but not attached to releases this phase.

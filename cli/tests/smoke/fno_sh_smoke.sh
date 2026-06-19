@@ -90,6 +90,23 @@ else
   miss "path-hint" "no PATH hint though the tool bin is off PATH"
 fi
 
+# --- check 3b: the default path edits the shell profile via uv (AC3-UI) ---
+# With FNO_NO_MODIFY_PATH unset, the installer runs `uv tool update-shell` to add
+# the tool bin to the right shell profile instead of leaving a manual-only hint.
+# HOME is isolated to $BASE_TMP/home above, so the profile edit is a throwaway.
+# Guard on the subcommand existing: the installer degrades to a manual PATH hint
+# on a uv too old for `tool update-shell`, so on such a uv the assertion would
+# false-fail though the installer behaved correctly (the fallback is exercised).
+if uv tool update-shell --help >/dev/null 2>&1; then
+  if printf '%s' "$OUT" | grep -qi 'update-shell'; then
+    pass "path-update-shell" "default path ran 'uv tool update-shell' to fix PATH"
+  else
+    miss "path-update-shell" "default path did not report a 'uv tool update-shell' profile edit"
+  fi
+else
+  pass "path-update-shell" "skipped (installed uv predates 'tool update-shell'; installer's manual-hint fallback path is exercised instead)"
+fi
+
 # --- check 4: all three binaries on the uv tool bin (US3 / AC3-HP / AC6-UI) ---
 for b in fno-agents fno-agents-daemon fno-agents-worker; do
   if [ -x "$UV_BIN/$b" ]; then pass "binary:$b" "present on the uv tool bin"
