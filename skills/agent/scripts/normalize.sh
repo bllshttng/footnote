@@ -46,6 +46,8 @@ HANDOFF_MODE=0     # 1 = `handoff` verb: payload is a doc path -> continuation s
 DISCUSS_MODE=0     # 1 = `discuss` verb: payload is a verbatim conversational seed
 PROJECT=""         # cross-project target: a registry project name/short_name to
                    # resolve into a launch cwd (work.workspaces.*.projects)
+PROJECT_SET=0      # 1 = -P/--project was passed (empty value -> loud error, never
+                   # a silent caller-cwd launch when a cross-project hop was asked)
 FORCE=0            # 1 = -f/--force: let --project win over a node's own cwd
 
 emit_error() { printf 'status=error\nerror=%s\n' "$1"; exit 0; }
@@ -77,7 +79,7 @@ while [[ $# -gt 0 ]]; do
     --ask)            ASK_MODE=1; shift ;;
     --handoff)        HANDOFF_MODE=1; shift ;;
     --discuss)        DISCUSS_MODE=1; shift ;;
-    -P|--project)     PROJECT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    -P|--project)     PROJECT="${2:-}"; PROJECT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -f|--force)       FORCE=1; shift ;;
     *) emit_error "unknown argument: $tok" ;;
   esac
@@ -318,7 +320,9 @@ resolve_project() {
   fi
   local abi_bin shebang
   abi_bin="$(command -v fno 2>/dev/null)" || { printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0; }
-  shebang="$(head -1 "$abi_bin" 2>/dev/null | sed 's/^#![[:space:]]*//')"
+  # Strip a trailing CR: a CRLF-lined fno (WSL / git autocrlf) would leave \r on
+  # the shebang and break the interpreter exec.
+  shebang="$(head -1 "$abi_bin" 2>/dev/null | sed 's/^#![[:space:]]*//' | tr -d '\r')"
   # Same interpreter guard as resolve_from_config: only a python entrypoint can
   # import the fno package. A shell-wrapper fno means the resolver is unreachable.
   [[ -n "$shebang" && "$shebang" == *python* ]] || { printf 'error\tproject resolver unavailable (fno is not a python entrypoint)\n'; return 0; }
@@ -348,6 +352,12 @@ if not path:
 print("ok\t%s\t%s" % (canon, path))' "$_proj" 2>/dev/null || { printf 'error\tproject resolver crashed\n'; return 0; }
 }
 
+# -P/--project was passed but its value is empty (a bare trailing `-P`, or an
+# explicit `-P ""`): the user asked for a cross-project hop, so refuse loud rather
+# than silently launch in the caller's cwd (mirrors the empty --name guard below).
+if [[ "$PROJECT_SET" -eq 1 && -z "$PROJECT" ]]; then
+  emit_error "-P/--project requires a project name (got an empty value)"
+fi
 if [[ -n "$PROJECT" ]]; then
   # A node reference (resolved ab-id, slug candidate, or `next` pointer) carries
   # its own project; --project conflicts unless forced.

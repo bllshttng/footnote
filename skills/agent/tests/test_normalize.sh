@@ -379,6 +379,14 @@ check_eq   'slug+proj force status' "$(field "$out" status)" 'ok'
 out="$(run 'add a --project switch to the cli')"
 check_eq   'stray --project token errors' "$(field "$out" status)" 'error'
 
+# --- -P with an empty value fails loud (codex P2): never a silent caller-cwd hop -
+out="$(run 'backend work' -P '')"
+check_eq       'empty -P value status' "$(field "$out" status)" 'error'
+check_contains 'empty -P value message' "$(field "$out" error)" 'requires a project name'
+# a bare trailing -P (no value token at all) is the same loud refusal
+out="$(bash "$NORM" --input 'backend work' -P)"
+check_eq       'bare trailing -P status' "$(field "$out" status)" 'error'
+
 rm -f "$_proj_res"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
