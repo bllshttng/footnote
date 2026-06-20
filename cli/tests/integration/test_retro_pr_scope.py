@@ -385,6 +385,21 @@ def test_resolve_pr_session_ids_bare_number_when_no_url(tmp_path):
     assert "o" not in _resolve_pr_session_ids(led, 522, "o/r")
 
 
+def test_resolve_pr_session_ids_requires_repo_scope(tmp_path):
+    """No resolvable repo (repo_slug=None) -> [] even when a global-ledger entry's
+    url ends in /pull/<pr>. The ledger is global and PR numbers collide across
+    repos, so an unscoped url match could consume a foreign PR's session (codex
+    P2); the safe answer is read-only."""
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"entries": [
+        {"session_id": "s1", "pr": 522, "pr_url": "https://github.com/o/r/pull/522"},
+        {"session_id": "s2", "pr": 522},  # bare number is also cross-repo-ambiguous
+    ]}), encoding="utf-8")
+    assert _resolve_pr_session_ids(led, 522, None) == []
+    # ... but a known slug still resolves the matching entry.
+    assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1", "s2"]
+
+
 def test_triage_carveouts_readonly_not_landed_or_consumed(tmp_path):
     """carveouts_readonly=True: the stray carve-out is surfaced read-only, NOT
     landed and NOT in harvested_carveout_ids (so the caller never consumes it).
@@ -429,7 +444,7 @@ def test_triage_carveouts_consumed_when_not_readonly(tmp_path):
     assert any("stray" in (c.get("title") or "").lower() for c in rec.created), rec.created
 
 
-def _run_synthetic_pr(tmp_path, monkeypatch, *, ledger_entries):
+def _run_synthetic_pr(tmp_path, monkeypatch, *, ledger_entries, local_slug="o/r"):
     """Drive run() for a synthetic --pr-number 522 with no --session-id, capturing
     the payload handed to _process_payload."""
     import fno.carveout.core as cocore
@@ -451,7 +466,7 @@ def _run_synthetic_pr(tmp_path, monkeypatch, *, ledger_entries):
     monkeypatch.setattr(paths, "ledger_json", lambda: tmp_path / "ledger.json")
     monkeypatch.setattr(cocore, "resolve_carveout_root", lambda: tmp_path)
     monkeypatch.setattr(store, "read_graph", lambda p: [])
-    monkeypatch.setattr(rcli, "_current_repo_slug", lambda *a, **k: "o/r")
+    monkeypatch.setattr(rcli, "_current_repo_slug", lambda *a, **k: local_slug)
 
     captured: dict = {}
 
@@ -483,3 +498,16 @@ def test_run_pr_with_owning_session_scopes_not_readonly(tmp_path, monkeypatch):
     ])
     assert captured.get("session_ids") == ["sess-A"], captured
     assert not captured.get("carveouts_readonly"), captured
+
+
+def test_run_pr_unresolvable_repo_is_readonly(tmp_path, monkeypatch):
+    """gh can't resolve the repo (local_slug=None, no --repo): even a matching
+    global-ledger entry must NOT scope - the run falls through to read-only so a
+    same-numbered foreign PR's carve-outs are never consumed (codex P2)."""
+    captured = _run_synthetic_pr(
+        tmp_path, monkeypatch, local_slug=None, ledger_entries=[
+            {"session_id": "sess-A", "pr": 522, "pr_url": "https://github.com/o/r/pull/522"},
+        ],
+    )
+    assert captured.get("carveouts_readonly") is True, captured
+    assert "session_ids" not in captured, captured

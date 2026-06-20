@@ -72,19 +72,24 @@ def _sentinel_repo_matches(path: Path, want_slug: Optional[str]) -> bool:
 def _resolve_pr_session_ids(
     ledger_path: Path, pr: int, repo_slug: Optional[str] = None
 ) -> list[str]:
-    """Session id(s) whose ledger entry owns this PR (by number or url tail).
+    """Session id(s) whose ledger entry owns this PR, scoped to ``repo_slug``.
 
-    Mirrors the post-merge Step 4b ledger scan (skills/pr/merged.md): an entry
-    matches when its ``pr``/``pr_number`` equals ``pr`` OR its ``pr_url`` ends in
-    ``/<pr>``. Because ``ledger.json`` is GLOBAL and GitHub PR numbers collide
-    across repos, when ``repo_slug`` is known an entry that carries a ``pr_url``
-    must match the full ``/<slug>/pull/<pr>`` tail; a slug-less or url-less entry
-    falls back to the bare number.
+    Mirrors the post-merge Step 4b ledger scan (skills/pr/merged.md). Because
+    ``ledger.json`` is GLOBAL and GitHub PR numbers collide across repos, a known
+    ``repo_slug`` is REQUIRED to attribute any entry: an entry matches when its
+    ``pr_url`` ends in ``/<slug>/pull/<pr>``, or (for a url-less entry) its bare
+    ``pr``/``pr_number`` equals ``pr``. When ``repo_slug`` is None - the repo
+    could not be resolved (no ``--repo``, ``gh`` down, or run outside a checkout)
+    - ownership CANNOT be confirmed, so the scan returns ``[]`` and the caller
+    falls through to the read-only path rather than risk consuming a same-numbered
+    foreign PR's carve-outs (codex P2).
 
-    Returns ``[]`` on any failure (missing/unreadable/malformed ledger, no
-    match), so the caller treats "no owning session" as the read-only case
-    (x-90b8) rather than crashing the harvest.
+    Returns ``[]`` on any failure (missing/unreadable/malformed ledger, no repo
+    scope, no match), so the caller treats "no owning session" as the read-only
+    case (x-90b8) rather than crashing the harvest.
     """
+    if not repo_slug:
+        return []
     try:
         data = json.loads(ledger_path.read_text(encoding="utf-8"))
     except Exception:
@@ -92,7 +97,7 @@ def _resolve_pr_session_ids(
     entries = data.get("entries") if isinstance(data, dict) else data
     if not isinstance(entries, list):
         return []
-    slug_l = repo_slug.lower() if repo_slug else None
+    slug_l = repo_slug.lower()
     out: list[str] = []
     seen: set[str] = set()
     for e in entries:
@@ -101,8 +106,7 @@ def _resolve_pr_session_ids(
         url = e.get("pr_url")
         url_s = url.rstrip("/").lower() if isinstance(url, str) else ""
         if url_s:
-            tail = f"/{slug_l}/pull/{pr}" if slug_l else f"/pull/{pr}"
-            matched = url_s.endswith(tail)
+            matched = url_s.endswith(f"/{slug_l}/pull/{pr}")
         else:
             # No url on the entry: fall back to the bare numeric field. Coerce
             # to int so a string-stored pr ("522") still matches the int arg.
