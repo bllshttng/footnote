@@ -27,6 +27,84 @@ def setup_main(ctx: typer.Context) -> None:
         raise typer.Exit(0)
 
 
+@app.command("cli-hooks")
+def cli_hooks_cmd(
+    codex: bool = typer.Option(True, "--codex/--no-codex", help="Install the Codex hook."),
+    gemini: bool = typer.Option(True, "--gemini/--no-gemini", help="Install the Gemini hook."),
+    gemini_settings: Optional[Path] = typer.Option(
+        None, "--gemini-settings", help="Override the Gemini settings.json path."
+    ),
+    codex_config: Optional[Path] = typer.Option(
+        None, "--codex-config", help="Override the Codex config.toml path."
+    ),
+) -> None:
+    """Wire footnote's SessionStart context hook into Codex and Gemini.
+
+    Claude Code wires this hook via its plugin manifest; Codex and Gemini read
+    hooks from user-level config (`~/.codex/config.toml`, `~/.gemini/settings.json`)
+    that footnote cannot ship as a repo file. This merges the hook in
+    idempotently, backs up the file first, and never clobbers your other hooks.
+
+    Codex treats the hook as untrusted until you approve it, so after this runs
+    you must trust the footnote SessionStart hook in Codex before it fires.
+    """
+    import os
+
+    from fno.setup.cli_hooks import install_codex_hook, install_gemini_hook
+
+    try:
+        entry = _paths.resolve_plugin_script("hooks/session-start.sh")
+    except Exception as exc:  # noqa: BLE001 - surface a clear message, never trace
+        typer.echo(
+            f"error: could not locate the installed footnote hooks dir ({exc}). "
+            "Run from a footnote-enabled session, or set CLAUDE_PLUGIN_ROOT.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    command = str(entry)
+
+    any_change = False
+    needs_trust = False
+
+    if gemini:
+        gpath = gemini_settings or (Path.home() / ".gemini" / "settings.json")
+        res = install_gemini_hook(command, settings_path=gpath)
+        any_change = any_change or res.changed
+        if res.note:
+            typer.echo(f"gemini: {res.note} ({res.path})")
+        elif res.already_present:
+            typer.echo(f"gemini: already wired ({res.path})")
+        else:
+            bak = f"; backed up {res.backup.name}" if res.backup else ""
+            typer.echo(f"gemini: wired SessionStart -> {command} ({res.path}{bak})")
+
+    if codex:
+        chome = os.environ.get("CODEX_HOME")
+        cpath = codex_config or (
+            (Path(chome).expanduser() if chome else Path.home() / ".codex")
+            / "config.toml"
+        )
+        res = install_codex_hook(command, config_path=cpath)
+        any_change = any_change or res.changed
+        needs_trust = needs_trust or res.needs_trust
+        if res.note:
+            typer.echo(f"codex: {res.note} ({res.path})")
+        elif res.already_present:
+            typer.echo(f"codex: already wired ({res.path})")
+        else:
+            bak = f"; backed up {res.backup.name}" if res.backup else ""
+            typer.echo(f"codex: wired SessionStart -> {command} ({res.path}{bak})")
+
+    if needs_trust:
+        typer.echo(
+            "\ncodex: the hook is UNTRUSTED until you approve it. Start Codex and "
+            "approve the footnote SessionStart hook, then confirm it fires."
+        )
+    if not any_change:
+        typer.echo("\nNothing to do (hooks already wired).")
+    raise typer.Exit(0)
+
+
 @app.command("plan")
 def plan_cmd(
     advanced: bool = typer.Option(
