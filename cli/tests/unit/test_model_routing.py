@@ -11,6 +11,7 @@ Covers the resolver contract from the plan's acceptance criteria:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -142,8 +143,8 @@ def test_missing_key_never_raises_without_notice() -> None:
     assert mr.resolve_route("coordinate", settings=_settings(), env={}) is None
 
 
-def test_env_file_supplies_key_when_process_env_absent(tmp_path: object) -> None:
-    envf = tmp_path / "modelkit.env"  # type: ignore[operator]
+def test_env_file_supplies_key_when_process_env_absent(tmp_path: Path) -> None:
+    envf = tmp_path / "modelkit.env"
     envf.write_text("# comment\nZAI_API_KEY=from-file\n", encoding="utf-8")
     route = mr.resolve_route(
         "consolidate",
@@ -154,8 +155,8 @@ def test_env_file_supplies_key_when_process_env_absent(tmp_path: object) -> None
     assert route["ANTHROPIC_AUTH_TOKEN"] == "from-file"
 
 
-def test_process_env_wins_over_env_file(tmp_path: object) -> None:
-    envf = tmp_path / "modelkit.env"  # type: ignore[operator]
+def test_process_env_wins_over_env_file(tmp_path: Path) -> None:
+    envf = tmp_path / "modelkit.env"
     envf.write_text("ZAI_API_KEY=from-file\n", encoding="utf-8")
     route = mr.resolve_route(
         "consolidate",
@@ -164,6 +165,16 @@ def test_process_env_wins_over_env_file(tmp_path: object) -> None:
     )
     assert route is not None
     assert route["ANTHROPIC_AUTH_TOKEN"] == "from-process"
+
+
+def test_env_file_tolerates_export_and_spaces(tmp_path: Path) -> None:
+    envf = tmp_path / "modelkit.env"
+    envf.write_text("export ZAI_API_KEY = spaced-and-exported\n", encoding="utf-8")
+    route = mr.resolve_route(
+        "consolidate", settings=_settings(zai_env_file=str(envf)), env={}
+    )
+    assert route is not None
+    assert route["ANTHROPIC_AUTH_TOKEN"] == "spaced-and-exported"
 
 
 def test_missing_env_file_is_not_fatal() -> None:

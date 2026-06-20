@@ -69,18 +69,25 @@ def _parse_override(raw: str) -> Optional[tuple[str, str]]:
 
 def _key_from_env_file(path_str: str, key_name: str) -> Optional[str]:
     """Read ``key_name`` from a ``.env``-style file. Missing file / key is not
-    fatal: returns None so the caller falls back to the default model."""
+    fatal: returns None so the caller falls back to the default model.
+
+    Tolerates the real-world ``.env`` shapes: an optional ``export`` prefix and
+    whitespace around the ``=`` (``export ZAI_API_KEY = value``). RuntimeError
+    is caught alongside OSError/ValueError because ``Path.expanduser()`` raises
+    it when the home directory cannot be resolved (restricted/container envs)."""
     try:
         text = Path(path_str).expanduser().read_text(encoding="utf-8")
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         return None
-    prefix = f"{key_name}="
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("#") or "=" not in line:
             continue
-        if line.startswith(prefix):
-            return line[len(prefix):].strip().strip('"').strip("'") or None
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        name, _, value = line.partition("=")
+        if name.strip() == key_name:
+            return value.strip().strip('"').strip("'") or None
     return None
 
 

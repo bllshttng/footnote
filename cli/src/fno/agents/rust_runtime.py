@@ -342,6 +342,21 @@ def resolve_installed_binary() -> Optional[Path]:
     return None
 
 
+def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying ``--role`` (x-d2fe).
+
+    Role-based model routing is implemented only in the Python spawn path
+    (``cmd_spawn`` -> ``bg_create`` resolves the per-spawn env). The Rust
+    client does not parse ``--role``, so a ``spawn ... --role <r>`` that
+    auto-routed to the binary would exit with ``unknown flag: --role``.
+    Detecting it here lets the call fall through to the Python runtime, which
+    owns the single source of truth for the routing policy.
+    """
+    if verb != "spawn":
+        return False
+    return any(a == "--role" or a.startswith("--role=") for a in args)
+
+
 def route_to_rust(
     args: Sequence[str],
     *,
@@ -503,9 +518,13 @@ def make_agents_group_cls() -> type:
             if args and args[0] not in ("-h", "--help"):
                 verb = args[0]
                 mode = runtime_mode()
-                if mode == "rust":
+                # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
+                # cannot parse --role, so never route it to the binary in any
+                # mode; fall through to the Python dispatch that implements it.
+                role_spawn = _is_role_bearing_spawn(verb, args)
+                if mode == "rust" and not role_spawn:
                     route_to_rust(list(args))  # execs; does not return
-                elif mode == "auto" and verb in AUTO_ROUTE_VERBS:
+                elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not role_spawn:
                     # Since ab-73da4ac2 this includes ``ask`` for every provider
                     # (the unconditional flip): the Rust client owns the full
                     # create/resume decision and surfaces the unresolvable-create

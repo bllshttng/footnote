@@ -735,3 +735,61 @@ def test_rust_only_verb_routes_when_installed(monkeypatch, tmp_path) -> None:
     result = CliRunner().invoke(app, ["agents", "host", "agent-A"])
     assert result.exit_code == 99
     assert captured == [(["host", "agent-A"], binary)]
+
+
+# --------------------------------------------------------------------------- #
+# Role-bearing spawn (x-d2fe): --role is Python-only, never routed to the binary
+# (the Rust client cannot parse it). `--help` exercises the make_context routing
+# decision without running a real spawn.
+# --------------------------------------------------------------------------- #
+
+
+def test_role_bearing_spawn_not_routed_to_rust(monkeypatch, tmp_path) -> None:
+    """`spawn ... --role <r>` falls through to Python even with a binary present."""
+    from fno.cli import app
+
+    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    called: list = []
+
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+    CliRunner().invoke(app, ["agents", "spawn", "--role", "consolidate", "--help"])
+    assert called == [], "a --role spawn must not route to the Rust binary"
+
+
+def test_role_bearing_spawn_not_routed_in_forced_rust_mode(monkeypatch, tmp_path) -> None:
+    """Even FNO_AGENTS_RUNTIME=rust must not route a --role spawn to the binary."""
+    from fno.cli import app
+
+    called: list = []
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+    CliRunner().invoke(app, ["agents", "spawn", "--role=tidy", "--help"])
+    assert called == []
+
+
+def test_plain_spawn_still_auto_routes(monkeypatch, tmp_path) -> None:
+    """Regression guard: a spawn WITHOUT --role still auto-routes to the binary."""
+    from fno.cli import app
+
+    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    captured: list = []
+
+    def fake_route(args, **kw):
+        captured.append(list(args))
+        raise SystemExit(99)
+
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    result = CliRunner().invoke(app, ["agents", "spawn", "worker", "--provider", "claude"])
+    assert result.exit_code == 99
+    assert captured == [["spawn", "worker", "--provider", "claude"]]
+
+
+def test_is_role_bearing_spawn_predicate() -> None:
+    assert rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--role", "tidy"])
+    assert rr._is_role_bearing_spawn("spawn", ["spawn", "--role=orient"])
+    assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--provider", "claude"])
+    assert not rr._is_role_bearing_spawn("ask", ["ask", "--role", "tidy"])
