@@ -78,7 +78,11 @@ def _build_cache() -> dict[str, str]:
     if not isinstance(data, dict):
         return {}
 
-    work = data.get("work", {})
+    # Accept both the nested `config.work.workspaces` schema (the shape the
+    # canonical ~/.fno/settings.yaml ships) and the legacy top-level `work.*`,
+    # mirroring graph._intake.project_root_from_settings so the two resolvers
+    # cannot drift on where the registry lives.
+    work = (data.get("config") or {}).get("work") or data.get("work") or {}
     if not isinstance(work, dict):
         return {}
 

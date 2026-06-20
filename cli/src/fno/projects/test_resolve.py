@@ -59,6 +59,33 @@ def test_canonical_name_resolves_to_itself(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# config.work nesting: the canonical ~/.fno/settings.yaml shape (cross-project-spawn)
+# ---------------------------------------------------------------------------
+
+def test_config_work_nesting_resolves(tmp_path, monkeypatch):
+    """The shipped settings.yaml nests the registry under `config.work.*`, not
+    top-level `work.*`. resolve_project_name must read it there too, matching
+    graph._intake.project_root_from_settings so the two resolvers cannot drift."""
+    _patch_settings(
+        monkeypatch,
+        tmp_path,
+        """
+        config:
+          work:
+            workspaces:
+              main:
+                projects:
+                  - name: example-pipeline
+                    short_name: etl
+        """,
+    )
+    from fno.projects.resolve import resolve_project_name
+
+    assert resolve_project_name("example-pipeline") == "example-pipeline"
+    assert resolve_project_name("etl") == "example-pipeline"
+
+
+# ---------------------------------------------------------------------------
 # AC1-EDGE: short_name resolves to canonical name
 # ---------------------------------------------------------------------------
 
