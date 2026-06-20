@@ -251,6 +251,96 @@ def _locked_update(
     return target
 
 
+def _apply_one(
+    existing: dict[str, Any], parts: list[str], key: str, value: str
+) -> tuple[dict[str, Any], Any]:
+    """Coerce + validate one key against ``existing`` and return
+    ``(new_dict, final_value)``. Raises ``ConfigSetError`` on a non-scalar key
+    or an invalid value. Runs UNDER the lock on the freshly-read content.
+
+    Validates only the changed block (extra='ignore' on the blocks keeps
+    unrelated keys out; field validators like ceiling_is_positive fire). The
+    block context is read off ``existing`` so a multi-key batch touching the
+    same block composes (each apply sees the prior apply's value).
+    """
+    parent_cls, leaf, leaf_ann = _resolve_parent_block(parts)  # type: ignore[misc]
+    if _as_model(leaf_ann) is not None:
+        raise ConfigSetError(
+            f"{key!r} is a config block, not a scalar; set a leaf key under it", 1
+        )
+    coerced = _coerce(value, leaf_ann)
+    block_dict = dict(_get_nested(existing, parts[:-1]) or {})
+    block_dict[leaf] = coerced
+    try:
+        parent_cls.model_validate(block_dict)
+    except ValidationError as exc:
+        first = exc.errors()[0] if exc.errors() else {"msg": str(exc)}
+        raise ConfigSetError(
+            f"invalid value for {key}: {first.get('msg', exc)}", 2
+        ) from exc
+    return _deep_set(existing, parts, coerced), coerced
+
+
+def set_config_values(
+    items: list[tuple[str, str]],
+    *,
+    scope: str = "global",
+    repo_root: Optional[Path] = None,
+) -> list[SetResult]:
+    """Set one or more dotted keys in one atomic, lock-serialized pass (US2).
+
+    All-or-nothing: every value is coerced + validated under a single lock and
+    the file is written only if ALL pass (a validation failure raises before any
+    temp file is created, so the original is untouched). A key appearing twice
+    uses the last value (AC2-EDGE). An empty batch is a usage error.
+
+    The single-key ``set_config_value`` delegates here, so both share one
+    read-modify-write path. Returns one ``SetResult`` per distinct key, in
+    first-seen order.
+    """
+    if not items:
+        raise ConfigSetError("no key=value pairs given", 2)
+
+    # Dedup by key, last value wins (AC2-EDGE); preserve first-seen order.
+    order: list[str] = []
+    deduped: dict[str, str] = {}
+    for key, value in items:
+        if key not in deduped:
+            order.append(key)
+        deduped[key] = value
+
+    # Resolve every key up front (unknown -> exit 1) before taking the lock.
+    parts_by_key: dict[str, list[str]] = {}
+    for key in order:
+        parts = key.split(".")
+        if _resolve_parent_block(parts) is None:
+            raise ConfigSetError(f"unknown config key {key!r}", 1)
+        parts_by_key[key] = parts
+
+    target = _target_path(scope, repo_root)
+    final_values: dict[str, Any] = {}
+
+    def _validate_and_merge(existing: dict[str, Any]) -> dict[str, Any]:
+        data = existing
+        for key in order:
+            data, final = _apply_one(data, parts_by_key[key], key, deduped[key])
+            final_values[key] = final
+        return data
+
+    try:
+        written = _locked_update(target, _validate_and_merge)
+    except OSError as exc:
+        # AC2-FR: the temp+rename already left the original intact; surface a
+        # clean non-zero exit.
+        raise ConfigSetError(
+            f"failed to write {target}: {exc} (settings left unchanged)", 1
+        ) from exc
+    return [
+        SetResult(key=key, value=final_values[key], path=written, scope=scope)
+        for key in order
+    ]
+
+
 def set_config_value(
     key: str,
     value: str,
@@ -258,48 +348,14 @@ def set_config_value(
     scope: str = "global",
     repo_root: Optional[Path] = None,
 ) -> SetResult:
-    """Set a dotted config key in the target settings file. Raises
-    ``ConfigSetError`` (with an exit code) on an unknown key, a non-scalar key,
-    a type-mismatched / schema-invalid value, or a malformed existing file.
+    """Set a single dotted config key (the single-key facade over
+    ``set_config_values``). Raises ``ConfigSetError`` (with an exit code) on an
+    unknown key, a non-scalar key, a type-mismatched / schema-invalid value, or
+    a malformed existing file.
     """
-    parts = key.split(".")
-    resolved = _resolve_parent_block(parts)
-    if resolved is None:
-        raise ConfigSetError(f"unknown config key {key!r}", 1)
-    parent_cls, leaf, leaf_ann = resolved
-    if _as_model(leaf_ann) is not None:
-        raise ConfigSetError(
-            f"{key!r} is a config block, not a scalar; set a leaf key under it", 1
-        )
-
-    coerced = _coerce(value, leaf_ann)
-
-    target = _target_path(scope, repo_root)
-
-    def _validate_and_merge(existing: dict[str, Any]) -> dict[str, Any]:
-        # Runs UNDER the lock on the freshly-read content (see _locked_update).
-        # Validate only the changed block (extra='ignore' on the blocks keeps
-        # unrelated keys out; field validators like ceiling_is_positive fire).
-        block_dict = dict(_get_nested(existing, parts[:-1]) or {})
-        block_dict[leaf] = coerced
-        try:
-            parent_cls.model_validate(block_dict)
-        except ValidationError as exc:
-            first = exc.errors()[0] if exc.errors() else {"msg": str(exc)}
-            raise ConfigSetError(
-                f"invalid value for {key}: {first.get('msg', exc)}", 2
-            ) from exc
-        return _deep_set(existing, parts, coerced)
-
-    try:
-        written = _locked_update(target, _validate_and_merge)
-    except OSError as exc:
-        # AC7-FR: the temp+rename in _locked_update already left the original
-        # file intact and unlinked the temp; surface a clean non-zero exit.
-        raise ConfigSetError(
-            f"failed to write {target}: {exc} (settings left unchanged)", 1
-        ) from exc
-    return SetResult(key=key, value=coerced, path=written, scope=scope)
+    return set_config_values(
+        [(key, value)], scope=scope, repo_root=repo_root
+    )[0]
 
 
 # ---------------------------------------------------------------------------
