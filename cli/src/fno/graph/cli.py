@@ -442,6 +442,7 @@ def cmd_idea(
         resolved_project = detect_project_from_settings(resolved_cwd)
 
     new_id_holder: list[Optional[str]] = [None]
+    node_holder: list[Optional[dict]] = [None]
 
     def mutator(entries):
         new_id = mint_node_id({e.get("id") for e in entries})
@@ -455,9 +456,34 @@ def cmd_idea(
         )
         node["id"] = new_id
         entries.append(node)
+        node_holder[0] = node
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Born-with-why (x-6a10): after the node persists, evaluate the
+    # context-carrying /think spawn from THIS deterministic code path (never an
+    # LLM-volunteered step). Strictly non-fatal and opt-in (config.think_spawn,
+    # default OFF): a gate-off install is a complete no-op, and any failure here
+    # never wedges the filing of the node above.
+    try:
+        from fno.provenance.spawn_think import maybe_spawn_think
+
+        # The persisted node may have been re-slugged inside locked_mutate_graph
+        # (store.ensure_slugs); read it back so the /think seed + worker name
+        # carry the node's durable slug rather than a pre-slug copy.
+        persisted = node_holder[0]
+        if persisted is not None and new_id_holder[0]:
+            from fno.graph.store import read_graph
+
+            for e in read_graph(_graph_path()):
+                if e.get("id") == new_id_holder[0]:
+                    persisted = e
+                    break
+            maybe_spawn_think(persisted)
+    except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
+        pass
+
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
 
