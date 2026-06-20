@@ -330,10 +330,11 @@ def cmd_spawn(
     role: str | None = typer.Option(
         None, "--role",
         help=(
-            "Routing role for per-spawn model selection (x-d2fe). Cheap roles "
-            "(coordinate|tidy|orient|consolidate) route to z.ai GLM when a key "
-            "is configured; production roles (implement|review-verdict) and the "
-            "default (no --role) stay on the Anthropic model."
+            "Routing role for per-spawn model selection (x-d2fe). Auxiliary "
+            "roles (coordinate|tidy|orient|consolidate) route to a secondary "
+            "provider (z.ai GLM by default) when a key is configured; production "
+            "roles (implement|review-verdict) and the default (no --role) stay "
+            "on the primary Anthropic model."
         ),
     ),
 ) -> None:

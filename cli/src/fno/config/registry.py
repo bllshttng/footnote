@@ -170,23 +170,17 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.model_routing.* (role-based per-spawn model routing, x-d2fe) ---
     "config.model_routing.enabled": Meta(
-        "advanced", "Route cheap roles (coordinate/tidy/orient/consolidate) to z.ai GLM at spawn.",
-        question="Route cheap coordination work to z.ai GLM (production stays on Anthropic)?",
+        "advanced", "Route auxiliary roles (coordinate/tidy/orient/consolidate) to a secondary provider at spawn.",
+        question="Route auxiliary coordination work to a secondary model provider (production stays on Anthropic)?",
     ),
-    "config.model_routing.zai_base_url": Meta(
-        "advanced", "z.ai endpoint for cheap-role spawns (default the GLM Coding Plan endpoint)."
+    "config.model_routing.providers": Meta(
+        "never", "Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file}); 'zai' is built in."
     ),
-    "config.model_routing.default_model": Meta(
-        "advanced", "Default cheap model for routed roles (override per role via overrides)."
+    "config.model_routing.roles": Meta(
+        "never", "Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7')."
     ),
-    "config.model_routing.overrides": Meta(
-        "never", "Per-role provider,model override map (e.g. tidy: 'zai,glm-4.5-air')."
-    ),
-    "config.model_routing.zai_key_env": Meta(
-        "never", "Env var name holding the z.ai key (default ZAI_API_KEY); the secret never lives in settings."
-    ),
-    "config.model_routing.zai_env_file": Meta(
-        "never", "Optional path to a .env file holding the z.ai key (e.g. modelkit's .env)."
+    "config.model_routing.extra_env": Meta(
+        "never", "Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides)."
     ),
 }
 

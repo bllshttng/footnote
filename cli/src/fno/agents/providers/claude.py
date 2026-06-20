@@ -152,10 +152,10 @@ def bg_create(
         cwd: Working directory passed to subprocess.run so claude inherits
             it for tool execution.
         timeout: Subprocess timeout in seconds. ``None`` means no timeout.
-        role: Optional routing role (x-d2fe). A cheap role (coordinate /
-            tidy / orient / consolidate) with a configured z.ai key routes the
-            worker to GLM via env overrides; ``None`` or a production role
-            leaves the spawn env byte-for-byte as today (regression guard).
+        role: Optional routing role (x-d2fe). An auxiliary role (coordinate /
+            tidy / orient / consolidate) with a configured provider key routes
+            the worker to a secondary provider via env overrides; ``None`` or a
+            production role leaves the spawn env byte-for-byte as today.
 
     Returns:
         :class:`ProviderResult` with ``session_id_out`` set to the parsed
@@ -179,10 +179,11 @@ def bg_create(
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_PROVIDER"] = "claude"
 
-    # Role-based model routing (x-d2fe). A cheap role with a configured z.ai
-    # key merges ANTHROPIC_BASE_URL/AUTH_TOKEN/MODEL so the worker runs on GLM;
-    # no role / production role / missing key returns None and changes nothing
-    # (fail-safe). Clear any stale ANTHROPIC_API_KEY so the z.ai auth token is
+    # Role-based model routing (x-d2fe). An auxiliary role with a configured
+    # provider key merges ANTHROPIC_BASE_URL/AUTH_TOKEN + the model env vars so
+    # the worker runs on the secondary provider (z.ai GLM, ...); no role /
+    # production role / missing key returns None and changes nothing
+    # (fail-safe). Clear any stale ANTHROPIC_API_KEY so the routed auth token is
     # the credential that wins for the routed worker.
     from fno.agents.model_routing import resolve_route
 

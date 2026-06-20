@@ -1249,29 +1249,48 @@ class WorkBlock(BaseModel):
         return {}
 
 
+class ModelProvider(BaseModel):
+    """One secondary model provider for role-based routing (z.ai, DeepSeek, ...).
+
+    ``protocol`` is how a worker talks to it: a ``claude --bg`` worker speaks the
+    Anthropic Messages API, so only ``anthropic``-protocol providers are usable
+    for the claude lane (use the vendor's Anthropic-compatible endpoint, e.g.
+    ``https://api.z.ai/api/anthropic`` or ``https://api.deepseek.com/anthropic``,
+    NOT its OpenAI ``/v4`` path). The API key is read from the process env var
+    named by ``api_key_env`` (falling back to ``api_key_file``); it never lives
+    in settings.yaml. ``zai`` is built in by default; list a provider here to
+    override it or to add another (e.g. ``deepseek``).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    protocol: str = "anthropic"
+    base_url: str = ""
+    api_key_env: str = ""
+    api_key_file: Optional[str] = None
+
+
 class ModelRoutingBlock(BaseModel):
     """Role-based per-spawn model routing (config.model_routing in settings.yaml).
 
-    Routes cheap coordination roles (coordinate / tidy / orient / consolidate)
-    to z.ai GLM at spawn time while production roles stay on the default
-    Anthropic model. The secret (the z.ai key) lives OUTSIDE this block - in
-    the process env var named by ``zai_key_env``, or in the ``.env`` file at
-    ``zai_env_file`` - never in settings.yaml. See fno.agents.model_routing.
+    Routes auxiliary coordination roles (coordinate / tidy / orient /
+    consolidate) to a secondary provider (z.ai GLM by default) at spawn time
+    while production roles stay on the primary Anthropic model. Keys live in env
+    vars / .env files named per provider, never here. See
+    fno.agents.model_routing.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
-    zai_base_url: str = "https://api.z.ai/api/coding/paas/v4"
-    default_model: str = "glm-5.2"
-    overrides: dict[str, str] = Field(default_factory=dict)
-    zai_key_env: str = "ZAI_API_KEY"
-    zai_env_file: Optional[str] = None
+    providers: dict[str, ModelProvider] = Field(default_factory=dict)
+    roles: dict[str, str] = Field(default_factory=dict)
+    extra_env: dict[str, str] = Field(default_factory=dict)
 
-    @field_validator("overrides", mode="before")
+    @field_validator("providers", "roles", "extra_env", mode="before")
     @classmethod
-    def _coerce_overrides(cls, v: object) -> object:
-        """Fail-safe: a non-mapping ``overrides`` degrades to {}."""
+    def _coerce_mapping(cls, v: object) -> object:
+        """Fail-safe: a non-mapping providers/roles/extra_env degrades to {}."""
         if isinstance(v, dict):
             return v
         return {}

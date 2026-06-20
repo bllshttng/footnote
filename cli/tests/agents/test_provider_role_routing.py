@@ -48,9 +48,10 @@ def test_cheap_role_merges_zai_env(
     )
 
     env = captured["env"]
-    assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/coding/paas/v4"
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
     assert env["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.2"  # whole worker on GLM
     assert "ANTHROPIC_API_KEY" not in env  # stale key cleared on route
     # FNO_AGENT_* injection still happens alongside the route.
     assert env["FNO_AGENT_SELF"] == "dreamer"

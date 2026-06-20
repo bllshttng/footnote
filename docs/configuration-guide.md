@@ -88,9 +88,7 @@
 | `config.collision.severity_thresholds.medium_count` | float | `2` | never | Collision scoring: medium-severity shared-file count. |
 | `config.collision.severity_thresholds.medium_ratio` | float | `0.25` | never | Collision scoring: medium-severity shared-file ratio. |
 | `config.work.workspaces` | dict[str, WorkspaceEntry] | `{}` | advanced | Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). |
-| `config.model_routing.enabled` | bool | `true` | advanced | Route cheap roles (coordinate/tidy/orient/consolidate) to z.ai GLM at spawn. |
-| `config.model_routing.zai_base_url` | str | `https://api.z.ai/api/coding/paas/v4` | advanced | z.ai endpoint for cheap-role spawns (default the GLM Coding Plan endpoint). |
-| `config.model_routing.default_model` | str | `glm-5.2` | advanced | Default cheap model for routed roles (override per role via overrides). |
-| `config.model_routing.overrides` | dict[str, str] | `{}` | never | Per-role provider,model override map (e.g. tidy: 'zai,glm-4.5-air'). |
-| `config.model_routing.zai_key_env` | str | `ZAI_API_KEY` | never | Env var name holding the z.ai key (default ZAI_API_KEY); the secret never lives in settings. |
-| `config.model_routing.zai_env_file` | str (optional) | _(none)_ | never | Optional path to a .env file holding the z.ai key (e.g. modelkit's .env). |
+| `config.model_routing.enabled` | bool | `true` | advanced | Route auxiliary roles (coordinate/tidy/orient/consolidate) to a secondary provider at spawn. |
+| `config.model_routing.providers` | dict[str, ModelProvider] | `{}` | never | Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file}); 'zai' is built in. |
+| `config.model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7'). |
+| `config.model_routing.extra_env` | dict[str, str] | `{}` | never | Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides). |
