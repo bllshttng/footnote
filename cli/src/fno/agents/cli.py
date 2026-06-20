@@ -327,6 +327,16 @@ def cmd_spawn(
         False, "--here", "--in-place",
         help="Opt out of --fresh: keep the worker in the caller's cwd.",
     ),
+    role: str | None = typer.Option(
+        None, "--role",
+        help=(
+            "Routing role for per-spawn model selection (x-d2fe). Auxiliary "
+            "roles (coordinate|tidy|orient|consolidate) route to a secondary "
+            "provider (z.ai GLM by default) when a key is configured; production "
+            "roles (implement|review-verdict) and the default (no --role) stay "
+            "on the primary Anthropic model."
+        ),
+    ),
 ) -> None:
     """Spawn a new agent (Python fallback runtime).
 
@@ -357,6 +367,7 @@ def cmd_spawn(
             timeout=timeout,
             from_name=from_name,
             yolo=yolo,
+            role=role,
         )
     except DispatchAskError as exc:
         print(str(exc), file=sys.stderr)

@@ -1431,6 +1431,53 @@ class ActiveBacklogConfig(BaseModel):
         return bool(self.enabled)
 
 
+class ModelProvider(BaseModel):
+    """One secondary model provider for role-based routing (z.ai, DeepSeek, ...).
+
+    ``protocol`` is how a worker talks to it: a ``claude --bg`` worker speaks the
+    Anthropic Messages API, so only ``anthropic``-protocol providers are usable
+    for the claude lane (use the vendor's Anthropic-compatible endpoint, e.g.
+    ``https://api.z.ai/api/anthropic`` or ``https://api.deepseek.com/anthropic``,
+    NOT its OpenAI ``/v4`` path). The API key is read from the process env var
+    named by ``api_key_env`` (falling back to ``api_key_file``); it never lives
+    in settings.yaml. ``zai`` is built in by default; list a provider here to
+    override it or to add another (e.g. ``deepseek``).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    protocol: str = "anthropic"
+    base_url: str = ""
+    api_key_env: str = ""
+    api_key_file: Optional[str] = None
+
+
+class ModelRoutingBlock(BaseModel):
+    """Role-based per-spawn model routing (config.model_routing in settings.yaml).
+
+    Routes auxiliary coordination roles (coordinate / tidy / orient /
+    consolidate) to a secondary provider (z.ai GLM by default) at spawn time
+    while production roles stay on the primary Anthropic model. Keys live in env
+    vars / .env files named per provider, never here. See
+    fno.agents.model_routing.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    providers: dict[str, ModelProvider] = Field(default_factory=dict)
+    roles: dict[str, str] = Field(default_factory=dict)
+    extra_env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("providers", "roles", "extra_env", mode="before")
+    @classmethod
+    def _coerce_mapping(cls, v: object) -> object:
+        """Fail-safe: a non-mapping providers/roles/extra_env degrades to {}."""
+        if isinstance(v, dict):
+            return v
+        return {}
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -1456,6 +1503,20 @@ class ConfigBlock(BaseModel):
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
     collision: CollisionBlock = Field(default_factory=CollisionBlock)
     work: WorkBlock = Field(default_factory=WorkBlock)
+    model_routing: ModelRoutingBlock = Field(default_factory=ModelRoutingBlock)
+
+    @field_validator("model_routing", mode="before")
+    @classmethod
+    def _coerce_model_routing(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``model_routing:`` degrades to defaults.
+
+        Mirrors ``_coerce_auto_merge``: a scalar/list/null cannot build the
+        block; fall back to defaults rather than raising out of the whole
+        settings load. A dict passes through so the inner coercers still run.
+        """
+        if isinstance(v, (dict, ModelRoutingBlock)):
+            return v
+        return {}
 
     @field_validator("logs", mode="before")
     @classmethod

@@ -1249,6 +1249,7 @@ def _claude_create_path(
     timeout: Optional[int],
     yolo: bool,
     lock_handle,  # type: ignore[no-untyped-def]
+    role: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1279,6 +1280,7 @@ def _claude_create_path(
             message=message,
             cwd=cwd,
             timeout=timeout,
+            role=role,
         )
     except claude_mod.ProviderSubprocessError as exc:
         events.emit(
@@ -1648,6 +1650,7 @@ def dispatch_spawn(
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
     from_name: str = _FROM_NAME_DEFAULT,
     yolo: bool = False,
+    role: Optional[str] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -1797,6 +1800,7 @@ def dispatch_spawn(
                         timeout=timeout,
                         yolo=yolo,
                         lock_handle=lock_handle,
+                        role=role,
                     )
                     return SpawnResult(
                         kind="created",
