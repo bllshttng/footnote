@@ -5,12 +5,11 @@ Public API:
 """
 from __future__ import annotations
 
-import math
 import os
 import tempfile
 from pathlib import Path
 
-from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER
+from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band
 
 # Canonical Kanban column order, left to right. Single source of truth for both
 # renderers: render_graph_md (below) and render_html.COLUMNS import this, so the
@@ -52,27 +51,6 @@ def _project_key(entry: dict) -> str:
 def _lane_order_key(project: str) -> tuple:
     """Order lanes within a column: named projects alphabetical, unscoped last."""
     return (project == UNSCOPED_LABEL, project)
-
-
-def _rank_band(entry: dict) -> tuple:
-    """Rank band for the lane sort: ranked nodes (band 0, ascending rank)
-    precede unranked nodes (band 1). bool is excluded (it subclasses int but
-    is never a real rank)."""
-    rank = entry.get("rank")
-    if isinstance(rank, bool) or not isinstance(rank, (int, float)):
-        return (1, 0.0)
-    # Degrade NaN/inf AND huge-int ranks to unranked. float() guards the
-    # OverflowError a giant int (from a hand-edited graph.json) raises; isfinite
-    # then excludes NaN/inf so the sort key stays a total order (NaN compares
-    # False both ways). A non-finite rank must never raise here - the render
-    # fires inside locked_mutate_graph and only OSError is swallowed upstream.
-    try:
-        f = float(rank)
-    except (OverflowError, ValueError):
-        return (1, 0.0)
-    if math.isfinite(f):
-        return (0, f)
-    return (1, 0.0)
 
 
 def _lane_sort_key(entry: dict) -> tuple:

@@ -15,7 +15,7 @@ from typing import Literal, Optional, TypedDict, Union
 
 from fno.graph._constants import (
     LEDGER_JSON, PRIORITY_ORDER, GRAPH_JSON,
-    is_wellformed_node_id, mint_node_id,
+    is_wellformed_node_id, mint_node_id, _rank_band,
 )
 from fno import paths as _paths
 from fno.graph.depends import (
@@ -186,10 +186,18 @@ def _graph_sort_key_fn(e: dict) -> tuple:
 
 
 def make_selection_sort_key(entries: list[dict]):
-    """Build the epics-first selection sort key (Locked Decision 7, C3).
+    """Build the rank-then-epics-first selection sort key (Locked Decision 7, C3; x-d1fe).
 
     Returns a key function for sorting *ready candidates* by selection
-    precedence: epics-first, then flat priority. A node is an "epic child"
+    precedence: curated ``rank`` first, then epics-first, then flat priority.
+    The key prepends the SAME ``_rank_band`` term the board lane key uses
+    (``render._lane_sort_key``), so a ``fno backlog rank --top`` node is
+    *worked* next, not merely floated on the board - board order and work
+    order share one rank definition and cannot drift (x-d1fe Locked
+    Decision 4). A ranked node (band 0, ascending rank) outranks every
+    unranked node, so an explicit rank overrides the epics-first heuristic;
+    with no ranks set every node shares the ``(1, 0.0)`` band and ordering is
+    byte-for-byte today's epics-first behavior. A node is an "epic child"
     when its ``parent`` resolves to another node in ``entries``; such
     children always outrank loose nodes regardless of raw priority, so a
     walk stays focused on one epic before starting loose work. Among epic
@@ -229,6 +237,13 @@ def make_selection_sort_key(entries: list[dict]):
         return PRIORITY_ORDER.get(e.get("priority", "p2"), 2)
 
     def key(node: dict) -> tuple:
+        # Curated rank leads (x-d1fe): the SAME `_rank_band` the board uses,
+        # prepended so a `rank --top` node (band 0, ascending rank) is selected
+        # ahead of ALL unranked nodes (band 1) - including in-progress epic
+        # children, so an explicit rank overrides the epics-first heuristic
+        # (Locked Decision 1). Unranked nodes all share the `(1, 0.0)` band, so
+        # the existing epics-first key below decides their order byte-for-byte.
+        band = _rank_band(node)
         child_prio = _prio(node)
         child_created = node.get("created_at", "") or ""
         pid = node.get("parent")
@@ -236,6 +251,7 @@ def make_selection_sort_key(entries: list[dict]):
         if epic is not None:
             in_progress_rank = 0 if epic_in_progress.get(pid) else 1
             return (
+                band,                    # curated rank band (ranked first)
                 0,                       # epic-children tier (before loose)
                 in_progress_rank,        # in-progress epics first
                 _prio(epic),             # highest-priority epic first
@@ -247,7 +263,7 @@ def make_selection_sort_key(entries: list[dict]):
         # tuple stays comparable; tier already separates loose from epic
         # children, so loose nodes only ever compare among themselves and
         # resolve on flat (priority, created_at).
-        return (1, 0, child_prio, child_created, child_prio, child_created)
+        return (band, 1, 0, child_prio, child_created, child_prio, child_created)
 
     return key
 
