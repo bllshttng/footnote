@@ -371,13 +371,18 @@ def test_resolve_pr_session_ids_matches_and_misses(tmp_path):
 
 
 def test_resolve_pr_session_ids_bare_number_when_no_url(tmp_path):
-    """An entry with no pr_url falls back to the bare numeric match."""
+    """An entry with no pr_url falls back to the bare numeric match, coercing a
+    string-stored pr; a non-list `sessions` is ignored, not spread into chars."""
     led = tmp_path / "ledger.json"
     led.write_text(json.dumps({"entries": [
-        {"session_id": "s1", "pr": 522},        # no url -> numeric match
-        {"session_id": "s2", "pr_number": 522}, # legacy field name
+        {"session_id": "s1", "pr": 522},          # no url -> numeric match
+        {"session_id": "s2", "pr_number": 522},   # legacy field name
+        {"session_id": "s3", "pr": "522"},        # string-stored pr -> coerced
+        {"session_id": "s4", "pr": 522, "sessions": "oops"},  # non-list -> ignored
     ]}), encoding="utf-8")
-    assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1", "s2"]
+    assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1", "s2", "s3", "s4"]
+    # `sessions: "oops"` must contribute nothing beyond the entry's session_id.
+    assert "o" not in _resolve_pr_session_ids(led, 522, "o/r")
 
 
 def test_triage_carveouts_readonly_not_landed_or_consumed(tmp_path):

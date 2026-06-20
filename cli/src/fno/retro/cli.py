@@ -104,10 +104,25 @@ def _resolve_pr_session_ids(
             tail = f"/{slug_l}/pull/{pr}" if slug_l else f"/pull/{pr}"
             matched = url_s.endswith(tail)
         else:
-            matched = e.get("pr") == pr or e.get("pr_number") == pr
+            # No url on the entry: fall back to the bare numeric field. Coerce
+            # to int so a string-stored pr ("522") still matches the int arg.
+            matched = False
+            for key in ("pr", "pr_number"):
+                val = e.get(key)
+                if val is None:
+                    continue
+                try:
+                    if int(val) == pr:
+                        matched = True
+                        break
+                except (ValueError, TypeError):
+                    pass
         if not matched:
             continue
-        sids = list(e.get("sessions") or [])
+        # Defensive: a non-list ``sessions`` (e.g. a stray string) must NOT be
+        # spread into per-character ids - guard the type before list().
+        sessions_val = e.get("sessions")
+        sids = list(sessions_val) if isinstance(sessions_val, list) else []
         if e.get("session_id"):
             sids.append(e["session_id"])
         for s in sids:
