@@ -33,6 +33,11 @@ class TriageReport:
     # Carve-out ids harvested this run; consumed (removed from the ledger) by the
     # caller on a clean land so they are never re-filed under a later PR.
     harvested_carveout_ids: list[str] = field(default_factory=list)
+    # Count of carve-outs surfaced READ-ONLY this run (x-90b8): an explicit
+    # `--pr-number` harvest that resolves no owning session must never file or
+    # consume cross-session carve-outs under that PR. They are listed for the
+    # operator but neither landed nor consumed.
+    readonly_carveout_count: int = 0
 
     @property
     def partial(self) -> bool:
@@ -72,6 +77,7 @@ def triage_pr(
     create_fn=None,
     inbox_fn=None,
     carveout_root: Optional[Path] = None,
+    carveouts_readonly: bool = False,
 ) -> TriageReport:
     warnings: list[str] = []
 
@@ -85,6 +91,18 @@ def triage_pr(
         source_pr=pr_number,
         warnings=warnings,
     )
+
+    # x-90b8: when an explicit `--pr-number` harvest resolves NO owning session,
+    # the carve-out source is READ-ONLY. A carve-out is session-scoped (an
+    # unrelated session's deferred work), so stamping every unconsumed carve-out
+    # onto an arbitrary PR and consuming it mis-attributes cross-session work
+    # under the wrong lineage (cv-0932fa60 -> PR #522). Drop them from the
+    # land/consume path; surface the count so the operator still sees them.
+    # Reviews + COMPLETION are inherently PR-scoped, so they are untouched.
+    readonly_carveout_count = 0
+    if carveouts_readonly:
+        readonly_carveout_count = len(carveouts)
+        carveouts = []
 
     gh_unavailable = False
     if comments is None:
@@ -141,6 +159,7 @@ def triage_pr(
         pr_number=pr_number,
         source_counts=source_counts,
         harvested_carveout_ids=[c.source_id for c in carveouts],
+        readonly_carveout_count=readonly_carveout_count,
         results=results,
         skipped_dupes=len(skipped),
         uncited=uncited,

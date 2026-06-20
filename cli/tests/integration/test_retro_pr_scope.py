@@ -325,3 +325,156 @@ def test_explicit_foreign_repo_not_attributed_to_local(tmp_path, monkeypatch):
     assert captured.get("current_repo_slug") == "acme/local", captured
     # The harvest target URL still honors --repo.
     assert captured.get("pr_url") == "https://github.com/other/repo/pull/5", captured
+
+
+# ── x-90b8: --pr-number with no owning session is carve-out READ-ONLY ──
+#
+# A hotfix / manual PR has no session<->PR ledger link. Without a guard, the
+# synthetic `retro run --pr-number N` harvests EVERY unconsumed carve-out,
+# stamps it `Source: PR #N`, files a node under the wrong lineage, and consumes
+# it - exactly cv-0932fa60 minted onto PR #522. The fix mirrors the post-merge
+# Step 4b guard: no owning session -> carve-outs are listed read-only, never
+# filed or consumed. Reviews/COMPLETION (inherently PR-scoped) are untouched.
+
+from fno.retro.cli import _resolve_pr_session_ids
+from fno.retro.routine import triage_pr
+
+
+def _write_carveout(root: Path, **rec) -> None:
+    d = root / ".fno"
+    d.mkdir(parents=True, exist_ok=True)
+    base = {
+        "id": "cv-stray",
+        "description": "stray deferred work from another session",
+        "session_id": "other-sess",
+        "kind": "deferred",
+    }
+    base.update(rec)
+    (d / "carveouts.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
+
+
+def test_resolve_pr_session_ids_matches_and_misses(tmp_path):
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"entries": [
+        {"session_id": "s1", "pr": 522, "pr_url": "https://github.com/o/r/pull/522"},
+        {"session_id": "s2", "pr": 999, "pr_url": "https://github.com/o/r/pull/999"},
+        {"sessions": ["s3", "s4"], "pr": 522, "pr_url": "https://github.com/o/r/pull/522"},
+    ]}), encoding="utf-8")
+    # matched entries: session_id + the sessions[] list, order-preserving + deduped
+    assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1", "s3", "s4"]
+    # no entry for this PR -> [] (the read-only case)
+    assert _resolve_pr_session_ids(led, 777, "o/r") == []
+    # same number in a different repo -> [] (the ledger is global, slug-scoped)
+    assert _resolve_pr_session_ids(led, 522, "x/y") == []
+    # missing / unreadable ledger -> [] (degrades to read-only, never crashes)
+    assert _resolve_pr_session_ids(tmp_path / "nope.json", 522, "o/r") == []
+
+
+def test_resolve_pr_session_ids_bare_number_when_no_url(tmp_path):
+    """An entry with no pr_url falls back to the bare numeric match."""
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"entries": [
+        {"session_id": "s1", "pr": 522},        # no url -> numeric match
+        {"session_id": "s2", "pr_number": 522}, # legacy field name
+    ]}), encoding="utf-8")
+    assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1", "s2"]
+
+
+def test_triage_carveouts_readonly_not_landed_or_consumed(tmp_path):
+    """carveouts_readonly=True: the stray carve-out is surfaced read-only, NOT
+    landed and NOT in harvested_carveout_ids (so the caller never consumes it).
+    A real reviewer finding still lands."""
+    _write_carveout(tmp_path)
+    rec = _Rec()
+    comments = [{"id": "c1", "body": "![high] real declined finding", "reviewer": "gemini[bot]"}]
+    report = triage_pr(
+        repo_root=tmp_path,
+        pr_number=522,
+        mode="autonomous",
+        comments=comments,
+        carveout_root=tmp_path,
+        carveouts_readonly=True,
+        create_fn=rec.create,
+        inbox_fn=rec.inbox_append,
+    )
+    titles = [c.get("title") or "" for c in rec.created]
+    assert any("real declined finding" in t for t in titles), rec.created
+    assert not any("stray" in t.lower() for t in titles), rec.created
+    assert report.harvested_carveout_ids == [], report.harvested_carveout_ids
+    assert report.readonly_carveout_count == 1, report.readonly_carveout_count
+
+
+def test_triage_carveouts_consumed_when_not_readonly(tmp_path):
+    """Control: with a resolved session (carveouts_readonly=False) the carve-out
+    lands AND is reported for consumption."""
+    _write_carveout(tmp_path)
+    rec = _Rec()
+    report = triage_pr(
+        repo_root=tmp_path,
+        pr_number=522,
+        mode="autonomous",
+        comments=[],
+        carveout_root=tmp_path,
+        carveouts_readonly=False,
+        create_fn=rec.create,
+        inbox_fn=rec.inbox_append,
+    )
+    assert report.harvested_carveout_ids == ["cv-stray"], report.harvested_carveout_ids
+    assert report.readonly_carveout_count == 0
+    assert any("stray" in (c.get("title") or "").lower() for c in rec.created), rec.created
+
+
+def _run_synthetic_pr(tmp_path, monkeypatch, *, ledger_entries):
+    """Drive run() for a synthetic --pr-number 522 with no --session-id, capturing
+    the payload handed to _process_payload."""
+    import fno.carveout.core as cocore
+    import fno.graph.store as store
+    import fno.paths as paths
+    import fno.retro.cli as rcli
+
+    (tmp_path / "graph.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "ledger.json").write_text(
+        json.dumps({"entries": ledger_entries}), encoding="utf-8"
+    )
+    sd = tmp_path / "retro-pending"
+    sd.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(paths, "resolve_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(paths, "resolve_canonical_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(paths, "retro_pending_dir", lambda: sd)
+    monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
+    monkeypatch.setattr(paths, "ledger_json", lambda: tmp_path / "ledger.json")
+    monkeypatch.setattr(cocore, "resolve_carveout_root", lambda: tmp_path)
+    monkeypatch.setattr(store, "read_graph", lambda p: [])
+    monkeypatch.setattr(rcli, "_current_repo_slug", lambda *a, **k: "o/r")
+
+    captured: dict = {}
+
+    def fake_pp(payload, **kw):
+        captured.update(payload)
+        return (object(), True)
+
+    monkeypatch.setattr(rcli, "_process_payload", fake_pp)
+    try:
+        rcli.run(node=None, pr=522, session=None, repo=None)
+    except typer.Exit:
+        pass
+    return captured
+
+
+def test_run_pr_no_owning_session_sets_readonly(tmp_path, monkeypatch):
+    """No ledger entry for the PR -> payload marks carve-outs read-only and
+    carries NO session scope (so triage_pr suppresses the carve-out source)."""
+    captured = _run_synthetic_pr(tmp_path, monkeypatch, ledger_entries=[])
+    assert captured.get("carveouts_readonly") is True, captured
+    assert "session_ids" not in captured, captured
+
+
+def test_run_pr_with_owning_session_scopes_not_readonly(tmp_path, monkeypatch):
+    """A ledger entry linking the PR to a session -> payload scopes to that
+    session and is NOT read-only (carve-outs land + consume, as before)."""
+    captured = _run_synthetic_pr(tmp_path, monkeypatch, ledger_entries=[
+        {"session_id": "sess-A", "pr": 522, "pr_url": "https://github.com/o/r/pull/522"},
+    ])
+    assert captured.get("session_ids") == ["sess-A"], captured
+    assert not captured.get("carveouts_readonly"), captured
