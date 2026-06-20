@@ -50,6 +50,153 @@ def plan_cmd(
     typer.echo(json.dumps(raw, indent=2))
 
 
+# ---------------------------------------------------------------------------
+# CLI-native interactive setup wizard (x-50f9, US4)
+# ---------------------------------------------------------------------------
+
+# Keys whose natural home is the project file, not the per-user global one. The
+# wizard asks "global or this project?" for these and routes the write
+# accordingly; everything else is global (the config model is global-first).
+PROJECT_SCOPED_KEYS = (
+    "config.post_merge.parking_lot_path",
+    "config.project.id",
+)
+
+
+def _wizard_default_str(default: object) -> str:
+    """Render a model default as the string shown in (and accepted from) the
+    prompt. Lists become comma-separated (the ``set`` coercer re-parses them);
+    None becomes empty (an Enter on a None-default field skips it).
+    """
+    if default is None:
+        return ""
+    if isinstance(default, bool):
+        return "true" if default else "false"
+    if isinstance(default, list):
+        return ",".join(str(x) for x in default)
+    if isinstance(default, dict):
+        import json
+
+        return json.dumps(default)
+    return str(default)
+
+
+def run_wizard(
+    repo_root: Path,
+    fields: list,
+    *,
+    prompt_fn: Callable[[str, str], Optional[str]],
+    scope_fn: Callable[[str], str],
+    echo_fn: Callable[[str], None] = lambda _m: None,
+) -> dict:
+    """Interactive-agnostic core of ``fno setup wizard``.
+
+    For each field (from ``schema_gen.wizard_plan``) prompt for a value and
+    write it through the validated ``set_config_value`` path. Defaults come from
+    the model (the wizard never reads ``load_settings``, so the ``@lru_cache`` on
+    it is irrelevant - no stale-cache pitfall). A rejected value (exit 2)
+    re-prompts rather than aborting (AC4-ERR). Project-scoped keys ask scope via
+    ``scope_fn`` and route to the project file (AC4-EDGE). Each write echoes the
+    scope + path actually written (AC4-UI). Returning None from ``prompt_fn``
+    (a Ctrl-C) stops the wizard, leaving every already-written key persisted and
+    nothing partial for the in-flight key (AC4-FR).
+
+    ``prompt_fn(question, default) -> str | None`` (None == cancel the wizard);
+    ``scope_fn(key) -> "global" | "project"`` (asked only for project keys);
+    returns ``{"written": [keys], "cancelled": bool}``.
+    """
+    from fno.config.writer import ConfigSetError, set_config_value
+
+    written: list[str] = []
+    for field in fields:
+        key = field["path"]
+        default = field.get("default")
+        question = field.get("question") or key
+        default_str = _wizard_default_str(default)
+        scope = scope_fn(key) if key in PROJECT_SCOPED_KEYS else "global"
+        repo = repo_root if scope == "project" else None
+
+        while True:
+            value = prompt_fn(question, default_str)
+            if value is None:
+                echo_fn("wizard cancelled; keys written so far are saved.")
+                return {"written": written, "cancelled": True}
+            value = value.strip()
+            # An optional (None-default) field left blank is skipped, not written.
+            if value == "" and default is None:
+                break
+            try:
+                res = set_config_value(key, value, scope=scope, repo_root=repo)
+            except ConfigSetError as exc:
+                if exc.exit_code == 2:
+                    echo_fn(f"  rejected: {exc}")
+                    continue  # AC4-ERR: re-prompt, never abort
+                echo_fn(f"  cannot write {key}: {exc}")
+                break
+            echo_fn(f"  set {key} = {res.value} ({res.scope}: {res.path})")
+            written.append(key)
+            break
+
+    return {"written": written, "cancelled": False}
+
+
+@app.command("wizard")
+def wizard_cmd(
+    advanced: bool = typer.Option(
+        False, "--advanced", help="Also surface the 'advanced' tier, not just 'always'."
+    ),
+) -> None:
+    """Interactive terminal setup wizard (the CLI twin of /fno:setup).
+
+    Walks the schema-derived question plan (``always`` fields by default,
+    ``--advanced`` adds the rest), prompting for each and writing it through the
+    validated config writer - so setup works headless / CLI-only without an
+    agent. Project-scoped keys ask whether to write global or just this project.
+    """
+    import json
+
+    from fno.config import schema_gen
+    from fno.config_cli import _repo_root
+
+    fields = json.loads(schema_gen.wizard_plan())["fields"]
+    if not advanced:
+        fields = [f for f in fields if f.get("tier") == "always"]
+
+    typer.echo("fno setup wizard - press Enter to accept each default.\n")
+
+    def prompt_fn(message: str, default: str) -> Optional[str]:
+        try:
+            return typer.prompt(message, default=default)
+        except typer.Abort:
+            return None
+
+    def scope_fn(key: str) -> str:
+        try:
+            local = typer.confirm(
+                f"Write {key} to THIS project only? (No = global)", default=False
+            )
+        except typer.Abort:
+            return "global"
+        return "project" if local else "global"
+
+    result = run_wizard(
+        _repo_root(),
+        fields,
+        prompt_fn=prompt_fn,
+        scope_fn=scope_fn,
+        echo_fn=typer.echo,
+    )
+    n = len(result["written"])
+    if result.get("cancelled"):
+        typer.echo(f"\nwizard cancelled after writing {n} key(s).")
+    else:
+        typer.echo(
+            f"\nwizard complete: {n} key(s) written. "
+            "Run `fno config doctor` to verify."
+        )
+    raise typer.Exit(0)
+
+
 @app.command("migrate-paths")
 def migrate_paths_cmd(
     force: bool = typer.Option(False, "--force", "-F", help="Re-run even if sentinel exists"),
