@@ -356,6 +356,16 @@ def test_presence_no_signal_defaults_away(tmp_path):
     assert st.classify_presence(env={}, project_root=tmp_path) == "away"
 
 
+def test_presence_spawned_worker_is_away(tmp_path):
+    """codex PR #9: a spawned bg worker exposes CLAUDE_CODE_SESSION_ID + the
+    FNO_AGENT_SELF marker but NOT FNO_BG and may have no manifest yet; it must
+    classify away (else US3's autonomous /think never fires)."""
+    assert st.classify_presence(
+        env={"CLAUDE_CODE_SESSION_ID": "sid", "FNO_AGENT_SELF": "think-x-1-foo"},
+        project_root=tmp_path,
+    ) == "away"
+
+
 def test_presence_owned_autonomous_manifest_is_away(tmp_path):
     """An owned target-state with attended:false classifies away (autonomous)."""
     fno = tmp_path / ".fno"
@@ -390,3 +400,54 @@ def test_invalid_decision_event_combo_raises():
     """A mismatched (decision, event) is a loud construction failure."""
     with pytest.raises(ValueError):
         st.ThinkSpawnResult("spawned", st.EVENT_SKIPPED)
+
+
+# ---------------------------------------------------------------------------
+# Robust short_id parsing (gemini PR #9)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_short_id_compact():
+    out = '{"name":"think-x-1","short_id":"abc123","provider":"claude"}\n'
+    assert st._parse_short_id(out) == "abc123"
+
+
+def test_parse_short_id_pretty_printed():
+    """A pretty-printed receipt (short_id on its own line) must still parse."""
+    out = '{\n  "name": "think-x-1",\n  "short_id": "abc123"\n}\n'
+    assert st._parse_short_id(out) == "abc123"
+
+
+def test_parse_short_id_among_noise():
+    """A receipt line among banner/log noise is found; noise is ignored."""
+    out = 'INFO booting agent\nWARN short_id not ready\n{"short_id":"def456"}\n'
+    assert st._parse_short_id(out) == "def456"
+
+
+def test_parse_short_id_absent():
+    assert st._parse_short_id("no json here at all") == ""
+
+
+# ---------------------------------------------------------------------------
+# project_root-aware settings load (gemini PR #9)
+# ---------------------------------------------------------------------------
+
+
+def test_enabled_honors_project_root(monkeypatch, tmp_path):
+    """think_spawn_enabled reads the NODE's repo settings when project_root given."""
+    monkeypatch.delenv("FNO_THINK_SPAWN", raising=False)
+    seen = []
+
+    class _S:
+        class config:
+            class think_spawn:
+                enabled = True
+                max_per_run = 7
+
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda root: seen.append(root) or _S,
+    )
+    assert st.think_spawn_enabled(project_root=tmp_path, env={}) is True
+    assert st._max_per_run(tmp_path) == 7
+    assert seen == [tmp_path, tmp_path]  # repo-specific loader used both times

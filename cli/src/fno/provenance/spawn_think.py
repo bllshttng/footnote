@@ -57,8 +57,14 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _ENV_OVERRIDE = "FNO_THINK_SPAWN"
 # Test/CI seam to pin presence without faking a manifest or tty.
 _ENV_PRESENCE = "FNO_THINK_SPAWN_PRESENCE"
-# Explicit headless marker (a --bg worker sets this).
+# Explicit headless markers. A --bg worker may set FNO_BG, but the claude
+# spawn path (providers/claude.py) injects FNO_AGENT_SELF into EVERY spawned
+# worker and does NOT set FNO_BG - so a bg worker filing an idea before its
+# target-state manifest exists would otherwise misclassify as attended (codex
+# PR #9). FNO_AGENT_SELF is the reliable "I am a spawned agent, not an operator
+# at the keyboard" signal.
 _ENV_BG = "FNO_BG"
+_ENV_AGENT_SELF = "FNO_AGENT_SELF"
 
 # Decision-event kinds (registered in docs/architecture/events-schema.yaml).
 EVENT_SPAWNED = "think_spawned"
@@ -139,6 +145,21 @@ class ThinkSeed:
 # ---------------------------------------------------------------------------
 
 
+def _settings_for(project_root: Optional[Path]):
+    """Load settings for the NODE's repo when known, else the ambient cwd.
+
+    Honors ``project_root`` (gemini PR #9): in a multi-repo / cross-project run
+    the gate must read the node's repo settings, not whatever repo the birth
+    process happens to be cwd'd in. Falls back to the ambient ``load_settings``
+    when no root is given (the cmd_idea path, which defaults project_root to cwd).
+    """
+    from fno.config import load_settings, load_settings_for_repo
+
+    if project_root is not None:
+        return load_settings_for_repo(Path(project_root))
+    return load_settings()
+
+
 def think_spawn_enabled(
     *,
     project_root: Optional[Path] = None,
@@ -148,7 +169,8 @@ def think_spawn_enabled(
 
     Precedence (highest first), mirroring advance.auto_continue_enabled:
       1. ``FNO_THINK_SPAWN`` env override (explicit force on/off).
-      2. ``config.think_spawn.enabled`` from settings.yaml (local>global).
+      2. ``config.think_spawn.enabled`` from the node's repo settings
+         (``project_root`` when given, else the ambient cwd; local>global).
       3. default False.
 
     Fail-safe (AC4-ERR): ANY exception reading settings degrades to False
@@ -160,20 +182,16 @@ def think_spawn_enabled(
         return override.strip().lower() in _TRUTHY
 
     try:
-        from fno.config import load_settings
-
-        return bool(load_settings().config.think_spawn.enabled)
+        return bool(_settings_for(project_root).config.think_spawn.enabled)
     except Exception as exc:  # noqa: BLE001 - fail-safe to disabled (AC4-ERR)
         _LOG.debug("think_spawn_enabled: settings read failed, defaulting off: %s", exc)
         return False
 
 
 def _max_per_run(project_root: Optional[Path]) -> int:
-    """The blast-radius cap from config, fail-safe to 5."""
+    """The blast-radius cap from the node's repo config, fail-safe to 5."""
     try:
-        from fno.config import load_settings
-
-        return int(load_settings().config.think_spawn.max_per_run)
+        return int(_settings_for(project_root).config.think_spawn.max_per_run)
     except Exception:  # noqa: BLE001
         return 5
 
@@ -233,7 +251,11 @@ def classify_presence(
     Primary signal (Locked Decision 3, dependency-free): the attended-vs-
     headless state of the *originating* session.
       1. ``FNO_THINK_SPAWN_PRESENCE`` test/CI override.
-      2. ``FNO_BG`` (an explicit --bg worker) => away.
+      2. A spawned/headless worker (``FNO_AGENT_SELF`` injected by the claude
+         spawn path, or an explicit ``FNO_BG``) => away. This MUST precede the
+         CLAUDE_CODE_SESSION_ID check below: a bg worker exposes that session id
+         too, so without this a manifest-less bg worker would misclassify as
+         attended (codex PR #9).
       3. This session's OWNED target-state manifest's ``attended`` flag.
       4. An interactive claude session env (``CLAUDE_CODE_SESSION_ID`` set)
          with no autonomous manifest => attended.
@@ -241,7 +263,7 @@ def classify_presence(
 
     tty probing is deliberately NOT primary (Domain Pitfall: false-positives
     inside tmux/CI, and ``fno backlog idea``'s own stdout is captured even in
-    attended sessions); the explicit manifest/--bg signal leads.
+    attended sessions); the explicit spawned-worker/manifest signal leads.
     """
     environ = os.environ if env is None else env
 
@@ -249,7 +271,9 @@ def classify_presence(
     if override in ("attended", "away"):
         return override
 
-    if (environ.get(_ENV_BG) or "").strip().lower() in _TRUTHY:
+    if (environ.get(_ENV_AGENT_SELF) or "").strip() or (
+        environ.get(_ENV_BG) or ""
+    ).strip().lower() in _TRUTHY:
         return "away"
 
     root = Path(project_root) if project_root is not None else Path.cwd()
@@ -379,21 +403,46 @@ def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node
             f"fno agents spawn exited {proc.returncode}: "
             f"{(stderr or proc.stdout or '').strip()[:200]}"
         )
-    short_id = ""
-    for line in (proc.stdout or "").splitlines():
-        if '"short_id"' in line:
-            try:
-                short_id = json.loads(line).get("short_id", "")
-            except json.JSONDecodeError:
-                continue
-            if short_id:
-                break
+    short_id = _parse_short_id(proc.stdout or "")
     if not short_id:
         raise SpawnError(
             f"fno agents spawn exit 0 but no short_id receipt: "
             f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
         )
     return short_id
+
+
+def _parse_short_id(stdout: str) -> str:
+    """Extract the spawn receipt's ``short_id`` from spawn stdout, robustly.
+
+    The receipt may arrive as a compact single-line JSON object, a
+    pretty-printed object (``"short_id"`` on its own line), or one line among
+    banner/log noise. A naive per-line ``json.loads`` raises on every line of a
+    pretty-printed object (gemini PR #9). So:
+      1. Try parsing the WHOLE stdout as one JSON object (covers compact AND
+         pretty-printed single objects).
+      2. Fall back to a per-line scan that ignores non-JSON noise lines (parity
+         with advance._spawn_worker, which guards against a log line that merely
+         MENTIONS short_id).
+    A bare regex is deliberately avoided: it would match a ``"short_id"`` inside
+    an unrelated log line, whereas a real JSON parse cannot.
+    """
+    text = stdout or ""
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and obj.get("short_id"):
+            return str(obj["short_id"])
+    except json.JSONDecodeError:
+        pass
+    for line in text.splitlines():
+        if '"short_id"' in line:
+            try:
+                sid = json.loads(line).get("short_id", "")
+            except json.JSONDecodeError:
+                continue
+            if sid:
+                return str(sid)
+    return ""
 
 
 # ---------------------------------------------------------------------------
