@@ -23,9 +23,12 @@ def test_gemini_fresh_install(tmp_path):
     assert res.changed and not res.already_present
     data = json.loads(settings.read_text())
     group = data["hooks"]["SessionStart"][0]
-    assert group["matcher"] == "startup"
-    assert group["hooks"][0]["command"] == CMD
-    assert group["hooks"][0]["name"] == "fno-session-start"
+    # No matcher -> fires on all SessionStart sources (startup/resume/clear).
+    assert "matcher" not in group
+    hook = group["hooks"][0]
+    assert hook["name"] == "fno-session-start"
+    # Command is wrapped with FNO_PLATFORM so the wrapper detects the platform.
+    assert hook["command"] == f"env FNO_PLATFORM=gemini {CMD}"
 
 
 def test_gemini_idempotent(tmp_path):
@@ -58,7 +61,8 @@ def test_gemini_preserves_existing_settings_and_hooks(tmp_path):
     assert data["hooks"]["AfterTool"][0]["hooks"][0]["command"] == "user.sh"
     ss = data["hooks"]["SessionStart"]
     cmds = [h["command"] for g in ss for h in g["hooks"]]
-    assert "their-init.sh" in cmds and CMD in cmds  # both present, none clobbered
+    # Both present, none clobbered (footnote's is wrapped with FNO_PLATFORM).
+    assert "their-init.sh" in cmds and any(CMD in c for c in cmds)
 
 
 def test_gemini_malformed_left_unchanged(tmp_path):
@@ -88,7 +92,10 @@ def test_codex_fresh_install(tmp_path):
         for g in parsed["hooks"]["SessionStart"]
         for h in g["hooks"]
     ]
-    assert CMD in cmds
+    # Command is wrapped with FNO_PLATFORM=codex so the wrapper detects codex
+    # even though Codex does not set CODEX_PLUGIN_ROOT for user-config hooks.
+    assert any(CMD in c for c in cmds)
+    assert any("FNO_PLATFORM=codex" in c for c in cmds)
 
 
 def test_codex_idempotent(tmp_path):
@@ -124,7 +131,7 @@ def test_codex_preserves_existing_config_and_comments(tmp_path):
     parsed = tomllib.loads(text)
     assert parsed["hooks"]["Stop"][0]["hooks"][0]["command"] == "my-stop.sh"
     ss_cmds = [h["command"] for g in parsed["hooks"]["SessionStart"] for h in g["hooks"]]
-    assert CMD in ss_cmds
+    assert any(CMD in c for c in ss_cmds)
 
 
 def test_codex_backup_only_when_file_exists(tmp_path):

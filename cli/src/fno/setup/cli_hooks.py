@@ -34,6 +34,14 @@ _HOOK_SUFFIX = "hooks/session-start.sh"
 _GEMINI_HOOK_NAME = "fno-session-start"
 
 
+def _wrapped_command(command: str, cli: str) -> str:
+    """Prefix the hook command with an explicit ``FNO_PLATFORM`` so the wrapper
+    detects the right platform. Codex/Gemini do NOT set their plugin-root env
+    var when running a user-config hook, so without this the wrapper falls
+    through to ``generic`` and emits the wrong output shape (PR #11 review)."""
+    return f"env FNO_PLATFORM={cli} {command}"
+
+
 @dataclass
 class HookInstallResult:
     cli: str  # "gemini" | "codex"
@@ -61,10 +69,18 @@ def _atomic_write(path: Path, text: str) -> None:
     import tempfile
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Preserve the original file's permissions. mkstemp creates 0o600, which
+    # would otherwise tighten an existing 0o644 user config (PR #11 review).
+    try:
+        prev_mode: Optional[int] = path.stat().st_mode
+    except OSError:
+        prev_mode = None
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
+        if prev_mode is not None:
+            os.chmod(tmp, prev_mode)
         os.replace(tmp, path)
     except Exception:
         try:
@@ -131,14 +147,17 @@ def install_gemini_hook(
                     already_present=True,
                 )
 
+    # No matcher: Gemini lifecycle matchers are exact strings, so "startup"
+    # would miss the `resume` and `clear` SessionStart sources. Omitting the
+    # matcher fires on all of them (parity with Claude's empty matcher and
+    # Codex's matcher-less group; PR #11 review).
     session_start.append(
         {
-            "matcher": "startup",
             "hooks": [
                 {
                     "name": _GEMINI_HOOK_NAME,
                     "type": "command",
-                    "command": command,
+                    "command": _wrapped_command(command, "gemini"),
                     "timeout": 10000,
                 }
             ],
@@ -184,7 +203,11 @@ def _codex_hook_present(text: str) -> bool:
         parsed = tomllib.loads(text)
         groups = (parsed.get("hooks", {}) or {}).get("SessionStart", []) or []
         for group in groups:
+            if not isinstance(group, dict):
+                continue
             for h in (group.get("hooks", []) or []):
+                if not isinstance(h, dict):
+                    continue
                 if str(h.get("command", "")).endswith(_HOOK_SUFFIX):
                     return True
         return False
@@ -210,8 +233,10 @@ def install_codex_hook(command: str, *, config_path: Path) -> HookInstallResult:
                 needs_trust=True,
             )
 
-    # TOML strings must be quoted; basic-string escape the command path.
-    quoted = '"' + command.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    # TOML basic strings share JSON's escaping rules, so json.dumps produces a
+    # valid quoted string (PR #11 review). Wrap with FNO_PLATFORM so the hook
+    # detects the codex platform regardless of Codex's env.
+    quoted = json.dumps(_wrapped_command(command, "codex"))
     block = _CODEX_BLOCK_TEMPLATE.format(command=quoted)
     sep = "" if existing == "" or existing.endswith("\n\n") else (
         "\n" if existing.endswith("\n") else "\n\n"

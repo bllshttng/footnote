@@ -63,11 +63,21 @@ def cli_hooks_cmd(
         raise typer.Exit(code=1) from exc
     command = str(entry)
 
+    def _safe_expand(p: Path) -> Path:
+        # Expand a user-supplied override (`~` is not shell-expanded in a
+        # non-interactive call); degrade to the raw path in restricted envs.
+        try:
+            return p.expanduser()
+        except (RuntimeError, OSError, ValueError):
+            return p
+
     any_change = False
     needs_trust = False
 
     if gemini:
-        gpath = gemini_settings or (Path.home() / ".gemini" / "settings.json")
+        gpath = _safe_expand(gemini_settings) if gemini_settings else (
+            Path.home() / ".gemini" / "settings.json"
+        )
         res = install_gemini_hook(command, settings_path=gpath)
         any_change = any_change or res.changed
         if res.note:
@@ -80,7 +90,7 @@ def cli_hooks_cmd(
 
     if codex:
         chome = os.environ.get("CODEX_HOME")
-        cpath = codex_config or (
+        cpath = _safe_expand(codex_config) if codex_config else (
             (Path(chome).expanduser() if chome else Path.home() / ".codex")
             / "config.toml"
         )
