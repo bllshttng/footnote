@@ -295,7 +295,7 @@ def doctor_cmd(
 @app.command("active-backlog")
 def active_backlog_cmd(
     json_out: bool = typer.Option(
-        False, "--json", help="Emit a JSON list of drain targets for the daemon."
+        False, "--json", "-J", help="Emit a JSON list of drain targets for the daemon."
     ),
 ) -> None:
     """Resolve which projects the active-backlog daemon should drain.
