@@ -81,8 +81,11 @@ def _build_cache() -> dict[str, str]:
     # Accept both the nested `config.work.workspaces` schema (the shape the
     # canonical ~/.fno/settings.yaml ships) and the legacy top-level `work.*`,
     # mirroring graph._intake.project_root_from_settings so the two resolvers
-    # cannot drift on where the registry lives.
-    work = (data.get("config") or {}).get("work") or data.get("work") or {}
+    # cannot drift on where the registry lives. Guard `config` with isinstance:
+    # a malformed YAML where `config` is a scalar/list would make `.get("work")`
+    # raise AttributeError instead of degrading to the empty-registry path.
+    config = data.get("config")
+    work = (config.get("work") if isinstance(config, dict) else None) or data.get("work") or {}
     if not isinstance(work, dict):
         return {}
 
