@@ -23,6 +23,7 @@ adapter; codex / gemini land in US4.
 from __future__ import annotations
 
 import contextvars
+import os
 import re
 import shutil
 import subprocess
@@ -1203,6 +1204,42 @@ def _gemini_followup_path(
     )
 
 
+def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Capture the spawning session's ambient identity from environment variables.
+
+    Returns ``(session_id, harness, cwd)`` — all three are strings or None.
+    Claude takes precedence when multiple session env vars are set.
+    Never raises; always returns a triple (missing fields degrade to None).
+
+    Harness detection order (Task 2.2, x-30f6):
+      CLAUDE_CODE_SESSION_ID -> harness="claude"
+      CODEX_SESSION_ID       -> harness="codex"
+      GEMINI_SESSION_ID      -> harness="gemini"
+    """
+    session_id: Optional[str] = None
+    harness: Optional[str] = None
+
+    # Trim then coerce empty -> None, symmetric with graph.cli._session_provenance,
+    # so a whitespace-only env value reads as unset rather than a bogus pointer.
+    claude_sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip() or None
+    codex_sid = (os.environ.get("CODEX_SESSION_ID") or "").strip() or None
+    gemini_sid = (os.environ.get("GEMINI_SESSION_ID") or "").strip() or None
+
+    if claude_sid:
+        session_id, harness = claude_sid, "claude"
+    elif codex_sid:
+        session_id, harness = codex_sid, "codex"
+    elif gemini_sid:
+        session_id, harness = gemini_sid, "gemini"
+
+    # $PWD may be unset (non-interactive shells, cron, daemonized procs); fall
+    # back to os.getcwd(), which for a `fno agents spawn` subprocess is the
+    # spawning session's cwd (inherited), so the parent cwd is always captured.
+    parent_cwd: Optional[str] = (os.environ.get("PWD") or os.getcwd()).strip() or None
+
+    return session_id, harness, parent_cwd
+
+
 def _claude_create_path(
     *,
     name: str,
@@ -1275,6 +1312,10 @@ def _claude_create_path(
     # captured; a miss leaves the field None and never gates the launch.
     session_uuid = claude_mod.resolve_session_uuid_at_spawn(short_id)
 
+    # Capture the spawning session's ambient identity (Task 2.2, x-30f6).
+    # Best-effort: never raises, degrades to (None, None, None) when absent.
+    spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
+
     # Registry write.
     log_path = _derive_log_path(name)
     new_entry = AgentEntry(
@@ -1284,6 +1325,9 @@ def _claude_create_path(
         log_path=str(log_path),
         claude_short_id=short_id,
         claude_session_uuid=session_uuid,
+        spawned_by_session=spawned_by_session,
+        spawned_by_harness=spawned_by_harness,
+        spawned_by_cwd=spawned_by_cwd,
     )
 
     try:
@@ -1309,6 +1353,18 @@ def _claude_create_path(
             f"(registry not updated)",
             exit_code=12,
         ) from exc
+
+    # Spawn event (Task 2.2, x-30f6): exactly one per successful create.
+    # Open schema — flattens onto the JSONL record alongside ts/kind.
+    events.emit(
+        "agent_spawned",
+        name=name,
+        short_id=short_id,
+        provider=chosen,
+        spawned_by_session=spawned_by_session,
+        spawned_by_harness=spawned_by_harness,
+        spawned_by_cwd=spawned_by_cwd,
+    )
 
     # Done event.
     _emit_ev(

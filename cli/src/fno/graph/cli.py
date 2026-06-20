@@ -123,6 +123,88 @@ def _briefs_dir() -> Path:
 _NodeFields = dict
 
 
+def _scan_md_field(text: str, key: str) -> Optional[str]:
+    """First ``<key>: <value>`` value in a target-state.md, matched-quote-stripped.
+
+    Local mirror of ``fno.agents.whoami._scan_field`` so ``graph`` does not import
+    ``agents`` (avoids an import cycle). ``None`` if the key is absent.
+    """
+    import re
+
+    # ^\s* tolerates indentation; (.+) captures the whole value so a path/title
+    # containing spaces is not truncated at the first space (\S+ would).
+    pattern = re.compile(rf"^\s*{re.escape(key)}:\s*(.+)")
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if match:
+            value = match.group(1).strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            return value
+    return None
+
+
+def _session_provenance(running_cwd: Optional[str] = None) -> dict:
+    """Ambient parent-edge provenance for a node born inside a live session.
+
+    Reads the running session's env + ``.fno/target-state.md`` and returns
+    ``source_session_id`` / ``source_harness`` / ``source_cwd`` /
+    ``source_node_id`` / ``source_plan_path``. Capture is AMBIENT, never
+    volunteered (x-30f6): no caller passes anything. Every key degrades to
+    ``None`` and the function NEVER raises (AC-EDGE).
+
+    ``source_cwd`` is the originating SESSION's cwd, which is the key claude
+    transcript dirs are slugged by -- distinct from the node's durable ``cwd``
+    (the canonical project root). The read-back resolver needs the session cwd,
+    so it is persisted separately rather than reusing the node's ``cwd``.
+
+    Ownership of the manifest is proven exactly as ``whoami.find_held_node``
+    does it: the manifest's ``claude_transcript_id`` must equal this process's
+    ``CLAUDE_CODE_SESSION_ID``, so a stale / reused / foreign worktree manifest
+    never leaks a node this session does not hold. Node + plan resolution is
+    claude-only (the only proven transcript-resolver lane); codex/gemini stamp
+    session + harness and degrade the rest.
+    """
+    cwd = running_cwd if running_cwd is not None else os.getcwd()
+
+    session: Optional[str] = None
+    harness: Optional[str] = None
+    sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    if sid:
+        session, harness = sid, "claude"
+    else:
+        codex_sid = (os.environ.get("CODEX_SESSION_ID") or "").strip()
+        gemini_sid = (os.environ.get("GEMINI_SESSION_ID") or "").strip()
+        if codex_sid:
+            session, harness = codex_sid, "codex"
+        elif gemini_sid:
+            session, harness = gemini_sid, "gemini"
+
+    source_node_id: Optional[str] = None
+    source_plan_path: Optional[str] = None
+    if session and harness == "claude":
+        try:
+            text = (Path(cwd) / ".fno" / "target-state.md").read_text(encoding="utf-8")
+            if _scan_md_field(text, "claude_transcript_id") == session:
+                nid = _scan_md_field(text, "graph_node_id")
+                if nid and nid.lower() != "null":
+                    source_node_id = nid
+                plan = _scan_md_field(text, "plan_path")
+                if plan and plan.lower() != "null":
+                    source_plan_path = plan
+        except OSError:
+            pass
+
+    return {
+        "source_session_id": session,
+        "source_harness": harness,
+        # session cwd is the transcript-resolver key; only meaningful with a session.
+        "source_cwd": cwd if session else None,
+        "source_node_id": source_node_id,
+        "source_plan_path": source_plan_path,
+    }
+
+
 def _build_backlog_node(
     *,
     title: str,
@@ -148,6 +230,10 @@ def _build_backlog_node(
     so duplicate-ID checks happen against the live snapshot.
     """
     from fno.graph._constants import ID_PREFIX  # noqa: F401 (kept for symmetry)
+    # Parent-edge provenance (x-30f6): stamped ambiently from the running
+    # session's env + manifest. Centralized here so every creator verb
+    # (add/idea/decompose) self-describes its origin with no caller arg.
+    prov = _session_provenance()
     return {
         "id": None,  # caller fills inside locked mutator
         "parent": parent,
@@ -175,6 +261,11 @@ def _build_backlog_node(
         "pr_url": None,
         "merge_status": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_session_id": prov["source_session_id"],
+        "source_harness": prov["source_harness"],
+        "source_cwd": prov["source_cwd"],
+        "source_node_id": prov["source_node_id"],
+        "source_plan_path": prov["source_plan_path"],
     }
 
 
@@ -1379,6 +1470,112 @@ def cmd_get(
         return
     typer.echo(f"No node matching '{id}' (id/slug/bare-hex) in {_graph_path()}", err=True)
     raise typer.Exit(code=1)
+
+
+# -- provenance --
+
+@cli.command("provenance")
+def cmd_provenance(
+    id: str = typer.Argument(
+        ...,
+        help="Node ab-id, slug, or bare 8-hex",
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit machine-readable JSON instead of human summary"
+    ),
+) -> None:
+    """Show provenance pointers for a node and resolve transcripts where possible.
+
+    Reads two provenance edges stored on the node:
+
+      node-birth edge  source_session_id + source_harness + source_cwd
+      spawn edge       spawned_by_session + spawned_by_harness + spawned_by_cwd
+
+    For each edge that carries a session id the resolver is run (claude only;
+    codex/gemini/etc. return resolved=False). Read-only: no graph mutation.
+    """
+    from fno.graph.store import read_graph
+    from fno.graph.fuzzy import resolve_node
+    from fno.provenance.resolver import resolve_transcript, _DEFAULT_PROJECTS_ROOT
+
+    entries = read_graph(_graph_path())
+    match = resolve_node(id, entries)
+    if match.kind != "exact":
+        typer.echo(f"No node matching '{id}' in {_graph_path()}", err=True)
+        raise typer.Exit(code=1)
+
+    e = match.candidates[0]
+    node_id = e["id"]
+
+    # node-birth edge: resolve against the originating SESSION cwd
+    # (source_cwd), NOT the node's durable project `cwd`. Claude transcript dirs
+    # are slugged by the session cwd, so a node filed from a worktree resolves
+    # only via source_cwd; fall back to `cwd` for legacy pre-source_cwd nodes.
+    birth_session = e.get("source_session_id")
+    birth_harness = e.get("source_harness")
+    birth_cwd = e.get("source_cwd") or e.get("cwd")
+    birth_result = None
+    if birth_session:
+        birth_result = resolve_transcript(
+            birth_harness, birth_session, birth_cwd,
+            projects_root=_DEFAULT_PROJECTS_ROOT,
+        )
+
+    # spawn edge: uses spawned_by_cwd
+    spawn_session = e.get("spawned_by_session")
+    spawn_harness = e.get("spawned_by_harness")
+    spawn_cwd = e.get("spawned_by_cwd")
+    spawn_result = None
+    if spawn_session:
+        spawn_result = resolve_transcript(
+            spawn_harness, spawn_session, spawn_cwd,
+            projects_root=_DEFAULT_PROJECTS_ROOT,
+        )
+
+    if json_out:
+        import dataclasses
+
+        def _edge(label: str, result) -> dict:
+            if result is None:
+                return {"edge": label, "session_id": None, "resolved": False}
+            d = dataclasses.asdict(result)
+            d["edge"] = label
+            return d
+
+        output = {
+            "node_id": node_id,
+            "title": e.get("title"),
+            "edges": [
+                _edge("node_birth", birth_result),
+                _edge("spawn", spawn_result),
+            ],
+        }
+        typer.echo(json.dumps(output, indent=2))
+        return
+
+    # Human-readable summary
+    lines = [f"provenance for {node_id}: {e.get('title', '')}"]
+
+    def _fmt_edge(label: str, result, session: Optional[str], harness: Optional[str]) -> None:
+        if session is None:
+            lines.append(f"  {label}: (none)")
+            return
+        lines.append(f"  {label}:")
+        lines.append(f"    session:  {session}")
+        lines.append(f"    harness:  {harness or '(unknown)'}")
+        if result is None:
+            lines.append("    transcript: (not resolved)")
+        elif result.resolved:
+            ambig = " [ambiguous match]" if result.ambiguous else ""
+            lines.append(f"    transcript: {result.transcript_path}{ambig}")
+        else:
+            reason = result.reason or "not-found"
+            lines.append(f"    transcript: (unresolved - {reason})")
+
+    _fmt_edge("node-birth", birth_result, birth_session, birth_harness)
+    _fmt_edge("spawn", spawn_result, spawn_session, spawn_harness)
+
+    typer.echo("\n".join(lines))
 
 
 # -- backfill-slugs --

@@ -88,7 +88,18 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "source_kind",
     "source_project",
     "source_session_id",
+    # Parent-edge provenance (x-30f6). source_node_id is the backlog->origin-node
+    # edge; source_harness/source_plan_path enrich the source_session_id at node
+    # birth; spawned_by_* is the ambient parent-session edge stamped at worker
+    # spawn. All nullable; ambient-captured, never required of a caller.
+    "source_harness",
+    "source_cwd",
+    "source_node_id",
+    "source_plan_path",
     "source_inbox_msg",
+    "spawned_by_session",
+    "spawned_by_harness",
+    "spawned_by_cwd",
     "queued_at",
     "queued_reason",
 ]
@@ -289,7 +300,16 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         e.setdefault("source_kind", "organic")
         e.setdefault("source_project", None)
         e.setdefault("source_session_id", None)
+        # Parent-edge provenance (x-30f6): null until ambient-stamped at node
+        # birth (graph/cli.py idea/add) or worker spawn (agents dispatch).
+        e.setdefault("source_harness", None)
+        e.setdefault("source_cwd", None)
+        e.setdefault("source_node_id", None)
+        e.setdefault("source_plan_path", None)
         e.setdefault("source_inbox_msg", None)
+        e.setdefault("spawned_by_session", None)
+        e.setdefault("spawned_by_harness", None)
+        e.setdefault("spawned_by_cwd", None)
         # Queued: orthogonal to _status. A queued node is still ready (has a
         # plan, unblocked); the queued_at field marks the user's intent to
         # pick it up next/today. Cleared on completion.

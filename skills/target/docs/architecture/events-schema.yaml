@@ -1,5 +1,5 @@
 # docs/architecture/events-schema.yaml
-# Single source of truth for events.jsonl envelope shape across abilities.
+# Single source of truth for events.jsonl envelope shape across footnote.
 #
 # Both validators load this file:
 #   - cli/src/fno/events/__init__.py (Python; imports raise SchemaUnavailableError if absent)
@@ -244,7 +244,7 @@ event_types:
     consumers: [postmortem]
 
   - name: mission_handoff_unreadable
-    description: "Stop hook attempted to read .fno/HANDOFF.md to seed the discoveries field in the mission completion JSON but could not. Best-effort forensic event written to hook-events.jsonl alongside the completion emit; does not block completion. See plan 2026-05-13-megatron-discoveries-field (ab-bc919f7f)."
+    description: "Stop hook attempted to read .fno/HANDOFF.md to seed the discoveries field in the mission completion JSON but could not. Best-effort forensic event written to hook-events.jsonl alongside the completion emit; does not block completion. See plan 2026-05-13-megatron-discoveries-field."
     sources: [hook]
     data:
       required: [mission_id, reason]
@@ -395,7 +395,7 @@ event_types:
       properties:
         session_id:
           type: string
-          description: "The abilities session ID passed to register_session_cost."
+          description: "The footnote session ID passed to register_session_cost."
         returncode:
           type: integer
           description: "Exit code (or signal-negated value) returned by session-cost.py subprocess."
@@ -869,7 +869,7 @@ event_types:
     consumers: [audit]
 
   - name: inbox_add
-    description: "DEPRECATED, renamed capture_add (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates. An item was captured into the capture tier below idea nodes."
+    description: "DEPRECATED, renamed capture_add: emitted only by pre-rename binaries; kept so append-only history always validates. An item was captured into the capture tier below idea nodes."
     sources: [backlog, target, hook]
     data:
       required: [session_id, fu_id]
@@ -888,7 +888,7 @@ event_types:
     consumers: [hooks/target-stop-hook.sh, scripts/lib/gate-audit.sh]
 
   - name: inbox_empty_pass
-    description: "DEPRECATED, renamed capture_empty_pass (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates. An honest empty deferrals pass."
+    description: "DEPRECATED, renamed capture_empty_pass: emitted only by pre-rename binaries; kept so append-only history always validates. An honest empty deferrals pass."
     sources: [backlog, target, hook]
     data:
       required: [session_id, reason]
@@ -904,7 +904,7 @@ event_types:
     consumers: [hooks/target-stop-hook.sh, scripts/lib/gate-audit.sh]
 
   - name: inbox_scan
-    description: "DEPRECATED, renamed capture_scan (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates."
+    description: "DEPRECATED, renamed capture_scan: emitted only by pre-rename binaries; kept so append-only history always validates."
     sources: [backlog, target, hook]
     data:
       required: [session_id, candidates]
@@ -917,7 +917,7 @@ event_types:
     consumers: [scripts/lib/gate-audit.sh]
 
   - name: inbox_promote
-    description: "DEPRECATED, renamed capture_promote (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates."
+    description: "DEPRECATED, renamed capture_promote: emitted only by pre-rename binaries; kept so append-only history always validates."
     sources: [backlog]
     data:
       required: [fu_id, node_id]
@@ -930,7 +930,7 @@ event_types:
     consumers: [audit]
 
   - name: inbox_dismiss
-    description: "DEPRECATED, renamed capture_dismiss (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates."
+    description: "DEPRECATED, renamed capture_dismiss: emitted only by pre-rename binaries; kept so append-only history always validates."
     sources: [backlog]
     data:
       required: [fu_id, reason]
@@ -942,7 +942,7 @@ event_types:
     consumers: [audit]
 
   - name: inbox_tidy
-    description: "DEPRECATED, renamed capture_tidy (ab-bf7cc0d8): emitted only by pre-rename binaries; kept so append-only history always validates."
+    description: "DEPRECATED, renamed capture_tidy: emitted only by pre-rename binaries; kept so append-only history always validates."
     sources: [backlog]
     data:
       required: [session_id, ejected]
@@ -1026,6 +1026,18 @@ event_types:
           type: string
         pid:
           type: integer
+        # Parent-edge provenance (x-30f6): the spawning session's ambient env,
+        # captured at launch so a worker can be traced BACK to the conversation
+        # that decided to spawn it. All optional; absent for legacy spawns.
+        spawned_by_session:
+          type: string
+          description: "Parent session id (e.g. CLAUDE_CODE_SESSION_ID) ambient at spawn time."
+        spawned_by_harness:
+          type: string
+          description: "Parent harness: claude | codex | gemini (from env)."
+        spawned_by_cwd:
+          type: string
+          description: "Parent cwd, used by the per-harness transcript-path resolver."
 
   - name: agent_stopped
     description: "An agent was stopped (graceful SIGTERM sequence completed)."
@@ -1229,7 +1241,7 @@ event_types:
           type: string
 
   - name: agent_stream_claim_unavailable
-    description: "The claude stream-json adopt front door could not consult the single-writer claim substrate (no `fno` on PATH / exec error / unparseable output) before spawning, so the adopt proceeded fail-open. The registry one-host re-check under the lock is the authoritative in-daemon guard; this event makes the degraded path greppable (ab-734fcd6c)."
+    description: "The claude stream-json adopt front door could not consult the single-writer claim substrate (no `fno` on PATH / exec error / unparseable output) before spawning, so the adopt proceeded fail-open. The registry one-host re-check under the lock is the authoritative in-daemon guard; this event makes the degraded path greppable."
     sources: [daemon]
     data:
       required: []
@@ -1365,7 +1377,7 @@ event_types:
         reason:
           type: string
 
-  # ── loop-check target-stream events (Task 1.1, ab-d0337fbc) ──────────────────
+  # ── loop-check target-stream events (Task 1.1) ──────────────────
   # Emitted by the Rust `fno-agents loop-check` verb and (for
   # loop_check_binary_missing) by the bash stop-hook shim. Source is always
   # "hook" (the stop hook fires them). These are target-stream events distinct
@@ -1402,7 +1414,7 @@ event_types:
         intent_source:
           type: string
           enum: [payload, transcript]
-          description: "Optional (ab-223d2dae). Which channel produced the intent read: 'payload' = last_assistant_message from the Stop-hook stdin JSON (race-free, primary); 'transcript' = bounded fallback scan over the transcript file (payload absent: tool-call-only turn, old shim, or non-Claude harness). A fleet of 'transcript' sources after shim rollout signals a harness regression."
+          description: "Optional. Which channel produced the intent read: 'payload' = last_assistant_message from the Stop-hook stdin JSON (race-free, primary); 'transcript' = bounded fallback scan over the transcript file (payload absent: tool-call-only turn, old shim, or non-Claude harness). A fleet of 'transcript' sources after shim rollout signals a harness regression."
         pr_state:
           type: string
           description: "GitHub PR state: OPEN, MERGED, CLOSED, or none (no PR)."
@@ -1411,7 +1423,7 @@ event_types:
           description: "CI conclusion: SUCCESS, FAILURE:<name>, PENDING, skipped, none, unknown."
         reviewed:
           type: boolean
-          description: "True when every bot in config.review.required_bots has a completed review pass AND no blocking inline finding is unaddressed (step 2, ab-f1c5a9ed)."
+          description: "True when every bot in config.review.required_bots has a completed review pass AND no blocking inline finding is unaddressed (step 2)."
         fp_read_failed:
           type: boolean
           description: "Optional. True when the fingerprint pre-read gh call hard-failed this fire (outage). The fingerprint was carried forward from the prior event; step 2 makes these fires transparent to the consecutive-unchanged streak."
@@ -1629,7 +1641,7 @@ event_types:
           description: "Session ID of the parent (delegating) session."
         to_session:
           type: string
-          description: "Agent name of the spawned successor (e.g. tgt-cc1bf08f-g2). Used by megawalk lineage resolution."
+          description: "Agent name of the spawned successor (e.g. tgt-1a2b3c4d-g2). Used by megawalk lineage resolution."
         child_session:
           type: string
           description: "Short session ID returned by fno agents spawn for the spawned child. May be empty if the registry row was confirmed by name lookup rather than by short-id."
@@ -1682,7 +1694,7 @@ event_types:
     consumers: [operator]
 
   - name: advance_dispatched
-    description: "Emitted by `fno backlog advance` (merge-triggered auto-continue, ab-3cd195b6) when it dispatches a fresh background /target no-merge worker for the next now-unblocked node after a PR merge. Surfaced in the next SessionStart reconcile reminder line."
+    description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target no-merge worker for the next now-unblocked node after a PR merge. Surfaced in the next SessionStart reconcile reminder line."
     sources: [backlog]
     data:
       required: [node_id]

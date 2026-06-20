@@ -13,6 +13,18 @@ In any Claude Code session:
 
 The postinstall hook puts the `fno` CLI on your PATH in a new session. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, `brew install bllshttng/fno/fno`, or `cargo install fno`. Full options: the [README](../README.md).
 
+### Windows (WSL2)
+
+footnote runs under [WSL2](https://learn.microsoft.com/windows/wsl/install), not native Windows. The loop leans on POSIX file locking, Unix sockets, and signals that Windows handles differently. WSL2 is real Linux, so everything here works unchanged inside it, and most Windows devs who'd want footnote already run their toolchain (and Claude Code) there.
+
+One-time setup, from PowerShell as Administrator:
+
+```powershell
+wsl --install        # installs WSL2 + Ubuntu; reboot if prompted
+```
+
+Then open the Ubuntu shell and do everything from there: install `gh`, Python 3.11+, and `jq`, run Claude Code inside WSL2, and follow the install steps above. Keep your repos on the Linux filesystem (under `~/`), not `/mnt/c/...`; on the Windows mount, file locking and file watches are slow and unreliable.
+
 ### Verify it worked
 
 ```bash
