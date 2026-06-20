@@ -69,6 +69,74 @@ def _sentinel_repo_matches(path: Path, want_slug: Optional[str]) -> bool:
     return sentinel_slug.lower() == want_slug.lower()
 
 
+def _resolve_pr_session_ids(
+    ledger_path: Path, pr: int, repo_slug: Optional[str] = None
+) -> list[str]:
+    """Session id(s) whose ledger entry owns this PR, scoped to ``repo_slug``.
+
+    Mirrors the post-merge Step 4b ledger scan (skills/pr/merged.md). Because
+    ``ledger.json`` is GLOBAL and GitHub PR numbers collide across repos, a known
+    ``repo_slug`` is REQUIRED to attribute any entry: an entry matches when its
+    ``pr_url`` ends in ``/<slug>/pull/<pr>``, or (for a url-less entry) its bare
+    ``pr``/``pr_number`` equals ``pr``. When ``repo_slug`` is None - the repo
+    could not be resolved (no ``--repo``, ``gh`` down, or run outside a checkout)
+    - ownership CANNOT be confirmed, so the scan returns ``[]`` and the caller
+    falls through to the read-only path rather than risk consuming a same-numbered
+    foreign PR's carve-outs (codex P2).
+
+    Returns ``[]`` on any failure (missing/unreadable/malformed ledger, no repo
+    scope, no match), so the caller treats "no owning session" as the read-only
+    case (x-90b8) rather than crashing the harvest.
+    """
+    if not repo_slug:
+        return []
+    try:
+        data = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    entries = data.get("entries") if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        return []
+    slug_l = repo_slug.lower()
+    out: list[str] = []
+    seen: set[str] = set()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        url = e.get("pr_url")
+        url_s = url.rstrip("/").lower() if isinstance(url, str) else ""
+        if url_s:
+            matched = url_s.endswith(f"/{slug_l}/pull/{pr}")
+        else:
+            # No url on the entry: fall back to the bare numeric field. Coerce
+            # to int so a string-stored pr ("522") still matches the int arg.
+            matched = False
+            for key in ("pr", "pr_number"):
+                val = e.get(key)
+                if val is None:
+                    continue
+                try:
+                    if int(val) == pr:
+                        matched = True
+                        break
+                except (ValueError, TypeError):
+                    pass
+        if not matched:
+            continue
+        # Defensive: a non-list ``sessions`` (e.g. a stray string) must NOT be
+        # spread into per-character ids - guard the type before list().
+        sessions_val = e.get("sessions")
+        sids = list(sessions_val) if isinstance(sessions_val, list) else []
+        if e.get("session_id"):
+            sids.append(e["session_id"])
+        for s in sids:
+            s = str(s)
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out
+
+
 def _completion_md_for(plan_path: Optional[str], repo_root: Path) -> Optional[Path]:
     """Resolve a plan's COMPLETION.md (folder plan -> inside; single-file -> sidecar).
 
@@ -98,6 +166,14 @@ def _emit_report(report: TriageReport, *, mode: str) -> None:
     )
     for w in report.warnings:
         typer.echo(f"WARN {w}", err=True)
+
+    if report.readonly_carveout_count:
+        typer.echo(
+            f"(PR #{report.pr_number}: {report.readonly_carveout_count} carve-out(s) "
+            "shown read-only - no owning session resolved for this --pr-number, so "
+            "they were NOT filed or consumed under this PR)",
+            err=True,
+        )
 
     queued_any = False
     for r in report.results:
@@ -194,6 +270,13 @@ def _process_payload(
         session_ids = [str(s) for s in payload["session_ids"]]
     elif payload.get("session_id"):
         session_ids = [str(payload["session_id"])]
+
+    # x-90b8: run()'s synthetic --pr-number path sets this when it could resolve
+    # NO owning session for the PR (a manual / hotfix merge with no session<->PR
+    # ledger link). Carve-outs are session-scoped, so an unscoped harvest under
+    # an arbitrary PR mis-attributes another session's deferred work; triage_pr
+    # then surfaces them read-only instead of filing/consuming them.
+    carveouts_readonly = bool(payload.get("carveouts_readonly"))
 
     # Derive resolved/skipped finding sets from REAL PR data before harvesting
     # reviewer comments. Without this every comment becomes a candidate, so an
@@ -297,6 +380,7 @@ def _process_payload(
         create_fn=create_fn,
         inbox_fn=inbox_fn,
         carveout_root=cr,
+        carveouts_readonly=carveouts_readonly,
     )
     # Surface derivation warnings alongside the harvest's own (ordered first).
     if derive_warnings:
@@ -431,6 +515,7 @@ def run(
     from fno.graph.store import read_graph
     from fno.paths import (
         graph_json,
+        ledger_json,
         resolve_canonical_repo_root,
         resolve_repo_root,
         retro_pending_dir,
@@ -521,8 +606,20 @@ def run(
     if pr is not None:
         slug = current_slug  # already resolved above (repo or gh repo view)
         payload: dict = {"pr_number": pr}
+        # Scope the carve-out harvest to this PR's owning session(s). An explicit
+        # --session-id wins; otherwise resolve from the ledger by PR number/url.
+        # If NEITHER yields a session, the carve-out source is read-only: an
+        # unscoped carve-out (another session's deferred work) must never be
+        # stamped onto / consumed under an arbitrary --pr-number (x-90b8). The
+        # post-merge Step 4b backfill slot uses the same guard.
         if session:
             payload["session_ids"] = list(session)
+        else:
+            resolved_sessions = _resolve_pr_session_ids(ledger_json(), pr, slug)
+            if resolved_sessions:
+                payload["session_ids"] = resolved_sessions
+            else:
+                payload["carveouts_readonly"] = True
         if slug:
             payload["pr_url"] = f"https://github.com/{slug}/pull/{pr}"
         try:
