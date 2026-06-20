@@ -96,6 +96,39 @@ def test_ac2_edge_same_key_twice_last_wins(tmp_path):
     assert results[0].value == 8
 
 
+def test_multi_set_cross_field_block_validates_on_final_state(tmp_path):
+    """PR #8 review (gemini high): a batch setting two cross-field-coupled keys
+    in the same block must validate the FINAL state, not the intermediate one.
+    config.obsidian.enabled requires .vault; enabled-first must NOT abort.
+    """
+    # enabled listed first (the order that previously aborted on enabled=true).
+    results = set_config_values(
+        [
+            ("config.obsidian.enabled", "true"),
+            ("config.obsidian.vault", "MyVault"),
+        ],
+        scope="project",
+        repo_root=tmp_path,
+    )
+    assert len(results) == 2
+    data = _read(tmp_path)
+    assert data["config"]["obsidian"]["enabled"] is True
+    assert data["config"]["obsidian"]["vault"] == "MyVault"
+
+
+def test_multi_set_cross_field_still_rejects_truly_invalid(tmp_path):
+    # enabled=true with NO vault in the batch is genuinely invalid -> reject,
+    # write nothing.
+    with pytest.raises(ConfigSetError) as exc:
+        set_config_values(
+            [("config.obsidian.enabled", "true")],
+            scope="project",
+            repo_root=tmp_path,
+        )
+    assert exc.value.exit_code == 2
+    assert not (tmp_path / ".fno" / "settings.yaml").exists()
+
+
 def test_empty_batch_rejected(tmp_path):
     with pytest.raises(ConfigSetError) as exc:
         set_config_values([], scope="project", repo_root=tmp_path)

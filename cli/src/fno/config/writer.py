@@ -273,66 +273,72 @@ def _parse_structured(value: str, key: str) -> Any:
         ) from exc
 
 
-def _apply_one(
-    existing: dict[str, Any], parts: list[str], key: str, value: str
-) -> tuple[dict[str, Any], Any]:
-    """Coerce + validate one key against ``existing`` and return
-    ``(new_dict, final_value)``. Raises ``ConfigSetError`` on an invalid value.
-    Runs UNDER the lock on the freshly-read content.
+def _resolve_final_value(
+    parts: list[str], key: str
+) -> tuple[Any, Optional[tuple[tuple[str, ...], type[BaseModel]]]]:
+    """Coerce/parse one key's annotation into its final stored shape, deferring
+    parent-block validation. Returns ``(coercer, block_to_validate)`` where
+    ``coercer`` turns the raw string into the value and ``block_to_validate`` is
+    ``(block_parts, parent_cls)`` for a scalar/dict leaf (validated once at the
+    end of the batch against the FINAL merged state) or ``None`` for a
+    block-leaf (validated in place, since it is self-contained).
 
-    Three leaf shapes:
-      * a nested BaseModel block (e.g. config.review) -> parse the value as a
-        JSON/YAML mapping and validate it via that block's model in isolation,
-        then REPLACE the block (US3).
-      * a dict-typed field (e.g. config.work.workspaces) -> parse a mapping and
-        validate it via the parent block with the field set (US3).
-      * a scalar / list field -> coerce the string to the field type and
-        validate the changed block.
-
-    Validating only the changed block (extra='ignore' keeps unrelated keys out;
-    field validators like ceiling_is_positive fire). The block context is read
-    off ``existing`` so a multi-key batch touching the same block composes.
+    Splitting coerce from validate is what makes a multi-key batch correct for
+    cross-field block invariants (e.g. config.obsidian.enabled + .vault): every
+    key is applied first, then each touched block is validated once on the final
+    state rather than on an intermediate state after each individual key (gemini
+    PR #8 review).
     """
     parent_cls, leaf, leaf_ann = _resolve_parent_block(parts)  # type: ignore[misc]
     block_model = _as_model(leaf_ann)
     base_ann = _unwrap_optional(leaf_ann)
     is_dict_leaf = get_origin(base_ann) is dict
+    block_parts = tuple(parts[:-1])
 
     if block_model is not None or is_dict_leaf:
-        parsed = _parse_structured(value, key)
-        if not isinstance(parsed, dict):
-            raise ConfigSetError(
-                f"{key!r} is a config block; expected a JSON/YAML object "
-                f"(mapping), got {type(parsed).__name__}",
-                2,
-            )
-        try:
+        # block-leaf / dict-leaf: parse a JSON/YAML mapping (US3).
+        def _coercer(value: str) -> Any:
+            parsed = _parse_structured(value, key)
+            if not isinstance(parsed, dict):
+                raise ConfigSetError(
+                    f"{key!r} is a config block; expected a JSON/YAML object "
+                    f"(mapping), got {type(parsed).__name__}",
+                    2,
+                )
             if block_model is not None:
-                # REPLACE: validate the whole block in isolation.
-                block_model.model_validate(parsed)
-            else:
-                # dict-typed field: validate via the parent block with it set.
-                ctx = dict(_get_nested(existing, parts[:-1]) or {})
-                ctx[leaf] = parsed
-                parent_cls.model_validate(ctx)
-        except ValidationError as exc:
-            first = exc.errors()[0] if exc.errors() else {"msg": str(exc)}
-            raise ConfigSetError(
-                f"invalid value for {key}: {first.get('msg', exc)}", 2
-            ) from exc
-        return _deep_set(existing, parts, parsed), parsed
+                # REPLACE: validate the whole block in isolation (self-contained).
+                try:
+                    block_model.model_validate(parsed)
+                except ValidationError as exc:
+                    first = exc.errors()[0] if exc.errors() else {"msg": str(exc)}
+                    raise ConfigSetError(
+                        f"invalid value for {key}: {first.get('msg', exc)}", 2
+                    ) from exc
+            return parsed
 
-    coerced = _coerce(value, leaf_ann)
-    block_dict = dict(_get_nested(existing, parts[:-1]) or {})
-    block_dict[leaf] = coerced
+        # A block-leaf is validated in its coercer; a dict-leaf defers to the
+        # parent block (so its parent's other fields are seen on final state).
+        block = None if block_model is not None else (block_parts, parent_cls)
+        return _coercer, block
+
+    return (lambda value: _coerce(value, leaf_ann)), (block_parts, parent_cls)
+
+
+def _validate_block(
+    data: dict[str, Any], block_parts: tuple[str, ...], parent_cls: type[BaseModel]
+) -> None:
+    """Validate one touched block against the final merged ``data``. Raises
+    ConfigSetError exit 2 naming the offending field on failure."""
+    block_dict = dict(_get_nested(data, list(block_parts)) or {})
     try:
         parent_cls.model_validate(block_dict)
     except ValidationError as exc:
         first = exc.errors()[0] if exc.errors() else {"msg": str(exc)}
+        loc = ".".join(str(p) for p in first.get("loc", ()))
+        where = ".".join(block_parts) + (f".{loc}" if loc else "")
         raise ConfigSetError(
-            f"invalid value for {key}: {first.get('msg', exc)}", 2
+            f"invalid value for {where}: {first.get('msg', exc)}", 2
         ) from exc
-    return _deep_set(existing, parts, coerced), coerced
 
 
 def set_config_values(
@@ -375,10 +381,22 @@ def set_config_values(
     final_values: dict[str, Any] = {}
 
     def _validate_and_merge(existing: dict[str, Any]) -> dict[str, Any]:
+        # Phase 1: coerce/parse + apply every key, collecting the distinct
+        # parent blocks to validate. Phase 2: validate each touched block once
+        # against the FINAL merged state, so a batch setting cross-field-coupled
+        # keys (config.obsidian.enabled + .vault) is judged on the end result,
+        # not on an intermediate state after a single key (PR #8 review).
         data = existing
+        blocks: dict[tuple[str, ...], type[BaseModel]] = {}
         for key in order:
-            data, final = _apply_one(data, parts_by_key[key], key, deduped[key])
+            coercer, block = _resolve_final_value(parts_by_key[key], key)
+            final = coercer(deduped[key])
+            data = _deep_set(data, parts_by_key[key], final)
             final_values[key] = final
+            if block is not None:
+                blocks[block[0]] = block[1]
+        for block_parts, parent_cls in blocks.items():
+            _validate_block(data, block_parts, parent_cls)
         return data
 
     try:
