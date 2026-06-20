@@ -31,13 +31,17 @@ from typing import TYPE_CHECKING, Callable, Mapping, Optional
 if TYPE_CHECKING:
     from fno.config import ModelRoutingBlock, SettingsModel
 
-# z.ai's Anthropic-compatible endpoint (verified live on claude 2.1.170).
-ZAI_BASE_URL = "https://api.z.ai/api/anthropic"
+# z.ai's GLM Coding Plan endpoint. Both this and the model below are config
+# defaults (config.model_routing.zai_base_url / default_model); these constants
+# are the fallback used only when the config attribute is somehow absent. Keep
+# them in lockstep with the ModelRoutingBlock schema defaults (drift-guarded by
+# test_config_defaults_match_module_constants).
+DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/coding/paas/v4"
 
 # Default cheap model. glm-4.5-air is too weak for reasoning-bearing work
-# (cosmetic noise); glm-5.1 does real work, so it is the default for every
-# cheap role. Trivial classification can be pinned to glm-4.5-air via override.
-DEFAULT_CHEAP_MODEL = "glm-5.1"
+# (cosmetic noise); a current GLM does real work, so it is the default for
+# every cheap role. Trivial classification can be pinned cheaper via override.
+DEFAULT_CHEAP_MODEL = "glm-5.2"
 
 # Roles that go cheap (z.ai GLM) by default. The money model never touches
 # these; they shuffle the backlog and consolidate memory.
@@ -172,8 +176,9 @@ def resolve_route(
         )
         return None
 
+    base_url = getattr(block, "zai_base_url", None) or DEFAULT_ZAI_BASE_URL
     return {
-        "ANTHROPIC_BASE_URL": ZAI_BASE_URL,
+        "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": key,
         "ANTHROPIC_MODEL": model,
     }
@@ -205,5 +210,6 @@ def _provider_and_model(
             return parsed
         # Malformed override: fall through to the default policy below.
     if role in CHEAP_ROLES:
-        return "zai", DEFAULT_CHEAP_MODEL
+        model = getattr(block, "default_model", None) or DEFAULT_CHEAP_MODEL
+        return "zai", model
     return None, None

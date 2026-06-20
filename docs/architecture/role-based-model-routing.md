@@ -11,9 +11,9 @@ A spawn's *role* is what it is doing, not what it is touching. `coordinate | tid
 Each worker is a fresh `claude --bg` process. Routing stamps three env vars into that worker's environment at spawn time:
 
 ```
-ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic   # z.ai's Anthropic-compatible endpoint
-ANTHROPIC_AUTH_TOKEN=<z.ai key>                      # Bearer auth
-ANTHROPIC_MODEL=glm-5.1                              # cheap, reasoning-capable
+ANTHROPIC_BASE_URL=https://api.z.ai/api/coding/paas/v4   # config.model_routing.zai_base_url
+ANTHROPIC_AUTH_TOKEN=<z.ai key>                           # Bearer auth
+ANTHROPIC_MODEL=glm-5.2                                   # config.model_routing.default_model
 ```
 
 That routes the whole worker to GLM, billed to the z.ai pool, zero Anthropic usage. No proxy sits in the path. Switching `base_url` per spawn is safe precisely because each worker is its own process; the base_url is never switched mid-session.
@@ -48,11 +48,13 @@ cmd_spawn --role  ->  dispatch_spawn  ->  _claude_create_path  ->  bg_create(rol
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `enabled` | `true` | Master on/off for cheap routing. |
+| `zai_base_url` | `https://api.z.ai/api/coding/paas/v4` | z.ai endpoint for routed spawns. |
+| `default_model` | `glm-5.2` | Default cheap model for routed roles. |
 | `overrides` | `{}` | `role -> "provider,model"` map (e.g. `tidy: "zai,glm-4.5-air"`). |
 | `zai_key_env` | `ZAI_API_KEY` | Env var name holding the z.ai key. |
 | `zai_env_file` | _(none)_ | Optional path to a `.env` file holding the key (e.g. modelkit's `.env`). |
 
-The secret never lives in `settings.yaml`. The key is resolved from the process env var named by `zai_key_env`, falling back to the `.env` file at `zai_env_file`; process env wins (mirrors modelkit's precedence). `glm-4.5-air` is too weak for reasoning-bearing work, so every cheap role defaults to `glm-5.1`; pin `glm-4.5-air` only for trivial classification via an override.
+Everything except the secret is set in `config.model_routing` in `~/.fno/settings.yaml` (global) or `.fno/settings.yaml` (project-local override). The endpoint and the default model are both config fields, so swapping the z.ai endpoint or bumping the GLM version is a settings edit, not a code change. The key itself never lives in `settings.yaml`: it is resolved from the process env var named by `zai_key_env`, falling back to the `.env` file at `zai_env_file`; process env wins (mirrors modelkit's precedence). `glm-4.5-air` is too weak for reasoning-bearing work, so `default_model` is `glm-5.2`; pin a cheaper model per role for trivial classification via an override.
 
 ## v1 scope and deferrals
 

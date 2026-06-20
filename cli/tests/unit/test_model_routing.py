@@ -2,7 +2,7 @@
 
 Covers the resolver contract from the plan's acceptance criteria:
 
-- AC1-HP  cheap role + valid key -> z.ai base_url + token + glm-5.1
+- AC1-HP  cheap role + valid key -> z.ai base_url + token + glm-5.2
 - AC2-HP  production role (implement) -> None (default model untouched)
 - AC2-INV no role -> None (regression guard: behaves as today)
 - AC3-HP  config override changes the model for a cheap role
@@ -44,16 +44,16 @@ def test_consolidate_with_key_routes_to_zai_glm() -> None:
         env={"ZAI_API_KEY": "zk-secret"},
     )
     assert route is not None
-    assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/coding/paas/v4"
     assert route["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
-    assert route["ANTHROPIC_MODEL"] == "glm-5.1"
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
 
 
 @pytest.mark.parametrize("role", ["coordinate", "tidy", "orient", "consolidate"])
 def test_all_cheap_roles_route_when_keyed(role: str) -> None:
     route = mr.resolve_route(role, settings=_settings(), env={"ZAI_API_KEY": "k"})
     assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "glm-5.1"
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
 
 
 def test_role_is_case_and_space_insensitive() -> None:
@@ -102,6 +102,46 @@ def test_override_changes_model_for_cheap_role() -> None:
     )
     assert route is not None
     assert route["ANTHROPIC_MODEL"] == "glm-4.5-air"
+
+
+def test_default_model_is_configurable() -> None:
+    route = mr.resolve_route(
+        "consolidate",
+        settings=_settings(default_model="glm-5.2-pro"),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2-pro"
+
+
+def test_base_url_is_configurable() -> None:
+    route = mr.resolve_route(
+        "consolidate",
+        settings=_settings(zai_base_url="https://example.test/api/anthropic"),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_BASE_URL"] == "https://example.test/api/anthropic"
+
+
+def test_per_role_override_beats_default_model() -> None:
+    # default_model sets the baseline; an explicit override still wins per role.
+    route = mr.resolve_route(
+        "tidy",
+        settings=_settings(
+            default_model="glm-5.2", overrides={"tidy": "zai,glm-4.5-air"}
+        ),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "glm-4.5-air"
+
+
+def test_config_defaults_match_module_constants() -> None:
+    # Drift guard: the schema defaults and the module fallback constants must agree.
+    block = ModelRoutingBlock()
+    assert block.zai_base_url == mr.DEFAULT_ZAI_BASE_URL
+    assert block.default_model == mr.DEFAULT_CHEAP_MODEL
 
 
 def test_disabled_block_returns_none_even_for_cheap_role() -> None:
@@ -196,7 +236,7 @@ def test_override_cannot_route_protected_role_cheap() -> None:
     # must be refused: the verdict/diff model is never cheap.
     route = mr.resolve_route(
         "implement",
-        settings=_settings(overrides={"implement": "zai,glm-5.1"}),
+        settings=_settings(overrides={"implement": "zai,glm-5.2"}),
         env={"ZAI_API_KEY": "k"},
     )
     assert route is None

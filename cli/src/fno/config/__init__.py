@@ -1262,6 +1262,8 @@ class ModelRoutingBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
+    zai_base_url: str = "https://api.z.ai/api/coding/paas/v4"
+    default_model: str = "glm-5.2"
     overrides: dict[str, str] = Field(default_factory=dict)
     zai_key_env: str = "ZAI_API_KEY"
     zai_env_file: Optional[str] = None

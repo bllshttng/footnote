@@ -173,6 +173,12 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "Route cheap roles (coordinate/tidy/orient/consolidate) to z.ai GLM at spawn.",
         question="Route cheap coordination work to z.ai GLM (production stays on Anthropic)?",
     ),
+    "config.model_routing.zai_base_url": Meta(
+        "advanced", "z.ai endpoint for cheap-role spawns (default the GLM Coding Plan endpoint)."
+    ),
+    "config.model_routing.default_model": Meta(
+        "advanced", "Default cheap model for routed roles (override per role via overrides)."
+    ),
     "config.model_routing.overrides": Meta(
         "never", "Per-role provider,model override map (e.g. tidy: 'zai,glm-4.5-air')."
     ),
