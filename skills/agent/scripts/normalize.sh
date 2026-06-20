@@ -44,6 +44,11 @@ YOLO=0             # 1 = full-auto (codex/gemini bypass); sandboxed default
 ASK_MODE=0         # 1 = `ask`/`bare` verb: send the prompt VERBATIM (no /target)
 HANDOFF_MODE=0     # 1 = `handoff` verb: payload is a doc path -> continuation seed
 DISCUSS_MODE=0     # 1 = `discuss` verb: payload is a verbatim conversational seed
+PROJECT=""         # cross-project target: a registry project name/short_name to
+                   # resolve into a launch cwd (work.workspaces.*.projects)
+PROJECT_SET=0      # 1 = -P/--project was passed (empty value -> loud error, never
+                   # a silent caller-cwd launch when a cross-project hop was asked)
+FORCE=0            # 1 = -f/--force: let --project win over a node's own cwd
 
 emit_error() { printf 'status=error\nerror=%s\n' "$1"; exit 0; }
 
@@ -74,6 +79,8 @@ while [[ $# -gt 0 ]]; do
     --ask)            ASK_MODE=1; shift ;;
     --handoff)        HANDOFF_MODE=1; shift ;;
     --discuss)        DISCUSS_MODE=1; shift ;;
+    -P|--project)     PROJECT="${2:-}"; PROJECT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    -f|--force)       FORCE=1; shift ;;
     *) emit_error "unknown argument: $tok" ;;
   esac
 done
@@ -188,7 +195,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--ask)
+      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|--yolo|--provider|--ask|-P|--project|-f|--force)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the build brief. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the feature text."
         ;;
     esac
@@ -277,6 +284,113 @@ if [[ "$shape_hint" == "feature" ]]; then
       what|why|how|should|can|does|is|are|when|who) shape_hint="question" ;;
     esac
   fi
+fi
+
+# ---- 2c. cross-project cwd resolution (-P/--project) -------------------------
+# A free-text spawn launches in the caller's cwd by default. `-P/--project <name>`
+# retargets it: resolve the registry name/short_name to its work-map root and emit
+# resolved_cwd, which the SKILL passes verbatim to `spawn.sh --cwd`. Resolution is
+# a PURE config lookup (work.workspaces.*.projects in settings.yaml) - no graph, no
+# lock, no LLM judgment - so it lives here in the deterministic layer alongside the
+# provider lookup, not in the SKILL (which owns the graph-needing slug/next tiers).
+# The `in <project>` / `as <project>` natural-language ergonomic is the SKILL's
+# model-judged job: it disambiguates a directive from task prose ("fix the bug in
+# etl") and calls this script with -P. normalize only ever sees the unambiguous flag.
+#
+# Node conflict: a backlog node carries its OWN project (its _resolved_cwd), so a
+# node + --project is contradictory. Refuse loud by default; -f/--force flips it to
+# a flag-win override (run the node's work in the forced repo). A slug candidate or
+# `next` pointer is an as-yet-unresolved node reference, so it conflicts too - the
+# SKILL re-runs normalize with the resolved ab-id (carrying -P/-f), and the conflict
+# fires deterministically there.
+#
+# Resolver is test-injectable via PROJECT_ROOT_RESOLVER (mirrors the provider and
+# slug resolvers): a command taking the project name and printing ONE line in the
+# protocol `ok\t<canonical>\t<abspath>` | `notfound\t<csv of known names>` |
+# `error\t<message>`. Default = the shipped fno python (resolve_project_name folds
+# short_name -> canonical; project_root_from_settings maps canonical -> abs path).
+PROJECT_CANON=""
+RESOLVED_CWD=""
+
+resolve_project() {
+  local _proj="$1"
+  if [[ -n "${PROJECT_ROOT_RESOLVER:-}" ]]; then
+    "$PROJECT_ROOT_RESOLVER" "$_proj" 2>/dev/null
+    return 0
+  fi
+  local abi_bin shebang
+  abi_bin="$(command -v fno 2>/dev/null)" || { printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0; }
+  # Strip a trailing CR: a CRLF-lined fno (WSL / git autocrlf) would leave \r on
+  # the shebang and break the interpreter exec.
+  shebang="$(head -1 "$abi_bin" 2>/dev/null | sed 's/^#![[:space:]]*//' | tr -d '\r')"
+  # Same interpreter guard as resolve_from_config: only a python entrypoint can
+  # import the fno package. A shell-wrapper fno means the resolver is unreachable.
+  [[ -n "$shebang" && "$shebang" == *python* ]] || { printf 'error\tproject resolver unavailable (fno is not a python entrypoint)\n'; return 0; }
+  local py_cmd=()
+  read -r -a py_cmd <<< "$shebang"
+  { [[ -x "${py_cmd[0]}" ]] || command -v "${py_cmd[0]}" >/dev/null 2>&1; } || { printf 'error\tproject resolver interpreter not executable\n'; return 0; }
+  "${py_cmd[@]}" -c 'import sys
+proj = sys.argv[1]
+try:
+    from fno.projects.resolve import resolve_project_name, ProjectNotFound, _get_cache
+    from fno.graph._intake import project_root_from_settings
+except Exception as e:
+    print("error\tproject resolver import failed: %s" % e); sys.exit(0)
+try:
+    canon = resolve_project_name(proj)
+except ProjectNotFound:
+    try:
+        known = sorted({v for v in _get_cache().values()})
+    except Exception:
+        known = []
+    print("notfound\t" + ",".join(known)); sys.exit(0)
+except Exception as e:
+    print("error\t%s" % e); sys.exit(0)
+path = project_root_from_settings(canon)
+if not path:
+    print("error\tproject %r resolved to no path in settings" % canon); sys.exit(0)
+print("ok\t%s\t%s" % (canon, path))' "$_proj" 2>/dev/null || { printf 'error\tproject resolver crashed\n'; return 0; }
+}
+
+# -P/--project was passed but its value is empty (a bare trailing `-P`, or an
+# explicit `-P ""`): the user asked for a cross-project hop, so refuse loud rather
+# than silently launch in the caller's cwd (mirrors the empty --name guard below).
+if [[ "$PROJECT_SET" -eq 1 && -z "$PROJECT" ]]; then
+  emit_error "-P/--project requires a project name (got an empty value)"
+fi
+if [[ -n "$PROJECT" ]]; then
+  # A node reference (resolved ab-id, slug candidate, or `next` pointer) carries
+  # its own project; --project conflicts unless forced.
+  if [[ "$FORCE" -eq 0 ]] && { [[ -n "$NODE" ]] || [[ -n "$NODE_QUERY" ]] || [[ "$SPAWN_NEXT" -eq 1 ]]; }; then
+    emit_error "a backlog node carries its own project, so --project '$PROJECT' conflicts with it. Drop --project (the node's cwd is used), or pass -f/--force to override the node's cwd with project '$PROJECT'."
+  fi
+  _pres="$(resolve_project "$PROJECT")"
+  _pkind="${_pres%%$'\t'*}"
+  _prest="${_pres#*$'\t'}"
+  case "$_pkind" in
+    ok)
+      PROJECT_CANON="${_prest%%$'\t'*}"
+      RESOLVED_CWD="${_prest#*$'\t'}"
+      # Refuse a mapped-but-missing repo BEFORE any billed launch (project_root_
+      # from_settings is a pure map lookup and does not stat). Names both the
+      # project and the path so the fix is obvious.
+      [[ -d "$RESOLVED_CWD" ]] || emit_error "project '$PROJECT_CANON' maps to $RESOLVED_CWD, which does not exist on disk; fix its path in settings.yaml or create the checkout"
+      ;;
+    notfound)
+      _known="$_prest"
+      [[ "$_known" == "$_pres" ]] && _known=""   # no tab -> no known list
+      if [[ -n "$_known" ]]; then
+        emit_error "unknown project '$PROJECT'; known projects: ${_known//,/, }"
+      else
+        emit_error "unknown project '$PROJECT' (no projects found in settings.yaml work.workspaces)"
+      fi
+      ;;
+    *)
+      _emsg="$_prest"
+      [[ "$_emsg" == "$_pres" ]] && _emsg="project resolution failed"
+      emit_error "$_emsg"
+      ;;
+  esac
 fi
 
 # ---- 3. agent-name derivation ------------------------------------------------
@@ -528,6 +642,11 @@ printf 'node=%s\n' "$NODE"
 printf 'node_query=%s\n' "$NODE_QUERY"
 printf 'spawn_next=%s\n' "$SPAWN_NEXT"
 printf 'next_scope=%s\n' "$NEXT_SCOPE"
+# Cross-project target (-P/--project). Both empty when no --project was passed.
+# project is the canonical registry name; resolved_cwd is its abs work-map root,
+# which the SKILL passes to `spawn.sh --cwd` and echoes in the REPORT receipt.
+printf 'project=%s\n' "$PROJECT_CANON"
+printf 'resolved_cwd=%s\n' "$RESOLVED_CWD"
 # shape_hint (path|question|continue|feature): the SKILL announces the /target
 # build wrap + offers handoff/discuss when this is not `feature` and no explicit
 # verb was typed (attended callers only). Emitted on every run.
