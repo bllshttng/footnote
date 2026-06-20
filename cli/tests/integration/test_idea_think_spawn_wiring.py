@@ -32,6 +32,9 @@ def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     # An origin so the persisted node is eligible (source_session_id populated).
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "testsid-1234")
+    # Arm the gate: cmd_idea checks think_spawn_enabled() BEFORE the re-read, so
+    # the hook is only reached (and the slug re-read only paid for) when armed.
+    monkeypatch.setenv("FNO_THINK_SPAWN", "1")
     monkeypatch.chdir(tmp_path)
 
     def entries():
@@ -58,6 +61,24 @@ def test_idea_invokes_birth_hook_with_persisted_node(graph, monkeypatch):
     # The node carries the x-30f6 ambient provenance stamp (origin present).
     assert seen[0]["source_session_id"] == "testsid-1234"
     # And it is the actually-persisted node, not a pre-persist copy.
+    assert any(e["id"] == created_id for e in entries())
+
+
+def test_idea_gate_off_skips_hook_entirely(graph, monkeypatch):
+    """Gate OFF: cmd_idea never reaches the hook (the slug re-read is not paid for)."""
+    _, entries = graph
+    monkeypatch.setenv("FNO_THINK_SPAWN", "0")
+    called: list = []
+    monkeypatch.setattr(st, "maybe_spawn_think", lambda node, **k: called.append(node))
+
+    res = CliRunner().invoke(
+        __import__("fno.cli", fromlist=["app"]).app,
+        ["backlog", "idea", "An idea filed with the feature off"],
+    )
+
+    assert res.exit_code == 0, res.output
+    assert called == []  # gate-first: hook is never invoked when disabled
+    created_id = json.loads(res.output)["id"]
     assert any(e["id"] == created_id for e in entries())
 
 

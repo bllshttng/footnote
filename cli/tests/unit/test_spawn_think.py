@@ -294,6 +294,24 @@ def test_away_spawn_failure_skips_no_stamp(iso, monkeypatch, patch_spawn):
     assert len(evs) == 1 and evs[0]["data"]["reason"] == "spawn-failed"
 
 
+def test_away_claim_error_skips(iso, monkeypatch, patch_spawn):
+    """A raising acquire_claim resolves to skip{claim-error}, never raises."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, _ = patch_spawn
+    monkeypatch.setattr(st, "_claim_is_live", lambda key: False)
+    monkeypatch.setattr(
+        "fno.claims.core.acquire_claim",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("lock dir gone")),
+    )
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "skipped" and res.reason == "claim-error"
+    assert spawn_calls == []
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["data"]["reason"] == "claim-error"
+
+
 def test_away_spawn_failure_releases_reservation(iso, monkeypatch, patch_spawn):
     """AC2-FR analogue: a failed spawn frees dispatch:think:<id> for a retry."""
     monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")

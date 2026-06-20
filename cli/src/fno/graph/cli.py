@@ -467,15 +467,19 @@ def cmd_idea(
     # default OFF): a gate-off install is a complete no-op, and any failure here
     # never wedges the filing of the node above.
     try:
-        from fno.provenance.spawn_think import maybe_spawn_think
+        from fno.provenance.spawn_think import maybe_spawn_think, think_spawn_enabled
 
-        # The persisted node may have been re-slugged inside locked_mutate_graph
-        # (store.ensure_slugs); read it back so the /think seed + worker name
-        # carry the node's durable slug rather than a pre-slug copy.
-        persisted = node_holder[0]
-        if persisted is not None and new_id_holder[0]:
+        # Gate FIRST so the default-OFF path stays zero-extra-I/O: the slug
+        # re-read below is wasted work when the feature is disabled (which is the
+        # default for every install that has not opted in).
+        if new_id_holder[0] and node_holder[0] is not None and think_spawn_enabled():
             from fno.graph.store import read_graph
 
+            # The persisted node may have been re-slugged inside
+            # locked_mutate_graph (store.ensure_slugs); read it back so the
+            # /think seed + worker name carry the node's durable slug rather than
+            # a pre-slug copy.
+            persisted = node_holder[0]
             for e in read_graph(_graph_path()):
                 if e.get("id") == new_id_holder[0]:
                     persisted = e
