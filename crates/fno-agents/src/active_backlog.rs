@@ -176,7 +176,9 @@ enum ClaimResult {
 
 fn acquire_claim(abi_bin: &str, key: &str, holder: &str, ttl: &str, reason: &str) -> ClaimResult {
     match abi_cmd(abi_bin)
-        .args(["claim", "acquire", key, "--holder", holder, "--ttl", ttl, "--reason", reason])
+        .args([
+            "claim", "acquire", key, "--holder", holder, "--ttl", ttl, "--reason", reason,
+        ])
         .output()
     {
         Ok(o) if o.status.success() => ClaimResult::Acquired,
@@ -210,7 +212,11 @@ fn walker_key_for(cwd: &Path) -> String {
 /// Run one drain tick: acquire the walker singleton, drain one node to
 /// termination, release the singleton. The `breaker` persists across ticks so
 /// a crash-looping node accumulates failures and is eventually parked.
-pub fn drain_tick(cfg: &DrainConfig, breaker: &mut CircuitBreaker, journal: &Journal) -> DrainOutcome {
+pub fn drain_tick(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    journal: &Journal,
+) -> DrainOutcome {
     let walker_key = walker_key_for(&cfg.cwd);
     let walker_holder = format!("active-backlog:{}", std::process::id());
 
@@ -220,7 +226,13 @@ pub fn drain_tick(cfg: &DrainConfig, breaker: &mut CircuitBreaker, journal: &Jou
     // the node re-enters selection, where it will trip the breaker again.
     refresh_parked_claims(cfg, breaker);
 
-    match acquire_claim(&cfg.abi_bin, &walker_key, &walker_holder, "24h", "active-backlog drain tick") {
+    match acquire_claim(
+        &cfg.abi_bin,
+        &walker_key,
+        &walker_holder,
+        "24h",
+        "active-backlog drain tick",
+    ) {
         ClaimResult::Acquired => {}
         ClaimResult::Held => {
             let _ = journal.append(
@@ -234,7 +246,9 @@ pub fn drain_tick(cfg: &DrainConfig, breaker: &mut CircuitBreaker, journal: &Jou
                 "active_backlog_skip",
                 json!({"reason": "walker-claim-error", "detail": e}),
             );
-            return DrainOutcome::Skipped { reason: format!("walker-claim-error: {e}") };
+            return DrainOutcome::Skipped {
+                reason: format!("walker-claim-error: {e}"),
+            };
         }
     }
 
@@ -268,14 +282,26 @@ fn build_env(cfg: &DrainConfig) -> Vec<(String, String)> {
     let signal_file = abilities_dir.join("target-promise.signal");
 
     let mut env: Vec<(String, String)> = vec![
-        ("OUTPUT_FILE".to_string(), output_file.to_string_lossy().into_owned()),
-        ("HISTORY_FILE".to_string(), history_file.to_string_lossy().into_owned()),
-        ("SIGNAL_FILE".to_string(), signal_file.to_string_lossy().into_owned()),
+        (
+            "OUTPUT_FILE".to_string(),
+            output_file.to_string_lossy().into_owned(),
+        ),
+        (
+            "HISTORY_FILE".to_string(),
+            history_file.to_string_lossy().into_owned(),
+        ),
+        (
+            "SIGNAL_FILE".to_string(),
+            signal_file.to_string_lossy().into_owned(),
+        ),
         ("MAX_TURNS".to_string(), cfg.max_turns.to_string()),
         ("BUDGET_USD".to_string(), format!("{}", cfg.budget_usd)),
         // CONTINUE_PROMPT is set per-unit by MegawalkDispatcher.
         ("CONTINUE_PROMPT".to_string(), String::new()),
-        ("FNO_CWD".to_string(), cfg.cwd.to_string_lossy().into_owned()),
+        (
+            "FNO_CWD".to_string(),
+            cfg.cwd.to_string_lossy().into_owned(),
+        ),
     ];
     match &cfg.model {
         Some(m) => env.push(("MODEL_FLAG".to_string(), format!("--model {m}"))),
@@ -284,7 +310,11 @@ fn build_env(cfg: &DrainConfig) -> Vec<(String, String)> {
     env
 }
 
-fn run_one_node(cfg: &DrainConfig, breaker: &mut CircuitBreaker, journal: &Journal) -> DrainOutcome {
+fn run_one_node(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    journal: &Journal,
+) -> DrainOutcome {
     let mut queue =
         MegawalkQueue::new_with_max_units(cfg.abi_bin.clone(), cfg.project.clone(), false, Some(1))
             .with_mission(cfg.mission.clone());
@@ -303,7 +333,9 @@ fn run_one_node(cfg: &DrainConfig, breaker: &mut CircuitBreaker, journal: &Journ
                 "active_backlog_skip",
                 json!({"reason": "bad-budget", "detail": format!("{e}")}),
             );
-            return DrainOutcome::Skipped { reason: format!("bad-budget: {e}") };
+            return DrainOutcome::Skipped {
+                reason: format!("bad-budget: {e}"),
+            };
         }
     };
 
@@ -326,7 +358,9 @@ fn run_one_node(cfg: &DrainConfig, breaker: &mut CircuitBreaker, journal: &Journ
                 "active_backlog_skip",
                 json!({"reason": "loop-error", "detail": format!("{e}")}),
             );
-            return DrainOutcome::Skipped { reason: format!("loop-error: {e}") };
+            return DrainOutcome::Skipped {
+                reason: format!("loop-error: {e}"),
+            };
         }
     };
 
@@ -352,7 +386,9 @@ fn map_outcome(
                     "active_backlog_skip",
                     json!({"reason": "no-close", "termination": format!("{other:?}")}),
                 );
-                DrainOutcome::Skipped { reason: format!("{other:?}") }
+                DrainOutcome::Skipped {
+                    reason: format!("{other:?}"),
+                }
             }
         };
     };
@@ -396,7 +432,9 @@ fn map_outcome(
                         "consecutive_failures": breaker.consecutive_failures(&node),
                     }),
                 );
-                DrainOutcome::Skipped { reason: format!("node {node} not closed: {detail}") }
+                DrainOutcome::Skipped {
+                    reason: format!("node {node} not closed: {detail}"),
+                }
             }
         }
     }

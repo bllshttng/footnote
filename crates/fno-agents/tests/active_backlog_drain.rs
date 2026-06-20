@@ -86,10 +86,7 @@ fn journal_in(tmp: &Path) -> (Journal, PathBuf) {
     let project = tmp.join(".fno").join("events.jsonl");
     let global = tmp.join("global-events.jsonl");
     fs::create_dir_all(project.parent().unwrap()).unwrap();
-    (
-        Journal::new_raw(project.clone(), global),
-        project,
-    )
+    (Journal::new_raw(project.clone(), global), project)
 }
 
 fn journal_events(project_journal: &Path) -> Vec<String> {
@@ -143,11 +140,15 @@ exit 0"#,
     assert_eq!(out, DrainOutcome::Yielded);
     let events = journal_events(&project_journal);
     assert!(
-        events.iter().any(|e| e.contains("active_backlog_yield") && e.contains("walker-live")),
+        events
+            .iter()
+            .any(|e| e.contains("active_backlog_yield") && e.contains("walker-live")),
         "expected active_backlog_yield event, got: {events:?}"
     );
     // No dispatch happened.
-    assert!(!events.iter().any(|e| e.contains("active_backlog_dispatched")));
+    assert!(!events
+        .iter()
+        .any(|e| e.contains("active_backlog_dispatched")));
 }
 
 // ── AC1-EDGE: empty / drained scope ─────────────────────────────────────────────
@@ -172,7 +173,9 @@ exit 0"#,
     assert_eq!(out, DrainOutcome::NoWork);
     // No dispatch event for an empty board.
     let events = journal_events(&project_journal);
-    assert!(!events.iter().any(|e| e.contains("active_backlog_dispatched")));
+    assert!(!events
+        .iter()
+        .any(|e| e.contains("active_backlog_dispatched")));
     assert!(!events.iter().any(|e| e.contains("active_backlog_parked")));
 }
 
@@ -199,7 +202,9 @@ exit 0"#,
     assert!(matches!(out, DrainOutcome::Skipped { .. }), "got {out:?}");
     let events = journal_events(&project_journal);
     assert!(events.iter().any(|e| e.contains("active_backlog_skip")));
-    assert!(!events.iter().any(|e| e.contains("active_backlog_dispatched")));
+    assert!(!events
+        .iter()
+        .any(|e| e.contains("active_backlog_dispatched")));
 }
 
 // ── AC1-HP: a node the worker completes -> Dispatched ───────────────────────────
@@ -234,11 +239,18 @@ exit 0"#,
     breaker.record_failure("ab-hpaaaaaa"); // pre-existing streak to prove reset
 
     let out = drain_tick(&cfg, &mut breaker, &journal);
-    assert_eq!(out, DrainOutcome::Dispatched { node: "ab-hpaaaaaa".to_string() });
+    assert_eq!(
+        out,
+        DrainOutcome::Dispatched {
+            node: "ab-hpaaaaaa".to_string()
+        }
+    );
     // Success resets the breaker streak for that node.
     assert_eq!(breaker.consecutive_failures("ab-hpaaaaaa"), 0);
     let events = journal_events(&project_journal);
-    assert!(events.iter().any(|e| e.contains("active_backlog_dispatched") && e.contains("ab-hpaaaaaa")));
+    assert!(events
+        .iter()
+        .any(|e| e.contains("active_backlog_dispatched") && e.contains("ab-hpaaaaaa")));
 }
 
 // ── AC2-FR: crash-loop park after failure_limit ticks ───────────────────────────
@@ -269,16 +281,30 @@ exit 0"#,
     // Ticks 1 and 2: the node fails but has not yet hit the limit -> Skipped.
     for i in 1..=2 {
         let out = drain_tick(&cfg, &mut breaker, &journal);
-        assert!(matches!(out, DrainOutcome::Skipped { .. }), "tick {i}: got {out:?}");
-        assert!(!breaker.is_parked("ab-park0001"), "tick {i}: parked too early");
+        assert!(
+            matches!(out, DrainOutcome::Skipped { .. }),
+            "tick {i}: got {out:?}"
+        );
+        assert!(
+            !breaker.is_parked("ab-park0001"),
+            "tick {i}: parked too early"
+        );
     }
     // Tick 3 trips the breaker -> Parked.
     let out = drain_tick(&cfg, &mut breaker, &journal);
-    assert_eq!(out, DrainOutcome::Parked { node: "ab-park0001".to_string(), failures: 3 });
+    assert_eq!(
+        out,
+        DrainOutcome::Parked {
+            node: "ab-park0001".to_string(),
+            failures: 3
+        }
+    );
     assert!(breaker.is_parked("ab-park0001"));
     let events = journal_events(&project_journal);
     assert!(
-        events.iter().any(|e| e.contains("active_backlog_parked") && e.contains("ab-park0001")),
+        events
+            .iter()
+            .any(|e| e.contains("active_backlog_parked") && e.contains("ab-park0001")),
         "expected active_backlog_parked event"
     );
 }
