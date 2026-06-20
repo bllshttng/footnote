@@ -72,7 +72,7 @@ def test_missing_parent_treated_as_loose():
     assert _ids_sorted(entries, [loose, orphan]) == ["o", "l"]
 
 
-# -- Curated rank drives selection (x-d1fe, AC1-*) --------------------------
+# -- Curated rank drives selection (AC1-*) ----------------------------------
 # The selection key prepends the SAME `_rank_band` term the board uses, so a
 # `fno backlog rank --top` node is worked next, not just floated on the board.
 

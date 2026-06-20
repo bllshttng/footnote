@@ -47,7 +47,7 @@ within a column.
 
 ## Board order == work order
 
-Board order and work order are one ordering (x-d1fe). The lane key above orders
+Board order and work order are one ordering. The lane key above orders
 the **board** (the Obsidian Kanban + the HTML board), and *selection* - what
 `fno backlog next` returns, and therefore what `/megawalk`, the active-backlog
 daemon, and a `/target <id>` walk pick up - shares the **same** `_rank_band`

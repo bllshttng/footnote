@@ -186,14 +186,14 @@ def _graph_sort_key_fn(e: dict) -> tuple:
 
 
 def make_selection_sort_key(entries: list[dict]):
-    """Build the rank-then-epics-first selection sort key (Locked Decision 7, C3; x-d1fe).
+    """Build the rank-then-epics-first selection sort key (Locked Decision 7, C3).
 
     Returns a key function for sorting *ready candidates* by selection
     precedence: curated ``rank`` first, then epics-first, then flat priority.
     The key prepends the SAME ``_rank_band`` term the board lane key uses
     (``render._lane_sort_key``), so a ``fno backlog rank --top`` node is
     *worked* next, not merely floated on the board - board order and work
-    order share one rank definition and cannot drift (x-d1fe Locked
+    order share one rank definition and cannot drift (Locked
     Decision 4). A ranked node (band 0, ascending rank) outranks every
     unranked node, so an explicit rank overrides the epics-first heuristic;
     with no ranks set every node shares the ``(1, 0.0)`` band and ordering is
@@ -237,7 +237,7 @@ def make_selection_sort_key(entries: list[dict]):
         return PRIORITY_ORDER.get(e.get("priority", "p2"), 2)
 
     def key(node: dict) -> tuple:
-        # Curated rank leads (x-d1fe): the SAME `_rank_band` the board uses,
+        # Curated rank leads: the SAME `_rank_band` the board uses,
         # prepended so a `rank --top` node (band 0, ascending rank) is selected
         # ahead of ALL unranked nodes (band 1) - including in-progress epic
         # children, so an explicit rank overrides the epics-first heuristic

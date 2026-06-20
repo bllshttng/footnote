@@ -255,7 +255,7 @@ def _rank_band(entry: dict) -> tuple:
     but is never a real rank).
 
     This is the SINGLE source of truth for "what counts as ranked, in what
-    order" (x-d1fe Locked Decision 4): ``render._lane_sort_key`` (the board)
+    order" (Locked Decision 4): ``render._lane_sort_key`` (the board)
     and ``_intake.make_selection_sort_key`` (``fno backlog next`` / the walker)
     both prepend this term, so the board can never disagree with work order.
 
