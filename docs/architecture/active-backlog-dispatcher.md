@@ -75,19 +75,23 @@ config.active_backlog (per project)
 
 - **Circuit breaker** (`CircuitBreaker`). A pure, cross-tick per-node
   consecutive-failure counter with Hermes semantics: increment on a failed
-  drain, reset to zero only on a successful close, trip at `failure_limit` with
-  no auto-unpark. At the trip the daemon holds the node's `node:<id>` claim so
-  `fno backlog next`'s live-claims filter excludes it from future selection (the
-  park *is* the claim). Parked claims are TTL-refreshed each tick.
+  drain, reset to zero on a successful close. When the streak reaches
+  `failure_limit` the daemon trips: it `fno backlog defer`s the node (graph
+  state) and resets the streak. Deferring (rather than an endlessly-refreshed
+  claim) is what makes the park **recoverable** - `fno backlog undefer` returns
+  the node to the ready pool with a fresh `failure_limit` attempts, exactly as
+  the plan specifies.
 
 - **Resident supervisor** (`run_supervisor`). Spawned when the daemon enters
-  `Serving`. One drain tick per enabled project per pass (serial, v1), each on
-  `spawn_blocking` so the synchronous `run_loop` never stalls the daemon's async
-  serve loop. A tick panic is caught, emitted as `active_backlog_task_crashed`,
-  and the supervisor restarts with exponential backoff (never taking down the
-  `agent.*` / `channel.*` serve loop). An enabled project keeps the daemon out
-  of `IdlePendingExit`. Config changes are picked up by re-resolving targets each
-  pass.
+  `Serving`. It spawns ONE independent drain loop **per enabled project**, so a
+  long-running drain in one project never blocks or starves another. Each loop
+  owns its own breaker, runs each tick on `spawn_blocking` (so the synchronous
+  `run_loop` never stalls the daemon's async serve loop), and re-resolves its
+  own enablement between ticks (a disabled project's loop exits after its current
+  tick - AC2-EDGE). A tick panic is caught, emitted as
+  `active_backlog_task_crashed`, and the loop restarts with exponential backoff
+  (never taking down the `agent.*` / `channel.*` serve loop). An enabled project
+  keeps the daemon out of `IdlePendingExit`.
 
 - **Wake scheduler + nudge** (`wait_for_wake` + Python `touch_nudge`). The poll
   floor (`interval`) is the correctness guarantee. Layered over it, a best-effort
@@ -103,7 +107,11 @@ Exactly one walker owns `walker:<cwd>` at any time. The daemon acquires it at
 the *start* of each tick and *releases* it at tick end. Releasing per-tick is
 deliberate: it lets a human `/megawalk` grab the singleton between ticks, after
 which the daemon's next acquire fails and the tick yields
-(`active_backlog_yield{walker-live}`). Holding the claim across the whole drain
+(`active_backlog_yield{walker-live}`). The walker-claim commands run with
+`current_dir` set to the **target project's cwd**, so a global daemon (launched
+from anywhere) and a manual `/megawalk` (run inside that project) store the
+`walker:<root>` singleton in the same claims dir and genuinely contend - without
+this anchoring the two could hold separate singletons and both dispatch. Holding the claim across the whole drain
 would make the daemon a permanent owner a manual walk could never displace,
 which v1 forbids. Merge-triggered `fno backlog advance` already no-ops while the
 walker is live, so the daemon and `advance` never both dispatch.
@@ -143,7 +151,8 @@ from `events.jsonl` alone:
 |----------|----------|
 | Manual `/megawalk` starts mid-drain | the daemon's next tick fails to acquire `walker:<cwd>` and yields |
 | Daemon crashes mid-dispatch | the worker owns `node:<id>` independently; on restart the live-claims filter excludes the in-flight node; the orphaned `walker:<cwd>` clears by TTL or same-holder re-acquire |
-| Node crash-loops | per-node consecutive-failure counter; at `failure_limit` the node is parked (claim held, excluded) and the tick moves on |
+| Node crash-loops | per-node consecutive-failure counter; at `failure_limit` the node is `fno backlog defer`red (excluded from selection, recoverable via `fno backlog undefer`) and the loop moves on |
+| One project's drain runs long | each enabled project has its own independent drain loop, so other projects keep draining concurrently |
 | Backlog mutated many times quickly | the nudge is coalesced to one pending drain |
 | Config disabled while a node is in flight | the current dispatch finishes (targets are re-resolved only between ticks); no further tick is scheduled; the walker claim is released on the final tick |
 | Empty / mission-empty scope | the tick ends with `NoWork`, dispatches nothing, and the daemon sleeps |

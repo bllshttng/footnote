@@ -1267,7 +1267,14 @@ def _parse_duration_to_seconds(v: object) -> Optional[int]:
         secs = int(v)
         return secs if secs > 0 else None
     if isinstance(v, str):
-        m = _DURATION_RE.match(v)
+        s = v.strip()
+        # A bare digit string ("300") is interpreted as seconds, matching the
+        # bare-int path so `interval: "300"` and `interval: 300` agree (instead
+        # of the quoted form silently disabling the feature).
+        if s.isdigit():
+            secs = int(s)
+            return secs if secs > 0 else None
+        m = _DURATION_RE.match(s)
         if not m:
             return None
         secs = int(m.group(1)) * _DURATION_UNITS[m.group(2)]

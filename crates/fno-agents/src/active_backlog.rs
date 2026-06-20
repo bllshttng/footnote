@@ -3,9 +3,10 @@
 //! This module is the engine for the always-on backlog drain. One *tick*
 //! claims the project's `walker:<cwd>` singleton, asks the existing
 //! [`MegawalkQueue`] for the next ready node, and runs it to termination
-//! through the unchanged [`run_loop`] primitive. The daemon (Wave 3) calls
-//! [`drain_tick`] on a schedule (Wave 4); this file owns only what happens
-//! inside one tick plus the cross-tick failure counter.
+//! through the unchanged [`run_loop`] primitive. The daemon's resident
+//! supervisor ([`run_supervisor`]) drives one independent drain loop PER
+//! enabled project, so a long-running drain in one project never starves
+//! another.
 //!
 //! ## Single-owner contract (AC1-FR)
 //!
@@ -13,10 +14,10 @@
 //! start and RELEASES it at the end. Releasing per-tick is deliberate: it lets
 //! a human `/megawalk` grab the singleton between ticks, after which the
 //! daemon's next acquire fails and the tick YIELDS (`active_backlog_yield`).
-//! Holding the claim across the whole drain (megawalk's model) would make the
-//! daemon a permanent owner that a manual walk could never displace, which
-//! AC1-FR forbids for v1. The `/megawalk` skill-body re-pointing (daemon
-//! client vs peer dispatcher) is the deferred follow-up D1.
+//! The walker-claim commands run with `current_dir` set to the TARGET project's
+//! cwd, so the daemon and a manual `/megawalk` (which runs in that cwd) store
+//! the `walker:<root>` singleton in the SAME claims dir and genuinely contend -
+//! a global daemon launched from elsewhere must still yield.
 //!
 //! ## One node per tick
 //!
@@ -28,13 +29,21 @@
 //! TTL. The per-unit dispatch cap is the in-tick crash-loop backstop; the
 //! cross-tick [`CircuitBreaker`] is the slower, operator-visible one.
 //!
+//! ## Circuit-breaker park (recoverable)
+//!
+//! When a node fails `failure_limit` consecutive drains the breaker trips and
+//! the daemon `fno backlog defer`s the node (graph state), then resets the
+//! in-memory streak. Deferring (not an endlessly-refreshed claim) is what makes
+//! the park recoverable: `fno backlog undefer` returns the node to the ready
+//! pool with a fresh `failure_limit` attempts, exactly as the plan specifies.
+//!
 //! ## Events (Journal contract)
 //!
 //! Every transition emits through [`Journal::append`] (project journal fatal,
 //! global mirror best-effort), matching every other loop event:
 //! `active_backlog_dispatched` / `_yield` / `_parked` / `_skip`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -52,68 +61,50 @@ use crate::loopcheck::TerminationReason;
 
 /// Cross-tick per-node consecutive-failure counter (the circuit breaker).
 ///
-/// Hermes semantics: increment on a failed drain, reset to zero ONLY on a
-/// successful close, trip at `failure_limit` with NO auto-unpark. A tripped
-/// node stays parked until an operator `fno backlog undefer` (or a later
-/// success once the operator clears the claim) resets it. This struct is the
-/// pure policy; holding the actual `node:<id>` claim that excludes the node
-/// from selection is the caller's IO step.
+/// Hermes semantics: increment on a failed drain, reset to zero on a successful
+/// close. When the streak reaches `failure_limit` the caller trips: it
+/// `fno backlog defer`s the node and then [`reset`](Self::reset)s the streak, so
+/// the graph (not an in-memory set) owns the exclusion and `fno backlog undefer`
+/// recovers the node with a fresh `failure_limit` attempts. This struct is the
+/// pure counting policy; the defer IO is the caller's step.
 #[derive(Debug, Default)]
 pub struct CircuitBreaker {
     failure_limit: u32,
     failures: HashMap<String, u32>,
-    parked: HashSet<String>,
 }
 
 impl CircuitBreaker {
-    /// `failure_limit` is clamped to at least 1 (a zero limit would park every
+    /// `failure_limit` is clamped to at least 1 (a zero limit would trip every
     /// node on its first failure, which is never the intent).
     pub fn new(failure_limit: u32) -> Self {
         Self {
             failure_limit: failure_limit.max(1),
             failures: HashMap::new(),
-            parked: HashSet::new(),
         }
     }
 
     /// Record a failed drain for `node`. Returns `true` iff this failure trips
-    /// the breaker (the streak just reached `failure_limit` and the node should
-    /// be parked now). An already-parked node never re-trips.
+    /// the breaker (the streak just reached `failure_limit`).
     pub fn record_failure(&mut self, node: &str) -> bool {
-        if self.parked.contains(node) {
-            return false;
-        }
         let n = self.failures.entry(node.to_string()).or_insert(0);
         *n += 1;
-        if *n >= self.failure_limit {
-            self.parked.insert(node.to_string());
-            true
-        } else {
-            false
-        }
+        *n >= self.failure_limit
     }
 
-    /// Record a successful close for `node`: clear the streak and unpark, so a
-    /// human-fixed node gets a fresh `failure_limit` attempts.
+    /// Record a successful close for `node`: clear the streak.
     pub fn record_success(&mut self, node: &str) {
         self.failures.remove(node);
-        self.parked.remove(node);
+    }
+
+    /// Clear the streak for `node` (called after a trip+defer so a later
+    /// `undefer` gives the node a fresh `failure_limit` attempts).
+    pub fn reset(&mut self, node: &str) {
+        self.failures.remove(node);
     }
 
     /// The current consecutive-failure count for `node` (0 if none).
     pub fn consecutive_failures(&self, node: &str) -> u32 {
         self.failures.get(node).copied().unwrap_or(0)
-    }
-
-    /// Whether `node` is currently parked by the breaker.
-    pub fn is_parked(&self, node: &str) -> bool {
-        self.parked.contains(node)
-    }
-
-    /// The set of currently-parked node ids (the daemon refreshes their claims
-    /// each tick so the park outlives the 24h claim TTL).
-    pub fn parked_nodes(&self) -> impl Iterator<Item = &String> {
-        self.parked.iter()
     }
 }
 
@@ -155,7 +146,7 @@ pub struct DrainConfig {
 pub enum DrainOutcome {
     /// A node was selected and closed successfully.
     Dispatched { node: String },
-    /// A node tripped the circuit breaker and was parked.
+    /// A node tripped the circuit breaker and was deferred (parked).
     Parked { node: String, failures: u32 },
     /// The walker singleton is held by another walker (manual /megawalk); the
     /// tick yielded without dispatching.
@@ -174,8 +165,21 @@ enum ClaimResult {
     Error(String),
 }
 
-fn acquire_claim(abi_bin: &str, key: &str, holder: &str, ttl: &str, reason: &str) -> ClaimResult {
+/// Acquire a claim, running in `cwd` so a per-repo claim (e.g. `walker:<root>`)
+/// lands in the target project's claims dir - the same one a manual `/megawalk`
+/// (run from that cwd) uses. Without this anchoring a global daemon would store
+/// the walker singleton under its own cwd and never contend with a manual walk
+/// (codex finding: AC1-FR).
+fn acquire_claim(
+    abi_bin: &str,
+    cwd: &Path,
+    key: &str,
+    holder: &str,
+    ttl: &str,
+    reason: &str,
+) -> ClaimResult {
     match abi_cmd(abi_bin)
+        .current_dir(cwd)
         .args([
             "claim", "acquire", key, "--holder", holder, "--ttl", ttl, "--reason", reason,
         ])
@@ -196,9 +200,19 @@ fn acquire_claim(abi_bin: &str, key: &str, holder: &str, ttl: &str, reason: &str
     }
 }
 
-fn release_claim(abi_bin: &str, key: &str, holder: &str) {
+fn release_claim(abi_bin: &str, cwd: &Path, key: &str, holder: &str) {
     let _ = abi_cmd(abi_bin)
+        .current_dir(cwd)
         .args(["claim", "release", key, "--holder", holder])
+        .output();
+}
+
+/// Best-effort `fno backlog defer <node>` for the circuit-breaker park. Graph
+/// state, recoverable via `fno backlog undefer`.
+fn defer_node(abi_bin: &str, cwd: &Path, node: &str, reason: &str) {
+    let _ = abi_cmd(abi_bin)
+        .current_dir(cwd)
+        .args(["backlog", "defer", node, "--reason", reason])
         .output();
 }
 
@@ -211,7 +225,7 @@ fn walker_key_for(cwd: &Path) -> String {
 
 /// Run one drain tick: acquire the walker singleton, drain one node to
 /// termination, release the singleton. The `breaker` persists across ticks so
-/// a crash-looping node accumulates failures and is eventually parked.
+/// a crash-looping node accumulates failures and is eventually deferred.
 pub fn drain_tick(
     cfg: &DrainConfig,
     breaker: &mut CircuitBreaker,
@@ -220,14 +234,9 @@ pub fn drain_tick(
     let walker_key = walker_key_for(&cfg.cwd);
     let walker_holder = format!("active-backlog:{}", std::process::id());
 
-    // Refresh any already-parked node claims so the park outlives the 24h TTL
-    // (Hermes: no auto-unpark - a parked node stays excluded until an operator
-    // intervenes). Best-effort; a missed refresh just lets the claim expire and
-    // the node re-enters selection, where it will trip the breaker again.
-    refresh_parked_claims(cfg, breaker);
-
     match acquire_claim(
         &cfg.abi_bin,
+        &cfg.cwd,
         &walker_key,
         &walker_holder,
         "24h",
@@ -256,23 +265,8 @@ pub fn drain_tick(
 
     // Release the singleton on every exit path so a manual /megawalk can take
     // over before the next tick (AC1-FR).
-    release_claim(&cfg.abi_bin, &walker_key, &walker_holder);
+    release_claim(&cfg.abi_bin, &cfg.cwd, &walker_key, &walker_holder);
     outcome
-}
-
-/// Re-acquire (idempotent, same-holder) every parked node's claim to reset its
-/// TTL window, keeping the circuit-breaker park in force across ticks.
-fn refresh_parked_claims(cfg: &DrainConfig, breaker: &CircuitBreaker) {
-    let holder = format!("active-backlog-park:{}", std::process::id());
-    for node in breaker.parked_nodes() {
-        let _ = acquire_claim(
-            &cfg.abi_bin,
-            &format!("node:{node}"),
-            &holder,
-            "24h",
-            "active-backlog circuit-breaker park hold",
-        );
-    }
 }
 
 fn build_env(cfg: &DrainConfig) -> Vec<(String, String)> {
@@ -406,22 +400,23 @@ fn map_outcome(
         CloseOutcome::Parked(detail) | CloseOutcome::Refused(detail) => {
             let tripped = breaker.record_failure(&node);
             if tripped {
-                // Hold the node claim so `fno backlog next`'s live-claims filter
-                // excludes it from future selection (the park is the claim).
-                let holder = format!("active-backlog-park:{}", std::process::id());
-                let _ = acquire_claim(
-                    &cfg.abi_bin,
-                    &format!("node:{node}"),
-                    &holder,
-                    "24h",
-                    "active-backlog circuit-breaker park",
+                // Park by deferring the node in graph state (recoverable via
+                // `fno backlog undefer`), then reset the streak so a later
+                // undefer gives it a fresh failure_limit attempts.
+                let reason_str = format!(
+                    "auto-failure: {} consecutive failed drains",
+                    cfg.failure_limit
                 );
-                let failures = breaker.consecutive_failures(&node);
+                defer_node(&cfg.abi_bin, &cfg.cwd, &node, &reason_str);
+                breaker.reset(&node);
                 let _ = journal.append(
                     "active_backlog_parked",
-                    json!({"node_id": node, "consecutive_failures": failures, "detail": detail}),
+                    json!({"node_id": node, "consecutive_failures": cfg.failure_limit, "detail": detail}),
                 );
-                DrainOutcome::Parked { node, failures }
+                DrainOutcome::Parked {
+                    node,
+                    failures: cfg.failure_limit,
+                }
             } else {
                 let _ = journal.append(
                     "active_backlog_skip",
@@ -440,7 +435,7 @@ fn map_outcome(
     }
 }
 
-// ── target resolution + resident supervisor (Wave 3) ───────────────────────────
+// ── target resolution + resident supervisor ─────────────────────────────────────
 
 /// One drain target as resolved by the Python `fno config active-backlog --json`
 /// helper (config.active_backlog + the workspace project->path map).
@@ -525,21 +520,6 @@ fn drain_config_for(target: &ResolvedTarget, abi_bin: &str) -> Option<DrainConfi
     })
 }
 
-/// Sleep `total`, waking early if `shutdown` flips. Checked in small steps so a
-/// long poll interval still tears down promptly at daemon shutdown.
-async fn sleep_interruptible(total: Duration, shutdown: &Arc<AtomicBool>) {
-    let step = Duration::from_millis(500);
-    let mut elapsed = Duration::ZERO;
-    while elapsed < total {
-        if shutdown.load(Ordering::SeqCst) {
-            return;
-        }
-        let chunk = step.min(total - elapsed);
-        tokio::time::sleep(chunk).await;
-        elapsed += chunk;
-    }
-}
-
 /// The wake nudge sentinel path ($HOME/.fno/.active-backlog-nudge by default).
 /// Mirrors the Python writer (`fno.active_backlog.nudge_sentinel_path`) under
 /// the default state dir; a non-default state_dir only loses the latency
@@ -552,10 +532,18 @@ fn nudge_sentinel_path() -> PathBuf {
 }
 
 /// The sentinel's mtime, or `None` if it does not exist / cannot be stat'd.
-fn nudge_mtime() -> Option<std::time::SystemTime> {
-    std::fs::metadata(nudge_sentinel_path())
-        .and_then(|m| m.modified())
-        .ok()
+/// The blocking `stat` is offloaded to the blocking pool so polling it every
+/// 500ms never blocks the async executor (gemini finding). `tokio::fs` is not
+/// used to avoid adding the `fs` feature to the tokio dependency.
+async fn nudge_mtime() -> Option<std::time::SystemTime> {
+    tokio::task::spawn_blocking(|| {
+        std::fs::metadata(nudge_sentinel_path())
+            .and_then(|m| m.modified())
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Wait up to `total` for the next poll tick, waking EARLY if the nudge sentinel
@@ -574,7 +562,7 @@ async fn wait_for_wake(
         if shutdown.load(Ordering::SeqCst) {
             return;
         }
-        let current = nudge_mtime();
+        let current = nudge_mtime().await;
         if current != *last {
             *last = current;
             return; // event nudge: wake early (coalesced)
@@ -585,102 +573,140 @@ async fn wait_for_wake(
     }
 }
 
-/// The resident drain supervisor (node x-c070, Wave 3).
+/// The resident drain supervisor (node x-c070).
 ///
-/// Runs until `shutdown` is set. Sets `live` true whenever there is >=1 enabled
-/// target so the daemon's idle-exit stays out (OQ1 Option A: an enabled but
-/// drained board keeps the daemon resident and polling). Each pass drains one
-/// node per enabled project (serial, v1). Every tick runs on `spawn_blocking`
-/// (`run_loop` is synchronous and blocks for the worker lifetime); a panic in a
-/// tick is caught, emitted as `active_backlog_task_crashed`, and the supervisor
-/// restarts with exponential backoff rather than taking down the daemon.
-///
-/// Config changes are picked up by re-resolving targets each pass: a project
-/// that drops out of `config.active_backlog` simply stops being ticked after its
-/// current (already-running) tick finishes - AC2-EDGE's "disable mid-flight
-/// completes the current dispatch, schedules no more" falls out for free because
-/// targets are only re-checked BETWEEN ticks, never mid-tick.
+/// Spawns ONE independent drain loop per enabled project so a long-running drain
+/// in one project never blocks or starves another (gemini finding). It sets
+/// `live` true whenever there is >=1 enabled target so the daemon's idle-exit
+/// stays out (OQ1 Option A: an enabled but drained board keeps the daemon
+/// resident and polling). Runs until `shutdown` is set, then aborts the
+/// per-project loops; an in-flight `spawn_blocking` tick is not abortable, but
+/// that is safe by design - the dispatched worker owns its `node:<id>` claim
+/// independently and the live-claims filter excludes it on the next start.
 pub async fn run_supervisor(
     abi_bin: String,
     emitter: EventEmitter,
     live: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let mut breakers: HashMap<String, CircuitBreaker> = HashMap::new();
+    let mut tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let recheck = Duration::from_secs(60);
-    let mut backoff = Duration::from_secs(1);
-    // Nudge cursor: the sentinel mtime last observed, so wait_for_wake can wake
-    // the loop early when a backlog mutation / advance touches it (Wave 4).
-    let mut last_nudge = nudge_mtime();
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
+        // Drop handles for loops that have exited (e.g. a project was disabled).
+        tasks.retain(|_, h| !h.is_finished());
+
         let targets = resolve_targets(&abi_bin);
-        if targets.is_empty() {
-            live.store(false, Ordering::SeqCst);
-            sleep_interruptible(recheck, &shutdown).await;
-            continue;
-        }
-        live.store(true, Ordering::SeqCst);
+        live.store(!targets.is_empty(), Ordering::SeqCst);
 
-        // Poll at the smallest configured interval among the enabled targets, so
-        // a single 10m project is polled every 10m (not capped at some default).
-        let mut min_interval: Option<Duration> = None;
-        for target in &targets {
-            if shutdown.load(Ordering::SeqCst) {
-                break;
-            }
-            let this = Duration::from_secs(target.interval_seconds.max(1));
-            min_interval = Some(min_interval.map_or(this, |m| m.min(this)));
-
-            let Some(cfg) = drain_config_for(target, &abi_bin) else {
+        for target in targets {
+            if tasks.contains_key(&target.project) {
                 continue;
-            };
-            let journal = journal_for(&cfg.cwd);
-            let project = target.project.clone();
-            let breaker = breakers
-                .remove(&project)
-                .unwrap_or_else(|| CircuitBreaker::new(target.failure_limit));
-            let emitter_for_crash = emitter.clone();
-
-            // run_loop is synchronous; offload so the daemon's async serve loop
-            // is never stalled. Move the breaker in and hand it back so its
-            // cross-tick failure counts survive.
-            let handle = tokio::task::spawn_blocking(move || {
-                let mut b = breaker;
-                let outcome = drain_tick(&cfg, &mut b, &journal);
-                (outcome, b)
-            });
-
-            match handle.await {
-                Ok((_outcome, b)) => {
-                    breakers.insert(project, b);
-                    backoff = Duration::from_secs(1);
-                }
-                Err(join_err) => {
-                    let _ = emitter_for_crash.emit(
-                        "active_backlog_task_crashed",
-                        &json!({"project": project, "error": join_err.to_string()}),
-                    );
-                    // Lose the panicked breaker's counts (rare); a fresh one is
-                    // safe (a crash-looping node re-accrues failures next pass).
-                    breakers.insert(project, CircuitBreaker::new(target.failure_limit));
-                    sleep_interruptible(backoff, &shutdown).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
-                }
             }
+            let project = target.project.clone();
+            let h = tokio::spawn(per_project_drain_loop(
+                target,
+                abi_bin.clone(),
+                emitter.clone(),
+                Arc::clone(&shutdown),
+            ));
+            tasks.insert(project, h);
         }
 
-        // Wait the poll floor between passes, waking early on an event nudge
-        // (Wave 4): a backlog mutation / advance touches the sentinel so a fresh
-        // ready node drains sooner than the floor. `min_interval` is always Some
-        // here (the empty-targets branch above `continue`d), but default safely.
-        let floor = min_interval.unwrap_or(Duration::from_secs(300));
-        wait_for_wake(floor, &shutdown, &mut last_nudge).await;
+        sleep_interruptible(recheck, &shutdown).await;
+    }
+
+    for (_, h) in tasks {
+        h.abort();
     }
     live.store(false, Ordering::SeqCst);
+}
+
+/// Sleep `total`, waking early if `shutdown` flips. Checked in small steps so a
+/// long poll interval still tears down promptly at daemon shutdown.
+async fn sleep_interruptible(total: Duration, shutdown: &Arc<AtomicBool>) {
+    let step = Duration::from_millis(500);
+    let mut elapsed = Duration::ZERO;
+    while elapsed < total {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        let chunk = step.min(total - elapsed);
+        tokio::time::sleep(chunk).await;
+        elapsed += chunk;
+    }
+}
+
+/// One project's independent drain loop: drain a node, wait the poll floor (or an
+/// event nudge), repeat. Owns its own [`CircuitBreaker`] so failure streaks are
+/// per-project. Exits when `shutdown` flips OR the project drops out of
+/// `config.active_backlog` (re-resolved between ticks - AC2-EDGE: a disable
+/// finishes the current dispatch then schedules no more).
+async fn per_project_drain_loop(
+    target: ResolvedTarget,
+    abi_bin: String,
+    emitter: EventEmitter,
+    shutdown: Arc<AtomicBool>,
+) {
+    let project = target.project.clone();
+    let mut breaker = CircuitBreaker::new(target.failure_limit);
+    let mut last_nudge = nudge_mtime().await;
+    let mut backoff = Duration::from_secs(1);
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+
+        // Re-resolve this project's enablement (config may have changed). If it
+        // is no longer enabled, exit the loop (the supervisor will not respawn).
+        let current = resolve_targets(&abi_bin)
+            .into_iter()
+            .find(|t| t.project == project);
+        let Some(t) = current else {
+            break;
+        };
+        let interval = Duration::from_secs(t.interval_seconds.max(1));
+
+        let Some(cfg) = drain_config_for(&t, &abi_bin) else {
+            // No driver lib (yet); back off and re-check rather than spin.
+            sleep_interruptible(interval, &shutdown).await;
+            continue;
+        };
+        let journal = journal_for(&cfg.cwd);
+
+        // run_loop is synchronous; offload so the async runtime is never stalled.
+        // Move the breaker in and hand it back so the streak survives the tick.
+        let taken = std::mem::take(&mut breaker);
+        let handle = tokio::task::spawn_blocking(move || {
+            let mut b = taken;
+            let outcome = drain_tick(&cfg, &mut b, &journal);
+            (outcome, b)
+        });
+        match handle.await {
+            Ok((_outcome, b)) => {
+                breaker = b;
+                backoff = Duration::from_secs(1);
+            }
+            Err(join_err) => {
+                let _ = emitter.emit(
+                    "active_backlog_task_crashed",
+                    &json!({"project": project, "error": join_err.to_string()}),
+                );
+                // The panicked breaker's streak is lost (rare); a fresh one is
+                // safe (a crash-looping node re-accrues failures and re-defers).
+                breaker = CircuitBreaker::new(t.failure_limit);
+                sleep_interruptible(backoff, &shutdown).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                continue;
+            }
+        }
+
+        wait_for_wake(interval, &shutdown, &mut last_nudge).await;
+    }
 }
 
 #[cfg(test)]
@@ -696,22 +722,32 @@ mod tests {
         assert_eq!(b.consecutive_failures("n1"), 2);
         // third failure trips
         assert!(b.record_failure("n1"));
-        assert!(b.is_parked("n1"));
         assert_eq!(b.consecutive_failures("n1"), 3);
     }
 
     #[test]
-    fn breaker_success_resets_streak_and_unparks() {
+    fn breaker_success_resets_streak() {
         let mut b = CircuitBreaker::new(2);
         b.record_failure("n1");
         assert_eq!(b.consecutive_failures("n1"), 1);
         b.record_success("n1");
         assert_eq!(b.consecutive_failures("n1"), 0);
-        assert!(!b.is_parked("n1"));
         // a fresh streak starts after the success
         assert!(!b.record_failure("n1"));
         assert!(b.record_failure("n1"));
-        assert!(b.is_parked("n1"));
+    }
+
+    #[test]
+    fn breaker_reset_gives_fresh_attempts() {
+        // Models trip -> defer -> reset: after a reset the node gets a fresh
+        // failure_limit run (the undefer-recovery contract).
+        let mut b = CircuitBreaker::new(2);
+        assert!(!b.record_failure("n1"));
+        assert!(b.record_failure("n1")); // trips
+        b.reset("n1"); // caller deferred + reset
+        assert_eq!(b.consecutive_failures("n1"), 0);
+        assert!(!b.record_failure("n1")); // fresh streak
+        assert!(b.record_failure("n1")); // trips again
     }
 
     #[test]
@@ -722,17 +758,7 @@ mod tests {
         assert_eq!(b.consecutive_failures("a"), 1);
         assert_eq!(b.consecutive_failures("b"), 1);
         assert!(b.record_failure("a")); // a trips
-        assert!(b.is_parked("a"));
-        assert!(!b.is_parked("b")); // b unaffected
-    }
-
-    #[test]
-    fn parked_node_does_not_retrip() {
-        let mut b = CircuitBreaker::new(1);
-        assert!(b.record_failure("n1")); // trips at limit 1
-        assert!(b.is_parked("n1"));
-        // further failures on a parked node return false (no re-trip / no event spam)
-        assert!(!b.record_failure("n1"));
+        assert_eq!(b.consecutive_failures("b"), 1); // b unaffected
     }
 
     #[test]
@@ -740,17 +766,6 @@ mod tests {
         let mut b = CircuitBreaker::new(0);
         // clamped to 1: first failure trips
         assert!(b.record_failure("n1"));
-        assert!(b.is_parked("n1"));
-    }
-
-    #[test]
-    fn parked_nodes_enumerates_parked_set() {
-        let mut b = CircuitBreaker::new(1);
-        b.record_failure("a");
-        b.record_failure("b");
-        let mut parked: Vec<String> = b.parked_nodes().cloned().collect();
-        parked.sort();
-        assert_eq!(parked, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]

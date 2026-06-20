@@ -86,10 +86,21 @@ def test_interval_bare_int_is_seconds():
     assert b.interval_seconds() == 90
 
 
+def test_interval_quoted_int_string_is_seconds():
+    # A quoted integer ("300") must parse as seconds, not silently disable.
+    b = ActiveBacklogConfig(enabled=True, interval="300")
+    assert b.interval_seconds() == 300
+    assert b.is_enabled_for("footnote") is True
+    # zero/negative quoted strings still fail closed
+    assert ActiveBacklogConfig(interval="0").interval_seconds() is None
+
+
 def test_invalid_interval_fails_closed_not_raises():
     # zero, negative, and unparseable intervals disable the feature rather than
     # spinning a 0-sleep hot loop (Boundaries) - and must NOT raise.
-    for bad in ("0s", "0m", "banana", "-5m", "", "5", "m"):
+    # NB: a bare positive digit string like "5" is now valid (5 seconds); only
+    # zero/negative/non-numeric/unit-less-non-digit forms fail closed.
+    for bad in ("0s", "0m", "banana", "-5m", "", "m", "5x"):
         b = ActiveBacklogConfig(enabled=True, interval=bad)
         assert b.interval_seconds() is None, bad
         assert b.is_enabled_for("footnote") is False, bad

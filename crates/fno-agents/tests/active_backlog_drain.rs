@@ -279,18 +279,19 @@ exit 0"#,
     let mut breaker = CircuitBreaker::new(3);
 
     // Ticks 1 and 2: the node fails but has not yet hit the limit -> Skipped.
-    for i in 1..=2 {
+    for i in 1u32..=2 {
         let out = drain_tick(&cfg, &mut breaker, &journal);
         assert!(
             matches!(out, DrainOutcome::Skipped { .. }),
             "tick {i}: got {out:?}"
         );
-        assert!(
-            !breaker.is_parked("ab-park0001"),
-            "tick {i}: parked too early"
+        assert_eq!(
+            breaker.consecutive_failures("ab-park0001"),
+            i,
+            "tick {i}: streak should be {i}"
         );
     }
-    // Tick 3 trips the breaker -> Parked.
+    // Tick 3 trips the breaker -> Parked (node deferred, streak reset).
     let out = drain_tick(&cfg, &mut breaker, &journal);
     assert_eq!(
         out,
@@ -299,7 +300,9 @@ exit 0"#,
             failures: 3
         }
     );
-    assert!(breaker.is_parked("ab-park0001"));
+    // After a trip the streak is reset (the deferred graph state owns exclusion,
+    // and a later `fno backlog undefer` gives a fresh failure_limit attempts).
+    assert_eq!(breaker.consecutive_failures("ab-park0001"), 0);
     let events = journal_events(&project_journal);
     assert!(
         events
