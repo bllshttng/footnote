@@ -37,6 +37,14 @@ prime_plugin_root_pointer || true
 
 # ── Platform detection ─────────────────────────────────────────────────
 detect_platform() {
+    # Explicit override wins. The Codex/Gemini hook installers set FNO_PLATFORM
+    # in the command they write, because those CLIs do NOT set their plugin-root
+    # env var when running a user-config hook - without this the hook would fall
+    # through to `generic` and emit the legacy output shape instead of the
+    # unified hookSpecificOutput.additionalContext (PR #11 codex review).
+    case "${FNO_PLATFORM:-}" in
+        claude|gemini|codex|cursor) echo "${FNO_PLATFORM}"; return ;;
+    esac
     if [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
         echo "gemini"
     elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
@@ -175,7 +183,7 @@ nudge_content=""
 if [[ -f "${SCRIPT_DIR}/setup-nudge-session-start.sh" ]]; then
     raw_nudge=$(bash "${SCRIPT_DIR}/setup-nudge-session-start.sh" 2>/dev/null || echo "")
     if [[ -n "$raw_nudge" ]]; then
-        nudge_content=$(echo "$raw_nudge" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // empty' 2>/dev/null || echo "$raw_nudge")
+        nudge_content=$(printf '%s\n' "$raw_nudge" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // empty' 2>/dev/null || printf '%s\n' "$raw_nudge")
     fi
 fi
 
