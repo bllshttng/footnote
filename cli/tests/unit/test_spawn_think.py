@@ -42,7 +42,7 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _events(events_path: Path) -> list[dict]:
     if not events_path.exists():
         return []
-    return [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+    return [json.loads(ln) for ln in events_path.read_text().splitlines() if ln.strip()]
 
 
 def _node(**over) -> dict:
