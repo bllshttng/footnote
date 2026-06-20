@@ -311,5 +311,75 @@ check_eq 'discuss node_query empty' "$(field "$out" node_query)" ''
 out="$(run '' --discuss)"
 check_eq 'discuss empty seed error' "$(field "$out" status)" 'error'
 
+# ===========================================================================
+# Cross-project cwd resolution (-P/--project)  (cross-project-spawn)
+# ===========================================================================
+# Hermetic injectable resolver (mirrors DISPATCH_PROVIDER_RESOLVER): speaks the
+# `ok\t<canon>\t<path>` | `notfound\t<csv>` | `error\t<msg>` protocol so these
+# tests never touch fno or settings.yaml. `etl` maps to $HERE (a real dir on
+# disk); `ghost` maps to a path that does not exist; anything else is unknown.
+_proj_res="$(mktemp)"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'case "$1" in\n'
+  printf '  etl)   printf '\''ok\\tetl\\t%%s\\n'\'' "%s" ;;\n' "$HERE"
+  printf '  ghost) printf '\''ok\\tghost\\t/no/such/dir/zzz\\n'\'' ;;\n'
+  printf '  *)     printf '\''notfound\\tchingu,etl,fno,loci,web\\n'\'' ;;\n'
+  printf 'esac\n'
+} > "$_proj_res"
+chmod +x "$_proj_res"
+
+# --- free-text + -P resolves: project + resolved_cwd emitted, build unchanged --
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -P etl)"
+check_eq   'proj resolve status'        "$(field "$out" status)"       'ok'
+check_eq   'proj resolve project'       "$(field "$out" project)"      'etl'
+check_eq   'proj resolve cwd'           "$(field "$out" resolved_cwd)" "$HERE"
+check_eq   'proj resolve node empty'    "$(field "$out" node)"         ''
+check_contains 'proj resolve still builds' "$(msg_block "$out")"       '/target backend work'
+
+# --- --project long form is identical to -P ----------------------------------
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' --project etl)"
+check_eq   'proj long-form cwd' "$(field "$out" resolved_cwd)" "$HERE"
+
+# --- no -P: project + resolved_cwd are empty (default caller-cwd launch) -------
+out="$(run 'backend work')"
+check_eq   'no-proj project empty'      "$(field "$out" project)"      ''
+check_eq   'no-proj resolved_cwd empty' "$(field "$out" resolved_cwd)" ''
+
+# --- unknown project -> error with the known-names list -----------------------
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -P bad)"
+check_eq       'unknown proj status' "$(field "$out" status)" 'error'
+check_contains 'unknown proj lists known' "$(field "$out" error)" 'etl, fno'
+
+# --- project resolves but path is missing on disk -> error (early stat) --------
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -P ghost)"
+check_eq       'missing-path status'   "$(field "$out" status)" 'error'
+check_contains 'missing-path names path' "$(field "$out" error)" '/no/such/dir/zzz'
+
+# --- node + -P conflicts (a node carries its own project) ---------------------
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'ab-12345678' -P etl)"
+check_eq       'node+proj conflict status' "$(field "$out" status)" 'error'
+check_contains 'node+proj conflict hints force' "$(field "$out" error)" '--force'
+
+# --- node + -P + -f forces the override (flag wins) ---------------------------
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'ab-12345678' -P etl -f)"
+check_eq   'forced override status'  "$(field "$out" status)"       'ok'
+check_eq   'forced override node'    "$(field "$out" node)"         'ab-12345678'
+check_eq   'forced override project' "$(field "$out" project)"      'etl'
+check_eq   'forced override cwd'     "$(field "$out" resolved_cwd)" "$HERE"
+
+# --- a slug candidate is an unresolved node ref -> also conflicts with -P ------
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'some-slug' -P etl)"
+check_eq   'slug+proj conflict status' "$(field "$out" status)" 'error'
+# ...and --force overrides that too
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'some-slug' -P etl -f)"
+check_eq   'slug+proj force status' "$(field "$out" status)" 'ok'
+
+# --- a stray --project token in task prose fails loud (defensive flag scan) ----
+out="$(run 'add a --project switch to the cli')"
+check_eq   'stray --project token errors' "$(field "$out" status)" 'error'
+
+rm -f "$_proj_res"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
