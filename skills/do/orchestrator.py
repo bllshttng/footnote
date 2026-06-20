@@ -13,6 +13,7 @@ Handles:
 import sys
 import re
 import os
+import json
 from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -770,55 +771,146 @@ def get_agent_info(agent_type: str) -> dict:
 
 @dataclass
 class TaskResult:
-    """Result from a archer agent execution."""
-    status: str  # 'SUCCESS' | 'FAILED' | 'BLOCKED'
+    """Result from an execution agent (archer/impeccable/...)."""
+    status: str  # one of VALID_STATUSES
     task_id: str
     commit: Optional[str] = None
     summary: Optional[str] = None
     error: Optional[str] = None
     reason: Optional[str] = None
     unblocks_after: Optional[str] = None
+    concerns: Optional[str] = None
+    # True when validated from a schema-enforced structured block (the claude
+    # path); False when parsed from the RESULT: text grammar (codex/gemini
+    # fallback). Either way the status is enum-validated.
+    structured: bool = False
+
+
+# The execution-agent return-contract status enum (AGENTS.md "Return Contract").
+# A status outside this set is REJECTED, never coerced: the parse layer fails
+# CLOSED so a model that appends prose or invents a status yields no false
+# success (ab-1394e797: "text output-format conventions fail open; schema
+# validation happens at the tool-call layer").
+VALID_STATUSES = ("SUCCESS", "DONE_WITH_CONCERNS", "FAILED", "BLOCKED")
+
+# Recognized contract field keys. In the text-grammar fallback a line is read as
+# a field ONLY when its key is one of these, so prose the model appends
+# ("Note: ...", "I fixed the bug: ...") cannot be absorbed as a field - the
+# fail-open hole that let a stray colon line pollute the result.
+_CONTRACT_KEYS = frozenset(
+    {"RESULT", "TASK", "COMMIT", "SUMMARY", "ERROR", "REASON",
+     "UNBLOCKS_AFTER", "CONCERNS"}
+)
+
+# Structured envelopes the claude path emits: a fenced ```json object or a
+# <result>{...}</result> tag carrying the contract as JSON.
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_RESULT_TAG_RE = re.compile(r"<result>\s*(\{.*?\})\s*</result>", re.DOTALL | re.IGNORECASE)
+
+
+def _build_task_result(data: dict, *, structured: bool) -> Optional[TaskResult]:
+    """Validate a KEY->value map against the contract; None if invalid (fail closed).
+
+    The status must be EXACTLY one of ``VALID_STATUSES`` (after stripping
+    surrounding whitespace/punctuation/quotes, but NOT trailing words - so
+    "SUCCESS." validates while "SUCCESS but it failed" does not), and ``TASK``
+    must be non-empty. Every other field is optional and normalized to None when
+    blank.
+    """
+    status = str(data.get("RESULT", "")).strip().strip(".`*'\"").strip().upper()
+    task_id = str(data.get("TASK", "")).strip()
+    if status not in VALID_STATUSES or not task_id:
+        return None
+
+    def _opt(key: str) -> Optional[str]:
+        val = data.get(key)
+        if val is None:
+            return None
+        text = str(val).strip()
+        return text or None
+
+    return TaskResult(
+        status=status,
+        task_id=task_id,
+        commit=_opt("COMMIT"),
+        summary=_opt("SUMMARY"),
+        error=_opt("ERROR"),
+        reason=_opt("REASON"),
+        unblocks_after=_opt("UNBLOCKS_AFTER"),
+        concerns=_opt("CONCERNS"),
+        structured=structured,
+    )
+
+
+def parse_structured_result(output: str) -> Optional[TaskResult]:
+    """Parse a schema-enforced structured return block (the claude path).
+
+    Looks for a fenced ```json object or a ``<result>{...}</result>`` envelope and
+    validates it against the contract via ``_build_task_result``. Keys are
+    upper-cased, so ``{"result": "success", "task": "1.2"}`` and
+    ``{"RESULT": ...}`` both validate.
+
+    Returns None when no structured block is present (the caller falls back to
+    the text grammar) OR when a block is present but fails validation - a
+    malformed structured block is NEVER silently accepted (fail closed).
+    """
+    if not output:
+        return None
+    match = _JSON_FENCE_RE.search(output) or _RESULT_TAG_RE.search(output)
+    if not match:
+        return None
+    try:
+        obj = json.loads(match.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    data = {str(k).strip().upper(): v for k, v in obj.items()}
+    return _build_task_result(data, structured=True)
 
 
 def parse_task_result(output: str) -> Optional[TaskResult]:
+    """Parse an execution agent's structured return, schema-first and fail-closed.
+
+    Resolution order (ab-1394e797 - schema over the RESULT: stdout grammar):
+
+    1. A schema-enforced structured block (```json or ``<result>``) is preferred,
+       the claude dispatch path. It is validated against the contract; a
+       malformed block is rejected, never coerced.
+    2. Otherwise the ``RESULT:`` text grammar - the codex/gemini fallback. Only
+       known contract keys are read as fields (so appended prose cannot pollute
+       the result), the FIRST occurrence of each key wins (a later stray
+       ``RESULT:`` in prose cannot hijack it), and the status must be EXACTLY one
+       of ``SUCCESS|DONE_WITH_CONCERNS|FAILED|BLOCKED`` or the parse fails - no
+       ``UNKNOWN`` false-success.
+
+    A structured envelope, once emitted, is authoritative: if one is present but
+    fails validation the parse fails CLOSED (returns None) rather than scraping
+    the surrounding prose, which could pick a stray ``RESULT:`` line out of the
+    agent's narration. The text grammar runs only when NO structured block exists.
+
+    Returns None when neither path yields a valid, complete result.
     """
-    Parse the structured output from a archer agent.
-
-    Expected format:
-    RESULT: SUCCESS|FAILED|BLOCKED
-    TASK: task-id
-    COMMIT: hash (if SUCCESS)
-    SUMMARY: description (if SUCCESS)
-    ERROR: message (if FAILED)
-    REASON: why (if BLOCKED)
-    UNBLOCKS_AFTER: what (if BLOCKED)
-
-    Args:
-        output: Raw output from archer agent
-
-    Returns:
-        TaskResult object or None if parsing fails
-    """
-    lines = output.strip().split('\n')
-    result_data = {}
-
-    for line in lines:
-        if ':' in line:
-            key, value = line.split(':', 1)
-            result_data[key.strip().upper()] = value.strip()
-
-    if 'RESULT' not in result_data or 'TASK' not in result_data:
+    if not output:
         return None
 
-    return TaskResult(
-        status=result_data.get('RESULT', 'UNKNOWN'),
-        task_id=result_data.get('TASK', ''),
-        commit=result_data.get('COMMIT'),
-        summary=result_data.get('SUMMARY'),
-        error=result_data.get('ERROR'),
-        reason=result_data.get('REASON'),
-        unblocks_after=result_data.get('UNBLOCKS_AFTER'),
-    )
+    # A structured block is authoritative when present (claude path) - validate
+    # it and do not fall back on failure.
+    if _JSON_FENCE_RE.search(output) or _RESULT_TAG_RE.search(output):
+        return parse_structured_result(output)
+
+    data: dict = {}
+    for line in output.strip().split("\n"):
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().upper()
+        # Known keys only, first-occurrence-wins: ignore appended prose lines and
+        # refuse to let a later stray contract line override the real one.
+        if key in _CONTRACT_KEYS and key not in data:
+            data[key] = value.strip()
+
+    return _build_task_result(data, structured=False)
 
 
 def get_blocked_tasks_from_state(state_path: str) -> List[str]:

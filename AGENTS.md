@@ -505,6 +505,26 @@ agents/<name>.md          # Agent definition with frontmatter:
 ```
 
 ### Return Contract for Execution Agents
+
+**Preferred (structured, the claude path).** Emit the result as a JSON object in a
+fenced ```json block (or a `<result>{...}</result>` tag). It is validated at the
+parse layer against the status enum, so a missing field or an invented status is
+rejected rather than coerced - text conventions fail open; a schema validates
+(ab-1394e797). Keys are case-insensitive:
+
+```json
+{"result": "SUCCESS", "task": "2.1", "commit": "abc123", "summary": "..."}
+```
+
+`result` must be exactly one of `SUCCESS | DONE_WITH_CONCERNS | FAILED | BLOCKED`;
+`task` is required; `commit`/`summary`/`concerns`/`error`/`reason`/`unblocks_after`
+are optional and carry the same meaning as the text grammar below.
+
+**Fallback (text grammar, codex/gemini).** When a structured block is not emitted,
+the `RESULT:` line grammar is parsed instead - but fail-closed: only these keys
+are read as fields (appended prose is ignored), the first occurrence of each key
+wins, and an out-of-enum status fails the parse rather than becoming `UNKNOWN`.
+
 ```
 RESULT: SUCCESS|DONE_WITH_CONCERNS|FAILED|BLOCKED
 TASK: task-id
@@ -514,6 +534,9 @@ ERROR: message (if FAILED)
 REASON: why (if BLOCKED)
 UNBLOCKS_AFTER: what needs to happen
 ```
+
+The canonical parser is `parse_task_result` in `skills/do/orchestrator.py`
+(structured-first, both paths enum-validated).
 
 ### Skill self-containment
 
