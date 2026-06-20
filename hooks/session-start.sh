@@ -166,20 +166,6 @@ if [[ -f "$hygiene_helper" ]]; then
     fi
 fi
 
-# 5. first-run setup nudge — fires only when no fno config exists anywhere
-#    (no global settings.yaml and no project-local one). Install lands the CLI
-#    but never prompts, so the setup wizard is otherwise undiscoverable. One
-#    line, advisory; goes silent the moment any settings file exists.
-setup_nudge_content=""
-global_settings="${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/settings.yaml}"
-project_settings=""
-if repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-    project_settings="$repo_root/.fno/settings.yaml"
-fi
-if [[ ! -f "$global_settings" ]] && [[ -z "$project_settings" || ! -f "$project_settings" ]]; then
-    setup_nudge_content="## First-run setup"$'\n'"- No fno config found yet. Run \`fno setup wizard\` (terminal) or \`/fno:setup\` (in a Claude Code session) to configure. Optional - defaults work, so \`/fno:target \"...\"\` runs without it."
-fi
-
 # ── Combine context ───────────────────────────────────────────────────
 # Newline-separate non-empty blocks so the agent sees each preamble as
 # its own section rather than one wall of text.
@@ -197,7 +183,6 @@ append_section "$using_abilities_content"
 append_section "$vision_content"
 append_section "$whoami_content"
 append_section "$hygiene_content"
-append_section "$setup_nudge_content"
 
 hydrate_state_provider_context
 
