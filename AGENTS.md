@@ -266,6 +266,8 @@ Both boards (`graph.md` Obsidian Kanban + `fno backlog view` HTML, auto-rendered
 
 Soft WIP caps are HTML-board-only and configured under `config.kanban.wip_caps` (a `column → int` map) in `~/.fno/settings.yaml` - read directly from the global file in the renderer (defensive: a malformed/negative/string cap degrades to uncapped, never raises, because the render fires inside `locked_mutate_graph`). When the `wip_caps` block is absent, defaults are `{now: 20, next: 50}`; other columns uncapped. A column over its cap renders its count with an overflow style. The md headings stay bare (`## Now`, no count) so the Obsidian Kanban plugin keeps per-column collapse state across re-renders.
 
+**Board order is NOT work order (today).** This lane key orders the *board*; it is a separate code path from *selection*. What the walker / active-backlog daemon works next comes from `fno backlog next` -> `make_selection_sort_key` (epics-first -> priority -> created_at), which does **not** consider `rank`. So `fno backlog rank <id> --top` reorders the board but does not make a node run next - use `fno backlog reprioritize <id> p0` for that. Unifying the two (rank drives selection) is tracked as `x-d1fe`. See the "Board order vs work order" section of [docs/architecture/backlog-board-ordering.md](docs/architecture/backlog-board-ordering.md).
+
 ### Backlog Health Monitoring
 
 `fno backlog triage health --check` evaluates the deterministic health report against configured thresholds, exits 0 healthy / 4 breach, dispatches notifications, and appends to `~/.fno/health-history.jsonl`. Pair with `--quiet` for `/loop`-style use. `fno backlog triage trend [--days N]` prints first-vs-latest deltas per metric (deterministic, no LLM).

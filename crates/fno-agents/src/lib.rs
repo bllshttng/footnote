@@ -39,6 +39,7 @@
 //!   (the per-CLI [`readiness::ReadinessDetector`] impls now live in
 //!   [`readiness`]).
 
+pub mod active_backlog;
 pub mod agents_config;
 pub mod claude_ask;
 pub mod client;
@@ -673,6 +674,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Deliver (daemon-emitted, Task 2.2 US4)
     "agent_deliver_injected",
     "agent_deliver_demoted",
+    // Active-backlog drain supervisor (daemon-emitted, node x-c070): the drain
+    // tick panicked and the supervisor is restarting it with backoff. The drain
+    // decision events (active_backlog_dispatched / _yield / _parked / _skip) are
+    // loop-stream events via Journal::append, NOT daemon emits, so they are
+    // exempt from this registry by design.
+    "active_backlog_task_crashed",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
 ];

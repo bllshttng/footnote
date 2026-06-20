@@ -79,6 +79,7 @@
             "startup_reconcile_failed",
             "agent_deliver_injected",
             "agent_deliver_demoted",
+            "active_backlog_task_crashed",
             "event_payload_too_large"
           ],
           "description": "Event kind name from the Rust KNOWN_EVENT_KINDS constant. Closed enum; kept in lockstep with the constant by the cross-language parity gate (compare_json diffs this set against fno-agents --emit-schema)."
