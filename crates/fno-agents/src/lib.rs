@@ -39,6 +39,7 @@
 //!   (the per-CLI [`readiness::ReadinessDetector`] impls now live in
 //!   [`readiness`]).
 
+pub mod active_backlog;
 pub mod agents_config;
 pub mod claude_ask;
 pub mod client;
