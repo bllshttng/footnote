@@ -168,6 +168,20 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "Workspace -> project topology map (config.work.workspaces.<slug>.projects[]).",
         default_source="auto-detect",
     ),
+    # --- config.model_routing.* (role-based per-spawn model routing, x-d2fe) ---
+    "config.model_routing.enabled": Meta(
+        "advanced", "Route cheap roles (coordinate/tidy/orient/consolidate) to z.ai GLM at spawn.",
+        question="Route cheap coordination work to z.ai GLM (production stays on Anthropic)?",
+    ),
+    "config.model_routing.overrides": Meta(
+        "never", "Per-role provider,model override map (e.g. tidy: 'zai,glm-4.5-air')."
+    ),
+    "config.model_routing.zai_key_env": Meta(
+        "never", "Env var name holding the z.ai key (default ZAI_API_KEY); the secret never lives in settings."
+    ),
+    "config.model_routing.zai_env_file": Meta(
+        "never", "Optional path to a .env file holding the z.ai key (e.g. modelkit's .env)."
+    ),
 }
 
 

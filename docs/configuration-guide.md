@@ -88,3 +88,7 @@
 | `config.collision.severity_thresholds.medium_count` | float | `2` | never | Collision scoring: medium-severity shared-file count. |
 | `config.collision.severity_thresholds.medium_ratio` | float | `0.25` | never | Collision scoring: medium-severity shared-file ratio. |
 | `config.work.workspaces` | dict[str, WorkspaceEntry] | `{}` | advanced | Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). |
+| `config.model_routing.enabled` | bool | `true` | advanced | Route cheap roles (coordinate/tidy/orient/consolidate) to z.ai GLM at spawn. |
+| `config.model_routing.overrides` | dict[str, str] | `{}` | never | Per-role provider,model override map (e.g. tidy: 'zai,glm-4.5-air'). |
+| `config.model_routing.zai_key_env` | str | `ZAI_API_KEY` | never | Env var name holding the z.ai key (default ZAI_API_KEY); the secret never lives in settings. |
+| `config.model_routing.zai_env_file` | str (optional) | _(none)_ | never | Optional path to a .env file holding the z.ai key (e.g. modelkit's .env). |

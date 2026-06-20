@@ -1249,6 +1249,32 @@ class WorkBlock(BaseModel):
         return {}
 
 
+class ModelRoutingBlock(BaseModel):
+    """Role-based per-spawn model routing (config.model_routing in settings.yaml).
+
+    Routes cheap coordination roles (coordinate / tidy / orient / consolidate)
+    to z.ai GLM at spawn time while production roles stay on the default
+    Anthropic model. The secret (the z.ai key) lives OUTSIDE this block - in
+    the process env var named by ``zai_key_env``, or in the ``.env`` file at
+    ``zai_env_file`` - never in settings.yaml. See fno.agents.model_routing.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    overrides: dict[str, str] = Field(default_factory=dict)
+    zai_key_env: str = "ZAI_API_KEY"
+    zai_env_file: Optional[str] = None
+
+    @field_validator("overrides", mode="before")
+    @classmethod
+    def _coerce_overrides(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``overrides`` degrades to {}."""
+        if isinstance(v, dict):
+            return v
+        return {}
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -1273,6 +1299,20 @@ class ConfigBlock(BaseModel):
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
     collision: CollisionBlock = Field(default_factory=CollisionBlock)
     work: WorkBlock = Field(default_factory=WorkBlock)
+    model_routing: ModelRoutingBlock = Field(default_factory=ModelRoutingBlock)
+
+    @field_validator("model_routing", mode="before")
+    @classmethod
+    def _coerce_model_routing(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``model_routing:`` degrades to defaults.
+
+        Mirrors ``_coerce_auto_merge``: a scalar/list/null cannot build the
+        block; fall back to defaults rather than raising out of the whole
+        settings load. A dict passes through so the inner coercers still run.
+        """
+        if isinstance(v, (dict, ModelRoutingBlock)):
+            return v
+        return {}
 
     @field_validator("logs", mode="before")
     @classmethod
