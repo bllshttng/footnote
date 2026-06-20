@@ -443,6 +443,14 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             render_graph_html(entries, html_target)
         except OSError as e:
             print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
+        # Wake the active-backlog drain daemon (node x-c070): a mutation may have
+        # produced a fresh ready node. Best-effort; the daemon's poll floor is the
+        # guarantee, so a failed touch is harmless and never wedges the mutation.
+        try:
+            from fno.active_backlog import touch_nudge
+            touch_nudge()
+        except Exception:
+            pass
         return entries
     finally:
         _release_flock(fd)

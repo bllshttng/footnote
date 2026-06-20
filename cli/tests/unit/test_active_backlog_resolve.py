@@ -1,0 +1,114 @@
+"""Unit tests for active-backlog drain-target resolution (node x-c070).
+
+resolve_drain_targets() turns config.active_backlog + the workspace project->path
+map into the concrete drain targets the daemon shells for. It must be fully
+fail-safe (a config or workspace fault yields no targets, never raises) and honor
+the bool/per-project-map enable model.
+"""
+from __future__ import annotations
+
+import fno.active_backlog as ab
+
+
+def _patch(monkeypatch, *, enabled, interval="5m", failure_limit=3, mission=None, paths):
+    from fno.config import ActiveBacklogConfig
+
+    cfg = ActiveBacklogConfig(
+        enabled=enabled, interval=interval, failure_limit=failure_limit, mission=mission
+    )
+
+    class _Cfg:
+        active_backlog = cfg
+
+    class _Settings:
+        config = _Cfg()
+
+    monkeypatch.setattr(ab, "_workspace_paths", lambda: paths)
+    # load_settings is imported inside resolve_drain_targets; patch at source.
+    import fno.config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "load_settings", lambda: _Settings())
+    return cfg
+
+
+def test_disabled_yields_no_targets(monkeypatch):
+    _patch(monkeypatch, enabled=False, paths={"footnote": "/repo/footnote"})
+    assert ab.resolve_drain_targets() == []
+
+
+def test_bool_true_drains_every_workspace_project(monkeypatch):
+    _patch(
+        monkeypatch,
+        enabled=True,
+        paths={"footnote": "/repo/footnote", "readyrule": "/repo/readyrule"},
+    )
+    targets = ab.resolve_drain_targets()
+    assert [t.project for t in targets] == ["footnote", "readyrule"]
+    assert all(t.interval_seconds == 300 for t in targets)
+    assert {t.cwd for t in targets} == {"/repo/footnote", "/repo/readyrule"}
+
+
+def test_bool_true_with_no_workspace_map_is_empty(monkeypatch):
+    # No project to root a drain at -> no targets (fail-safe, never a guessed cwd).
+    _patch(monkeypatch, enabled=True, paths={})
+    assert ab.resolve_drain_targets() == []
+
+
+def test_per_project_map_only_truthy_keys(monkeypatch):
+    _patch(
+        monkeypatch,
+        enabled={"footnote": True, "readyrule": False},
+        paths={"footnote": "/repo/footnote", "readyrule": "/repo/readyrule"},
+    )
+    targets = ab.resolve_drain_targets()
+    assert [t.project for t in targets] == ["footnote"]
+    assert targets[0].cwd == "/repo/footnote"
+
+
+def test_enabled_project_without_workspace_path_is_skipped(monkeypatch):
+    _patch(monkeypatch, enabled={"ghost": True}, paths={"footnote": "/repo/footnote"})
+    assert ab.resolve_drain_targets() == []
+
+
+def test_invalid_interval_disables_everything(monkeypatch):
+    _patch(monkeypatch, enabled=True, interval="0s", paths={"footnote": "/repo/footnote"})
+    assert ab.resolve_drain_targets() == []
+
+
+def test_failure_limit_and_mission_propagate(monkeypatch):
+    _patch(
+        monkeypatch,
+        enabled={"footnote": True},
+        failure_limit=5,
+        mission="fno-mission-7",
+        paths={"footnote": "/repo/footnote"},
+    )
+    t = ab.resolve_drain_targets()[0]
+    assert t.failure_limit == 5
+    assert t.mission == "fno-mission-7"
+    assert t.interval_seconds == 300
+
+
+def test_load_settings_fault_yields_empty(monkeypatch):
+    import fno.config as cfgmod
+
+    def _boom():
+        raise RuntimeError("settings exploded")
+
+    monkeypatch.setattr(cfgmod, "load_settings", _boom)
+    monkeypatch.setattr(ab, "_workspace_paths", lambda: {"footnote": "/repo/footnote"})
+    assert ab.resolve_drain_targets() == []
+
+
+def test_as_dicts_shape(monkeypatch):
+    _patch(monkeypatch, enabled={"footnote": True}, paths={"footnote": "/repo/footnote"})
+    dicts = ab.drain_targets_as_dicts()
+    assert dicts == [
+        {
+            "project": "footnote",
+            "cwd": "/repo/footnote",
+            "interval_seconds": 300,
+            "failure_limit": 3,
+            "mission": None,
+        }
+    ]

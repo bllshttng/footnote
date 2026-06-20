@@ -125,6 +125,23 @@ FIELD_META: dict[str, Meta] = {
     "config.agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
     # --- config.auto_continue.* ---
     "config.auto_continue.enabled": Meta("advanced", "Auto-dispatch the next ready node after a PR merges."),
+    # --- config.active_backlog.* ---
+    "config.active_backlog.enabled": Meta(
+        "advanced",
+        "Always-on backlog drain: true (every project) or a per-project map.",
+    ),
+    "config.active_backlog.interval": Meta(
+        "advanced", "Poll-floor cadence for the drain daemon (e.g. 5m, 30s)."
+    ),
+    "config.active_backlog.failure_limit": Meta(
+        "advanced", "Consecutive dispatch failures before a node is parked."
+    ),
+    "config.active_backlog.max_concurrent": Meta(
+        "never", "In-flight nodes per project per tick (v1 == 1)."
+    ),
+    "config.active_backlog.mission": Meta(
+        "never", "Scope the drain daemon to a single mission's nodes."
+    ),
     # --- config.auto_merge.* ---
     "config.auto_merge.enabled": Meta(
         "always", "Auto-merge a PR once external review passes.",

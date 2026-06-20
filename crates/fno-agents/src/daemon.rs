@@ -566,6 +566,25 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         drives: crate::drive::new_table(),
     });
 
+    // Active-backlog drain supervisor (node x-c070). Opt-in via
+    // config.active_backlog; the supervisor resolves its own enabled targets and
+    // stays dormant (live=false) when none, so this is byte-for-byte today's
+    // behavior unless an operator turns it on. Started AFTER the Serving
+    // transition (recovery is already complete here). `ab_live` keeps the daemon
+    // out of idle-exit while >=1 project is enabled; `ab_shutdown` winds the task
+    // down between ticks on daemon shutdown.
+    let ab_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ab_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ab_handle = {
+        let abi_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+        let ab_emitter = EventEmitter::new(ctx.home.events_jsonl(), "active-backlog");
+        let live = Arc::clone(&ab_live);
+        let shutdown = Arc::clone(&ab_shutdown);
+        tokio::spawn(crate::active_backlog::run_supervisor(
+            abi_bin, ab_emitter, live, shutdown,
+        ))
+    };
+
     // SIGTERM -> graceful shutdown.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut idle_check = tokio::time::interval(Duration::from_secs(5));
@@ -602,7 +621,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // Never idle-exit out from under an active drive session, even if
                 // the registry momentarily looks empty (review LOW #3).
                 let no_drives = ctx.drives.lock().await.is_empty();
-                if empty && no_drives && last_activity.elapsed() >= ctx.opts.idle_exit {
+                // An enabled active-backlog project keeps the daemon resident even
+                // when the board is drained (OQ1 Option A): idle-exit must never
+                // kill a live drain supervisor.
+                let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
+                if empty && no_drives && !ab_active && last_activity.elapsed() >= ctx.opts.idle_exit {
                     emit_state(&ctx.emitter, DaemonState::IdlePendingExit);
                     let _ = ctx.emitter.emit("daemon_idle_pending_exit", &json!({}));
                     emit_state(&ctx.emitter, DaemonState::ShuttingDown);
@@ -615,6 +638,14 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
             }
         }
     }
+
+    // Wind down the active-backlog supervisor: signal it to stop scheduling new
+    // ticks, then abort its await. An in-flight tick's spawn_blocking thread is
+    // not abortable, but that is safe by design - the dispatched worker owns its
+    // node:<id> claim independently, and on the next daemon start the live-claims
+    // filter excludes the still-in-flight node (no double-dispatch).
+    ab_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    ab_handle.abort();
 
     let _ = std::fs::remove_file(ctx.home.supervisor_sock());
     emit_state(&ctx.emitter, DaemonState::Exited);

@@ -292,6 +292,38 @@ def doctor_cmd(
     raise typer.Exit(rc)
 
 
+@app.command("active-backlog")
+def active_backlog_cmd(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit a JSON list of drain targets for the daemon."
+    ),
+) -> None:
+    """Resolve which projects the active-backlog daemon should drain.
+
+    Reads config.active_backlog + the workspace project->path map and prints the
+    enabled drain targets (project, cwd, interval, failure_limit, mission). The
+    daemon shells this on entering Serving to discover its targets. Read-only and
+    best-effort: a malformed config yields an empty list, never an error.
+    """
+    import json as _json
+
+    from fno.active_backlog import drain_targets_as_dicts
+
+    targets = drain_targets_as_dicts()
+    if json_out:
+        typer.echo(_json.dumps(targets))
+        return
+    if not targets:
+        typer.echo("active-backlog: disabled (no enabled projects)")
+        return
+    for t in targets:
+        mission = f" mission={t['mission']}" if t["mission"] else ""
+        typer.echo(
+            f"{t['project']}\t{t['cwd']}\tinterval={t['interval_seconds']}s\t"
+            f"failure_limit={t['failure_limit']}{mission}"
+        )
+
+
 @app.command("get")
 def get_cmd(
     key: str = typer.Argument(
