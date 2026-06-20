@@ -1,0 +1,284 @@
+//! Integration tests for the active-backlog drain tick (node x-c070, Wave 5).
+//!
+//! These exercise `drain_tick`'s real IO branches against a stub `fno` binary
+//! (passed directly as `DrainConfig.abi_bin`) and a stub driver lib, with the
+//! loop Journal pointed at a tempdir so no real `~/.fno` state is touched.
+//!
+//! Acceptance-criteria coverage map:
+//!   AC1-FR   yield to a live manual /megawalk (walker claim held) -> Yielded
+//!   AC1-EDGE empty / drained scope (backlog next -> null) -> NoWork, no dispatch
+//!   AC1-HP   a node the worker completes -> Dispatched + breaker reset
+//!   AC2-FR   a crash-looping node parks after failure_limit ticks -> Parked
+//!   (skip)   a walker-claim ERROR (non-1 exit) -> Skipped, never dispatches
+//!
+//! AC2-FR's breaker *policy* is also unit-tested in src/active_backlog.rs; these
+//! tests prove the drain_tick wiring drives it. AC3-FR (poll+nudge double-fire)
+//! is enforced by `fno backlog next`'s live-claims filter (Python-side tests).
+//! AC2-EDGE (disable mid-flight) is covered by the Python resolver tests.
+
+use fno_agents::active_backlog::{drain_tick, CircuitBreaker, DrainConfig, DrainOutcome};
+use fno_agents::loop_runtime::{GlobalJournalPath, Journal, ProjectJournalPath};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
+
+fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    fs::write(&path, format!("#!/usr/bin/env bash\n{body}\n").as_bytes()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn node_json(id: &str) -> String {
+    format!(
+        r#"{{
+  "id": "{id}",
+  "title": "Drain {id}",
+  "priority": "p2",
+  "domain": "code",
+  "project": "footnote",
+  "cwd": "/tmp/x",
+  "size": null,
+  "plan_path": null
+}}"#
+    )
+}
+
+/// A driver lib whose `driver_invoke` writes a DonePRGreen termination event for
+/// the dispatched session, so run_loop closes the unit successfully.
+fn driver_lib_done(dir: &Path, journal: &Path) -> PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    let body = format!(
+        r#"#!/usr/bin/env bash
+driver_default_max() {{ echo 10; }}
+driver_invoke() {{
+  local sid="${{TARGET_SESSION_ID:-}}"
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{{"ts":"%s","type":"termination","source":"hook","data":{{"session_id":"%s","reason":"DonePRGreen","message":"done"}}}}\n' "$ts" "$sid" >> "{j}"
+}}
+"#,
+        j = journal.display()
+    );
+    let p = dir.join("driver-claude-code.sh");
+    fs::write(&p, body.as_bytes()).unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// A driver lib whose `driver_invoke` does nothing (never emits a termination),
+/// so run_loop synthesizes NoProgress and parks the unit.
+fn driver_lib_noop(dir: &Path) -> PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    let p = dir.join("driver-claude-code.sh");
+    fs::write(
+        &p,
+        b"#!/usr/bin/env bash\ndriver_default_max() { echo 10; }\ndriver_invoke() { exit 0; }\n",
+    )
+    .unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+fn journal_in(tmp: &Path) -> (Journal, PathBuf) {
+    let project = tmp.join(".fno").join("events.jsonl");
+    let global = tmp.join("global-events.jsonl");
+    fs::create_dir_all(project.parent().unwrap()).unwrap();
+    (
+        Journal::new_raw(project.clone(), global),
+        project,
+    )
+}
+
+fn journal_events(project_journal: &Path) -> Vec<String> {
+    if !project_journal.exists() {
+        return vec![];
+    }
+    fs::read_to_string(project_journal)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn base_cfg(tmp: &Path, abi_bin: PathBuf, lib_path: PathBuf, failure_limit: u32) -> DrainConfig {
+    DrainConfig {
+        cwd: tmp.to_path_buf(),
+        project: Some("footnote".to_string()),
+        mission: None,
+        lib_path,
+        abi_bin: abi_bin.display().to_string(),
+        allow_merge: false,
+        max_turns: 5,
+        budget_usd: 25.0,
+        model: None,
+        max_iterations: 10,
+        per_unit_max_dispatches: 1,
+        failure_limit,
+    }
+}
+
+// ── AC1-FR: yield to a live manual /megawalk ────────────────────────────────────
+
+#[test]
+fn ac1_fr_yields_when_walker_claim_held() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    // Every `claim acquire` exits 1 (held by another walker).
+    let fno = write_stub(
+        &bin,
+        "fno",
+        r#"if [[ "$1" == "claim" && "$2" == "acquire" ]]; then exit 1; fi
+exit 0"#,
+    );
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    let (journal, project_journal) = journal_in(tmp.path());
+    let cfg = base_cfg(tmp.path(), fno, lib, 3);
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(out, DrainOutcome::Yielded);
+    let events = journal_events(&project_journal);
+    assert!(
+        events.iter().any(|e| e.contains("active_backlog_yield") && e.contains("walker-live")),
+        "expected active_backlog_yield event, got: {events:?}"
+    );
+    // No dispatch happened.
+    assert!(!events.iter().any(|e| e.contains("active_backlog_dispatched")));
+}
+
+// ── AC1-EDGE: empty / drained scope ─────────────────────────────────────────────
+
+#[test]
+fn ac1_edge_no_work_when_backlog_empty() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    // Walker claim succeeds; backlog next returns null (drained); release ok.
+    let fno = write_stub(
+        &bin,
+        "fno",
+        r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then echo 'null'; exit 0; fi
+exit 0"#,
+    );
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    let (journal, project_journal) = journal_in(tmp.path());
+    let cfg = base_cfg(tmp.path(), fno, lib, 3);
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(out, DrainOutcome::NoWork);
+    // No dispatch event for an empty board.
+    let events = journal_events(&project_journal);
+    assert!(!events.iter().any(|e| e.contains("active_backlog_dispatched")));
+    assert!(!events.iter().any(|e| e.contains("active_backlog_parked")));
+}
+
+// ── skip: walker-claim error (non-1 exit) ───────────────────────────────────────
+
+#[test]
+fn walker_claim_error_skips_without_dispatch() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    // claim acquire exits 2 (a real error, not "held"): the tick must skip, never
+    // guess a node, never dispatch.
+    let fno = write_stub(
+        &bin,
+        "fno",
+        r#"if [[ "$1" == "claim" && "$2" == "acquire" ]]; then exit 2; fi
+exit 0"#,
+    );
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    let (journal, project_journal) = journal_in(tmp.path());
+    let cfg = base_cfg(tmp.path(), fno, lib, 3);
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert!(matches!(out, DrainOutcome::Skipped { .. }), "got {out:?}");
+    let events = journal_events(&project_journal);
+    assert!(events.iter().any(|e| e.contains("active_backlog_skip")));
+    assert!(!events.iter().any(|e| e.contains("active_backlog_dispatched")));
+}
+
+// ── AC1-HP: a node the worker completes -> Dispatched ───────────────────────────
+
+#[test]
+fn ac1_hp_dispatches_and_closes_a_completed_node() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    let (journal, project_journal) = journal_in(tmp.path());
+    // The driver writes its termination event into the SAME project journal that
+    // run_loop reads via find_termination.
+    let lib = driver_lib_done(&tmp.path().join("lib"), &project_journal);
+    // fno: walker/node claim ok, backlog next -> node A then null, done ok.
+    let node_a = node_json("ab-hpaaaaaa");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then
+  c="$(cat "{cnt}" 2>/dev/null || echo 0)"; c=$((c+1)); echo "$c" > "{cnt}"
+  if [[ "$c" -eq 1 ]]; then echo '{node_a}'; else echo 'null'; fi
+  exit 0
+fi
+exit 0"#,
+            cnt = tmp.path().join("cnt.txt").display(),
+            node_a = node_a,
+        ),
+    );
+    fs::write(tmp.path().join("cnt.txt"), "0").unwrap();
+    let cfg = base_cfg(tmp.path(), fno, lib, 3);
+    let mut breaker = CircuitBreaker::new(3);
+    breaker.record_failure("ab-hpaaaaaa"); // pre-existing streak to prove reset
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(out, DrainOutcome::Dispatched { node: "ab-hpaaaaaa".to_string() });
+    // Success resets the breaker streak for that node.
+    assert_eq!(breaker.consecutive_failures("ab-hpaaaaaa"), 0);
+    let events = journal_events(&project_journal);
+    assert!(events.iter().any(|e| e.contains("active_backlog_dispatched") && e.contains("ab-hpaaaaaa")));
+}
+
+// ── AC2-FR: crash-loop park after failure_limit ticks ───────────────────────────
+
+#[test]
+fn ac2_fr_crash_loop_parks_after_failure_limit() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    // No-op driver: the worker never emits a termination, so run_loop synthesizes
+    // NoProgress (per_unit_max_dispatches=1) and parks the unit each tick.
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    // backlog next ALWAYS returns the same node (the stub has no live-claims
+    // filter), so the daemon-side breaker is what eventually parks it.
+    let node_a = node_json("ab-park0001");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then echo '{node_a}'; exit 0; fi
+exit 0"#,
+            node_a = node_a,
+        ),
+    );
+    let (journal, project_journal) = journal_in(tmp.path());
+    let cfg = base_cfg(tmp.path(), fno, lib, 3);
+    let mut breaker = CircuitBreaker::new(3);
+
+    // Ticks 1 and 2: the node fails but has not yet hit the limit -> Skipped.
+    for i in 1..=2 {
+        let out = drain_tick(&cfg, &mut breaker, &journal);
+        assert!(matches!(out, DrainOutcome::Skipped { .. }), "tick {i}: got {out:?}");
+        assert!(!breaker.is_parked("ab-park0001"), "tick {i}: parked too early");
+    }
+    // Tick 3 trips the breaker -> Parked.
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(out, DrainOutcome::Parked { node: "ab-park0001".to_string(), failures: 3 });
+    assert!(breaker.is_parked("ab-park0001"));
+    let events = journal_events(&project_journal);
+    assert!(
+        events.iter().any(|e| e.contains("active_backlog_parked") && e.contains("ab-park0001")),
+        "expected active_backlog_parked event"
+    );
+}
