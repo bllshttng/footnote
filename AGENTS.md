@@ -68,6 +68,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 This is the **footnote** Claude Code plugin - an autonomous delivery pipeline that takes features from idea to shipped PR. Think, plan, do, review, ship.
 
+**First time here?** Configure the project with `fno setup wizard` (terminal, any CLI) or `/fno:setup` (in a Claude Code session). It is optional - defaults work, so `/fno:target "..."` runs without it - but it writes a validated `.fno/settings.yaml` (review bots, auto-merge, backlog prefix, vault, etc.). On Claude Code a first-run SessionStart hook nudges you toward this when no config exists yet; on Codex/Gemini this pointer is the nudge.
+
 ## Architecture
 
 ```
@@ -268,7 +270,7 @@ Both boards (`graph.md` Obsidian Kanban + `fno backlog view` HTML, auto-rendered
 
 Soft WIP caps are HTML-board-only and configured under `config.kanban.wip_caps` (a `column → int` map) in `~/.fno/settings.yaml` - read directly from the global file in the renderer (defensive: a malformed/negative/string cap degrades to uncapped, never raises, because the render fires inside `locked_mutate_graph`). When the `wip_caps` block is absent, defaults are `{now: 20, next: 50}`; other columns uncapped. A column over its cap renders its count with an overflow style. The md headings stay bare (`## Now`, no count) so the Obsidian Kanban plugin keeps per-column collapse state across re-renders.
 
-**Board order is NOT work order (today).** This lane key orders the *board*; it is a separate code path from *selection*. What the walker / active-backlog daemon works next comes from `fno backlog next` -> `make_selection_sort_key` (epics-first -> priority -> created_at), which does **not** consider `rank`. So `fno backlog rank <id> --top` reorders the board but does not make a node run next - use `fno backlog reprioritize <id> p0` for that. Unifying the two (rank drives selection) is tracked as `x-d1fe`. See the "Board order vs work order" section of [docs/architecture/backlog-board-ordering.md](docs/architecture/backlog-board-ordering.md).
+**Board order == work order.** The lane key and *selection* share one rank definition. What the walker / active-backlog daemon works next comes from `fno backlog next` -> `make_selection_sort_key`, which prepends the **same** `_rank_band` term the board uses (`rank band -> epics-first -> priority -> created_at`). So `fno backlog rank <id> --top` floats a card on the board AND makes it run next, and an explicit rank overrides the epics-first heuristic. With no rank set, selection is byte-for-byte the prior epics-first -> priority -> created_at order, so `fno backlog reprioritize <id> p0` is still the lever for unranked work. The shared helper lives in `cli/src/fno/graph/_constants.py` so board and selection can never drift. See the "Board order == work order" section of [docs/architecture/backlog-board-ordering.md](docs/architecture/backlog-board-ordering.md).
 
 ### Backlog Health Monitoring
 

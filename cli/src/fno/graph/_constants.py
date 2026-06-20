@@ -4,6 +4,7 @@ These MUST match the legacy script's values exactly -- callers depend on them.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 from pathlib import Path
@@ -243,3 +244,35 @@ LOCK_TTL_HOURS = float(os.environ.get("TASK_LOCK_TTL_HOURS", "2"))
 PRIORITY_ORDER: dict[str, int] = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 PRIORITY_MIGRATION: dict[str, str] = {"high": "p1", "medium": "p2", "low": "p3"}
 DEFAULT_PRIORITY: str = "p2"
+
+
+def _rank_band(entry: dict) -> tuple:
+    """Rank band shared by the board lane key and the walker selection key.
+
+    Returns ``(0, float(rank))`` for a finite, non-bool ``rank`` and
+    ``(1, 0.0)`` otherwise, so ranked nodes (band 0, ascending rank) precede
+    ALL unranked nodes (band 1). ``bool`` is excluded (it subclasses ``int``
+    but is never a real rank).
+
+    This is the SINGLE source of truth for "what counts as ranked, in what
+    order" (Locked Decision 4): ``render._lane_sort_key`` (the board)
+    and ``_intake.make_selection_sort_key`` (``fno backlog next`` / the walker)
+    both prepend this term, so the board can never disagree with work order.
+
+    Degrades NaN/inf AND huge-int ranks (from a hand-edited graph.json) to
+    unranked: ``float()`` guards the ``OverflowError`` a giant int raises, and
+    ``isfinite`` then excludes NaN/inf so the key stays a total order (NaN
+    compares False both ways). A non-finite rank must never raise here - the
+    board render fires inside ``locked_mutate_graph`` and only ``OSError`` is
+    swallowed upstream.
+    """
+    rank = entry.get("rank")
+    if isinstance(rank, bool) or not isinstance(rank, (int, float)):
+        return (1, 0.0)
+    try:
+        f = float(rank)
+    except (OverflowError, ValueError):
+        return (1, 0.0)
+    if math.isfinite(f):
+        return (0, f)
+    return (1, 0.0)

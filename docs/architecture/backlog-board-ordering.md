@@ -45,38 +45,42 @@ independent of "etl's #1 in Now". Rank never changes a node's column -
 `render._kanban_column` remains the sole column authority; rank only orders
 within a column.
 
-## Board order vs work order (important)
+## Board order == work order
 
-The lane key above orders the **board** - what you see in the Obsidian Kanban
-and the HTML board. It is NOT the order the walker works nodes in. *Selection* -
-what `fno backlog next` returns, and therefore what `/megawalk`, the
-active-backlog daemon, and a `/target <id>` walk pick up - is a separate key,
-`make_selection_sort_key` (`cli/src/fno/graph/_intake.py`):
+Board order and work order are one ordering. The lane key above orders
+the **board** (the Obsidian Kanban + the HTML board), and *selection* - what
+`fno backlog next` returns, and therefore what `/megawalk`, the active-backlog
+daemon, and a `/target <id>` walk pick up - shares the **same** `_rank_band`
+term. So "top of the board" means "worked next."
+
+Selection uses `make_selection_sort_key` (`cli/src/fno/graph/_intake.py`):
 
 ```
-epics-first  ->  priority (pN)  ->  created_at
+rank band  ->  epics-first  ->  priority (pN)  ->  created_at
 ```
 
-`rank` does not appear in that key. Consequences today:
+The `rank band` is `_rank_band` from `cli/src/fno/graph/_constants.py` - the
+ONE helper both the board lane key (`render._lane_sort_key`) and the selection
+key import, so the two can never drift (this section's old "board lies about
+work order" gap is closed). It returns `(0, rank)` for a finite rank and
+`(1, 0.0)` otherwise, so ranked nodes (band 0, ascending rank) precede all
+unranked nodes (band 1). Consequences:
 
-- **`rank` does not change what runs next.** `fno backlog rank <id> --top` floats
-  a card to the top of its swimlane on the board, but selection ignores `rank`, so
-  the walker / daemon will not pick it first because of that.
-- **Priority is the selection lever.** To make a node run next, raise its
-  priority: `fno backlog reprioritize <id> p0` (p0 = "drop everything"). Epic
-  *children* always outrank loose nodes (Locked Decision 7), so a loose p0 still
-  yields to an in-progress epic's children.
-- **Swimlanes are per-project.** A node's swimlane is its `project`; move it with
-  `fno backlog update <id> --project <P> --cwd <path>`. Note that `update` does
-  NOT clear `rank`, so a previously-ranked node keeps its `rank` value and lands
-  in the *ranked* band of the new `(column, project)` lane (not the unranked
-  flow). Run `fno backlog rank <id> --clear` (or re-`rank`) afterward if you want
-  to reposition it in the new lane.
-
-This divergence is a known gap. With the active-backlog daemon draining the
-board autonomously, "top of the board" should mean "worked next"; unifying the
-two (wiring `rank` into `make_selection_sort_key`) is tracked as **x-d1fe**.
-Once that lands, this section collapses to "board order == work order".
+- **`rank` changes what runs next.** `fno backlog rank <id> --top` floats a card
+  to the top of its swimlane on the board AND makes the walker / daemon pick it
+  first. An explicit rank overrides the epics-first heuristic (a ranked loose
+  node beats an in-progress epic's children - Locked Decision 1).
+- **Priority is still the lever for unranked work.** Among unranked nodes
+  (no `rank` set), selection is byte-for-byte the prior epics-first -> priority
+  -> created_at order, so `fno backlog reprioritize <id> p0` remains the way to
+  promote a node you have not explicitly ranked. Epic *children* outrank loose
+  nodes (Locked Decision 7) only within the unranked band.
+- **Rank is per-`(column, project)` lane.** Selection is project-scoped
+  (`fno backlog next [--project P]`), so rank orders within the project's ready
+  set, matching the board's per-`(column, project)` swimlane rank; it never
+  reorders across projects. `fno backlog update` does NOT clear `rank`, so a
+  moved node keeps its rank in the new lane's ranked band; run
+  `fno backlog rank <id> --clear` to rejoin the unranked flow.
 
 ## The rank model
 
