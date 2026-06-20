@@ -56,6 +56,38 @@ def test_ac4_hp_always_fields_written_and_valid(tmp_path, monkeypatch):
     SettingsModel.model_validate(data)  # raises on an invalid combination
 
 
+def test_enabling_obsidian_with_vault_succeeds(tmp_path, monkeypatch):
+    """Regression: config.obsidian.enabled is listed before config.obsidian.vault,
+    but ObsidianBlock requires vault when enabled. Enabling obsidian (and giving
+    a vault) must succeed, not dead-end in a re-prompt loop on `enabled`.
+    """
+    gpath = _global_path(tmp_path, monkeypatch)
+    fields = [
+        f
+        for f in _always_fields()
+        if f["path"] in ("config.obsidian.enabled", "config.obsidian.vault")
+    ]
+
+    # The fields are presented enabled-then-vault (schema order). Answer
+    # enabled=true first, then the vault name. The wizard must defer the failing
+    # `enabled` write until `vault` lands, then retry it.
+    seq = iter(["true", "MyVault"])
+
+    def prompt_seq(message, default):
+        return next(seq, default)
+
+    result = run_wizard(
+        tmp_path, fields, prompt_fn=prompt_seq, scope_fn=lambda k: "global"
+    )
+    assert set(result["written"]) == {
+        "config.obsidian.enabled",
+        "config.obsidian.vault",
+    }
+    data = yaml.safe_load(gpath.read_text())
+    assert data["config"]["obsidian"]["enabled"] is True
+    assert data["config"]["obsidian"]["vault"] == "MyVault"
+
+
 def test_ac4_err_rejected_value_reprompts(tmp_path, monkeypatch):
     _global_path(tmp_path, monkeypatch)
     # Just the id_prefix field, which has a strict validator.

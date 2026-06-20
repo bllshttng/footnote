@@ -105,9 +105,25 @@ def run_wizard(
     ``scope_fn(key) -> "global" | "project"`` (asked only for project keys);
     returns ``{"written": [keys], "cancelled": bool}``.
     """
+    from collections import Counter
+
     from fno.config.writer import ConfigSetError, set_config_value
 
+    def _block_of(dotted: str) -> str:
+        return ".".join(dotted.split(".")[:-1])
+
+    # A field can be rejected (exit 2) for two different reasons: a bad VALUE
+    # (re-prompt, e.g. a reserved id_prefix) or a cross-field block invariant
+    # whose sibling is written LATER (e.g. obsidian.enabled requires
+    # obsidian.vault, but the schema lists enabled first). To tell them apart we
+    # count fields per parent block: if the block has another field still to
+    # come, a rejection is likely the dependency, so defer and retry at the end
+    # rather than trapping the user in a re-prompt loop.
+    block_counts = Counter(_block_of(f["path"]) for f in fields)
+
     written: list[str] = []
+    deferred: list[tuple[str, str, str, Optional[Path]]] = []
+
     for field in fields:
         key = field["path"]
         default = field.get("default")
@@ -129,6 +145,13 @@ def run_wizard(
                 res = set_config_value(key, value, scope=scope, repo_root=repo)
             except ConfigSetError as exc:
                 if exc.exit_code == 2:
+                    if block_counts[_block_of(key)] > 1:
+                        # Sibling in the same block not yet written -> likely a
+                        # cross-field dependency; defer and retry once the rest
+                        # of the block lands.
+                        deferred.append((key, value, scope, repo))
+                        echo_fn(f"  deferring {key} (may depend on a later field)")
+                        break
                     echo_fn(f"  rejected: {exc}")
                     continue  # AC4-ERR: re-prompt, never abort
                 echo_fn(f"  cannot write {key}: {exc}")
@@ -136,6 +159,18 @@ def run_wizard(
             echo_fn(f"  set {key} = {res.value} ({res.scope}: {res.path})")
             written.append(key)
             break
+
+    # Retry deferred fields now that their siblings are persisted. A field that
+    # still fails is a genuine invalid combination (e.g. enabled with no vault);
+    # surface it and move on rather than looping.
+    for key, value, scope, repo in deferred:
+        try:
+            res = set_config_value(key, value, scope=scope, repo_root=repo)
+        except ConfigSetError as exc:
+            echo_fn(f"  skipped {key}: {exc}")
+            continue
+        echo_fn(f"  set {key} = {res.value} ({res.scope}: {res.path})")
+        written.append(key)
 
     return {"written": written, "cancelled": False}
 
