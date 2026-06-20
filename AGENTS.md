@@ -68,6 +68,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 This is the **footnote** Claude Code plugin - an autonomous delivery pipeline that takes features from idea to shipped PR. Think, plan, do, review, ship.
 
+**First time here?** Configure the project with `fno setup wizard` (terminal, any CLI) or `/fno:setup` (in a Claude Code session). It is optional - defaults work, so `/fno:target "..."` runs without it - but it writes a validated `.fno/settings.yaml` (review bots, auto-merge, backlog prefix, vault, etc.). On Claude Code a first-run SessionStart hook nudges you toward this when no config exists yet; on Codex/Gemini this pointer is the nudge.
+
 ## Architecture
 
 ```
