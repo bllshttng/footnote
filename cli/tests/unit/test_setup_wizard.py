@@ -1,4 +1,4 @@
-"""Tests for `fno setup wizard` (x-50f9, US4).
+"""Tests for `fno setup wizard`.
 
 Drives the interactive-agnostic core ``run_wizard`` with stub prompt/scope
 functions (mirroring how test_config_post_merge drives scaffold_post_merge).
@@ -109,9 +109,9 @@ def test_ac4_err_rejected_value_reprompts(tmp_path, monkeypatch):
 
 
 def test_deferred_genuine_error_reprompts_not_skipped(tmp_path, monkeypatch):
-    """PR #8 review (codex P2): in a multi-field block, a genuinely invalid value
-    on a field with a later sibling is deferred, but on retry it must RE-PROMPT
-    (and eventually write a valid value), never be silently skipped.
+    """In a multi-field block, a genuinely invalid value on a field with a later
+    sibling is deferred, but on retry it must RE-PROMPT (and eventually write a
+    valid value), never be silently skipped.
     """
     gpath = _global_path(tmp_path, monkeypatch)
     # Two fields in the same block (config.backlog): id_prefix then id_hex_width.

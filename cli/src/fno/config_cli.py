@@ -379,7 +379,7 @@ def set_cmd(
 ) -> None:
     """Set one or more config keys in settings.yaml (atomic, schema-validated).
 
-    Two forms (ab-098697b4 US7 + x-50f9 US2):
+    Two forms:
 
       fno config set <key> <value>        # single key (value may contain '=')
       fno config set a.b=1 c.d=2 ...       # atomic multi-key set
@@ -445,7 +445,7 @@ def unset_cmd(
         "per-user global ~/.fno/settings.yaml (default global).",
     ),
 ) -> None:
-    """Remove a config key, reverting it to the model default (x-50f9, US1).
+    """Remove a config key, reverting it to the model default.
 
     The undo of ``set``: deletes the dotted key (and prunes any block the
     removal leaves empty), so the value falls back to its schema default. Since

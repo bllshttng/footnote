@@ -51,7 +51,7 @@ def plan_cmd(
 
 
 # ---------------------------------------------------------------------------
-# CLI-native interactive setup wizard (x-50f9, US4)
+# CLI-native interactive setup wizard
 # ---------------------------------------------------------------------------
 
 # Keys whose natural home is the project file, not the per-user global one. The
@@ -61,7 +61,7 @@ PROJECT_SCOPED_KEYS = (
     "config.post_merge.parking_lot_path",
     "config.project.id",
     # vision describes THIS codebase; writing it global bleeds one repo's vision
-    # into every other repo's resolved config (PR #8 review).
+    # into every other repo's resolved config.
     "config.project.vision",
 )
 
@@ -135,7 +135,7 @@ def run_wizard(
         # plan - then it is likely a cross-field dependency (e.g. obsidian.enabled
         # before .vault), so defer and retry once the block lands. Computed
         # positionally so a genuine error on a block's LAST field re-prompts
-        # rather than being deferred-then-skipped (PR #8 review).
+        # rather than being deferred-then-skipped.
         has_later_sibling = any(
             _block_of(f["path"]) == _block_of(key) for f in fields[i + 1:]
         )
@@ -167,7 +167,7 @@ def run_wizard(
 
     # Retry deferred fields now that their siblings are persisted. A field that
     # STILL fails was a genuine bad value, not a dependency, so re-prompt it
-    # (never silently skip - PR #8 review).
+    # (never silently skip).
     for key, value, scope, repo, field in deferred:
         default = field.get("default")
         question = field.get("question") or key

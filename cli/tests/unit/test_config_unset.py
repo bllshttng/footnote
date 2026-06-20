@@ -1,4 +1,4 @@
-"""Tests for `fno config unset` / fno.config.writer.unset_config_value (x-50f9, US1).
+"""Tests for `fno config unset` / fno.config.writer.unset_config_value.
 
 Covers AC1-HP (removes key, reverts to default, file no longer contains it),
 AC1-ERR (unknown key exits 1, file unchanged), AC1-UI (CLI confirm line),

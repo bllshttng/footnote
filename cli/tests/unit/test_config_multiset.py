@@ -1,4 +1,4 @@
-"""Tests for multi-key `fno config set a.b=1 c.d=2` (x-50f9, US2).
+"""Tests for multi-key `fno config set a.b=1 c.d=2`.
 
 Covers AC2-HP (both set, one lock), AC2-ERR (one invalid -> writes nothing),
 AC2-UI (each pair + scope/path once), AC2-EDGE (same key twice -> last wins),
@@ -97,9 +97,9 @@ def test_ac2_edge_same_key_twice_last_wins(tmp_path):
 
 
 def test_multi_set_cross_field_block_validates_on_final_state(tmp_path):
-    """PR #8 review (gemini high): a batch setting two cross-field-coupled keys
-    in the same block must validate the FINAL state, not the intermediate one.
-    config.obsidian.enabled requires .vault; enabled-first must NOT abort.
+    """A batch setting two cross-field-coupled keys in the same block must
+    validate the FINAL state, not the intermediate one. config.obsidian.enabled
+    requires .vault; enabled-first must NOT abort.
     """
     # enabled listed first (the order that previously aborted on enabled=true).
     results = set_config_values(

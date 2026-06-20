@@ -1,4 +1,4 @@
-"""Tests for block/object set `fno config set <block> '<json>'` (x-50f9, US3).
+"""Tests for block/object set `fno config set <block> '<json>'`.
 
 Covers AC3-HP (set a block from JSON, get a leaf back), AC3-ERR (malformed
 JSON / invalid block -> exit 2, file unchanged), AC3-EDGE (nested map of maps

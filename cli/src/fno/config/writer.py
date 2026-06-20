@@ -286,8 +286,7 @@ def _resolve_final_value(
     Splitting coerce from validate is what makes a multi-key batch correct for
     cross-field block invariants (e.g. config.obsidian.enabled + .vault): every
     key is applied first, then each touched block is validated once on the final
-    state rather than on an intermediate state after each individual key (gemini
-    PR #8 review).
+    state rather than on an intermediate state after each individual key.
     """
     parent_cls, leaf, leaf_ann = _resolve_parent_block(parts)  # type: ignore[misc]
     block_model = _as_model(leaf_ann)
@@ -385,7 +384,7 @@ def set_config_values(
         # parent blocks to validate. Phase 2: validate each touched block once
         # against the FINAL merged state, so a batch setting cross-field-coupled
         # keys (config.obsidian.enabled + .vault) is judged on the end result,
-        # not on an intermediate state after a single key (PR #8 review).
+        # not on an intermediate state after a single key.
         data = existing
         blocks: dict[tuple[str, ...], type[BaseModel]] = {}
         for key in order:
@@ -432,7 +431,7 @@ def set_config_value(
 
 
 # ---------------------------------------------------------------------------
-# unset (x-50f9, US1)
+# unset
 # ---------------------------------------------------------------------------
 
 
