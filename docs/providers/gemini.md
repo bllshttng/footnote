@@ -9,7 +9,7 @@ This repository supports Gemini through a two-tier adapter:
 
 - `GEMINI.md` project context
 - Gemini extension manifest via `gemini-extension.json`
-- Hook-assisted lifecycle via `hooks/hooks-gemini.json`
+- SessionStart context hook (vision, `fno whoami`, worktree hygiene, first-run setup nudge), installed with `fno setup cli-hooks` into `~/.gemini/settings.json` (`hooks.SessionStart` -> `hooks/session-start.sh`). Idempotent, backs up first, never clobbers your other hooks.
 - Shared skills under `skills/`
 - Sequential `do`, `operator`, and `target` execution when agent upgrade prerequisites are missing
 
