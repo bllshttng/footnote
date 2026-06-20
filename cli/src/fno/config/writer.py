@@ -251,23 +251,77 @@ def _locked_update(
     return target
 
 
+def _parse_structured(value: str, key: str) -> Any:
+    """Parse a block/object value as JSON (then trivial YAML), for block-set.
+
+    JSON is tried first; a flow-style YAML mapping (``{a: b}``) is accepted as a
+    fallback (Claude's Discretion #2). A value that parses as neither raises
+    ConfigSetError exit 2 (AC3-ERR), leaving the file untouched.
+    """
+    import json as _json
+
+    s = value.strip()
+    try:
+        return _json.loads(s)
+    except _json.JSONDecodeError:
+        pass
+    try:
+        return yaml.safe_load(s)
+    except yaml.YAMLError as exc:
+        raise ConfigSetError(
+            f"invalid JSON/YAML for {key}: {exc}", 2
+        ) from exc
+
+
 def _apply_one(
     existing: dict[str, Any], parts: list[str], key: str, value: str
 ) -> tuple[dict[str, Any], Any]:
     """Coerce + validate one key against ``existing`` and return
-    ``(new_dict, final_value)``. Raises ``ConfigSetError`` on a non-scalar key
-    or an invalid value. Runs UNDER the lock on the freshly-read content.
+    ``(new_dict, final_value)``. Raises ``ConfigSetError`` on an invalid value.
+    Runs UNDER the lock on the freshly-read content.
 
-    Validates only the changed block (extra='ignore' on the blocks keeps
-    unrelated keys out; field validators like ceiling_is_positive fire). The
-    block context is read off ``existing`` so a multi-key batch touching the
-    same block composes (each apply sees the prior apply's value).
+    Three leaf shapes:
+      * a nested BaseModel block (e.g. config.review) -> parse the value as a
+        JSON/YAML mapping and validate it via that block's model in isolation,
+        then REPLACE the block (US3).
+      * a dict-typed field (e.g. config.work.workspaces) -> parse a mapping and
+        validate it via the parent block with the field set (US3).
+      * a scalar / list field -> coerce the string to the field type and
+        validate the changed block.
+
+    Validating only the changed block (extra='ignore' keeps unrelated keys out;
+    field validators like ceiling_is_positive fire). The block context is read
+    off ``existing`` so a multi-key batch touching the same block composes.
     """
     parent_cls, leaf, leaf_ann = _resolve_parent_block(parts)  # type: ignore[misc]
-    if _as_model(leaf_ann) is not None:
-        raise ConfigSetError(
-            f"{key!r} is a config block, not a scalar; set a leaf key under it", 1
-        )
+    block_model = _as_model(leaf_ann)
+    base_ann = _unwrap_optional(leaf_ann)
+    is_dict_leaf = get_origin(base_ann) is dict
+
+    if block_model is not None or is_dict_leaf:
+        parsed = _parse_structured(value, key)
+        if not isinstance(parsed, dict):
+            raise ConfigSetError(
+                f"{key!r} is a config block; expected a JSON/YAML object "
+                f"(mapping), got {type(parsed).__name__}",
+                2,
+            )
+        try:
+            if block_model is not None:
+                # REPLACE: validate the whole block in isolation.
+                block_model.model_validate(parsed)
+            else:
+                # dict-typed field: validate via the parent block with it set.
+                ctx = dict(_get_nested(existing, parts[:-1]) or {})
+                ctx[leaf] = parsed
+                parent_cls.model_validate(ctx)
+        except ValidationError as exc:
+            first = exc.errors()[0] if exc.errors() else {"msg": str(exc)}
+            raise ConfigSetError(
+                f"invalid value for {key}: {first.get('msg', exc)}", 2
+            ) from exc
+        return _deep_set(existing, parts, parsed), parsed
+
     coerced = _coerce(value, leaf_ann)
     block_dict = dict(_get_nested(existing, parts[:-1]) or {})
     block_dict[leaf] = coerced
@@ -349,9 +403,10 @@ def set_config_value(
     repo_root: Optional[Path] = None,
 ) -> SetResult:
     """Set a single dotted config key (the single-key facade over
-    ``set_config_values``). Raises ``ConfigSetError`` (with an exit code) on an
-    unknown key, a non-scalar key, a type-mismatched / schema-invalid value, or
-    a malformed existing file.
+    ``set_config_values``). The key may be a scalar/list leaf (coerced) or a
+    block/dict leaf (set from a JSON/YAML object, REPLACE semantics; US3).
+    Raises ``ConfigSetError`` (with an exit code) on an unknown key, a
+    type-mismatched / schema-invalid value, or a malformed existing file.
     """
     return set_config_values(
         [(key, value)], scope=scope, repo_root=repo_root
