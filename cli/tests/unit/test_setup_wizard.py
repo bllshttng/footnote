@@ -144,11 +144,12 @@ def test_ac4_fr_cancel_midrun_keeps_written_nothing_partial(tmp_path, monkeypatc
         tmp_path, fields, prompt_fn=prompt_fn, scope_fn=lambda k: "global"
     )
     assert result["cancelled"] is True
-    # Exactly the first field (if it had a writable default) is persisted.
-    # The first always field with a non-None default is obsidian.enabled.
-    data = yaml.safe_load(gpath.read_text()) if gpath.exists() else {}
-    # The in-flight (second) prompt wrote nothing; only the first key may exist.
+    # The in-flight (second) prompt wrote nothing; at most the first key (if it
+    # had a writable default) is persisted. Each prior write was atomic.
     assert len(result["written"]) <= 1
+    if gpath.exists():
+        # Whatever did land parses cleanly (no partial / corrupt write).
+        yaml.safe_load(gpath.read_text())
 
 
 def test_cli_wizard_smoke_accepts_defaults(tmp_path, monkeypatch):

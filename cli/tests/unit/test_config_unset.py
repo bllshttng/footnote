@@ -52,7 +52,6 @@ def test_ac1_edge_absent_key_is_noop(tmp_path):
     set_config_value(
         "config.agents.a2a.auto", "false", scope="project", repo_root=tmp_path
     )
-    before = (tmp_path / ".fno" / "settings.yaml").read_text()
     res = unset_config_value(
         "config.auto_merge.enabled", scope="project", repo_root=tmp_path
     )
