@@ -364,37 +364,118 @@ def get_cmd(
 
 @app.command("set")
 def set_cmd(
-    key: str = typer.Argument(
-        ..., help="Dotted config key, e.g. config.agents.a2a.auto"
+    tokens: list[str] = typer.Argument(
+        ...,
+        help="Either `<key> <value>` (single set; value may contain '=') or "
+        "one-or-more `key=value` pairs (atomic multi-key set).",
     ),
-    value: str = typer.Argument(..., help="New value (coerced to the schema type)."),
     local: bool = typer.Option(
         False,
         "--local/--global",
+        "-l/-g",
         help="Write the project-local .fno/settings.yaml instead of the "
         "per-user global ~/.fno/settings.yaml (default global).",
     ),
 ) -> None:
-    """Set a single config key in settings.yaml (atomic, schema-validated).
+    """Set one or more config keys in settings.yaml (atomic, schema-validated).
 
-    A write companion to the read-only ``get`` (ab-098967b4, US7): the value is
-    coerced to the field's type and validated against the schema (e.g.
-    ``config.agents.a2a.turn_ceiling`` must be >= 1), then written atomically
-    under a file lock. An invalid value leaves the file unchanged and exits
-    non-zero (AC7-ERR / AC7-FR). Stdout confirms the new value and scope.
+    Two forms:
+
+      fno config set <key> <value>        # single key (value may contain '=')
+      fno config set a.b=1 c.d=2 ...       # atomic multi-key set
+
+    Each value is coerced to the field's type and validated against the schema
+    (e.g. ``config.agents.a2a.turn_ceiling`` must be >= 1), then written
+    atomically under a single file lock. In the multi-key form the batch is
+    all-or-nothing: if ANY value is invalid the file is left unchanged and the
+    command exits non-zero (AC2-ERR / AC2-FR). A key repeated in one call uses
+    the last value (AC2-EDGE).
     """
     import sys
 
-    from fno.config.writer import ConfigSetError, set_config_value
+    from fno.config.writer import ConfigSetError, set_config_values
 
     scope = "project" if local else "global"
+
+    # Disambiguate the single-key `<key> <value>` form (so a value may itself
+    # contain '=') from the multi-key `key=value` form: exactly two tokens whose
+    # first carries no '=' is the legacy single set; otherwise every token must
+    # be a key=value pair.
+    if len(tokens) == 2 and "=" not in tokens[0]:
+        items = [(tokens[0], tokens[1])]
+    else:
+        items = []
+        for tok in tokens:
+            if "=" not in tok:
+                typer.echo(
+                    f"error: expected key=value, got {tok!r}. Use "
+                    "`fno config set <key> <value>` for a single key.",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2)
+            k, _, v = tok.partition("=")
+            items.append((k, v))
+
     try:
-        result = set_config_value(key, value, scope=scope)
+        results = set_config_values(items, scope=scope)
     except ConfigSetError as exc:
         typer.echo(f"error: {exc}", file=sys.stderr)
         raise typer.Exit(code=exc.exit_code) from exc
 
-    typer.echo(f"set {result.key} = {result.value} ({result.scope}: {result.path})")
+    if len(results) == 1:
+        r = results[0]
+        typer.echo(f"set {r.key} = {r.value} ({r.scope}: {r.path})")
+    else:
+        for r in results:
+            typer.echo(f"set {r.key} = {r.value}")
+        # Scope + path printed once (AC2-UI).
+        typer.echo(f"({results[0].scope}: {results[0].path})")
+
+
+@app.command("unset")
+def unset_cmd(
+    key: str = typer.Argument(
+        ..., help="Dotted config key to remove, e.g. config.auto_merge.enabled"
+    ),
+    local: bool = typer.Option(
+        False,
+        "--local/--global",
+        "-l/-g",
+        help="Remove from the project-local .fno/settings.yaml instead of the "
+        "per-user global ~/.fno/settings.yaml (default global).",
+    ),
+) -> None:
+    """Remove a config key, reverting it to the model default.
+
+    The undo of ``set``: deletes the dotted key (and prunes any block the
+    removal leaves empty), so the value falls back to its schema default. Since
+    the revert is non-destructive there is no confirmation. An unknown key exits
+    1 and changes nothing; an absent key is a clean no-op (``not set: <key>``).
+    Aliased as ``fno config rm``.
+    """
+    import sys
+
+    from fno.config.writer import ConfigSetError, unset_config_value
+
+    scope = "project" if local else "global"
+    try:
+        result = unset_config_value(key, scope=scope)
+    except ConfigSetError as exc:
+        typer.echo(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=exc.exit_code) from exc
+
+    if not result.present:
+        typer.echo(f"not set: {key}")
+        raise typer.Exit(0)
+
+    typer.echo(
+        f"unset {result.key} (was {result.was}); now defaults to "
+        f"{result.default} ({result.scope}: {result.path})"
+    )
+
+
+# `fno config rm` is an alias for `unset` (Claude's Discretion #3).
+app.command("rm")(unset_cmd)
 
 
 @app.command("schema")

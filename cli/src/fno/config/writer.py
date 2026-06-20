@@ -45,6 +45,16 @@ class SetResult:
     scope: str  # "global" | "project"
 
 
+@dataclass
+class UnsetResult:
+    key: str
+    was: Any  # the previous value (None if the key was absent)
+    present: bool  # whether the key was present before the unset
+    default: Any  # the model default the key reverts to once removed
+    path: Path
+    scope: str  # "global" | "project"
+
+
 def _unwrap_optional(ann: Any) -> Any:
     """``Optional[X]`` / ``Union[X, None]`` / ``X | None`` -> ``X`` (best-effort).
 
@@ -241,6 +251,167 @@ def _locked_update(
     return target
 
 
+def _parse_structured(value: str, key: str) -> Any:
+    """Parse a block/object value as JSON (then trivial YAML), for block-set.
+
+    JSON is tried first; a flow-style YAML mapping (``{a: b}``) is accepted as a
+    fallback (Claude's Discretion #2). A value that parses as neither raises
+    ConfigSetError exit 2 (AC3-ERR), leaving the file untouched.
+    """
+    import json as _json
+
+    s = value.strip()
+    try:
+        return _json.loads(s)
+    except _json.JSONDecodeError:
+        pass
+    try:
+        return yaml.safe_load(s)
+    except yaml.YAMLError as exc:
+        raise ConfigSetError(
+            f"invalid JSON/YAML for {key}: {exc}", 2
+        ) from exc
+
+
+def _resolve_final_value(
+    parts: list[str], key: str
+) -> tuple[Any, Optional[tuple[tuple[str, ...], type[BaseModel]]]]:
+    """Coerce/parse one key's annotation into its final stored shape, deferring
+    parent-block validation. Returns ``(coercer, block_to_validate)`` where
+    ``coercer`` turns the raw string into the value and ``block_to_validate`` is
+    ``(block_parts, parent_cls)`` for a scalar/dict leaf (validated once at the
+    end of the batch against the FINAL merged state) or ``None`` for a
+    block-leaf (validated in place, since it is self-contained).
+
+    Splitting coerce from validate is what makes a multi-key batch correct for
+    cross-field block invariants (e.g. config.obsidian.enabled + .vault): every
+    key is applied first, then each touched block is validated once on the final
+    state rather than on an intermediate state after each individual key.
+    """
+    parent_cls, leaf, leaf_ann = _resolve_parent_block(parts)  # type: ignore[misc]
+    block_model = _as_model(leaf_ann)
+    base_ann = _unwrap_optional(leaf_ann)
+    is_dict_leaf = get_origin(base_ann) is dict
+    block_parts = tuple(parts[:-1])
+
+    if block_model is not None or is_dict_leaf:
+        # block-leaf / dict-leaf: parse a JSON/YAML mapping (US3).
+        def _coercer(value: str) -> Any:
+            parsed = _parse_structured(value, key)
+            if not isinstance(parsed, dict):
+                raise ConfigSetError(
+                    f"{key!r} is a config block; expected a JSON/YAML object "
+                    f"(mapping), got {type(parsed).__name__}",
+                    2,
+                )
+            if block_model is not None:
+                # REPLACE: validate the whole block in isolation (self-contained).
+                try:
+                    block_model.model_validate(parsed)
+                except ValidationError as exc:
+                    first = exc.errors()[0] if exc.errors() else {"msg": str(exc)}
+                    raise ConfigSetError(
+                        f"invalid value for {key}: {first.get('msg', exc)}", 2
+                    ) from exc
+            return parsed
+
+        # A block-leaf is validated in its coercer; a dict-leaf defers to the
+        # parent block (so its parent's other fields are seen on final state).
+        block = None if block_model is not None else (block_parts, parent_cls)
+        return _coercer, block
+
+    return (lambda value: _coerce(value, leaf_ann)), (block_parts, parent_cls)
+
+
+def _validate_block(
+    data: dict[str, Any], block_parts: tuple[str, ...], parent_cls: type[BaseModel]
+) -> None:
+    """Validate one touched block against the final merged ``data``. Raises
+    ConfigSetError exit 2 naming the offending field on failure."""
+    block_dict = dict(_get_nested(data, list(block_parts)) or {})
+    try:
+        parent_cls.model_validate(block_dict)
+    except ValidationError as exc:
+        first = exc.errors()[0] if exc.errors() else {"msg": str(exc)}
+        loc = ".".join(str(p) for p in first.get("loc", ()))
+        where = ".".join(block_parts) + (f".{loc}" if loc else "")
+        raise ConfigSetError(
+            f"invalid value for {where}: {first.get('msg', exc)}", 2
+        ) from exc
+
+
+def set_config_values(
+    items: list[tuple[str, str]],
+    *,
+    scope: str = "global",
+    repo_root: Optional[Path] = None,
+) -> list[SetResult]:
+    """Set one or more dotted keys in one atomic, lock-serialized pass (US2).
+
+    All-or-nothing: every value is coerced + validated under a single lock and
+    the file is written only if ALL pass (a validation failure raises before any
+    temp file is created, so the original is untouched). A key appearing twice
+    uses the last value (AC2-EDGE). An empty batch is a usage error.
+
+    The single-key ``set_config_value`` delegates here, so both share one
+    read-modify-write path. Returns one ``SetResult`` per distinct key, in
+    first-seen order.
+    """
+    if not items:
+        raise ConfigSetError("no key=value pairs given", 2)
+
+    # Dedup by key, last value wins (AC2-EDGE); preserve first-seen order.
+    order: list[str] = []
+    deduped: dict[str, str] = {}
+    for key, value in items:
+        if key not in deduped:
+            order.append(key)
+        deduped[key] = value
+
+    # Resolve every key up front (unknown -> exit 1) before taking the lock.
+    parts_by_key: dict[str, list[str]] = {}
+    for key in order:
+        parts = key.split(".")
+        if _resolve_parent_block(parts) is None:
+            raise ConfigSetError(f"unknown config key {key!r}", 1)
+        parts_by_key[key] = parts
+
+    target = _target_path(scope, repo_root)
+    final_values: dict[str, Any] = {}
+
+    def _validate_and_merge(existing: dict[str, Any]) -> dict[str, Any]:
+        # Phase 1: coerce/parse + apply every key, collecting the distinct
+        # parent blocks to validate. Phase 2: validate each touched block once
+        # against the FINAL merged state, so a batch setting cross-field-coupled
+        # keys (config.obsidian.enabled + .vault) is judged on the end result,
+        # not on an intermediate state after a single key.
+        data = existing
+        blocks: dict[tuple[str, ...], type[BaseModel]] = {}
+        for key in order:
+            coercer, block = _resolve_final_value(parts_by_key[key], key)
+            final = coercer(deduped[key])
+            data = _deep_set(data, parts_by_key[key], final)
+            final_values[key] = final
+            if block is not None:
+                blocks[block[0]] = block[1]
+        for block_parts, parent_cls in blocks.items():
+            _validate_block(data, block_parts, parent_cls)
+        return data
+
+    try:
+        written = _locked_update(target, _validate_and_merge)
+    except OSError as exc:
+        # AC2-FR: the temp+rename already left the original intact; surface a
+        # clean non-zero exit.
+        raise ConfigSetError(
+            f"failed to write {target}: {exc} (settings left unchanged)", 1
+        ) from exc
+    return [
+        SetResult(key=key, value=final_values[key], path=written, scope=scope)
+        for key in order
+    ]
+
+
 def set_config_value(
     key: str,
     value: str,
@@ -248,45 +419,115 @@ def set_config_value(
     scope: str = "global",
     repo_root: Optional[Path] = None,
 ) -> SetResult:
-    """Set a dotted config key in the target settings file. Raises
-    ``ConfigSetError`` (with an exit code) on an unknown key, a non-scalar key,
-    a type-mismatched / schema-invalid value, or a malformed existing file.
+    """Set a single dotted config key (the single-key facade over
+    ``set_config_values``). The key may be a scalar/list leaf (coerced) or a
+    block/dict leaf (set from a JSON/YAML object, REPLACE semantics; US3).
+    Raises ``ConfigSetError`` (with an exit code) on an unknown key, a
+    type-mismatched / schema-invalid value, or a malformed existing file.
+    """
+    return set_config_values(
+        [(key, value)], scope=scope, repo_root=repo_root
+    )[0]
+
+
+# ---------------------------------------------------------------------------
+# unset
+# ---------------------------------------------------------------------------
+
+
+def _deep_unset(
+    d: dict[str, Any], parts: list[str]
+) -> tuple[dict[str, Any], Any, bool]:
+    """Return ``(new_dict, was_value, present)`` removing ``parts`` from a copy.
+
+    Prunes any parent block left empty by the removal so the file never
+    accumulates dangling ``{}`` stanzas (AC1-EDGE). If the key (or any parent
+    segment) is absent, returns the unchanged copy with ``present=False``.
+    """
+    out = copy.deepcopy(d)
+    chain: list[tuple[dict[str, Any], str]] = []
+    node: Any = out
+    for part in parts[:-1]:
+        if not isinstance(node, dict) or not isinstance(node.get(part), dict):
+            return out, None, False
+        chain.append((node, part))
+        node = node[part]
+    leaf = parts[-1]
+    if not isinstance(node, dict) or leaf not in node:
+        return out, None, False
+    was = node.pop(leaf)
+    # Walk back up, pruning each parent that the removal left empty.
+    for parent, key in reversed(chain):
+        if isinstance(parent.get(key), dict) and not parent[key]:
+            del parent[key]
+        else:
+            break
+    return out, was, True
+
+
+def _model_default(parts: list[str]) -> Any:
+    """The value ``parts`` reverts to once unset: read off a default-constructed
+    ``SettingsModel`` by walking the dotted path. Returns None if not resolvable.
+    """
+    node: Any = SettingsModel()
+    for part in parts:
+        if isinstance(node, BaseModel) and part in type(node).model_fields:
+            node = getattr(node, part)
+        elif isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node
+
+
+def unset_config_value(
+    key: str,
+    *,
+    scope: str = "global",
+    repo_root: Optional[Path] = None,
+) -> UnsetResult:
+    """Remove a dotted config key, reverting it to the model default.
+
+    Non-destructive (the value falls back to its schema default), so no
+    confirmation. An unknown key exits 1 (same as ``set``); an absent key is a
+    clean no-op (``present=False``, nothing written). Atomic + lock-serialized
+    via the shared ``_locked_update``; a write failure leaves the file intact.
     """
     parts = key.split(".")
-    resolved = _resolve_parent_block(parts)
-    if resolved is None:
+    if _resolve_parent_block(parts) is None:
         raise ConfigSetError(f"unknown config key {key!r}", 1)
-    parent_cls, leaf, leaf_ann = resolved
-    if _as_model(leaf_ann) is not None:
-        raise ConfigSetError(
-            f"{key!r} is a config block, not a scalar; set a leaf key under it", 1
+
+    default = _model_default(parts)
+    target = _target_path(scope, repo_root)
+    real_target = Path(os.path.realpath(target)) if target.is_symlink() else target
+
+    # No file -> nothing to remove; do not create an empty settings file.
+    if not real_target.exists():
+        return UnsetResult(
+            key=key, was=None, present=False, default=default,
+            path=real_target, scope=scope,
         )
 
-    coerced = _coerce(value, leaf_ann)
+    captured: dict[str, Any] = {"was": None, "present": False}
 
-    target = _target_path(scope, repo_root)
-
-    def _validate_and_merge(existing: dict[str, Any]) -> dict[str, Any]:
-        # Runs UNDER the lock on the freshly-read content (see _locked_update).
-        # Validate only the changed block (extra='ignore' on the blocks keeps
-        # unrelated keys out; field validators like ceiling_is_positive fire).
-        block_dict = dict(_get_nested(existing, parts[:-1]) or {})
-        block_dict[leaf] = coerced
-        try:
-            parent_cls.model_validate(block_dict)
-        except ValidationError as exc:
-            first = exc.errors()[0] if exc.errors() else {"msg": str(exc)}
-            raise ConfigSetError(
-                f"invalid value for {key}: {first.get('msg', exc)}", 2
-            ) from exc
-        return _deep_set(existing, parts, coerced)
+    def _mutate(existing: dict[str, Any]) -> dict[str, Any]:
+        new, was, present = _deep_unset(existing, parts)
+        captured["was"] = was
+        captured["present"] = present
+        return new
 
     try:
-        written = _locked_update(target, _validate_and_merge)
+        written = _locked_update(target, _mutate)
     except OSError as exc:
-        # AC7-FR: the temp+rename in _locked_update already left the original
-        # file intact and unlinked the temp; surface a clean non-zero exit.
         raise ConfigSetError(
             f"failed to write {target}: {exc} (settings left unchanged)", 1
         ) from exc
-    return SetResult(key=key, value=coerced, path=written, scope=scope)
+
+    return UnsetResult(
+        key=key,
+        was=captured["was"],
+        present=captured["present"],
+        default=default,
+        path=written,
+        scope=scope,
+    )

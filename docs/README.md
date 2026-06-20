@@ -14,6 +14,8 @@ The repo root [`README.md`](../README.md) is the quickstart. This index maps the
 
 - [guides/target.md](guides/target.md) - the autonomous loop: flags, gates, cross-project, resume
 - [guides/think-and-plan.md](guides/think-and-plan.md) - design exploration, plan creation, wave execution
+- [guides/pr-lifecycle.md](guides/pr-lifecycle.md) - review, create, check, merged: the PR arc by hand
+- [guides/agents-quickstart.md](guides/agents-quickstart.md) - spawn and message peer agents (claude/codex/gemini)
 - [guides/execution-modes.md](guides/execution-modes.md) - when to use target vs do vs operator
 - [guides/per-task-executors.md](guides/per-task-executors.md) - how operator resolves an executor per task
 - [guides/megawalk-walker.md](guides/megawalk-walker.md) - the continuous-delivery loop

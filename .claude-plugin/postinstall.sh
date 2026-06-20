@@ -25,6 +25,9 @@ CLI_DIR="$(dirname "$SCRIPT_DIR")/cli"
 
 log() { printf "[fno postinstall] %s\n" "$*"; }
 err() { printf "[fno postinstall] ERROR: %s\n" "$*" >&2; }
+# Printed after a successful install so a new user knows the one configuration
+# step exists (install never prompts). Optional: defaults work without it.
+next_steps() { log "Next: run 'fno setup wizard' to configure (optional; defaults work)."; }
 
 if [[ ! -f "$CLI_DIR/pyproject.toml" ]]; then
   err "expected cli/ at $CLI_DIR but pyproject.toml is missing."
@@ -56,6 +59,7 @@ install_source_via_uv() {
     log "installed Python-only fno from source. The Rust binaries are NOT included -"
     log "run 'fno update --rust' for the daemon-backed verbs (or install a published PyPI wheel)."
     log "restart your shell (or source your env) to pick up PATH."
+    next_steps
     return 0
   fi
   return 1
@@ -82,6 +86,7 @@ if command -v uv >/dev/null 2>&1; then
     if [[ -n "$SRC_VERSION" && "$INSTALLED" == "$SRC_VERSION" ]]; then
       log "installed binary-complete fno $INSTALLED from PyPI (CLI + all three Rust binaries on PATH)."
       log "restart your shell (or source your env) to pick up PATH."
+      next_steps
       exit 0
     fi
     # Not ours: the reserved 0.0.0 placeholder, a name collision, or a version
@@ -105,6 +110,7 @@ if command -v pip >/dev/null 2>&1 || command -v pip3 >/dev/null 2>&1; then
   if "$PIP" install --user "$CLI_DIR"; then
     log "installed Python-only fno via pip --user. Run 'fno update --rust' for the Rust binaries."
     log "ensure ~/.local/bin (or your user site-scripts dir) is on PATH."
+    next_steps
     exit 0
   else
     err "pip install --user failed."

@@ -39,6 +39,16 @@ codex plugin marketplace add bllshttng/footnote                   # Codex CLI (t
 
 Local-clone install and path configuration: [docs/getting-started.md](docs/getting-started.md).
 
+## Set it up
+
+Configure a project from a Claude Code session with `/fno:setup`, or from the terminal with no agent:
+
+```
+fno setup wizard              # asks the few real per-project decisions, writes them validated
+```
+
+Read or edit any setting directly: `fno config get|set|unset <key>` (atomic and schema-checked). Defaults are sensible; you can skip straight to running.
+
 ## Run it
 
 Two ways to ship a feature; both end in a merged PR. Then scale up.
@@ -67,7 +77,7 @@ It runs the whole loop with or without you watching, and prints the PR URL when 
 
 ```
 fno agents spawn reviewer "review the diff" -p codex   # a Codex agent on this repo
-fno agents send reviewer "what did you find?"           # message it; it works on its own
+fno agents ask reviewer "what did you find?"            # message it; it works on its own
 ```
 
 Each agent runs its own loop and they coordinate over a message bus. Claude, Codex, and Gemini, one project.
@@ -82,9 +92,11 @@ Not a sandbox. Not a babysitter. Not a hero-video launch. It runs your plans wit
 
 ## Docs
 
-- [Getting started](docs/getting-started.md): install to first PR
+- [Getting started](docs/getting-started.md): install, setup, and the commands you'll actually run
 - [Target pipeline](docs/guides/target.md): the loop: flags, gates, cross-project, resume
 - [Think and plan](docs/guides/think-and-plan.md): design exploration and planning
+- [PR lifecycle](docs/guides/pr-lifecycle.md): review, create, check, merged
+- [Agents quickstart](docs/guides/agents-quickstart.md): spawn and message peer agents
 - [Best practices](docs/best-practices.md): reliable, cost-bounded runs
 - [Troubleshooting](docs/troubleshooting.md): when it breaks
 - [Security posture](docs/security-posture.md): what it will and won't do
