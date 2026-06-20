@@ -45,6 +45,16 @@ class SetResult:
     scope: str  # "global" | "project"
 
 
+@dataclass
+class UnsetResult:
+    key: str
+    was: Any  # the previous value (None if the key was absent)
+    present: bool  # whether the key was present before the unset
+    default: Any  # the model default the key reverts to once removed
+    path: Path
+    scope: str  # "global" | "project"
+
+
 def _unwrap_optional(ann: Any) -> Any:
     """``Optional[X]`` / ``Union[X, None]`` / ``X | None`` -> ``X`` (best-effort).
 
@@ -290,3 +300,106 @@ def set_config_value(
             f"failed to write {target}: {exc} (settings left unchanged)", 1
         ) from exc
     return SetResult(key=key, value=coerced, path=written, scope=scope)
+
+
+# ---------------------------------------------------------------------------
+# unset (x-50f9, US1)
+# ---------------------------------------------------------------------------
+
+
+def _deep_unset(
+    d: dict[str, Any], parts: list[str]
+) -> tuple[dict[str, Any], Any, bool]:
+    """Return ``(new_dict, was_value, present)`` removing ``parts`` from a copy.
+
+    Prunes any parent block left empty by the removal so the file never
+    accumulates dangling ``{}`` stanzas (AC1-EDGE). If the key (or any parent
+    segment) is absent, returns the unchanged copy with ``present=False``.
+    """
+    out = copy.deepcopy(d)
+    chain: list[tuple[dict[str, Any], str]] = []
+    node: Any = out
+    for part in parts[:-1]:
+        if not isinstance(node, dict) or not isinstance(node.get(part), dict):
+            return out, None, False
+        chain.append((node, part))
+        node = node[part]
+    leaf = parts[-1]
+    if not isinstance(node, dict) or leaf not in node:
+        return out, None, False
+    was = node.pop(leaf)
+    # Walk back up, pruning each parent that the removal left empty.
+    for parent, key in reversed(chain):
+        if isinstance(parent.get(key), dict) and not parent[key]:
+            del parent[key]
+        else:
+            break
+    return out, was, True
+
+
+def _model_default(parts: list[str]) -> Any:
+    """The value ``parts`` reverts to once unset: read off a default-constructed
+    ``SettingsModel`` by walking the dotted path. Returns None if not resolvable.
+    """
+    node: Any = SettingsModel()
+    for part in parts:
+        if isinstance(node, BaseModel) and part in type(node).model_fields:
+            node = getattr(node, part)
+        elif isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node
+
+
+def unset_config_value(
+    key: str,
+    *,
+    scope: str = "global",
+    repo_root: Optional[Path] = None,
+) -> UnsetResult:
+    """Remove a dotted config key, reverting it to the model default.
+
+    Non-destructive (the value falls back to its schema default), so no
+    confirmation. An unknown key exits 1 (same as ``set``); an absent key is a
+    clean no-op (``present=False``, nothing written). Atomic + lock-serialized
+    via the shared ``_locked_update``; a write failure leaves the file intact.
+    """
+    parts = key.split(".")
+    if _resolve_parent_block(parts) is None:
+        raise ConfigSetError(f"unknown config key {key!r}", 1)
+
+    default = _model_default(parts)
+    target = _target_path(scope, repo_root)
+    real_target = Path(os.path.realpath(target)) if target.is_symlink() else target
+
+    # No file -> nothing to remove; do not create an empty settings file.
+    if not real_target.exists():
+        return UnsetResult(
+            key=key, was=None, present=False, default=default,
+            path=real_target, scope=scope,
+        )
+
+    captured: dict[str, Any] = {"was": None, "present": False}
+
+    def _mutate(existing: dict[str, Any]) -> dict[str, Any]:
+        new, was, present = _deep_unset(existing, parts)
+        captured["was"] = was
+        captured["present"] = present
+        return new
+
+    try:
+        written = _locked_update(target, _mutate)
+    except OSError as exc:
+        raise ConfigSetError(
+            f"failed to write {target}: {exc} (settings left unchanged)", 1
+        ) from exc
+
+    return UnsetResult(
+        key=key,
+        was=captured["was"],
+        present=captured["present"],
+        default=default,
+        path=written,
+        scope=scope,
+    )

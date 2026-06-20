@@ -397,6 +397,52 @@ def set_cmd(
     typer.echo(f"set {result.key} = {result.value} ({result.scope}: {result.path})")
 
 
+@app.command("unset")
+def unset_cmd(
+    key: str = typer.Argument(
+        ..., help="Dotted config key to remove, e.g. config.auto_merge.enabled"
+    ),
+    local: bool = typer.Option(
+        False,
+        "--local/--global",
+        "-l/-g",
+        help="Remove from the project-local .fno/settings.yaml instead of the "
+        "per-user global ~/.fno/settings.yaml (default global).",
+    ),
+) -> None:
+    """Remove a config key, reverting it to the model default (x-50f9, US1).
+
+    The undo of ``set``: deletes the dotted key (and prunes any block the
+    removal leaves empty), so the value falls back to its schema default. Since
+    the revert is non-destructive there is no confirmation. An unknown key exits
+    1 and changes nothing; an absent key is a clean no-op (``not set: <key>``).
+    Aliased as ``fno config rm``.
+    """
+    import sys
+
+    from fno.config.writer import ConfigSetError, unset_config_value
+
+    scope = "project" if local else "global"
+    try:
+        result = unset_config_value(key, scope=scope)
+    except ConfigSetError as exc:
+        typer.echo(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=exc.exit_code) from exc
+
+    if not result.present:
+        typer.echo(f"not set: {key}")
+        raise typer.Exit(0)
+
+    typer.echo(
+        f"unset {result.key} (was {result.was}); now defaults to "
+        f"{result.default} ({result.scope}: {result.path})"
+    )
+
+
+# `fno config rm` is an alias for `unset` (Claude's Discretion #3).
+app.command("rm")(unset_cmd)
+
+
 @app.command("schema")
 def schema(
     json_schema: bool = typer.Option(
