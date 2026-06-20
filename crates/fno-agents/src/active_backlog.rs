@@ -587,12 +587,15 @@ pub async fn run_supervisor(
         }
         live.store(true, Ordering::SeqCst);
 
-        let mut min_interval = Duration::from_secs(300);
+        // Poll at the smallest configured interval among the enabled targets, so
+        // a single 10m project is polled every 10m (not capped at some default).
+        let mut min_interval: Option<Duration> = None;
         for target in &targets {
             if shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            min_interval = min_interval.min(Duration::from_secs(target.interval_seconds.max(1)));
+            let this = Duration::from_secs(target.interval_seconds.max(1));
+            min_interval = Some(min_interval.map_or(this, |m| m.min(this)));
 
             let Some(cfg) = drain_config_for(target, &abi_bin) else {
                 continue;
@@ -634,8 +637,10 @@ pub async fn run_supervisor(
 
         // Wait the poll floor between passes, waking early on an event nudge
         // (Wave 4): a backlog mutation / advance touches the sentinel so a fresh
-        // ready node drains sooner than the floor.
-        wait_for_wake(min_interval, &shutdown, &mut last_nudge).await;
+        // ready node drains sooner than the floor. `min_interval` is always Some
+        // here (the empty-targets branch above `continue`d), but default safely.
+        let floor = min_interval.unwrap_or(Duration::from_secs(300));
+        wait_for_wake(floor, &shutdown, &mut last_nudge).await;
     }
     live.store(false, Ordering::SeqCst);
 }
