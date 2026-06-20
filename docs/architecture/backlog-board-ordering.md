@@ -59,17 +59,19 @@ epics-first  ->  priority (pN)  ->  created_at
 
 `rank` does not appear in that key. Consequences today:
 
-- **`rank` does not change what runs next.** `fno backlog rank --top` floats a
-  card to the top of its swimlane on the board, but selection ignores `rank`, so
+- **`rank` does not change what runs next.** `fno backlog rank <id> --top` floats
+  a card to the top of its swimlane on the board, but selection ignores `rank`, so
   the walker / daemon will not pick it first because of that.
 - **Priority is the selection lever.** To make a node run next, raise its
   priority: `fno backlog reprioritize <id> p0` (p0 = "drop everything"). Epic
   *children* always outrank loose nodes (Locked Decision 7), so a loose p0 still
   yields to an in-progress epic's children.
 - **Swimlanes are per-project.** A node's swimlane is its `project`; move it with
-  `fno backlog update <id> --project <P> --cwd <path>`. Rank is scoped per
-  `(column, project)` lane, so re-projecting drops it into the new lane's
-  unranked flow (re-`rank --top` to pin it there visually).
+  `fno backlog update <id> --project <P> --cwd <path>`. Note that `update` does
+  NOT clear `rank`, so a previously-ranked node keeps its `rank` value and lands
+  in the *ranked* band of the new `(column, project)` lane (not the unranked
+  flow). Run `fno backlog rank <id> --clear` (or re-`rank`) afterward if you want
+  to reposition it in the new lane.
 
 This divergence is a known gap. With the active-backlog daemon draining the
 board autonomously, "top of the board" should mean "worked next"; unifying the
