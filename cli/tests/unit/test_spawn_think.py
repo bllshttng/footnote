@@ -1,0 +1,453 @@
+"""BDD decision-matrix tests for born-with-why /think spawn (x-6a10).
+
+Covers every user story's acceptance criteria for
+:func:`fno.provenance.spawn_think.maybe_spawn_think` plus the load-bearing
+invariants:
+
+- US1: a node born with its resolved why (transcript pointer, not paraphrase).
+- US2: an attended operator gets a one-line handoff, not an autonomous spawn.
+- US3: an away operator gets a fire-and-forget bg /think + a forward stamp.
+- US4: opt-in, bounded, non-fatal.
+
+Claim isolation: every spawn test routes claims under a tmp FNO_CLAIMS_ROOT +
+FNO_REPO_ROOT so the dispatch dedup token never touches the real .fno/claims.
+The ``fno agents spawn`` subprocess is always patched at the
+``_spawn_think_worker`` seam - no test shells out.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from fno.provenance import spawn_think as st
+from fno.provenance.resolver import ResolvedTranscript
+
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolate claims + arm the gate + pin presence; return the events path."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("FNO_THINK_SPAWN", "1")  # armed by default for tests
+    return tmp_path / ".fno" / "events.jsonl"
+
+
+def _events(events_path: Path) -> list[dict]:
+    if not events_path.exists():
+        return []
+    return [json.loads(ln) for ln in events_path.read_text().splitlines() if ln.strip()]
+
+
+def _node(**over) -> dict:
+    """A generated organic node WITH an origin (eligible by default)."""
+    base = {
+        "id": "x-2222aaaa",
+        "slug": "born-with-why",
+        "title": "Idea nodes born with their why",
+        "details": "the why lives in the transcript",
+        "cwd": "/tmp/proj",
+        "source_harness": "claude",
+        "source_session_id": "abc12345",
+        "source_cwd": "/tmp/sess",
+        "source_node_id": "x-0000aaaa",
+        "roadmap_id": None,
+        "vision_path": None,
+    }
+    base.update(over)
+    return base
+
+
+@pytest.fixture
+def patch_spawn(monkeypatch: pytest.MonkeyPatch):
+    """Patch the spawn seam + forward stamp; return (spawn_calls, stamp_calls)."""
+    spawn_calls: list[tuple] = []
+    stamp_calls: list[tuple] = []
+
+    def fake_spawn(node_id, prompt, node_cwd, node_slug):
+        spawn_calls.append((node_id, prompt, node_cwd, node_slug))
+        return "deadbeef"
+
+    monkeypatch.setattr(st, "_spawn_think_worker", fake_spawn)
+    monkeypatch.setattr(
+        st, "_stamp_forward",
+        lambda nid, sess, root: stamp_calls.append((nid, sess, root)),
+    )
+    return spawn_calls, stamp_calls
+
+
+def _resolved(monkeypatch, *, ok: bool, path: str = "/x/t.jsonl", reason="not-found"):
+    """Pin assemble_seed's transcript resolution result."""
+    def fake(harness, sid, cwd, **kw):
+        if ok:
+            return ResolvedTranscript(harness, sid, cwd, True, transcript_path=path)
+        return ResolvedTranscript(harness, sid, cwd, False, reason=reason)
+    monkeypatch.setattr(st, "resolve_transcript", fake)
+
+
+# ---------------------------------------------------------------------------
+# US4 - opt-in & bounded
+# ---------------------------------------------------------------------------
+
+
+def test_gate_off_is_complete_noop(iso, monkeypatch, patch_spawn):
+    """AC4-HP: gate off -> no event, no spawn, decision=noop."""
+    monkeypatch.setenv("FNO_THINK_SPAWN", "0")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "noop" and res.event is None
+    assert spawn_calls == []
+    assert _events(iso) == []
+
+
+def test_malformed_config_fails_safe_disabled(monkeypatch, tmp_path):
+    """AC4-ERR: a settings read that raises degrades to disabled, never raises."""
+    monkeypatch.delenv("FNO_THINK_SPAWN", raising=False)
+
+    def boom():
+        raise RuntimeError("settings exploded")
+
+    monkeypatch.setattr("fno.config.load_settings", boom)
+    assert st.think_spawn_enabled(project_root=tmp_path, env={}) is False
+
+
+def test_bulk_intake_skipped(iso, monkeypatch, patch_spawn):
+    """AC4-UI: a roadmap/vision intake node is ineligible -> skip{bulk-intake}."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(roadmap_id="rm-1"),
+                               env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "skipped" and res.reason == "bulk-intake"
+    assert spawn_calls == []
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["data"]["reason"] == "bulk-intake"
+
+
+def test_blast_radius_cap(iso, monkeypatch, patch_spawn, capsys):
+    """AC4-EDGE: a run over max_per_run skips the rest and logs the truncation."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    monkeypatch.setattr(st, "_max_per_run", lambda root: 1)
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, _ = patch_spawn
+    rs = st.RunState()
+    env = dict(__import__("os").environ)
+
+    r1 = st.maybe_spawn_think(_node(id="x-a"), env=env, events_path=iso,
+                              project_root=iso.parent.parent, run_state=rs)
+    r2 = st.maybe_spawn_think(_node(id="x-b"), env=env, events_path=iso,
+                              project_root=iso.parent.parent, run_state=rs)
+
+    assert r1.decision == "spawned"
+    assert r2.decision == "skipped" and r2.reason == "cap-exceeded"
+    assert len(spawn_calls) == 1
+    assert "blast-radius cap" in capsys.readouterr().err
+
+
+def test_dedup_at_most_one_spawn(iso, monkeypatch, patch_spawn):
+    """AC4-FR: two evaluations of the same node birth spawn at most once."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, _ = patch_spawn
+    env = dict(__import__("os").environ)
+    node = _node()
+
+    r1 = st.maybe_spawn_think(node, env=env, events_path=iso,
+                              project_root=iso.parent.parent)
+    # second observation: the dispatch:think:<id> TTL token is still live.
+    r2 = st.maybe_spawn_think(node, env=env, events_path=iso,
+                              project_root=iso.parent.parent)
+
+    assert r1.decision == "spawned"
+    assert r2.decision == "skipped" and r2.reason == "already-claimed"
+    assert len(spawn_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# US1 - node born with resolved why
+# ---------------------------------------------------------------------------
+
+
+def test_resolved_seed_carries_transcript_pointer(iso, monkeypatch, patch_spawn):
+    """AC1-HP: resolved claude origin -> seed has the transcript path + node id."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=True, path="/real/transcript.jsonl")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "spawned" and res.resolved is True
+    (_, prompt, _, _) = spawn_calls[0]
+    assert "/real/transcript.jsonl" in prompt  # the POINTER, not a paraphrase
+    assert "x-2222aaaa" in prompt
+    assert "origin node chain: x-0000aaaa" in prompt
+
+
+def test_no_origin_skipped(iso, monkeypatch, patch_spawn):
+    """AC1-ERR: all provenance pointers null -> skip{no-origin}, no spawn."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    spawn_calls, _ = patch_spawn
+    node = _node(source_session_id=None, source_harness=None, source_cwd=None,
+                 source_node_id=None)
+    res = st.maybe_spawn_think(node, env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "skipped" and res.reason == "no-origin"
+    assert spawn_calls == []
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["data"]["reason"] == "no-origin"
+
+
+def test_exactly_one_event_per_evaluation(iso, monkeypatch, patch_spawn):
+    """AC1-UI: a gate-on evaluation emits exactly one decision event."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=True)
+    st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                         events_path=iso, project_root=iso.parent.parent)
+    assert len(_events(iso)) == 1
+
+
+def test_foreign_harness_still_spawns_unresolved(iso, monkeypatch, patch_spawn):
+    """AC1-EDGE: unresolvable harness -> resolved=False, away spawn still proceeds."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=False, reason="harness-not-supported")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(source_harness="codex"),
+                               env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "spawned" and res.resolved is False
+    (_, prompt, _, _) = spawn_calls[0]
+    assert "UNRESOLVED" in prompt
+    evs = _events(iso)
+    assert evs[0]["data"]["resolved"] is False
+
+
+# ---------------------------------------------------------------------------
+# US2 - operator present
+# ---------------------------------------------------------------------------
+
+
+def test_attended_offers_line_not_spawn(iso, monkeypatch, patch_spawn, capsys):
+    """AC2-HP/UI: attended -> single-line /think offer, no autonomous spawn."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
+    _resolved(monkeypatch, ok=True, path="/t.jsonl")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "offered" and spawn_calls == []
+    assert res.offer_line.startswith("/think x-2222aaaa")
+    assert "\n" not in res.offer_line  # single copy-pasteable line (AC2-UI)
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "think_offered"
+
+
+def test_attended_unresolved_degrades_to_bare_line(iso, monkeypatch, patch_spawn):
+    """AC2-ERR: attended + unresolved -> bare /think line, resolved=False."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
+    _resolved(monkeypatch, ok=False)
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "offered" and res.resolved is False
+    assert res.offer_line == "/think x-2222aaaa"
+
+
+# ---------------------------------------------------------------------------
+# US3 - operator away
+# ---------------------------------------------------------------------------
+
+
+def test_away_spawns_and_stamps_node(iso, monkeypatch, patch_spawn):
+    """AC3-HP/UI: headless -> bg /think spawn + node stamped + single think_spawned."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, stamp_calls = patch_spawn
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "spawned" and res.think_session == "deadbeef"
+    assert len(spawn_calls) == 1
+    assert stamp_calls == [("x-2222aaaa", "deadbeef", iso.parent.parent)]
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "think_spawned"
+    assert evs[0]["data"]["think_session"] == "deadbeef"
+
+
+def test_away_spawn_failure_skips_no_stamp(iso, monkeypatch, patch_spawn):
+    """AC3-ERR: a non-zero spawn -> skip{spawn-failed}, no stamp, never raises."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=True)
+    _, stamp_calls = patch_spawn
+
+    def boom(*a, **k):
+        raise st.SpawnError("mesh down")
+
+    monkeypatch.setattr(st, "_spawn_think_worker", boom)
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "skipped" and res.reason == "spawn-failed"
+    assert stamp_calls == []
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["data"]["reason"] == "spawn-failed"
+
+
+def test_away_claim_error_skips(iso, monkeypatch, patch_spawn):
+    """A raising acquire_claim resolves to skip{claim-error}, never raises."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, _ = patch_spawn
+    monkeypatch.setattr(st, "_claim_is_live", lambda key: False)
+    monkeypatch.setattr(
+        "fno.claims.core.acquire_claim",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("lock dir gone")),
+    )
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "skipped" and res.reason == "claim-error"
+    assert spawn_calls == []
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["data"]["reason"] == "claim-error"
+
+
+def test_away_spawn_failure_releases_reservation(iso, monkeypatch, patch_spawn):
+    """AC2-FR analogue: a failed spawn frees dispatch:think:<id> for a retry."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=True)
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise st.SpawnError("transient")
+        return "second-try"
+
+    monkeypatch.setattr(st, "_spawn_think_worker", flaky)
+    monkeypatch.setattr(st, "_stamp_forward", lambda *a, **k: None)
+    env = dict(__import__("os").environ)
+    node = _node()
+
+    r1 = st.maybe_spawn_think(node, env=env, events_path=iso,
+                              project_root=iso.parent.parent)
+    r2 = st.maybe_spawn_think(node, env=env, events_path=iso,
+                              project_root=iso.parent.parent)
+    assert r1.reason == "spawn-failed"
+    assert r2.decision == "spawned"  # reservation was released, retry succeeds
+
+
+# ---------------------------------------------------------------------------
+# Presence classifier (Locked Decision 3)
+# ---------------------------------------------------------------------------
+
+
+def test_presence_bg_env_is_away():
+    assert st.classify_presence(env={"FNO_BG": "1"}) == "away"
+
+
+def test_presence_interactive_session_is_attended(tmp_path):
+    assert st.classify_presence(
+        env={"CLAUDE_CODE_SESSION_ID": "sid"}, project_root=tmp_path
+    ) == "attended"
+
+
+def test_presence_no_signal_defaults_away(tmp_path):
+    assert st.classify_presence(env={}, project_root=tmp_path) == "away"
+
+
+def test_presence_spawned_worker_is_away(tmp_path):
+    """codex PR #9: a spawned bg worker exposes CLAUDE_CODE_SESSION_ID + the
+    FNO_AGENT_SELF marker but NOT FNO_BG and may have no manifest yet; it must
+    classify away (else US3's autonomous /think never fires)."""
+    assert st.classify_presence(
+        env={"CLAUDE_CODE_SESSION_ID": "sid", "FNO_AGENT_SELF": "think-x-1-foo"},
+        project_root=tmp_path,
+    ) == "away"
+
+
+def test_presence_owned_autonomous_manifest_is_away(tmp_path):
+    """An owned target-state with attended:false classifies away (autonomous)."""
+    fno = tmp_path / ".fno"
+    fno.mkdir()
+    (fno / "target-state.md").write_text(
+        "claude_transcript_id: sid-123\nattended: false\n", encoding="utf-8"
+    )
+    assert st.classify_presence(
+        env={"CLAUDE_CODE_SESSION_ID": "sid-123"}, project_root=tmp_path
+    ) == "away"
+
+
+def test_presence_foreign_manifest_ignored(tmp_path):
+    """A manifest whose transcript-id != this session is not trusted."""
+    fno = tmp_path / ".fno"
+    fno.mkdir()
+    (fno / "target-state.md").write_text(
+        "claude_transcript_id: OTHER\nattended: false\n", encoding="utf-8"
+    )
+    # Falls through to the interactive-session signal -> attended.
+    assert st.classify_presence(
+        env={"CLAUDE_CODE_SESSION_ID": "sid-123"}, project_root=tmp_path
+    ) == "attended"
+
+
+# ---------------------------------------------------------------------------
+# Result invariant
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_decision_event_combo_raises():
+    """A mismatched (decision, event) is a loud construction failure."""
+    with pytest.raises(ValueError):
+        st.ThinkSpawnResult("spawned", st.EVENT_SKIPPED)
+
+
+# ---------------------------------------------------------------------------
+# Robust short_id parsing (gemini PR #9)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_short_id_compact():
+    out = '{"name":"think-x-1","short_id":"abc123","provider":"claude"}\n'
+    assert st._parse_short_id(out) == "abc123"
+
+
+def test_parse_short_id_pretty_printed():
+    """A pretty-printed receipt (short_id on its own line) must still parse."""
+    out = '{\n  "name": "think-x-1",\n  "short_id": "abc123"\n}\n'
+    assert st._parse_short_id(out) == "abc123"
+
+
+def test_parse_short_id_among_noise():
+    """A receipt line among banner/log noise is found; noise is ignored."""
+    out = 'INFO booting agent\nWARN short_id not ready\n{"short_id":"def456"}\n'
+    assert st._parse_short_id(out) == "def456"
+
+
+def test_parse_short_id_absent():
+    assert st._parse_short_id("no json here at all") == ""
+
+
+# ---------------------------------------------------------------------------
+# project_root-aware settings load (gemini PR #9)
+# ---------------------------------------------------------------------------
+
+
+def test_enabled_honors_project_root(monkeypatch, tmp_path):
+    """think_spawn_enabled reads the NODE's repo settings when project_root given."""
+    monkeypatch.delenv("FNO_THINK_SPAWN", raising=False)
+    seen = []
+
+    class _S:
+        class config:
+            class think_spawn:
+                enabled = True
+                max_per_run = 7
+
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda root: seen.append(root) or _S,
+    )
+    assert st.think_spawn_enabled(project_root=tmp_path, env={}) is True
+    assert st._max_per_run(tmp_path) == 7
+    assert seen == [tmp_path, tmp_path]  # repo-specific loader used both times

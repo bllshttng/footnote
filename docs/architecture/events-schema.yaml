@@ -1751,6 +1751,76 @@ event_types:
           description: "The just-merged node whose close triggered this advance."
     consumers: [operator]
 
+  - name: think_spawned
+    description: "Emitted by the node-birth path (x-6a10 born-with-why) when an away/headless session spawns a fire-and-forget context-carrying /think bg worker for a freshly-filed generated organic node. The node is then stamped with the spawned think's session pointer."
+    sources: [backlog]
+    data:
+      required: [node_id, think_session]
+      properties:
+        node_id:
+          type: string
+          description: "The freshly-filed node a /think was spawned for."
+        think_session:
+          type: string
+          description: "Short id of the spawned claude /think bg worker (from the spawn receipt)."
+        presence:
+          type: string
+          enum: [away]
+          description: "Presence classification that routed to an autonomous spawn (always 'away')."
+        resolved:
+          type: boolean
+          description: "Whether the origin transcript pointer resolved to a real .jsonl (false => seeded from the stored triple)."
+        agent_name:
+          type: string
+          description: "Spawned agent name (think-<node-id>-<slug>)."
+    consumers: [operator]
+
+  - name: think_offered
+    description: "Emitted by the node-birth path (x-6a10) when an attended operator is present: a single copy-pasteable /think <node-id> handoff line is surfaced rather than an autonomous spawn."
+    sources: [backlog]
+    data:
+      required: [node_id]
+      properties:
+        node_id:
+          type: string
+          description: "The freshly-filed node a /think handoff was offered for."
+        presence:
+          type: string
+          enum: [attended]
+          description: "Presence classification (always 'attended' for an offer)."
+        resolved:
+          type: boolean
+          description: "Whether the origin transcript pointer resolved (false => bare /think line, AC2-ERR)."
+        offer_line:
+          type: string
+          description: "The single copy-pasteable handoff line surfaced to the operator."
+    consumers: [operator]
+
+  - name: think_skipped
+    description: "Emitted by the node-birth path (x-6a10) when it deliberately spawns/offers nothing. The reason discriminates no-origin / bulk-intake / cap-exceeded / already-claimed / claim-error / spawn-failed / no-node-id. A gate-off evaluation emits NOTHING (no-op); this fires only when the gate is on."
+    sources: [backlog]
+    data:
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [no-origin, bulk-intake, cap-exceeded, already-claimed, claim-error, spawn-failed, no-node-id]
+          description: "Why the birth hook spawned/offered nothing this evaluation."
+        node_id:
+          type: string
+          description: "The candidate node, when the reason references one."
+        presence:
+          type: string
+          enum: [attended, away]
+          description: "Presence classification, when one was reached before the skip."
+        resolved:
+          type: boolean
+          description: "Origin-resolution flag, when the seed was assembled before the skip."
+        detail:
+          type: string
+          description: "Optional human-readable detail (e.g. the spawn error), truncated."
+    consumers: [operator]
+
   - name: pr_watch_dispatched
     description: "PR-state watcher successfully fired a headless claude skill for one PR (either /fno:pr merged or /fno:pr check)."
     sources: [daemon]

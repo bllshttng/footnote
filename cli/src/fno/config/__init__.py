@@ -856,6 +856,81 @@ class AutoContinueBlock(BaseModel):
         return False
 
 
+class ThinkSpawnBlock(BaseModel):
+    """Context-carrying /think spawn settings (nested under 'config.think_spawn').
+
+    The opt-in for node x-6a10: when enabled, the node-birth path (``fno backlog
+    idea``) spawns/offers a context-carrying ``/think`` thread for a generated
+    organic node, handing it the *resolved* origin transcript pointer (not a
+    paraphrase) so a later pickup starts from ground truth.
+
+    Default ``False`` (Locked Decision 2): shipping this changes nothing until
+    the operator arms it; an absent key reads as off. The fail-safe posture
+    mirrors ``config.auto_continue``: a malformed block degrades to disabled
+    rather than failing the whole settings load - false-enabled (a background
+    ``/think`` dispatched against the operator's intent) is the dangerous
+    direction. The enable + presence + spawn logic lives in
+    :mod:`fno.provenance.spawn_think`.
+
+    ``max_per_run`` is the per-node-generation-run blast-radius cap (AC4-EDGE):
+    a bulk run exceeding it skips the remainder and logs the truncation.
+    ``idle_threshold_s`` is the discretionary activity-recency refinement
+    (Claude's Discretion 1); ``0`` (default) disables it so the primary
+    attended-vs-headless signal stands alone.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    max_per_run: int = 5
+    idle_threshold_s: int = 0
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        """Fail-safe to disabled on any non-boolean value (AC4-ERR).
+
+        Deliberately STRICT for a safety opt-in: only a clear affirmative
+        (``true``/``yes``/``on``/``1``) enables; an ambiguous value fails safe
+        to disabled, mirroring ``AutoContinueBlock._coerce_enabled``.
+        """
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):  # bool already handled above
+            return v == 1
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    @staticmethod
+    def _nonneg_int_or(v: object, fallback: int) -> int:
+        """Coerce ``v`` to a non-negative int, else ``fallback``. Never raises."""
+        if isinstance(v, bool):
+            return fallback  # a bool is not a meaningful bound
+        if isinstance(v, int) and v >= 0:
+            return v
+        if isinstance(v, str) and v.strip().isdigit():
+            return int(v.strip())
+        return fallback
+
+    @field_validator("max_per_run", mode="before")
+    @classmethod
+    def _coerce_max_per_run(cls, v: object) -> int:
+        """Fail-safe: a garbage cap degrades to the default 5, never 0.
+
+        Coercing garbage to 0 would silently disable every spawn; coercing to a
+        small positive cap keeps the blast-radius guard meaningful while still
+        bounding a spawn-storm (AC4-EDGE).
+        """
+        return cls._nonneg_int_or(v, 5)
+
+    @field_validator("idle_threshold_s", mode="before")
+    @classmethod
+    def _coerce_idle_threshold(cls, v: object) -> int:
+        """Fail-safe: a garbage threshold degrades to 0 (refinement off)."""
+        return cls._nonneg_int_or(v, 0)
+
+
 def _coerce_affirmative(v: object, default: bool) -> bool:
     """Map a settings value to a bool with the bash get_config truth table.
 
@@ -1496,6 +1571,7 @@ class ConfigBlock(BaseModel):
     evals: EvalsBlock = Field(default_factory=EvalsBlock)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
+    think_spawn: ThinkSpawnBlock = Field(default_factory=ThinkSpawnBlock)
     active_backlog: ActiveBacklogConfig = Field(default_factory=ActiveBacklogConfig)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
     logs: LogsBlock = Field(default_factory=LogsBlock)
@@ -1595,6 +1671,20 @@ class ConfigBlock(BaseModel):
         ``enabled`` coercer still runs.
         """
         if isinstance(v, (dict, AutoContinueBlock)):
+            return v
+        return {}
+
+    @field_validator("think_spawn", mode="before")
+    @classmethod
+    def _coerce_think_spawn(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``think_spawn:`` degrades to defaults (OFF).
+
+        Mirrors ``_coerce_auto_continue``: ``think_spawn: 42`` (or a list, or
+        null) cannot build the block; fall back to the default disabled block
+        (AC4-ERR) rather than raising out of the whole settings load. A dict
+        passes through so the inner coercers still run.
+        """
+        if isinstance(v, (dict, ThinkSpawnBlock)):
             return v
         return {}
 

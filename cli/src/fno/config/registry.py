@@ -125,6 +125,16 @@ FIELD_META: dict[str, Meta] = {
     "config.agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
     # --- config.auto_continue.* ---
     "config.auto_continue.enabled": Meta("advanced", "Auto-dispatch the next ready node after a PR merges."),
+    # --- config.think_spawn.* ---
+    "config.think_spawn.enabled": Meta(
+        "advanced", "Born-with-why: spawn/offer a context-carrying /think for a generated idea node."
+    ),
+    "config.think_spawn.max_per_run": Meta(
+        "advanced", "Blast-radius cap on /think spawns per node-generation run."
+    ),
+    "config.think_spawn.idle_threshold_s": Meta(
+        "advanced", "Idle seconds before an attended operator downgrades to away (0 = off)."
+    ),
     # --- config.active_backlog.* ---
     "config.active_backlog.enabled": Meta(
         "advanced",
