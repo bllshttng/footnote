@@ -60,6 +60,9 @@ def plan_cmd(
 PROJECT_SCOPED_KEYS = (
     "config.post_merge.parking_lot_path",
     "config.project.id",
+    # vision describes THIS codebase; writing it global bleeds one repo's vision
+    # into every other repo's resolved config (PR #8 review).
+    "config.project.vision",
 )
 
 
@@ -105,32 +108,37 @@ def run_wizard(
     ``scope_fn(key) -> "global" | "project"`` (asked only for project keys);
     returns ``{"written": [keys], "cancelled": bool}``.
     """
-    from collections import Counter
-
     from fno.config.writer import ConfigSetError, set_config_value
 
     def _block_of(dotted: str) -> str:
         return ".".join(dotted.split(".")[:-1])
 
-    # A field can be rejected (exit 2) for two different reasons: a bad VALUE
-    # (re-prompt, e.g. a reserved id_prefix) or a cross-field block invariant
-    # whose sibling is written LATER (e.g. obsidian.enabled requires
-    # obsidian.vault, but the schema lists enabled first). To tell them apart we
-    # count fields per parent block: if the block has another field still to
-    # come, a rejection is likely the dependency, so defer and retry at the end
-    # rather than trapping the user in a re-prompt loop.
-    block_counts = Counter(_block_of(f["path"]) for f in fields)
+    def _scope_for(key: str) -> tuple[str, Optional[Path]]:
+        scope = scope_fn(key) if key in PROJECT_SCOPED_KEYS else "global"
+        return scope, (repo_root if scope == "project" else None)
 
     written: list[str] = []
-    deferred: list[tuple[str, str, str, Optional[Path]]] = []
+    # (key, value, scope, repo, field) for fields whose write was rejected while
+    # a later sibling in the same block was still unwritten (a likely cross-field
+    # dependency). Retried after the rest of the block lands.
+    deferred: list[tuple[str, str, str, Optional[Path], dict]] = []
 
-    for field in fields:
+    for i, field in enumerate(fields):
         key = field["path"]
         default = field.get("default")
         question = field.get("question") or key
         default_str = _wizard_default_str(default)
-        scope = scope_fn(key) if key in PROJECT_SCOPED_KEYS else "global"
-        repo = repo_root if scope == "project" else None
+        scope, repo = _scope_for(key)
+
+        # A rejection (exit 2) is a bad VALUE (re-prompt, e.g. a reserved
+        # id_prefix) unless a sibling in the same block is still AHEAD in the
+        # plan - then it is likely a cross-field dependency (e.g. obsidian.enabled
+        # before .vault), so defer and retry once the block lands. Computed
+        # positionally so a genuine error on a block's LAST field re-prompts
+        # rather than being deferred-then-skipped (PR #8 review).
+        has_later_sibling = any(
+            _block_of(f["path"]) == _block_of(key) for f in fields[i + 1:]
+        )
 
         while True:
             value = prompt_fn(question, default_str)
@@ -145,11 +153,8 @@ def run_wizard(
                 res = set_config_value(key, value, scope=scope, repo_root=repo)
             except ConfigSetError as exc:
                 if exc.exit_code == 2:
-                    if block_counts[_block_of(key)] > 1:
-                        # Sibling in the same block not yet written -> likely a
-                        # cross-field dependency; defer and retry once the rest
-                        # of the block lands.
-                        deferred.append((key, value, scope, repo))
+                    if has_later_sibling:
+                        deferred.append((key, value, scope, repo, field))
                         echo_fn(f"  deferring {key} (may depend on a later field)")
                         break
                     echo_fn(f"  rejected: {exc}")
@@ -161,16 +166,30 @@ def run_wizard(
             break
 
     # Retry deferred fields now that their siblings are persisted. A field that
-    # still fails is a genuine invalid combination (e.g. enabled with no vault);
-    # surface it and move on rather than looping.
-    for key, value, scope, repo in deferred:
-        try:
-            res = set_config_value(key, value, scope=scope, repo_root=repo)
-        except ConfigSetError as exc:
-            echo_fn(f"  skipped {key}: {exc}")
-            continue
-        echo_fn(f"  set {key} = {res.value} ({res.scope}: {res.path})")
-        written.append(key)
+    # STILL fails was a genuine bad value, not a dependency, so re-prompt it
+    # (never silently skip - PR #8 review).
+    for key, value, scope, repo, field in deferred:
+        default = field.get("default")
+        question = field.get("question") or key
+        while True:
+            try:
+                res = set_config_value(key, value, scope=scope, repo_root=repo)
+            except ConfigSetError as exc:
+                if exc.exit_code == 2:
+                    echo_fn(f"  rejected: {exc}")
+                    value = prompt_fn(question, _wizard_default_str(default))
+                    if value is None:
+                        echo_fn("wizard cancelled; keys written so far are saved.")
+                        return {"written": written, "cancelled": True}
+                    value = value.strip()
+                    if value == "" and default is None:
+                        break  # left blank -> skip the optional field
+                    continue
+                echo_fn(f"  cannot write {key}: {exc}")
+                break
+            echo_fn(f"  set {key} = {res.value} ({res.scope}: {res.path})")
+            written.append(key)
+            break
 
     return {"written": written, "cancelled": False}
 
@@ -206,12 +225,14 @@ def wizard_cmd(
             return None
 
     def scope_fn(key: str) -> str:
+        # These keys are project-specific, so default the prompt to "this
+        # project" (Enter keeps it local, not global).
         try:
             local = typer.confirm(
-                f"Write {key} to THIS project only? (No = global)", default=False
+                f"Write {key} to THIS project only? (No = global)", default=True
             )
         except typer.Abort:
-            return "global"
+            return "project"
         return "project" if local else "global"
 
     result = run_wizard(

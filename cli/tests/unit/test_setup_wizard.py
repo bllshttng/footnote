@@ -108,6 +108,80 @@ def test_ac4_err_rejected_value_reprompts(tmp_path, monkeypatch):
     assert result["written"] == ["config.backlog.id_prefix"]
 
 
+def test_deferred_genuine_error_reprompts_not_skipped(tmp_path, monkeypatch):
+    """PR #8 review (codex P2): in a multi-field block, a genuinely invalid value
+    on a field with a later sibling is deferred, but on retry it must RE-PROMPT
+    (and eventually write a valid value), never be silently skipped.
+    """
+    gpath = _global_path(tmp_path, monkeypatch)
+    # Two fields in the same block (config.backlog): id_prefix then id_hex_width.
+    fields = [
+        {
+            "path": "config.backlog.id_prefix",
+            "default": None,
+            "tier": "always",
+            "question": "prefix?",
+        },
+        {
+            "path": "config.backlog.id_hex_width",
+            "default": 4,
+            "tier": "advanced",
+            "question": "hex width?",
+        },
+    ]
+
+    answers = iter(
+        [
+            "BADPREFIX",  # id_prefix: invalid (uppercase/too long) -> deferred
+            "4",  # id_hex_width: valid
+            "ok",  # id_prefix retry re-prompt: valid
+        ]
+    )
+
+    def prompt_fn(message, default):
+        return next(answers, default)
+
+    result = run_wizard(
+        tmp_path, fields, prompt_fn=prompt_fn, scope_fn=lambda k: "global"
+    )
+    assert set(result["written"]) == {
+        "config.backlog.id_prefix",
+        "config.backlog.id_hex_width",
+    }
+    data = yaml.safe_load(gpath.read_text())
+    assert data["config"]["backlog"]["id_prefix"] == "ok"
+
+
+def test_project_vision_is_project_scoped(tmp_path):
+    assert "config.project.vision" in PROJECT_SCOPED_KEYS
+
+    field = {
+        "path": "config.project.vision",
+        "default": None,
+        "tier": "always",
+        "question": "vision?",
+    }
+    asked: list[str] = []
+
+    def scope_fn(key):
+        asked.append(key)
+        return "project"
+
+    run_wizard(
+        tmp_path,
+        [field],
+        prompt_fn=lambda m, d: "A CLI that ships features end to end.",
+        scope_fn=scope_fn,
+    )
+    # The scope was asked, and vision landed in the PROJECT file, not global.
+    assert asked == ["config.project.vision"]
+    data = yaml.safe_load((tmp_path / ".fno" / "settings.yaml").read_text())
+    assert (
+        data["config"]["project"]["vision"]
+        == "A CLI that ships features end to end."
+    )
+
+
 def test_ac4_ui_echoes_scope_and_path(tmp_path, monkeypatch):
     _global_path(tmp_path, monkeypatch)
     field = next(
