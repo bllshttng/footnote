@@ -36,11 +36,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::json;
 
+use crate::events::EventEmitter;
 use crate::loop_megawalk::{abi_cmd, MegawalkDispatcher, MegawalkQueue};
-use crate::loop_runtime::{run_loop, CloseOutcome, Journal, LoopBudget};
+use crate::loop_runtime::{
+    run_loop, CloseOutcome, GlobalJournalPath, Journal, LoopBudget, ProjectJournalPath,
+};
 use crate::loopcheck::TerminationReason;
 
 /// Cross-tick per-node consecutive-failure counter (the circuit breaker).
@@ -393,6 +400,244 @@ fn map_outcome(
             }
         }
     }
+}
+
+// ── target resolution + resident supervisor (Wave 3) ───────────────────────────
+
+/// One drain target as resolved by the Python `fno config active-backlog --json`
+/// helper (config.active_backlog + the workspace project->path map).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResolvedTarget {
+    pub project: String,
+    pub cwd: String,
+    pub interval_seconds: u64,
+    pub failure_limit: u32,
+    #[serde(default)]
+    pub mission: Option<String>,
+}
+
+/// Per-worker turn cap for daemon-dispatched drains (overridable via env). The
+/// daemon has no `--max-turns` flag like megawalk, so it carries a generous
+/// default; an operator tuning knob lands as config if ever needed.
+fn daemon_max_turns() -> u64 {
+    std::env::var("FNO_ACTIVE_BACKLOG_MAX_TURNS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200)
+}
+
+fn daemon_budget_usd() -> f64 {
+    std::env::var("FNO_ACTIVE_BACKLOG_BUDGET_USD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20.0)
+}
+
+/// In-tick re-dispatch cap, matching megawalk's `PER_UNIT_MAX_DISPATCHES`.
+const PER_UNIT_MAX_DISPATCHES: u64 = 15;
+
+/// Shell `fno config active-backlog --json` to discover enabled drain targets.
+/// Best-effort: any failure (missing fno, non-zero exit, unparseable output)
+/// yields an empty list, so the feature simply stays dormant.
+pub fn resolve_targets(abi_bin: &str) -> Vec<ResolvedTarget> {
+    match abi_cmd(abi_bin)
+        .args(["config", "active-backlog", "--json"])
+        .output()
+    {
+        Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Build the per-project loop journal (project events.jsonl fatal, global mirror
+/// best-effort) for a drain target's cwd.
+fn journal_for(cwd: &Path) -> Journal {
+    let project_events = cwd.join(".fno").join("events.jsonl");
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"));
+    let global_events = home.join(".fno").join("events.jsonl");
+    Journal::new(
+        ProjectJournalPath(project_events),
+        GlobalJournalPath(global_events),
+    )
+}
+
+/// Resolve a [`DrainConfig`] for a target, or `None` if its driver lib is absent
+/// (a project without `scripts/lib/driver-claude-code.sh` cannot be drained).
+fn drain_config_for(target: &ResolvedTarget, abi_bin: &str) -> Option<DrainConfig> {
+    use crate::loop_dispatch::{driver_default_max, preflight};
+    let cwd = PathBuf::from(&target.cwd);
+    let lib_dir = cwd.join("scripts").join("lib");
+    let lib_path = preflight("claude-code", &lib_dir, None).ok()?;
+    let max_iterations = driver_default_max(&lib_path).unwrap_or(PER_UNIT_MAX_DISPATCHES);
+    Some(DrainConfig {
+        cwd,
+        project: Some(target.project.clone()),
+        mission: target.mission.clone(),
+        lib_path,
+        abi_bin: abi_bin.to_string(),
+        allow_merge: false,
+        max_turns: daemon_max_turns(),
+        budget_usd: daemon_budget_usd(),
+        model: None,
+        max_iterations,
+        per_unit_max_dispatches: PER_UNIT_MAX_DISPATCHES,
+        failure_limit: target.failure_limit,
+    })
+}
+
+/// Sleep `total`, waking early if `shutdown` flips. Checked in small steps so a
+/// long poll interval still tears down promptly at daemon shutdown.
+async fn sleep_interruptible(total: Duration, shutdown: &Arc<AtomicBool>) {
+    let step = Duration::from_millis(500);
+    let mut elapsed = Duration::ZERO;
+    while elapsed < total {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        let chunk = step.min(total - elapsed);
+        tokio::time::sleep(chunk).await;
+        elapsed += chunk;
+    }
+}
+
+/// The wake nudge sentinel path ($HOME/.fno/.active-backlog-nudge by default).
+/// Mirrors the Python writer (`fno.active_backlog.nudge_sentinel_path`) under
+/// the default state dir; a non-default state_dir only loses the latency
+/// optimization, never correctness (the poll floor is the guarantee).
+fn nudge_sentinel_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"));
+    home.join(".fno").join(".active-backlog-nudge")
+}
+
+/// The sentinel's mtime, or `None` if it does not exist / cannot be stat'd.
+fn nudge_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(nudge_sentinel_path())
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// Wait up to `total` for the next poll tick, waking EARLY if the nudge sentinel
+/// changes (an event nudge) or `shutdown` flips. `last` carries the mtime across
+/// calls; a burst of touches during a tick coalesces to a single wake because
+/// `last` advances to the newest mtime once, here. The poll floor (`total`) is
+/// the backstop, so a missed nudge just delays a drain by at most one interval.
+async fn wait_for_wake(
+    total: Duration,
+    shutdown: &Arc<AtomicBool>,
+    last: &mut Option<std::time::SystemTime>,
+) {
+    let step = Duration::from_millis(500);
+    let mut elapsed = Duration::ZERO;
+    while elapsed < total {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        let current = nudge_mtime();
+        if current != *last {
+            *last = current;
+            return; // event nudge: wake early (coalesced)
+        }
+        let chunk = step.min(total - elapsed);
+        tokio::time::sleep(chunk).await;
+        elapsed += chunk;
+    }
+}
+
+/// The resident drain supervisor (node x-c070, Wave 3).
+///
+/// Runs until `shutdown` is set. Sets `live` true whenever there is >=1 enabled
+/// target so the daemon's idle-exit stays out (OQ1 Option A: an enabled but
+/// drained board keeps the daemon resident and polling). Each pass drains one
+/// node per enabled project (serial, v1). Every tick runs on `spawn_blocking`
+/// (`run_loop` is synchronous and blocks for the worker lifetime); a panic in a
+/// tick is caught, emitted as `active_backlog_task_crashed`, and the supervisor
+/// restarts with exponential backoff rather than taking down the daemon.
+///
+/// Config changes are picked up by re-resolving targets each pass: a project
+/// that drops out of `config.active_backlog` simply stops being ticked after its
+/// current (already-running) tick finishes - AC2-EDGE's "disable mid-flight
+/// completes the current dispatch, schedules no more" falls out for free because
+/// targets are only re-checked BETWEEN ticks, never mid-tick.
+pub async fn run_supervisor(
+    abi_bin: String,
+    emitter: EventEmitter,
+    live: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+) {
+    let mut breakers: HashMap<String, CircuitBreaker> = HashMap::new();
+    let recheck = Duration::from_secs(60);
+    let mut backoff = Duration::from_secs(1);
+    // Nudge cursor: the sentinel mtime last observed, so wait_for_wake can wake
+    // the loop early when a backlog mutation / advance touches it (Wave 4).
+    let mut last_nudge = nudge_mtime();
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        let targets = resolve_targets(&abi_bin);
+        if targets.is_empty() {
+            live.store(false, Ordering::SeqCst);
+            sleep_interruptible(recheck, &shutdown).await;
+            continue;
+        }
+        live.store(true, Ordering::SeqCst);
+
+        let mut min_interval = Duration::from_secs(300);
+        for target in &targets {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            min_interval = min_interval.min(Duration::from_secs(target.interval_seconds.max(1)));
+
+            let Some(cfg) = drain_config_for(target, &abi_bin) else {
+                continue;
+            };
+            let journal = journal_for(&cfg.cwd);
+            let project = target.project.clone();
+            let breaker = breakers
+                .remove(&project)
+                .unwrap_or_else(|| CircuitBreaker::new(target.failure_limit));
+            let emitter_for_crash = emitter.clone();
+
+            // run_loop is synchronous; offload so the daemon's async serve loop
+            // is never stalled. Move the breaker in and hand it back so its
+            // cross-tick failure counts survive.
+            let handle = tokio::task::spawn_blocking(move || {
+                let mut b = breaker;
+                let outcome = drain_tick(&cfg, &mut b, &journal);
+                (outcome, b)
+            });
+
+            match handle.await {
+                Ok((_outcome, b)) => {
+                    breakers.insert(project, b);
+                    backoff = Duration::from_secs(1);
+                }
+                Err(join_err) => {
+                    let _ = emitter_for_crash.emit(
+                        "active_backlog_task_crashed",
+                        &json!({"project": project, "error": join_err.to_string()}),
+                    );
+                    // Lose the panicked breaker's counts (rare); a fresh one is
+                    // safe (a crash-looping node re-accrues failures next pass).
+                    breakers.insert(project, CircuitBreaker::new(target.failure_limit));
+                    sleep_interruptible(backoff, &shutdown).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                }
+            }
+        }
+
+        // Wait the poll floor between passes, waking early on an event nudge
+        // (Wave 4): a backlog mutation / advance touches the sentinel so a fresh
+        // ready node drains sooner than the floor.
+        wait_for_wake(min_interval, &shutdown, &mut last_nudge).await;
+    }
+    live.store(false, Ordering::SeqCst);
 }
 
 #[cfg(test)]

@@ -461,4 +461,11 @@ def advance(
     )
     if verbose:
         print(f"advance: dispatched {node_id} -> target worker {short_id}", file=sys.stderr)
+    # Wake the active-backlog drain daemon (node x-c070): a successor may now be
+    # unblocked. Best-effort; the poll floor is the guarantee.
+    try:
+        from fno.active_backlog import touch_nudge
+        touch_nudge()
+    except Exception:
+        pass
     return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
