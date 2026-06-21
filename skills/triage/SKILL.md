@@ -175,6 +175,27 @@ translate positional words into the equivalent flag:
 
    The subagent returns proposal JSON.
 
+   **Tournament ordering (large backlogs).** When `count` (from `triage
+   context`) is large enough that a one-shot ordering gets unreliable -
+   roughly `count >= 6` - prefer comparative judgment over absolute scoring
+   for the *claim-order* decision: ask the LLM to pick a winner per candidate
+   PAIR ("ship X or Y first?") rather than rank all at once. Enumerate the
+   candidate pairs, collect each verdict as `{"winner": "ab-X", "loser":
+   "ab-Y"}`, write them to `/tmp/triage-verdicts.json`, then fold them into a
+   single consistent order:
+
+   ```bash
+   fno backlog triage rank --verdicts /tmp/triage-verdicts.json
+   ```
+
+   It aggregates by Copeland score (wins minus losses), tolerating the
+   occasional contradictory or cyclic verdict, and emits a best-first `order`.
+   Apply that order to the board with `fno backlog rank <id> --top` (front of
+   its lane) or `--after <id>` (since board order is work order), and feed the
+   ranking into the `priority_changes` rationale. For a small backlog the
+   one-shot proposal above is cheaper and fine; reserve the pairwise pass for
+   when the node count makes it worthwhile.
+
 3. **Validate.** Run:
 
    ```bash
