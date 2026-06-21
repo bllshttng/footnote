@@ -37,6 +37,14 @@ prime_plugin_root_pointer || true
 
 # ── Platform detection ─────────────────────────────────────────────────
 detect_platform() {
+    # Explicit override wins. The Codex/Gemini hook installers set FNO_PLATFORM
+    # in the command they write, because those CLIs do NOT set their plugin-root
+    # env var when running a user-config hook - without this the hook would fall
+    # through to `generic` and emit the legacy output shape instead of the
+    # unified hookSpecificOutput.additionalContext (PR #11 codex review).
+    case "${FNO_PLATFORM:-}" in
+        claude|gemini|codex|cursor) echo "${FNO_PLATFORM}"; return ;;
+    esac
     if [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
         echo "gemini"
     elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
@@ -166,6 +174,19 @@ if [[ -f "$hygiene_helper" ]]; then
     fi
 fi
 
+# 5. first-run setup nudge — points a brand-new user (no fno config yet) at the
+#    setup wizard. Silent once any settings file exists. On Claude Code this
+#    fires as its own hooks.json entry; here it rides the wrapper so Codex and
+#    Gemini get the same nudge. The sub-hook prints plain markdown, so the jq
+#    extraction falls through to the raw text (same as the vision block).
+nudge_content=""
+if [[ -f "${SCRIPT_DIR}/setup-nudge-session-start.sh" ]]; then
+    raw_nudge=$(bash "${SCRIPT_DIR}/setup-nudge-session-start.sh" 2>/dev/null || echo "")
+    if [[ -n "$raw_nudge" ]]; then
+        nudge_content=$(printf '%s\n' "$raw_nudge" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // empty' 2>/dev/null || printf '%s\n' "$raw_nudge")
+    fi
+fi
+
 # ── Combine context ───────────────────────────────────────────────────
 # Newline-separate non-empty blocks so the agent sees each preamble as
 # its own section rather than one wall of text.
@@ -183,6 +204,7 @@ append_section "$using_abilities_content"
 append_section "$vision_content"
 append_section "$whoami_content"
 append_section "$hygiene_content"
+append_section "$nudge_content"
 
 hydrate_state_provider_context
 
@@ -194,12 +216,18 @@ fi
 # ── Platform-specific output ──────────────────────────────────────────
 # Use jq for safe JSON escaping of the combined context string.
 case "$PLATFORM" in
-    claude)
+    claude|gemini|codex)
+        # Claude, Gemini, and Codex have all converged on the same SessionStart
+        # output contract: hookSpecificOutput.additionalContext (camelCase).
+        # Verified against Gemini's hook reference (geminicli.com/docs/hooks/
+        # reference) and Codex's SessionStartHookSpecificOutputWire schema. The
+        # earlier `additional_context` (snake_case) shape for non-Claude was
+        # stale and would be ignored by current Gemini/Codex.
         jq -n --arg ctx "$combined" \
             '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":$ctx}}'
         ;;
     *)
-        # Gemini, Codex, Cursor, generic — all use additional_context
+        # Cursor / generic — unverified; keep the legacy additional_context shape.
         jq -n --arg ctx "$combined" \
             '{"additional_context":$ctx}'
         ;;
