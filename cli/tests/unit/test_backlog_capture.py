@@ -438,6 +438,19 @@ def test_cli_list_json(tmp_path: Path) -> None:
     assert {"alpha", "beta"} <= titles
 
 
+def test_cli_list_unreadable_inbox_exits_clean(tmp_path: Path) -> None:
+    """A present-but-unreadable inbox exits 1 cleanly, not a raw traceback (ab-0625107e)."""
+    from fno.backlog.capture import _inbox_path, cli
+    path = _inbox_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")  # decode error on read
+    res = runner.invoke(cli, ["list"])
+    assert res.exit_code == 1, res.output
+    assert "cannot read inbox" in (res.stderr or res.output)
+    # SystemExit from typer.Exit is clean; any other exception is the bug.
+    assert res.exception is None or isinstance(res.exception, SystemExit)
+
+
 # --------------------------------------------------------------------------
 # scan: realistic positive + negative fixtures (Claude's Discretion #2 -
 # the trigger regex must be tested with positive AND negative fixtures so a

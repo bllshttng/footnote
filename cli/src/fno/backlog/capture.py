@@ -1410,7 +1410,13 @@ def cmd_list(
 ) -> None:
     """List inbox items (open by default)."""
     path = _inbox_path()
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    try:
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+    except (OSError, UnicodeDecodeError) as exc:
+        # A present-but-unreadable inbox (permission denied / non-UTF-8) must exit
+        # cleanly, not dump a raw traceback (ab-0625107e).
+        typer.echo(f"error: cannot read inbox {path}: {exc}", err=True)
+        raise typer.Exit(code=1)
     if by_type:
         _render_by_type(text, as_json=as_json, include_struck=include_struck)
         return
