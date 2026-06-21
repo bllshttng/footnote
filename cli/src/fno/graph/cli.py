@@ -1310,7 +1310,15 @@ def cmd_next(
         allowed.add("deferred")
 
     def _pick_ready(entries):
-        candidates = [e for e in entries if e.get("_status") in allowed]
+        # read_graph does not recompute _status, so a node closed out of band
+        # (e.g. PR merged via reconcile/done in another process) can carry
+        # completed_at while its persisted _status is still "ready". Guard on
+        # completed_at so advance / megawalk never dispatch a /target worker for
+        # an already-done node.
+        candidates = [
+            e for e in entries
+            if e.get("_status") in allowed and not e.get("completed_at")
+        ]
         if roadmap_id:
             candidates = [e for e in candidates if e.get("roadmap_id") == roadmap_id]
         if mission:
@@ -1406,6 +1414,12 @@ def cmd_ready(
         "--include-deferred",
         help="Also list deferred rows for explicit re-engagement.",
     ),
+    # ponytail: `ready` already always emits JSON; the flag exists only so a
+    # caller passing --json (inbox triage) isn't rejected with Typer exit 2.
+    # Accepted-and-ignored, never a behavior switch.
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit JSON (default; flag accepted for parity)."
+    ),
 ) -> None:
     from fno.graph.store import read_graph
     from fno.graph._intake import (
@@ -1418,7 +1432,14 @@ def cmd_ready(
         allowed.add("idea")
     if include_deferred:
         allowed.add("deferred")
-    ready = [e for e in entries if e.get("_status") in allowed]
+    # read_graph does not recompute _status, so a node closed out of band can
+    # carry completed_at while its persisted _status is still "ready". Guard on
+    # completed_at so a done node never lists as actionable work (the same guard
+    # is in `next`'s _pick_ready, the dispatch path).
+    ready = [
+        e for e in entries
+        if e.get("_status") in allowed and not e.get("completed_at")
+    ]
     ready = filter_by_project(ready, project, all_)
     if roadmap_id:
         ready = [e for e in ready if e.get("roadmap_id") == roadmap_id]
