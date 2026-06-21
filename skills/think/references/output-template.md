@@ -22,13 +22,13 @@ _(Only present when session was loaded via continue. Omit for first-run sessions
 
 | Finding | Consensus | Priority | Confirmed By | Disputed By |
 |---------|-----------|----------|--------------|-------------|
-| [finding title] | Confirmed/Probable/Minority | 3.4 | PM, Designer, TU | Developer |
-| [finding title] | Confirmed/Probable/Minority | 2.8 | ... | ... |
+| [finding title] | Confirmed/Probable/Minority | 2.1 | PM, Designer, TU | Developer |
+| [finding title] | Confirmed/Probable/Minority | 1.6 | ... | ... |
 
 ## Ranked Recommendations
 
 ### Recommendation 1: [action]
-**Priority Score:** 3.4 | **Consensus:** Confirmed (4/5)
+**Priority Score:** 2.1 | **Consensus:** Confirmed (3/5)
 
 | Persona | Vote | Note |
 |---------|------|------|
@@ -41,7 +41,7 @@ _(Only present when session was loaded via continue. Omit for first-run sessions
 [Rationale synthesized from supporting analyses]
 
 ### Recommendation 2: [action]
-**Priority Score:** 2.8 | **Consensus:** Probable (3/5)
+**Priority Score:** 1.6 | **Consensus:** Probable (2/5)
 
 | Persona | Vote | Note |
 |---------|------|------|

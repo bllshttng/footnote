@@ -325,6 +325,8 @@ Where:
 
 Sort findings descending by priority_score to produce ranked recommendations.
 
+Scores range from 0.5 (LOW severity, LOW confidence, consensus_ratio 0) to 2.2 (CRITICAL severity, HIGH confidence, consensus_ratio 1.0). Worked example: a CRITICAL finding (severity_weight 4) at HIGH confidence (confidence_boost 1.0) confirmed by 3 of 4 non-abstaining personas (consensus_ratio 0.75) scores `4*0.4 + 1.0*0.2 + 0.75*0.4 = 2.1`. Example scores below must stay within this range.
+
 ### Step 4: Preserve Dissent
 
 For every finding, record which personas disputed and their rationale. Minority findings are preserved in the report - never suppress them.
@@ -356,12 +358,12 @@ Note: In shallow mode (1 debate round), convergence_speed = 1 is expected and is
 
 | Finding | Consensus | Priority | Confirmed By | Disputed By |
 |---------|-----------|----------|--------------|-------------|
-| {title} | Confirmed | 3.4 | PM, Designer, TU | Developer |
+| {title} | Confirmed | 2.1 | PM, Designer, TU | Developer |
 
 ## Recommendations
 
 ### Recommendation 1: {action}
-**Priority Score:** 3.4 | **Consensus:** Confirmed (4/5)
+**Priority Score:** 2.1 | **Consensus:** Confirmed (3/5)
 
 | Persona | Vote | Note |
 |---------|------|------|
