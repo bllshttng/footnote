@@ -41,6 +41,13 @@ def test_copeland_ignores_unknown_ids():
     ]
 
 
+def test_copeland_tolerates_non_string_verdict_values():
+    # Malformed JSON could carry a list/dict (unhashable) winner/loser; the
+    # isinstance guard must skip it rather than raise TypeError.
+    verdicts = [{"winner": ["x"], "loser": "a"}, {"winner": "a", "loser": "b"}]
+    assert [r["id"] for r in _copeland_rank(["a", "b"], verdicts)] == ["a", "b"]
+
+
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
@@ -70,3 +77,18 @@ def test_triage_rank_cli_round_trip(tmp_graph, tmp_path):
     order = json.loads(r.stdout)["order"]
     assert [o["id"] for o in order] == ["ab-2", "ab-1"]
     assert order[0]["title"] == "two"
+
+
+def test_triage_rank_drops_ids_not_in_graph(tmp_graph, tmp_path):
+    # A stale / typo'd verdict id must not reach the emitted order (it would
+    # then fail `fno backlog rank`). Only graph-resident ids participate.
+    tmp_graph.write_text(json.dumps({"entries": [
+        {"id": "ab-1", "title": "one", "priority": "p2"},
+    ]}))
+    vfile = tmp_path / "verdicts.json"
+    vfile.write_text(json.dumps([{"winner": "ab-1", "loser": "ab-GONE"}]))
+    r = runner.invoke(app, ["backlog", "triage", "rank", "--verdicts", str(vfile)],
+                      catch_exceptions=False)
+    assert r.exit_code == 0, r.output
+    order = json.loads(r.stdout)["order"]
+    assert [o["id"] for o in order] == ["ab-1"]

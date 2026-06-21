@@ -334,7 +334,16 @@ def _copeland_rank(
         if not isinstance(v, dict):
             continue
         win, lose = v.get("winner"), v.get("loser")
-        if win in present and lose in present and win != lose:
+        # isinstance guard before the membership test: a non-str (list/dict)
+        # value from malformed JSON is unhashable and would raise TypeError on
+        # `in present`. Verdicts are external input, so validate at the boundary.
+        if (
+            isinstance(win, str)
+            and isinstance(lose, str)
+            and win in present
+            and lose in present
+            and win != lose
+        ):
             wins[win] += 1
             losses[lose] += 1
     meta = meta or {}
@@ -580,7 +589,8 @@ def cmd_rank(
     consistent order, tolerating the occasional contradictory/cyclic verdict.
     Apply the resulting order with ``fno backlog rank --top/--after``.
 
-    Participants are the union of ids named in the verdicts. Output is JSON:
+    Participants are the verdict ids that exist in the graph (unknown ids are
+    dropped, mirroring validate). Output is JSON:
     ``{"order": [{"id", "title", "wins", "losses", "net"}, ...]}`` best-first.
     """
     import sys
@@ -588,7 +598,11 @@ def cmd_rank(
     from fno.graph._constants import PRIORITY_ORDER
     from fno.graph.store import read_graph
 
-    raw = verdicts.read_text() if verdicts else sys.stdin.read()
+    try:
+        raw = verdicts.read_text() if verdicts else sys.stdin.read()
+    except OSError as e:
+        typer.echo(f"Error: could not read verdicts: {e}", err=True)
+        raise typer.Exit(code=2)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -600,15 +614,21 @@ def cmd_rank(
         typer.echo("Error: verdicts must be a JSON list of {winner, loser}", err=True)
         raise typer.Exit(code=2)
 
+    entries = read_graph(_graph_path())
+    by_id = {e.get("id"): e for e in entries if isinstance(e.get("id"), str)}
+
+    # Participants are verdict ids that actually exist in the graph. Dropping
+    # unknown ids (an LLM typo or a stale node) mirrors the validate path and
+    # keeps the emitted order applyable: a non-graph id would survive to the
+    # output with a null title and then fail `fno backlog rank`.
     ids: list[str] = []
     for v in pairs:
         if isinstance(v, dict):
             for k in ("winner", "loser"):
-                if isinstance(v.get(k), str):
-                    ids.append(v[k])
+                val = v.get(k)
+                if isinstance(val, str) and val in by_id:
+                    ids.append(val)
 
-    entries = read_graph(_graph_path())
-    by_id = {e.get("id"): e for e in entries if isinstance(e.get("id"), str)}
     meta = {
         i: (
             PRIORITY_ORDER.get(by_id.get(i, {}).get("priority", "p2"), 2),

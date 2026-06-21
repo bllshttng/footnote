@@ -190,11 +190,15 @@ translate positional words into the equivalent flag:
 
    It aggregates by Copeland score (wins minus losses), tolerating the
    occasional contradictory or cyclic verdict, and emits a best-first `order`.
-   Apply that order to the board with `fno backlog rank <id> --top` (front of
-   its lane) or `--after <id>` (since board order is work order), and feed the
-   ranking into the `priority_changes` rationale. For a small backlog the
-   one-shot proposal above is cheaper and fine; reserve the pairwise pass for
-   when the node count makes it worthwhile.
+   Apply that order to the board so board position matches work order: seed the
+   top item with `fno backlog rank <first-id> --top`, then chain each remaining
+   id after its predecessor with `fno backlog rank <id> --after <previous-id>`.
+   Do NOT call `--top` for every id in a forward pass: `--top` inserts before
+   the current front of the lane, so iterating best-first would reverse the
+   order (the last id processed would land first). Feed the ranking into the
+   `priority_changes` rationale too. For a small backlog the one-shot proposal
+   above is cheaper and fine; reserve the pairwise pass for when the node count
+   makes it worthwhile.
 
 3. **Validate.** Run:
 
