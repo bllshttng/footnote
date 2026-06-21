@@ -1,0 +1,43 @@
+name: control-plane-doc-colocation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: control-plane-doc-colocation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Advisory: warns (never blocks) when control-plane code changes without a
+  # matching docs/architecture/ update. continue-on-error keeps it out of the
+  # merge gate even if branch protection lists it.
+  doc-colocation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check control-plane doc colocation
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/control-plane-doc-colocation.sh
+
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run doc-colocation test harness
+        run: bash tests/ci/test_control_plane_doc_colocation.sh
