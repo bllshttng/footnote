@@ -61,38 +61,63 @@ CHANGED=$(git diff --name-only "$MB" HEAD 2>/dev/null) \
 
 [[ -n "$CHANGED" ]] || { echo "PASS: no changed files."; exit 0; }
 
-# ── Control-plane path set: include: block from the loc-ratchet manifest ──────
-# Mirrors the manifest's match semantics (loc-ratchet-manifest.yaml header):
-#   trailing "/" -> directory prefix; trailing "*" -> path-prefix glob;
-#   otherwise -> exact file match.
-INCLUDES=$(awk '
-    /^include:/ {inblock=1; next}
-    inblock && /^[A-Za-z]/ {inblock=0}
-    inblock && /^[[:space:]]*-[[:space:]]/ {
-        line=$0
-        sub(/^[[:space:]]*-[[:space:]]*/, "", line)
-        gsub(/"/, "", line)
-        sub(/[[:space:]]+$/, "", line)
-        if (line != "") print line
-    }
-' "$MANIFEST")
+# ── Manifest path sets: include:/exclude: blocks from the loc-ratchet manifest ─
+# Reuse the manifest as the SINGLE source of truth for BOTH the control-plane
+# path set AND the exclusions, so this nudge and the LOC ratchet can never drift
+# on either. Match semantics (loc-ratchet-manifest.yaml header):
+#   include:  trailing "/" -> dir prefix; trailing "*" -> path-prefix glob;
+#             otherwise -> exact file match.
+#   exclude:  leading "**/" stripped; trailing "/**" -> path-segment rule;
+#             otherwise -> basename glob.
+parse_manifest_section() {
+    # $1 = section key (include|exclude). Emits one stripped entry per line.
+    awk -v key="^$1:" '
+        $0 ~ key {inblock=1; next}
+        inblock && /^[A-Za-z]/ {inblock=0}
+        inblock && /^[[:space:]]*-[[:space:]]/ {
+            line=$0
+            sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+            gsub(/"/, "", line)
+            gsub(/\047/, "", line)     # also strip single quotes (YAML allows them)
+            sub(/[[:space:]]+$/, "", line)
+            if (line != "") print line
+        }
+    ' "$MANIFEST"
+}
+
+INCLUDES=$(parse_manifest_section include)
+EXCLUDES=$(parse_manifest_section exclude)
 
 [[ -n "$INCLUDES" ]] || notice_and_exit "manifest has no include: entries"
 
-# A file is "control plane" if it matches an include entry and is not a test file.
-is_test_file() {
-    local f="$1"
-    case "$f" in
-        */tests/*|tests/*) return 0 ;;
-        */test_*|test_*) return 0 ;;
-        *_test.*) return 0 ;;
-    esac
+# A file is excluded if any manifest exclude: pattern matches. Mirrors
+# loc-ratchet.sh's exclude semantics exactly (strip leading "**/"; trailing
+# "/**" is a path-segment rule; otherwise a basename glob). Empty EXCLUDES ->
+# nothing excluded.
+is_excluded() {
+    local f="$1" basename="${1##*/}" pattern stripped dir_seg
+    [[ -n "$EXCLUDES" ]] || return 1
+    while IFS= read -r pattern; do
+        [[ -n "$pattern" ]] || continue
+        stripped="${pattern#\*\*/}"
+        if [[ "$stripped" == *"/**" ]]; then
+            dir_seg="${stripped%/**}"
+            if [[ "$f" == "${dir_seg}/"* ]] || [[ "$f" == *"/${dir_seg}/"* ]]; then
+                return 0
+            fi
+        else
+            # shellcheck disable=SC2254  # intentional glob match, not literal
+            case "$basename" in
+                $stripped) return 0 ;;
+            esac
+        fi
+    done <<< "$EXCLUDES"
     return 1
 }
 
 is_control_plane() {
     local f="$1" entry
-    is_test_file "$f" && return 1
+    is_excluded "$f" && return 1
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         case "$entry" in

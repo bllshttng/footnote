@@ -40,6 +40,22 @@ extensions:
   - rs
 exclude:
   - "**/tests/**"
+  - "**/test_*"
+  - "**/*_test.*"
+MANIFEST
+}
+
+# A second fixture using SINGLE-quoted entries, to prove the parser strips both
+# quote styles (gemini finding on PR #12, line 78).
+FIXTURE_MANIFEST_SQ="$TMP/manifest-singlequote.yaml"
+write_fixture_manifest_singlequote() {
+    cat > "$FIXTURE_MANIFEST_SQ" <<'MANIFEST'
+include:
+  - 'hooks/'
+extensions:
+  - sh
+exclude:
+  - '**/tests/**'
 MANIFEST
 }
 
@@ -132,5 +148,25 @@ run_advisory "$FIXTURE_MANIFEST"
 [[ "$RC" -eq 0 ]] || fail "T06 expected rc=0, got $RC"
 grep -q "ADVISORY" <<< "$OUT" || fail "T06 glob include should trigger advisory: $OUT"
 pass "T06 prefix-glob include -> advisory"
+
+# ── T07: basename-glob exclude (test_*) is manifest-driven, not hardcoded ─────
+build_repo
+printf 'tt\n' > "$TMP/repo/hooks/test_helper.sh"
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" commit -q -m "add test_ file under control-plane dir"
+run_advisory "$FIXTURE_MANIFEST"
+[[ "$RC" -eq 0 ]] || fail "T07 expected rc=0, got $RC"
+grep -q "no control-plane paths changed" <<< "$OUT" || fail "T07 manifest test_* exclude should apply: $OUT"
+pass "T07 basename-glob exclude (manifest-driven) -> pass"
+
+# ── T08: single-quoted manifest entries parse (finding 1) ────────────────────
+write_fixture_manifest_singlequote
+build_repo
+printf 'a\nchanged\n' > "$TMP/repo/hooks/check.sh"
+git -C "$TMP/repo" commit -q -am "touch hook, single-quoted manifest"
+run_advisory "$FIXTURE_MANIFEST_SQ"
+[[ "$RC" -eq 0 ]] || fail "T08 expected rc=0, got $RC"
+grep -q "ADVISORY" <<< "$OUT" || fail "T08 single-quoted 'hooks/' include should still match: $OUT"
+pass "T08 single-quoted manifest entries -> parsed, advisory fires"
 
 printf '[doc-coloc] ALL PASS\n'

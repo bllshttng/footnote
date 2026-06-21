@@ -9,7 +9,7 @@ It is the sibling of the [LOC ratchet](loc-ratchet.md): same control-plane path 
 On every PR, [`scripts/ci/control-plane-doc-colocation.sh`](../../scripts/ci/control-plane-doc-colocation.sh):
 
 1. Computes the changed-file set as `git diff --name-only <merge-base> HEAD`, with the base resolved from `BASE_REF` (GitHub Actions sets it from `github.base_ref`) or an explicit `--base <ref>`.
-2. Classifies each changed file as control-plane or not, using the **same `include:` list** the LOC ratchet reads from [`scripts/ci/loc-ratchet-manifest.yaml`](../../scripts/ci/loc-ratchet-manifest.yaml). Test files (`**/tests/**`, `test_*`, `*_test.*`) are excluded, mirroring the ratchet's intent of measuring executable control-plane surface.
+2. Classifies each changed file as control-plane or not, using the **same `include:` and `exclude:` lists** the LOC ratchet reads from [`scripts/ci/loc-ratchet-manifest.yaml`](../../scripts/ci/loc-ratchet-manifest.yaml). Both sets are parsed from the manifest (with the same match semantics the ratchet uses), so test files (`**/tests/**`, `test_*`, `*_test.*`) are excluded without a hardcoded list that could drift.
 3. Checks whether any changed file lives under `docs/architecture/`.
 4. If control-plane code changed **and** no `docs/architecture/` file did, it emits a `::warning` annotation plus a GitHub step-summary entry listing the control-plane files. Otherwise it prints `PASS`.
 
@@ -17,7 +17,7 @@ The script **always exits 0**. The signal is the annotation, not a red check.
 
 ## Why one path list
 
-Reading the control-plane path set from `loc-ratchet-manifest.yaml` rather than duplicating it means the two checks can never disagree about what "control plane" is. Add a path to the manifest once, and both the ratchet and this nudge pick it up. The current set:
+Reading both the control-plane path set (`include:`) and the exclusions (`exclude:`) from `loc-ratchet-manifest.yaml` rather than duplicating them means the two checks can never disagree about what "control plane" is. Add a path to the manifest once, and both the ratchet and this nudge pick it up. The current include set:
 
 - `hooks/`
 - `scripts/lib/`
