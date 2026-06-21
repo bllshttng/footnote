@@ -788,8 +788,8 @@ fn resolve_handoffs_dir(
     if let Some(d) = override_dir {
         return d.to_path_buf();
     }
-    if let Some(d) = std::env::var_os("HANDOFFS_DIR") {
-        return PathBuf::from(d);
+    if let Some(d) = env_dir_unless_null("HANDOFFS_DIR") {
+        return d;
     }
     let project = repo_project_name(cwd);
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -816,6 +816,19 @@ fn resolve_handoffs_dir(
 /// Read a `<key>:` path value from a settings.yaml (any indent level). The
 /// `config.paths.*` keys (`handoffs_dir`, `postmortems_dir`, ...) are
 /// distinctive enough that a flat scan is safe.
+/// Read a dir from an env var, treating an empty or literal-"null" value as
+/// unset. emit_shell never emits "null", but a stale/hand-edited environment
+/// can, and trusting it verbatim is what wrote `./null/` inside the repo
+/// (x-54c2). Mirrors the same guard in read_path_setting.
+fn env_dir_unless_null(key: &str) -> Option<PathBuf> {
+    let v = std::env::var(key).ok()?;
+    let t = v.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    Some(PathBuf::from(t))
+}
+
 fn read_path_setting(path: &Path, key: &str) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let prefix = format!("{key}:");
@@ -831,7 +844,12 @@ fn read_path_setting(path: &Path, key: &str) -> Option<String> {
                 .unwrap_or("")
                 .trim()
                 .trim_matches(|c| c == '"' || c == '\'');
-            if !v.is_empty() {
+            // A YAML `null` scalar (`key: null`) is the "use default" sentinel,
+            // not a literal path. emit_shell writes `postmortems_dir: null` for an
+            // unset path, so reading it as the string "null" sent the writer to
+            // `./null/<date>-<sid>.md` inside the repo (x-54c2). Treat it as absent
+            // so the caller falls through to `~/.fno/<dir>`.
+            if !v.is_empty() && !v.eq_ignore_ascii_case("null") {
                 return Some(v.to_string());
             }
         }
@@ -994,8 +1012,8 @@ fn resolve_postmortems_dir(
     if let Some(d) = override_dir {
         return d.to_path_buf();
     }
-    if let Some(d) = std::env::var_os("POSTMORTEMS_DIR") {
-        return PathBuf::from(d);
+    if let Some(d) = env_dir_unless_null("POSTMORTEMS_DIR") {
+        return d;
     }
     let project = repo_project_name(cwd);
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -1294,6 +1312,29 @@ mod tests {
             Some("~/pm")
         );
         assert_eq!(read_path_setting(&f, "absent_key"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_path_setting_null_is_absent() {
+        // emit_shell writes `postmortems_dir: null` for an unset path; reading it
+        // as the literal "null" wrote `./null/` inside the repo (x-54c2). It must
+        // read as absent so resolve_*_dir falls through to the `~/.fno` default.
+        let dir = std::env::temp_dir().join(format!("finalize-null-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let f = dir.join("settings.yaml");
+        fs::write(&f, "    postmortems_dir: null\n    handoffs_dir: NULL\n").unwrap();
+        assert_eq!(read_path_setting(&f, "postmortems_dir"), None);
+        assert_eq!(read_path_setting(&f, "handoffs_dir"), None);
+
+        // With the env override absent, the null settings value must resolve to
+        // the absolute global default, never a relative `./null`.
+        if std::env::var_os("POSTMORTEMS_DIR").is_none() {
+            let home = PathBuf::from("/home/user");
+            let resolved = resolve_postmortems_dir(None, Some(&f), Some(&home), &dir);
+            assert_eq!(resolved, PathBuf::from("/home/user/.fno/postmortems"));
+            assert!(resolved.is_absolute());
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
