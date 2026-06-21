@@ -169,4 +169,15 @@ run_advisory "$FIXTURE_MANIFEST_SQ"
 grep -q "ADVISORY" <<< "$OUT" || fail "T08 single-quoted 'hooks/' include should still match: $OUT"
 pass "T08 single-quoted manifest entries -> parsed, advisory fires"
 
+# ── T09: `--base` as the last arg (no value) must not crash under set -e ──────
+build_repo
+cd "$TMP/repo"
+set +e
+OUT=$(LOC_RATCHET_MANIFEST="$FIXTURE_MANIFEST" bash "$ADVISORY_SCRIPT" --base 2>&1)
+RC=$?
+set -e
+[[ "$RC" -eq 0 ]] || fail "T09 bare --base must exit 0 (advisory), got $RC: $OUT"
+grep -q "requires an argument" <<< "$OUT" || fail "T09 expected --base guard notice: $OUT"
+pass "T09 bare --base -> clean exit 0 (no shift crash)"
+
 printf '[doc-coloc] ALL PASS\n'

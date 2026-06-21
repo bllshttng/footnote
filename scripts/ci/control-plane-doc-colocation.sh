@@ -28,7 +28,16 @@ DOC_PREFIX="docs/architecture/"
 BASE_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --base) BASE_OVERRIDE="${2:-}"; shift 2 ;;
+        --base)
+            # Guard the shift 2: with `--base` as the last arg, `shift 2` exits
+            # nonzero under set -e and would kill this advisory script. Bail clean.
+            if [[ $# -ge 2 ]]; then
+                BASE_OVERRIDE="$2"; shift 2
+            else
+                echo "control-plane-doc-colocation: --base requires an argument (advisory; skipping)" >&2
+                exit 0
+            fi
+            ;;
         --base=*) BASE_OVERRIDE="${1#*=}"; shift ;;
         *) echo "advisory: unknown argument: $1" >&2; shift ;;
     esac
