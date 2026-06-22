@@ -35,6 +35,9 @@ class Fno < Formula
   # of the clean `depends_on :macos` refusal below. arm64 overrides this url (and
   # adds its Sonoma floor) inside on_macos.
   url "https://files.pythonhosted.org/packages/84/71/57d630e1ecda386573585f87e3893cfa191306fc86e849ca35386ea82cd9/fno-0.1.0-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
+  # Explicit version: Homebrew's filename version-detect picks "64" out of the
+  # x86_64 default-url tag, not 0.1.0. Pin it so `brew info`/upgrade are correct.
+  version "0.1.0"
   sha256 "729af7804d7c62c0d79b5d3784e694ad8499c05d223e27acbee33f323aa50991"
   license "Apache-2.0"
 
