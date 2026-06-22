@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import hashlib
 import html as _html
+import ipaddress
 import json
 import re
+import socket
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -60,6 +63,64 @@ _SCRIPT_STYLE_RE = re.compile(
 )
 _WS_RE = re.compile(r"[ \t\r\f\v]+")
 _BLANKLINES_RE = re.compile(r"\n{3,}")
+
+
+class BlockedHost(urllib.error.URLError):
+    """A URL (initial or redirect target) points at a non-public host/scheme.
+
+    Subclasses URLError so fetch_url's existing handler records the row
+    verified=false rather than crashing the round. This is the SSRF boundary:
+    self-fetching attacker-influenced URLs (search results + their redirects)
+    must never reach cloud-metadata (169.254.169.254), loopback, or RFC-1918
+    addresses on the operator's host/network.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+
+
+def _guard_url(url: str) -> None:
+    """Reject non-http(s) schemes and hosts that resolve to a non-public IP.
+
+    ponytail: validates by resolving the host then checking every returned IP.
+    A DNS-rebind TOCTOU remains (urllib re-resolves at connect time); closing it
+    fully means pinning the connection to the vetted IP. For a research fetcher
+    the resolve-and-check guard blocks the realistic SSRF (metadata/internal
+    redirects); pin the IP only if rebinding attacks become a real threat.
+    """
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise BlockedHost(f"blocked scheme: {parts.scheme or 'none'}")
+    host = parts.hostname
+    if not host:
+        raise BlockedHost("blocked: no host")
+    try:
+        infos = socket.getaddrinfo(host, parts.port or None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise BlockedHost(f"unresolvable host: {host} ({e})") from e
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise BlockedHost(f"blocked non-public host: {host} -> {ip}")
+
+
+class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate every redirect hop, not just the seed URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        _guard_url(newurl)  # raises BlockedHost (URLError) -> caught by fetch_url
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_GuardedRedirectHandler())
 
 
 class DdgsUnavailable(RuntimeError):
@@ -207,7 +268,8 @@ def fetch_url(url: str, timeout: int = _FETCH_TIMEOUT_S) -> FetchResult:
     (never raise) so one bad source never aborts a round."""
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        _guard_url(url)  # SSRF: vet the seed host before the first connect
+        with _opener().open(req, timeout=timeout) as resp:  # noqa: S310
             ct = resp.headers.get("Content-Type", "")
             status = getattr(resp, "status", None) or resp.getcode()
             if not _TEXT_CT_RE.search(ct or ""):
@@ -216,6 +278,8 @@ def fetch_url(url: str, timeout: int = _FETCH_TIMEOUT_S) -> FetchResult:
             charset = resp.headers.get_content_charset() or "utf-8"
             text = raw.decode(charset, errors="replace")
             return FetchResult(True, _strip_html(text), ct, status, "")
+    except BlockedHost as e:
+        return FetchResult(False, "", "", None, str(e.reason))
     except urllib.error.HTTPError as e:
         return FetchResult(False, "", "", e.code, f"http {e.code}")
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:

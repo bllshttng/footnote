@@ -107,24 +107,44 @@ class _Headers:
         return "utf-8"
 
 
-def test_fetch_text_ok_and_html_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
+class _FakeOpener:
+    """Stands in for _opener(); .open() returns/raises like urlopen would.
+
+    fetch_url goes through _opener().open(...), so tests stub the opener rather
+    than urlopen. _guard_url is also stubbed to a public-IP no-op so these tests
+    isolate the fetch/extract behavior from the SSRF resolver.
+    """
+
+    def __init__(self, result):
+        self._result = result
+
+    def open(self, *a, **k):
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+@pytest.fixture
+def _guard_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(core, "_guard_url", lambda url: None)
+
+
+def test_fetch_text_ok_and_html_stripped(monkeypatch: pytest.MonkeyPatch, _guard_ok) -> None:
     html = b"<html><script>bad()</script><body><h1>Hi</h1> there</body></html>"
-    monkeypatch.setattr(core.urllib.request, "urlopen", lambda *a, **k: _Resp(html, "text/html"))
+    monkeypatch.setattr(core, "_opener", lambda: _FakeOpener(_Resp(html, "text/html")))
     r = core.fetch_url("https://x.com")
     assert r.ok and "Hi there" in r.text and "bad()" not in r.text
 
 
-def test_fetch_non_text_recorded_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(core.urllib.request, "urlopen", lambda *a, **k: _Resp(b"%PDF", "application/pdf"))
+def test_fetch_non_text_recorded_unverified(monkeypatch: pytest.MonkeyPatch, _guard_ok) -> None:
+    monkeypatch.setattr(core, "_opener", lambda: _FakeOpener(_Resp(b"%PDF", "application/pdf")))
     r = core.fetch_url("https://x.com/doc.pdf")
     assert not r.ok and "non-text" in r.reason
 
 
-def test_fetch_http_error_recorded_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
-    def raise_404(*a, **k):
-        raise core.urllib.error.HTTPError("https://x", 404, "nf", {}, None)
-
-    monkeypatch.setattr(core.urllib.request, "urlopen", raise_404)
+def test_fetch_http_error_recorded_unverified(monkeypatch: pytest.MonkeyPatch, _guard_ok) -> None:
+    err = core.urllib.error.HTTPError("https://x", 404, "nf", {}, None)
+    monkeypatch.setattr(core, "_opener", lambda: _FakeOpener(err))
     r = core.fetch_url("https://x.com")
     assert not r.ok and "404" in r.reason
 
@@ -134,6 +154,61 @@ def test_build_source_verified_only_with_hash() -> None:
     assert ok.verified and ok.hash and ok.extract == "body text"
     bad = core.build_source("https://y", core.FetchResult(False, "", "", 404, "http 404"))
     assert not bad.verified and bad.hash == "" and bad.reason == "http 404"
+
+
+# --- SSRF guard ------------------------------------------------------------
+
+def _addrinfo(ip: str):
+    return [(2, 1, 6, "", (ip, 0))]
+
+
+@pytest.mark.parametrize("scheme", ["ftp", "file", "gopher", ""])
+def test_guard_rejects_non_http_scheme(scheme: str) -> None:
+    url = f"{scheme}://x.com/a" if scheme else "x.com/a"
+    with pytest.raises(core.BlockedHost):
+        core._guard_url(url)
+
+
+@pytest.mark.parametrize(
+    "ip",
+    ["127.0.0.1", "169.254.169.254", "10.0.0.5", "192.168.1.1", "172.16.0.1", "::1"],
+)
+def test_guard_rejects_non_public_hosts(ip: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: _addrinfo(ip))
+    with pytest.raises(core.BlockedHost):
+        core._guard_url("https://evil.example/meta")
+
+
+def test_guard_allows_public_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34"))
+    core._guard_url("https://example.com/page")  # does not raise
+
+
+def test_guard_rejects_unresolvable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a, **k):
+        raise core.socket.gaierror("nope")
+
+    monkeypatch.setattr(core.socket, "getaddrinfo", boom)
+    with pytest.raises(core.BlockedHost):
+        core._guard_url("https://nx.example/x")
+
+
+def test_fetch_blocked_seed_recorded_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: _addrinfo("127.0.0.1"))
+    # urlopen must never be reached for a blocked seed.
+    monkeypatch.setattr(
+        core.urllib.request, "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not fetch")),
+    )
+    r = core.fetch_url("http://localhost:8000/admin")
+    assert not r.ok and "non-public host" in r.reason
+
+
+def test_redirect_handler_revalidates_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: _addrinfo("10.0.0.9"))
+    h = core._GuardedRedirectHandler()
+    with pytest.raises(core.BlockedHost):
+        h.redirect_request(None, None, 302, "Found", {}, "http://internal.svc/secret")
 
 
 # --- store round-trip ------------------------------------------------------
