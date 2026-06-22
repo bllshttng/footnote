@@ -27,39 +27,39 @@
 class Fno < Formula
   desc "Autonomous delivery pipeline CLI (footnote)"
   homepage "https://github.com/bllshttng/footnote"
+
+  # The x86_64 wheel (macosx_10_12) is the top-level default so a `url` is ALWAYS
+  # defined - including on Linux, where the on_macos block is skipped. Homebrew
+  # validates url presence at load (before requirements), so without a top-level
+  # url a Linuxbrew user would hit a confusing `stable: url is missing` instead
+  # of the clean `depends_on :macos` refusal below. arm64 overrides this url (and
+  # adds its Sonoma floor) inside on_macos.
+  url "https://files.pythonhosted.org/packages/84/71/57d630e1ecda386573585f87e3893cfa191306fc86e849ca35386ea82cd9/fno-0.1.0-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
+  sha256 "729af7804d7c62c0d79b5d3784e694ad8499c05d223e27acbee33f323aa50991"
   license "Apache-2.0"
 
-  # Both macOS arches ship a wheel now, so the macOS floor is arch-conditional.
-  # The arm64 wheel is tagged macosx_14_0, so pin its floor to Sonoma on arm
-  # only: an arm64 Mac on macOS 11-13 would otherwise pass the formula and then
-  # hit an ugly pip "incompatible wheel" error instead of a clean refusal up
-  # front. The x86_64 wheel targets the much lower macosx_10_12 floor, so Intel
-  # needs no extra macOS gate beyond python@3.13's own. (A `depends_on macos:`
-  # is a macOS gate, so a Linuxbrew user gets a clean macOS refusal up front
-  # instead of a confusing "no url" error from the empty non-macOS branch.)
-  # The arm-only Sonoma floor lives with the arm64 url in the on_macos block.
+  # Both macOS arches ship a wheel; the macOS floor is arch-conditional. The
+  # arm64 wheel is tagged macosx_14_0, so its Sonoma floor is pinned on arm only
+  # (an arm64 Mac on macOS 11-13 would otherwise pass and then hit an ugly pip
+  # "incompatible wheel" error); the x86_64 default targets macosx_10_12, so
+  # Intel needs no extra macOS gate beyond python@3.13's own. `depends_on :macos`
+  # refuses Linuxbrew, and the top-level url above makes that refusal the error a
+  # Linux user actually sees instead of "url is missing".
   depends_on :macos
   depends_on "python@3.13"
 
-  # Per-arch platform wheels: the wheel carries native Rust binaries, so the URL
-  # must match the host arch. The wheel is also tagged macosx_14_0, so it needs
-  # macOS 14 (Sonoma) or newer. url + sha256 are the published PyPI file URL
-  # (content-hashed path) and its sha256.
-  #
+  # The wheel carries native Rust binaries, so the URL must match the host arch.
   # `using: :nounzip` keeps the wheel a FILE: a .whl is a zip, and an unpacked
   # wheel dir is not pip-installable (no build backend), so the install step
   # below pip-installs the wheel file directly rather than the unpacked tree.
+  # arm64 overrides the top-level x86_64 default with its own wheel + floor.
   on_macos do
     on_arm do
       # The arm64 wheel is tagged macosx_14_0, so it requires Sonoma; the x86_64
-      # wheel below targets macosx_10_12, so this floor is arm-only.
+      # default targets macosx_10_12, so this floor is arm-only.
       depends_on macos: :sonoma
       url "https://files.pythonhosted.org/packages/0f/29/009ccdefc9528fa2acd407b2458c87f3be0ff5424f288fc610120a5c004a/fno-0.1.0-py3-none-macosx_14_0_arm64.whl", using: :nounzip
       sha256 "0c452f9b2813f35ae5f246c7be087b7ceb5699856e6b2182e5039aadb64e5533"
-    end
-    on_intel do
-      url "https://files.pythonhosted.org/packages/84/71/57d630e1ecda386573585f87e3893cfa191306fc86e849ca35386ea82cd9/fno-0.1.0-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
-      sha256 "729af7804d7c62c0d79b5d3784e694ad8499c05d223e27acbee33f323aa50991"
     end
   end
 
