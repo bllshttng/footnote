@@ -821,12 +821,18 @@ fn resolve_handoffs_dir(
 /// can, and trusting it verbatim is what wrote `./null/` inside the repo
 /// (x-54c2). Mirrors the same guard in read_path_setting.
 fn env_dir_unless_null(key: &str) -> Option<PathBuf> {
-    let v = std::env::var(key).ok()?;
-    let t = v.trim();
-    if t.is_empty() || t.eq_ignore_ascii_case("null") {
-        return None;
+    let v = std::env::var_os(key)?;
+    // Only the string-decodable "null"/empty sentinel is filtered; a non-UTF-8
+    // value (valid arbitrary-byte path on Unix) is preserved verbatim, matching
+    // the original var_os behavior (gemini review).
+    if let Some(s) = v.to_str() {
+        let t = s.trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("null") {
+            return None;
+        }
+        return Some(PathBuf::from(t));
     }
-    Some(PathBuf::from(t))
+    Some(PathBuf::from(v))
 }
 
 fn read_path_setting(path: &Path, key: &str) -> Option<String> {
