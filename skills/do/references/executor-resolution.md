@@ -51,6 +51,7 @@ arms regardless of directory.
 | `do` | `archer` | Default. TDD-disciplined task implementation. |
 | `tdd` | `archer` | Alias for `do`. |
 | `impeccable` | `frontend-executor` | `/impeccable craft + critique` loop with score-based convergence. |
+| `research` | `scout` | Retrieve + store: ddgs backbone -> self-fetch -> `sources.jsonl`. Reached via `fno research "X"` (a research-pipeline alias over `target`), NOT via `/do waves` surface inference - the surface resolver below only emits `do`/`impeccable`. The `doc` deliverable terminal + verify profile + eval are Group 2. |
 
 ## Override paths
 
