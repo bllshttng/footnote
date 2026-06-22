@@ -82,9 +82,15 @@ fno agents ask reviewer "what did you find?"            # message it; it works o
 
 Each agent runs its own loop and they coordinate over a message bus. Claude, Codex, and Gemini, one project.
 
+**Also in the box:**
+
+- A six-agent review panel reads the diff before it ships, integration and UX-flow tests, not just unit, via `/review`.
+- Provider rotation with failover and per-model lockout, so a flaky or rate-limited model doesn't stall the loop.
+- `/megatron` runs the same loop across a fleet of repos for cross-project missions.
+
 ## What it is
 
-An orchestration loop for shipping software, packaged as a plugin. Most loops re-run a prompt or fire on a timer; this one verifies against external truth (a real merged green PR with clean reviews) and reasons over a dependency graph to decide what to ship next. It survives session compactions, provider hiccups, and your skepticism. No vibes-based "done."
+An orchestration loop for shipping software, packaged as a plugin. Most loops re-run a prompt or fire on a timer; this one won't let a session stop until external truth says so: the PR exists, CI is actually green, and every required reviewer signed off with nothing blocking. It reasons over a dependency graph to decide what to ship next, and survives session compactions, provider hiccups, and your skepticism. No vibes-based "done."
 
 ## What it isn't
 
