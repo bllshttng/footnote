@@ -14,12 +14,11 @@
 # source. brew owns the venv + symlinks, so `brew uninstall`/`brew upgrade` are
 # clean (Locked Decisions 2 + 3).
 #
-# LAUNCH GATE: both satisfied for 0.1.0 (arm64). `fno` 0.1.0 is published to
-# PyPI (the shared gate with cargo + fno.sh), and the arm64 `url` + `sha256`
-# below are the real published wheel (kept in lockstep on every release bump).
-# The on_intel `url` + `sha256` stay placeholders: no x86_64 macOS wheel is
-# published yet (deferred, x-a6ae), and `depends_on arch: :arm64` makes that
-# branch unreachable until it ships.
+# LAUNCH GATE: satisfied for 0.1.0 on both macOS arches. `fno` 0.1.0 is
+# published to PyPI (the shared gate with cargo + fno.sh), and the arm64 +
+# x86_64 `url` + `sha256` below are the real published wheels (kept in lockstep
+# on every release bump). The x86_64 macOS wheel is cross-built on the macos-14
+# runner (the native Intel macos-13 image is retired); see release-wheels.yml.
 #
 # Deps: an own-tap formula installs with network, so `pip install` resolves the
 # Python deps from PyPI at install time. (Vendoring deps as offline `resource`
@@ -28,44 +27,39 @@
 class Fno < Formula
   desc "Autonomous delivery pipeline CLI (footnote)"
   homepage "https://github.com/bllshttng/footnote"
+
+  # The x86_64 wheel (macosx_10_12) is the top-level default so a `url` is ALWAYS
+  # defined - including on Linux, where the on_macos block is skipped. Homebrew
+  # validates url presence at load (before requirements), so without a top-level
+  # url a Linuxbrew user would hit a confusing `stable: url is missing` instead
+  # of the clean `depends_on :macos` refusal below. arm64 overrides this url (and
+  # adds its Sonoma floor) inside on_macos.
+  url "https://files.pythonhosted.org/packages/84/71/57d630e1ecda386573585f87e3893cfa191306fc86e849ca35386ea82cd9/fno-0.1.0-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
+  sha256 "729af7804d7c62c0d79b5d3784e694ad8499c05d223e27acbee33f323aa50991"
   license "Apache-2.0"
 
-  # 0.1.0 ships an arm64 wheel only; the Intel/x86_64 macOS wheel is deferred
-  # (backlog x-a6ae - the macos-13 runner image is retired). Refuse Intel cleanly
-  # here instead of falling through to the unfilled on_intel placeholder. Drop
-  # this line and fill on_intel below when the x86_64 wheel ships.
-  depends_on arch: :arm64
-  # The published wheel is tagged macosx_14_0, so pin the macOS floor to Sonoma:
-  # an arm64 Mac on macOS 11-13 would otherwise pass the formula and then hit an
-  # ugly pip "incompatible wheel" error instead of a clean Homebrew refusal up
-  # front. This also keeps a Linuxbrew user from a confusing "no url" error (it
-  # is a macOS gate). NOTE: when Intel is enabled (drop the arch gate + fill
-  # on_intel), make this floor arch-conditional - the x86_64 wheel targets a
-  # lower deployment floor (macosx_10_12) than the arm64 wheel.
-  depends_on macos: :sonoma
+  # Both macOS arches ship a wheel; the macOS floor is arch-conditional. The
+  # arm64 wheel is tagged macosx_14_0, so its Sonoma floor is pinned on arm only
+  # (an arm64 Mac on macOS 11-13 would otherwise pass and then hit an ugly pip
+  # "incompatible wheel" error); the x86_64 default targets macosx_10_12, so
+  # Intel needs no extra macOS gate beyond python@3.13's own. `depends_on :macos`
+  # refuses Linuxbrew, and the top-level url above makes that refusal the error a
+  # Linux user actually sees instead of "url is missing".
+  depends_on :macos
   depends_on "python@3.13"
 
-  # Per-arch platform wheels: the wheel carries native Rust binaries, so the URL
-  # must match the host arch. The wheel is also tagged macosx_14_0, so it needs
-  # macOS 14 (Sonoma) or newer. url + sha256 are the published PyPI file URL
-  # (content-hashed path) and its sha256.
-  #
+  # The wheel carries native Rust binaries, so the URL must match the host arch.
   # `using: :nounzip` keeps the wheel a FILE: a .whl is a zip, and an unpacked
   # wheel dir is not pip-installable (no build backend), so the install step
   # below pip-installs the wheel file directly rather than the unpacked tree.
+  # arm64 overrides the top-level x86_64 default with its own wheel + floor.
   on_macos do
     on_arm do
+      # The arm64 wheel is tagged macosx_14_0, so it requires Sonoma; the x86_64
+      # default targets macosx_10_12, so this floor is arm-only.
+      depends_on macos: :sonoma
       url "https://files.pythonhosted.org/packages/0f/29/009ccdefc9528fa2acd407b2458c87f3be0ff5424f288fc610120a5c004a/fno-0.1.0-py3-none-macosx_14_0_arm64.whl", using: :nounzip
       sha256 "0c452f9b2813f35ae5f246c7be087b7ceb5699856e6b2182e5039aadb64e5533"
-    end
-    on_intel do
-      # Deferred (x-a6ae): no x86_64 macOS wheel published yet. Unreachable while
-      # `depends_on arch: :arm64` is set above; fill when the Intel wheel ships.
-      # Placeholder path only: a real PyPI wheel lives under a content-hashed
-      # /packages/<hash>/ path (never /packages/source/, which is sdist-only);
-      # the real url is filled from the PyPI JSON at publish, like the arm64 url.
-      url "https://files.pythonhosted.org/packages/placeholder/fno-0.1.0-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
