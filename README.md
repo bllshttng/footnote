@@ -12,29 +12,28 @@ Really, I built this to ship my own projects faster. One of them became a busine
 
 ## Install
 
-Inside a Claude Code session:
+**Agent integration** - the `/fno:*` commands and the walk-away workflow. Each AI CLI installs its own integration; the Claude plugin also bundles the `fno` CLI (its postinstall puts it on your PATH in a new session), so you don't need a separate CLI install:
 
 ```
-/plugin marketplace add bllshttng/footnote
-/plugin install fno@footnote
+Claude Code:   /plugin marketplace add bllshttng/footnote
+               /plugin install fno@footnote
+Gemini CLI:    gemini extensions install https://github.com/bllshttng/footnote
+Codex CLI:     codex plugin marketplace add bllshttng/footnote   # then enable
 ```
 
-The plugin bundles the `fno` CLI and its postinstall hook puts it on your PATH in a new session. Then run `/fno:setup` to configure.
+Then configure with `/fno:setup` and point it at a feature:
 
-Prefer the CLI on its own? Pick a channel:
+```
+/fno:target "add OAuth login"
+```
+
+**CLI only** - just the `fno` binary, for scripting, CI, or driving footnote yourself. This installs `fno` but **not** the `/fno:*` slash commands (those need the agent integration above):
 
 ```
 curl -fsSL fno.sh | sh          # one-liner
 uv tool install fno             # uv  (or: pip install fno)
 brew install bllshttng/fno/fno  # homebrew
 cargo install fno               # cargo
-```
-
-**Other AI CLIs:**
-
-```
-gemini extensions install https://github.com/bllshttng/footnote   # Gemini CLI
-codex plugin marketplace add bllshttng/footnote                   # Codex CLI (then enable)
 ```
 
 Local-clone install and path configuration: [docs/getting-started.md](docs/getting-started.md).
@@ -82,9 +81,15 @@ fno agents ask reviewer "what did you find?"            # message it; it works o
 
 Each agent runs its own loop and they coordinate over a message bus. Claude, Codex, and Gemini, one project.
 
+**Also in the box:**
+
+- A six-agent review panel reads the diff before it ships, analyzing integration and UX-flow, not just unit tests, via `/review`.
+- Provider rotation with failover and per-model lockout, so a flaky or rate-limited model doesn't stall the loop.
+- `/megatron` runs the same loop across a fleet of repos for cross-project missions.
+
 ## What it is
 
-An orchestration loop for shipping software, packaged as a plugin. Most loops re-run a prompt or fire on a timer; this one verifies against external truth (a real merged green PR with clean reviews) and reasons over a dependency graph to decide what to ship next. It survives session compactions, provider hiccups, and your skepticism. No vibes-based "done."
+An orchestration loop for shipping software, packaged as a plugin. Most loops re-run a prompt or fire on a timer; this one won't let a session stop until external truth says so: the PR exists, CI is actually green, and every required reviewer has signed off with nothing blocking. It reasons over a dependency graph to decide what to ship next, and survives session compactions, provider hiccups, and your skepticism. No vibes-based "done."
 
 ## What it isn't
 
