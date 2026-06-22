@@ -1,6 +1,6 @@
 # Research layer: retrieve + store (Group 1)
 
-`fno research "X"` is the research-pipeline counterpart to `fno target`: where target runs a code task to a green PR, research runs a topic to a cited, eval-checkable evidence store. This doc covers **Group 1** - the retrieve + store foundation. The `doc` deliverable terminal, the advisory verify profile, and the `fno evals` research golden-task are **Group 2** (blocked on this group). Design doc: `internal/fno/plans/2026-06-21-fno-footnote-to-everything-gaps.md`.
+`fno research "X"` is the research-pipeline counterpart to `fno target`: where target runs a code task to a green PR, research runs a topic to a cited, eval-checkable evidence store. This doc covers **Group 1** - the retrieve + store foundation. The `doc` deliverable terminal, the advisory verify profile, and the `fno evals` research golden-task are **Group 2** (blocked on this group).
 
 ## The one retrieval path
 
