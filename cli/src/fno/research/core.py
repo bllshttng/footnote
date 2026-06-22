@@ -21,7 +21,6 @@ on untrusted web content).
 from __future__ import annotations
 
 import hashlib
-import html as _html
 import ipaddress
 import json
 import re
@@ -31,6 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
+from html.parser import HTMLParser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -57,10 +57,6 @@ _UA = "fno-research/0.1 (+https://github.com/jasonnoahchoi/footnote)"
 # non-text fetch: row recorded verified=false, never crashes the round.
 _TEXT_CT_RE = re.compile(r"\b(text/|application/(json|xml|xhtml))", re.IGNORECASE)
 
-_TAG_RE = re.compile(r"<[^>]+>")
-_SCRIPT_STYLE_RE = re.compile(
-    r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
-)
 _WS_RE = re.compile(r"[ \t\r\f\v]+")
 _BLANKLINES_RE = re.compile(r"\n{3,}")
 
@@ -100,6 +96,10 @@ def _guard_url(url: str) -> None:
         raise BlockedHost(f"unresolvable host: {host} ({e})") from e
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
+        # IPv4-mapped IPv6 (::ffff:127.0.0.1) does NOT report .is_private/.is_loopback
+        # on the IPv6 object - unwrap to the mapped v4 so it can't bypass the guard.
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
         if (
             ip.is_private
             or ip.is_loopback
@@ -211,12 +211,15 @@ def _run_ddgs(query: str, max_results: int) -> str:
             capture_output=True,
             text=True,
             check=False,
+            timeout=30,  # ddgs hits the network; never block the CLI indefinitely
         )
     except FileNotFoundError as e:
         raise DdgsUnavailable(
             "ddgs not found. Install the backbone: `pip install ddgs` "
             "(or `pipx install ddgs`)."
         ) from e
+    except subprocess.TimeoutExpired as e:
+        raise DdgsUnavailable(f"ddgs search timed out: {e}") from e
     if proc.returncode != 0:
         err = (proc.stderr or "").strip() or f"exit {proc.returncode}"
         raise DdgsUnavailable(f"ddgs failed (rate-limited?): {err}")
@@ -255,12 +258,43 @@ def search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[str]:
 # Self-fetch + extract
 # ---------------------------------------------------------------------------
 
+class _TextExtractor(HTMLParser):
+    """Strip tags + script/style bodies. Uses the stdlib parser instead of a
+    tag regex so text containing `<`/`>` (e.g. `x < y and y > z`) survives."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._skip = True
+        else:
+            self._parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self._skip = False
+        else:
+            self._parts.append(" ")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
 def _strip_html(body: str) -> str:
-    body = _SCRIPT_STYLE_RE.sub(" ", body)
-    body = _TAG_RE.sub(" ", body)
-    body = _html.unescape(body)
-    body = _WS_RE.sub(" ", body)
-    return _BLANKLINES_RE.sub("\n\n", body).strip()
+    parser = _TextExtractor()
+    try:
+        parser.feed(body)
+    except Exception:  # noqa: BLE001 - a malformed page never aborts the round
+        pass
+    text = _WS_RE.sub(" ", parser.text())
+    return _BLANKLINES_RE.sub("\n\n", text).strip()
 
 
 def fetch_url(url: str, timeout: int = _FETCH_TIMEOUT_S) -> FetchResult:
@@ -326,6 +360,8 @@ def read_sources(path: Path) -> list[Source]:
             continue
         try:
             d = json.loads(line)
+            if not isinstance(d, dict):
+                continue  # a bare list/str/number is not a source row
             out.append(
                 Source(
                     url=d["url"],
@@ -348,9 +384,11 @@ def read_sources(path: Path) -> list[Source]:
 def _run_claim(args: list[str]) -> tuple[int, str]:
     try:
         proc = subprocess.run(
-            ["fno", "claim", *args], capture_output=True, text=True, check=False
+            ["fno", "claim", *args], capture_output=True, text=True, check=False, timeout=10
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # Missing binary OR a hung/contended lock: degrade to the single-process
+        # assumption rather than blocking the whole pipeline.
         return (127, "")
     return (proc.returncode, (proc.stdout or "").strip())
 

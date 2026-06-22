@@ -136,6 +136,14 @@ def test_fetch_text_ok_and_html_stripped(monkeypatch: pytest.MonkeyPatch, _guard
     assert r.ok and "Hi there" in r.text and "bad()" not in r.text
 
 
+def test_fetch_keeps_angle_brackets_in_text(monkeypatch: pytest.MonkeyPatch, _guard_ok) -> None:
+    # The regex stripper would eat "< y and y >" as a tag; HTMLParser keeps it.
+    html = b"<p>compare x &lt; y and y &gt; z here</p>"
+    monkeypatch.setattr(core, "_opener", lambda: _FakeOpener(_Resp(html, "text/html")))
+    r = core.fetch_url("https://x.com")
+    assert r.ok and "x < y and y > z here" in r.text
+
+
 def test_fetch_non_text_recorded_unverified(monkeypatch: pytest.MonkeyPatch, _guard_ok) -> None:
     monkeypatch.setattr(core, "_opener", lambda: _FakeOpener(_Resp(b"%PDF", "application/pdf")))
     r = core.fetch_url("https://x.com/doc.pdf")
@@ -179,6 +187,15 @@ def test_guard_rejects_non_public_hosts(ip: str, monkeypatch: pytest.MonkeyPatch
         core._guard_url("https://evil.example/meta")
 
 
+@pytest.mark.parametrize("ip", ["::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:10.0.0.1"])
+def test_guard_rejects_ipv4_mapped_ipv6_bypass(ip: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # ::ffff:127.0.0.1 does not report .is_loopback on the IPv6 object - the
+    # guard must unwrap the mapped v4 or the SSRF protection is bypassable.
+    monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: _addrinfo(ip))
+    with pytest.raises(core.BlockedHost):
+        core._guard_url("https://evil.example/meta")
+
+
 def test_guard_allows_public_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34"))
     core._guard_url("https://example.com/page")  # does not raise
@@ -217,6 +234,8 @@ def test_append_and_read_sources_skips_malformed(tmp_path: Path) -> None:
     p = tmp_path / "t.sources.jsonl"
     core.append_source(p, core.Source("https://a", "2026-01-01", "h", "x", True))
     p.open("a").write("{not json}\n")
+    p.open("a").write('["a bare list is not a row"]\n')
+    p.open("a").write("42\n")
     core.append_source(p, core.Source("https://b", "2026-01-01", "", "", False, "http 500"))
     rows = core.read_sources(p)
     assert [r.url for r in rows] == ["https://a", "https://b"]
