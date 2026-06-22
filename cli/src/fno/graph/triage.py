@@ -307,6 +307,57 @@ def _load_proposal(path: Path) -> dict:
         raise typer.Exit(code=2)
 
 
+def _copeland_rank(
+    ids: list[str],
+    verdicts: list[dict],
+    meta: Optional[dict[str, tuple]] = None,
+) -> list[dict]:
+    """Order ``ids`` best-first from pairwise verdicts via Copeland score.
+
+    Tournament ordering: comparative judgment ("ship X or Y first?") is more
+    reliable than one-shot absolute scoring for qualitative ranking. Each
+    verdict is ``{"winner": id, "loser": id}``. The Copeland
+    score is ``wins - losses``; contradictory or cyclic verdicts are tolerated
+    (they net out) rather than rejected, and a verdict naming an id outside
+    ``ids`` is ignored. Deterministic tiebreak: higher net, then ``meta``
+    (priority rank asc, created_at asc), then id.
+
+    ponytail: Copeland over an explicit verdict list, not Elo/Swiss. No
+    iterative rating, no match scheduling - the skill enumerates the pairs and
+    the LLM judges them; this just folds the answers into one stable order.
+    """
+    idset = list(dict.fromkeys(ids))  # de-dupe, preserve first-seen order
+    present = set(idset)
+    wins = {i: 0 for i in idset}
+    losses = {i: 0 for i in idset}
+    for v in verdicts:
+        if not isinstance(v, dict):
+            continue
+        win, lose = v.get("winner"), v.get("loser")
+        # isinstance guard before the membership test: a non-str (list/dict)
+        # value from malformed JSON is unhashable and would raise TypeError on
+        # `in present`. Verdicts are external input, so validate at the boundary.
+        if (
+            isinstance(win, str)
+            and isinstance(lose, str)
+            and win in present
+            and lose in present
+            and win != lose
+        ):
+            wins[win] += 1
+            losses[lose] += 1
+    meta = meta or {}
+
+    def _key(i: str):
+        prio, created = meta.get(i, (99, ""))
+        return (-(wins[i] - losses[i]), prio, created, i)
+
+    return [
+        {"id": i, "wins": wins[i], "losses": losses[i], "net": wins[i] - losses[i]}
+        for i in sorted(idset, key=_key)
+    ]
+
+
 def _build_dependency_map(entries: list[dict]) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     for e in entries:
@@ -517,6 +568,78 @@ def cmd_propose(
         typer.echo("\n".join(header), err=True)
 
     typer.echo(json.dumps(proposal, indent=2))
+
+
+@cli.command("rank")
+def cmd_rank(
+    verdicts: Optional[Path] = typer.Option(
+        None,
+        "--verdicts",
+        help=(
+            'JSON file of pairwise verdicts [{"winner": id, "loser": id}, ...]. '
+            "Reads stdin when omitted."
+        ),
+    ),
+) -> None:
+    """Fold pairwise comparison verdicts into one total order (Copeland).
+
+    The deterministic seam of tournament triage: the /triage skill judges
+    candidate PAIRS with the LLM (comparative judgment beats one-shot
+    absolute scoring), then this verb aggregates those verdicts into a single
+    consistent order, tolerating the occasional contradictory/cyclic verdict.
+    Apply the resulting order with ``fno backlog rank --top/--after``.
+
+    Participants are the verdict ids that exist in the graph (unknown ids are
+    dropped, mirroring validate). Output is JSON:
+    ``{"order": [{"id", "title", "wins", "losses", "net"}, ...]}`` best-first.
+    """
+    import sys
+
+    from fno.graph._constants import PRIORITY_ORDER
+    from fno.graph.store import read_graph
+
+    try:
+        raw = verdicts.read_text() if verdicts else sys.stdin.read()
+    except OSError as e:
+        typer.echo(f"Error: could not read verdicts: {e}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        typer.echo(f"Error: verdicts are not valid JSON: {e}", err=True)
+        raise typer.Exit(code=2)
+    # Accept either a bare list or {"verdicts": [...]}.
+    pairs = data.get("verdicts", []) if isinstance(data, dict) else data
+    if not isinstance(pairs, list):
+        typer.echo("Error: verdicts must be a JSON list of {winner, loser}", err=True)
+        raise typer.Exit(code=2)
+
+    entries = read_graph(_graph_path())
+    by_id = {e.get("id"): e for e in entries if isinstance(e.get("id"), str)}
+
+    # Participants are verdict ids that actually exist in the graph. Dropping
+    # unknown ids (an LLM typo or a stale node) mirrors the validate path and
+    # keeps the emitted order applyable: a non-graph id would survive to the
+    # output with a null title and then fail `fno backlog rank`.
+    ids: list[str] = []
+    for v in pairs:
+        if isinstance(v, dict):
+            for k in ("winner", "loser"):
+                val = v.get(k)
+                if isinstance(val, str) and val in by_id:
+                    ids.append(val)
+
+    meta = {
+        i: (
+            PRIORITY_ORDER.get(by_id.get(i, {}).get("priority", "p2"), 2),
+            by_id.get(i, {}).get("created_at", "") or "",
+        )
+        for i in set(ids)
+    }
+    ranked = _copeland_rank(ids, pairs, meta)
+    for r in ranked:
+        r["title"] = by_id.get(r["id"], {}).get("title")
+    typer.echo(json.dumps({"order": ranked}, indent=2))
 
 
 @cli.command("validate")
