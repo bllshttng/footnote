@@ -175,6 +175,29 @@ Backward compat: plans without `kill_criteria:` return exit 0 (no abort).
 Malformed predicates log WARN and are skipped (never abort on an
 unparseable criterion).
 
+#### Session-Project Invariant (per wave, MANDATORY)
+
+**Before executing any wave, check whether it belongs to this session's
+project.** A `/do` session operates only in its own project; a wave whose
+`project:` differs from the session project is **foreign** and must NOT be
+executed here. Resolve the session project (plan frontmatter `project:`, or the
+target-state node's `project`) and compare it to each `wave.project`:
+
+- **local** (`wave.project` empty or == session project): execute normally.
+- **foreign + unblocked node**: spawn `fno agents spawn --provider claude --cwd
+  <root> "target-<node>" "/target <node>"`, mark the wave DELEGATED in STATE.md,
+  continue this session's own waves. Never `cd` into the foreign repo.
+- **foreign + blocked node**: do NOT spawn (a worker would refuse on the blocked
+  node); record `fno carveout add --kind deferred ...` and rely on G1's
+  merge-triggered dispatch. Log the deferral.
+- **foreign + unmapped project** (`fno backlog project-root` exits 1) or
+  **node-less foreign wave**: REFUSE by name; do not guess a cwd.
+
+Every foreign wave prints a one-line receipt or deferral - none is silently
+skipped. Load
+[references/session-project-invariant.md](references/session-project-invariant.md)
+for the full decision table, exact commands, and receipt formats.
+
 For each wave in order:
 
 **If mode: sequential**

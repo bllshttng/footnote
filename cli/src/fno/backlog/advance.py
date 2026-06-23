@@ -469,3 +469,224 @@ def advance(
     except Exception:
         pass
     return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+
+
+# ---------------------------------------------------------------------------
+# advance_dependents() - cross-project successor dispatch (G1 / AC5-FR)
+# ---------------------------------------------------------------------------
+#
+# advance() above dispatches the project-scoped `next` ready node (same-project
+# auto-continue). It deliberately CANNOT reach a dependent in another project:
+# `fno backlog next --project <closed.project>` filters foreign nodes out. So a
+# merge of A (project etl) never dispatches B (project web, blocked_by A).
+#
+# advance_dependents() closes that gap by following `blocked_by` EDGES instead of
+# a project-scoped selection: for each now-unblocked DIRECT dependent in a
+# DIFFERENT project, it spawns `/target no-merge <dep> --cwd <dep project root>`.
+# The two paths are intentionally distinct (Domain Pitfall: dispatch-by-edge vs
+# select-next must not be conflated) and share the same dispatch:<id> dedup +
+# node:<id> liveness + spawn machinery, so the same successor observed by both
+# advance() and advance_dependents() (or by two triggers) dispatches at most once.
+
+
+def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> list[dict]:
+    """Ready, cross-project, direct ``blocked_by`` dependents of the closed node.
+
+    Reads the graph (``read_graph`` recomputes ``_status`` at read), so a
+    dependent whose only open blocker was the just-closed node already reads
+    ``ready`` here. Returns minimal dicts ``{id, project, slug, cwd}``.
+
+    Cross-project ONLY (``project != closed_project``): same-project successors
+    stay with advance()'s project-scoped ``next`` selection so existing behavior
+    is byte-identical (Boundaries: a pure single-project plan dispatches nothing
+    new here). Raises on a graph read error so advance_dependents skips rather
+    than guessing (Failure Modes: Errors).
+    """
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+
+    entries = read_graph(graph_json())
+    out: list[dict] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if closed_node_id not in (e.get("blocked_by") or []):
+            continue
+        # "now-unblocked" == ready: blocker done + no other open blocker + has a
+        # plan. A still-blocked dependent reads `blocked`; a plan-less one reads
+        # `idea`; a claimed/done/deferred one reads its own bucket - all excluded.
+        if e.get("_status") != "ready":
+            continue
+        # An in-flight PR (pr_number set, not yet merged-and-closed) still reads
+        # `ready` because completed_at is only set at close. The project-scoped
+        # `next` path excludes these via _has_unmerged_open_pr; mirror it here so
+        # a dependent already in review is not re-dispatched once the dispatch TTL
+        # expires and a later reconcile/advance fires for the same blocker (codex
+        # P2). The PID-based node:<id> claim dies with the builder, leaving no
+        # in-flight signal behind, so this field guard is the durable one.
+        if e.get("pr_number") and not e.get("completed_at"):
+            continue
+        if (e.get("project") or None) == (closed_project or None):
+            continue  # same-project -> advance()'s `next` owns it
+        node_id = e.get("id")
+        if not node_id:
+            continue
+        out.append({
+            "id": node_id,
+            "project": e.get("project"),
+            "slug": e.get("slug") or e.get("title"),
+            "cwd": e.get("cwd"),
+        })
+    return out
+
+
+def _walker_live_at(project_root: str) -> bool:
+    """True when the DEPENDENT project's own megawalk/active-backlog walker is
+    live. Its ``walker:<root>`` claim lives under ``<root>/.fno/claims`` (the
+    megawalk loop writes it from that project's checkout), which is a different
+    claims root from this process's, so check it there explicitly. A live walker
+    there will pick the node up itself; spawning would double-launch into that
+    repo (codex P2). Best-effort: a probe error never blocks dispatch."""
+    from fno.claims.core import claim_status
+
+    try:
+        return claim_status(
+            f"walker:{project_root}", root=Path(project_root)
+        ).get("state") == "live"
+    except Exception:  # noqa: BLE001 - a probe error must not block dispatch
+        return False
+
+
+def _dispatch_one_dependent(
+    dep: dict, closed_node_id: str, ev_path: Path, verbose: bool
+) -> AdvanceResult:
+    """Resolve one dependent's own project root, dedup, and spawn its worker.
+
+    Reuses advance()'s claim + spawn + event machinery so a cross-project
+    dispatch is byte-for-byte the same launch as a same-project one, only with a
+    different (mapped) ``--cwd`` root.
+    """
+    node_id = dep["id"]
+
+    def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
+        data: dict = {"reason": reason, "node_id": node_id, "closed_node_id": closed_node_id}
+        if detail:
+            data["detail"] = detail[:200]
+        _emit(EVENT_SKIPPED, data, ev_path)
+        return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail)
+
+    def failed(error: str) -> AdvanceResult:
+        _emit(
+            EVENT_FAILED,
+            {"node_id": node_id, "closed_node_id": closed_node_id, "error": error[:200]},
+            ev_path,
+        )
+        return AdvanceResult("failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error)
+
+    # Resolve the dependent's OWN project root from the work map. Reject (never
+    # guess a cwd for) an unmapped project, surfacing it by name so the operator
+    # sees which project is missing from config.work.workspaces (Boundaries).
+    project = dep.get("project")
+    if not project:
+        return skip("no-project")
+    from fno.graph._intake import project_root_from_settings
+
+    root = project_root_from_settings(project)
+    if not root:
+        return skip("unmapped-project", detail=project)
+
+    # The spawned worker runs in the DEPENDENT's repo, not this one. If that
+    # project already has a live walker, let it claim the node - spawning here
+    # would launch a second target into that repo (codex P2). Checked at the
+    # dependent root because its walker claim lives under that root's .fno/claims.
+    if _walker_live_at(root):
+        return skip("walker-live")
+
+    # Already being worked? Same liveness gate as advance() step 4.
+    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+        return skip("already-claimed")
+
+    from fno.claims.core import ClaimHeldByOther, acquire_claim
+
+    dispatch_key = f"dispatch:{node_id}"
+    holder = f"advance:{os.getpid()}"
+    dispatch_root = _claims_root_for(dispatch_key)
+    try:
+        acquire_claim(
+            dispatch_key,
+            holder,
+            ttl_ms=_DISPATCH_TTL_MS,
+            reason=f"cross-project dispatch for {node_id} (dep of {closed_node_id})",
+            root=dispatch_root,
+        )
+    except ClaimHeldByOther:
+        return skip("already-claimed")
+    except Exception as exc:  # noqa: BLE001
+        return skip("claim-error", detail=str(exc))
+
+    try:
+        short_id = _spawn_worker(node_id, root, dep.get("slug"))
+    except SpawnAlreadyRunning:
+        _safe_release(dispatch_key, holder, dispatch_root)
+        return skip("already-claimed")
+    except Exception as exc:  # noqa: BLE001
+        _safe_release(dispatch_key, holder, dispatch_root)
+        return failed(str(exc))
+
+    _emit(
+        EVENT_DISPATCHED,
+        {
+            "node_id": node_id,
+            "short_id": short_id,
+            "closed_node_id": closed_node_id,
+            "agent_name": _worker_agent_name(node_id, dep.get("slug")),
+            "cross_project": True,
+        },
+        ev_path,
+    )
+    if verbose:
+        print(
+            f"advance: dispatched cross-project dependent {node_id} -> "
+            f"target worker {short_id} (--cwd {root})",
+            file=sys.stderr,
+        )
+    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+
+
+def advance_dependents(
+    *,
+    closed_node_id: str,
+    closed_project: Optional[str] = None,
+    project_root: Optional[Path] = None,
+    events_path: Optional[Path] = None,
+    verbose: bool = False,
+) -> list[AdvanceResult]:
+    """Dispatch the closed node's now-unblocked cross-project dependents (G1).
+
+    Called alongside advance() on the merge event (reconcile + ``backlog
+    advance --closed``). Gated on the same opt-in as advance() and strictly
+    non-fatal. Emits exactly one decision event per dependent (dispatched /
+    skipped / failed); a clean run with no cross-project dependents emits
+    nothing and returns ``[]`` (Boundaries: a zero-dependent close is a no-op).
+    """
+    ev_path = events_path if events_path is not None else _events_path(project_root)
+
+    # Same opt-in gate as advance(); resolved against the closed node's project
+    # context. advance() already recorded the disabled/walker-live decision for
+    # this merge event, so we add no duplicate event here - just no-op.
+    if not auto_continue_enabled(project_root=project_root):
+        return []
+    if _claim_is_live(_walker_key()):
+        return []
+
+    try:
+        deps = _direct_dependents(closed_node_id, closed_project)
+    except Exception as exc:  # noqa: BLE001 - never guess on a read error
+        _emit(
+            EVENT_SKIPPED,
+            {"reason": "dependents-error", "closed_node_id": closed_node_id, "detail": str(exc)[:200]},
+            ev_path,
+        )
+        return [AdvanceResult("skipped", EVENT_SKIPPED, reason="dependents-error", detail=str(exc))]
+
+    return [_dispatch_one_dependent(dep, closed_node_id, ev_path, verbose) for dep in deps]

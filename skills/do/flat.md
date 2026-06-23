@@ -60,6 +60,14 @@ Backward compat: plans without a `## Kill Criteria` block (most focused
 plans will not have one) return exit 0 (no abort). Malformed predicates
 log WARN to stderr and are skipped.
 
+**Session-project invariant:** a flat plan is single-project by construction.
+If a numbered change would edit a file **outside this session's project repo
+root**, STOP — do NOT `cd` into the other repo and edit it. Surface that work as
+a backlog node and spawn a worker into its project
+(`fno agents spawn --provider claude --cwd <root> "target-<node>" "/target <node>"`),
+or, if no node exists yet, report it so the user can `/blueprint` it. See
+[references/session-project-invariant.md](references/session-project-invariant.md).
+
 For each numbered change under `## Changes`:
 
 1. **Read** the target file(s) listed in the change
