@@ -25,7 +25,9 @@ from typing import Callable, Optional
 _MARKETPLACE = "bllshttng/footnote"
 _REPO_URL = "https://github.com/bllshttng/footnote"
 
-Runner = Callable[[list], "subprocess.CompletedProcess"]
+# A subprocess runner: takes an argv list (and an optional timeout) and returns
+# a CompletedProcess. `...` keeps the optional timeout kwarg in the contract.
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 @dataclass
@@ -53,7 +55,7 @@ class IntegrationAdapter:
     install: Callable[[], IntegrationResult]
 
 
-def _run(cmd: list, timeout: int = 120) -> "subprocess.CompletedProcess":
+def _run(cmd: list[str], timeout: int = 120) -> "subprocess.CompletedProcess[str]":
     """Run a command, capturing output, never raising.
 
     A vanished binary / timeout / OS error becomes a returncode-1 result so
@@ -124,7 +126,9 @@ def _claude_skills_dir_install(run: Runner) -> IntegrationResult:
     dest = _claude_skills_dir()
     if (dest / ".claude-plugin" / "plugin.json").exists():
         return IntegrationResult("claude", label, "already-installed", note="skills-dir")
-    clone = run(["git", "clone", "--depth", "1", _REPO_URL, str(dest)])
+    # A full-repo shallow clone over a slow link can outrun the default 120s, so
+    # give the one network-heavy step more room before it fails closed.
+    clone = run(["git", "clone", "--depth", "1", _REPO_URL, str(dest)], timeout=300)
     if clone.returncode == 0:
         return IntegrationResult(
             "claude", label, "installed", note="skills-dir; no `claude plugin update`"
@@ -175,7 +179,7 @@ def _codex_install(run: Runner) -> IntegrationResult:
     return IntegrationResult("codex", label, "failed", note=_tail(res.stderr))
 
 
-def build_adapters(run: Runner = _run) -> list:
+def build_adapters(run: Runner = _run) -> "list[IntegrationAdapter]":
     """The v1 adapter registry: claude (preferred + skills-dir fallback), gemini,
     codex. hermes / openclaw are intentionally absent - their install surfaces
     are unverified, and printing a command that does not exist is worse than
@@ -208,10 +212,10 @@ def build_adapters(run: Runner = _run) -> list:
 
 def run_cli_integration(
     *,
-    select_fn: Callable[[list], list],
+    select_fn: "Callable[[list[dict[str, object]]], list[str]]",
     echo_fn: Callable[[str], None] = lambda _m: None,
-    adapters: Optional[list] = None,
-) -> list:
+    adapters: "Optional[list[IntegrationAdapter]]" = None,
+) -> "list[IntegrationResult]":
     """Interactive-agnostic core of the ``fno setup`` CLI-integration step.
 
     Detects agent CLIs on PATH, pre-marks already-installed integrations, asks

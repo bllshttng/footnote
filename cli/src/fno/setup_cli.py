@@ -347,17 +347,17 @@ def wizard_cmd(
 
     typer.echo("\nAgent CLI integration - add the /fno:* commands to your CLI:")
 
-    def select_fn(options: list) -> list:
+    def select_fn(options: list[dict[str, object]]) -> list[str]:
         # No native multi-select primitive in a plain terminal, so degrade to a
         # per-CLI yes/no over the not-yet-installed rows (already-installed ones
         # were echoed and are skipped). Ctrl-C stops asking, installs nothing more.
-        chosen: list = []
+        chosen: list[str] = []
         for opt in options:
             if opt["installed"]:
                 continue
             try:
                 if typer.confirm(f"  Wire up {opt['label']}?", default=False):
-                    chosen.append(opt["cli"])
+                    chosen.append(str(opt["cli"]))
             except typer.Abort:
                 break
         return chosen
