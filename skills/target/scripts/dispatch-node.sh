@@ -142,6 +142,23 @@ for id in "${NODES[@]}"; do
       continue ;;
   esac
 
+  # Open-PR guard (mirrors _has_unmerged_open_pr, cli.py:68): a node that already
+  # carries a pr_number but is not yet done is in flight / in review - the PR
+  # outlives the builder's PID node:<id> claim once that worker exits.
+  # The selection guard inside `fno backlog next`/`ready` already drops these,
+  # but the explicit-id path reads `fno backlog get` directly and skips it, so
+  # mirror it here: park instead of launching a duplicate. completed_at => done
+  # was already handled by the case above; this catches the PR window before close.
+  # One jq pass for both fields (tab-separated); read splits them. An empty/
+  # failed parse leaves both empty -> falls through to dispatch (prior behavior).
+  IFS=$'\t' read -r pr_number completed_at <<< "$(printf '%s' "$node_json" \
+    | jq -r '[.pr_number // "", .completed_at // ""] | @tsv' 2>/dev/null)"
+  if [[ -n "$pr_number" && -z "$completed_at" ]]; then
+    echo "already-running $id reason=\"node carries open PR #$pr_number; not re-dispatching\""
+    n_already=$((n_already + 1))
+    continue
+  fi
+
   # Provenance-carrying name: target-<full-node-id>-<slug> so the bg thread title
   # reads at a glance which node a /target worker is on (e.g.
   # target-ab-4040eee8-cargo-bootstrapper). The slug is the node's title-derived

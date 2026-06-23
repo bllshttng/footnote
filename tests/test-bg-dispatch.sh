@@ -46,15 +46,19 @@ case "$sub $verb" in
     id="${3:-}"
     [[ -f "$S/get_err" ]] && exit 1            # simulate a transient read failure
     if [[ -f "$S/status_$id" ]]; then
+      # Emit pr_number (open-PR guard sim) when pr_<id> is set; otherwise
+      # omit the field so the guard's `.pr_number // empty` stays empty.
+      pr_fragment=""
+      [[ -f "$S/pr_$id" ]] && pr_fragment=",\"pr_number\":\"$(cat "$S/pr_$id")\",\"completed_at\":null"
       # Emit _resolved_cwd when set, otherwise omit the field (stale-abi sim).
       if [[ -f "$S/resolved_cwd_$id" ]]; then
-        printf '{"id":"%s","_status":"%s","_resolved_cwd":"%s","cwd":"%s"}\n' \
+        printf '{"id":"%s","_status":"%s","_resolved_cwd":"%s","cwd":"%s"%s}\n' \
           "$id" "$(cat "$S/status_$id")" \
           "$(cat "$S/resolved_cwd_$id")" \
-          "$(cat "$S/cwd_$id" 2>/dev/null || echo "")"
+          "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment"
       else
-        printf '{"id":"%s","_status":"%s","cwd":"%s"}\n' \
-          "$id" "$(cat "$S/status_$id")" "$(cat "$S/cwd_$id" 2>/dev/null || echo "")"
+        printf '{"id":"%s","_status":"%s","cwd":"%s"%s}\n' \
+          "$id" "$(cat "$S/status_$id")" "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment"
       fi
     else
       exit 1   # unknown node -> nonzero, no output (mirrors not-found)
@@ -119,7 +123,8 @@ set_claim()  { echo "$2" > "$MOCKSTATE/claim_$1"; }
 set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2" > "$MOCKSTATE/agents_list.json"; }
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
 set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
-reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log 2>/dev/null || true; }
+set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
+reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
 
 echo "=============================================="
@@ -194,6 +199,19 @@ echo "$out" | grep -q "^already-running ab-dddd4444 " \
 [[ "$(ask_count)" -eq 0 ]] \
   && pass "AC5-EDGE: already-running did NOT dispatch a second worker" \
   || fail "AC5-EDGE: a worker was dispatched for a live-claimed node"
+
+# ---- open-PR guard: a node carrying an open PR is parked, NOT re-dispatched ----
+# A no-merge worker links pr_number at PR creation, so even after its PID claim
+# dies the explicit-id dispatch path must treat the node as in flight:
+# ready status + free claim (dead worker) + open PR.
+reset_mock; set_status ab-ffff6666 ready; set_claim ab-ffff6666 free; set_pr ab-ffff6666 16
+out="$(bash "$DISPATCH" ab-ffff6666 2>&1)"
+echo "$out" | grep -q '^already-running ab-ffff6666 reason="node carries open PR #16' \
+  && pass "open-PR guard: open-PR node reported already-running" \
+  || fail "open-PR guard: expected already-running open-PR line, got: $out"
+[[ "$(ask_count)" -eq 0 ]] \
+  && pass "open-PR guard: open-PR node did NOT dispatch a duplicate worker" \
+  || fail "open-PR guard: a duplicate worker was dispatched for an open-PR node"
 
 # ---- AC5-EDGE: a READY node with a stale claim is recoverable (re-dispatch) ----
 reset_mock; set_status ab-dddd4444 ready; set_claim ab-dddd4444 stale
