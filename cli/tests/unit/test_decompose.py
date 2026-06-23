@@ -157,6 +157,96 @@ def test_inherits_epic_project_cwd(graph_env):
         assert c["cwd"] == "/tmp/abilities"
 
 
+# -- per-group repo routing (multi-repo decomposition) --
+
+
+def _patch_workmap(monkeypatch, mapping):
+    """Stub project_root_from_settings so a known project resolves to a root."""
+    import fno.graph._intake as intake
+
+    monkeypatch.setattr(
+        intake, "project_root_from_settings", lambda p: mapping.get(p)
+    )
+
+
+def test_per_group_project_derives_cwd_from_workmap(graph_env, monkeypatch):
+    """A group with `project` routes the child into that repo, cwd from work-map."""
+    g, read_entries = graph_env
+    _patch_workmap(monkeypatch, {"web": "/repos/web"})
+    groups = [
+        {"slug": "1", "title": "G1 backend", "waves": "1", "blocked_by_groups": []},
+        {"slug": "2", "title": "G2 web", "waves": "2", "blocked_by_groups": ["1"],
+         "project": "web"},
+    ]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    by_frag = {e["plan_path"]: e for e in read_entries() if e.get("parent") == "ab-epic0001"}
+    g1 = by_frag["internal/fno/plans/big.md#group-1"]
+    g2 = by_frag["internal/fno/plans/big.md#group-2"]
+    # G1 inherits the epic's repo; G2 routed into web.
+    assert (g1["project"], g1["cwd"]) == ("fno", "/tmp/abilities")
+    assert (g2["project"], g2["cwd"]) == ("web", "/repos/web")
+
+
+def test_per_group_explicit_cwd_used(graph_env, monkeypatch):
+    """An explicit cwd is used verbatim (abspath); project still inherits epic."""
+    g, read_entries = graph_env
+    _patch_workmap(monkeypatch, {})  # work-map not consulted when cwd is explicit
+    groups = [
+        {"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": [],
+         "cwd": "/custom/root"},
+    ]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    child = next(e for e in read_entries() if e.get("parent") == "ab-epic0001")
+    assert child["cwd"] == "/custom/root"
+    assert child["project"] == "fno"  # inherited (no explicit project)
+
+
+def test_per_group_unmapped_project_refused_atomically(graph_env, monkeypatch):
+    """An unmapped project is refused before any write (atomic), not guessed."""
+    g, read_entries = graph_env
+    _patch_workmap(monkeypatch, {})  # nothing resolves
+    groups = [
+        {"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []},
+        {"slug": "2", "title": "G2", "waves": "2", "blocked_by_groups": ["1"],
+         "project": "ghost"},
+    ]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert result.exit_code == 1
+    assert "work-map" in result.output
+    # Atomic: no children created despite the first group being valid.
+    assert [e for e in read_entries() if e.get("parent") == "ab-epic0001"] == []
+
+
+def test_redecompose_adds_route_reprojects_existing(graph_env, monkeypatch):
+    """A second pass that adds a route reprojects the already-created child."""
+    g, read_entries = graph_env
+    _patch_workmap(monkeypatch, {"web": "/repos/web"})
+    base = [{"slug": "2", "title": "G2", "waves": "2", "blocked_by_groups": []}]
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(base)])
+    child = next(e for e in read_entries() if e.get("parent") == "ab-epic0001")
+    assert child["project"] == "fno"  # inherited on first pass
+
+    routed = [{"slug": "2", "title": "G2", "waves": "2", "blocked_by_groups": [],
+               "project": "web"}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(routed)])
+    assert result.exit_code == 0, result.output
+    children = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+    assert len(children) == 1  # upsert, not duplicate
+    assert (children[0]["project"], children[0]["cwd"]) == ("web", "/repos/web")
+
+
+def test_invalid_project_type_rejected(graph_env):
+    """A non-string project is a spec error (exit 1), nothing written."""
+    g, read_entries = graph_env
+    groups = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": [],
+               "project": 123}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert result.exit_code == 1
+    assert [e for e in read_entries() if e.get("parent") == "ab-epic0001"] == []
+
+
 # -- AC1-UI: command feedback --
 
 

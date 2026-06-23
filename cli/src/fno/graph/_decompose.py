@@ -18,12 +18,20 @@ GROUP_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 
 
 class NormalizedGroup(TypedDict):
-    """A validated group spec. The four keys are guaranteed present."""
+    """A validated group spec. All keys are guaranteed present.
+
+    `project`/`cwd` are None when the group inherits the epic's repo, or carry
+    the per-group routing for a child that belongs to a different repo (the
+    cross-project decomposition path). cwd resolution from `project` happens in
+    the CLI, outside the graph lock; validation here only checks shape.
+    """
 
     slug: str
     title: str
     waves: str
     blocked_by_groups: list[str]
+    project: Optional[str]
+    cwd: Optional[str]
 
 
 class DecomposeError(ValueError):
@@ -141,12 +149,31 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
                 f"group {slug!r} blocked_by_groups must be a list of slugs",
                 exit_code=1,
             )
+        # Optional per-group repo routing. When present each must be a non-empty
+        # string; absent -> None (inherit the epic's project/cwd). cwd is NOT
+        # resolved here (that needs a settings read, done in the CLI outside the
+        # graph lock); validation only checks shape so a bad spec fails before
+        # any graph write (atomicity).
+        project = grp.get("project")
+        if project is not None and (not isinstance(project, str) or not project.strip()):
+            raise DecomposeError(
+                f"group {slug!r} project must be a non-empty string when set",
+                exit_code=1,
+            )
+        cwd = grp.get("cwd")
+        if cwd is not None and (not isinstance(cwd, str) or not cwd.strip()):
+            raise DecomposeError(
+                f"group {slug!r} cwd must be a non-empty string when set",
+                exit_code=1,
+            )
         normalized.append(
             {
                 "slug": slug,
                 "title": title.strip(),
                 "waves": str(grp.get("waves", "")).strip(),
                 "blocked_by_groups": list(deps),
+                "project": project.strip() if isinstance(project, str) else None,
+                "cwd": cwd.strip() if isinstance(cwd, str) else None,
             }
         )
 

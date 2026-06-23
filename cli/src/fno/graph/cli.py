@@ -501,7 +501,11 @@ def cmd_decompose(
         ...,
         "--groups",
         help=(
-            "JSON array of {slug,title,waves,blocked_by_groups} group specs. "
+            "JSON array of {slug,title,waves,blocked_by_groups[,project][,cwd]} "
+            "group specs. Optional per-group project/cwd route a child into a "
+            "different repo (multi-repo decomposition): project resolves its cwd "
+            "from the settings work-map; an explicit cwd overrides; absent -> "
+            "inherit the epic's repo. "
             "Prefix '@' to read a file (--groups @groups.json) or pass '-' to read stdin."
         ),
     ),
@@ -578,6 +582,32 @@ def cmd_decompose(
         emit_error(ctx, str(e))
         raise typer.Exit(code=e.exit_code)
 
+    # 3b. Resolve per-group repo routing OUTSIDE the graph lock (settings reads
+    #     never happen under the lock, mirroring `update`). A group with an
+    #     explicit cwd uses it as-is; a group with only a project derives its
+    #     cwd from the work-map and is REFUSED (atomically, before any write) if
+    #     that project is unmapped - guessing a cwd would silently record foreign
+    #     work under the wrong repo and break spawn-into-project. No project/cwd
+    #     -> (None, None) = inherit the epic's repo (the single-repo default).
+    from fno.graph._intake import project_root_from_settings
+    slug_route: dict[str, tuple[Optional[str], Optional[str]]] = {}
+    for grp in norm:
+        gproj, gcwd = grp["project"], grp["cwd"]
+        if gcwd is not None:
+            slug_route[grp["slug"]] = (gproj, os.path.abspath(os.path.expanduser(gcwd)))
+        elif gproj is not None:
+            root = project_root_from_settings(gproj)
+            if root is None:
+                emit_error(
+                    ctx,
+                    f"group {grp['slug']!r} project {gproj!r} is not in any "
+                    "settings.yaml work-map; add it there or pass an explicit cwd",
+                )
+                raise typer.Exit(code=1)
+            slug_route[grp["slug"]] = (gproj, root)
+        else:
+            slug_route[grp["slug"]] = (None, None)
+
     keep_slugs = {g["slug"] for g in norm}
     results: list[dict] = []
     epic_id_box: list[str] = [epic_id]
@@ -629,16 +659,24 @@ def cmd_decompose(
                 ),
                 None,
             )
+            route_proj, route_cwd = slug_route[grp["slug"]]
             if existing is not None:
                 action = "updated"
                 node = existing
+                # Re-running with an explicit route reprojects an existing child
+                # (e.g. a first pass inherited the epic's repo, a later pass adds
+                # per-group routing). No route leaves the child's repo untouched.
+                if route_proj is not None:
+                    node["project"] = route_proj
+                if route_cwd is not None:
+                    node["cwd"] = route_cwd
             else:
                 action = "created"
                 node = _build_backlog_node(
                     title=grp["title"],
                     parent=epic_resolved_id,
-                    project=live_epic.get("project"),
-                    cwd=live_epic.get("cwd"),
+                    project=route_proj if route_proj is not None else live_epic.get("project"),
+                    cwd=route_cwd if route_cwd is not None else live_epic.get("cwd"),
                     priority=live_epic.get("priority", "p2"),
                     domain=live_epic.get("domain", "code"),
                     plan_path=cpath,
