@@ -113,6 +113,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "doctor":        ("fno.doctor:doctor_command",         "Diagnose installed-vs-source fno skew (network-free)."),
     "done":          ("fno.done.cli:done_command",         "Mark a backlog node as done."),
     "find":          ("fno.graph.cli:cmd_find",            "Fuzzy search across graph entries."),
+    "research":      ("fno.research:research_command",     "Retrieve + store: ddgs backbone -> self-fetch -> sources.jsonl."),
     "new":           ("fno.graph.cli:cmd_new",             "Create a new graph entry without a plan file."),
     "update":        ("fno.update:update_command",         "Reinstall fno from its source directory."),
     "upgrade":       ("fno.update:update_command",         "Reinstall fno from its source directory.", {"hidden": True}),
