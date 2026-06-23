@@ -149,8 +149,10 @@ for id in "${NODES[@]}"; do
   # but the explicit-id path reads `fno backlog get` directly and skips it, so
   # mirror it here: park instead of launching a duplicate. completed_at => done
   # was already handled by the case above; this catches the PR window before close.
-  pr_number="$(printf '%s' "$node_json" | jq -r '.pr_number // empty' 2>/dev/null)"
-  completed_at="$(printf '%s' "$node_json" | jq -r '.completed_at // empty' 2>/dev/null)"
+  # One jq pass for both fields (tab-separated); read splits them. An empty/
+  # failed parse leaves both empty -> falls through to dispatch (prior behavior).
+  IFS=$'\t' read -r pr_number completed_at <<< "$(printf '%s' "$node_json" \
+    | jq -r '[.pr_number // "", .completed_at // ""] | @tsv' 2>/dev/null)"
   if [[ -n "$pr_number" && -z "$completed_at" ]]; then
     echo "already-running $id reason=\"node carries open PR #$pr_number; not re-dispatching\""
     n_already=$((n_already + 1))

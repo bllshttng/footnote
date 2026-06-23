@@ -38,7 +38,8 @@ when no merge ever happens:
 ```bash
 # graph_node_id lives in the target-state.md manifest BODY (below the
 # frontmatter) - the same field finalize.rs reads (finalize.rs:125-161).
-NODE_ID=$(awk '/^graph_node_id:/{print $2; exit}' .fno/target-state.md 2>/dev/null)
+# Strip leading space, quotes, and CR so the extraction is copy-paste robust.
+NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | tr -d "'\"\r" | head -n 1)
 if [[ -n "$NODE_ID" && "$NODE_ID" != "-" && "$NODE_ID" != "null" && -n "${PR_NUMBER:-}" ]]; then
   fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" \
     || echo "ship: WARN failed to link PR #$PR_NUMBER to node $NODE_ID (non-fatal)" >&2
