@@ -23,6 +23,32 @@ back and run it before creating the PR. The ship phase itself should NOT
 create missing docs - that would couple concerns and hide bugs in the phase
 resolver.
 
+## Link PR→node (right after /pr create, before any merge)
+
+The moment `/pr create` returns the new PR number/URL - for EVERY ship run,
+including `no-merge` - link it to the backlog node so the selection guard
+(`_has_unmerged_open_pr`, `cli/src/fno/graph/cli.py:68`) sees the node is in
+flight. Without this, a `no-merge` worker opens the PR, exits, its PID-based
+`node:<id>` claim goes stale, and the node reads as fresh `ready` work again -
+a duplicate dispatch then rebuilds the already-shipped work into a conflicting PR.
+
+Do this BEFORE the optional rebase/merge step below, so the link lands even
+when no merge ever happens:
+
+```bash
+# graph_node_id lives in the target-state.md manifest BODY (below the
+# frontmatter) - the same field finalize.rs reads (finalize.rs:125-161).
+NODE_ID=$(awk '/^graph_node_id:/{print $2; exit}' .fno/target-state.md 2>/dev/null)
+if [[ -n "$NODE_ID" && "$NODE_ID" != "-" && "$NODE_ID" != "null" && -n "${PR_NUMBER:-}" ]]; then
+  fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" \
+    || echo "ship: WARN failed to link PR #$PR_NUMBER to node $NODE_ID (non-fatal)" >&2
+fi
+```
+
+Non-fatal: a failed link must never block the ship - it is a best-effort
+in-flight signal. `_reconcile.py` still overwrites `pr_number` authoritatively
+from merge ground truth at merge time, so a double-link cannot break close.
+
 ## When to Invoke fno pr rebase
 
 Before every `fno pr merge` call, run:
