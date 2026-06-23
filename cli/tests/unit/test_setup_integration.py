@@ -251,3 +251,43 @@ def test_claude_is_installed_false_on_malformed_json(tmp_path, monkeypatch):
     monkeypatch.setattr(I, "_claude_skills_dir", lambda: tmp_path / "absent")
     run = _FakeRun([("plugin list", 0, "not json", "")])
     assert I._claude_is_installed(run) is False
+
+
+# --- codex: marketplace-add is not a full install (no false success) --------
+
+def test_codex_install_reports_manual_not_installed():
+    run = _FakeRun([("marketplace add", 0, "", "")])
+    res = I._codex_install(run)
+    # marketplace registration succeeded, but the plugin still needs a manual
+    # finish, so this must NOT read as installed.
+    assert res.status == "manual" and not res.ok
+    assert "plugin browser" in res.note
+
+
+def test_codex_install_failed_on_nonzero_marketplace_add():
+    run = _FakeRun([("marketplace add", 1, "", "no such marketplace")])
+    res = I._codex_install(run)
+    assert res.status == "failed" and not res.ok
+
+
+def test_codex_is_installed_never_claims_installed_from_marketplace():
+    # a listed marketplace is not proof the plugin is wired up
+    run = _FakeRun([("marketplace list", 0, "footnote", "")])
+    assert I._codex_is_installed(run) is False
+
+
+def test_manual_result_echoes_a_finish_step_not_installed():
+    lines, echo = _collector()
+    adapters = [
+        _adapter(
+            "codex",
+            "Codex CLI",
+            result=IntegrationResult("codex", "Codex CLI", "manual", note="finish in browser"),
+        )
+    ]
+    run_cli_integration(
+        select_fn=lambda opts: ["codex"], echo_fn=echo, adapters=adapters
+    )
+    blob = "\n".join(lines)
+    assert "needs a manual finish" in blob and "finish in browser" in blob
+    assert "Codex CLI: installed" not in blob

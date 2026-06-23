@@ -36,11 +36,13 @@ class IntegrationResult:
 
     cli: str  # "claude" | "gemini" | "codex"
     label: str  # human name, e.g. "Claude Code"
-    status: str  # "installed" | "already-installed" | "failed"
-    note: str = ""  # detail (e.g. "skills-dir", a failure reason)
+    status: str  # "installed" | "already-installed" | "manual" | "failed"
+    note: str = ""  # detail (e.g. "skills-dir", a manual step, a failure reason)
 
     @property
     def ok(self) -> bool:
+        # "manual" is NOT ok: a step succeeded but the integration is not yet
+        # wired up, so it must never print as "installed".
         return self.status in ("installed", "already-installed")
 
 
@@ -166,25 +168,29 @@ def _gemini_install(run: Runner) -> IntegrationResult:
 # --- codex ------------------------------------------------------------------
 
 def _codex_is_installed(run: Runner) -> bool:
-    # Codex's list surface is the least-confirmed of the three; treat any
-    # "footnote" mention in a successful marketplace listing as installed, and a
-    # non-zero / unrecognized surface as "not installed" (re-installing is
-    # delegated to codex's own idempotency).
-    res = run(["codex", "plugin", "marketplace", "list"])
-    if res.returncode != 0:
-        return False
-    return "footnote" in (res.stdout or "")
+    # `codex plugin marketplace add` only registers a marketplace SOURCE; the
+    # plugin is installed separately (from Codex's plugin browser). A listed
+    # marketplace is therefore NOT proof the integration is wired up, and codex
+    # has no verified non-interactive installed-plugin query. So we never claim
+    # codex is installed: the step is re-offered each run, and re-running the
+    # (idempotent) marketplace add is harmless.
+    return False
 
 
 def _codex_install(run: Runner) -> IntegrationResult:
     label = "Codex CLI"
-    # ponytail: marketplace add only; a separate non-interactive enable step is
-    # unverified (plan Open Q3), so we do not print an unverified command. The
-    # note tells the user to enable it in Codex if needed.
+    # The only verified non-interactive step is registering the marketplace
+    # source; the actual plugin install is done from Codex's plugin browser
+    # (developers.openai.com/codex/plugins). So we register the source and report
+    # a MANUAL finish - never "installed", which would be a false success.
     res = run(["codex", "plugin", "marketplace", "add", _MARKETPLACE])
     if res.returncode == 0:
         return IntegrationResult(
-            "codex", label, "installed", note="enable in Codex if not auto-enabled"
+            "codex",
+            label,
+            "manual",
+            note="marketplace registered; install the footnote plugin from "
+            "Codex's plugin browser to finish",
         )
     return IntegrationResult("codex", label, "failed", note=_tail(res.stderr))
 
@@ -277,6 +283,10 @@ def run_cli_integration(
         if res.ok:
             detail = f" ({res.note})" if res.note else ""
             echo_fn(f"  {adapter.label}: installed{detail}")
+        elif res.status == "manual":
+            # A step succeeded but a manual finish is required - say so plainly,
+            # never "installed".
+            echo_fn(f"  {adapter.label}: needs a manual finish - {res.note}")
         else:
             echo_fn(f"  {adapter.label}: FAILED ({res.note})")
     return results
