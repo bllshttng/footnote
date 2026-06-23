@@ -3339,9 +3339,17 @@ def cmd_advance(
     exits 0 (a dispatch decision is never an error to the host op).
     """
     from fno.backlog.advance import advance as _advance
+    from fno.backlog.advance import advance_dependents as _advance_deps
 
     try:
         result = _advance(closed_node_id=closed, project=project, verbose=verbose)
+        # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
+        # Only meaningful with --closed (an edge source); the project-scoped
+        # next selection above never reaches a foreign dependent. Shares the
+        # dispatch:<id> dedup with reconcile's call so a node seen by both the
+        # reconcile sweep and this explicit verb dispatches at most once.
+        if closed:
+            _advance_deps(closed_node_id=closed, closed_project=project, verbose=verbose)
     except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
         # advance() is designed non-fatal (every path emits + returns), but the
         # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
@@ -3500,11 +3508,23 @@ def cmd_reconcile(
                 # project B, and B's campaign-arm marker lives under B's root.
                 _adv_cwd = _adv_node.get("cwd") if _adv_node else None
                 from fno.backlog.advance import advance as _advance
+                from fno.backlog.advance import advance_dependents as _advance_deps
 
+                _adv_root = Path(_adv_cwd) if _adv_cwd else None
                 _advance(
                     closed_node_id=record.node_id,
                     project=_adv_project,
-                    project_root=Path(_adv_cwd) if _adv_cwd else None,
+                    project_root=_adv_root,
+                )
+                # G1 (AC5-FR): also dispatch the closed node's now-unblocked
+                # CROSS-project dependents into their own repos. advance() above
+                # only reaches same-project successors (project-scoped `next`);
+                # this follows blocked_by edges across projects. Shares the
+                # dispatch:<id> dedup so a node observed by both dispatches once.
+                _advance_deps(
+                    closed_node_id=record.node_id,
+                    closed_project=_adv_project,
+                    project_root=_adv_root,
                 )
             except Exception as _adv_exc:  # noqa: BLE001 - never abort the sweep
                 typer.echo(
