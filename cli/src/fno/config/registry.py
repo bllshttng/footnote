@@ -90,6 +90,12 @@ FIELD_META: dict[str, Meta] = {
     ),
     "config.post_merge.enabled": Meta("advanced", "Whether the post-merge ritual runs."),
     "config.post_merge.self_reap": Meta("never", "Whether a post-merge watcher self-reaps."),
+    # --- config.research.* ---
+    "config.research.output_dir": Meta(
+        "advanced",
+        "Landing dir for the `fno research` doc deliverable (brief + sources sidecar); "
+        "vault area, not repo-relative. Unset => ship fails loud (never guesses).",
+    ),
     # --- config.review.* ---
     "config.review.required_bots": Meta(
         "advanced", "GitHub bot logins that must have reviewed before the ship gate goes green (the GATE).",

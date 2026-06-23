@@ -1,7 +1,7 @@
 ---
 name: review
-description: "Review a diff. Routes to the internal six-agent Claude panel (sigma, default) or a cross-model second opinion (peer). Use when: 'review this', 'code review', 'is this ready', 'get a second opinion', 'have codex review this PR'."
-argument-hint: "[sigma|peer]  (peer: [PR#|branch] [codex|gemini])   e.g. (bare = sigma), `peer 657 codex`"
+description: "Review a diff or a research brief. Routes to the internal six-agent Claude panel (sigma, default), a cross-model second opinion (peer), or the advisory research-verify panel for a doc deliverable (research). Use when: 'review this', 'code review', 'is this ready', 'get a second opinion', 'have codex review this PR', 'review this research brief'."
+argument-hint: "[sigma|peer|research]  (peer: [PR#|branch] [codex|gemini]; research: [brief.md])   e.g. (bare = sigma), `peer 657 codex`, `research out/topic.md`"
 requires:
   binaries:
     - "fno >= 0.1"
@@ -17,6 +17,7 @@ requires:
 |------|-----------|---------------|
 | `sigma` (default) | internal six-agent Claude review panel | the diff |
 | `peer` | a cross-model second opinion (`codex` / `gemini`) on your coding-account quota | the diff |
+| `research` | advisory research-verify panel (fact-checker / citation-auditor / contradiction-finder / completeness-critic) | a `doc` deliverable (brief + sources sidecar) |
 
 This is a **router**, not a monolith. It parses the first argument as a mode, announces the resolved mode, then loads that mode's reference and follows it in this same context. It never calls another skill at runtime (it dispatches review subagents via the Task/Agent tool and loads modes via Read).
 
@@ -27,11 +28,12 @@ Parse the first argument token:
 - **no argument** -> mode is `sigma`. Print exactly: `running sigma (default)` and continue to Step 2.
 - **`sigma`** -> mode is `sigma`. Print `running sigma`. The remaining tokens, if any, are ignored by sigma (it auto-detects local commits vs PR context). Continue to Step 2.
 - **`peer`** -> mode is `peer`. Print `running peer review (cross-model)`. The remaining tokens are peer's own arguments (`[PR#|branch] [codex|gemini]`). Continue to Step 3.
+- **`research`** -> mode is `research`. Print `running research-verify (advisory)`. The remaining tokens, if any, are the brief path. Continue to Step 4.
 - **any other non-empty token** -> this is an unknown mode. Do NOT default, do NOT guess. Print:
 
   ```
   unknown review mode: '<token>'
-  valid modes: sigma (default), peer
+  valid modes: sigma (default), peer, research
   ```
 
   and stop with a non-zero result (emit no review, dispatch no agents). This is the locked router contract: an unknown non-empty mode never silently falls through to a default.
@@ -82,6 +84,12 @@ Load [peer.md](peer.md) and execute it in full, in this context. That reference 
 
 The peer review is **advisory**: it runs on a coding-account quota, not the bot account, and never satisfies a `required_bots` review gate. A human still merges.
 
+## Step 4: research mode (advisory research-verify panel)
+
+Load [research-verify.md](research-verify.md) and execute it in full, in this context. That reference is the canonical research-verify process: it dispatches four claim-shaped reviewers (fact-checker / citation-auditor / contradiction-finder / completeness-critic) over a `doc` deliverable (the brief + its `sources.jsonl` sidecar) via the **Task/Agent tool**, never by invoking another skill at runtime.
+
+The research-verify panel is **advisory**: the green/red verdict on a research brief is mechanical and belongs to `fno evals grade` (zero uncited claims, zero dead URLs, ≥1 golden checklist item per section). This panel annotates the brief; it never blocks, flips, or substitutes for the eval.
+
 ## Multi-CLI
 
-Claude-Code primary. Both modes need `fno` and `gh`/`git`; peer mode additionally needs the `fno agents` daemon for the `codex`/`gemini` one-shot lane. If a dependency is missing, the mode fails loud and reports it - it never fakes a review.
+Claude-Code primary. All modes need `fno` and `gh`/`git`; peer mode additionally needs the `fno agents` daemon for the `codex`/`gemini` one-shot lane, and research mode needs the Task/Agent tool to dispatch its roster. If a dependency is missing, the mode fails loud and reports it - it never fakes a review.
