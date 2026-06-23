@@ -354,6 +354,31 @@ class PostMergeBlock(BaseModel):
         return False
 
 
+class ResearchBlock(BaseModel):
+    """`fno research` doc-deliverable settings (nested under 'config.research').
+
+    `output_dir` is the landing area for the research `doc` deliverable: the
+    brief (`<slug>.md`) and its evidence sidecar (`<slug>.sources.jsonl`) are
+    written there. Unlike `post_merge.parking_lot_path` this is NOT repo-relative
+    - it is a vault/output area (e.g. ~/c3po/raw/readyrule), so absolute and
+    '~'-anchored paths are allowed. Left unset by default so a repo that has not
+    opted in fails loud at the ship step rather than guessing a landing path
+    (the parking_lot_path lesson, AC5).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    output_dir: Optional[str] = None
+
+    @field_validator("output_dir", mode="before")
+    @classmethod
+    def validate_output_dir(cls, v: object) -> object:
+        if isinstance(v, str):
+            _check_no_glob(v, "config.research.output_dir")
+            _check_path_max(v, "config.research.output_dir")
+        return v
+
+
 class CrossModelBlock(BaseModel):
     """Cross-model review opt-in (nested under 'config.review.cross_model').
 
@@ -1566,6 +1591,7 @@ class ConfigBlock(BaseModel):
     blueprint: BlueprintBlock = Field(default_factory=BlueprintBlock)
     backlog: BacklogBlock = Field(default_factory=BacklogBlock)
     post_merge: PostMergeBlock = Field(default_factory=PostMergeBlock)
+    research: ResearchBlock = Field(default_factory=ResearchBlock)
     review: ReviewBlock = Field(default_factory=ReviewBlock)
     target: TargetConfig = Field(default_factory=TargetConfig)
     evals: EvalsBlock = Field(default_factory=EvalsBlock)
