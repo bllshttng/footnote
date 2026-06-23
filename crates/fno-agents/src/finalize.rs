@@ -936,51 +936,79 @@ fn resolve_project_name(
     repo_project_name(cwd)
 }
 
-/// Read `config.project.id` from a settings.yaml. Scoped scan (not the flat one
-/// in `read_path_setting`, since `id:` is too generic): find the `project:`
-/// mapping, then return its direct-child `id:` scalar. A `null`/empty value is
-/// the "unset" sentinel and yields None so the caller falls back to the
-/// basename. Hand-scanned to keep the crate free of a YAML dependency, matching
-/// the existing `read_path_setting` style.
-/// ponytail: bespoke scan for one nested key; swap for serde_yaml if settings
-/// parsing ever needs more than this.
+/// Read the project id from a settings.yaml, matching the Python loader:
+/// `config.project.id` is canonical; a deprecated top-level `project.id` is the
+/// fallback (the loader lifts legacy `project.id` into `config.project` only
+/// when the canonical value is unset, so config.project wins —
+/// `cli/src/fno/config/__init__.py:1982-1990`). An empty/`null` value, an
+/// unreadable file, or an id outside `[A-Za-z0-9._-]` all yield None so the
+/// caller falls back to the basename.
 fn read_project_id(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
-    let mut project_indent: Option<usize> = None;
-    let mut child_indent: Option<usize> = None;
+    let id = yaml_scalar_at(&content, &["config", "project", "id"])
+        .or_else(|| yaml_scalar_at(&content, &["project", "id"]))?;
+    // The Python settings model rejects ids outside [A-Za-z0-9._-]
+    // (config/__init__.py:176-185). A hand-edited invalid value (e.g. `foo/bar`)
+    // must never be spliced into a `{project}` path segment, so degrade to the
+    // basename rather than write artifacts outside the project dir.
+    valid_project_id(&id).then_some(id)
+}
+
+/// Project ids are restricted to `[A-Za-z0-9._-]`, matching the Python
+/// `validate_project_id` regex. ASCII byte check (no `regex` dependency).
+fn valid_project_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
+/// Read a scalar at a dotted key path (e.g. `config.project.id`) from
+/// block-style YAML via indent tracking. Scoping to the full path means a
+/// false-positive key elsewhere (a `project:` block under another section, or a
+/// legacy top-level one) cannot be mistaken for the canonical value. Inline
+/// comments and surrounding quotes are stripped; an empty/`null` leaf yields
+/// None. Only block-mapping style is understood (the settings.yaml schema);
+/// flow style degrades to None and the caller falls back.
+/// ponytail: bespoke path reader to stay off a YAML dependency, matching the
+/// existing `read_path_setting` hand-scan; swap for serde_yaml if settings
+/// parsing ever needs more than scalar lookups.
+fn yaml_scalar_at(content: &str, path: &[&str]) -> Option<String> {
+    // indents[i] = indentation of the i-th matched path segment's key line.
+    let mut indents: Vec<usize> = Vec::new();
+    // Indent of the leaf level's direct children, so a deeper grandchild key
+    // with the same leaf name cannot be misread as the target.
+    let mut leaf_indent: Option<usize> = None;
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
+        let clean = trimmed.split('#').next().unwrap_or("").trim();
+        if clean.is_empty() {
+            continue;
+        }
         let indent = line.len() - line.trim_start().len();
-        match project_indent {
-            None => {
-                if trimmed == "project:" {
-                    project_indent = Some(indent);
-                }
+        // Pop matched segments we have dedented out of; resetting leaf_indent so
+        // the next sibling subtree restarts its direct-child tracking.
+        while indents.last().is_some_and(|&top| indent <= top) {
+            indents.pop();
+            leaf_indent = None;
+        }
+        let depth = indents.len();
+        if depth + 1 == path.len() {
+            // Leaf level: only accept the parent's direct children.
+            let li = *leaf_indent.get_or_insert(indent);
+            if indent != li {
+                continue;
             }
-            Some(pi) => {
-                // A line at or above the project: indent ends the block.
-                if indent <= pi {
-                    return None;
-                }
-                // Only the project: mapping's direct children (its first deeper
-                // indent level) are candidates; deeper grandchildren are skipped.
-                let ci = *child_indent.get_or_insert(indent);
-                if indent == ci {
-                    if let Some(rest) = trimmed.strip_prefix("id:") {
-                        let v = rest
-                            .split('#')
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .trim_matches(|c| c == '"' || c == '\'');
-                        return (!v.is_empty() && !v.eq_ignore_ascii_case("null"))
-                            .then(|| v.to_string());
-                    }
-                }
+            if let Some(rest) = clean.strip_prefix(&format!("{}:", path[depth])) {
+                let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+                return (!v.is_empty() && !v.eq_ignore_ascii_case("null")).then(|| v.to_string());
             }
+        } else if clean == format!("{}:", path[depth]) {
+            // Matched an intermediate mapping key; descend.
+            indents.push(indent);
+            leaf_indent = None;
         }
     }
     None
@@ -1670,6 +1698,67 @@ mod tests {
         write_settings(&cwd, "config:\n  project:\n    id: fno\n");
         write_settings(&home, "config:\n  project:\n    id: other\n");
         assert_eq!(resolve_project_name(None, Some(&home), &cwd), "fno");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn write_yaml(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let _ = fs::create_dir_all(dir);
+        let f = dir.join(name);
+        fs::write(&f, body).unwrap();
+        f
+    }
+
+    #[test]
+    fn project_id_ignores_false_positive_block_and_inline_comments() {
+        // A `project:` under another section appears BEFORE config.project, and
+        // both config: and project: carry inline comments (gemini HIGH).
+        let dir = std::env::temp_dir().join(format!("fin-fp-{}", std::process::id()));
+        let f = write_yaml(
+            &dir,
+            "s.yaml",
+            "other_tool:\n  project:\n    id: wrong\nconfig: # cfg\n  project: # proj\n    id: right\n",
+        );
+        assert_eq!(read_project_id(&f).as_deref(), Some("right"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_id_config_wins_over_legacy_top_level() {
+        // Legacy top-level project.id is only a fallback; config.project wins
+        // (config/__init__.py:1982-1990).
+        let dir = std::env::temp_dir().join(format!("fin-legacy-{}", std::process::id()));
+        let win = write_yaml(
+            &dir,
+            "win.yaml",
+            "project:\n  id: legacy\nconfig:\n  project:\n    id: canon\n",
+        );
+        assert_eq!(read_project_id(&win).as_deref(), Some("canon"));
+        // No canonical block -> legacy top-level is the fallback.
+        let fb = write_yaml(&dir, "fb.yaml", "project:\n  id: legacy\n");
+        assert_eq!(read_project_id(&fb).as_deref(), Some("legacy"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_id_rejects_invalid_chars() {
+        // A hand-edited id with a path separator must not reach a path segment
+        // (codex P2; mirrors validate_project_id). Falls back to None.
+        let dir = std::env::temp_dir().join(format!("fin-inval-{}", std::process::id()));
+        let f = write_yaml(&dir, "s.yaml", "config:\n  project:\n    id: foo/bar\n");
+        assert_eq!(read_project_id(&f), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_id_skips_grandchild_id_key() {
+        // A deeper `id:` under a nested sub-mapping is not the project id.
+        let dir = std::env::temp_dir().join(format!("fin-gc-{}", std::process::id()));
+        let f = write_yaml(
+            &dir,
+            "s.yaml",
+            "config:\n  project:\n    nested:\n      id: deep\n    id: good\n",
+        );
+        assert_eq!(read_project_id(&f).as_deref(), Some("good"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
