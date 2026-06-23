@@ -456,7 +456,7 @@ each shipping its own PR in its own repo.
 **Check target-state.md BEFORE any execution.** If `cross_project: true`
 (a legacy `cross-project` subcommand, or a plan with `scope: cross-project`):
 
-1. **WARN** the user: `scope: cross-project is deprecated and the parallel pipeline was removed. Model multi-repo work as one backlog node per project (linked by blocked_by); each ships its own PR. Use `fno backlog decompose` to split a legacy plan.`
+1. **WARN** the user: "scope: cross-project is deprecated and the parallel pipeline was removed. Model multi-repo work as one backlog node per project (linked by blocked_by); each ships its own PR. Use `fno backlog decompose` to split a legacy plan."
 2. **Do NOT** invoke any cross-project pipeline (removed) and **do NOT** `cd` into other repos to write code.
 3. **Route to spawn-into-project:** continue THIS session in its own project only. Foreign waves are handled by `/do` (auto-spawn when the foreign node is unblocked; defer + carveout when it is blocked); cross-project dependents are dispatched on merge by `fno backlog advance`.
 

@@ -84,7 +84,7 @@ The `scope: cross-project` parallel-worktree pipeline has been removed;
 (from its `project:` field / node) against the workspace map and, when a wave
 belongs to a project OTHER than the session's:
 
-- **Foreign node unblocked (ready):** `fno agents spawn --cwd <foreign-root> "/target <foreign-node>"`, mark the wave delegated, print a `spawned target-<node> --cwd <root>` receipt, and continue this session's own waves.
+- **Foreign node unblocked (ready):** `fno agents spawn --cwd <foreign-root> "/target <foreign-node>"`, mark the wave delegated, print a `spawned target-<node> --cwd <foreign-root>` receipt, and continue this session's own waves.
 - **Foreign node still blocked** (e.g. `blocked_by` the current, not-yet-merged node): do NOT spawn (the worker would refuse). Record a `fno carveout add --kind deferred` entry, print a `deferred <node> to <project>; dispatch on <blocker> merge` line, and rely on `fno backlog advance` to dispatch it after merge.
 - **Never** `cd` into the foreign repo and execute locally.
 
