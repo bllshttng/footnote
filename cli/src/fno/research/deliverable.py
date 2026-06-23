@@ -129,10 +129,15 @@ def deliver(
     output_dir: Optional[str],
     now: Optional[datetime] = None,
 ) -> DeliverResult:
-    """Ship the brief + cited-evidence sidecar to output_dir. Reports DoneAdvisory.
+    """Ship the brief + evidence sidecar to output_dir. Reports DoneAdvisory.
 
-    Reads the cache sources from `sources_path`, writes only the *verified*
-    (cited) rows to the output sidecar beside the brief.
+    Reads the cache sources from `sources_path`. The brief cites only *verified*
+    rows (claims), but the sidecar carries the **full evidence store** - every
+    fetched row, verified or not. That is deliberate: the eval's dead-URL
+    assertion reads this sidecar, so dropping failed fetches here would hide
+    404s and make the assertion vacuous (the plan's Failure Mode: "404 on
+    self-fetch -> mark verified=false; the eval's dead-URL assertion catches
+    it"). A brief goes green only if its dead sources were Wayback-archived.
     """
     out = resolve_output_dir(output_dir)  # raises OutputDirUnset (AC5)
     slug = slugify(topic)
@@ -144,7 +149,7 @@ def deliver(
 
     brief_path.write_text(build_brief(topic, slug, sources, stopped=stopped, now=now), encoding="utf-8")
     with sidecar_path.open("w", encoding="utf-8") as fh:
-        for s in verified:
+        for s in sources:  # full store, not just verified - keeps dead URLs visible
             fh.write(s.to_json_line() + "\n")
 
     return DeliverResult(

@@ -173,6 +173,15 @@ def test_missing_brief_errors(tmp_path: Path) -> None:
         rg.grade(tmp_path / "nope.md", golden)
 
 
+def test_empty_golden_checklist_errors(tmp_path: Path) -> None:
+    """A golden doc with no headings is a setup error (exit 2), not a red brief."""
+    brief = _write(tmp_path / "example-agency.md", GREEN_BRIEF)
+    _green_sidecar(tmp_path / "example-agency.sources.jsonl")
+    golden = _write(tmp_path / "golden.md", "just prose, no headings at all\n")
+    with pytest.raises(rg.GradeError):
+        rg.grade(brief, golden)
+
+
 # --------------------------------------------------------------------------- #
 # `fno evals grade` CLI exit codes
 # --------------------------------------------------------------------------- #

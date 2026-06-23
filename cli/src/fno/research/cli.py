@@ -95,8 +95,17 @@ def research_command(
     except OutputDirUnset as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(5)
+    except OSError as e:
+        typer.echo(f"research: failed to write deliverable: {e}", err=True)
+        raise typer.Exit(6)
 
-    emit_done_advisory(Path(".fno/events.jsonl"), slug=delivered.slug)
+    try:
+        from fno.paths import resolve_repo_root
+
+        events_path = resolve_repo_root() / ".fno" / "events.jsonl"
+    except Exception:
+        events_path = Path(".fno/events.jsonl")  # best-effort fallback; emit is non-fatal
+    emit_done_advisory(events_path, slug=delivered.slug)
     typer.echo(
         f"research: shipped {delivered.brief_path} "
         f"(+{delivered.slug}.sources.jsonl, {delivered.verified} cited) -> DoneAdvisory"

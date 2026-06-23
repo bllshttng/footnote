@@ -153,7 +153,10 @@ def grade(
     if not sidecar.exists():
         raise GradeError(f"sources sidecar not found: {sidecar}")
 
-    rows = read_sources(sidecar)
+    try:
+        rows = read_sources(sidecar)
+    except OSError as e:  # unreadable sidecar (permissions, etc.) - setup error, exit 2
+        raise GradeError(f"failed to read sources sidecar {sidecar}: {e}") from e
     sidecar_urls = {r.url for r in rows}
     # ref map [Sn] -> url (parsed across the whole brief, incl. the Sources block)
     refs = {int(n): url for n, url in _REF_RE.findall(brief_text)}
@@ -185,6 +188,10 @@ def grade(
     # brief grades red on (c), it is not vacuously green).
     checklist = [_normalize(item) for item in _golden_checklist(golden_text)]
     checklist = [c for c in checklist if c]
+    if not checklist:
+        # A golden doc with no headings is a setup error, not a red brief - exit 2
+        # is clearer than failing every section as uncovered.
+        raise GradeError(f"golden doc has no checklist items (headings): {golden_path}")
     if not sections:
         res.sections_uncovered.append("(no content sections)")
     for name, sect in sections:

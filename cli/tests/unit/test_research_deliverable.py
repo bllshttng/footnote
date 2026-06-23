@@ -119,6 +119,22 @@ def test_deliver_writes_brief_and_sidecar(tmp_path: Path) -> None:
     assert json.loads(sidecar.read_text().splitlines()[0])["url"] == "https://a.example/p"
 
 
+def test_deliver_sidecar_preserves_failed_rows(tmp_path: Path) -> None:
+    """The graded sidecar carries the FULL store (incl. verified=false rows) so
+    the eval's dead-URL assertion stays meaningful (codex P1 on PR #21)."""
+    cache = tmp_path / "cache" / "mixed-topic-words.sources.jsonl"
+    _write_sources(cache, [
+        _verified("https://a.example/p", "finding p"),
+        Source(url="https://dead.example", fetched_at="t", hash="", extract="", verified=False, reason="http 404"),
+    ])
+    out = tmp_path / "out"
+    deli.deliver("mixed topic words", sources_path=cache, stopped="declared", output_dir=str(out))
+    lines = (out / "mixed-topic-words.sources.jsonl").read_text().splitlines()
+    urls = {json.loads(ln)["url"] for ln in lines}
+    assert "https://dead.example" in urls  # failed row preserved, not dropped
+    assert len(lines) == 2
+
+
 def test_deliver_unset_output_dir_fails_loud(tmp_path: Path) -> None:
     """AC5: deliver with no output_dir raises OutputDirUnset (non-zero upstream)."""
     cache = tmp_path / "c" / "t.sources.jsonl"
