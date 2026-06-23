@@ -991,77 +991,6 @@ def handle_blocked_task(
         path.write_text(updated)
 
 
-def load_workspace_settings(settings_path: Optional[str] = None) -> dict:
-    """Load workspace settings from project or global location."""
-    search_paths: List[str] = []
-    if settings_path:
-        search_paths.append(settings_path)
-    search_paths.extend([
-        ".fno/settings.yaml",
-        os.path.expanduser("~/.fno/settings.yaml"),
-    ])
-
-    try:
-        import yaml  # type: ignore
-    except ModuleNotFoundError:
-        print("Warning: PyYAML not installed - workspace settings parsing disabled", file=sys.stderr)
-        return {}
-
-    for path in search_paths:
-        if os.path.exists(path):
-            try:
-                with open(path) as f:
-                    return yaml.safe_load(f) or {}
-            except (yaml.YAMLError, OSError) as e:
-                print(f"Warning: Failed to load settings from {path}: {e}", file=sys.stderr)
-                continue
-    return {}
-
-
-def resolve_project_paths(
-    project_keys: List[str],
-    settings_path: Optional[str] = None,
-) -> Dict[str, str]:
-    """Resolve project keys to absolute paths from workspace settings.
-
-    Args:
-        project_keys: List of project keys referenced in the INDEX
-        settings_path: Optional explicit path to settings.yaml
-
-    Returns:
-        Dict mapping project keys to absolute paths
-
-    Raises:
-        ValueError: If a project key is not found or its path doesn't exist
-    """
-    import os
-    settings = load_workspace_settings(settings_path)
-    workspace_projects = settings.get("workspace", {}).get("projects", [])
-
-    # Build lookup from project list (supports both list and dict formats)
-    project_lookup: Dict[str, dict] = {}
-    if isinstance(workspace_projects, list):
-        for proj in workspace_projects:
-            if isinstance(proj, dict) and "name" in proj:
-                project_lookup[proj["name"]] = proj
-    elif isinstance(workspace_projects, dict):
-        project_lookup = workspace_projects
-
-    resolved: Dict[str, str] = {}
-    for key in project_keys:
-        if key not in project_lookup:
-            raise ValueError(
-                f"Project '{key}' not found in workspace settings. "
-                f"Available: {list(project_lookup.keys())}"
-            )
-        proj_data = project_lookup[key]
-        path = os.path.expanduser(proj_data.get("path", ""))
-        if not os.path.isdir(path):
-            raise ValueError(f"Project '{key}' path does not exist: {path}")
-        resolved[key] = os.path.abspath(path)
-    return resolved
-
-
 def load_plan_strategy(
     plan_input: str,
 ) -> Optional[ExecutionStrategy]:
@@ -1227,7 +1156,6 @@ if __name__ == "__main__":
         print("  orchestrator.py <index>                  Parse and display execution strategy")
         print("  orchestrator.py <index> --next            Show next wave to execute")
         print("  orchestrator.py <index> --state <state>   Resume from state file")
-        print("  orchestrator.py <index> --cross-project   Parse cross-project scope and validate")
         print("  orchestrator.py <index> --wave-decision N [--provider codex]")
         print("                                           Show effective execution mode for a wave")
         print("  orchestrator.py --agent <description>     Determine agent for task")
@@ -1283,22 +1211,7 @@ if __name__ == "__main__":
             print(f"Completed tasks from state: {completed_tasks}")
             print()
 
-    if "--cross-project" in sys.argv:
-        if strategy.scope != "cross-project":
-            print("Warning: INDEX does not have scope: cross-project", file=sys.stderr)
-            sys.exit(1)
-        try:
-            paths = resolve_project_paths(list(strategy.project_tasks.keys()))
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-        output = {
-            "scope": strategy.scope,
-            "project_tasks": strategy.project_tasks,
-            "project_paths": paths,
-        }
-        print(json.dumps(output, indent=2))
-    elif "--wave-decision" in sys.argv:
+    if "--wave-decision" in sys.argv:
         wave_idx = sys.argv.index("--wave-decision")
         if wave_idx + 1 >= len(sys.argv):
             print("Error: --wave-decision requires a wave number", file=sys.stderr)

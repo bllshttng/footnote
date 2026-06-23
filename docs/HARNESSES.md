@@ -18,7 +18,7 @@ Other CLIs (Cursor, GitHub Copilot Agents, Kiro, OpenCode, Pi, Qoder, Rovo Dev, 
 
 - **Skills are portable markdown** and work on every CLI in scope.
 - **The autonomous target loop** runs natively on Claude Code, Codex, and Gemini: a stop-equivalent hook blocks session exit until a `<promise>` tag appears. Hermes and Openclaw use a loop wrapper (`scripts/run-target-loop.sh --driver <name>`), which polls for the same tag.
-- **Parallel subagent dispatch** (`/review sigma`, `/speculate`, `/cross-project-pipeline`) needs Claude Code; everywhere else those skills run sequentially.
+- **Parallel subagent dispatch** (`/review sigma`, `/speculate`) needs Claude Code; everywhere else those skills run sequentially.
 - **Context file:** footnote makes `AGENTS.md` canonical; `CLAUDE.md` and `GEMINI.md` are one-line stubs that import it, so every CLI inlines identical content.
 
 ## Official CLI documentation

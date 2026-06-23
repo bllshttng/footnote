@@ -117,34 +117,12 @@ State: .fno/ symlinked from main repo
 Ready to implement.
 ```
 
-## Cross-Project Pattern
+## Multi-Repo Features
 
-When `--cross-project` flag used:
-
-```
-webapp (frontend)                       api (backend)
-├── .claude/worktrees/                  ├── .claude/worktrees/
-│   └── auth/                           │   └── auth/
-│       └── branch: feature/auth        │       └── branch: feature/auth
-```
-
-**Coordination:**
-1. Create matching worktrees in both repos (same feature slug)
-2. Use same branch name for traceability (`feature/{slug}`)
-3. Link PRs in descriptions (automated by cross-project-pipeline)
-
-### Cross-Project Command
-
-```bash
-# In frontend
-mkdir -p .claude/worktrees
-git worktree add .claude/worktrees/auth -b feature/auth
-
-# In backend
-cd ${BACKEND_PATH}
-mkdir -p .claude/worktrees
-git worktree add .claude/worktrees/auth -b feature/auth
-```
+The `--cross-project` parallel-worktree pattern has been removed. A multi-repo
+feature is decomposed into one backlog node per project (linked by `blocked_by`);
+each node ships its own PR from its own repo, and spawn-into-project dispatches
+the cross-repo handoff. No matched-worktree coordination across repos is needed.
 
 ## Claude Code Native Integration
 
@@ -161,8 +139,7 @@ Claude Code's `--worktree` flag (`claude -w feature-name`) creates worktrees at
 ### Subagent isolation
 
 Subagents can use `isolation: "worktree"` in the Agent tool to automatically
-get a fresh worktree. The cross-project-pipeline skill uses explicit worktree
-creation for more control over branch names and project paths.
+get a fresh worktree.
 
 ## Parallel Phase Execution
 
@@ -203,18 +180,6 @@ git branch -d feature/sign-in-sheet
 | Hardcoding paths | Use project-relative paths |
 | Forgetting dependencies | Run pnpm install / uv sync |
 | Forgetting .fno symlink | Symlink is automatic in step 3b |
-
-## Integration with target
-
-When `/target` uses `--cross-project`:
-
-```
-1. Create frontend worktree
-2. Create matching backend worktree
-3. Verify both baselines clean
-4. Execute plan with cross-repo awareness
-5. Create linked PRs in both repos
-```
 
 ## Quick Reference
 

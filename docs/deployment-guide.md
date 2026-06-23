@@ -255,7 +255,6 @@ footnote/                          # Repository root
         run-target-loop.sh        # Cross-session loop runner
         validate-test-first.sh      # TDD validation
         validate-plan.sh            # Plan format validation
-        cross-project-setup.sh      # Worktree creation
         sync-codex-agents.py        # Codex agent sync
         sync-gemini-agents.py       # Gemini agent sync
         discovery-brief.py          # Codebase analysis

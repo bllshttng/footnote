@@ -29,10 +29,9 @@ footnote/                              # Flat root - plugin.json at .claude-plug
 │   ├── setup/                          # Interactive settings wizard
 │   ├── codemap/                        # AST structural analysis (PageRank)
 │   ├── ship-docs/                      # Architecture documentation generation
-│   ├── git-worktrees/                  # Isolated git worktree management
-│   └── cross-project-pipeline/         # Multi-repo feature orchestration
+│   └── git-worktrees/                  # Isolated git worktree management
 │
-├── agents/                             # 12 agent definitions
+├── agents/                             # agent definitions
 │   ├── archer.md                      # TDD task executor (Sonnet)
 │   ├── code-reviewer.md                # Code quality reviewer (Opus)
 │   ├── silent-failure-hunter.md        # Error swallowing detector
@@ -42,7 +41,6 @@ footnote/                              # Flat root - plugin.json at .claude-plug
 │   ├── multi-device-checker.md         # Responsive/cross-device checker
 │   ├── verifier.md                     # 3-level task verification (Haiku)
 │   ├── goal-verifier.md                # Original goal validation
-│   ├── cross-project-finalizer.md      # Multi-repo PR finalization
 │   ├── tournament-debugger.md          # Competitive debugging
 │   └── roadmap-generator.md            # Roadmap generation
 │

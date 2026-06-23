@@ -81,7 +81,8 @@ work:
                                          # the uv cache (45GB+ observed). An
                                          # explicit setup_command still runs.
 
-  # Cross-project patterns
+  # Project-type execution ordering (informs blocked_by chaining when a
+  # multi-repo feature is decomposed into per-project backlog nodes)
   patterns:
     execution_order:
       backend: 1
@@ -90,12 +91,6 @@ work:
       docs: 2
       fullstack: 1
       plugin: 1
-
-  # Cross-project
-  cross_project:
-    memory_target: main
-    pr_linking: true
-    finalize_model: sonnet
 ```
 
 ## Key Conventions

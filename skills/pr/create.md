@@ -129,15 +129,6 @@ Proceed to push (user has chosen not to have CI).
 
 ---
 
-### 2.6 Detect Cross-Project Context
-
-If `RELATED_PROJECTS` is set (passed by cross-project-pipeline):
-- Note this is part of a cross-project feature
-- Include "Related PRs" section in description template (Step 5)
-
-If `RELATED_PROJECTS` is NOT set:
-- Behavior is identical to standard single-project PR creation
-
 ### 3. Push Branch
 
 ```bash
@@ -188,33 +179,6 @@ EOF
 ```
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
-
-### 5b. Cross-Project PR Template Extension
-
-When `RELATED_PROJECTS` context is provided, append to PR body:
-
-```markdown
-## Related PRs
-
-This PR is part of a cross-project feature: **{FEATURE_NAME}**
-
-| Project | PR | Status |
-|---------|-----|--------|
-| {project_1} | {url_or_pending} | {status} |
-| {project_2} | {url_or_pending} | {status} |
-
-> Cross-linked by footnote cross-project-pipeline
-```
-
-### Post-Creation Update
-
-After all project PRs are created, the cross-project-pipeline orchestrator updates each PR:
-
-```bash
-gh pr edit {pr_url} --body "$(updated body with all PR URLs)"
-```
-
-This is handled by the pipeline's Step 4 (Link), not by create-pr itself.
 
 ### 6. Report the result (RESULT contract)
 

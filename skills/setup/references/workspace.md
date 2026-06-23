@@ -78,19 +78,13 @@ work:
       fullstack: 1
       plugin: 1
 
-  # Worktree configuration (used by cross-project-pipeline and git-worktrees skills)
+  # Worktree configuration (used by the git-worktrees skill)
   worktree:
     base: .claude/worktrees        # relative to each project root (matches Claude Code native)
     shared_branch_name: true       # same branch name across all projects
     symlink_directories:           # maps to Claude Code's worktree.symlinkDirectories
       - node_modules
       - .venv
-
-  # Cross-project pipeline configuration
-  cross_project:
-    memory_target: main            # "main" = route to orchestrating project's memory path
-    pr_linking: true               # auto-link PRs across repos
-    finalize_model: sonnet         # model for PR creation subagent
 
   # Worktree resolution
   # Full path: {project.path}/{work.worktree.base}/{feature-slug}
@@ -189,10 +183,10 @@ pwd = ~/code/myplatform/api
 ```
 
 This determines:
-- Which **related projects** to consider for cross-project work
+- Which **related projects** to consider when dispatching foreign work (spawn-into-project)
 - Which **testing context** to inject for the current project
 - Which **worktree base** to use when creating feature branches
-- Which **workspace peers** to coordinate with during `--cross-project` runs
+- Which **project roots** to resolve when spawning a `/target` worker into a peer project
 
 If `pwd` doesn't match any project path, workspace features are disabled and tools operates in single-project mode.
 
@@ -208,19 +202,13 @@ If file exists "~/.fno/settings.yaml":
   Enable cross-project features
 ```
 
-### In Targetabilities
+### In Target (spawn-into-project)
 
-When `--cross-project` flag:
-```
-1. Load settings.yaml
-2. For each project in work.workspaces.{name}.projects:
-   - Create matching worktree
-   - Use same branch name
-   - Track in progress file
-3. When creating PR:
-   - Create PR in each affected repo
-   - Link PRs in descriptions
-```
+A `/target` session works only in its own project. When a wave belongs to a
+peer project, the session resolves that project's root from `work.workspaces`
+and spawns a worker into it (`fno agents spawn --cwd <root> "/target <node>"`)
+rather than editing the peer repo. Each project ships its own PR; there is no
+matched-worktree / linked-PR pipeline.
 
 ### In Audit
 
@@ -232,61 +220,12 @@ When analyzing features:
 4. Tag plans with affected projects
 ```
 
-## Memory Routing
+## Worktree Resolution
 
-When `cross_project.memory_target: main`, all subagent memory writes go to the main project's memory path - the project where target was invoked.
-
-- Memory path format: `~/.claude/projects/{encoded-path}/memory/`
-- Encoding: slashes become hyphens, leading slash dropped
-- Example: `/Users/you/code/myproject` -> `~/.claude/projects/-Users-you-code-myproject/memory/`
-
-This prevents memory scatter across multiple project directories. All cross-project learnings are consolidated in one searchable location.
-
-## Cross-Project Worktree Pattern
-
-Worktrees are created at `{project.path}/.claude/worktrees/{feature-slug}`:
-
-```bash
-# Frontend
-~/code/myplatform/frontend/
-└── .claude/worktrees/
-    └── auth/              # git worktree on branch feature/auth
-
-# Backend
-~/code/myplatform/api/
-└── .claude/worktrees/
-    └── auth/              # git worktree (matching branch name)
-```
-
-**Resolution formula:**
-```
-{project.path}/{work.worktree.base}/{feature-slug}
-```
-
-Where `feature-slug` is derived from the branch name (e.g., `feature/auth` -> `auth`).
-
-
-## Cross-Project PR Pattern
-
-Frontend PR description:
-```markdown
-## Related PRs
-- Backend: org/api#123
-
-## Changes
-- Added auth UI components
-- Calls new `/api/auth/login` endpoint
-```
-
-Backend PR description:
-```markdown
-## Related PRs
-- Frontend: org/frontend#456
-
-## Changes
-- Added `/api/auth/login` endpoint
-- New database migration for sessions table
-```
+Worktrees are created at `{project.path}/{work.worktree.base}/{feature-slug}`,
+where `feature-slug` is derived from the branch name (e.g., `feature/auth` ->
+`auth`). Each project's worktree is independent; there is no matched-worktree
+coordination across repos.
 
 ## Add Project (`--add-project` / `--add-projects`)
 

@@ -31,8 +31,8 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 |-------|-----------|-------|
 | 1. Think | `input_type == idea` | `fno:think` |
 | 2. Plan | idea OR no 00-INDEX.md | `fno:plan` |
-| 3. Do | `cross_project: false` | `domain_phases.execute` (default: `fno:do waves`) |
-| 3. Do | `cross_project: true` | `fno:cross-project-pipeline` (HARD GATE) |
+| 3. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:do waves`) |
+| 3. Do | `cross_project: true` (legacy only) | Migration shim — the cross-project pipeline was removed. WARN + route to spawn-into-project (see SKILL.md "CROSS-PROJECT IS RETIRED"); then run `domain_phases.execute` for this session's own project. Do NOT invoke a cross-project pipeline skill. |
 | 3.5 Clean | Only with `clean` modifier | `/simplify` on changed files |
 | 4. Review | Always (BEFORE PUSH) | `domain_phases.review` (default: `fno:review`) |
 | 5. Validate | Always (BEFORE PUSH) | `domain_phases.validate` (default: project-detected); CI green on the PR is verified by the loop-check verb at promise time |

@@ -59,7 +59,7 @@ graph TB
         EXEC["Executors<br/>archer"]
         REV["Reviewers<br/>code-reviewer,<br/>silent-failure-hunter,<br/>integration-test-analyzer,<br/>type-design-analyzer,<br/>ux-flow-tester,<br/>multi-device-checker"]
         VER["Verifiers<br/>goal-verifier, verifier"]
-        SPEC["Specialists<br/>tournament-debugger,<br/>cross-project-finalizer,<br/>roadmap-generator"]
+        SPEC["Specialists<br/>tournament-debugger,<br/>roadmap-generator"]
     end
 
     subgraph "Hooks Layer"
@@ -552,26 +552,14 @@ graph TD
 
 ---
 
-## Cross-Project Worktree Architecture
+## Multi-Repo Features (spawn-into-project)
 
-For multi-repo features, each project gets an isolated worktree:
-
-```
-.claude/worktrees/{feature-slug}/
-    project-a/    # Worktree of project A
-    project-b/    # Worktree of project B
-```
-
-### Cross-Project Pipeline Phases
-
-1. **Setup** (parallel): Create worktrees per project, create matching branches (`feature/{slug}`)
-2. **Implement** (parallel): Run subagents per project, each working in isolation
-3. **Finalize** (parallel per project): Atomic commits, code review, create PR
-4. **Link**: Cross-reference PRs across repos
-
-Execution mode supports sequential, parallel, and mixed - allowing backend PRs to be created immediately after the backend phase completes rather than waiting for all projects.
-
-The `cross-project-finalizer` agent handles per-project finalization: commit, review, and PR creation.
+There is no cross-project orchestration pipeline. A multi-repo feature is
+decomposed into one backlog node per project (linked by `blocked_by`); each
+node ships its own PR from its own repo. A `/target` session works only in its
+own project; a foreign, unblocked wave is dispatched into its project via
+`fno agents spawn --cwd <root> "/target <node>"`, and `fno backlog advance`
+dispatches now-unblocked cross-project dependents when a node's PR merges.
 
 ---
 
