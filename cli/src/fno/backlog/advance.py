@@ -508,6 +508,8 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     entries = read_graph(graph_json())
     out: list[dict] = []
     for e in entries:
+        if not isinstance(e, dict):
+            continue
         if closed_node_id not in (e.get("blocked_by") or []):
             continue
         # "now-unblocked" == ready: blocker done + no other open blocker + has a
@@ -515,15 +517,44 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
         # `idea`; a claimed/done/deferred one reads its own bucket - all excluded.
         if e.get("_status") != "ready":
             continue
+        # An in-flight PR (pr_number set, not yet merged-and-closed) still reads
+        # `ready` because completed_at is only set at close. The project-scoped
+        # `next` path excludes these via _has_unmerged_open_pr; mirror it here so
+        # a dependent already in review is not re-dispatched once the dispatch TTL
+        # expires and a later reconcile/advance fires for the same blocker (codex
+        # P2). The PID-based node:<id> claim dies with the builder, leaving no
+        # in-flight signal behind, so this field guard is the durable one.
+        if e.get("pr_number") and not e.get("completed_at"):
+            continue
         if (e.get("project") or None) == (closed_project or None):
             continue  # same-project -> advance()'s `next` owns it
+        node_id = e.get("id")
+        if not node_id:
+            continue
         out.append({
-            "id": e["id"],
+            "id": node_id,
             "project": e.get("project"),
             "slug": e.get("slug") or e.get("title"),
             "cwd": e.get("cwd"),
         })
     return out
+
+
+def _walker_live_at(project_root: str) -> bool:
+    """True when the DEPENDENT project's own megawalk/active-backlog walker is
+    live. Its ``walker:<root>`` claim lives under ``<root>/.fno/claims`` (the
+    megawalk loop writes it from that project's checkout), which is a different
+    claims root from this process's, so check it there explicitly. A live walker
+    there will pick the node up itself; spawning would double-launch into that
+    repo (codex P2). Best-effort: a probe error never blocks dispatch."""
+    from fno.claims.core import claim_status
+
+    try:
+        return claim_status(
+            f"walker:{project_root}", root=Path(project_root)
+        ).get("state") == "live"
+    except Exception:  # noqa: BLE001 - a probe error must not block dispatch
+        return False
 
 
 def _dispatch_one_dependent(
@@ -563,6 +594,13 @@ def _dispatch_one_dependent(
     root = project_root_from_settings(project)
     if not root:
         return skip("unmapped-project", detail=project)
+
+    # The spawned worker runs in the DEPENDENT's repo, not this one. If that
+    # project already has a live walker, let it claim the node - spawning here
+    # would launch a second target into that repo (codex P2). Checked at the
+    # dependent root because its walker claim lives under that root's .fno/claims.
+    if _walker_live_at(root):
+        return skip("walker-live")
 
     # Already being worked? Same liveness gate as advance() step 4.
     if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):

@@ -58,9 +58,9 @@ ROOT=$(fno backlog project-root "$WAVE_PROJECT") || {
 }
 
 # 2. A foreign wave with no node: is a /blueprint authoring error.
-[[ -z "$WAVE_NODE" ]] && {
+if [[ -z "$WAVE_NODE" ]]; then
   echo "do: REFUSE foreign wave for '$WAVE_PROJECT' - no node: reference (every cross-repo shippable unit must be a backlog node)" >&2
-}
+fi
 
 # 3. Branch on the foreign node's status.
 STATUS=$(fno backlog get "$WAVE_NODE" --field _status)

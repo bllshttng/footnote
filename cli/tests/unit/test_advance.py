@@ -669,3 +669,42 @@ def test_direct_dependents_treats_missing_closed_project_as_cross(monkeypatch):
     monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
     deps = adv._direct_dependents("A", None)
     assert [d["id"] for d in deps] == ["B"]
+
+
+def test_direct_dependents_skips_pr_in_flight(monkeypatch):
+    """codex P2: a dependent already in review (pr_number set, not closed) still
+    reads `ready`, but must NOT be re-dispatched - mirror _has_unmerged_open_pr."""
+    entries = [
+        # ready cross-project dep WITH an open PR -> EXCLUDED (in review)
+        {"id": "B", "project": "web", "_status": "ready", "blocked_by": ["A"],
+         "pr_number": 99, "completed_at": None},
+        # ready cross-project dep with NO pr -> INCLUDED
+        {"id": "C", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    deps = adv._direct_dependents("A", "etl")
+    assert [d["id"] for d in deps] == ["C"]
+
+
+def test_direct_dependents_skips_non_dict_and_idless(monkeypatch):
+    """gemini medium: a malformed (non-dict / id-less) entry is skipped, not crashed."""
+    entries = [
+        "not-a-dict",
+        {"project": "web", "_status": "ready", "blocked_by": ["A"]},  # no id
+        {"id": "B", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    deps = adv._direct_dependents("A", "etl")
+    assert [d["id"] for d in deps] == ["B"]
+
+
+def test_dependents_honors_dependent_repo_walker(iso, monkeypatch):
+    """codex P2: a live walker in the DEPENDENT's repo suppresses the spawn (the
+    walker will claim the node itself; spawning would double-launch there)."""
+    monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
+    _map_project(monkeypatch, {"web": "/mapped/web"})
+    monkeypatch.setattr(adv, "_walker_live_at", lambda root: root == "/mapped/web")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+
+    results = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
+    assert results[0].decision == "skipped" and results[0].reason == "walker-live"
