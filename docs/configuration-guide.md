@@ -34,6 +34,7 @@
 | `config.post_merge.parking_lot_path` | str (optional) | _(none)_ | advanced | Per-repo vault parking-lot path for the post-merge ritual (repo-relative). |
 | `config.post_merge.enabled` | bool | `true` | advanced | Whether the post-merge ritual runs. |
 | `config.post_merge.self_reap` | bool | `false` | never | Whether a post-merge watcher self-reaps. |
+| `config.research.output_dir` | str (optional) | _(none)_ | advanced | Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses). |
 | `config.review.required_bots` | list[str] (optional) | _(none)_ | advanced | GitHub bot logins that must have reviewed before the ship gate goes green (the GATE). |
 | `config.review.external_reviewers` | list[str] | `[]` | always | Which AI reviewers /pr requests a review from (the INVOCATION list). |
 | `config.review.agent_providers` | dict[str, str] | `{}` | never | Per-agent provider routing for the cross-model review panel. |
