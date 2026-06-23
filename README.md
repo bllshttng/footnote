@@ -27,7 +27,7 @@ Then configure with `/fno:setup` and point it at a feature:
 /fno:target "add OAuth login"
 ```
 
-**CLI only** - just the `fno` binary, for scripting, CI, or driving footnote yourself. This installs `fno` but **not** the `/fno:*` slash commands (those need the agent integration above):
+**CLI only** - just the `fno` binary, for scripting, CI, or driving footnote yourself. This installs `fno` but **not** the `/fno:*` slash commands (those need the agent integration above, or run `fno setup wizard`, which offers to wire them into the agent CLIs it finds on your PATH):
 
 ```
 curl -fsSL fno.sh | sh          # one-liner
@@ -44,6 +44,7 @@ Configure a project from a Claude Code session with `/fno:setup`, or from the te
 
 ```
 fno setup wizard              # asks the few real per-project decisions, writes them validated
+                              # then offers to install the /fno:* integration for each agent CLI on your PATH
 ```
 
 Read or edit any setting directly: `fno config get|set|unset <key>` (atomic and schema-checked). Defaults are sensible; you can skip straight to running.
