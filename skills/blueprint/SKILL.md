@@ -824,12 +824,7 @@ Same lookup as quick mode (see above). Uses `plansDirectory` from `.claude/setti
    `references/discovery-gate.md` for the protocol (up to 5 questions in full mode).
    Skip if /think already produced a `## Discovery` or `## Assumptions` section.
 2. **Identify Phases** — Break into logical phases with dependency patterns
-3. **Cross-Project Detection** — If phases touch >1 project from work config in settings.yaml:
-   - Set `scope: cross-project` and `execution_mode: mixed`
-   - Build `projects:` map: assign each project its tasks from the phases
-   - Auto-assign `order:` from `work.patterns.execution_order` (e.g., `backend: 1`, `frontend: 2`)
-   - Plans can override with explicit `order:` values
-   - If all projects resolve to the same order, use `execution_mode: parallel`
+3. **Cross-Project Decomposition** — If phases touch >1 project from work config in settings.yaml, do NOT set `scope: cross-project` (removed). A plan is single-project from the executing session's view. Decompose into one backlog node per project, linked by `blocked_by`, each carrying its own `project`/`cwd` and its own `plan_path` (or a `#fragment` of this shared design doc per `references/section-headers.md`). Use the `fno backlog decompose <epic> --groups <json>` primitive (which mints `parent`/`blocked_by`/per-node fragments). Each node ships its own PR in its own repo; spawn-into-project carries the cross-repo handoff.
 4. **Execution Strategy** — Load [dependency-detection.md](references/dependency-detection.md) for the algorithm
 5. **Create INDEX.md** — Load [index-template.md](references/index-template.md). Keep ~200 lines.
 
@@ -842,7 +837,7 @@ Same lookup as quick mode (see above). Uses `plansDirectory` from `.claude/setti
    without matching tasks inherit the plan default (`executor: do`).
 6. **Goal Alignment** (if goals exist in settings.yaml) — Map tasks → goals
 7. **Critical Path Trace** (MANDATORY) — Trace every user journey through the system
-8. **Scope Classification** — `feature` | `scaffolding` | `poc` | `cross-project` (auto-detected in step 3)
+8. **Scope Classification** — `feature` | `scaffolding` | `poc` (a multi-repo feature is decomposed into per-project nodes in step 3, not classified `cross-project`)
 9. **Create Phase Files** — Load [phase-template.md](references/phase-template.md) for task format
 10. **Linear Ticket** — Only if `config.linear.enabled: true` in settings.yaml. Read team prefix from `config.linear.team`. If Linear is not configured, skip this step entirely.
 11. **Validate** — Run `bash ${SKILL_DIR}/scripts/validate-plan.sh <plan-folder>`

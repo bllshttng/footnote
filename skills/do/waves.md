@@ -77,28 +77,19 @@ fi
 
 The plan summary supplements but never replaces 00-INDEX.md.
 
-#### Cross-Project Scope Detection
+#### Foreign-wave handling (spawn-into-project)
 
-After loading the execution strategy, check for cross-project scope from TWO sources:
+The `scope: cross-project` parallel-worktree pipeline has been removed;
+`/do waves` no longer delegates to it. Instead, resolve each wave's project
+(from its `project:` field / node) against the workspace map and, when a wave
+belongs to a project OTHER than the session's:
 
-1. **INDEX check:** `scope: cross-project` in the INDEX YAML
-2. **Target-state check:** `.fno/target-state.md` has `cross_project: true` (from `cross-project` subcommand)
+- **Foreign node unblocked (ready):** `fno agents spawn --cwd <foreign-root> "/target <foreign-node>"`, mark the wave delegated, print a `spawned target-<node> --cwd <root>` receipt, and continue this session's own waves.
+- **Foreign node still blocked** (e.g. `blocked_by` the current, not-yet-merged node): do NOT spawn (the worker would refuse). Record a `fno carveout add --kind deferred` entry, print a `deferred <node> to <project>; dispatch on <blocker> merge` line, and rely on `fno backlog advance` to dispatch it after merge.
+- **Never** `cd` into the foreign repo and execute locally.
 
-If EITHER is true:
-   - Load work config via workspace skill (settings.yaml)
-   - Validate all referenced projects exist in settings.yaml
-   - Delegate to `cross-project-pipeline` skill with:
-     - Plan path
-     - Resolved project paths (from workspace config)
-     - Feature name from INDEX
-   - The pipeline handles its own wave execution internally
-   - waves-mode STATE.md is NOT used (the pipeline tracks its own state)
-   - waves mode returns when the pipeline returns
-   - Results from the pipeline are reported back to archer
-
-If NEITHER is true: continue with normal wave execution below
-
-**Note:** In practice, when `cross_project: true`, the target skill should invoke the cross-project pipeline directly (HARD GATE) and never reach waves mode. This fallback exists for cases where `/do waves` is invoked manually on a cross-project plan.
+A pure single-project plan (zero foreign waves) behaves byte-identically to
+before: no spawn, no deferral, normal wave execution below.
 
 ```yaml
 execution_mode: mixed

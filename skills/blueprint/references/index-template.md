@@ -76,15 +76,10 @@ kill_criteria:
 ```yaml
 execution_mode: mixed  # sequential | parallel | mixed
 
-# Optional: Cross-project scope (only when orchestrating across multiple repos)
-# scope: cross-project  # single-project (default) | cross-project
-# projects:
-#   backend:             # key from work.workspaces.{name}.projects in settings.yaml
-#     order: 1           # execution order — order 1 completes (implement + PR) before order 2 starts
-#     tasks: [1.1, 1.2, 2.1]
-#   frontend:
-#     order: 2           # depends on backend schema — starts after backend PR exists
-#     tasks: [1.3, 2.2, 2.3]
+# scope: cross-project has been removed. A plan is single-project from the
+# executing session's view. For a multi-repo feature, decompose into one backlog
+# node per project (linked by blocked_by) via `fno backlog decompose`; each node
+# ships its own PR and spawn-into-project carries the cross-repo handoff.
 
 waves:
   - wave: 1
@@ -172,7 +167,7 @@ _For plans with zero waves (single-phase trivial work), omit the `## Wave N:` se
 | 3 | [03-ui.md](./03-ui.md) | 18 | 01, 02, 02b | - | _(project key)_ |
 | 4 | [04-tests.md](./04-tests.md) | 16 | All | - | _(all)_ |
 
-_The **Project** column maps phases to workspace project keys from settings.yaml. Only used when `scope: cross-project`._
+_The **Project** column maps phases to workspace project keys from settings.yaml (informational; a multi-repo feature is decomposed into per-project backlog nodes rather than executed as one `scope: cross-project` plan)._
 
 ---
 

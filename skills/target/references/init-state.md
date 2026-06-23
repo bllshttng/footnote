@@ -127,32 +127,22 @@ fi
 
 The stop hook uses `plan_path` to archive the scratchpad (if any) to `scratchpad-archive/` inside the plan folder, and to drive `stamp-plan.py` on ship. Session-state files (HANDOFF.md, SUMMARY.md, STATE.md, target-state.md) are transient and are NOT archived - the plan frontmatter stamp, COMPLETION.md, ledger.json, and git history are the durable record.
 
-## Step 3a: Cross-Project Detection
+## Step 3a: Cross-Project Is Retired (migration shim)
 
-Check for cross-project scope:
-1. **Explicit:** `cross-project` subcommand in arguments → set `cross_project: true`
-2. **Implicit:** Plan's 00-INDEX.md has `scope: cross-project`
-3. **Neither:** proceed with single-project pipeline (default)
+The `scope: cross-project` parallel-worktree pipeline has been removed.
+There is no longer a cross-project detection step that forks a separate
+pipeline. A session works only in its own project; multi-repo features are
+modeled as one backlog node per project (linked by `blocked_by`), each
+shipping its own PR. See the "CROSS-PROJECT IS RETIRED (migration shim)"
+section in SKILL.md.
 
-When cross-project detected:
-- target-state.md gets `cross_project: true` and `projects:` section
-- Read project paths from settings.yaml work config
-- Validate all referenced projects exist on disk
-- `/do waves` reads this and delegates to cross-project-pipeline skill
-
-```yaml
-# target-state.md — cross-project extension
-cross_project: true
-projects:
-  backend:
-    status: IN_PROGRESS
-    pr_url: null
-    pr_number: null
-  frontend:
-    status: IN_PROGRESS
-    pr_url: null
-    pr_number: null
-```
+`fno target init` still persists `cross_project: false` by default (the
+manifest schema field is retained for back-compat with already-stamped
+legacy plans, whose graduation timing `fno-agents finalize` still honors).
+A legacy plan carrying `scope: cross-project` (or a `cross-project`
+subcommand) sets `cross_project: true`; that no longer forks the pipeline,
+it only triggers the SKILL.md deprecation warning + spawn-into-project
+routing.
 
 ## Step 3b: Linear Ticket Auto-Detection (if linear plugin installed)
 
