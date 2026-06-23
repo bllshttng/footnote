@@ -125,7 +125,6 @@ See [docs/provider-rotation.md](docs/provider-rotation.md) for the full schema, 
 | `/target "feature"` | End-to-end: think → blueprint → do → review → ship |
 | `/target path/to/plan` | Execute existing plan (skips think/blueprint) |
 | `/target <node-id>` | Execute a specific graph-backlog node by ID (e.g. `/target fno-a3f9`; resolves via `~/.fno/graph.json`). Same form works in `/megawalk`. |
-| `/target cross-project "feature"` | Multi-repo feature: worktrees + parallel PRs |
 | `/target L "feature"` | Large size: full ceremony including adversarial |
 | `/target auto-merge "feature"` | Auto-merge PR once external review passes (opt-in; also works on `/megawalk`). Requires `config.auto_merge.enabled: true` OR the CLI modifier. See [skills/_shared/auto-merge.md](skills/_shared/auto-merge.md). |
 | `/megawalk` (bare) | Loop through the ready backlog until done. Replaces the removed `continue` and `next` subcommands. |
@@ -368,13 +367,20 @@ When `/target` completes the ship gate, it stamps the plan's frontmatter (`statu
 
 Folder plans get a `COMPLETION.md` at ship-gate time and a `scratchpad-archive/` preserving the final target session. See [docs/architecture/plan-completion-stamp.md](docs/architecture/plan-completion-stamp.md).
 
-### Cross-Project Pipeline
+### Multi-Repo Features (spawn-into-project)
 
-When `cross-project` subcommand or `scope: cross-project` in plan:
-1. Setup worktrees per project (parallel) at `.claude/worktrees/{feature}`
-2. Implement per project (parallel subagents)
-3. Finalize per project (parallel: commits → review → PR)
-4. Link PRs across repos
+The heavyweight `scope: cross-project` parallel-worktree pipeline has been
+removed. A session works only in its OWN project; when work belongs to
+another repo it is spawned into that repo's project, never edited from the
+current session. A multi-repo feature is modeled as one backlog node per
+project, linked by `blocked_by`, each shipping its own PR in its own repo:
+
+1. `/blueprint` decomposes the feature into per-project nodes (`fno backlog decompose`), each with its own `project`/`cwd` and `plan_path` (or a `#fragment` of one shared design doc).
+2. `/do` resolves each wave's project; a foreign, unblocked wave is dispatched via `fno agents spawn --cwd <root> "/target <node>"`; a foreign, still-blocked wave is deferred (carveout) to the merge trigger.
+3. When a node's PR merges, `fno backlog advance` dispatches its now-unblocked cross-project dependents into their own projects.
+
+A legacy plan carrying `scope: cross-project` is grandfathered: it warns and
+routes to this model rather than running the removed pipeline.
 
 ## Work-Claim Coordination (`fno claim`)
 
@@ -593,13 +599,6 @@ All execution agents enforce test-first:
 3. Implement minimal code (green)
 4. Verify database state (not just UI)
 5. Atomic commit
-
-### Cross-Project Worktrees
-
-Each project gets `.claude/worktrees/{feature}` with:
-- Matching branch names across repos (`feature/{slug}`)
-- Memory routing to main project's path
-- Automated PR cross-linking via `cross-project-pipeline` skill
 
 ### Deviation Rules
 When encountering issues not in the plan:

@@ -146,18 +146,10 @@ Configuration, analysis, and operational tools.
 | `codemap` | `/fno:codemap` | AST-based structural analysis with PageRank (god nodes, orphans, module boundaries) |
 | `ship-docs` | `/fno:ship-docs` | Architecture documentation generation |
 | `git-worktrees` | `/fno:git-worktrees` | Git worktree creation and management |
-| `cross-project-pipeline` | `/fno:cross-project-pipeline` | Multi-repo orchestration with parallel PRs |
 
-#### cross-project-pipeline
+#### Multi-repo features
 
-When `--cross-project` flag or `scope: cross-project` is set in a plan:
-
-1. Setup worktrees per project (parallel) at `.claude/worktrees/{feature}`
-2. Implement per project (parallel subagents)
-3. Finalize per project (parallel: commits, review, PR)
-4. Link PRs across repos
-
-Supports `execution_mode: sequential` for creating PRs immediately after each project phase completes.
+There is no cross-project orchestration skill. A multi-repo feature is decomposed into one backlog node per project (linked by `blocked_by`); each ships its own PR from its own repo, and spawn-into-project dispatches the cross-repo handoff (`/do` auto-spawns foreign unblocked waves; `fno backlog advance` dispatches dependents on merge).
 
 ---
 
@@ -243,7 +235,6 @@ UNBLOCKS_AFTER: <prerequisite>    # if BLOCKED
 
 | Agent | Model | Color | Tools | Purpose |
 |-------|-------|-------|-------|---------|
-| `cross-project-finalizer` | sonnet | green | Read, Write, Edit, Bash, Grep, Glob, Agent | Atomic commits + PR creation per project in cross-project pipeline |
 | `tournament-debugger` | sonnet | red | Read, Grep, Glob, Bash | Parallel hypothesis testing - multiple agents compete to find root cause |
 | `roadmap-generator` | opus | green | Read, Write, Edit, Bash, Grep, Glob | Generates prioritized task backlog from vision documents for megawalk |
 ---

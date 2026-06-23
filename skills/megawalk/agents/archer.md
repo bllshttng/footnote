@@ -160,7 +160,6 @@ See [references/usage-detail.md](references/usage-detail.md) for model-optimizat
 # Execution modes (combinable with sizes)
 /target agent "feature"                  # subagent dispatch
 /target fork path/to/plans-folder/       # worktree isolation per plan
-/target cross-project "feature"          # multi-repo
 /target bg ab-A ab-B                     # fire-and-forget: dispatch ready node(s) as claude --bg /target workers (US5)
 /target bg --all-ready                   # dispatch every ready, non-deferred node; planning session keeps going
 
@@ -446,23 +445,25 @@ per-phase schema and the complete size invariant (500-token cap).
 
 ### 4. Execute Pipeline
 
-#### CROSS-PROJECT HARD GATE (NON-NEGOTIABLE)
+#### CROSS-PROJECT IS RETIRED (migration shim)
 
-**Check target-state.md BEFORE any execution.** If `cross_project: true`:
+The `scope: cross-project` parallel-worktree pipeline has been removed. A
+session works only in its OWN project; foreign work is spawned into its
+project via `fno agents spawn --cwd <root>` (spawn-into-project). A multi-repo
+feature is now a set of single-project backlog nodes linked by `blocked_by`,
+each shipping its own PR in its own repo.
 
-1. You **MUST** invoke the `cross-project-pipeline` skill via the Skill tool
-2. You **MUST NOT** write code directly in the main thread
-3. You **MUST NOT** `cd` to other repos and make changes manually
-4. You **MUST NOT** skip any project referenced in the plan
-5. You **MUST NOT** invoke `/do waves` — the pipeline replaces it entirely
+**Check target-state.md BEFORE any execution.** If `cross_project: true`
+(a legacy `cross-project` subcommand, or a plan with `scope: cross-project`):
 
-**FORBIDDEN:** Implementing cross-project work in the main thread. The pipeline creates per-project worktrees, dispatches parallel subagents, and creates per-project PRs. You cannot replicate this by hand.
+1. **WARN** the user: `scope: cross-project is deprecated and the parallel pipeline was removed. Model multi-repo work as one backlog node per project (linked by blocked_by); each ships its own PR. Use `fno backlog decompose` to split a legacy plan.`
+2. **Do NOT** invoke any cross-project pipeline (removed) and **do NOT** `cd` into other repos to write code.
+3. **Route to spawn-into-project:** continue THIS session in its own project only. Foreign waves are handled by `/do` (auto-spawn when the foreign node is unblocked; defer + carveout when it is blocked); cross-project dependents are dispatched on merge by `fno backlog advance`.
 
-**After pipeline returns:** Resume at the standard review → validate → ship flow. The pipeline handles implementation + per-project code review internally. You handle the overall PR linking and external review.
-
-**If the plan INDEX has `scope: feature` but target-state has `cross_project: true`:** The `cross-project` subcommand overrides the INDEX scope. Pass `cross_project: true` to the pipeline — it will infer projects from the plan content and workspace config.
-
-See [references/cross-project.md](references/cross-project.md) for the full coordination protocol.
+`cross_project: true` no longer forks the pipeline; it only triggers this
+deprecation warning + the spawn-into-project routing above. The manifest
+field and the plan-graduation timing in `fno-agents finalize` are retained
+so an already-stamped legacy plan still parses and graduates correctly.
 
 #### Self-Handoff at Pipeline Boundaries (ab-534bcc55)
 
@@ -539,7 +540,7 @@ When validation fails or the same error fires repeatedly, target has structured 
 
 #### Secondary Repo Inline Commit
 
-When a plan task touches a secondary repo (e.g., a frontend plan with a backend migration), branch+commit+PR inline before returning to the main repo. See [references/secondary-repo-commit.md](references/secondary-repo-commit.md). For >3 files or meaningful parallel work, use `cross-project` instead.
+When a plan task touches a secondary repo (e.g., a frontend plan with a backend migration), branch+commit+PR inline before returning to the main repo. See [references/secondary-repo-commit.md](references/secondary-repo-commit.md). For >3 files or meaningful parallel work, model the other repo as its own backlog node (linked by `blocked_by`) and let spawn-into-project dispatch it.
 
 #### Auto-Merge Mechanics
 
@@ -599,7 +600,6 @@ Configuration lives in `.fno/settings.yaml` (project-local) with `~/.fno/setting
 - [references/model-fallback.md](references/model-fallback.md) - Rate-limit handling
 - [references/resume.md](references/resume.md) - Resume protocol + project vision re-read
 - [references/settings.md](references/settings.md) - settings.yaml schema + state files + cost tracking
-- [references/cross-project.md](references/cross-project.md) - Cross-project coordination
 - [references/multi-plan.md](references/multi-plan.md) - Multi-plan worktree mode
 - [references/domain-profiles.md](references/domain-profiles.md) - Domain phase resolution
 - [references/gate-artifacts.md](references/gate-artifacts.md) - SUPERSEDED: see docs/architecture/control-plane-loop.md
