@@ -824,7 +824,9 @@ Same lookup as quick mode (see above). Uses `plansDirectory` from `.claude/setti
    `references/discovery-gate.md` for the protocol (up to 5 questions in full mode).
    Skip if /think already produced a `## Discovery` or `## Assumptions` section.
 2. **Identify Phases** — Break into logical phases with dependency patterns
-3. **Cross-Project Decomposition** — If phases touch >1 project from work config in settings.yaml, do NOT set `scope: cross-project` (removed). A plan is single-project from the executing session's view. Decompose into one backlog node per project, linked by `blocked_by`, each carrying its own `project`/`cwd` and its own `plan_path` (or a `#fragment` of this shared design doc per `references/section-headers.md`). Use the `fno backlog decompose <epic> --groups <json>` primitive (which mints `parent`/`blocked_by`/per-node fragments). Each node ships its own PR in its own repo; spawn-into-project carries the cross-repo handoff.
+3. **Cross-Project Decomposition** — If phases touch >1 project from work config in settings.yaml, do NOT set `scope: cross-project` (removed). A plan is single-project from the executing session's view. Decompose into one backlog node per project, linked by `blocked_by`, each carrying its own `project`/`cwd` and its own `plan_path` (or a `#fragment` of this shared design doc per `references/section-headers.md`):
+   - `fno backlog decompose <epic> --groups <json>` mints the per-group child nodes (`parent`/`blocked_by`/per-node `#fragment`). **Note:** decompose copies the epic's `project`/`cwd` onto every child, so a child that belongs to a *different* repo must then be reprojected: `fno backlog update <child> --project <p> --cwd <root>` (the work-map root for `<p>`). Without this step the foreign node is recorded under the current repo and spawn-into-project will not dispatch it.
+   - Each node then ships its own PR in its own repo; spawn-into-project carries the cross-repo handoff.
 4. **Execution Strategy** — Load [dependency-detection.md](references/dependency-detection.md) for the algorithm
 5. **Create INDEX.md** — Load [index-template.md](references/index-template.md). Keep ~200 lines.
 

@@ -78,8 +78,10 @@ execution_mode: mixed  # sequential | parallel | mixed
 
 # scope: cross-project has been removed. A plan is single-project from the
 # executing session's view. For a multi-repo feature, decompose into one backlog
-# node per project (linked by blocked_by) via `fno backlog decompose`; each node
-# ships its own PR and spawn-into-project carries the cross-repo handoff.
+# node per project (linked by blocked_by) via `fno backlog decompose`, then
+# `fno backlog update <child> --project <p> --cwd <root>` for any child in a
+# different repo (decompose copies the epic's project/cwd to every child). Each
+# node ships its own PR and spawn-into-project carries the cross-repo handoff.
 
 waves:
   - wave: 1
