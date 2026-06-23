@@ -362,7 +362,13 @@ def wizard_cmd(
                 break
         return chosen
 
-    run_cli_integration(select_fn=select_fn, echo_fn=typer.echo)
+    try:
+        run_cli_integration(select_fn=select_fn, echo_fn=typer.echo)
+    except KeyboardInterrupt:
+        # A Ctrl-C mid-install (e.g. during a clone) should exit cleanly, not
+        # dump a traceback.
+        typer.echo("\nintegration cancelled.")
+        raise typer.Exit(1)
     raise typer.Exit(0)
 
 
