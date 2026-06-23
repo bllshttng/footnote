@@ -36,8 +36,11 @@ foreign wave:
   no `node:` on the wave                    ->  REFUSE (authoring error)
   fno backlog project-root <WAVE_PROJECT>   ->  exit 1 (unmapped)  ->  REFUSE by name
   fno backlog get <node> --field _status:
-      ready | idea  (unblocked)             ->  SPAWN into <root>
+      ready  (unblocked, has a plan)        ->  SPAWN into <root>
       blocked                               ->  DEFER (carveout) + rely on G1
+      idea   (unblocked but plan-less)      ->  skip; needs /blueprint first, not
+                                                auto-dispatched (matches G1, which
+                                                dispatches ready-only)
       done                                  ->  skip (already shipped)
       claimed                               ->  skip (a worker already owns it)
 ```
@@ -62,11 +65,16 @@ ROOT=$(fno backlog project-root "$WAVE_PROJECT") || {
 # 3. Branch on the foreign node's status.
 STATUS=$(fno backlog get "$WAVE_NODE" --field _status)
 case "$STATUS" in
-  ready|idea)
+  ready)
     # SPAWN into the foreign project. --cwd (never -P); subscription lane (never -p/--bare).
     fno agents spawn --provider claude --cwd "$ROOT" "target-$WAVE_NODE" "/target $WAVE_NODE"
     echo "do: spawned target-$WAVE_NODE --cwd $ROOT"   # receipt (AC3-UI)
     # mark the wave DELEGATED in STATE.md; continue the session's own waves
+    ;;
+  idea)
+    # Unblocked but plan-less: not "ready" work. Skip (a human /blueprint authors
+    # it first), matching G1's ready-only dispatch so the two pillars agree.
+    echo "do: skipped $WAVE_NODE ($WAVE_PROJECT) - no plan yet; /blueprint it first"
     ;;
   blocked)
     # DEFER: a spawned worker would refuse on the still-blocked node. Record it
