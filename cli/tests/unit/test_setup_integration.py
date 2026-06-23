@@ -215,6 +215,21 @@ def test_ac1_fr_old_claude_without_plugin_subcommand_routes_to_skills_dir(tmp_pa
     assert not any("marketplace add" in " ".join(c) for c in run.calls)
 
 
+def test_skills_dir_recovers_from_a_stale_partial_clone(tmp_path, monkeypatch):
+    # A prior failed clone left dest non-empty but without a valid plugin.json.
+    dest = tmp_path / "skills-fno"
+    dest.mkdir()
+    (dest / "stale").write_text("leftover from a failed clone")
+    monkeypatch.setattr(I, "_claude_skills_dir", lambda: dest)
+    run = _FakeRun([("git clone", 0, "", "")])
+
+    res = I._claude_skills_dir_install(run)
+
+    # the stale dir was cleared before the retry clone, and the result is honest
+    assert not (dest / "stale").exists()
+    assert res.status == "installed" and "skills-dir" in res.note
+
+
 # --- adapter exit-code honesty ----------------------------------------------
 
 def test_install_never_claims_success_on_nonzero_exit():

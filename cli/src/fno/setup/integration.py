@@ -64,7 +64,12 @@ def _run(cmd: list[str], timeout: int = 120) -> "subprocess.CompletedProcess[str
     """
     try:
         return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
+            cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",  # non-UTF-8 installer output must not raise
+            timeout=timeout,
+            check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr=str(exc))
@@ -126,6 +131,11 @@ def _claude_skills_dir_install(run: Runner) -> IntegrationResult:
     dest = _claude_skills_dir()
     if (dest / ".claude-plugin" / "plugin.json").exists():
         return IntegrationResult("claude", label, "already-installed", note="skills-dir")
+    # A prior clone that failed/timed out leaves a non-empty dest without a valid
+    # plugin.json; `git clone` refuses to write into it. Clear the stale dir so a
+    # re-run recovers (idempotency + transient-failure robustness).
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
     # A full-repo shallow clone over a slow link can outrun the default 120s, so
     # give the one network-heavy step more room before it fails closed.
     clone = run(["git", "clone", "--depth", "1", _REPO_URL, str(dest)], timeout=300)
