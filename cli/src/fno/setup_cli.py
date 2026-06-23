@@ -333,11 +333,42 @@ def wizard_cmd(
     n = len(result["written"])
     if result.get("cancelled"):
         typer.echo(f"\nwizard cancelled after writing {n} key(s).")
-    else:
-        typer.echo(
-            f"\nwizard complete: {n} key(s) written. "
-            "Run `fno config doctor` to verify."
-        )
+        raise typer.Exit(0)
+
+    typer.echo(
+        f"\nwizard complete: {n} key(s) written. "
+        "Run `fno config doctor` to verify."
+    )
+
+    # Optional capstone: wire the /fno:* slash commands into the agent CLIs on
+    # PATH. A CLI-only install has the binary but not the slash commands; this
+    # lets that user opt into the agent door without hunting the docs.
+    from fno.setup.integration import run_cli_integration
+
+    typer.echo("\nAgent CLI integration - add the /fno:* commands to your CLI:")
+
+    def select_fn(options: list[dict[str, object]]) -> list[str]:
+        # No native multi-select primitive in a plain terminal, so degrade to a
+        # per-CLI yes/no over the not-yet-installed rows (already-installed ones
+        # were echoed and are skipped). Ctrl-C stops asking, installs nothing more.
+        chosen: list[str] = []
+        for opt in options:
+            if opt["installed"]:
+                continue
+            try:
+                if typer.confirm(f"  Wire up {opt['label']}?", default=False):
+                    chosen.append(str(opt["cli"]))
+            except typer.Abort:
+                break
+        return chosen
+
+    try:
+        run_cli_integration(select_fn=select_fn, echo_fn=typer.echo)
+    except KeyboardInterrupt:
+        # A Ctrl-C mid-install (e.g. during a clone) should exit cleanly, not
+        # dump a traceback.
+        typer.echo("\nintegration cancelled.")
+        raise typer.Exit(1)
     raise typer.Exit(0)
 
 
