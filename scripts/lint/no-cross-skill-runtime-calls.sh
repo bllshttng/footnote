@@ -83,7 +83,7 @@ FRONTMATTER_CHECKER="$SCRIPT_REPO_ROOT/scripts/lib/check-skill-frontmatter.py"
 #                     `fno` binary declaration in frontmatter.
 # ---------------------------------------------------------------------------
 DRIVER_SKILLS=(target megawalk megatron)
-CLUSTER_ROUTERS=(review fix think pr do ship)
+CLUSTER_ROUTERS=(review fix think pr do)
 SELF_CONTAINED_SKILLS=("${DRIVER_SKILLS[@]}" "${CLUSTER_ROUTERS[@]}")
 EXIT=0
 

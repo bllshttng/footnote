@@ -1,7 +1,7 @@
 ---
 name: ship
 description: "Drive any deliverable to its finish line. The umbrella over delivery terminals: 'ship pr' is the PR lifecycle (= today's /pr), 'ship doc' ships a research brief to output_dir and grades it. Use when: 'ship this', 'ship a PR', 'ship the doc', 'ship the brief', 'deliver this'. Not for ongoing areas (budget, community) - those have no finish line; use /target or /megawalk."
-argument-hint: "<pr|doc>  (pr: create|check|merged - the PR lifecycle; doc: <topic|brief.md> [--golden <discovery-*.md>])  - a type is required, there is no default"
+argument-hint: "<pr|doc>  (pr: create|check|merged - the PR lifecycle; doc: <topic> [--golden <discovery-*.md>])  - a type is required, there is no default"
 requires:
   binaries:
     - "fno >= 0.1"
@@ -25,6 +25,10 @@ A thing is a ship type ONLY if it has a definable **green** - a finish line read
 ## Vocabulary: "ship" the verb vs the ship phase/gate
 
 `/ship` (this verb) = drive a deliverable to its finish line. It is distinct from the *ship phase* and *ship gate* inside `/target`, from the `DonePRGreen`/`DoneAdvisory` termination reasons, from `fno pr merge`, and from `/ship-docs` (which generates documentation and is NOT a ship type). The single canonical disambiguation lives in `AGENTS.md` -> "Ship vocabulary"; read it if the overlap is confusing.
+
+## Composition, not self-containment
+
+`/ship` is a **composing umbrella**, deliberately NOT a self-contained, liftable-in-isolation skill. `/ship pr` routes to the co-installed `/pr` skill (which stays the real implementation and permanent alias - the plan's no-forced-migration rule); `/pr` is therefore a hard companion dependency, not reimplemented here. Only the genuinely-new `doc` mode is local to this folder ([doc.md](doc.md), loaded via Read). This skill is intentionally excluded from the marketplace self-containment lint, because folding `/pr`'s ~400 lines of mode bodies in would tax the dominant code path for no payoff.
 
 ## Step 1: Resolve the type (ALWAYS announce it)
 
