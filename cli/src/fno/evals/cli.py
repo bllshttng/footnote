@@ -101,6 +101,38 @@ def run_command(
     raise typer.Exit(code=rc)
 
 
+@evals_app.command("grade")
+def grade_command(
+    brief: Path = typer.Option(..., "--brief", help="Path to the research brief <slug>.md."),
+    golden: Path = typer.Option(..., "--golden", help="Path to the golden discovery-*.md doc."),
+    sidecar: Optional[Path] = typer.Option(
+        None, "--sidecar",
+        help="Path to the sources.jsonl (default: <brief-stem>.sources.jsonl beside the brief).",
+    ),
+) -> None:
+    """Grade a research brief against a golden doc (US5, three mechanical assertions).
+
+    Green only if: (a) zero uncited claims, (b) zero dead source URLs,
+    (c) >=1 golden checklist item per section. No model in the gate; the
+    research-verify panel is advisory and never changes this verdict.
+
+    Exit codes:
+      0  GREEN (all three pass)
+      1  RED (one or more assertions failed)
+      2  scorer setup error (missing brief / golden / sidecar)
+    """
+    from fno.evals.research_grade import GradeError, grade
+
+    try:
+        result = grade(brief, golden, sidecar_path=sidecar)
+    except GradeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    typer.echo(result.summary())
+    raise typer.Exit(code=0 if result.green else 1)
+
+
 @evals_app.command("report")
 def report_command(
     task: Optional[str] = typer.Option(

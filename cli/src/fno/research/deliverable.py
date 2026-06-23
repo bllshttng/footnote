@@ -102,6 +102,8 @@ def build_brief(
     body = ["", f"# {topic}", ""]
     if not verified:
         body += [
+            "## Findings",
+            "",
             "No sources found for this topic. The evidence store is empty; this "
             "brief is stamped accordingly so the eval reports the gap rather than "
             "treating a thin result as complete.",
