@@ -791,7 +791,7 @@ fn resolve_handoffs_dir(
     if let Some(d) = env_dir_unless_null("HANDOFFS_DIR") {
         return d;
     }
-    let project = repo_project_name(cwd);
+    let project = resolve_project_name(settings_override, home, cwd);
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(s) = settings_override {
         candidates.push(s.to_path_buf());
@@ -905,6 +905,85 @@ fn repo_project_name(cwd: &Path) -> String {
     cwd.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "project".into())
+}
+
+/// Resolve the `{project}` path token. Prefers `config.project.id` from
+/// project-local then global settings.yaml (matching the Python resolver
+/// `fno.paths._resolve`, paths.py:293-303, which reads project.id first and the
+/// repo basename only as a fallback), then falls back to the git main-worktree
+/// basename via `repo_project_name`. Non-fatal: a missing or malformed settings
+/// file or an unset/`null` project.id degrades to the basename, so unconfigured
+/// installs are unchanged. Uses the SAME project-then-global candidate order the
+/// callers already use for `config.paths.*_dir`.
+fn resolve_project_name(
+    settings_override: Option<&Path>,
+    home: Option<&Path>,
+    cwd: &Path,
+) -> String {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(s) = settings_override {
+        candidates.push(s.to_path_buf());
+    }
+    candidates.push(cwd.join(".fno/settings.yaml"));
+    if let Some(h) = home {
+        candidates.push(h.join(".fno/settings.yaml"));
+    }
+    for sp in candidates {
+        if let Some(id) = read_project_id(&sp) {
+            return id;
+        }
+    }
+    repo_project_name(cwd)
+}
+
+/// Read `config.project.id` from a settings.yaml. Scoped scan (not the flat one
+/// in `read_path_setting`, since `id:` is too generic): find the `project:`
+/// mapping, then return its direct-child `id:` scalar. A `null`/empty value is
+/// the "unset" sentinel and yields None so the caller falls back to the
+/// basename. Hand-scanned to keep the crate free of a YAML dependency, matching
+/// the existing `read_path_setting` style.
+/// ponytail: bespoke scan for one nested key; swap for serde_yaml if settings
+/// parsing ever needs more than this.
+fn read_project_id(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut project_indent: Option<usize> = None;
+    let mut child_indent: Option<usize> = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        match project_indent {
+            None => {
+                if trimmed == "project:" {
+                    project_indent = Some(indent);
+                }
+            }
+            Some(pi) => {
+                // A line at or above the project: indent ends the block.
+                if indent <= pi {
+                    return None;
+                }
+                // Only the project: mapping's direct children (its first deeper
+                // indent level) are candidates; deeper grandchildren are skipped.
+                let ci = *child_indent.get_or_insert(indent);
+                if indent == ci {
+                    if let Some(rest) = trimmed.strip_prefix("id:") {
+                        let v = rest
+                            .split('#')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .trim_matches(|c| c == '"' || c == '\'');
+                        return (!v.is_empty() && !v.eq_ignore_ascii_case("null"))
+                            .then(|| v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Best-effort PR URL for the current HEAD/branch via `gh`.
@@ -1021,7 +1100,7 @@ fn resolve_postmortems_dir(
     if let Some(d) = env_dir_unless_null("POSTMORTEMS_DIR") {
         return d;
     }
-    let project = repo_project_name(cwd);
+    let project = resolve_project_name(settings_override, home, cwd);
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(s) = settings_override {
         candidates.push(s.to_path_buf());
@@ -1508,6 +1587,89 @@ mod tests {
         .unwrap();
         assert_eq!(derive_expected_url_count(&dir, "folderplan", true), Some(3));
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── project name resolution (x-44e7) ──────────────────────────────────
+
+    fn write_settings(dir: &Path, body: &str) {
+        let cfg = dir.join(".fno");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(cfg.join("settings.yaml"), body).unwrap();
+    }
+
+    #[test]
+    fn project_id_parses_nested_scalar() {
+        let dir = std::env::temp_dir().join(format!("fin-projid-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let f = dir.join("settings.yaml");
+        // basename of the dir differs from project.id on purpose.
+        fs::write(
+            &f,
+            "config:\n  project:\n    id: fno\n  obsidian:\n    id: ignored\n",
+        )
+        .unwrap();
+        assert_eq!(read_project_id(&f).as_deref(), Some("fno"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_id_null_and_missing_are_unset() {
+        let dir = std::env::temp_dir().join(format!("fin-projnull-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let null = dir.join("null.yaml");
+        fs::write(&null, "config:\n  project:\n    id: null\n").unwrap();
+        assert_eq!(read_project_id(&null), None, "null id -> unset");
+        let empty = dir.join("empty.yaml");
+        fs::write(&empty, "config:\n  project: {}\n").unwrap();
+        assert_eq!(read_project_id(&empty), None, "no id key -> unset");
+        assert_eq!(
+            read_project_id(&dir.join("absent.yaml")),
+            None,
+            "missing file -> unset"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_project_name_prefers_project_id_over_basename() {
+        // Dir basename is "footnote-like"; project.id is "fno".
+        let dir = std::env::temp_dir().join(format!("fin-rpn-pref-{}", std::process::id()));
+        let cwd = dir.join("footnote-like");
+        let _ = fs::create_dir_all(&cwd);
+        write_settings(&cwd, "config:\n  project:\n    id: fno\n");
+        let home = dir.join("home"); // no settings -> not consulted before cwd
+        let _ = fs::create_dir_all(&home);
+        assert_eq!(resolve_project_name(None, Some(&home), &cwd), "fno");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_project_name_falls_back_to_basename() {
+        // No project.id anywhere -> git/cwd basename (here, the cwd dir name).
+        let dir = std::env::temp_dir().join(format!("fin-rpn-fb-{}", std::process::id()));
+        let cwd = dir.join("regready-ccld-pipeline");
+        let _ = fs::create_dir_all(&cwd);
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&home);
+        assert_eq!(
+            resolve_project_name(None, Some(&home), &cwd),
+            "regready-ccld-pipeline"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_project_name_local_over_global() {
+        // Project-local project.id wins over the global one.
+        let dir = std::env::temp_dir().join(format!("fin-rpn-lg-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(&cwd, "config:\n  project:\n    id: fno\n");
+        write_settings(&home, "config:\n  project:\n    id: other\n");
+        assert_eq!(resolve_project_name(None, Some(&home), &cwd), "fno");
         let _ = fs::remove_dir_all(&dir);
     }
 }
