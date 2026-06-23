@@ -1523,6 +1523,30 @@ def cmd_get(
     raise typer.Exit(code=1)
 
 
+# -- project-root (work-map resolution; null-for-unmapped) --
+
+@cli.command("project-root")
+def cmd_project_root(
+    project: str = typer.Argument(..., help="Project name to resolve against config.work.workspaces."),
+) -> None:
+    """Print a project's work-map root, or exit 1 (empty stdout) if unmapped.
+
+    The G2 session-project invariant needs to tell "mapped to a root" apart from
+    "unmapped" so it can REFUSE an unmapped foreign wave by name rather than
+    guess a cwd (AC2-ERR). ``backlog get --field _resolved_cwd`` can't answer
+    this: it applies a ``root or cwd`` fallback, so an unmapped project with a
+    recorded cwd still prints a (guessed) path. This verb exposes the raw
+    ``project_root_from_settings`` lookup - the same pure work-map resolver G1
+    uses - with no cwd fallback, so empty/exit-1 means exactly "unmapped".
+    """
+    from fno.graph._intake import project_root_from_settings
+
+    root = project_root_from_settings(project)
+    if not root:
+        raise typer.Exit(code=1)
+    typer.echo(root)
+
+
 # -- provenance --
 
 @cli.command("provenance")
