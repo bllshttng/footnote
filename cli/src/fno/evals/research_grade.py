@@ -75,7 +75,7 @@ def _normalize(s: str) -> str:
     return _NORM_RE.sub(" ", s.lower()).strip()
 
 
-def _strip_frontmatter(text: str) -> tuple[dict, str]:
+def _strip_frontmatter(text: str) -> tuple[dict[str, str], str]:
     """Split a leading `---` frontmatter block. Returns (fields, body).
 
     Only the flat scalar keys we need (`sources:`) are parsed; the rest is
@@ -122,7 +122,7 @@ def _golden_checklist(golden_text: str) -> list[str]:
     return items
 
 
-def _resolve_sidecar(brief_path: Path, fields: dict, sidecar_path: Optional[Path]) -> Path:
+def _resolve_sidecar(brief_path: Path, fields: dict[str, str], sidecar_path: Optional[Path]) -> Path:
     if sidecar_path is not None:
         return sidecar_path
     named = fields.get("sources")
