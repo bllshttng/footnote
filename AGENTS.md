@@ -359,6 +359,20 @@ fno setup migrate-paths --force
 
 Full schema reference, env vars, and template variables (`{vault}`, `{project}`): [docs/path-config.md](docs/path-config.md).
 
+### Ship vocabulary
+
+"Ship" is overloaded; this is the one canonical disambiguation. Five distinct meanings:
+
+| Term | What it is |
+|------|-----------|
+| `/ship` (the verb) | The deliverable-strategy umbrella: drive any deliverable to its finish line, dispatching on deliverable type. `/ship pr` = the PR lifecycle (= `/pr`, the retained permanent alias); `/ship doc` ships a research brief to `config.research.output_dir` + grades it. A thing is a ship type only if it has a mechanical *green*; ongoing areas (budget, community) are not - route them through `/target` / `/megawalk`. See [skills/ship/SKILL.md](skills/ship/SKILL.md). |
+| ship phase | The `/target` pipeline phase that creates the PR (rebase + `/pr create`); runs after validate + docs + browser. |
+| ship gate | The completion point where `/target` stamps the plan frontmatter (status, shipped_at, urls). "First ship completed (PR created)." |
+| `DonePRGreen` / `DoneAdvisory` | Loop `TerminationReason`s: a code deliverable finishes at `DonePRGreen` (PR + CI + reviewed); a doc/advisory deliverable at `DoneAdvisory` (written + eval-green, no PR). These are the two finish lines `/ship` dispatches between. |
+| `/ship-docs` | A documentation-generation skill (architecture docs + how-to guides), invoked as `/target`'s docs phase. It is NOT a `/ship` deliverable type - the name predates the umbrella; do not confuse the two. |
+
+`fno pr merge` is the PR-merge CLI primitive, unrelated to the `/ship` verb (merge is one action inside the `pr` lifecycle, not a ship type of its own).
+
 ### Plan Completion Stamp
 
 When `/target` completes the ship gate, it stamps the plan's frontmatter (`status: shipped|done`, `shipped_at`, `urls`, `session_ids`) so shipped plans are self-describing. Inline-list syntax only: the stdlib writer doesn't parse block-list indented frontmatter, so don't hand-edit `urls` / `session_ids` into block-list form.

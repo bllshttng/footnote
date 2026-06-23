@@ -22,7 +22,7 @@ Six verbs are the advertised front door:
 | `/fno:pr` | Drive a PR through its lifecycle. Routes: `create` (Haiku worker), `check` (poll + implement external review), `merged` (the post-merge ritual). |
 | `/fno:fix` | Repair a broken state. Routes: `fix` (fast one-fix-per-iteration loop with auto-revert, default), `investigate` (scientific-method hypothesis loop). |
 
-**Everything else stays invocable by its full name** - it is just not surfaced at the top. Common non-advertised verbs: `/fno:blueprint` (plan authoring), `/fno:do` (execute a plan; `do waves` runs wave orchestration), `/fno:setup`, `/fno:triage`, `/fno:megatron`, `/fno:agent`, `/fno:mail` (message a peer/project over `fno mail`), `/fno:inbox`, `/fno:ship-docs`, `/fno:audit`, `/fno:speculate`.
+**Everything else stays invocable by its full name** - it is just not surfaced at the top. Common non-advertised verbs: `/fno:blueprint` (plan authoring), `/fno:do` (execute a plan; `do waves` runs wave orchestration), `/fno:ship` (the deliverable umbrella: `ship pr` = `/pr`, `ship doc` ships a research brief), `/fno:setup`, `/fno:triage`, `/fno:megatron`, `/fno:agent`, `/fno:mail` (message a peer/project over `fno mail`), `/fno:inbox`, `/fno:ship-docs`, `/fno:audit`, `/fno:speculate`.
 
 The full skill catalog is in your session skill list - look for entries prefixed `footnote:`. The harness enumerates every skill with a description, so the non-advertised verbs remain discoverable; this curated set is the recommended entry point, not an access boundary.
 
