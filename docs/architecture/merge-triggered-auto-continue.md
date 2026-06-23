@@ -85,9 +85,21 @@ Both triggers observing one merge dispatch the successor at most once: the `disp
 
 The worker spawn mirrors `dispatch-node.sh` exactly: `no-merge` rides as a command token (`/target no-merge <id>`), not an env var (the shipped sibling proves the token is the reliable channel through `fno agents spawn`); the agent is named `target-<full-node-id>-<slug>`; cwd resolves to the node's recorded root (`--cwd`) or canonical main (`--fresh`). Subscription lane only (`fno agents spawn --provider claude`), never `-p` / API credit.
 
+## Cross-project successor dispatch (G1)
+
+`advance()` selects the project-scoped *next* ready node, so it can only continue a chain *within one project*: `fno backlog next --project <closed.project>` filters foreign nodes out. A multi-repo feature modeled as one node per project linked by `blocked_by` (backend node A in `etl`, frontend node B in `web`, `B blocked_by A`) would stall at the repo boundary - A merges, but B is never dispatched.
+
+`advance_dependents()` (same module) closes that gap by following `blocked_by` **edges** instead of a project-scoped selection. After a node closes, for each now-unblocked **direct** dependent in a **different** project it spawns `/target no-merge <dep> --cwd <dep work-map root>`. The two paths are deliberately distinct (dispatch-by-edge vs select-next): `advance()` is untouched, so a pure single-project close dispatches nothing new, and the same-project continuation keeps using `next`.
+
+- **Unblocked == ready.** `_direct_dependents` reads the graph fresh (after the close commits under `locked_mutate_graph`), so `recompute_statuses` already reflects the merge: a dependent whose only open blocker was the closed node reads `ready`. The filter is `_status == "ready"` + cross-project + direct edge - no hand-written unblock predicate. Plan-less (`idea`) dependents are not auto-dispatched.
+- **Root from the work map, never guessed.** The dependent's `--cwd` is `project_root_from_settings(dep.project)` (exposed standalone as `fno backlog project-root <project>`). An unmapped project is refused by name (`advance_skipped{unmapped-project, detail=<project>}`), never launched against a guessed cwd.
+- **At most one worker.** Reuses the same `dispatch:<id>` TTL reservation + `node:<id>` liveness gate, so a successor seen by both `advance()` and `advance_dependents()` - or by reconcile and the explicit `backlog advance --closed` (both fire in `/pr merged`) - dispatches exactly once. One decision event per dependent; strictly non-fatal.
+
+Wired alongside `advance()` in `reconcile` and `cmd_advance`. The session-side mirror is **G2** (the `/do` session-project invariant): a `/do` wave in a foreign project is spawned (unblocked) or deferred via `fno carveout` (blocked, picked up later by this G1 path on merge), never executed in place. See `skills/do/references/session-project-invariant.md`.
+
 ## Scope
 
-Phase 1 (this implementation): the `advance` verb + `config.auto_continue` + reconcile and post-merge wiring + the `/megawalk auto-continue` modifier. Project-scoped next-node selection (the same selection bare megawalk uses).
+Phase 1 (this implementation): the `advance` verb + `config.auto_continue` + reconcile and post-merge wiring + the `/megawalk auto-continue` modifier. Project-scoped next-node selection (the same selection bare megawalk uses). Cross-project successor dispatch (G1, above) extends the merge event to follow `blocked_by` edges across projects.
 
 Deferred (Phase 2, gated on Phase 1 dogfooding): a per-repo launchd watcher that fires reconcile/post-merge headlessly seconds after a web merge, removing the up-to-15-min reconcile-throttle latency. Epic-affinity in next-node selection (siblings-first) stays an optional refinement, out of Phase 1.
 
@@ -95,18 +107,19 @@ Deferred (Phase 2, gated on Phase 1 dogfooding): a per-repo launchd watcher that
 
 Three kinds, registered in `docs/architecture/events-schema.yaml`, source `backlog`:
 
-- `advance_dispatched{node_id, short_id, agent_name, closed_node_id?}` - surfaced loudly in the next SessionStart reconcile reminder.
-- `advance_skipped{reason, node_id?, closed_node_id?, detail?}` - `dispatched`/`failed` are surfaced; pure skips stay quiet.
+- `advance_dispatched{node_id, short_id, agent_name, closed_node_id?, cross_project?}` - surfaced loudly in the next SessionStart reconcile reminder. `cross_project: true` marks a G1 edge-following dispatch into a different project.
+- `advance_skipped{reason, node_id?, closed_node_id?, detail?}` - `dispatched`/`failed` are surfaced; pure skips stay quiet. G1 adds the reasons `unmapped-project` / `no-project` / `dependents-error`.
 - `advance_failed{node_id, error, closed_node_id?}` - surfaced loudly (a failed chain must be visible); the next reconcile retries.
 
 ## Files
 
-- `cli/src/fno/backlog/advance.py` - the verb (resolver + decision matrix + seams).
+- `cli/src/fno/backlog/advance.py` - the verb (resolver + decision matrix + seams) + `advance_dependents()` (G1 cross-project edge dispatch).
 - `cli/src/fno/config/__init__.py` - `AutoContinueBlock`.
-- `cli/src/fno/graph/cli.py` - `fno backlog advance` command + the reconcile trigger.
+- `cli/src/fno/graph/cli.py` - `fno backlog advance` command + the reconcile trigger (both also call `advance_dependents`); `fno backlog project-root` (the unmapped-project detector G2 uses).
+- `skills/do/waves.md`, `skills/do/flat.md`, `skills/do/references/session-project-invariant.md` - the G2 session-project invariant (spawn/defer/refuse foreign waves).
 - `skills/pr/merged.md`, `skills/megawalk/SKILL.md`, `skills/megawalk/references/argument-parsing.md` - trigger + campaign-arm modifier.
-- `docs/architecture/events-schema.yaml` - the three event kinds.
-- Tests: `cli/tests/unit/test_auto_continue.py`, `cli/tests/unit/test_advance.py`, `cli/tests/integration/test_backlog_reconcile.py`.
+- `docs/architecture/events-schema.yaml` - the three event kinds (+ G1 `cross_project` field and reasons).
+- Tests: `cli/tests/unit/test_auto_continue.py`, `cli/tests/unit/test_advance.py`, `cli/tests/unit/test_project_root_cmd.py`, `cli/tests/integration/test_backlog_reconcile.py`.
 
 ## Design doc
 
