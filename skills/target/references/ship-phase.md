@@ -36,11 +36,20 @@ Do this BEFORE the optional rebase/merge step below, so the link lands even
 when no merge ever happens:
 
 ```bash
-# graph_node_id lives in the target-state.md manifest BODY (below the
-# frontmatter) - the same field finalize.rs reads (finalize.rs:125-161).
-# Strip leading space, quotes, and CR so the extraction is copy-paste robust.
-NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | tr -d "'\"\r" | head -n 1)
-if [[ -n "$NODE_ID" && "$NODE_ID" != "-" && "$NODE_ID" != "null" && -n "${PR_NUMBER:-}" ]]; then
+# graph_node_id lives in the target-state.md manifest BODY (below the closing
+# frontmatter fence) - the same field finalize.rs reads (finalize.rs:125-161).
+# Scope to the body so a frontmatter line (e.g. an `input:` value that happens
+# to contain `graph_node_id:`) can never be grabbed first; strip quotes/CR and
+# skip a `null` placeholder.
+NODE_ID=$(awk '
+  /^---[[:space:]]*$/ { fence++; next }            # frontmatter fences
+  fence < 2 { next }                               # ignore everything above the body
+  /^graph_node_id:[[:space:]]/ {
+    sub(/^graph_node_id:[[:space:]]*/, ""); gsub(/[[:space:]"\047\r]/, "")
+    if ($0 != "" && $0 != "null") { print; exit }
+  }
+' .fno/target-state.md 2>/dev/null)
+if [[ -n "$NODE_ID" && "$NODE_ID" != "-" && -n "${PR_NUMBER:-}" ]]; then
   fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" \
     || echo "ship: WARN failed to link PR #$PR_NUMBER to node $NODE_ID (non-fatal)" >&2
 fi
