@@ -79,6 +79,8 @@ cli/.venv/
 .claude/commands/
 .claude/agents/
 .claude/.skill-scoping-state.json
+# local runtime hook logs (never commit)
+.claude/hooks/
 
 # understand-anything skill output (generated knowledge graph; keep local, never commit)
 .understand-anything/
