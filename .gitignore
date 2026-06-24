@@ -75,3 +75,6 @@ cli/.venv/
 .claude/commands/
 .claude/agents/
 .claude/.skill-scoping-state.json
+
+# understand-anything skill output (generated knowledge graph; keep local, never commit)
+.understand-anything/
