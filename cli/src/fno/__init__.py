@@ -3,7 +3,7 @@
 The ``run_loop`` / ``target`` Python API has been removed. Drive work via
 ``/target`` in a Claude Code session instead.
 """
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = ["__version__"]
 
