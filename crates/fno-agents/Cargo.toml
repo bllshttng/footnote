@@ -1,6 +1,6 @@
 [package]
 name = "fno-agents"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # MSRV: std's File::lock/lock_shared/try_lock/unlock stabilized in Rust 1.89
 # (ab-6aff100c), which let this crate drop the fs2 dependency for advisory

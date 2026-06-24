@@ -9,7 +9,9 @@ trap "rm -rf $TMPDIR_INSTALL" EXIT
 uv venv --quiet "$TMPDIR_INSTALL/venv"
 uv pip install --quiet --python "$TMPDIR_INSTALL/venv/bin/python" dist/*.whl
 out=$("$TMPDIR_INSTALL/venv/bin/fno" --version 2>&1 || true)
-echo "$out" | grep -q "0.1.0"
+# version-agnostic: the binary must report SOME semver, not a pinned one, so a
+# release bump never breaks this smoke test (the build wires the version).
+echo "$out" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+'
 echo "PASS: uv build produces installable wheel"
 
 # ab-fe825805 change 3: the events schema must SHIP inside the wheel as

@@ -1,6 +1,6 @@
 [package]
 name = "fno"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # Low MSRV on purpose: this is an install front door, so `cargo install fno`
 # must work on whatever stable Rust a user already has. The shim uses only
