@@ -1,6 +1,6 @@
 {
   "name": "fno",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Set a target. Say f[no] to mostly done.",
   "author": {"name": "Jason Noah Choi"},
   "license": "Apache-2.0",
