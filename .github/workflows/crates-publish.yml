@@ -20,6 +20,12 @@ on:
         description: "Type true to actually publish the crates to crates.io (permanent)"
         type: boolean
         default: false
+  # A v* tag auto-publishes, but the publish job is approval-gated by the
+  # `release` environment (one click before the permanent upload). The manual
+  # dispatch path above stays for re-publishing without a tag.
+  push:
+    tags:
+      - "v*"
   pull_request:
     paths:
       - crates/fno-agents/**
@@ -64,7 +70,10 @@ jobs:
 
   publish:
     name: cargo publish (${{ matrix.crate }}, gated)
-    if: github.event_name == 'workflow_dispatch' && inputs.confirm == true
+    # Auto on a v* tag push (approval-gated by the `release` environment) OR a
+    # manual dispatch with confirm=true. crates.io uploads are permanent.
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.confirm == true)
+    environment: release
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

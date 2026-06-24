@@ -14,7 +14,12 @@
 # source. brew owns the venv + symlinks, so `brew uninstall`/`brew upgrade` are
 # clean (Locked Decisions 2 + 3).
 #
-# LAUNCH GATE: satisfied for 0.1.0 on both macOS arches. `fno` 0.1.0 is
+# NOTE: this is the SEED snapshot. The live tap (bllshttng/homebrew-fno, what
+# `brew install` reads) is auto-bumped on every release by
+# scripts/release/update-homebrew-formula.py (x-0afe); these values are just the
+# last-release snapshot, not the source of truth.
+#
+# LAUNCH GATE: satisfied for 0.2.1 on both macOS arches. `fno` 0.2.1 is
 # published to PyPI (the shared gate with cargo + fno.sh), and the arm64 +
 # x86_64 `url` + `sha256` below are the real published wheels (kept in lockstep
 # on every release bump). The x86_64 macOS wheel is cross-built on the macos-14
@@ -34,11 +39,11 @@ class Fno < Formula
   # url a Linuxbrew user would hit a confusing `stable: url is missing` instead
   # of the clean `depends_on :macos` refusal below. arm64 overrides this url (and
   # adds its Sonoma floor) inside on_macos.
-  url "https://files.pythonhosted.org/packages/84/71/57d630e1ecda386573585f87e3893cfa191306fc86e849ca35386ea82cd9/fno-0.1.0-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
+  url "https://files.pythonhosted.org/packages/68/a9/a27123cff3c20c24ff169bf23da899219a69719a8747e5dc2fec22336e7d/fno-0.2.1-py3-none-macosx_10_12_x86_64.whl", using: :nounzip
   # Explicit version: Homebrew's filename version-detect picks "64" out of the
-  # x86_64 default-url tag, not 0.1.0. Pin it so `brew info`/upgrade are correct.
-  version "0.1.0"
-  sha256 "729af7804d7c62c0d79b5d3784e694ad8499c05d223e27acbee33f323aa50991"
+  # x86_64 default-url tag, not 0.2.1. Pin it so `brew info`/upgrade are correct.
+  version "0.2.1"
+  sha256 "233df8b02cc7259508c0c7f2a84d777c944219b4c5fb79443b255119edf72d60"
   license "Apache-2.0"
 
   # Both macOS arches ship a wheel; the macOS floor is arch-conditional. The
@@ -61,8 +66,8 @@ class Fno < Formula
       # The arm64 wheel is tagged macosx_14_0, so it requires Sonoma; the x86_64
       # default targets macosx_10_12, so this floor is arm-only.
       depends_on macos: :sonoma
-      url "https://files.pythonhosted.org/packages/0f/29/009ccdefc9528fa2acd407b2458c87f3be0ff5424f288fc610120a5c004a/fno-0.1.0-py3-none-macosx_14_0_arm64.whl", using: :nounzip
-      sha256 "0c452f9b2813f35ae5f246c7be087b7ceb5699856e6b2182e5039aadb64e5533"
+      url "https://files.pythonhosted.org/packages/d0/85/981aec952b85e9cbe7f182f1a381e779704e9a721037677c87890ca1909b/fno-0.2.1-py3-none-macosx_14_0_arm64.whl", using: :nounzip
+      sha256 "aa850871c34948ba86e47da35dd936ebda51a513c50f9d4af575aec4d06080ca"
     end
   end
 
