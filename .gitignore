@@ -34,6 +34,10 @@ __pycache__/
 # Runtime state (planning/execution)
 .fno/
 **/.fno/
+# In worktrees .fno is a SYMLINK to canonical; the dir-only patterns above miss
+# it, so `git add -A` would stage it. Ignore the symlink form too.
+.fno
+**/.fno
 # Legacy state dir (abilities -> fno rename): ignored through the migration window.
 .abilities/
 **/.abilities/
