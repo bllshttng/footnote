@@ -48,10 +48,7 @@ _reconcile_mtime() {
 # hook to render on a later session. Always returns 0.
 reconcile_maybe_fire() {
     local repo_root="${1:-$PWD}"
-    # Only reconcile a project already initialized with footnote. NEVER create
-    # .fno here: a virgin directory has no backlog to reconcile, so creating it
-    # would litter every folder the agent ever opens a session in. This gate
-    # also makes the later mkdir redundant, so it is gone.
+    # Only reconcile an already-initialized project; never create .fno in a virgin dir.
     [[ -d "$repo_root/.fno" ]] || return 0
     local footnote_dir="$repo_root/.fno"
     local stamp="$footnote_dir/.reconcile-stamp"
