@@ -80,6 +80,22 @@ grep -q "ab-faketest" "$RESULT1" || fail "fire: result json missing reconcile ou
 pass "fire: absent stamp fires mutate reconcile, publishes result, writes stamp"
 
 # ============================================================================
+# AC: gate — a directory without a .fno/ is never reconciled and is NEVER
+# given a .fno/. This is the "do not litter every folder" guard: reconcile
+# only ever touches a project already initialized with footnote.
+# ============================================================================
+log "gate: no .fno -> no fire, no .fno created"
+REPO_VIRGIN="$WORK/virgin"; mkdir -p "$REPO_VIRGIN"   # deliberately NO .fno
+: > "$FNO_CALL_LOG"
+RECONCILE_THROTTLE_SECONDS=900 reconcile_maybe_fire "$REPO_VIRGIN"
+sleep 0.3
+[[ ! -e "$REPO_VIRGIN/.fno" ]] \
+    || fail "gate: reconcile created a .fno in a virgin directory"
+[[ ! -s "$FNO_CALL_LOG" ]] \
+    || fail "gate: reconcile fired in a directory with no .fno (got: $(cat "$FNO_CALL_LOG"))"
+pass "gate: virgin directory is left untouched"
+
+# ============================================================================
 # AC: throttle — a fresh stamp suppresses a second fire.
 # ============================================================================
 log "throttle: fresh stamp -> no second fire"

@@ -48,9 +48,14 @@ _reconcile_mtime() {
 # hook to render on a later session. Always returns 0.
 reconcile_maybe_fire() {
     local repo_root="${1:-$PWD}"
-    local abilities_dir="$repo_root/.fno"
-    local stamp="$abilities_dir/.reconcile-stamp"
-    local result="$abilities_dir/.reconcile-result.json"
+    # Only reconcile a project already initialized with footnote. NEVER create
+    # .fno here: a virgin directory has no backlog to reconcile, so creating it
+    # would litter every folder the agent ever opens a session in. This gate
+    # also makes the later mkdir redundant, so it is gone.
+    [[ -d "$repo_root/.fno" ]] || return 0
+    local footnote_dir="$repo_root/.fno"
+    local stamp="$footnote_dir/.reconcile-stamp"
+    local result="$footnote_dir/.reconcile-result.json"
 
     # Throttle: skip if the stamp is younger than the window.
     if [[ -f "$stamp" ]]; then
@@ -65,8 +70,6 @@ reconcile_maybe_fire() {
     local abi_cmd
     abi_cmd="$(_reconcile_resolve_abi)" || return 0
     [[ -n "$abi_cmd" ]] || return 0
-
-    mkdir -p "$abilities_dir" 2>/dev/null || return 0
 
     # Claim the throttle window BEFORE launching so a parallel caller starting
     # in the same instant sees a fresh stamp and skips.
