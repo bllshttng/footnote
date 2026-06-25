@@ -77,7 +77,9 @@ def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(st, "_spawn_think_worker", fake_spawn)
     monkeypatch.setattr(
         st, "_stamp_forward",
-        lambda nid, sess, root: stamp_calls.append((nid, sess, root)),
+        lambda nid, sess, root, output_path=None: stamp_calls.append(
+            (nid, sess, root, output_path)
+        ),
     )
     return spawn_calls, stamp_calls
 
@@ -256,6 +258,30 @@ def test_attended_unresolved_degrades_to_bare_line(iso, monkeypatch, patch_spawn
     assert res.offer_line == "/think x-2222aaaa"
 
 
+def test_attended_spawn_optin_dispatches(iso, monkeypatch, patch_spawn):
+    """AC4-HP (B, x-5d51): attended + config.think_spawn.attended=spawn -> real bg
+    /think dispatch instead of the stderr offer line."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
+    monkeypatch.setenv("FNO_THINK_SPAWN_ATTENDED", "spawn")
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, stamp_calls = patch_spawn
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "spawned" and len(spawn_calls) == 1
+    assert len(stamp_calls) == 1
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "think_spawned"
+    assert evs[0]["data"]["presence"] == "attended"  # honest about the opt-in source
+
+
+def test_attended_mode_env_override_is_authoritative_when_present():
+    """gemini PR #33: a PRESENT FNO_THINK_SPAWN_ATTENDED wins over config; a
+    set-but-garbage value resolves to 'offer', never leaking to a config spawn."""
+    assert st._attended_mode(env={st._ENV_ATTENDED: "spawn"}) == "spawn"
+    assert st._attended_mode(env={st._ENV_ATTENDED: "garbage"}) == "offer"
+    assert st._attended_mode(env={st._ENV_ATTENDED: ""}) == "offer"
+
+
 # ---------------------------------------------------------------------------
 # US3 - operator away
 # ---------------------------------------------------------------------------
@@ -270,10 +296,26 @@ def test_away_spawns_and_stamps_node(iso, monkeypatch, patch_spawn):
                                events_path=iso, project_root=iso.parent.parent)
     assert res.decision == "spawned" and res.think_session == "deadbeef"
     assert len(spawn_calls) == 1
-    assert stamp_calls == [("x-2222aaaa", "deadbeef", iso.parent.parent)]
+    assert len(stamp_calls) == 1
+    nid, sess, root, output_path = stamp_calls[0]
+    assert (nid, sess, root) == ("x-2222aaaa", "deadbeef", iso.parent.parent)
+    assert output_path and output_path.endswith("think-x-2222aaaa.md")
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "think_spawned"
     assert evs[0]["data"]["think_session"] == "deadbeef"
+
+
+def test_away_prompt_carries_output_path(iso, monkeypatch, patch_spawn):
+    """AC3-HP (B, x-5d51): the headless worker is handed a briefs output path in
+    its prompt so its /think doc has a defined home, not nowhere."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, _ = patch_spawn
+    st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                         events_path=iso, project_root=iso.parent.parent)
+    prompt = spawn_calls[0][1]
+    assert "WRITE YOUR /think OUTPUT" in prompt
+    assert "think-x-2222aaaa.md" in prompt
 
 
 def test_away_spawn_failure_skips_no_stamp(iso, monkeypatch, patch_spawn):

@@ -918,6 +918,11 @@ class ThinkSpawnBlock(BaseModel):
     on_work_start: bool = False
     on_retro: bool = False
     daily_cap: int = 20
+    # B (x-5d51): how an attended session handles a born node. ``offer`` (default,
+    # byte-for-byte x-6a10) prints a copy-pasteable handoff line; ``spawn`` opts
+    # into a real bg /think dispatch. Fail-safe to ``offer`` so a garbage value
+    # never auto-spawns against operator intent.
+    attended: str = "offer"
 
     @field_validator("enabled", "on_work_start", "on_retro", mode="before")
     @classmethod
@@ -974,6 +979,18 @@ class ThinkSpawnBlock(BaseModel):
         (disables the ceiling) since it round-trips through ``_nonneg_int_or``.
         """
         return cls._nonneg_int_or(v, 20)
+
+    @field_validator("attended", mode="before")
+    @classmethod
+    def _coerce_attended(cls, v: object) -> str:
+        """Fail-safe: only an explicit ``spawn`` opts in; everything else => offer.
+
+        Strict like ``_coerce_enabled``: the dangerous direction is an unintended
+        auto-spawn, so an ambiguous/garbage value keeps the safe ``offer`` default.
+        """
+        if isinstance(v, str) and v.strip().lower() == "spawn":
+            return "spawn"
+        return "offer"
 
 
 def _coerce_affirmative(v: object, default: bool) -> bool:
