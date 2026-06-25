@@ -524,20 +524,37 @@ def test_on_node_born_threads_run_state(iso, tmp_path, monkeypatch, patch_spawn)
     assert rs.spawned == 1
 
 
-def test_on_node_born_defaults_project_root_to_node_repo(iso, tmp_path, monkeypatch):
-    """The gate reads the NODE's repo settings, not the birth process cwd."""
-    monkeypatch.delenv("FNO_THINK_SPAWN", raising=False)  # exercise config path
-    seen: list = []
+def test_on_node_born_persisted_skips_reread(iso, monkeypatch, patch_spawn):
+    """persisted=True dispatches the passed node directly, skipping the re-read."""
+    spawn_calls, _ = patch_spawn
+    _resolved(monkeypatch, ok=True)
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
 
-    class _S:
-        class config:
-            class think_spawn:
-                enabled = False
-                max_per_run = 5
+    import fno.graph.store as gs
+    reached: list = []
+    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read") or [])
 
-    monkeypatch.setattr(
-        "fno.config.load_settings_for_repo",
-        lambda root: seen.append(root) or _S,
-    )
-    st.on_node_born(_node(cwd=str(tmp_path)))
-    assert seen == [tmp_path]  # gate consulted the node's own repo
+    st.on_node_born(_node(slug="durable-slug"), persisted=True)
+
+    assert spawn_calls and spawn_calls[0][3] == "durable-slug"
+    assert reached == []  # the graph was never re-read
+
+
+def test_on_node_born_does_not_key_gate_off_node_cwd(iso, tmp_path, monkeypatch, patch_spawn):
+    """Regression (codex P2): the hook must NOT auto-derive project_root from the
+    node's durable cwd, or a worktree-born autonomous node's away-manifest is
+    looked for in the canonical checkout and it misclassifies as attended."""
+    _resolved(monkeypatch, ok=True)
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    seen_roots: list = []
+
+    def fake_enabled(*, project_root=None, env=None):
+        seen_roots.append(project_root)
+        return True
+
+    monkeypatch.setattr(st, "think_spawn_enabled", fake_enabled)
+    g = tmp_path / "graph.json"
+    _write_graph(g, [_node(cwd="/some/canonical/checkout")])
+    st.on_node_born(_node(cwd="/some/canonical/checkout"), graph_path=g)
+    # Every gate consult uses ambient (None), never the node's durable cwd.
+    assert seen_roots and all(r is None for r in seen_roots)

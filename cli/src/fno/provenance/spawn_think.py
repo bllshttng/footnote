@@ -517,6 +517,7 @@ def on_node_born(
     project_root: Optional[Path] = None,
     run_state: Optional[RunState] = None,
     graph_path: Optional[Path] = None,
+    persisted: bool = False,
 ) -> Optional[ThinkSpawnResult]:
     """Single post-persist birth hook: every node-creation path routes here.
 
@@ -533,40 +534,49 @@ def on_node_born(
       * **Durable re-read.** ``store.ensure_slugs`` may re-slug a node inside
         ``locked_mutate_graph``, so the seed + worker name must read the node
         back by id post-persist (Domain Pitfall: slug re-read after persist).
-        Falls back to the passed-in node when the re-read can't find it.
+        Falls back to the passed-in node when the re-read can't find it. A
+        caller that ALREADY holds the persisted, slugged node (decompose's
+        ``by_id`` map, intake's re-read) passes ``persisted=True`` to skip the
+        redundant read.
       * **Strictly non-fatal.** Any failure here resolves to ``None`` and never
         raises into the node-birth path that called it (additive, opt-in).
 
     Bulk paths (decompose children, a retro batch) thread ONE ``run_state`` so
-    the blast-radius cap bounds the whole run, not each node. ``project_root``
-    defaults to the node's own repo so the gate reads the NODE's settings, not
-    the birth process's cwd (the foreign-repo concurrency invariant).
+    the blast-radius cap bounds the whole run, not each node.
+
+    ``project_root`` is honored as-given and is NOT auto-derived from the node's
+    cwd: ``maybe_spawn_think`` uses it for BOTH the settings gate AND presence
+    classification, and presence must key off the *originating* session's cwd
+    (where its ``target-state.md`` lives), which for a worktree-born node is the
+    running cwd, not the node's durable canonical cwd. Defaulting to the node
+    cwd would make an autonomous worktree session's away-manifest invisible and
+    misclassify it as attended (codex P2). Left as ``None`` it inherits x-6a10's
+    proven ambient behavior; a caller may still pass an explicit root to scope
+    the gate.
     """
     try:
         node_id = (node or {}).get("id")
-        # Default to the node's own repo: the gate + spawn must key off where
-        # the node lives, not where the birth subprocess happens to be cwd'd.
-        root = project_root
-        if root is None:
-            cwd = (node or {}).get("_resolved_cwd") or (node or {}).get("cwd")
-            root = Path(cwd) if cwd else None
 
         # Gate-first: off => zero further I/O (the slug re-read below is wasted
         # work for the default-OFF install, which is every un-opted-in install).
-        if not node_id or not think_spawn_enabled(project_root=root):
+        if not node_id or not think_spawn_enabled(project_root=project_root):
             return None
 
-        from fno.graph.cli import _graph_path
-        from fno.graph.store import read_graph
+        if persisted:
+            durable = node
+        else:
+            from fno.graph.cli import _graph_path
+            from fno.graph.store import read_graph
 
-        gp = graph_path if graph_path is not None else _graph_path()
-        # ponytail: linear scan of the graph per born node. Bounded by the
-        # blast cap (default 5) and gated OFF by default, so not worth indexing.
-        persisted = next(
-            (e for e in read_graph(gp) if e.get("id") == node_id), node
-        )
+            gp = graph_path if graph_path is not None else _graph_path()
+            # ponytail: linear scan of the graph per born node. Bounded by the
+            # blast cap (default 5) and gated OFF by default; callers holding the
+            # durable node already pass persisted=True to skip this.
+            durable = next(
+                (e for e in read_graph(gp) if e.get("id") == node_id), node
+            )
         return maybe_spawn_think(
-            persisted, project_root=root, run_state=run_state
+            durable, project_root=project_root, run_state=run_state
         )
     except Exception as exc:  # noqa: BLE001 - additive; never wedge node birth
         _LOG.debug("on_node_born: non-fatal dispatch failure: %s", exc)

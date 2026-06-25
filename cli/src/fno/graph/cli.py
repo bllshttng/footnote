@@ -752,7 +752,10 @@ def cmd_decompose(
             by_id = {e.get("id"): e for e in read_graph(_graph_path())}
             born_rs = RunState()
             for cid in created_ids:
-                on_node_born(by_id.get(cid) or {"id": cid}, run_state=born_rs)
+                child = by_id.get(cid)
+                if child is not None:
+                    # Already the persisted, slugged node -> skip the re-read.
+                    on_node_born(child, run_state=born_rs, persisted=True)
         except Exception:  # noqa: BLE001 - additive; never wedge the decompose
             pass
 
@@ -1020,7 +1023,8 @@ def _intake_impl(
 
             born_node = _find_node(read_graph(_graph_path()), new_id_holder[0])
             if born_node is not None:
-                on_node_born(born_node)
+                # Already the persisted, slugged node -> skip the re-read.
+                on_node_born(born_node, persisted=True)
         except Exception:  # noqa: BLE001 - additive; never wedge the intake
             pass
 

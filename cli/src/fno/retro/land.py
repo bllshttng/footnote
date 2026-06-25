@@ -175,14 +175,14 @@ def land_candidates(
         # this epic fixes (x-7c38 / x-6e23 filed follow-ups with no /think). Route
         # each created node through the shared hook so its why travels forward.
         # One shared RunState bounds the whole batch's blast radius; strictly
-        # non-fatal + opt-in (gate OFF => complete no-op). The cwd stub lets the
-        # hook gate on the NODE's repo before re-reading the durable node by id.
+        # non-fatal + opt-in (gate OFF => complete no-op). The hook re-reads the
+        # durable node by id, so the id stub is all it needs.
         try:
             from fno.provenance.spawn_think import RunState, on_node_born
 
             if born_rs is None:
                 born_rs = RunState()
-            on_node_born({"id": node_id, "cwd": node_cwd}, run_state=born_rs)
+            on_node_born({"id": node_id}, run_state=born_rs)
         except Exception:  # noqa: BLE001 - additive; never wedge the harvest
             pass
 
