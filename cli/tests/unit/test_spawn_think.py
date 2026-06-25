@@ -451,3 +451,93 @@ def test_enabled_honors_project_root(monkeypatch, tmp_path):
     assert st.think_spawn_enabled(project_root=tmp_path, env={}) is True
     assert st._max_per_run(tmp_path) == 7
     assert seen == [tmp_path, tmp_path]  # repo-specific loader used both times
+
+
+# ---------------------------------------------------------------------------
+# on_node_born() - the shared birth seam (v2 A1)
+# ---------------------------------------------------------------------------
+
+
+def _write_graph(path: Path, entries: list[dict]) -> None:
+    path.write_text(json.dumps({"entries": entries}) + "\n")
+
+
+def test_on_node_born_gate_off_is_complete_noop(iso, monkeypatch):
+    """Gate OFF => no dispatch attempt AND no graph re-read (gate-first)."""
+    monkeypatch.setenv("FNO_THINK_SPAWN", "0")
+    reached = []
+    monkeypatch.setattr(st, "maybe_spawn_think", lambda *a, **k: reached.append(1))
+    # Any graph re-read would import read_graph; assert it is never called.
+    import fno.graph.store as gs
+    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read"))
+    assert st.on_node_born(_node()) is None
+    assert reached == []
+
+
+def test_on_node_born_rereads_durable_node(iso, tmp_path, monkeypatch, patch_spawn):
+    """The dispatch carries the post-persist durable node, not a stale caller copy."""
+    spawn_calls, _ = patch_spawn
+    _resolved(monkeypatch, ok=True)
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    durable = _node(slug="durable-slug", cwd=str(tmp_path))
+    g = tmp_path / "graph.json"
+    _write_graph(g, [durable])
+    # Caller hands a pre-slug stub; on_node_born must re-read the durable one.
+    st.on_node_born(
+        {"id": durable["id"], "slug": "stale-stub", "cwd": str(tmp_path)},
+        graph_path=g,
+    )
+    assert spawn_calls, "expected an away spawn"
+    # _spawn_think_worker(node_id, prompt, node_cwd, node_slug)
+    assert spawn_calls[0][3] == "durable-slug"
+
+
+def test_on_node_born_falls_back_when_node_absent(iso, tmp_path, monkeypatch, patch_spawn):
+    """A node not yet visible in the graph re-read falls back to the passed dict."""
+    spawn_calls, _ = patch_spawn
+    _resolved(monkeypatch, ok=True)
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    g = tmp_path / "graph.json"
+    _write_graph(g, [])  # empty - the born node is not present
+    node = _node(cwd=str(tmp_path))
+    st.on_node_born(node, graph_path=g)
+    assert spawn_calls and spawn_calls[0][0] == node["id"]
+
+
+def test_on_node_born_is_strictly_non_fatal(iso, monkeypatch):
+    """A raising dispatch resolves to None, never propagates into birth."""
+    monkeypatch.setattr(
+        st, "maybe_spawn_think",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kaboom")),
+    )
+    assert st.on_node_born(_node()) is None
+
+
+def test_on_node_born_threads_run_state(iso, tmp_path, monkeypatch, patch_spawn):
+    """A shared RunState's blast-cap counter advances across the hook (bulk paths)."""
+    _resolved(monkeypatch, ok=True)
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    g = tmp_path / "graph.json"
+    _write_graph(g, [_node(cwd=str(tmp_path))])
+    rs = st.RunState()
+    st.on_node_born(_node(cwd=str(tmp_path)), graph_path=g, run_state=rs)
+    assert rs.spawned == 1
+
+
+def test_on_node_born_defaults_project_root_to_node_repo(iso, tmp_path, monkeypatch):
+    """The gate reads the NODE's repo settings, not the birth process cwd."""
+    monkeypatch.delenv("FNO_THINK_SPAWN", raising=False)  # exercise config path
+    seen: list = []
+
+    class _S:
+        class config:
+            class think_spawn:
+                enabled = False
+                max_per_run = 5
+
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda root: seen.append(root) or _S,
+    )
+    st.on_node_born(_node(cwd=str(tmp_path)))
+    assert seen == [tmp_path]  # gate consulted the node's own repo
