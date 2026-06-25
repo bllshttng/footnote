@@ -137,6 +137,7 @@ def land_candidates(
     interactive = mode == MODE_INTERACTIVE
 
     results: list[LandResult] = []
+    born_rs = None  # one shared blast-cap across the whole harvest batch (lazy)
     for c in candidates:
         if c.uncited:
             continue  # never land an uncited candidate
@@ -169,6 +170,21 @@ def land_candidates(
         results.append(
             LandResult("queued" if interactive else "active", c, node_id=node_id)
         )
+
+        # Born-with-why (v2 A1): the retro-harvest birth path is the exact gap
+        # this epic fixes (x-7c38 / x-6e23 filed follow-ups with no /think). Route
+        # each created node through the shared hook so its why travels forward.
+        # One shared RunState bounds the whole batch's blast radius; strictly
+        # non-fatal + opt-in (gate OFF => complete no-op). The cwd stub lets the
+        # hook gate on the NODE's repo before re-reading the durable node by id.
+        try:
+            from fno.provenance.spawn_think import RunState, on_node_born
+
+            if born_rs is None:
+                born_rs = RunState()
+            on_node_born({"id": node_id, "cwd": node_cwd}, run_state=born_rs)
+        except Exception:  # noqa: BLE001 - additive; never wedge the harvest
+            pass
 
     return results
 

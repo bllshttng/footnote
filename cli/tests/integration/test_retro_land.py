@@ -145,3 +145,72 @@ def test_inbox_default_appends_file(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     inbox = tmp_path / ".fno" / "backlog" / "parking-lot.md"
     assert inbox.exists()
     assert "a nit" in inbox.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# v2 A1 - the retro-harvest birth path routes through on_node_born
+# (the exact gap this epic fixes: x-7c38 / x-6e23 filed with no /think).
+# ---------------------------------------------------------------------------
+
+
+def test_a1_birth_hook_fires_per_created_node_sharing_one_run_state(tmp_path, monkeypatch):
+    """Every retro-filed node routes through on_node_born once; the whole batch
+    threads ONE RunState so the blast cap bounds the harvest, not each node."""
+    import fno.provenance.spawn_think as st
+
+    calls: list[str] = []
+    seen_rs: list = []
+
+    def fake(node, *, run_state=None, **k):
+        calls.append(node["id"])
+        seen_rs.append(run_state)
+
+    monkeypatch.setattr(st, "on_node_born", fake)
+    rec = _Recorder()
+    land_candidates(
+        [_node(title="a", chash="h1"), _node(title="b", chash="h2")],
+        mode=MODE_AUTONOMOUS, repo_root=tmp_path,
+        create_fn=rec.create, inbox_fn=rec.inbox_append,
+    )
+    assert calls == ["ab-00000001", "ab-00000002"]
+    assert seen_rs[0] is seen_rs[1] is not None  # one shared cap across the batch
+
+
+def test_a1_birth_hook_skips_inbox_and_failed_creates(tmp_path, monkeypatch):
+    """A nit landed to inbox (no node) and a failed create both skip the hook."""
+    import fno.provenance.spawn_think as st
+
+    calls: list[str] = []
+    monkeypatch.setattr(st, "on_node_born", lambda node, **k: calls.append(node["id"]))
+
+    rec = _Recorder()
+    # inbox-tier -> appended, never a node
+    land_candidates(
+        [_node(tier=TIER_INBOX)], mode=MODE_AUTONOMOUS, repo_root=tmp_path,
+        create_fn=rec.create, inbox_fn=rec.inbox_append,
+    )
+    # create raising -> recorded failure, never a birth
+    def boom(**k):
+        raise RuntimeError("lock timeout")
+
+    land_candidates(
+        [_node()], mode=MODE_AUTONOMOUS, repo_root=tmp_path,
+        create_fn=boom, inbox_fn=rec.inbox_append,
+    )
+    assert calls == []
+
+
+def test_a1_birth_hook_failure_is_non_fatal_to_harvest(tmp_path, monkeypatch):
+    """A raising hook never breaks the harvest: the node still lands active."""
+    import fno.provenance.spawn_think as st
+
+    monkeypatch.setattr(
+        st, "on_node_born",
+        lambda node, **k: (_ for _ in ()).throw(RuntimeError("spawn leg exploded")),
+    )
+    rec = _Recorder()
+    results = land_candidates(
+        [_node()], mode=MODE_AUTONOMOUS, repo_root=tmp_path,
+        create_fn=rec.create, inbox_fn=rec.inbox_append,
+    )
+    assert results[0].outcome == "active"
