@@ -188,7 +188,11 @@ def test_target_init_resolves_from_plugin_root(monkeypatch, tmp_path):
         returncode = 0
 
     def _stub_run(cmd, check=False, env=None, **kwargs):
-        captured["cmd"] = list(cmd)
+        # Capture the init invocation specifically; the post-init work-start
+        # dispatch (x-122a) may shell `git rev-parse` afterward, which must not
+        # clobber the assertion target.
+        if cmd and cmd[0] == "bash":
+            captured["cmd"] = list(cmd)
         return _Result()
 
     plugin_root = tmp_path / "plugin"
@@ -229,3 +233,84 @@ def test_state_init_allow_stub_escape(tmp_path, monkeypatch):
     result = runner.invoke(app, ["state", "init", "--allow-stub"])
     assert result.exit_code == 0, result.output
     assert (tmp_path / ".fno" / "target-state.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# A2 work-start lifecycle dispatch (x-122a)
+# ---------------------------------------------------------------------------
+
+
+def _write_manifest(repo_root, node_id):
+    fno_dir = repo_root / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    (fno_dir / "target-state.md").write_text(
+        f"session_id: s1\ngraph_node_id: {node_id}\nattended: false\n", encoding="utf-8"
+    )
+
+
+def _arm_work_start(monkeypatch):
+    """Force config.think_spawn.on_work_start True past the gate-first check."""
+    import types
+    from fno import config as _config
+
+    fake = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            think_spawn=types.SimpleNamespace(on_work_start=True)
+        )
+    )
+    monkeypatch.setattr(_config, "load_settings", lambda *a, **k: fake)
+
+
+def test_work_start_dispatch_gated_off_does_nothing(tmp_path, monkeypatch):
+    """Default-OFF: no settings arm -> the helper returns before any repo/graph I/O."""
+    _write_manifest(tmp_path, "x-122a")
+    from fno.provenance import spawn_think as _st
+
+    seen = []
+    monkeypatch.setattr(_st, "on_node_work_start", lambda n, **k: seen.append(n))
+    target_cli._maybe_dispatch_work_start()
+    assert seen == []
+
+
+def test_work_start_dispatch_reads_claimed_node(tmp_path, monkeypatch):
+    """AC2-HP wiring: a real graph_node_id routes the durable node to on_node_work_start."""
+    _arm_work_start(monkeypatch)
+    _write_manifest(tmp_path, "x-122a")
+    import json as _json
+    from fno import paths as _paths
+    from fno.provenance import spawn_think as _st
+
+    node = {"id": "x-122a", "title": "lifecycle"}
+    g = tmp_path / "graph.json"
+    g.write_text(_json.dumps({"entries": [node]}), encoding="utf-8")
+
+    monkeypatch.setattr(_paths, "resolve_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(_paths, "graph_json", lambda: g)
+    seen = []
+    monkeypatch.setattr(_st, "on_node_work_start", lambda n, **k: seen.append(n["id"]))
+
+    target_cli._maybe_dispatch_work_start()
+    assert seen == ["x-122a"]
+
+
+def test_work_start_dispatch_skips_null_node(tmp_path, monkeypatch):
+    """graph_node_id: null means no node was claimed -> nothing dispatched."""
+    _arm_work_start(monkeypatch)
+    _write_manifest(tmp_path, "null")
+    from fno import paths as _paths
+    from fno.provenance import spawn_think as _st
+
+    monkeypatch.setattr(_paths, "resolve_repo_root", lambda: tmp_path)
+    seen = []
+    monkeypatch.setattr(_st, "on_node_work_start", lambda n, **k: seen.append(n))
+    target_cli._maybe_dispatch_work_start()
+    assert seen == []
+
+
+def test_work_start_dispatch_non_fatal_on_missing_manifest(tmp_path, monkeypatch):
+    """No manifest -> the helper swallows the read error and never raises."""
+    _arm_work_start(monkeypatch)
+    from fno import paths as _paths
+
+    monkeypatch.setattr(_paths, "resolve_repo_root", lambda: tmp_path)
+    target_cli._maybe_dispatch_work_start()  # must not raise

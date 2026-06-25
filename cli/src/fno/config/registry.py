@@ -141,6 +141,15 @@ FIELD_META: dict[str, Meta] = {
     "config.think_spawn.idle_threshold_s": Meta(
         "advanced", "Idle seconds before an attended operator downgrades to away (0 = off)."
     ),
+    "config.think_spawn.on_work_start": Meta(
+        "advanced", "A2: dispatch a context /think when /target claims a node to work it (default OFF)."
+    ),
+    "config.think_spawn.on_retro": Meta(
+        "advanced", "A2: dispatch a context /think when `fno backlog done` closes a node (default OFF)."
+    ),
+    "config.think_spawn.daily_cap": Meta(
+        "advanced", "Per-install per-day ceiling on /think spawns (firehose guard; 0 = off)."
+    ),
     # --- config.active_backlog.* ---
     "config.active_backlog.enabled": Meta(
         "advanced",
