@@ -94,3 +94,9 @@ jobs:
         with:
           files: dist/*.tar.gz
           fail_on_unmatched_files: true
+          # Self-document the release from the PRs since the previous tag, so a
+          # bare `git push origin vX` produces notes with no manual step. (Notes
+          # that must span more than one prior tag - e.g. when a version was
+          # GitHub-only and never published - still need a manual
+          # `gh release edit --notes-file` with a custom --notes-start-tag.)
+          generate_release_notes: true
