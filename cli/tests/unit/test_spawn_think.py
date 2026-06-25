@@ -70,8 +70,8 @@ def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     spawn_calls: list[tuple] = []
     stamp_calls: list[tuple] = []
 
-    def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth"):
-        spawn_calls.append((node_id, prompt, node_cwd, node_slug, reason))
+    def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth", invocation_suffix=None):
+        spawn_calls.append((node_id, prompt, node_cwd, node_slug, reason, invocation_suffix))
         return "deadbeef"
 
     monkeypatch.setattr(st, "_spawn_think_worker", fake_spawn)
@@ -185,7 +185,7 @@ def test_resolved_seed_carries_transcript_pointer(iso, monkeypatch, patch_spawn)
     res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
                                events_path=iso, project_root=iso.parent.parent)
     assert res.decision == "spawned" and res.resolved is True
-    (_, prompt, _, _, _) = spawn_calls[0]
+    prompt = spawn_calls[0][1]
     assert "/real/transcript.jsonl" in prompt  # the POINTER, not a paraphrase
     assert "x-2222aaaa" in prompt
     assert "origin node chain: x-0000aaaa" in prompt
@@ -223,7 +223,7 @@ def test_foreign_harness_still_spawns_unresolved(iso, monkeypatch, patch_spawn):
                                env=dict(__import__("os").environ),
                                events_path=iso, project_root=iso.parent.parent)
     assert res.decision == "spawned" and res.resolved is False
-    (_, prompt, _, _, _) = spawn_calls[0]
+    prompt = spawn_calls[0][1]
     assert "UNRESOLVED" in prompt
     evs = _events(iso)
     assert evs[0]["data"]["resolved"] is False
@@ -864,4 +864,35 @@ def test_dispatch_conversational_dedup_at_most_once(iso, monkeypatch, patch_spaw
     assert r1.decision == "spawned"
     assert r2.decision == "skipped" and r2.reason == "already-claimed"
     assert len(spawn_calls) == 1
+    # The worker name + dedup token carried the live session discriminator.
+    assert spawn_calls[0][5] == "s"
+
+
+def test_dispatch_different_sessions_both_spawn(iso, monkeypatch, patch_spawn):
+    """codex P2: two DIFFERENT conversations dispatching the same node each get
+    their own worker (distinct name + session-scoped dedup token), so a later
+    conversation can re-dispatch - the verb is repeatable, unlike once-per-moment
+    birth/lifecycle triggers whose names/tokens are reason-scoped only."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, _ = patch_spawn
+    n = _node()
+    r1 = st.dispatch_conversational(n, session_id="sessAAAA", cwd="/l",
+                                    events_path=iso, project_root=iso.parent.parent)
+    r2 = st.dispatch_conversational(n, session_id="sessBBBB", cwd="/l",
+                                    events_path=iso, project_root=iso.parent.parent)
+    assert r1.decision == "spawned" and r2.decision == "spawned"
+    assert len(spawn_calls) == 2
+    assert spawn_calls[0][5] == "sessAAAA" and spawn_calls[1][5] == "sessBBBB"
+
+
+def test_worker_name_unique_per_conversation():
+    """The per-invocation suffix lands in the worker name (the permanent registry
+    key `fno agents spawn` rejects on collision)."""
+    a = st._worker_agent_name("x-1", "slug", st.REASON_CONVERSATIONAL, "sessAAAA")
+    b = st._worker_agent_name("x-1", "slug", st.REASON_CONVERSATIONAL, "sessBBBB")
+    assert a != b
+    assert a.endswith("-sessaaaa") and b.endswith("-sessbbbb")
+    # No suffix -> byte-for-byte the prior name (birth/lifecycle unchanged).
+    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "think-x-1-slug"
 

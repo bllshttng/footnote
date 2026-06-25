@@ -40,13 +40,15 @@ def dispatch(
     ),
     session_id: Optional[str] = typer.Option(
         None, "--session-id",
-        help="Live transcript session id (default: $CLAUDE_CODE_SESSION_ID).",
+        help="Live transcript session id (default: ambient $CLAUDE_CODE_SESSION_ID "
+             "/ $CODEX_SESSION_ID / $GEMINI_SESSION_ID).",
     ),
     cwd: Optional[str] = typer.Option(
         None, "--cwd", help="Live session cwd (default: the current working dir)."
     ),
-    harness: str = typer.Option(
-        "claude", "--harness", help="Live session harness (claude/codex/gemini)."
+    harness: Optional[str] = typer.Option(
+        None, "--harness",
+        help="Live session harness (default: ambiently detected; claude/codex/gemini).",
     ),
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit the dispatch result as JSON."
@@ -59,21 +61,30 @@ def dispatch(
     offered, 1 skipped (e.g. dedup / daily-cap), 2 bad input (no live session id
     or node not found).
     """
-    from fno.graph.cli import _graph_path
+    from fno.graph.cli import _graph_path, _session_provenance
     from fno.graph.fuzzy import resolve_node
     from fno.graph.store import read_graph
     from fno.provenance.spawn_think import dispatch_conversational
 
-    sid = (session_id or os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    # Resolve the LIVE session pointer ambiently across all three harnesses (the
+    # same capture node-birth provenance uses, x-30f6), so the verb works in a
+    # codex/gemini session too, not only claude (codex P2). Explicit flags win.
+    prov = _session_provenance()
+    sid = (session_id or prov.get("source_session_id") or "").strip()
+    live_harness = (harness or prov.get("source_harness") or "claude").strip()
     if not sid:
         typer.echo(
             "fno think dispatch: no live session id - set --session-id or run "
-            "inside a claude session ($CLAUDE_CODE_SESSION_ID). There is nothing "
-            "to carry without a live pointer.",
+            "inside a claude/codex/gemini session ($CLAUDE_CODE_SESSION_ID / "
+            "$CODEX_SESSION_ID / $GEMINI_SESSION_ID). There is nothing to carry "
+            "without a live pointer.",
             err=True,
         )
         raise typer.Exit(code=2)
-    live_cwd = cwd or os.getcwd()
+    # Normalize an explicit --cwd to an absolute path; otherwise use the session
+    # cwd (gemini: don't pass a relative/whitespace path to the dispatch core).
+    live_cwd = (os.path.abspath(cwd.strip()) if cwd and cwd.strip()
+                else (prov.get("source_cwd") or os.getcwd()))
 
     # Deterministic resolution tiers 1-3 (exact id / slug / bare-hex) - the same
     # resolver `fno backlog get` uses, so every exact entry form resolves.
@@ -97,7 +108,7 @@ def dispatch(
         target["_resolved_cwd"] = root
 
     result = dispatch_conversational(
-        target, session_id=sid, cwd=live_cwd, harness=harness,
+        target, session_id=sid, cwd=live_cwd, harness=live_harness,
     )
 
     if json_output:
@@ -109,6 +120,7 @@ def dispatch(
             "presence": result.presence,
             "resolved": result.resolved,
             "think_session": result.think_session,
+            "detail": result.detail,
         }))
     elif result.decision == "spawned":
         typer.echo(

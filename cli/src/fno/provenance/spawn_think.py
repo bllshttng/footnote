@@ -508,7 +508,7 @@ def _name_slug(raw: Optional[str]) -> str:
     return s[:30].rstrip("-")
 
 
-def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REASON_BIRTH) -> str:
+def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None) -> str:
     """Provenance-carrying bg worker name, scoped by trigger reason.
 
     Birth keeps ``think-<node-id>-<slug>`` byte-for-byte (A1). A LIFECYCLE
@@ -520,10 +520,16 @@ def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REA
     """
     base = f"think-{node_id}" if reason == REASON_BIRTH else f"think-{node_id}-{reason}"
     slug = _name_slug(node_slug)
-    return f"{base}-{slug}" if slug else base
+    name = f"{base}-{slug}" if slug else base
+    # An optional per-invocation discriminator (C/x-0a9c: the live session id) so a
+    # REPEATABLE trigger (conversational) gets a DISTINCT name each call. Without
+    # it `fno agents spawn` rejects the constant name and a later conversation can
+    # never re-dispatch the node even after the dedup TTL expires (codex P2).
+    suf = _name_slug(invocation_suffix)
+    return f"{name}-{suf}" if suf else name
 
 
-def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node_slug: Optional[str], reason: str = REASON_BIRTH) -> str:
+def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None) -> str:
     """Dispatch a fire-and-forget ``/think`` claude bg worker carrying the seed.
 
     Mirrors advance._spawn_worker: ``/think`` rides as the command prompt (NOT
@@ -532,7 +538,7 @@ def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node
     (``--fresh``). Returns the spawn receipt's short_id. Raises
     SpawnAlreadyRunning on a name-collision and SpawnError otherwise.
     """
-    agent_name = _worker_agent_name(node_id, node_slug, reason)
+    agent_name = _worker_agent_name(node_id, node_slug, reason, invocation_suffix)
     cmd = ["fno", "agents", "spawn", "--provider", "claude"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
@@ -876,12 +882,17 @@ def dispatch_conversational(
     }
     environ[_ENV_OVERRIDE] = "1"
     environ[_ENV_ATTENDED] = "spawn"
+    # The live session id discriminates the dedup token + worker name so a LATER
+    # conversation can re-dispatch the same node (the verb is repeatable, unlike
+    # the once-per-moment birth/lifecycle triggers) - codex P2.
+    suffix = (session_id or "").strip()[:8] or None
     return maybe_spawn_think(
         live_node,
         reason=REASON_CONVERSATIONAL,
         project_root=project_root,
         events_path=events_path,
         env=environ,
+        invocation_suffix=suffix,
     )
 
 
@@ -898,6 +909,7 @@ def maybe_spawn_think(
     events_path: Optional[Path] = None,
     env: Optional[dict] = None,
     run_state: Optional[RunState] = None,
+    invocation_suffix: Optional[str] = None,
 ) -> ThinkSpawnResult:
     """Evaluate + execute the context /think spawn for a node at a trigger moment.
 
@@ -1004,7 +1016,12 @@ def maybe_spawn_think(
     #    dispatches once per moment (AC4-FR).
     from fno.claims.core import ClaimHeldByOther, acquire_claim
 
+    # The dedup token carries the same per-invocation discriminator as the worker
+    # name (C/x-0a9c) so two DIFFERENT conversations dispatching the same node are
+    # independent, while a retry from the SAME invocation is still deduped.
     dispatch_key = f"dispatch:think:{node_id}:{reason}"
+    if invocation_suffix:
+        dispatch_key = f"{dispatch_key}:{invocation_suffix}"
     holder = f"think-spawn:{os.getpid()}"
     if _claim_is_live(dispatch_key):
         return skip("already-claimed", presence=presence, node_id=node_id)
@@ -1021,7 +1038,7 @@ def maybe_spawn_think(
     node_cwd = node.get("_resolved_cwd") or node.get("cwd") or None
     node_slug = node.get("slug") or node.get("title")
     try:
-        short_id = _spawn_think_worker(node_id, seed.prompt, node_cwd, node_slug, reason)
+        short_id = _spawn_think_worker(node_id, seed.prompt, node_cwd, node_slug, reason, invocation_suffix)
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder)
         return skip("already-claimed", presence=presence)
@@ -1039,7 +1056,7 @@ def maybe_spawn_think(
         {"node_id": node_id, "trigger": reason, "think_session": short_id,
          "presence": presence, "resolved": seed.resolved,
          "output_path": seed.output_path or None,
-         "agent_name": _worker_agent_name(node_id, node_slug, reason)},
+         "agent_name": _worker_agent_name(node_id, node_slug, reason, invocation_suffix)},
         ev_path,
     )
     return ThinkSpawnResult(

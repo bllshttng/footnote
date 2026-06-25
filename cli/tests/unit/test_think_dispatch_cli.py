@@ -34,11 +34,24 @@ def graph(monkeypatch, tmp_path):
 
 
 def test_no_live_session_exits_2(graph, monkeypatch):
-    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    for v in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(v, raising=False)
     r = runner.invoke(think_cli.think_app, ["dispatch", "x-0a9c"])
     assert r.exit_code == 2
     assert "no live session id" in r.output
     assert "node" not in graph  # never reached the dispatch
+
+
+def test_ambient_codex_session(graph, monkeypatch):
+    """codex P2: a codex session (no CLAUDE_CODE_SESSION_ID) still dispatches -
+    the live pointer is detected ambiently across all three harnesses."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("GEMINI_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEX_SESSION_ID", "codex-sid")
+    r = runner.invoke(think_cli.think_app, ["dispatch", "x-0a9c"])
+    assert r.exit_code == 0
+    assert graph["session_id"] == "codex-sid"
+    assert graph["harness"] == "codex"
 
 
 def test_node_not_found_exits_2(graph, monkeypatch):
