@@ -351,6 +351,16 @@ follows the work-map root:
 2. else the node's `_resolved_cwd` (from `fno backlog get "$node"`);
 3. else the caller's `cwd`.
 
+**Auto-worktree (x-9c4c).** When the payload is code-implementing (`/target` |
+`/do` | `/fix`) and the resolved `--cwd` is a repo's MAIN checkout, `spawn.sh`
+deterministically creates `~/conductor/workspaces/<repo>/<name>` on a fresh
+feature branch and launches the worker THERE - born isolated, location verdict
+`ok` from line one, no reliance on the worker self-creating a worktree. A
+`/think` (non-code) dispatch stays in repo root; an already-isolated worktree
+cwd is not re-isolated; any creation error fails safe to repo root. This is in
+`spawn.sh` (deterministic), so you do nothing here except relay the receipt -
+its `cwd=<worktree>` field on the launched line surfaces the real launch dir.
+
 #### 5. REPORT (echo ONLY what actually happened)
 
 **Receipt-echo invariant (every skip path).** When the confirm was auto-skipped
