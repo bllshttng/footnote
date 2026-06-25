@@ -12,7 +12,7 @@ acme-web target run):
 
 1. **Schema resolution.** `fno gate set` routes through
    `scripts/lib/set-gate.sh` -> `scripts/lib/events-validate.sh`, which loads
-   `docs/architecture/events-schema.yaml`. From a repo that does not vendor that
+   `cli/src/fno/events/schema.yaml`. From a repo that does not vendor that
    file, the bash resolver could only find it through `FNO_REPO_ROOT` or
    `CLAUDE_PLUGIN_ROOT`, neither of which is set in a plain terminal outside a
    Claude Code session. Result: `schema unavailable`, and the gate refused to flip.
@@ -34,14 +34,14 @@ documents that `FNO_REPO_ROOT` is for project/config scoping only.
 `_ev_resolve_schema_path` resolves the first readable path in this order:
 
 1. `EVENTS_SCHEMA_PATH` - explicit operator override.
-2. `${git toplevel}/docs/architecture/events-schema.yaml` - a repo that vendors
+2. `${git toplevel}/cli/src/fno/events/schema.yaml` - a repo that vendors
    its own schema (local override).
-3. **lib-relative** `$(dirname BASH_SOURCE)/../../docs/architecture/events-schema.yaml`
+3. **lib-relative** `$(dirname BASH_SOURCE)/../../cli/src/fno/events/schema.yaml`
    - the schema bundled beside this lib inside the plugin. `BASH_SOURCE[0]` is
    this file regardless of cwd or who sourced it, so the bundled schema resolves
    with *no env var set*. This is the tier that fixes the foreign-cwd miss.
-4. `${FNO_REPO_ROOT}/docs/architecture/events-schema.yaml` - legacy fallback.
-5. `${CLAUDE_PLUGIN_ROOT}/docs/architecture/events-schema.yaml` - legacy fallback.
+4. `${FNO_REPO_ROOT}/cli/src/fno/events/schema.yaml` - legacy fallback.
+5. `${CLAUDE_PLUGIN_ROOT}/cli/src/fno/events/schema.yaml` - legacy fallback.
 
 The lib-relative tier sits *above* the env-var tiers so an operator never needs
 `FNO_REPO_ROOT` to fix a schema miss. `BASH_SOURCE[0]` is read through a `:-`
@@ -54,34 +54,22 @@ self-location pattern in `scripts/lib/phase-verifier.sh` and
 When every tier misses, the original `schema unavailable: <path>` diagnostic
 (rc 2) is preserved.
 
-## Python schema bundling (`cli/hatch_build.py`, `cli/pyproject.toml`)
+## Python schema (`cli/src/fno/events/schema.yaml`)
 
-The Python validator (`cli/src/fno/events/__init__.py`) resolves an
-in-package `_schema.yaml` first, then walks up for a dev-tree
-`docs/architecture/events-schema.yaml`. The in-package copy only works if the
-wheel actually ships it. Before this change there was no force-include: a clean
-`uv tool install` produced a wheel with no schema, so `import fno.events`
-(and `python -m fno.events --emit-schema`) raised `SchemaUnavailableError`
-from a foreign cwd. The schema that the installed tool *did* carry arrived via an
-out-of-band sync and had drifted stale.
+The schema lives INSIDE the package, beside the validator that loads it
+(`cli/src/fno/events/__init__.py`). `_resolve_manifest_path` reads the sibling
+`schema.yaml` directly - no walk-up, no env var. Because the file sits under the
+`src/fno` package, it ships as ordinary package data in both the wheel and the
+sdist, so an installed `fno` resolves the schema from any cwd with no `docs/`
+tree present. A built wheel carrying `fno/events/schema.yaml` is therefore the
+canonical schema verbatim.
 
-The schema lives at the repo root (`docs/architecture/events-schema.yaml`), one
-level above the `cli/` build root, so a static `../docs/...` force-include
-cannot work: `uv build` does sdist-then-wheel-from-sdist, and the repo `docs/`
-tree is not inside the sdist. The build instead:
-
-- **sdist** force-includes the schema at its root as `_schema_vendor.yaml`
-  (`[tool.hatch.build.targets.sdist.force-include]`), keeping the sdist
-  self-contained.
-- **wheel** force-includes the schema as `fno/events/_schema.yaml` via the
-  `hatch_build.py` hook. `schema_source(root)` probes two locations and takes the
-  first that exists: `<repo>/docs/architecture/events-schema.yaml` (direct source
-  build) then `<root>/_schema_vendor.yaml` (wheel-from-sdist). The hook
-  hard-fails (`FileNotFoundError`) if neither exists, so a schema-less wheel can
-  never ship silently.
-
-The bundled `_schema.yaml` is therefore byte-identical to the canonical schema
-at build time, in both build modes, replacing the stale out-of-band copy.
+This replaced an earlier force-include scheme: the schema used to live in
+`docs/architecture/` (outside the package), so a `hatch_build.py` hook
+force-included it into the wheel as `fno/events/_schema.yaml` and an sdist
+`force-include` vendored a `_schema_vendor.yaml` copy for the
+sdist-then-wheel-from-sdist build mode. Colocating the schema with its loader
+removed that machinery entirely - the package now carries its own schema.
 
 ## FNO_REPO_ROOT overload warning (`cli/src/fno/paths.py`)
 
@@ -105,9 +93,8 @@ it fires at most once per process (`resolve_repo_root` is `@cache`-d).
 | File | Role |
 |------|------|
 | `scripts/lib/events-validate.sh` | bash resolver: lib-relative tier above env tiers |
-| `cli/hatch_build.py` | wheel hook: `schema_source` probe + `resolve_required_schema` hard-fail |
-| `cli/pyproject.toml` | sdist vendors `_schema_vendor.yaml`; wheel hook wiring |
-| `cli/src/fno/events/__init__.py` | in-package `_schema.yaml` fallback resolver |
+| `cli/src/fno/events/schema.yaml` | the schema itself - package data, ships in wheel + sdist |
+| `cli/src/fno/events/__init__.py` | reads its sibling `schema.yaml` (`_resolve_manifest_path`) |
 | `cli/src/fno/paths.py` | `FNO_REPO_ROOT` foreign-project warning |
 
 ## Verification
@@ -116,7 +103,6 @@ it fires at most once per process (`resolve_repo_root` is `@cache`-d).
   resolves the bundled schema (bash tier 3); `tests/events/test-bash-validator.sh`
   asserts this with a foreign tmp git repo.
 - `uv build` (sdist + wheel-from-sdist) and `uv build --wheel` (direct) both ship
-  a byte-identical `fno/events/_schema.yaml`; `cli/tests/smoke/test_build.sh`
+  `fno/events/schema.yaml` as package data; `cli/tests/smoke/test_build.sh`
   installs the wheel into a clean venv and imports it from an empty cwd.
-- `cli/tests/unit/test_hatch_build.py` covers the probe order and the hard-fail.
 - `cli/tests/unit/test_paths.py` covers the warning (fires / not-footnote / same-repo).

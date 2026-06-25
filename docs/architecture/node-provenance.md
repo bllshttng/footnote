@@ -25,7 +25,7 @@ Every graph node carries (all nullable, defaulted on read in `cli/src/fno/graph/
 | `spawned_by_harness` | parent harness | worker spawn |
 | `spawned_by_cwd` | parent cwd, for the transcript-path slug resolver | worker spawn |
 
-The `agent_spawned` event (`docs/architecture/events-schema.yaml`) carries the same `spawned_by_*` triple, so the durable event log keeps the parent edge even if a registry row is later rewritten.
+The `agent_spawned` event (`cli/src/fno/events/schema.yaml`) carries the same `spawned_by_*` triple, so the durable event log keeps the parent edge even if a registry row is later rewritten.
 
 ## Where capture happens
 

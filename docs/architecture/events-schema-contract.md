@@ -26,7 +26,7 @@ The contract has six pieces, one job each.
 ## Six components
 
 ```
-docs/architecture/events-schema.yaml      single source of truth
+cli/src/fno/events/schema.yaml      single source of truth
         |
         +-> cli/src/fno/events/__init__.py    (Python validator + builders)
         |
@@ -51,7 +51,7 @@ diagnostic.
 ```
 
 Required fields and allowed source enum live in
-`docs/architecture/events-schema.yaml`. Per-type required-data fields
+`cli/src/fno/events/schema.yaml`. Per-type required-data fields
 live under `event_types[].data.required`. A `phase_transition` with
 `gate_bearing: true` MUST carry a `data.gate` value drawn from the
 schema's `gates:` allowlist; `gate_bearing: false` is for audit-only
@@ -264,7 +264,7 @@ harnesses (`test-bash-validator`, `test-set-gate`,
 ## Adding a new event type
 
 1. Add an entry under `event_types` in
-   `docs/architecture/events-schema.yaml`. Declare `data.required`
+   `cli/src/fno/events/schema.yaml`. Declare `data.required`
    and `data.properties`.
 2. If the type is gate-bearing, add the gate name to `gates:`.
 3. Add a typed builder in `cli/src/fno/events/__init__.py`
@@ -306,7 +306,7 @@ down without restoring the old-name branch.
 These were locked during the design phase and codified by the spec
 ship. Re-litigating any of them is out of scope:
 
-1. Schema home: YAML at `docs/architecture/events-schema.yaml`
+1. Schema home: YAML at `cli/src/fno/events/schema.yaml`
    (language-neutral; both validators parse directly).
 2. Two validators that both load the YAML; CI parity test catches
    drift.

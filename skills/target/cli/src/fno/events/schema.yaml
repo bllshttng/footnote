@@ -1,5 +1,6 @@
-# docs/architecture/events-schema.yaml
+# cli/src/fno/events/schema.yaml
 # Single source of truth for events.jsonl envelope shape across footnote.
+# Lives beside its Python loader (fno.events) and ships as package data.
 #
 # Both validators load this file:
 #   - cli/src/fno/events/__init__.py (Python; imports raise SchemaUnavailableError if absent)
@@ -1755,7 +1756,7 @@ event_types:
     consumers: [operator]
 
   - name: think_spawned
-    description: "Emitted by the node-birth path (x-6a10 born-with-why) when an away/headless session spawns a fire-and-forget context-carrying /think bg worker for a freshly-filed generated organic node. The node is then stamped with the spawned think's session pointer."
+    description: "Emitted by a dispatch trigger (x-6a10 born-with-why birth, or x-122a A2 lifecycle: work-start / retro-at-done) when an away/headless session spawns a fire-and-forget context-carrying /think bg worker for the node. The node is then stamped with the spawned think's session pointer."
     sources: [backlog]
     data:
       required: [node_id, think_session]
@@ -1763,6 +1764,10 @@ event_types:
         node_id:
           type: string
           description: "The freshly-filed node a /think was spawned for."
+        trigger:
+          type: string
+          enum: [birth, work-start, retro]
+          description: "Which dispatch moment fired (x-122a): birth (A1), work-start or retro (A2 lifecycle)."
         think_session:
           type: string
           description: "Short id of the spawned claude /think bg worker (from the spawn receipt)."
@@ -1787,6 +1792,10 @@ event_types:
         node_id:
           type: string
           description: "The freshly-filed node a /think handoff was offered for."
+        trigger:
+          type: string
+          enum: [birth, work-start, retro]
+          description: "Which dispatch moment fired (x-122a): birth (A1), work-start or retro (A2 lifecycle)."
         presence:
           type: string
           enum: [attended]
@@ -1800,15 +1809,19 @@ event_types:
     consumers: [operator]
 
   - name: think_skipped
-    description: "Emitted by the node-birth path (x-6a10) when it deliberately spawns/offers nothing. The reason discriminates no-origin / bulk-intake / cap-exceeded / already-claimed / claim-error / spawn-failed / no-node-id. A gate-off evaluation emits NOTHING (no-op); this fires only when the gate is on."
+    description: "Emitted by a dispatch trigger (x-6a10 birth, x-122a A2 lifecycle) when it deliberately spawns/offers nothing. The reason discriminates no-origin / bulk-intake / cap-exceeded / already-claimed / claim-error / spawn-failed / no-node-id / unresolved-pointer (A2 relevance filter) / daily-cap (A2 per-day ceiling). A gate-off evaluation emits NOTHING (no-op); this fires only when the gate is on."
     sources: [backlog]
     data:
       required: [reason]
       properties:
         reason:
           type: string
-          enum: [no-origin, bulk-intake, cap-exceeded, already-claimed, claim-error, spawn-failed, no-node-id]
-          description: "Why the birth hook spawned/offered nothing this evaluation."
+          enum: [no-origin, bulk-intake, cap-exceeded, already-claimed, claim-error, spawn-failed, no-node-id, unresolved-pointer, daily-cap]
+          description: "Why the dispatch spawned/offered nothing this evaluation."
+        trigger:
+          type: string
+          enum: [birth, work-start, retro]
+          description: "Which dispatch moment fired (x-122a): birth (A1), work-start or retro (A2 lifecycle)."
         node_id:
           type: string
           description: "The candidate node, when the reason references one."

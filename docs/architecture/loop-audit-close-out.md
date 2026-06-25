@@ -53,7 +53,7 @@ If `graph.json` does not exist when the walker starts, both seed mtimes stay `No
 
 ### Events
 
-Two new event types are registered in `docs/architecture/events-schema.yaml`:
+Two new event types are registered in `cli/src/fno/events/schema.yaml`:
 
 | Event | Required fields | Optional fields | Emitted when |
 |-------|-----------------|-----------------|--------------|
@@ -130,7 +130,7 @@ All three fixes share an anti-pattern catalogued in past memory:
 | Init test | `cli/tests/hooks/test_init_target_state_skip_flags.py` |
 | Walker | `cli/src/fno/megawalk.py` (`run_walker` reload block, lines 1525-1531 + 1665-1695) |
 | Walker test | `cli/tests/megawalk/test_graph_reload.py` |
-| Walker schema | `docs/architecture/events-schema.yaml` (`graph_reloaded`, `graph_reload_failed`) |
+| Walker schema | `cli/src/fno/events/schema.yaml` (`graph_reloaded`, `graph_reload_failed`) |
 | Megatron consumers | `cli/src/fno/megatron/artifact.py` (`_build_waves`, lines 185-197) |
 | | `cli/src/fno/megatron/brief.py` (`assemble_wave_brief`, lines 69-74) |
 | Megatron fixture | `cli/src/fno/megatron/state.py` (`_append_received_complete_for_test`) |

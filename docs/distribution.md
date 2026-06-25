@@ -48,9 +48,10 @@ staged binaries and:
 Staging is **all-or-nothing**: zero binaries staged → a pure-Python wheel (a valid
 variant); a partial set (1–2 of 3) **hard-fails** the build — a release wheel must be
 binary-complete, so a staging defect never reaches PyPI. The same hook also
-force-includes the events schema and the **LICENSE + NOTICE** texts (under
-`fno/_licenses/`), each required: a schema-less or license-less wheel hard-fails rather
-than ship silently (US5). The CI runs a clean-machine smoke
+force-includes the **LICENSE + NOTICE** texts (under `fno/_licenses/`), required: a
+license-less wheel hard-fails rather than ship silently (US5). The events schema
+(`fno/events/schema.yaml`) ships as ordinary package data — it lives inside the
+`src/fno` package, so it needs no force-include. The CI runs a clean-machine smoke
 (`cli/tests/smoke/clean_machine_smoke.sh`) against the freshly built wheel — all three
 binaries on PATH, the internalized verbs run, the clone-only verbs degrade — failing the
 release on any miss.

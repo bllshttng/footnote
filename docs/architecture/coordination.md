@@ -102,7 +102,7 @@ recreate.
 ### Audit trail
 
 Seven event types route through the existing `events.jsonl` validator
-(see `docs/architecture/events-schema.yaml`):
+(see `cli/src/fno/events/schema.yaml`):
 
 | Event | When |
 |-------|------|

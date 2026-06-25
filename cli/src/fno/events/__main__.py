@@ -19,7 +19,7 @@ def _build_branch_a_schema() -> dict:
     """Build the Branch A envelope schema for Python/fno events.
 
     This describes the Python emitter's envelope shape: {ts, type, source,
-    data}. It mirrors docs/architecture/schemas/events-v3.json Branch A.
+    data}. It mirrors schemas/events-v3.json Branch A.
     """
     from fno.events import ALLOWED_SOURCES, _schema_load_error  # noqa: PLC0415
 
