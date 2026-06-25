@@ -150,6 +150,9 @@ FIELD_META: dict[str, Meta] = {
     "config.think_spawn.daily_cap": Meta(
         "advanced", "Per-install per-day ceiling on /think spawns (firehose guard; 0 = off)."
     ),
+    "config.think_spawn.attended": Meta(
+        "advanced", "Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think)."
+    ),
     # --- config.active_backlog.* ---
     "config.active_backlog.enabled": Meta(
         "advanced",

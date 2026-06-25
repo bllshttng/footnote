@@ -57,6 +57,9 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _ENV_OVERRIDE = "FNO_THINK_SPAWN"
 # Test/CI seam to pin presence without faking a manifest or tty.
 _ENV_PRESENCE = "FNO_THINK_SPAWN_PRESENCE"
+# Test/CI + force seam for the attended opt-in (B, x-5d51); mirrors _ENV_OVERRIDE.
+# Otherwise read from config.think_spawn.attended (spawn|offer, default offer).
+_ENV_ATTENDED = "FNO_THINK_SPAWN_ATTENDED"
 # Explicit headless markers. A --bg worker may set FNO_BG, but the claude
 # spawn path (providers/claude.py) injects FNO_AGENT_SELF into EVERY spawned
 # worker and does NOT set FNO_BG - so a bg worker filing an idea before its
@@ -147,6 +150,7 @@ class ThinkSeed:
     prompt: str  # multi-line; carries the transcript POINTER, never a paraphrase
     offer_line: str  # single copy-pasteable line (AC2-UI)
     resolved: bool  # did the origin transcript resolve to a real .jsonl?
+    output_path: str = ""  # where the headless worker writes its /think doc (B, x-5d51)
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +272,29 @@ def _bump_daily_count() -> None:
         os.replace(tmp, p)  # atomic rename: a reader sees the old OR new file, never a torn one
     except OSError as exc:  # noqa: BLE001 - never wedge a spawn on a counter write
         _LOG.debug("spawn_think: daily-count bump failed: %s", exc)
+
+
+def _attended_mode(
+    project_root: Optional[Path] = None,
+    *,
+    env: Optional[dict] = None,
+) -> str:
+    """Resolve the attended opt-in: ``spawn`` (real bg /think) or ``offer`` (B, x-5d51).
+
+    Precedence mirrors think_spawn_enabled: ``FNO_THINK_SPAWN_ATTENDED`` override,
+    then ``config.think_spawn.attended`` from the node's repo settings. Fail-safe
+    to ``offer`` (byte-for-byte x-6a10): any unreadable/garbage value keeps the
+    default stderr-handoff behavior, never an unintended auto-spawn (AC4-HP).
+    """
+    environ = os.environ if env is None else env
+    override = (environ.get(_ENV_ATTENDED) or "").strip().lower()
+    if override in ("spawn", "offer"):
+        return override
+    try:
+        val = str(_settings_for(project_root).config.think_spawn.attended).strip().lower()
+        return "spawn" if val == "spawn" else "offer"
+    except Exception:  # noqa: BLE001 - fail-safe to the offer default
+        return "offer"
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +432,11 @@ def assemble_seed(node: dict) -> ThinkSeed:
     if source_node:
         why_lines.append(f"  origin node chain: {source_node}")
 
+    # B (x-5d51): give the headless worker a durable, known home for its output
+    # so the /think doc is never written nowhere. Reuses the existing briefs dir
+    # (the lazy choice); best-effort - an unresolvable path just omits the line.
+    output_path = _think_output_path(node_id)
+
     prompt = (
         f"/think {node_id}\n\n"
         f"WHY THIS NODE EXISTS - read the originating context below for the full "
@@ -415,6 +447,12 @@ def assemble_seed(node: dict) -> ThinkSeed:
         + f"\n\nNode: {node_id} {('(' + slug + ')') if slug else ''}\n"
         f"Title: {title}\n"
         + (f"\nDetails:\n{details}\n" if details else "")
+        + (
+            f"\nWRITE YOUR /think OUTPUT to this exact path so node {node_id} can "
+            f"point at it:\n  {output_path}\n"
+            if output_path
+            else ""
+        )
     )
 
     # The offer line is a single copy-pasteable line (AC2-UI). When resolved we
@@ -424,7 +462,25 @@ def assemble_seed(node: dict) -> ThinkSeed:
     else:
         offer_line = f"/think {node_id}"
 
-    return ThinkSeed(prompt=prompt, offer_line=offer_line, resolved=bool(res.resolved))
+    return ThinkSeed(
+        prompt=prompt, offer_line=offer_line, resolved=bool(res.resolved),
+        output_path=output_path,
+    )
+
+
+def _think_output_path(node_id: str) -> str:
+    """Resolve the durable sidecar the headless /think worker writes to (B, x-5d51).
+
+    ``briefs_dir()/think-<node-id>.md`` - reuses the existing briefs dir. Returns
+    "" on any resolution failure (settings unreadable); a missing path just omits
+    the write-instruction line rather than wedging the spawn.
+    """
+    try:
+        from fno.paths import briefs_dir
+
+        return str(briefs_dir() / f"think-{node_id}.md")
+    except Exception:  # noqa: BLE001 - best-effort; an unresolved path is non-fatal
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -565,12 +621,19 @@ def _emit(kind: str, data: dict, events_path: Path) -> None:
         print(f"spawn_think: WARNING: event emit failed ({kind}): {exc}", file=sys.stderr)
 
 
-def _stamp_forward(node_id: str, think_session: str, project_root: Optional[Path]) -> None:
-    """Stamp the node with its spawned /think session pointer (Discretion 5).
+def _stamp_forward(
+    node_id: str,
+    think_session: str,
+    project_root: Optional[Path],
+    output_path: Optional[str] = None,
+) -> None:
+    """Stamp the node with its spawned /think session + output pointers (Discretion 5).
 
     Serialized under locked_mutate_graph so the forward pointer write cannot
     clobber a concurrent node update (Concurrency invariant). Best-effort: a
-    stamp failure never unwinds an already-successful spawn.
+    stamp failure never unwinds an already-successful spawn. ``output_path`` (B,
+    x-5d51) records where the headless worker writes its /think doc so the node
+    points at the artifact, not just the session.
     """
     try:
         from fno.graph.cli import _graph_path
@@ -580,6 +643,8 @@ def _stamp_forward(node_id: str, think_session: str, project_root: Optional[Path
             for e in entries:
                 if e.get("id") == node_id:
                     e["think_session_id"] = think_session
+                    if output_path:
+                        e["think_output_path"] = output_path
                     break
             return entries
 
@@ -841,8 +906,10 @@ def maybe_spawn_think(
     if reason in _LIFECYCLE_REASONS and not seed.resolved:
         return skip("unresolved-pointer", presence=presence, resolved=False)
 
-    # 6. Attended => offer a single handoff line, never auto-spawn (AC2-HP/UI).
-    if presence == "attended":
+    # 6. Attended => offer a single handoff line by default; auto-spawn only when
+    #    the operator opted in via config.think_spawn.attended: spawn (AC4-HP, B).
+    #    Default 'offer' is byte-for-byte x-6a10.
+    if presence == "attended" and _attended_mode(project_root, env=environ) == "offer":
         print(f"spawn_think: born-with-why handoff -> {seed.offer_line}", file=sys.stderr)
         _emit(
             EVENT_OFFERED,
@@ -855,31 +922,32 @@ def maybe_spawn_think(
             resolved=seed.resolved, offer_line=seed.offer_line,
         )
 
-    # 6b. Per-day firehose ceiling (A2, Locked Decision 3): bound total away
-    #     spawns per install per day. Checked only on the away (spawn) path -
-    #     an attended offer costs nothing. 0 disables the ceiling.
+    # 6b. Per-day firehose ceiling (A2, Locked Decision 3): bound total bg /think
+    #     spawns per install per day. Checked only on the spawn path - an attended
+    #     offer costs nothing. 0 disables the ceiling.
     day_cap = _daily_cap(project_root)
     if day_cap > 0 and _daily_count() >= day_cap:
-        return skip("daily-cap", presence="away", detail=f"daily_cap={day_cap}")
+        return skip("daily-cap", presence=presence, detail=f"daily_cap={day_cap}")
 
-    # 7. Away => fire-and-forget bg /think. Dedup via a per-(node, reason) TTL
-    #    bridge token so two triggers observing the SAME moment spawn at most one,
-    #    while a node born + later retro'd still dispatches once per moment (AC4-FR).
+    # 7. Away (or attended-with-opt-in-spawn) => fire-and-forget bg /think. Dedup
+    #    via a per-(node, reason) TTL bridge token so two triggers observing the
+    #    SAME moment spawn at most one, while a node born + later retro'd still
+    #    dispatches once per moment (AC4-FR).
     from fno.claims.core import ClaimHeldByOther, acquire_claim
 
     dispatch_key = f"dispatch:think:{node_id}:{reason}"
     holder = f"think-spawn:{os.getpid()}"
     if _claim_is_live(dispatch_key):
-        return skip("already-claimed", presence="away", node_id=node_id)
+        return skip("already-claimed", presence=presence, node_id=node_id)
     try:
         acquire_claim(
             dispatch_key, holder, ttl_ms=_DISPATCH_TTL_MS,
             reason=f"context /think dispatch ({reason}) for {node_id}",
         )
     except ClaimHeldByOther:
-        return skip("already-claimed", presence="away")
+        return skip("already-claimed", presence=presence)
     except Exception as exc:  # noqa: BLE001
-        return skip("claim-error", presence="away", detail=str(exc))
+        return skip("claim-error", presence=presence, detail=str(exc))
 
     node_cwd = node.get("_resolved_cwd") or node.get("cwd") or None
     node_slug = node.get("slug") or node.get("title")
@@ -887,23 +955,25 @@ def maybe_spawn_think(
         short_id = _spawn_think_worker(node_id, seed.prompt, node_cwd, node_slug, reason)
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder)
-        return skip("already-claimed", presence="away")
+        return skip("already-claimed", presence=presence)
     except Exception as exc:  # noqa: BLE001 - AC3-ERR: spawn fail -> skip, no stamp
         _safe_release(dispatch_key, holder)
-        return skip("spawn-failed", presence="away", detail=str(exc))
+        return skip("spawn-failed", presence=presence, detail=str(exc))
 
-    # 8. Loop-closing forward stamp: node now points forward to its /think thread.
+    # 8. Loop-closing forward stamp: node now points forward to its /think thread
+    #    AND the durable output path the worker writes to (B, x-5d51).
     rs.spawned += 1
     _bump_daily_count()
-    _stamp_forward(node_id, short_id, project_root)
+    _stamp_forward(node_id, short_id, project_root, output_path=seed.output_path or None)
     _emit(
         EVENT_SPAWNED,
         {"node_id": node_id, "trigger": reason, "think_session": short_id,
-         "presence": "away", "resolved": seed.resolved,
+         "presence": presence, "resolved": seed.resolved,
+         "output_path": seed.output_path or None,
          "agent_name": _worker_agent_name(node_id, node_slug, reason)},
         ev_path,
     )
     return ThinkSpawnResult(
-        "spawned", EVENT_SPAWNED, node_id=node_id, presence="away",
+        "spawned", EVENT_SPAWNED, node_id=node_id, presence=presence,
         resolved=seed.resolved, think_session=short_id,
     )
