@@ -770,3 +770,98 @@ def test_lifecycle_wrapper_strictly_non_fatal(iso, monkeypatch):
     assert st.on_node_work_start(_node()) is None
     assert st.on_node_retro(_node()) is None
 
+
+# ---------------------------------------------------------------------------
+# US5 (C, x-0a9c) - explicit conversational dispatch verb
+# ---------------------------------------------------------------------------
+
+
+def _stored_origin_node(**over) -> dict:
+    """A node whose STORED birth origin differs from the live session, so a test
+    can prove the LIVE pointer (not the birth origin) is what gets carried."""
+    return _node(
+        source_harness="codex",
+        source_session_id="STORED-birth-sid",
+        source_cwd="/tmp/birth-origin",
+        **over,
+    )
+
+
+def test_dispatch_conversational_carries_live_pointer(iso, monkeypatch, patch_spawn):
+    """AC5-HP: the spawned think resolves the LIVE session pointer, NOT the node's
+    stored birth origin; reason=conversational; one think_spawned event."""
+    seen: dict = {}
+
+    def fake_resolve(harness, sid, cwd, **kw):
+        seen["triple"] = (harness, sid, cwd)
+        return ResolvedTranscript(harness, sid, cwd, True, transcript_path="/live/t.jsonl")
+
+    monkeypatch.setattr(st, "resolve_transcript", fake_resolve)
+    spawn_calls, _ = patch_spawn
+
+    res = st.dispatch_conversational(
+        _stored_origin_node(), session_id="LIVE-sid", cwd="/tmp/live-sess",
+        harness="claude", events_path=iso, project_root=iso.parent.parent,
+    )
+    assert res.decision == "spawned" and res.think_session == "deadbeef"
+    # resolve_transcript saw the LIVE triple, never the stored (codex/STORED.../...).
+    assert seen["triple"] == ("claude", "LIVE-sid", "/tmp/live-sess")
+    # The prompt carries the live transcript POINTER (never a paraphrase).
+    assert "/live/t.jsonl" in spawn_calls[0][1]
+    # Spawn used the conversational reason => reason-scoped worker name + dedup token.
+    assert spawn_calls[0][4] == st.REASON_CONVERSATIONAL
+    evs = _events(iso)
+    assert evs[-1]["type"] == st.EVENT_SPAWNED
+    assert evs[-1]["data"]["trigger"] == "conversational"
+
+
+def test_dispatch_forces_spawn_when_gate_off_and_attended(monkeypatch, tmp_path, patch_spawn):
+    """AC5-HP: the explicit verb spawns even when the config gate is OFF and the
+    session is attended - the invocation IS the opt-in, and it is a real spawn
+    (not the default stderr offer line)."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    monkeypatch.delenv("FNO_THINK_SPAWN", raising=False)        # config gate OFF (ambient)
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")  # operator at the keyboard
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, _ = patch_spawn
+    events_path = tmp_path / ".fno" / "events.jsonl"
+
+    res = st.dispatch_conversational(
+        _node(), session_id="LIVE-sid", cwd="/tmp/live",
+        events_path=events_path, project_root=tmp_path,
+    )
+    # Not noop (gate forced on) and not offered (attended forced to spawn).
+    assert res.decision == "spawned"
+    assert res.presence == "attended"  # presence is recorded truthfully
+    assert len(spawn_calls) == 1
+
+
+def test_dispatch_no_live_session_skips_no_origin(iso, monkeypatch, patch_spawn):
+    """An empty live session_id has nothing to carry -> skip{no-origin} (the CLI
+    verb rejects this earlier with a clearer message; the core still fails safe)."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
+    spawn_calls, _ = patch_spawn
+    res = st.dispatch_conversational(
+        _node(), session_id="", cwd="/tmp/live",
+        events_path=iso, project_root=iso.parent.parent,
+    )
+    assert res.decision == "skipped" and res.reason == "no-origin"
+    assert spawn_calls == []
+
+
+def test_dispatch_conversational_dedup_at_most_once(iso, monkeypatch, patch_spawn):
+    """Invariant: two dispatches for the same node within the TTL spawn once
+    (reason-scoped dedup token dispatch:think:<id>:conversational)."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
+    _resolved(monkeypatch, ok=True)
+    spawn_calls, _ = patch_spawn
+    n = _node()
+    r1 = st.dispatch_conversational(n, session_id="s", cwd="/tmp/l",
+                                    events_path=iso, project_root=iso.parent.parent)
+    r2 = st.dispatch_conversational(n, session_id="s", cwd="/tmp/l",
+                                    events_path=iso, project_root=iso.parent.parent)
+    assert r1.decision == "spawned"
+    assert r2.decision == "skipped" and r2.reason == "already-claimed"
+    assert len(spawn_calls) == 1
+

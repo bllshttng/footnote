@@ -94,6 +94,10 @@ _SPAWN_ALREADY_EXISTS = "already exists"
 REASON_BIRTH = "birth"
 REASON_WORK_START = "work-start"
 REASON_RETRO = "retro"
+# C (x-0a9c): the explicit conversational verb. NOT in _LIFECYCLE_REASONS: it is
+# operator-invoked (one per explicit call, no firehose), so it does not need the
+# relevance filter and may degrade to the stored triple like birth does.
+REASON_CONVERSATIONAL = "conversational"
 _LIFECYCLE_REASONS = frozenset({REASON_WORK_START, REASON_RETRO})
 
 
@@ -817,6 +821,67 @@ def on_node_retro(
     return _on_node_lifecycle(
         node, reason=REASON_RETRO, subflag="on_retro",
         project_root=project_root, run_state=run_state,
+    )
+
+
+# ---------------------------------------------------------------------------
+# dispatch_conversational() - the explicit conversational verb (v2 C, x-0a9c)
+# ---------------------------------------------------------------------------
+
+
+def dispatch_conversational(
+    node: dict,
+    *,
+    session_id: Optional[str],
+    cwd: Optional[str],
+    harness: str = "claude",
+    project_root: Optional[Path] = None,
+    events_path: Optional[Path] = None,
+    env: Optional[dict] = None,
+) -> ThinkSpawnResult:
+    """C (x-0a9c): explicit conversational /think dispatch for a named node.
+
+    The operator, mid-conversation about an fno-touched node, invokes one verb
+    and a bg /think picks it up with full LIVE context (US5/AC5-HP). Unlike the
+    automatic A1/A2 triggers this:
+
+      * carries the LIVE session's transcript pointer (``session_id``/``cwd``/
+        ``harness``), NOT the node's stored birth origin - so the spawned think
+        reads THIS conversation, not whatever first filed the node;
+      * actually SPAWNS a bg /think even in an attended session - the explicit
+        invocation IS the opt-in, so we do not degrade to a stderr offer line;
+      * is not gated behind ``config.think_spawn.enabled`` - the verb is the
+        per-invocation opt-in, so a default-OFF install still serves an explicit
+        request.
+
+    All three forcings reuse existing env seams rather than new ``maybe_spawn``
+    branches (Locked Decision 6): ``FNO_THINK_SPAWN=1`` arms the gate and
+    ``FNO_THINK_SPAWN_ATTENDED=spawn`` chooses a real spawn over the offer line.
+    Every other guard is reused verbatim by routing through
+    :func:`maybe_spawn_think`: the reason-scoped dedup TTL token, the per-day
+    firehose ceiling, the forward stamp, the single decision event, and strict
+    non-fatality. There is NO auto-grep heuristic - a dispatch happens only on
+    this explicit call (AC5-FR).
+    """
+    environ = dict(os.environ if env is None else env)
+    # Overlay the LIVE pointer so assemble_seed resolves THIS conversation's
+    # transcript, never the node's birth origin (AC5-HP). An empty session_id
+    # falls through to maybe_spawn_think's no-origin skip (the CLI verb rejects
+    # that earlier with a clearer message).
+    live_node = {
+        **node,
+        "source_harness": harness,
+        "source_session_id": session_id,
+        "source_cwd": cwd,
+    }
+    environ[_ENV_OVERRIDE] = "1"
+    environ[_ENV_ATTENDED] = "spawn"
+    return maybe_spawn_think(
+        live_node,
+        reason=REASON_CONVERSATIONAL,
+        project_root=project_root,
+        events_path=events_path,
+        env=environ,
     )
 
 

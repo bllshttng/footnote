@@ -1,7 +1,7 @@
 ---
 name: think
 description: "Reason about a design before building. Routes to design+BDD exploration (think, default), scenario/failure-mode stress testing (what-if), or a multi-persona expert debate (panel). Use when: 'think through this', 'brainstorm', 'what could go wrong', 'stress test this idea', 'convene a panel', 'should we build X'."
-argument-hint: "[what-if|panel]  (bare or prose = think default; what-if: [domain] [depth] failure-modes \"scope\"; panel: [auto] [deep] \"decision\")"
+argument-hint: "[what-if|panel|dispatch]  (bare or prose = think default; what-if: [domain] [depth] failure-modes \"scope\"; panel: [auto] [deep] \"decision\"; dispatch: <node-id>)"
 requires:
   binaries:
     - "fno >= 0.1"
@@ -17,6 +17,7 @@ requires:
 | `think` (default) | design exploration + multi-perspective challenge + BDD acceptance criteria | you are shaping a feature and want a reviewable design doc |
 | `what-if` | scenario / failure-mode stress test across 12 dimensions | you want to break the idea before committing to it |
 | `panel` | a panel of opinionated expert personas debates the decision | a strategic call (build / pivot / prioritize) needs more than one lens |
+| `dispatch` | hand a named node to a bg `/think` carrying THIS conversation's context | you are mid-discussion about an fno node and want a deep think to pick it up off the main thread |
 
 This is a **router**, not a monolith. It parses the first argument as a mode, announces the resolved mode, then loads that mode's body and follows it in this same context. It never calls another skill at runtime (it dispatches subagents via the Task/Agent tool and loads modes via Read).
 
@@ -28,11 +29,12 @@ The default mode `think` takes a **free-text design seed** (or no argument, for 
 - **`think`** -> mode is `think` (explicit). Print `running think (default)`. Consume the token; the remaining text is the design seed. Go to Step 2.
 - **`what-if`** -> mode is `what-if`. Print `running what-if (scenario stress-test)`. The remaining tokens are what-if's own arguments (`[domain] [depth] [from-scenarios] [failure-modes] "scope" [Iterations: N]`). Go to Step 3.
 - **`panel`** (or the hidden alias **`tank`**) -> mode is `panel`. Print `running panel (multi-persona debate)`. The remaining tokens are panel's own arguments (`[auto] [continue {slug}|list] [deep|shallow] [startup|adversarial] <decision>`). Go to Step 4.
+- **`dispatch`** -> mode is `dispatch`. Print `running dispatch (conversational /think handoff)`. The remaining token is the target node id/slug. Go to Step 5.
 - **a single bare word that is none of the above** -> this is an unknown mode (almost always a typo'd mode keyword, not a one-word design seed). Do NOT default, do NOT guess. Print:
 
   ```
   unknown think mode: '<token>'
-  valid modes: think (default), what-if, panel
+  valid modes: think (default), what-if, panel, dispatch
   ```
 
   and stop with a non-zero result (start no design, dispatch no agents). This is the locked router contract: an unknown non-empty mode never silently falls through. To seed the design with a single word, prefix the default mode explicitly (`/think think dark-mode`) or quote it (`/think "dark-mode"`).
@@ -61,6 +63,20 @@ Load [panel.md](panel.md) and execute it in full, in this context. That body is 
 **Handoff, not runtime invocation (router contract override).** panel.md's report step offers downstream verbs - both the default handoff options and the optional `--chain think|plan|megawalk`. In router mode those are **presented as copy-paste handoff lines** (`/think ...`, `/blueprint ...`, `/megawalk`) for the user to run next; the panel mode never invokes another skill at runtime. Routers load modes inline and dispatch only via Task/Agent, and a self-contained install may ship the `think` folder without the chained skill present, so `/think panel --chain plan ...` resolves the recommendation and then emits the `/blueprint ...` line rather than calling it.
 
 **Thin input is fine.** `/think panel "should we add dark mode"` (a one-line decision) still convenes the full panel - the flow gathers project context itself and never crashes on a sparse prompt.
+
+## Step 5: dispatch mode (conversational /think handoff)
+
+You are mid-conversation about an fno-touched node and want a deep `/think` to pick it up off the main thread, carrying THIS conversation as context. One verb hands the node to a background `/think` worker that runs beside this thread in its own agents-view row (on claude it is a fully interactive `claude --bg` session; on codex/gemini it degrades to an autonomous `exec` draft).
+
+This mode is **explicit-only**: it dispatches ONLY when you invoke it. There is no auto-grep detector that volunteers a dispatch when you merely mention a node (the false-positive class that bit prior detectors - the offer-on-detection heuristic is a deliberate later layer).
+
+The whole mechanism is the `fno think dispatch` verb - do NOT hand-assemble a spawn. Resolve the node token, then shell:
+
+```bash
+fno think dispatch <node-id>
+```
+
+The verb reads `$CLAUDE_CODE_SESSION_ID` + the current cwd as the live transcript pointer, resolves the node in the graph, and routes through the shared dispatch core (reason-scoped dedup token, per-day firehose ceiling, forward stamp, single decision event, strict non-fatality). Relay the verb's output verbatim - it prints the spawned worker's id and an `fno agents watch` hint, or a one-line skip reason (e.g. dedup / daily-cap). If no node token was given, print `dispatch needs a node id: /think dispatch <node-id>` and stop. If the verb exits non-zero, surface its stderr; never fabricate a launch.
 
 ## Multi-CLI
 
