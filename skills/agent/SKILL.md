@@ -351,6 +351,19 @@ follows the work-map root:
 2. else the node's `_resolved_cwd` (from `fno backlog get "$node"`);
 3. else the caller's `cwd`.
 
+**Auto-worktree (x-9c4c).** When the payload writes code and the resolved
+`--cwd` is a repo's MAIN checkout, `spawn.sh` deterministically creates
+`~/conductor/workspaces/<repo>/<name>` on a fresh feature branch and launches the
+worker THERE - born isolated, location verdict `ok` from line one, no reliance on
+the worker self-creating a worktree. "Writes code" is keyed off `payload_mode`,
+not the message text: a `build` dispatch (claude `/target` wrap OR a codex/gemini
+`Implement ...` prose brief) and an explicit claude `/target`|`/do`|`/fix`
+passthrough all isolate; `ask`/`handoff`/`discuss` and a non-code claude slash
+command (`/think` writes a design doc) stay in repo root. An already-isolated
+worktree cwd is not re-isolated; any creation error fails safe to repo root. This
+is in `spawn.sh` (deterministic), so you do nothing here except relay the receipt
+- its `cwd="<worktree>"` field on the launched line surfaces the real launch dir.
+
 #### 5. REPORT (echo ONLY what actually happened)
 
 **Receipt-echo invariant (every skip path).** When the confirm was auto-skipped

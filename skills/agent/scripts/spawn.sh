@@ -183,6 +183,85 @@ case "$existing_status" in
     exit 0 ;;
 esac
 
+# ---- Auto-worktree for code-implementing payloads (x-9c4c) --------------
+# A bg /target|/do|/fix launched into a repo's MAIN checkout lands on the
+# canonical (often protected) branch and relies on the soft skill instruction
+# "a bg /target self-creates its worktree before building." Do it
+# deterministically here instead: create ~/conductor/workspaces/<repo>/<name>
+# on a fresh feature branch and launch THERE, so the worker is born isolated
+# (location verdict ok from line one) regardless of whether the cwd came from
+# -P, a node's _resolved_cwd, or the caller sitting on canonical main.
+#
+# Scope: code payloads only -- a born-with-why /think dispatch writes a design
+# doc, not commits, so it stays in repo root (failure mode 1). Fail-safe: any
+# error keeps the original cwd so the prior self-worktree path still applies;
+# the launch is NEVER blocked (failure mode 2). The <repo>/<name> path is
+# deterministic per dispatch, so a re-spawn of the same node reuses it rather
+# than colliding (failure mode 3).
+AUTO_WT=""
+# A payload writes code (and so wants isolation) when it is a build dispatch OR
+# an explicit claude /target|/do|/fix passthrough. Keying off PAYLOAD_MODE -- not
+# only the message prefix -- is load-bearing: a codex/gemini build reaches here
+# as a prose brief ("Implement backlog node ...", normalize.sh build case), never
+# a literal /target, and those workers have NO location gate, so a prefix-only
+# check would leave them editing a protected main checkout -- the exact harm this
+# guards against. ask/handoff/discuss (one-shot / doc / chat) and a non-code
+# claude slash command (/think writes a design doc) are NOT code payloads.
+is_code_payload() {
+  case "$PAYLOAD_MODE" in
+    build) return 0 ;;  # claude `/target` wrap OR codex/gemini "Implement ..." brief
+    passthrough)        # claude-only verbatim slash command; isolate only code verbs
+      case "$MESSAGE" in
+        /target|/target\ *|/do|/do\ *|/fix|/fix\ *) return 0 ;;
+        *) return 1 ;;
+      esac ;;
+    *) return 1 ;;      # ask | handoff | discuss
+  esac
+}
+maybe_auto_worktree() {
+  is_code_payload || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  local base="${CWD:-$PWD}"
+  [[ -d "$base" ]] || return 0
+  local top common gdir
+  top="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [[ -n "$top" ]] || return 0
+  # git-dir / git-common-dir may be returned relative to $base (e.g. a subdir cwd
+  # gives `../../.git`). cd into each and `pwd -P` to canonicalize -> subdir- and
+  # symlink-proof. A linked worktree's git-dir is .../.git/worktrees/<x> != the
+  # common dir; only re-isolate a MAIN checkout (the two resolve equal).
+  common="$(cd "$base" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)" || return 0
+  gdir="$(cd "$base" 2>/dev/null && cd "$(git rev-parse --git-dir 2>/dev/null)" 2>/dev/null && pwd -P)" || return 0
+  [[ -n "$common" && "$gdir" == "$common" ]] || return 0
+
+  local repo="${top##*/}"
+  local wt="$HOME/conductor/workspaces/$repo/$NAME"
+  # Re-spawn of the same node -> same path; reuse it if it is already a worktree
+  # rooted at $wt (`-ef` compares inode, so a /var<->/private/var symlink can't
+  # fool it). Never clobber a stray same-named dir that is not a worktree.
+  if [[ -d "$wt" ]] && git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+     && [[ "$(cd "$wt" && git rev-parse --show-toplevel 2>/dev/null)" -ef "$wt" ]]; then
+    CWD="$wt"; AUTO_WT="$wt"; printf 'auto-worktree: reusing %s\n' "$wt" >&2; return 0
+  fi
+  [[ -e "$wt" ]] && { printf 'auto-worktree: %s exists but is not a worktree; launching in %s\n' "$wt" "$top" >&2; return 0; }
+  mkdir -p "$(dirname "$wt")" 2>/dev/null || return 0
+
+  local branch="feature/$NAME"
+  if git -C "$top" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$top" worktree add "$wt" "$branch" >/dev/null 2>&1 \
+      || { printf 'auto-worktree: git worktree add failed; launching in %s\n' "$top" >&2; return 0; }
+  else
+    git -C "$top" worktree add "$wt" -b "$branch" >/dev/null 2>&1 \
+      || { printf 'auto-worktree: git worktree add failed; launching in %s\n' "$top" >&2; return 0; }
+  fi
+  # Link gitignored shared state (footnote-ecosystem only; absent -> skip).
+  local setup="$top/scripts/setup/setup-worktree.sh"
+  [[ -f "$setup" ]] && CANONICAL="$top" WORKTREE="$wt" bash "$setup" >/dev/null 2>&1
+  CWD="$wt"; AUTO_WT="$wt"
+  printf 'auto-worktree: created %s on %s\n' "$wt" "$branch" >&2
+}
+maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout
+
 # ---- Spawn (subscription lane only) -------------------------------------
 # Run the GENUINE verb. claude `spawn` builds `claude --bg --name <name> <msg>`
 # client-side (Group 1 ab-8b3e4fe0 moved the create off `ask`); codex/gemini
@@ -265,7 +344,11 @@ if [[ "$VERB" == "host" ]]; then
   printf 'result=launched short_id=%s name=%s mode=interactive staged="not running yet" drive="fno agents grid %s"\n' \
     "$short_id" "$NAME" "$NAME"
 else
-  printf 'result=launched short_id=%s name=%s mode=exec hint="fno agents logs %s" trace="fno agents trace %s"\n' \
-    "$short_id" "$NAME" "$NAME" "$NAME"
+  # Surface the auto-worktree cwd so an isolated launch is never silent. Quote
+  # the value (like hint/trace): a path with spaces must not split the receipt's
+  # space-separated key=value fields.
+  wt_field=""; [[ -n "$AUTO_WT" ]] && wt_field=" cwd=\"$AUTO_WT\""
+  printf 'result=launched short_id=%s name=%s mode=exec%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
+    "$short_id" "$NAME" "$wt_field" "$NAME" "$NAME"
 fi
 exit 0
