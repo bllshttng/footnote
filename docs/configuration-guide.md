@@ -61,6 +61,9 @@
 | `config.think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node. |
 | `config.think_spawn.max_per_run` | int | `5` | advanced | Blast-radius cap on /think spawns per node-generation run. |
 | `config.think_spawn.idle_threshold_s` | int | `0` | advanced | Idle seconds before an attended operator downgrades to away (0 = off). |
+| `config.think_spawn.on_work_start` | bool | `false` | advanced | A2: dispatch a context /think when /target claims a node to work it (default OFF). |
+| `config.think_spawn.on_retro` | bool | `false` | advanced | A2: dispatch a context /think when `fno backlog done` closes a node (default OFF). |
+| `config.think_spawn.daily_cap` | int | `20` | advanced | Per-install per-day ceiling on /think spawns (firehose guard; 0 = off). |
 | `config.active_backlog.enabled` | bool | dict[str, bool] | `false` | advanced | Always-on backlog drain: true (every project) or a per-project map. |
 | `config.active_backlog.interval` | str | `5m` | advanced | Poll-floor cadence for the drain daemon (e.g. 5m, 30s). |
 | `config.active_backlog.failure_limit` | int | `3` | advanced | Consecutive dispatch failures before a node is parked. |

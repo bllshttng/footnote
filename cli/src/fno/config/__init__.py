@@ -909,8 +909,17 @@ class ThinkSpawnBlock(BaseModel):
     enabled: bool = False
     max_per_run: int = 5
     idle_threshold_s: int = 0
+    # --- A2 lifecycle triggers (x-122a) ---
+    # Two non-birth dispatch moments, each behind its OWN sub-flag, default OFF
+    # even when ``enabled`` is on (Open Question 1): ``on_work_start`` fires when
+    # /target claims a node to work it; ``on_retro`` fires when ``fno backlog
+    # done`` closes a node. ``daily_cap`` is the per-install per-day firehose
+    # ceiling the broad A2 triggers require (Locked Decision 3); 0 disables it.
+    on_work_start: bool = False
+    on_retro: bool = False
+    daily_cap: int = 20
 
-    @field_validator("enabled", mode="before")
+    @field_validator("enabled", "on_work_start", "on_retro", mode="before")
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
         """Fail-safe to disabled on any non-boolean value (AC4-ERR).
@@ -954,6 +963,17 @@ class ThinkSpawnBlock(BaseModel):
     def _coerce_idle_threshold(cls, v: object) -> int:
         """Fail-safe: a garbage threshold degrades to 0 (refinement off)."""
         return cls._nonneg_int_or(v, 0)
+
+    @field_validator("daily_cap", mode="before")
+    @classmethod
+    def _coerce_daily_cap(cls, v: object) -> int:
+        """Fail-safe: a garbage ceiling degrades to the default 20 (never 0).
+
+        Coercing garbage to 0 would silently disable the firehose guard; the
+        default keeps a meaningful per-day ceiling. An explicit 0 is honored
+        (disables the ceiling) since it round-trips through ``_nonneg_int_or``.
+        """
+        return cls._nonneg_int_or(v, 20)
 
 
 def _coerce_affirmative(v: object, default: bool) -> bool:
