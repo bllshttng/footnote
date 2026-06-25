@@ -199,11 +199,27 @@ esac
 # deterministic per dispatch, so a re-spawn of the same node reuses it rather
 # than colliding (failure mode 3).
 AUTO_WT=""
-maybe_auto_worktree() {
-  case "$MESSAGE" in
-    /target|/target\ *|/do|/do\ *|/fix|/fix\ *) : ;;
-    *) return 0 ;;  # not a code-implementing payload (e.g. /think) -> no worktree
+# A payload writes code (and so wants isolation) when it is a build dispatch OR
+# an explicit claude /target|/do|/fix passthrough. Keying off PAYLOAD_MODE -- not
+# only the message prefix -- is load-bearing: a codex/gemini build reaches here
+# as a prose brief ("Implement backlog node ...", normalize.sh build case), never
+# a literal /target, and those workers have NO location gate, so a prefix-only
+# check would leave them editing a protected main checkout -- the exact harm this
+# guards against. ask/handoff/discuss (one-shot / doc / chat) and a non-code
+# claude slash command (/think writes a design doc) are NOT code payloads.
+is_code_payload() {
+  case "$PAYLOAD_MODE" in
+    build) return 0 ;;  # claude `/target` wrap OR codex/gemini "Implement ..." brief
+    passthrough)        # claude-only verbatim slash command; isolate only code verbs
+      case "$MESSAGE" in
+        /target|/target\ *|/do|/do\ *|/fix|/fix\ *) return 0 ;;
+        *) return 1 ;;
+      esac ;;
+    *) return 1 ;;      # ask | handoff | discuss
   esac
+}
+maybe_auto_worktree() {
+  is_code_payload || return 0
   command -v git >/dev/null 2>&1 || return 0
   local base="${CWD:-$PWD}"
   [[ -d "$base" ]] || return 0
@@ -328,8 +344,10 @@ if [[ "$VERB" == "host" ]]; then
   printf 'result=launched short_id=%s name=%s mode=interactive staged="not running yet" drive="fno agents grid %s"\n' \
     "$short_id" "$NAME" "$NAME"
 else
-  # Surface the auto-worktree cwd so an isolated launch is never silent.
-  wt_field=""; [[ -n "$AUTO_WT" ]] && wt_field=" cwd=$AUTO_WT"
+  # Surface the auto-worktree cwd so an isolated launch is never silent. Quote
+  # the value (like hint/trace): a path with spaces must not split the receipt's
+  # space-separated key=value fields.
+  wt_field=""; [[ -n "$AUTO_WT" ]] && wt_field=" cwd=\"$AUTO_WT\""
   printf 'result=launched short_id=%s name=%s mode=exec%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
     "$short_id" "$NAME" "$wt_field" "$NAME" "$NAME"
 fi

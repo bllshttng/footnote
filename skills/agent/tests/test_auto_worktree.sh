@@ -50,8 +50,9 @@ git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 
 run_spawn() { # <msg> [extra args...]: HOME-pinned, stubbed-fno spawn.sh run
   local msg="$1"; shift
+  # claude /target passthrough = payload_mode passthrough (msg leads with `/`).
   HOME="$TMP" PATH="$STUBDIR:$PATH" \
-    bash "$SPAWN" --name "spawn-x-9c4c-demo" --provider claude \
+    bash "$SPAWN" --name "spawn-x-9c4c-demo" --provider claude --payload-mode passthrough \
     --message "$msg" --node "x-9c4c" --cwd "$REPO" "$@" 2>"$TMP/err"
 }
 
@@ -60,7 +61,8 @@ out="$(run_spawn "/target no-merge x-9c4c")"; rc=$?
 err="$(cat "$TMP/err")"
 ok   "code-payload exit 0" "$rc" "0"
 has  "code-payload launched" "$out" "result=launched"
-has  "code-payload cwd in receipt" "$out" "cwd=$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"
+# cwd value is double-quoted in the receipt (a path with spaces must not split fields).
+has  "code-payload cwd in receipt" "$out" "cwd=\"$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo\""
 has  "code-payload worktree note" "$err" "auto-worktree: created"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: worktree dir not created"; }
 # branch must be the fresh feature branch, not the protected default.
@@ -74,10 +76,10 @@ no   "re-spawn no add" "$err2" "auto-worktree: created"
 cnt="$(git -C "$REPO" worktree list | grep -c "spawn-x-9c4c-demo")"
 ok   "re-spawn single worktree" "$cnt" "1"
 
-# 3. /think (non-code) payload -> NO worktree, launches in repo root.
+# 3. /think (non-code passthrough) payload -> NO worktree, launches in repo root.
 out3="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-think-demo" \
-  --provider claude --message "/think born-with-why for x-9c4c" --node "x-f7c9" \
-  --cwd "$REPO" 2>"$TMP/err3")"
+  --provider claude --payload-mode passthrough --message "/think born-with-why for x-9c4c" \
+  --node "x-f7c9" --cwd "$REPO" 2>"$TMP/err3")"
 err3="$(cat "$TMP/err3")"
 has  "think launched" "$out3" "result=launched"
 no   "think no worktree note" "$err3" "auto-worktree:"
@@ -87,7 +89,7 @@ no   "think no cwd field" "$out3" "cwd="
 # 4. already a linked worktree -> not re-isolated (launch in place, no nesting).
 WT="$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"  # the worktree from test 1
 out4="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-nested-demo" \
-  --provider claude --message "/do task 1.1" --node "x-other" \
+  --provider claude --payload-mode passthrough --message "/do task 1.1" --node "x-other" \
   --cwd "$WT" 2>"$TMP/err4")"
 err4="$(cat "$TMP/err4")"
 has  "linked-wt launched" "$out4" "result=launched"
@@ -98,7 +100,7 @@ no   "linked-wt not re-isolated" "$err4" "auto-worktree:"
 #    -> launch still succeeds in repo root, never blocked (failure mode 2).
 mkdir -p "$TMP/conductor/workspaces/myrepo/spawn-blocked-demo/decoy"
 out5="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-blocked-demo" \
-  --provider claude --message "/fix the bug" --node "x-blk" \
+  --provider claude --payload-mode passthrough --message "/fix the bug" --node "x-blk" \
   --cwd "$REPO" 2>"$TMP/err5")"; rc5=$?
 err5="$(cat "$TMP/err5")"
 ok   "fail-safe exit 0" "$rc5" "0"
@@ -115,6 +117,26 @@ out6="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-subdir-dem
 err6="$(cat "$TMP/err6")"
 has  "subdir worktree'd" "$err6" "auto-worktree: created"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-subdir-demo" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: subdir cwd not worktree'd"; }
+
+# 7. codex/gemini BUILD payload reaches spawn.sh as a PROSE brief (no /target
+#    prefix) but payload_mode=build -> still a code-writing worker, so it MUST be
+#    isolated. A message-prefix-only check would miss this (the Codex P1 fix), and
+#    these workers have no location gate to fail safe on.
+out7="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-codex-build" \
+  --provider codex --payload-mode build --node "x-cdx" \
+  --message "Implement backlog node x-cdx following AGENTS.md. Commit and open a pull request for review; do not merge it." \
+  --cwd "$REPO" 2>"$TMP/err7")"
+err7="$(cat "$TMP/err7")"
+has  "codex-build worktree'd" "$err7" "auto-worktree: created"
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-codex-build" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: codex build prose payload not worktree'd"; }
+
+# 8. ask payload (one-shot question, any provider) -> NOT code-writing, no worktree.
+out8="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-ask-demo" \
+  --provider codex --payload-mode ask --node "x-ask" \
+  --message "what does the dispatch guard do?" --cwd "$REPO" 2>"$TMP/err8")"
+err8="$(cat "$TMP/err8")"
+no   "ask no worktree note" "$err8" "auto-worktree:"
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-ask-demo" ]] && { FAIL=$((FAIL+1)); echo "FAIL: ask payload got a worktree"; } || PASS=$((PASS+1))
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
