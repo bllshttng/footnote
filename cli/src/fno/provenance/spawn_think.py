@@ -84,6 +84,15 @@ _VALID_DECISION_EVENTS = {
 # The discriminator `fno agents spawn` prints on a name collision (exit 2).
 _SPAWN_ALREADY_EXISTS = "already exists"
 
+# A2 (x-122a): non-birth dispatch reasons. The default birth reason keeps A1
+# byte-for-byte; the lifecycle reasons additionally require a RESOLVED transcript
+# pointer (relevance filter, Locked Decision 3) so a context-free /think never
+# fires on a high-volume lifecycle moment.
+REASON_BIRTH = "birth"
+REASON_WORK_START = "work-start"
+REASON_RETRO = "retro"
+_LIFECYCLE_REASONS = frozenset({REASON_WORK_START, REASON_RETRO})
+
 
 class SpawnAlreadyRunning(RuntimeError):
     """A peer dispatcher / live worker already owns this node's /think launch."""
@@ -194,6 +203,68 @@ def _max_per_run(project_root: Optional[Path]) -> int:
         return int(_settings_for(project_root).config.think_spawn.max_per_run)
     except Exception:  # noqa: BLE001
         return 5
+
+
+def _daily_cap(project_root: Optional[Path]) -> int:
+    """The per-install per-day ceiling from config, fail-safe to 20 (0 = off)."""
+    try:
+        return int(_settings_for(project_root).config.think_spawn.daily_cap)
+    except Exception:  # noqa: BLE001
+        return 20
+
+
+# ---------------------------------------------------------------------------
+# Per-day firehose ceiling (Locked Decision 3) - global across projects/nodes
+# ---------------------------------------------------------------------------
+
+
+def _daily_counter_path() -> Path:
+    """``~/.fno/.think-spawn-daily.json`` - the global per-day spawn counter.
+
+    Per-install (not per-project): the firehose guard bounds total bg /think
+    sessions a day regardless of which repo or node triggered them. Resolved
+    under ``global_claims_root()`` (the SAME ``$FNO_CLAIMS_ROOT``-honoring base
+    as the dispatch dedup tokens) so the counter isolates with the claims in
+    tests and travels with them in production.
+    """
+    from fno.claims.io import global_claims_root
+
+    return global_claims_root() / ".fno" / ".think-spawn-daily.json"
+
+
+def _today_str() -> str:
+    from datetime import date
+
+    return date.today().isoformat()
+
+
+def _daily_count() -> int:
+    """Today's spawn count, or 0 when the file is absent / stale / unreadable."""
+    try:
+        obj = json.loads(_daily_counter_path().read_text(encoding="utf-8"))
+        if isinstance(obj, dict) and obj.get("date") == _today_str():
+            return int(obj.get("count") or 0)
+    except (OSError, ValueError, TypeError):
+        pass
+    return 0
+
+
+def _bump_daily_count() -> None:
+    """Increment today's spawn count (resetting on a new day). Best-effort.
+
+    ponytail: plain read-modify-write, last-writer-wins. A soft ceiling does not
+    need cross-process atomicity - the per-(node,reason) dedup token already
+    prevents the same node double-spawning; this only bounds total daily volume,
+    where an off-by-one under a rare race is harmless. Swap in the claim lock if
+    exact accounting ever matters.
+    """
+    try:
+        p = _daily_counter_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        count = _daily_count() + 1
+        p.write_text(json.dumps({"date": _today_str(), "count": count}), encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 - never wedge a spawn on a counter write
+        _LOG.debug("spawn_think: daily-count bump failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +655,86 @@ def on_node_born(
 
 
 # ---------------------------------------------------------------------------
+# A2 lifecycle wrappers (x-122a) - work-start + retro-at-done
+# ---------------------------------------------------------------------------
+
+
+def _subflag_on(name: str, project_root: Optional[Path]) -> bool:
+    """Read a ``config.think_spawn.<name>`` bool sub-flag, fail-safe to False.
+
+    A2 triggers gate on their OWN sub-flag IN ADDITION to ``enabled`` (Open
+    Question 1: even when the layer is on, work-start/retro stay off until
+    explicitly armed). Any settings-read error degrades to off.
+    """
+    try:
+        return bool(getattr(_settings_for(project_root).config.think_spawn, name))
+    except Exception:  # noqa: BLE001 - fail-safe to disabled
+        return False
+
+
+def _on_node_lifecycle(
+    node: dict,
+    *,
+    reason: str,
+    subflag: str,
+    project_root: Optional[Path],
+    run_state: Optional[RunState],
+) -> Optional[ThinkSpawnResult]:
+    """Shared A2 lifecycle dispatch: gate the sub-flag, then route to the core.
+
+    Mirrors :func:`on_node_born` (gate-first, strictly non-fatal) but adds the
+    per-trigger sub-flag gate and tags the dispatch with ``reason``. Callers
+    already hold the persisted node (the claimed/closed node dict), so no graph
+    re-read is needed.
+    """
+    try:
+        node_id = (node or {}).get("id")
+        # Gate-first: the layer must be enabled AND this trigger's sub-flag on.
+        if not node_id or not _subflag_on(subflag, project_root):
+            return None
+        return maybe_spawn_think(
+            node, reason=reason, project_root=project_root, run_state=run_state
+        )
+    except Exception as exc:  # noqa: BLE001 - additive; never wedge the lifecycle op
+        _LOG.debug("on_node_%s: non-fatal dispatch failure: %s", reason, exc)
+        return None
+
+
+def on_node_work_start(
+    node: dict,
+    *,
+    project_root: Optional[Path] = None,
+    run_state: Optional[RunState] = None,
+) -> Optional[ThinkSpawnResult]:
+    """A2: dispatch a ``work-start`` context /think when /target claims a node.
+
+    Gated by ``config.think_spawn.on_work_start`` (default OFF even when the
+    layer is enabled). Non-fatal: never blocks the claim it rides in on.
+    """
+    return _on_node_lifecycle(
+        node, reason=REASON_WORK_START, subflag="on_work_start",
+        project_root=project_root, run_state=run_state,
+    )
+
+
+def on_node_retro(
+    node: dict,
+    *,
+    project_root: Optional[Path] = None,
+    run_state: Optional[RunState] = None,
+) -> Optional[ThinkSpawnResult]:
+    """A2: dispatch a ``retro`` context /think when ``fno backlog done`` closes a node.
+
+    Gated by ``config.think_spawn.on_retro`` (default OFF even when the layer is
+    enabled). Non-fatal: never blocks the node close it rides in on.
+    """
+    return _on_node_lifecycle(
+        node, reason=REASON_RETRO, subflag="on_retro",
+        project_root=project_root, run_state=run_state,
+    )
+
+
+# ---------------------------------------------------------------------------
 # maybe_spawn_think() - the birth-hook decision matrix
 # ---------------------------------------------------------------------------
 
@@ -591,25 +742,35 @@ def on_node_born(
 def maybe_spawn_think(
     node: dict,
     *,
+    reason: str = REASON_BIRTH,
     project_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
     env: Optional[dict] = None,
     run_state: Optional[RunState] = None,
 ) -> ThinkSpawnResult:
-    """Evaluate + execute the born-with-why /think spawn for a freshly-filed node.
+    """Evaluate + execute the context /think spawn for a node at a trigger moment.
 
-    Called from the node-birth path AFTER the node persists. Strictly non-fatal:
-    any failure resolves to ``think_skipped{reason}`` and the filing pipeline
-    continues. Emits EXACTLY ONE decision event per evaluation once the gate is
-    on; a gate-off evaluation is a complete no-op (no event - AC4-HP).
+    ``reason`` names the trigger: ``birth`` (A1 default, byte-for-byte x-6a10),
+    ``work-start`` or ``retro`` (A2 lifecycle, x-122a). It scopes the dedup token
+    (``dispatch:think:<id>:<reason>`` so a node born + retro'd dispatches once per
+    moment, not once total) and tags every decision event. Lifecycle reasons add
+    a relevance filter (skip unless the transcript pointer resolves) so a
+    context-free /think never fires on a high-volume lifecycle moment.
+
+    Strictly non-fatal: any failure resolves to ``think_skipped{reason}`` and the
+    host operation continues. Emits EXACTLY ONE decision event per evaluation once
+    the gate is on; a gate-off evaluation is a complete no-op (no event - AC4-HP).
     """
     environ = os.environ if env is None else env
     ev_path = events_path if events_path is not None else _events_path(project_root)
     rs = run_state if run_state is not None else RunState()
     node_id = node.get("id")
 
-    def skip(reason: str, **extra) -> ThinkSpawnResult:
-        data: dict = {"reason": reason}
+    def skip(skip_reason: str, **extra) -> ThinkSpawnResult:
+        # ``reason`` (event key) stays the SKIP reason for back-compat; the
+        # trigger reason rides as ``trigger`` so no consumer of the existing
+        # schema breaks (AC1-UI: one event, non-null reason+node_id).
+        data: dict = {"reason": skip_reason, "trigger": reason}
         if node_id:
             data["node_id"] = node_id
         for k, v in extra.items():
@@ -617,7 +778,7 @@ def maybe_spawn_think(
                 data[k] = v
         _emit(EVENT_SKIPPED, data, ev_path)
         return ThinkSpawnResult(
-            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id,
+            "skipped", EVENT_SKIPPED, reason=skip_reason, node_id=node_id,
             presence=extra.get("presence"), resolved=extra.get("resolved"),
             detail=extra.get("detail"),
         )
@@ -656,13 +817,20 @@ def maybe_spawn_think(
     presence = classify_presence(project_root=project_root, env=environ)
     seed = assemble_seed(node)
 
+    # 5b. Relevance filter (A2, Locked Decision 3): a LIFECYCLE trigger fires only
+    #     when the origin pointer resolves - a high-volume work-start/retro moment
+    #     must not dispatch a context-free /think. Birth (A1) is unchanged: it
+    #     still degrades to the stored (harness, sid, cwd) triple.
+    if reason in _LIFECYCLE_REASONS and not seed.resolved:
+        return skip("unresolved-pointer", presence=presence, resolved=False)
+
     # 6. Attended => offer a single handoff line, never auto-spawn (AC2-HP/UI).
     if presence == "attended":
         print(f"spawn_think: born-with-why handoff -> {seed.offer_line}", file=sys.stderr)
         _emit(
             EVENT_OFFERED,
-            {"node_id": node_id, "presence": "attended", "resolved": seed.resolved,
-             "offer_line": seed.offer_line},
+            {"node_id": node_id, "trigger": reason, "presence": "attended",
+             "resolved": seed.resolved, "offer_line": seed.offer_line},
             ev_path,
         )
         return ThinkSpawnResult(
@@ -670,18 +838,26 @@ def maybe_spawn_think(
             resolved=seed.resolved, offer_line=seed.offer_line,
         )
 
-    # 7. Away => fire-and-forget bg /think. Dedup via a TTL bridge token so two
-    #    triggers observing the same birth spawn at most one (AC4-FR).
+    # 6b. Per-day firehose ceiling (A2, Locked Decision 3): bound total away
+    #     spawns per install per day. Checked only on the away (spawn) path -
+    #     an attended offer costs nothing. 0 disables the ceiling.
+    day_cap = _daily_cap(project_root)
+    if day_cap > 0 and _daily_count() >= day_cap:
+        return skip("daily-cap", presence="away", detail=f"daily_cap={day_cap}")
+
+    # 7. Away => fire-and-forget bg /think. Dedup via a per-(node, reason) TTL
+    #    bridge token so two triggers observing the SAME moment spawn at most one,
+    #    while a node born + later retro'd still dispatches once per moment (AC4-FR).
     from fno.claims.core import ClaimHeldByOther, acquire_claim
 
-    dispatch_key = f"dispatch:think:{node_id}"
+    dispatch_key = f"dispatch:think:{node_id}:{reason}"
     holder = f"think-spawn:{os.getpid()}"
     if _claim_is_live(dispatch_key):
         return skip("already-claimed", presence="away", node_id=node_id)
     try:
         acquire_claim(
             dispatch_key, holder, ttl_ms=_DISPATCH_TTL_MS,
-            reason=f"born-with-why /think dispatch for {node_id}",
+            reason=f"context /think dispatch ({reason}) for {node_id}",
         )
     except ClaimHeldByOther:
         return skip("already-claimed", presence="away")
@@ -701,11 +877,12 @@ def maybe_spawn_think(
 
     # 8. Loop-closing forward stamp: node now points forward to its /think thread.
     rs.spawned += 1
+    _bump_daily_count()
     _stamp_forward(node_id, short_id, project_root)
     _emit(
         EVENT_SPAWNED,
-        {"node_id": node_id, "think_session": short_id, "presence": "away",
-         "resolved": seed.resolved,
+        {"node_id": node_id, "trigger": reason, "think_session": short_id,
+         "presence": "away", "resolved": seed.resolved,
          "agent_name": _worker_agent_name(node_id, node_slug)},
         ev_path,
     )
