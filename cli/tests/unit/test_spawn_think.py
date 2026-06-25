@@ -274,6 +274,14 @@ def test_attended_spawn_optin_dispatches(iso, monkeypatch, patch_spawn):
     assert evs[0]["data"]["presence"] == "attended"  # honest about the opt-in source
 
 
+def test_attended_mode_env_override_is_authoritative_when_present():
+    """gemini PR #33: a PRESENT FNO_THINK_SPAWN_ATTENDED wins over config; a
+    set-but-garbage value resolves to 'offer', never leaking to a config spawn."""
+    assert st._attended_mode(env={st._ENV_ATTENDED: "spawn"}) == "spawn"
+    assert st._attended_mode(env={st._ENV_ATTENDED: "garbage"}) == "offer"
+    assert st._attended_mode(env={st._ENV_ATTENDED: ""}) == "offer"
+
+
 # ---------------------------------------------------------------------------
 # US3 - operator away
 # ---------------------------------------------------------------------------

@@ -287,9 +287,13 @@ def _attended_mode(
     default stderr-handoff behavior, never an unintended auto-spawn (AC4-HP).
     """
     environ = os.environ if env is None else env
-    override = (environ.get(_ENV_ATTENDED) or "").strip().lower()
-    if override in ("spawn", "offer"):
-        return override
+    # A PRESENT override is authoritative (mirrors think_spawn_enabled): a
+    # set-but-garbage value resolves to ``offer`` here rather than leaking
+    # through to a config ``attended: spawn`` (gemini PR #33). Only an ABSENT
+    # override falls through to settings.
+    override = environ.get(_ENV_ATTENDED)
+    if override is not None:
+        return "spawn" if override.strip().lower() == "spawn" else "offer"
     try:
         val = str(_settings_for(project_root).config.think_spawn.attended).strip().lower()
         return "spawn" if val == "spawn" else "offer"
