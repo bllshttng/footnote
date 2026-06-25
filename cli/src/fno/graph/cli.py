@@ -737,6 +737,25 @@ def cmd_decompose(
                 err=True,
             )
 
+    # 4b. Born-with-why (v2 A1): decompose mints child nodes; route each NEWLY
+    #     created child through the shared birth hook so the epic's why can carry
+    #     a context /think into the group (US2). One shared RunState bounds the
+    #     whole batch's blast radius (AC1-EDGE), not each child. Re-read once so
+    #     each child carries its durable cwd/slug/provenance. Strictly non-fatal +
+    #     opt-in (gate-OFF default => complete no-op); never wedges the decompose.
+    created_ids = [r["id"] for r in results if r["action"] == "created"]
+    if created_ids:
+        try:
+            from fno.graph.store import read_graph
+            from fno.provenance.spawn_think import RunState, on_node_born
+
+            by_id = {e.get("id"): e for e in read_graph(_graph_path())}
+            born_rs = RunState()
+            for cid in created_ids:
+                on_node_born(by_id.get(cid) or {"id": cid}, run_state=born_rs)
+        except Exception:  # noqa: BLE001 - additive; never wedge the decompose
+            pass
+
     # 5. Record the group count N on the shared epic doc so it graduates only
     #    after all N group PRs ship (not after the first). The graph mutation
     #    above is the source of truth and is NEVER rolled back; decompose also
@@ -987,6 +1006,23 @@ def _intake_impl(
         # The mutation already committed; a stray failure in the warning
         # path must not surface as if the intake itself failed.
         sys.stderr.write(f"warning: post-intake project check failed: {e}\n")
+
+    # Born-with-why (v2 A1): route the intaked node through the shared birth hook
+    # for uniformity across birth paths. Independent of the project-warning block
+    # above so a warn failure never drops the dispatch. Most intake nodes are
+    # built by _build_intake_node (no ambient provenance stamp) and self-skip
+    # with 'no-origin'; this keeps every birth path consistent. Non-fatal +
+    # opt-in (gate-OFF default => complete no-op).
+    if new_id_holder[0]:
+        try:
+            from fno.graph._intake import _find_node
+            from fno.provenance.spawn_think import on_node_born
+
+            born_node = _find_node(read_graph(_graph_path()), new_id_holder[0])
+            if born_node is not None:
+                on_node_born(born_node)
+        except Exception:  # noqa: BLE001 - additive; never wedge the intake
+            pass
 
 
 @cli.command("intake")
