@@ -1,4 +1,4 @@
-"""Structural-validation tests for docs/architecture/events-schema.yaml.
+"""Structural-validation tests for cli/src/fno/events/schema.yaml.
 
 The manifest is the canonical source of truth for events.jsonl shape.
 These tests assert it parses and that key invariants (envelope required
@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 
 
-MANIFEST = Path(__file__).resolve().parents[3] / "docs/architecture/events-schema.yaml"
+MANIFEST = Path(__file__).resolve().parents[3] / "cli/src/fno/events/schema.yaml"
 
 
 def _load() -> dict:

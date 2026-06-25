@@ -124,80 +124,9 @@ def test_platform_tag_env_override(monkeypatch) -> None:
     assert hatch_build._platform_tag() == "manylinux_2_17_x86_64"
 
 
-# -- ab-fe825805 change 3: events schema bundling --
-
-def test_apply_schema_bundle_none_is_noop() -> None:
-    build_data: dict = {}
-    out = hatch_build.apply_schema_bundle(None, build_data)
-    assert out == {}  # missing schema is handled (hard-fail) in the hook, not here
-
-
-def test_apply_schema_bundle_force_includes(tmp_path) -> None:
-    schema = tmp_path / "events-schema.yaml"
-    schema.write_text("envelope: {}\n")
-    build_data: dict = {}
-    hatch_build.apply_schema_bundle(schema, build_data)
-    assert build_data["force_include"] == {str(schema): hatch_build.SCHEMA_REL_DEST}
-
-
-def test_schema_source_direct_build(tmp_path) -> None:
-    # tmp_path plays the repo root; cli/ is the build root one level down.
-    build_root = tmp_path / "cli"
-    build_root.mkdir()
-    canonical = tmp_path.joinpath(*hatch_build.SCHEMA_REPO_REL)
-    canonical.parent.mkdir(parents=True)
-    canonical.write_text("envelope: {}\n")
-    assert hatch_build.schema_source(build_root) == canonical
-
-
-def test_schema_source_from_sdist(tmp_path) -> None:
-    # No repo docs/ tree; the sdist vendored the schema at the build root.
-    vendor = tmp_path / hatch_build.SCHEMA_SDIST_VENDOR
-    vendor.write_text("envelope: {}\n")
-    assert hatch_build.schema_source(tmp_path) == vendor
-
-
-def test_schema_source_prefers_repo_docs(tmp_path) -> None:
-    build_root = tmp_path / "cli"
-    build_root.mkdir()
-    canonical = tmp_path.joinpath(*hatch_build.SCHEMA_REPO_REL)
-    canonical.parent.mkdir(parents=True)
-    canonical.write_text("envelope: {}\n")
-    (build_root / hatch_build.SCHEMA_SDIST_VENDOR).write_text("envelope: {}\n")
-    # Direct-build location wins over the sdist vendor copy.
-    assert hatch_build.schema_source(build_root) == canonical
-
-
-def test_schema_source_missing_returns_none(tmp_path) -> None:
-    assert hatch_build.schema_source(tmp_path / "cli") is None
-
-
-def test_apply_schema_bundle_composes_with_existing_force_include(tmp_path) -> None:
-    # A pre-existing force_include entry (e.g. from another hook) must survive.
-    schema = tmp_path / "events-schema.yaml"
-    schema.write_text("envelope: {}\n")
-    build_data: dict = {"force_include": {"/some/other": "pkg/other.txt"}}
-    hatch_build.apply_schema_bundle(schema, build_data)
-    assert build_data["force_include"] == {
-        "/some/other": "pkg/other.txt",
-        str(schema): hatch_build.SCHEMA_REL_DEST,
-    }
-
-
-def test_resolve_required_schema_returns_path_when_present(tmp_path) -> None:
-    build_root = tmp_path / "cli"
-    build_root.mkdir()
-    canonical = tmp_path.joinpath(*hatch_build.SCHEMA_REPO_REL)
-    canonical.parent.mkdir(parents=True)
-    canonical.write_text("envelope: {}\n")
-    assert hatch_build.resolve_required_schema(build_root) == canonical
-
-
-def test_resolve_required_schema_raises_when_missing(tmp_path) -> None:
-    # The "schema-less wheel can never ship silently" guarantee: a genuine
-    # miss must raise loud, not return None.
-    with pytest.raises(FileNotFoundError, match="events schema not found"):
-        hatch_build.resolve_required_schema(tmp_path / "cli")
+# The events schema is no longer force-included: it lives at
+# cli/src/fno/events/schema.yaml (package data) and ships naturally. The wheel
+# smoke test (tests/smoke/test_build.sh) asserts it is present in a built wheel.
 
 
 # -- ab-18563bcc US5: LICENSE + NOTICE bundling --
@@ -269,13 +198,13 @@ def test_apply_license_bundle_force_includes(tmp_path) -> None:
 
 
 def test_apply_license_bundle_composes_with_existing_force_include(tmp_path) -> None:
-    # The schema force_include entry (or any other) must survive.
+    # A pre-existing force_include entry (e.g. from another hook) must survive.
     lic = tmp_path / "LICENSE"
     lic.write_text("Apache-2.0\n")
-    build_data: dict = {"force_include": {"/schema/src": hatch_build.SCHEMA_REL_DEST}}
+    build_data: dict = {"force_include": {"/some/src": "pkg/other.txt"}}
     hatch_build.apply_license_bundle({"LICENSE": lic}, build_data)
     assert build_data["force_include"] == {
-        "/schema/src": hatch_build.SCHEMA_REL_DEST,
+        "/some/src": "pkg/other.txt",
         str(lic): f"{hatch_build.LICENSE_REL_DEST_DIR}/LICENSE",
     }
 

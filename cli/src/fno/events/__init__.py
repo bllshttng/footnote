@@ -1,6 +1,6 @@
 """Schema-aware event validation and typed builders for events.jsonl.
 
-Loads docs/architecture/events-schema.yaml at module import. Failure to
+Loads the in-package ``fno/events/schema.yaml`` at module import. Failure to
 load is loud: ``SchemaUnavailableError`` is raised so callers cannot silently
 proceed with malformed events.
 
@@ -43,32 +43,21 @@ class SchemaUnavailableError(Exception):
 
 
 def _resolve_manifest_path(start: Path | None = None) -> Path:
-    """Find the schema YAML.
+    """Find the schema YAML: the sibling ``schema.yaml`` in this package.
 
-    Two places are checked, in order:
+    The schema lives AT ``fno/events/schema.yaml`` - package source in the
+    dev tree and editable installs, package data in the wheel - so it is
+    always beside this module with no force-include, walk-up, or env var.
+    ``start`` is accepted for back-compat (tests pin a fake root) but the
+    in-package sibling is authoritative.
 
-    1. ``<this-file's-dir>/_schema.yaml`` - the in-package copy that ships
-       with the wheel (force-included from ``docs/architecture/events-schema.yaml``
-       at build time by ``cli/hatch_build.py``; see ab-fe825805 change 3).
-    2. ``docs/architecture/events-schema.yaml`` walking up from ``start``
-       (or this file's parents) - the dev-tree path used during pytest
-       runs and editable installs.
-
-    Raises ``SchemaUnavailableError`` if neither exists.
+    Raises ``SchemaUnavailableError`` if it is missing.
     """
-    in_package = Path(__file__).resolve().parent / "_schema.yaml"
-    if in_package.is_file():
-        return in_package
-
-    here = (start if start is not None else Path(__file__)).resolve()
-    parents = [here, *here.parents] if here.is_dir() else [*here.parents]
-    for parent in parents:
-        candidate = parent / "docs/architecture/events-schema.yaml"
-        if candidate.is_file():
-            return candidate
+    sibling = Path(__file__).resolve().parent / "schema.yaml"
+    if sibling.is_file():
+        return sibling
     raise SchemaUnavailableError(
-        f"events schema not found (looked in package _schema.yaml and "
-        f"docs/architecture/events-schema.yaml from {here})"
+        f"events schema not found beside the package (expected {sibling})"
     )
 
 

@@ -69,7 +69,7 @@ _ENV_ATTENDED = "FNO_THINK_SPAWN_ATTENDED"
 _ENV_BG = "FNO_BG"
 _ENV_AGENT_SELF = "FNO_AGENT_SELF"
 
-# Decision-event kinds (registered in docs/architecture/events-schema.yaml).
+# Decision-event kinds (registered in cli/src/fno/events/schema.yaml).
 EVENT_SPAWNED = "think_spawned"
 EVENT_OFFERED = "think_offered"
 EVENT_SKIPPED = "think_skipped"

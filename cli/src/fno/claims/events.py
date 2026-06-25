@@ -115,7 +115,7 @@ def emit_claim_force_overridden(
 
 
 # claim_clock_skew_rejected stays registered in the events schema
-# (docs/architecture/events-schema.yaml) for future use. An emit helper
+# (cli/src/fno/events/schema.yaml) for future use. An emit helper
 # will land alongside the first concrete clock-skew check inside refresh
 # or acquire - PR1 has no path that legitimately rejects on clock skew,
 # so adding a helper now would be dead code.

@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCHEMA_PATH = REPO_ROOT / "docs/architecture/events-schema.yaml"
+SCHEMA_PATH = REPO_ROOT / "cli/src/fno/events/schema.yaml"
 
 # Real Rust event kinds that must appear in events-schema.yaml after W7.
 # The complete list is kept in sync with KNOWN_EVENT_KINDS in

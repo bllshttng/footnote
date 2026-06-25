@@ -1,5 +1,6 @@
-# docs/architecture/events-schema.yaml
+# cli/src/fno/events/schema.yaml
 # Single source of truth for events.jsonl envelope shape across footnote.
+# Lives beside its Python loader (fno.events) and ships as package data.
 #
 # Both validators load this file:
 #   - cli/src/fno/events/__init__.py (Python; imports raise SchemaUnavailableError if absent)

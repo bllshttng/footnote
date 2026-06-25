@@ -44,32 +44,21 @@ path = "src/fno/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/fno"]
 
-# The canonical events schema ships INSIDE the wheel as
-# `fno/events/_schema.yaml` so the Python validator's in-package fallback
-# (events/__init__.py:_resolve_manifest_path) resolves from any cwd in an
-# installed wheel - no `docs/` tree, no env var. Without it a clean install
-# ships a wheel with no schema and `import fno.events` raises
-# SchemaUnavailableError from a foreign cwd (ab-fe825805 change 3).
-#
-# The wheel force-include is injected by hatch_build.py, NOT declared here,
-# because the schema's source path differs between build modes: a direct
-# source build finds it at <repo>/docs/... (one level above this `cli/` build
-# root), but `uv build` does sdist-then-wheel-FROM-sdist where the repo `docs/`
-# tree is absent. A static `../docs/...` force-include breaks that sdist->wheel
-# step (CI runs full `uv build`). The hook probes both locations and HARD-FAILS
-# the build if neither exists, so a schema-less wheel can never ship silently.
+# The canonical events schema ships INSIDE the wheel as `fno/events/schema.yaml`
+# - ordinary package data under `src/fno`, so both the wheel and the sdist carry
+# it with no force-include machinery. The Python validator reads the sibling
+# `schema.yaml` directly (events/__init__.py:_resolve_manifest_path). (x-122a
+# follow-up: colocate the schema with its loader.)
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
 
-# Vendor the canonical schema + license texts INTO the sdist (at its root) so a
-# wheel built FROM the sdist can still find them (the repo root - `docs/`, the
-# license files - is not inside the sdist). Keeps the sdist self-contained; the
-# wheel hook reads these copies in the from-sdist build mode. See
-# hatch_build.py:schema_source / license_sources. LICENSE + NOTICE live at the
-# repo root (one level above this `cli/` build root), vendored under
-# _license_vendor/ so the wheel ships them (US5; a license-less wheel hard-fails).
+# Vendor the license texts INTO the sdist (at its root) so a wheel built FROM the
+# sdist can still find them (the repo root - the license files - is not inside
+# the sdist). The events schema needs no vendoring: it lives under `src/fno`, so
+# it is already in the sdist. See hatch_build.py:license_sources. LICENSE +
+# NOTICE live at the repo root (one level above this `cli/` build root), vendored
+# under _license_vendor/ so the wheel ships them (US5; a license-less wheel hard-fails).
 [tool.hatch.build.targets.sdist.force-include]
-"../docs/architecture/events-schema.yaml" = "_schema_vendor.yaml"
 "../LICENSE" = "_license_vendor/LICENSE"
 "../NOTICE" = "_license_vendor/NOTICE"
 
