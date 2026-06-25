@@ -461,32 +461,19 @@ def cmd_idea(
 
     locked_mutate_graph(_graph_path(), mutator)
 
-    # Born-with-why (x-6a10): after the node persists, evaluate the
-    # context-carrying /think spawn from THIS deterministic code path (never an
-    # LLM-volunteered step). Strictly non-fatal and opt-in (config.think_spawn,
-    # default OFF): a gate-off install is a complete no-op, and any failure here
-    # never wedges the filing of the node above.
-    try:
-        from fno.provenance.spawn_think import maybe_spawn_think, think_spawn_enabled
+    # Born-with-why (x-6a10 / v2 A1): after the node persists, route the
+    # context-carrying /think dispatch through the shared birth hook. Gate-first,
+    # durable slug re-read, and strict non-fatality all live in on_node_born, so a
+    # gate-OFF install is a complete no-op and a dispatch failure never wedges the
+    # filing of the node above. The import guard keeps even an import error
+    # non-fatal to birth.
+    if node_holder[0] is not None:
+        try:
+            from fno.provenance.spawn_think import on_node_born
 
-        # Gate FIRST so the default-OFF path stays zero-extra-I/O: the slug
-        # re-read below is wasted work when the feature is disabled (which is the
-        # default for every install that has not opted in).
-        if new_id_holder[0] and node_holder[0] is not None and think_spawn_enabled():
-            from fno.graph.store import read_graph
-
-            # The persisted node may have been re-slugged inside
-            # locked_mutate_graph (store.ensure_slugs); read it back so the
-            # /think seed + worker name carry the node's durable slug rather than
-            # a pre-slug copy.
-            persisted = node_holder[0]
-            for e in read_graph(_graph_path()):
-                if e.get("id") == new_id_holder[0]:
-                    persisted = e
-                    break
-            maybe_spawn_think(persisted)
-    except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
-        pass
+            on_node_born(node_holder[0])
+        except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
+            pass
 
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
