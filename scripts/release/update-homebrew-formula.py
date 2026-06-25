@@ -57,10 +57,10 @@ def rewrite(text: str, version: str, wheels: dict[str, tuple[str, str]]) -> str:
             pending = m.group(2)
         elif pending and 'sha256 "' in line:
             _, sha = wheels[pending]
-            line = re.sub(r'sha256 "[0-9a-f]*"', f'sha256 "{sha}"', line)
+            line = re.sub(r'sha256 "[^"]*"', f'sha256 "{sha}"', line)
             pending = None
-        elif re.search(r'version "[0-9][0-9.]*"', line):
-            line = re.sub(r'version "[0-9][0-9.]*"', f'version "{version}"', line)
+        elif re.search(r'version "[^"]+"', line):
+            line = re.sub(r'version "[^"]+"', f'version "{version}"', line)
         out.append(line)
     return "".join(out)
 
@@ -92,14 +92,18 @@ def main() -> int:
         sys.stderr.write(__doc__)
         return 2
     version, path = sys.argv[1], sys.argv[2]
-    wheels = fetch_wheels(version)
+    try:
+        wheels = fetch_wheels(version)
+    except (OSError, ValueError) as e:  # network error, bad status, or non-JSON body
+        sys.stderr.write(f"fno {version}: could not fetch wheels from PyPI: {e}\n")
+        return 1
     missing = [a for a in (X64, ARM) if a not in wheels]
     if missing:
         sys.stderr.write(f"fno {version}: macOS wheels not on PyPI yet: {missing}\n")
         return 1
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         text = f.read()
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(rewrite(text, version, wheels))
     print(f"updated {path} -> fno {version}")
     return 0
