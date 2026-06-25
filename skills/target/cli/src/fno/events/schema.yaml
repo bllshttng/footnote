@@ -1773,11 +1773,14 @@ event_types:
           description: "Short id of the spawned claude /think bg worker (from the spawn receipt)."
         presence:
           type: string
-          enum: [away]
-          description: "Presence classification that routed to an autonomous spawn (always 'away')."
+          enum: [away, attended]
+          description: "Presence classification that routed to an autonomous spawn: 'away' (headless), or 'attended' when an operator opted in via config.think_spawn.attended=spawn (x-5d51 B)."
         resolved:
           type: boolean
           description: "Whether the origin transcript pointer resolved to a real .jsonl (false => seeded from the stored triple)."
+        output_path:
+          type: ["string", "null"]
+          description: "Durable sidecar (briefs_dir()/think-<id>.md) the worker is told to write its /think doc to, also stamped on the node (x-5d51 B); null when the path could not be resolved."
         agent_name:
           type: string
           description: "Spawned agent name (think-<node-id>-<slug>)."
