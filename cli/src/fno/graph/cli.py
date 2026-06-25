@@ -461,32 +461,19 @@ def cmd_idea(
 
     locked_mutate_graph(_graph_path(), mutator)
 
-    # Born-with-why (x-6a10): after the node persists, evaluate the
-    # context-carrying /think spawn from THIS deterministic code path (never an
-    # LLM-volunteered step). Strictly non-fatal and opt-in (config.think_spawn,
-    # default OFF): a gate-off install is a complete no-op, and any failure here
-    # never wedges the filing of the node above.
-    try:
-        from fno.provenance.spawn_think import maybe_spawn_think, think_spawn_enabled
+    # Born-with-why (x-6a10 / v2 A1): after the node persists, route the
+    # context-carrying /think dispatch through the shared birth hook. Gate-first,
+    # durable slug re-read, and strict non-fatality all live in on_node_born, so a
+    # gate-OFF install is a complete no-op and a dispatch failure never wedges the
+    # filing of the node above. The import guard keeps even an import error
+    # non-fatal to birth.
+    if node_holder[0] is not None:
+        try:
+            from fno.provenance.spawn_think import on_node_born
 
-        # Gate FIRST so the default-OFF path stays zero-extra-I/O: the slug
-        # re-read below is wasted work when the feature is disabled (which is the
-        # default for every install that has not opted in).
-        if new_id_holder[0] and node_holder[0] is not None and think_spawn_enabled():
-            from fno.graph.store import read_graph
-
-            # The persisted node may have been re-slugged inside
-            # locked_mutate_graph (store.ensure_slugs); read it back so the
-            # /think seed + worker name carry the node's durable slug rather than
-            # a pre-slug copy.
-            persisted = node_holder[0]
-            for e in read_graph(_graph_path()):
-                if e.get("id") == new_id_holder[0]:
-                    persisted = e
-                    break
-            maybe_spawn_think(persisted)
-    except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
-        pass
+            on_node_born(node_holder[0])
+        except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
+            pass
 
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
@@ -750,6 +737,28 @@ def cmd_decompose(
                 err=True,
             )
 
+    # 4b. Born-with-why (v2 A1): decompose mints child nodes; route each NEWLY
+    #     created child through the shared birth hook so the epic's why can carry
+    #     a context /think into the group (US2). One shared RunState bounds the
+    #     whole batch's blast radius (AC1-EDGE), not each child. Re-read once so
+    #     each child carries its durable cwd/slug/provenance. Strictly non-fatal +
+    #     opt-in (gate-OFF default => complete no-op); never wedges the decompose.
+    created_ids = [r["id"] for r in results if r["action"] == "created"]
+    if created_ids:
+        try:
+            from fno.graph.store import read_graph
+            from fno.provenance.spawn_think import RunState, on_node_born
+
+            by_id = {e.get("id"): e for e in read_graph(_graph_path())}
+            born_rs = RunState()
+            for cid in created_ids:
+                child = by_id.get(cid)
+                if child is not None:
+                    # Already the persisted, slugged node -> skip the re-read.
+                    on_node_born(child, run_state=born_rs, persisted=True)
+        except Exception:  # noqa: BLE001 - additive; never wedge the decompose
+            pass
+
     # 5. Record the group count N on the shared epic doc so it graduates only
     #    after all N group PRs ship (not after the first). The graph mutation
     #    above is the source of truth and is NEVER rolled back; decompose also
@@ -1000,6 +1009,24 @@ def _intake_impl(
         # The mutation already committed; a stray failure in the warning
         # path must not surface as if the intake itself failed.
         sys.stderr.write(f"warning: post-intake project check failed: {e}\n")
+
+    # Born-with-why (v2 A1): route the intaked node through the shared birth hook
+    # for uniformity across birth paths. Independent of the project-warning block
+    # above so a warn failure never drops the dispatch. Most intake nodes are
+    # built by _build_intake_node (no ambient provenance stamp) and self-skip
+    # with 'no-origin'; this keeps every birth path consistent. Non-fatal +
+    # opt-in (gate-OFF default => complete no-op).
+    if new_id_holder[0]:
+        try:
+            from fno.graph._intake import _find_node
+            from fno.provenance.spawn_think import on_node_born
+
+            born_node = _find_node(read_graph(_graph_path()), new_id_holder[0])
+            if born_node is not None:
+                # Already the persisted, slugged node -> skip the re-read.
+                on_node_born(born_node, persisted=True)
+        except Exception:  # noqa: BLE001 - additive; never wedge the intake
+            pass
 
 
 @cli.command("intake")
