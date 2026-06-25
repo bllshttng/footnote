@@ -105,7 +105,7 @@ Deferred (Phase 2, gated on Phase 1 dogfooding): a per-repo launchd watcher that
 
 ## Events
 
-Three kinds, registered in `docs/architecture/events-schema.yaml`, source `backlog`:
+Three kinds, registered in `cli/src/fno/events/schema.yaml`, source `backlog`:
 
 - `advance_dispatched{node_id, short_id, agent_name, closed_node_id?, cross_project?}` - surfaced loudly in the next SessionStart reconcile reminder. `cross_project: true` marks a G1 edge-following dispatch into a different project.
 - `advance_skipped{reason, node_id?, closed_node_id?, detail?}` - `dispatched`/`failed` are surfaced; pure skips stay quiet. G1 adds the reasons `unmapped-project` / `no-project` / `dependents-error`.
@@ -118,7 +118,7 @@ Three kinds, registered in `docs/architecture/events-schema.yaml`, source `backl
 - `cli/src/fno/graph/cli.py` - `fno backlog advance` command + the reconcile trigger (both also call `advance_dependents`); `fno backlog project-root` (the unmapped-project detector G2 uses).
 - `skills/do/waves.md`, `skills/do/flat.md`, `skills/do/references/session-project-invariant.md` - the G2 session-project invariant (spawn/defer/refuse foreign waves).
 - `skills/pr/merged.md`, `skills/megawalk/SKILL.md`, `skills/megawalk/references/argument-parsing.md` - trigger + campaign-arm modifier.
-- `docs/architecture/events-schema.yaml` - the three event kinds (+ G1 `cross_project` field and reasons).
+- `cli/src/fno/events/schema.yaml` - the three event kinds (+ G1 `cross_project` field and reasons).
 - Tests: `cli/tests/unit/test_auto_continue.py`, `cli/tests/unit/test_advance.py`, `cli/tests/unit/test_project_root_cmd.py`, `cli/tests/integration/test_backlog_reconcile.py`.
 
 ## Design doc

@@ -687,8 +687,8 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
 /// Build the Branch B (Rust/fno-agents) envelope JSON Schema and the
 /// `status-v1` AgentState schema as static JSON objects.
 ///
-/// This mirrors `docs/architecture/schemas/events-v3.json` Branch B and
-/// `docs/architecture/schemas/status-v1.json`. The hand-rolled approach is
+/// This mirrors `schemas/events-v3.json` Branch B and
+/// `schemas/status-v1.json`. The hand-rolled approach is
 /// chosen to avoid pulling in `schemars`; it MUST be accompanied by the
 /// struct-drift unit test in `src/bin/client.rs` that asserts every
 /// `AgentState` field key is present in the emitted status schema properties.

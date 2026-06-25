@@ -14,15 +14,15 @@ out=$("$TMPDIR_INSTALL/venv/bin/fno" --version 2>&1 || true)
 echo "$out" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+'
 echo "PASS: uv build produces installable wheel"
 
-# ab-fe825805 change 3: the events schema must SHIP inside the wheel as
-# `_schema.yaml` (force-included from docs/architecture/events-schema.yaml),
-# so the Python validator's in-package fallback resolves from an installed
-# artifact with no `docs/` tree and no env var. Regression: a clean build
-# that ships no schema makes `import fno.events` raise from a foreign cwd.
+# The events schema must SHIP inside the wheel as `fno/events/schema.yaml`
+# (ordinary package data under src/fno; no force-include), so the Python
+# validator reads its sibling from an installed artifact with no `docs/` tree
+# and no env var. Regression: a clean build that ships no schema makes
+# `import fno.events` raise from a foreign cwd.
 PKG_SCHEMA=$("$TMPDIR_INSTALL/venv/bin/python" -c \
-  "import fno.events as e, os; print(os.path.join(os.path.dirname(e.__file__), '_schema.yaml'))")
-test -f "$PKG_SCHEMA" || { echo "FAIL: wheel did not ship fno/events/_schema.yaml"; exit 1; }
-echo "PASS: wheel ships in-package _schema.yaml"
+  "import fno.events as e, os; print(os.path.join(os.path.dirname(e.__file__), 'schema.yaml'))")
+test -f "$PKG_SCHEMA" || { echo "FAIL: wheel did not ship fno/events/schema.yaml"; exit 1; }
+echo "PASS: wheel ships in-package schema.yaml"
 
 # ab-18563bcc US5: the wheel must carry LICENSE + NOTICE (Apache-2.0 is declared
 # in pyproject.toml, but the texts must ship in the distribution). The build

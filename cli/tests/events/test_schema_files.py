@@ -1,8 +1,7 @@
 """Tests for canonical JSON Schema files (Task 1.1).
 
-Verifies that docs/architecture/schemas/events-v3.json and
-status-v1.json parse as valid JSON Schema documents with the correct
-structure.
+Verifies that schemas/events-v3.json and status-v1.json parse as valid
+JSON Schema documents with the correct structure.
 """
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ import json
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCHEMAS_DIR = REPO_ROOT / "docs/architecture/schemas"
+SCHEMAS_DIR = REPO_ROOT / "schemas"
 EVENTS_V3 = SCHEMAS_DIR / "events-v3.json"
 STATUS_V1 = SCHEMAS_DIR / "status-v1.json"
 

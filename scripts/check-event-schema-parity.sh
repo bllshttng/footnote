@@ -78,7 +78,7 @@ _timeout() {
 if [[ -n "$TEST_SCHEMA_DIR" ]]; then
     SCHEMA_DIR="$TEST_SCHEMA_DIR"
 else
-    SCHEMA_DIR="$REPO_ROOT/docs/architecture/schemas"
+    SCHEMA_DIR="$REPO_ROOT/schemas"
 fi
 EVENTS_V3="$SCHEMA_DIR/events-v3.json"
 STATUS_V1="$SCHEMA_DIR/status-v1.json"

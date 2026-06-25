@@ -27,12 +27,12 @@ set -uo pipefail
 # plugin's repo) can still find the canonical schema that ships with the
 # plugin. Precedence:
 #   1. EVENTS_SCHEMA_PATH env var (explicit override)
-#   2. ${project repo}/docs/architecture/events-schema.yaml (this repo)
-#   3. lib-relative ../../docs/architecture/events-schema.yaml (the schema
+#   2. ${project repo}/cli/src/fno/events/schema.yaml (this repo)
+#   3. lib-relative ../../cli/src/fno/events/schema.yaml (the schema
 #      bundled beside THIS lib inside the plugin; self-located via BASH_SOURCE
 #      so it resolves from ANY cwd with NO env var set)
-#   4. ${FNO_REPO_ROOT}/docs/architecture/events-schema.yaml (legacy fallback)
-#   5. ${CLAUDE_PLUGIN_ROOT}/docs/architecture/events-schema.yaml (legacy fallback)
+#   4. ${FNO_REPO_ROOT}/cli/src/fno/events/schema.yaml (legacy fallback)
+#   5. ${CLAUDE_PLUGIN_ROOT}/cli/src/fno/events/schema.yaml (legacy fallback)
 # The first readable path wins. If none is readable, the original
 # project-root path is preserved so the existing "schema unavailable: <path>"
 # diagnostic continues to name a useful location.
@@ -49,7 +49,7 @@ _ev_resolve_schema_path() {
     fi
     local project_root project_path
     project_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-    project_path="${project_root:-.}/docs/architecture/events-schema.yaml"
+    project_path="${project_root:-.}/cli/src/fno/events/schema.yaml"
     if [[ -r "$project_path" ]]; then
         printf '%s' "$project_path"
         return 0
@@ -67,7 +67,7 @@ _ev_resolve_schema_path() {
     if [[ -n "$self_src" ]]; then
         lib_root="$(cd "$(dirname "$self_src")/../.." 2>/dev/null && pwd)"
         if [[ -n "$lib_root" ]]; then
-            lib_candidate="${lib_root}/docs/architecture/events-schema.yaml"
+            lib_candidate="${lib_root}/cli/src/fno/events/schema.yaml"
             if [[ -r "$lib_candidate" ]]; then
                 printf '%s' "$lib_candidate"
                 return 0
@@ -77,7 +77,7 @@ _ev_resolve_schema_path() {
     local root candidate
     for root in "${FNO_REPO_ROOT:-}" "${CLAUDE_PLUGIN_ROOT:-}"; do
         [[ -z "$root" ]] && continue
-        candidate="${root}/docs/architecture/events-schema.yaml"
+        candidate="${root}/cli/src/fno/events/schema.yaml"
         if [[ -r "$candidate" ]]; then
             printf '%s' "$candidate"
             return 0

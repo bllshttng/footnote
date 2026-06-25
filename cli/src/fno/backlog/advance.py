@@ -99,7 +99,7 @@ def auto_continue_enabled(
         return False
 
 
-# Decision-event kinds (registered in docs/architecture/events-schema.yaml).
+# Decision-event kinds (registered in cli/src/fno/events/schema.yaml).
 EVENT_DISPATCHED = "advance_dispatched"
 EVENT_SKIPPED = "advance_skipped"
 EVENT_FAILED = "advance_failed"

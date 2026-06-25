@@ -56,14 +56,15 @@ bundles:
       # events-validate.sh stays - emit_event_raw consumers still validate.
       - source: scripts/lib/events-validate.sh
         dest: scripts/lib/events-validate.sh
-      # events-schema.yaml: events-validate.sh self-locates the bundled schema
-      # via ../../docs/architecture/events-schema.yaml from its own dir. In the
-      # canonical plugin that climbs to <plugin>/docs/...; in the BUNDLED skill
-      # (scripts/lib/ inside skills/target/) it climbs to skills/target/docs/...,
-      # so co-locate the schema there or the portable-skill `set-gate.sh` path
-      # (no `fno` CLI, foreign cwd) cannot find it (ab-fe825805, Codex on #412).
-      - source: docs/architecture/events-schema.yaml
-        dest: docs/architecture/events-schema.yaml
+      # schema.yaml: events-validate.sh self-locates the bundled schema via
+      # ../../cli/src/fno/events/schema.yaml from its own dir. In the canonical
+      # plugin that climbs to <plugin>/cli/src/...; in the BUNDLED skill
+      # (scripts/lib/ inside skills/target/) it climbs to
+      # skills/target/cli/src/..., so co-locate the schema there at the matching
+      # relative path or the portable-skill path (no `fno` CLI, foreign cwd)
+      # cannot find it.
+      - source: cli/src/fno/events/schema.yaml
+        dest: cli/src/fno/events/schema.yaml
       # phase-verifier.sh + blocked-taxonomy.sh entries removed (ab-d0337fbc):
       # the phase machine and BLOCKED taxonomy died with the wedge.
       # graph-resolve.sh: sourced from references/init-state.md to

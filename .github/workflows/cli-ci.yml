@@ -19,7 +19,6 @@ on:
       - skills/**
       - hooks/**
       - scripts/**
-      - docs/architecture/events-schema.yaml
       - scripts/lib/events-validate.sh
       - scripts/lib/set-gate.sh
       - scripts/lib/paths.sh
@@ -38,7 +37,6 @@ on:
       - skills/**
       - hooks/**
       - scripts/**
-      - docs/architecture/events-schema.yaml
       - scripts/lib/events-validate.sh
       - scripts/lib/set-gate.sh
       - scripts/lib/paths.sh

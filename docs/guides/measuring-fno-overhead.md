@@ -83,4 +83,4 @@ fno backlog undefer <node-id>  # revives the existing deferred node
 | `cli/benchmarks/fno_in_target_results.json` | Most recent raw measurement output |
 | `.fno/measurements/*.md` | Decision artifacts (one per measurement run that produced a new decision) |
 | `cli/src/fno/events/__init__.py` | Canonical `phase_0_decision()` event builder |
-| `docs/architecture/events-schema.yaml` | Schema entry for `phase_0_decision` events |
+| `cli/src/fno/events/schema.yaml` | Schema entry for `phase_0_decision` events |

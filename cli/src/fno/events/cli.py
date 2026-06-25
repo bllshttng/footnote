@@ -77,7 +77,7 @@ def emit(
     """Emit a single canonical event to events.jsonl.
 
     The envelope is ``{ts, type, source, data}`` (see
-    ``docs/architecture/events-schema.yaml``). Validation runs before the
+    ``cli/src/fno/events/schema.yaml``). Validation runs before the
     file lock is acquired so a malformed call cannot block writers.
 
     Source defaults to ``target`` when a target state file is present and

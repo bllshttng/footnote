@@ -104,7 +104,7 @@ config:
 
 ## Events added
 
-Three new event types in `docs/architecture/events-schema.yaml`:
+Three new event types in `cli/src/fno/events/schema.yaml`:
 
 | Type | When emitted | Key data fields |
 |------|-------------|-----------------|

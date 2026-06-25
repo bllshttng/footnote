@@ -19,7 +19,7 @@ These are both live. The contract accepts both rather than breaking either.
 
 ## Canonical schemas (in-repo)
 
-The JSON Schemas live **in the repo** at `docs/architecture/schemas/`, NOT in the `~/your-vault` Obsidian vault. The original design placed them in the vault, but GitHub CI checks out the repo and cannot read the vault, so the parity check would be non-functional there. In-repo is the only location where both CI and the parity script can read them.
+The JSON Schemas live **in the repo** at `schemas/`, NOT in the `~/your-vault` Obsidian vault. The original design placed them in the vault, but GitHub CI checks out the repo and cannot read the vault, so the parity check would be non-functional there. In-repo is the only location where both CI and the parity script can read them.
 
 - `events-v3.json` - the `events.jsonl` envelope as a `oneOf` of two mutually-exclusive branches:
   - **Branch A** (Python): requires `ts, type, source, data`; `source` from the fixed enum; carries `not: {required: [kind]}`.
@@ -27,7 +27,7 @@ The JSON Schemas live **in the repo** at `docs/architecture/schemas/`, NOT in th
   The two `not` guards make the branches disjoint: an event with both `type` and `kind`, or neither, matches zero branches and is rejected. A `$comment` records that the union is a documented bridge, not an accident.
 - `status-v1.json` - per-agent `state.json`, derived from the Rust `AgentState` struct (`crates/fno-agents/src/state.rs`). Required: `schema_version, short_id, status`; `status` is the 10-value `AgentStatus` enum; `pty` mirrors the flat `PtyStateWire` projection.
 
-`docs/architecture/events-schema.yaml` (the older per-type Python contract, consumed by `scripts/lib/events-validate.sh` and the Python validator) is reconciled **additively**: the Rust event kinds and the `daemon` source are documented there so live Rust events stop reading as undocumented. No existing entry changed.
+`cli/src/fno/events/schema.yaml` (the older per-type Python contract, consumed by `scripts/lib/events-validate.sh` and the Python validator) is reconciled **additively**: the Rust event kinds and the `daemon` source are documented there so live Rust events stop reading as undocumented. No existing entry changed.
 
 ## `--emit-schema` introspection
 
@@ -57,7 +57,7 @@ Both are read-only, side-effect-free, and idempotent.
 ## How to add a new cross-language event
 
 1. **Emit it.** Rust: `emitter.emit("my_new_kind", &payload)`. Add `"my_new_kind"` to `KNOWN_EVENT_KINDS` in `crates/fno-agents/src/lib.rs` (and to `emit_schema_json()` if it embeds the list). The list is hand-maintained; keep it in sync with every `.emit(...)` call site. Python: emit with a unique `type` not already used by any Rust `kind`.
-2. **Document it.** Add an additive `event_types` entry in `docs/architecture/events-schema.yaml` with `sources`, a one-line description, and a minimal `data` shape.
+2. **Document it.** Add an additive `event_types` entry in `cli/src/fno/events/schema.yaml` with `sources`, a one-line description, and a minimal `data` shape.
 3. **Keep payloads under 500 bytes.** Larger payloads use the evidence-pointer pattern (put the path in the event, the content in a separate file).
 4. **Run the check.** `bash scripts/check-event-schema-parity.sh` must print `parity OK`. If you renamed a field or changed the envelope shape, bump the schema major version (`events-v3` -> `events-v4`) and release both languages together.
 

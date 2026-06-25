@@ -9,8 +9,6 @@ Covers:
 """
 from __future__ import annotations
 
-import importlib
-
 import pytest
 
 from fno.events import (
@@ -268,45 +266,19 @@ def test_done_race_collision_builder_happy() -> None:
 # -- AC4-EDGE: SchemaUnavailableError on bad path --
 
 def test_schema_unavailable_raises(monkeypatch, tmp_path) -> None:
-    """A reload with a bogus search root must raise SchemaUnavailableError.
+    """Resolving with no sibling schema.yaml must raise SchemaUnavailableError.
 
-    We don't actually break the live schema (other tests in this module
-    rely on it). We exercise the error path via the helper directly.
+    The loader reads ``schema.yaml`` beside the package module. We point the
+    module's ``__file__`` at an empty tmp dir (no sibling schema) so the lookup
+    misses; the live package schema other tests rely on is untouched.
     """
     import fno.events as events_mod
 
-    # The helper walks parents from a starting Path looking for the manifest.
-    # Pointing it at an empty tmp_path means no parent has the manifest.
-    fake_start = tmp_path / "deep" / "nested"
-    fake_start.mkdir(parents=True)
-    # Need to also dodge the in-package _schema.yaml lookup that
-    # _resolve_manifest_path now consults first.
-    monkeypatch.setattr(
-        events_mod, "_resolve_manifest_path", events_mod._resolve_manifest_path
-    )
-    # Override the in-package check by patching __file__ to a non-existent
-    # location for this call. Easier: patch Path(__file__) usage by
-    # temporarily renaming any installed _schema.yaml in-package copy.
-    import pathlib
-
-    orig_resolve = events_mod._resolve_manifest_path
-
-    def _no_in_package(start=None):
-        # Re-implement without the in-package short-circuit so the dev-tree
-        # walk fires and finds nothing under fake_start's parents.
-        here = (start if start is not None else pathlib.Path(events_mod.__file__)).resolve()
-        parents = [here, *here.parents] if here.is_dir() else [*here.parents]
-        for parent in parents:
-            candidate = parent / "docs/architecture/events-schema.yaml"
-            if candidate.is_file():
-                return candidate
-        raise SchemaUnavailableError(
-            f"events schema not found (test-stripped lookup) from {here}"
-        )
-
-    monkeypatch.setattr(events_mod, "_resolve_manifest_path", _no_in_package)
+    fake_module = tmp_path / "events" / "__init__.py"
+    fake_module.parent.mkdir(parents=True)
+    monkeypatch.setattr(events_mod, "__file__", str(fake_module))
     with pytest.raises(SchemaUnavailableError, match="events schema not found"):
-        events_mod._resolve_manifest_path(start=fake_start)
+        events_mod._resolve_manifest_path()
 
 
 # -- BUG-MT-001: megatron manifest events must validate --

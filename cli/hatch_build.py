@@ -158,78 +158,11 @@ def apply_binary_bundle(binaries: Sequence[Path] | None, build_data: dict) -> di
     return build_data
 
 
-#: Where the events schema lands INSIDE the wheel. The Python validator's
-#: in-package fallback resolves `<events-pkg-dir>/_schema.yaml`, so this dest
-#: must match events/__init__.py:_resolve_manifest_path. (ab-fe825805 change 3)
-#: A ``str`` (not ``Path``) because hatchling force_include VALUES must be
-#: forward-slash distribution paths; ``SCHEMA_REPO_REL`` below is a tuple
-#: because it is splatted into ``Path.joinpath``.
-SCHEMA_REL_DEST = "fno/events/_schema.yaml"
-#: Canonical schema location relative to the REPO root (parent of the `cli/`
-#: build root) - the direct source build (`uv tool install`, `uv build --wheel`).
-SCHEMA_REPO_REL = ("docs", "architecture", "events-schema.yaml")
-#: Copy the sdist vendors at its root (pyproject `sdist.force-include`), used
-#: when a wheel is built FROM the sdist (`uv build`), where the repo `docs/`
-#: tree is absent.
-SCHEMA_SDIST_VENDOR = "_schema_vendor.yaml"
-
-
-def schema_source(root: Path) -> Path | None:
-    """Locate the events schema for the current wheel build, or ``None``.
-
-    Two build modes resolve from different places:
-      * direct source build: ``<repo>/docs/architecture/events-schema.yaml``,
-        one level above the ``cli/`` build ``root``.
-      * wheel-from-sdist (``uv build``): the sdist vendored it at the sdist
-        root as ``_schema_vendor.yaml`` (the repo ``docs/`` tree is not in the
-        sdist).
-    First existing candidate wins.
-    """
-    for candidate in (
-        Path(root).parent.joinpath(*SCHEMA_REPO_REL),
-        Path(root) / SCHEMA_SDIST_VENDOR,
-    ):
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def apply_schema_bundle(schema: Path | None, build_data: dict) -> dict:
-    """Pure decision: force-include ``schema`` into the wheel as the in-package
-    `_schema.yaml`. No-op when ``schema`` is ``None`` (callers turn that into a
-    hard build failure via ``resolve_required_schema`` - a schema-less wheel is
-    broken, not a valid variant).
-
-    Uses ``setdefault`` so it composes with a pre-existing ``force_include``
-    (e.g. another hook's entry) rather than clobbering it. Factored out for
-    unit-testability, mirroring ``apply_binary_bundle``.
-    """
-    if schema is None:
-        return build_data
-    build_data.setdefault("force_include", {})[str(schema)] = SCHEMA_REL_DEST
-    return build_data
-
-
-def resolve_required_schema(root: Path) -> Path:
-    """``schema_source`` but REQUIRED: raise ``FileNotFoundError`` with an
-    actionable message instead of returning ``None``.
-
-    Unlike the binary (optional -> pure-Python wheel is a valid variant), the
-    schema MUST ship: without it the installed validator raises from a foreign
-    cwd. A miss is a build error, not a degraded mode. Factored out of
-    ``CustomBuildHook.initialize`` so the loud-failure contract is unit-testable
-    without constructing a hatchling ``BuildHookInterface``.
-    """
-    schema = schema_source(root)
-    if schema is None:
-        raise FileNotFoundError(
-            "events schema not found for wheel bundling: looked for "
-            f"<repo>/{'/'.join(SCHEMA_REPO_REL)} (direct build) and "
-            f"<sdist-root>/{SCHEMA_SDIST_VENDOR} (wheel-from-sdist). Without it "
-            "the wheel ships no fno/events/_schema.yaml and "
-            "`import fno.events` fails from a foreign cwd (ab-fe825805)."
-        )
-    return schema
+# The events schema no longer needs build-time force-include: it lives at
+# `cli/src/fno/events/schema.yaml`, INSIDE the `src/fno` package, so it ships
+# as ordinary package data in both the wheel and the sdist with no machinery.
+# The Python loader (events/__init__.py:_resolve_manifest_path) reads the
+# sibling `schema.yaml` directly. (x-122a follow-up: colocate schema with loader.)
 
 
 # -- ab-18563bcc US5: LICENSE + NOTICE bundling --
@@ -285,7 +218,7 @@ def apply_license_bundle(licenses: dict[str, Path] | None, build_data: dict) -> 
     ``fno/_licenses/``. No-op on a falsy mapping (callers hard-fail via
     ``resolve_required_licenses`` - a license-less wheel is broken, not a
     variant). Uses ``setdefault`` so it composes with a pre-existing
-    ``force_include`` (e.g. the schema entry). Mirrors ``apply_schema_bundle``.
+    ``force_include`` (e.g. another hook's entry). Mirrors ``apply_binary_bundle``.
     """
     if not licenses:
         return build_data
@@ -299,8 +232,7 @@ def resolve_required_licenses(root: Path) -> dict[str, Path]:
     """``license_sources`` but REQUIRED: raise ``FileNotFoundError`` naming the
     missing files rather than silently shipping a non-compliant wheel.
 
-    Mirrors ``resolve_required_schema``: a license-less wheel is a build error,
-    not a degraded mode (AC5-ERR).
+    A license-less wheel is a build error, not a degraded mode (AC5-ERR).
     """
     found = license_sources(root)
     missing = [name for name in LICENSE_BASENAMES if name not in found]
@@ -318,16 +250,13 @@ def resolve_required_licenses(root: Path) -> dict[str, Path]:
 
 class CustomBuildHook(BuildHookInterface):
     """Place the prebuilt binaries in the wheel's ``.data/scripts/`` dir if
-    present, and force-include the events schema + license texts as in-package
-    data."""
+    present, and force-include the license texts as in-package data. The events
+    schema ships as ordinary package data (``fno/events/schema.yaml``)."""
 
     def initialize(self, version: str, build_data: dict) -> None:
         # Binaries are optional (zero -> pure-Python wheel) but all-or-nothing
         # when present: a partial set hard-fails inside resolve_binary_bundle.
         apply_binary_bundle(resolve_binary_bundle(Path(self.root)), build_data)
-        # Schema is required (see resolve_required_schema): fail the build loud
-        # rather than ship a silently-broken wheel.
-        apply_schema_bundle(resolve_required_schema(Path(self.root)), build_data)
         # LICENSE + NOTICE are required (see resolve_required_licenses): a
         # license-less wheel is non-compliant, so fail the build loud (US5).
         apply_license_bundle(resolve_required_licenses(Path(self.root)), build_data)
