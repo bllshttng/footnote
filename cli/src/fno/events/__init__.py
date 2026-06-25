@@ -42,14 +42,12 @@ class SchemaUnavailableError(Exception):
     """Raised when the schema manifest cannot be loaded at module import."""
 
 
-def _resolve_manifest_path(start: Path | None = None) -> Path:
+def _resolve_manifest_path() -> Path:
     """Find the schema YAML: the sibling ``schema.yaml`` in this package.
 
     The schema lives AT ``fno/events/schema.yaml`` - package source in the
     dev tree and editable installs, package data in the wheel - so it is
     always beside this module with no force-include, walk-up, or env var.
-    ``start`` is accepted for back-compat (tests pin a fake root) but the
-    in-package sibling is authoritative.
 
     Raises ``SchemaUnavailableError`` if it is missing.
     """
