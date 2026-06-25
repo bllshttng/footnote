@@ -3399,6 +3399,17 @@ def cmd_done(
             session_id=node.get("session_id"),
         )
 
+    # A2 (x-122a): retro-at-done lifecycle trigger. Dispatch a `retro` context
+    # /think while the closed node's session context is still resolvable. Gated
+    # by config.think_spawn.on_retro (default OFF) and strictly non-fatal: a
+    # dispatch failure never unwinds the close it rode in on.
+    try:
+        from fno.provenance.spawn_think import on_node_retro
+
+        on_node_retro(node)
+    except Exception:  # noqa: BLE001 - additive; never wedge `done`
+        pass
+
 
 # -- reconcile (close merged-PR drift) --
 

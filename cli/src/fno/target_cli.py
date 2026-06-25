@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -352,4 +353,57 @@ def init(
         env["TARGET_SIZE"] = normalized_size
 
     result = subprocess.run(["bash", str(script_path)], check=False, env=env)
+    if result.returncode == 0:
+        _maybe_dispatch_work_start()
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def _maybe_dispatch_work_start() -> None:
+    """A2 (x-122a): fire a ``work-start`` context /think after a node is claimed.
+
+    Runs right after the init script returns success - the authoritative
+    ``fno claim acquire node:<id>`` has completed and the manifest is written, so
+    this is the "node enters work" moment (Claude's Discretion 4). Reads the
+    claimed ``graph_node_id`` back from the manifest (``null`` => no node claimed
+    => nothing to dispatch) and routes the durable node through
+    ``on_node_work_start``, gated by ``config.think_spawn.on_work_start``
+    (default OFF). Strictly non-fatal: any failure here never affects the init
+    exit code the caller propagates.
+    """
+    try:
+        from fno.config import load_settings
+
+        # Gate-first: the default-OFF install (every un-opted-in install) pays one
+        # settings read and returns - NO git rev-parse, NO graph load, NO manifest
+        # read. The wrapper re-checks the sub-flag authoritatively below.
+        try:
+            if not load_settings().config.think_spawn.on_work_start:
+                return
+        except Exception:  # noqa: BLE001 - fail-safe to disabled
+            return
+
+        from fno.paths import graph_json, resolve_repo_root
+
+        repo_root = resolve_repo_root()
+        manifest = repo_root / ".fno" / "target-state.md"
+        text = manifest.read_text(encoding="utf-8")
+        m = re.search(r"^graph_node_id\s*:\s*(.+)$", text, re.MULTILINE)
+        if not m:
+            return
+        node_id = m.group(1).strip().strip("\"'")
+        if not node_id or node_id == "null":
+            return
+
+        from fno.graph.load import load_graph
+        from fno.provenance.spawn_think import on_node_work_start
+
+        graph_data = load_graph(graph_json())
+        entries = graph_data if isinstance(graph_data, list) else []
+        node = next(
+            (e for e in entries if isinstance(e, dict) and e.get("id") == node_id),
+            None,
+        )
+        if node is not None:
+            on_node_work_start(node, project_root=repo_root)
+    except Exception:  # noqa: BLE001 - additive; never affect the init exit code
+        pass
