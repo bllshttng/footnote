@@ -60,7 +60,7 @@ def dispatch(
     or node not found).
     """
     from fno.graph.cli import _graph_path
-    from fno.graph.fuzzy import resolve_id
+    from fno.graph.fuzzy import resolve_node
     from fno.graph.store import read_graph
     from fno.provenance.spawn_think import dispatch_conversational
 
@@ -75,21 +75,27 @@ def dispatch(
         raise typer.Exit(code=2)
     live_cwd = cwd or os.getcwd()
 
-    match = resolve_id(node, read_graph(_graph_path()))
-    if match.kind == "none":
-        typer.echo(f"fno think dispatch: no node matches {node!r}.", err=True)
-        raise typer.Exit(code=2)
-    if match.kind == "ambiguous":
+    # Deterministic resolution tiers 1-3 (exact id / slug / bare-hex) - the same
+    # resolver `fno backlog get` uses, so every exact entry form resolves.
+    match = resolve_node(node, read_graph(_graph_path()))
+    if match.kind != "exact":
         typer.echo(
-            f"fno think dispatch: {len(match.candidates)} nodes match {node!r}; "
-            "be more specific:",
+            f"fno think dispatch: no node matches {node!r} (id/slug/bare-hex).",
             err=True,
         )
-        for c in match.candidates:
-            typer.echo(f"  {c.get('id'):<14} {c.get('title', '')}", err=True)
         raise typer.Exit(code=2)
 
     target = match.candidates[0]
+    # Resolve the worker cwd to the node's project root (work-map), like `get`,
+    # so the spawned /think runs in the node's repo - not whatever stale cwd the
+    # node carries. Falls back to the recorded cwd when the project is unmapped.
+    from fno.graph._intake import project_root_from_settings
+
+    proj = target.get("project")
+    root = project_root_from_settings(proj) if proj else None
+    if root:
+        target["_resolved_cwd"] = root
+
     result = dispatch_conversational(
         target, session_id=sid, cwd=live_cwd, harness=harness,
     )
