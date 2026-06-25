@@ -252,17 +252,20 @@ def _daily_count() -> int:
 def _bump_daily_count() -> None:
     """Increment today's spawn count (resetting on a new day). Best-effort.
 
-    ponytail: plain read-modify-write, last-writer-wins. A soft ceiling does not
-    need cross-process atomicity - the per-(node,reason) dedup token already
-    prevents the same node double-spawning; this only bounds total daily volume,
-    where an off-by-one under a rare race is harmless. Swap in the claim lock if
-    exact accounting ever matters.
+    ponytail: read-modify-write, last-writer-wins on the count - a soft ceiling
+    tolerates an off-by-one under a rare race. But the WRITE is atomic (tmp +
+    os.replace) so a concurrent bump can never leave a torn/partial JSON file,
+    which would read back as 0 and silently RESET the ceiling for the day. The
+    per-(node,reason) dedup token bounds same-node storms; this bounds total
+    daily volume. Swap in the claim lock if exact accounting ever matters.
     """
     try:
         p = _daily_counter_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         count = _daily_count() + 1
-        p.write_text(json.dumps({"date": _today_str(), "count": count}), encoding="utf-8")
+        tmp = p.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"date": _today_str(), "count": count}), encoding="utf-8")
+        os.replace(tmp, p)  # atomic rename: a reader sees the old OR new file, never a torn one
     except OSError as exc:  # noqa: BLE001 - never wedge a spawn on a counter write
         _LOG.debug("spawn_think: daily-count bump failed: %s", exc)
 
@@ -441,23 +444,31 @@ def _name_slug(raw: Optional[str]) -> str:
     return s[:30].rstrip("-")
 
 
-def _worker_agent_name(node_id: str, node_slug: Optional[str]) -> str:
-    """Provenance-carrying bg worker name: ``think-<node-id>-<slug>``."""
-    base = f"think-{node_id}"
+def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REASON_BIRTH) -> str:
+    """Provenance-carrying bg worker name, scoped by trigger reason.
+
+    Birth keeps ``think-<node-id>-<slug>`` byte-for-byte (A1). A LIFECYCLE
+    trigger gets ``think-<node-id>-<reason>-<slug>`` so a node born + later
+    worked + retro'd dispatches a DISTINCT worker per moment - the dedup token
+    is reason-scoped, and ``fno agents spawn`` rejects a duplicate NAME, so the
+    name must be reason-scoped too or the second lifecycle trigger collides and
+    is wrongly skipped (codex P2).
+    """
+    base = f"think-{node_id}" if reason == REASON_BIRTH else f"think-{node_id}-{reason}"
     slug = _name_slug(node_slug)
     return f"{base}-{slug}" if slug else base
 
 
-def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node_slug: Optional[str]) -> str:
+def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node_slug: Optional[str], reason: str = REASON_BIRTH) -> str:
     """Dispatch a fire-and-forget ``/think`` claude bg worker carrying the seed.
 
     Mirrors advance._spawn_worker: ``/think`` rides as the command prompt (NOT
-    an env var), the agent is named ``think-<node-id>-<slug>``, the cwd resolves
-    to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
-    Returns the spawn receipt's short_id. Raises SpawnAlreadyRunning on a
-    name-collision and SpawnError otherwise.
+    an env var), the agent is named ``think-<node-id>[-<reason>]-<slug>``, the
+    cwd resolves to the node's recorded root (``--cwd``) or canonical main
+    (``--fresh``). Returns the spawn receipt's short_id. Raises
+    SpawnAlreadyRunning on a name-collision and SpawnError otherwise.
     """
-    agent_name = _worker_agent_name(node_id, node_slug)
+    agent_name = _worker_agent_name(node_id, node_slug, reason)
     cmd = ["fno", "agents", "spawn", "--provider", "claude"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
@@ -690,7 +701,13 @@ def _on_node_lifecycle(
     try:
         node_id = (node or {}).get("id")
         # Gate-first: the layer must be enabled AND this trigger's sub-flag on.
-        if not node_id or not _subflag_on(subflag, project_root):
+        # Checking enabled here (not only the sub-flag) keeps the default-OFF
+        # install from doing maybe_spawn_think's env/path setup just to noop.
+        if (
+            not node_id
+            or not think_spawn_enabled(project_root=project_root)
+            or not _subflag_on(subflag, project_root)
+        ):
             return None
         return maybe_spawn_think(
             node, reason=reason, project_root=project_root, run_state=run_state
@@ -867,7 +884,7 @@ def maybe_spawn_think(
     node_cwd = node.get("_resolved_cwd") or node.get("cwd") or None
     node_slug = node.get("slug") or node.get("title")
     try:
-        short_id = _spawn_think_worker(node_id, seed.prompt, node_cwd, node_slug)
+        short_id = _spawn_think_worker(node_id, seed.prompt, node_cwd, node_slug, reason)
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder)
         return skip("already-claimed", presence="away")
@@ -883,7 +900,7 @@ def maybe_spawn_think(
         EVENT_SPAWNED,
         {"node_id": node_id, "trigger": reason, "think_session": short_id,
          "presence": "away", "resolved": seed.resolved,
-         "agent_name": _worker_agent_name(node_id, node_slug)},
+         "agent_name": _worker_agent_name(node_id, node_slug, reason)},
         ev_path,
     )
     return ThinkSpawnResult(

@@ -70,8 +70,8 @@ def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     spawn_calls: list[tuple] = []
     stamp_calls: list[tuple] = []
 
-    def fake_spawn(node_id, prompt, node_cwd, node_slug):
-        spawn_calls.append((node_id, prompt, node_cwd, node_slug))
+    def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth"):
+        spawn_calls.append((node_id, prompt, node_cwd, node_slug, reason))
         return "deadbeef"
 
     monkeypatch.setattr(st, "_spawn_think_worker", fake_spawn)
@@ -183,7 +183,7 @@ def test_resolved_seed_carries_transcript_pointer(iso, monkeypatch, patch_spawn)
     res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
                                events_path=iso, project_root=iso.parent.parent)
     assert res.decision == "spawned" and res.resolved is True
-    (_, prompt, _, _) = spawn_calls[0]
+    (_, prompt, _, _, _) = spawn_calls[0]
     assert "/real/transcript.jsonl" in prompt  # the POINTER, not a paraphrase
     assert "x-2222aaaa" in prompt
     assert "origin node chain: x-0000aaaa" in prompt
@@ -221,7 +221,7 @@ def test_foreign_harness_still_spawns_unresolved(iso, monkeypatch, patch_spawn):
                                env=dict(__import__("os").environ),
                                events_path=iso, project_root=iso.parent.parent)
     assert res.decision == "spawned" and res.resolved is False
-    (_, prompt, _, _) = spawn_calls[0]
+    (_, prompt, _, _, _) = spawn_calls[0]
     assert "UNRESOLVED" in prompt
     evs = _events(iso)
     assert evs[0]["data"]["resolved"] is False
@@ -700,6 +700,21 @@ def test_on_node_retro_subflag_gate(iso, monkeypatch, patch_spawn):
     res = st.on_node_retro(_node(), project_root=iso.parent.parent)
     assert res is not None and res.decision == "spawned"
     assert len(spawn_calls) == 1
+
+
+def test_worker_agent_name_reason_scoped():
+    """codex P2: birth name is byte-for-byte; lifecycle names are distinct per reason.
+
+    The spawned `fno agents spawn` name must be reason-scoped or the second
+    lifecycle trigger for a node collides on name and is wrongly skipped.
+    """
+    assert st._worker_agent_name("x-1", "slug") == "think-x-1-slug"  # default birth
+    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "think-x-1-slug"
+    assert st._worker_agent_name("x-1", "slug", st.REASON_WORK_START) == "think-x-1-work-start-slug"
+    assert st._worker_agent_name("x-1", "slug", st.REASON_RETRO) == "think-x-1-retro-slug"
+    names = {st._worker_agent_name("x-1", "slug", r)
+             for r in (st.REASON_BIRTH, st.REASON_WORK_START, st.REASON_RETRO)}
+    assert len(names) == 3  # no collision across a node's lifecycle
 
 
 def test_lifecycle_wrapper_strictly_non_fatal(iso, monkeypatch):
