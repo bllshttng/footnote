@@ -50,7 +50,6 @@ def _run_abi(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
 _FORBIDDEN_AFTER_HELP = [
     "fno.state.cli",
     "fno.megawalk",
-    "fno.megatron.cli",
     "fno.adapters.providers.cli",
     "fno.worker.cli",
     "fno.graph.cli",
@@ -81,7 +80,7 @@ def test_abi_help_does_not_import_sub_app_modules():
 
 
 # ---------------------------------------------------------------------------
-# AC3-HP: fno paths state-dir does NOT import megawalk / megatron
+# AC3-HP: fno paths state-dir does NOT import megawalk
 # ---------------------------------------------------------------------------
 
 _CHECK_CODE_PATHS = """\
@@ -89,7 +88,7 @@ import sys
 from fno import cli
 from typer.testing import CliRunner
 CliRunner().invoke(cli.app, ["paths", "state-dir"])
-found = [m for m in ["fno.megawalk", "fno.megatron.cli"] if m in sys.modules]
+found = [m for m in ["fno.megawalk"] if m in sys.modules]
 if found:
     print("FOUND:", ",".join(found), file=sys.stderr)
 sys.exit(len(found))
@@ -100,7 +99,7 @@ def test_abi_paths_does_not_import_megawalk():
     """AC3-HP: `fno paths state-dir` only loads the paths sub-app."""
     result = _run_py(_CHECK_CODE_PATHS)
     assert result.returncode == 0, (
-        f"megawalk/megatron imported during `fno paths state-dir`:\n{result.stderr}"
+        f"megawalk imported during `fno paths state-dir`:\n{result.stderr}"
     )
 
 
@@ -168,7 +167,6 @@ _EXPECTED_SUBCOMMANDS = [
     "mail",
     "agent",
     "megawalk",
-    "megatron",
     "providers",
     "review",
     "cost",
@@ -266,20 +264,6 @@ def test_megawalk_help_carries_extended_help():
     )
 
 
-def test_megatron_help_carries_exit_codes():
-    """Same regression check for megatron's extended help."""
-    from fno.cli import app
-    from typer.testing import CliRunner
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["megatron", "--help"])
-    assert result.exit_code == 0, f"fno megatron --help failed: {result.output}"
-    assert "Exit codes" in result.output, (
-        "Expected 'Exit codes' in `fno megatron --help` output; "
-        f"got: {result.output[:500]}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Real-subprocess smoke for the installed entry point
 # ---------------------------------------------------------------------------
@@ -347,11 +331,11 @@ def test_did_you_mean_suggests_lazy_commands():
     from typer.testing import CliRunner
 
     runner = CliRunner()
-    # ``megatron`` is a lazy entry; ``mehtatron`` is a typo.
-    result = runner.invoke(app, ["mehtatron"])
+    # ``megawalk`` is a lazy entry; ``mehgawalk`` is a typo.
+    result = runner.invoke(app, ["mehgawalk"])
     assert result.exit_code != 0
-    assert "Did you mean 'megatron'" in result.output, (
-        f"Missing megatron suggestion: {result.output}"
+    assert "Did you mean 'megawalk'" in result.output, (
+        f"Missing megawalk suggestion: {result.output}"
     )
 
 

@@ -34,7 +34,7 @@ The repo root [`README.md`](../README.md) is the quickstart. This index maps the
 The [architecture/](architecture/) directory holds the design docs (one per subsystem). Entry points:
 
 - [system-architecture.md](system-architecture.md) - the big picture
-- [architecture/control-plane-loop.md](architecture/control-plane-loop.md) - the current completion model: external truth (PR + CI + required-bot review) plus a budget cap, decided by `fno-agents loop-check`- [architecture/megawalk-pipeline.md](architecture/megawalk-pipeline.md), [architecture/megatron.md](architecture/megatron.md) - the multi-feature and fleet loops
+- [architecture/control-plane-loop.md](architecture/control-plane-loop.md) - the current completion model: external truth (PR + CI + required-bot review) plus a budget cap, decided by `fno-agents loop-check`- [architecture/megawalk-pipeline.md](architecture/megawalk-pipeline.md) - the multi-feature loop
 - [architecture/coordination.md](architecture/coordination.md) - the `fno claim` work-claim primitive
 - [architecture/memory-system.md](architecture/memory-system.md) - the memory pass
 - [architecture/multi-cli-hooks.md](architecture/multi-cli-hooks.md) - how footnote wires into each CLI's hooks

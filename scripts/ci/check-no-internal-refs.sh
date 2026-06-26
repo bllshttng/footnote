@@ -32,7 +32,7 @@
 #   A handful of docs legitimately DOCUMENT the Obsidian-gated vault layout -
 #   the "internal/" token is the documented subject (post-merge inbox_path,
 #   cross-project inbox layout, triage default, reading-shipped-plans, the
-#   megatron plan-write location, the _VAULT_TOPLEVEL_DIRS snippet), not a
+#   _VAULT_TOPLEVEL_DIRS snippet), not a
 #   leak. Add a doc here only when "internal/" is genuinely what it documents.
 
 set -euo pipefail
@@ -51,7 +51,6 @@ cd "$REPO_ROOT"
 ALLOWLIST=(
     "docs/architecture/auto-post-merge-ritual.md"
     "docs/architecture/cross-project-inbox.md"
-    "docs/architecture/megatron.md"
     "docs/guides/cross-project-inbox.md"
     "docs/guides/reading-shipped-plans.md"
     "docs/system-architecture.md"

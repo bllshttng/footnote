@@ -128,14 +128,9 @@ TWO_SPELLING_SITES: dict[tuple[str, str], list[tuple[str, str]]] = {
 }
 
 #: Visible --session/--pr declarations exempt from the canonicalization
-#: invariant. megatron reconcile's --pr is a 1-indexed *candidate position*
-#: selector (which ambiguous PR candidate to backfill), not a PR number -
-#: renaming it --pr-number would be actively misleading, so it keeps the
-#: short spelling. The design's drift enumeration was flag-name-based and
-#: listed it in error.
-TWO_SPELLING_EXEMPTIONS: set[tuple[str, str, str]] = {
-    ("megatron/cli.py", "cmd_reconcile", "--pr"),
-}
+#: invariant. None currently: every visible long must use the canonical
+#: --session-id/--pr-number spelling (with a hidden short alias).
+TWO_SPELLING_EXEMPTIONS: set[tuple[str, str, str]] = set()
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "fno"
 

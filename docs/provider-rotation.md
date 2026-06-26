@@ -839,8 +839,6 @@ Single-provider combos short-circuit (cursor never advances past `idx=0`).
 | `/megawalk` skill | `/megawalk combo my-stack` |
 | `run-target-loop.sh` | `TARGET_COMBO=my-stack bash scripts/run-target-loop.sh <plan>` (env; the `fno loop` verb is removed) |
 | `fno megawalk` | `fno megawalk --combo my-stack` |
-| `fno megatron run` | `fno megatron run <id> --combo my-stack` (CLI wins over manifest `combo:` key) |
-| Megatron mission manifest | `combo: my-stack` in `~/.fno/fleet/<slug>/00-INDEX.md` frontmatter |
 
 All paths terminate in setting `TARGET_COMBO=<name>` in the environment of spawned subprocesses (`spawn_with_provider_snapshot` already propagates env to target children).
 

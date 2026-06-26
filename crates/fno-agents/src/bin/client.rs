@@ -1595,7 +1595,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "resume <name> [--print-command]",
     "attach <name>",
     "logs <name> [--follow] [options]",
-    "loop run --driver target|megawalk|megatron [options]",
+    "loop run --driver target|megawalk [options]",
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`
