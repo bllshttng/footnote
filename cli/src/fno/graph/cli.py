@@ -349,6 +349,7 @@ def cmd_add(
         blockers = [b.strip() for b in blocked_by.split(",") if b.strip()]
 
     new_id_holder: list[Optional[str]] = [None]
+    node_holder: list[Optional[dict]] = [None]
 
     def mutator(entries):
         new_id = mint_node_id({e.get("id") for e in entries})
@@ -370,9 +371,23 @@ def cmd_add(
         )
         node["id"] = new_id
         entries.append(node)
+        node_holder[0] = node
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Born-with-why v2: route cmd_add births through the shared birth hook,
+    # mirroring cmd_idea. Gate-first, durable slug re-read, and strict
+    # non-fatality all live in on_node_born, so a gate-OFF install is a no-op
+    # and a dispatch failure never wedges the filing of the node above.
+    if node_holder[0] is not None:
+        try:
+            from fno.provenance.spawn_think import on_node_born
+
+            on_node_born(node_holder[0])
+        except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
+            pass
+
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
 
