@@ -1149,6 +1149,17 @@ def cmd_update(
     merge_status: Optional[str] = typer.Option(None, "--merge-status", help="Merge status"),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Update display title"),
+    details: Optional[str] = typer.Option(
+        None,
+        "--details",
+        "--description",
+        "-d",
+        help="Update free-form details/rationale (stored in `details`). Pass 'null' to clear.",
+    ),
+    domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
+    size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
+    type_: Optional[str] = typer.Option(None, "--type", help="Update node type (feature|epic|bug)"),
+    public: Optional[bool] = typer.Option(None, "--public/--no-public", help="Mark node for the public roadmap (fno backlog roadmap)"),
     project: Optional[str] = typer.Option(None, "--project", help="Reproject this node (use for migrating wrong-scope nodes)"),
     cwd: Optional[str] = typer.Option(None, "--cwd", "-c", help="Update cwd (pair with --project for migration)"),
     blocked_by: Optional[List[str]] = typer.Option(None, "--blocked-by", help="Replace blocked_by list"),
@@ -1305,6 +1316,16 @@ def cmd_update(
                 typer.echo("Error: --title cannot be empty or whitespace-only", err=True)
                 raise typer.Exit(code=1)
             node["title"] = new_title
+        if details is not None:
+            node["details"] = None if details.lower() == "null" else details
+        if domain is not None:
+            node["domain"] = domain
+        if size is not None:
+            node["size"] = size.upper() if size.lower() != "null" else None
+        if type_ is not None:
+            node["type"] = type_
+        if public is not None:
+            node["public"] = public
         if acknowledge_collisions is not None:
             ids = [x.strip() for x in acknowledge_collisions.split(",") if x.strip()]
             node["collisions_acknowledged"] = ids

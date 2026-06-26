@@ -176,3 +176,37 @@ def test_backfill_slugs_assigns_and_is_idempotent(tmp_graph):
     result2 = runner.invoke(app, ["backlog", "backfill-slugs"])
     assert result2.exit_code == 0, result2.output
     assert json.loads(result2.stdout)["slugs_assigned"] == 0
+
+
+# -- update --details --------------------------------------------------------
+
+
+def test_update_details_sets_and_clears(tmp_graph):
+    # `update --details` edits rationale in place (no recreate-via-idea dupe).
+    _seed(tmp_graph, [
+        {"id": "ab-deadbeef", "title": "Thing", "slug": "thing", "_status": "ready",
+         "domain": "code", "project": "p", "details": None},
+    ])
+    result = runner.invoke(app, ["backlog", "update", "ab-deadbeef", "--details", "the full rationale"])
+    assert result.exit_code == 0, result.output
+    assert _read(tmp_graph)[0]["details"] == "the full rationale"
+
+    # `null` clears it; --description is an accepted alias.
+    result = runner.invoke(app, ["backlog", "update", "ab-deadbeef", "--description", "null"])
+    assert result.exit_code == 0, result.output
+    assert _read(tmp_graph)[0]["details"] is None
+
+
+def test_update_domain_size_type(tmp_graph):
+    # Create-only fields are now editable, so a mistake never forces a recreate.
+    _seed(tmp_graph, [
+        {"id": "ab-feedface", "title": "Thing", "slug": "thing", "_status": "ready",
+         "domain": "code", "type": "feature", "project": "p"},
+    ])
+    result = runner.invoke(app, ["backlog", "update", "ab-feedface",
+                                 "--domain", "design", "--size", "l", "--type", "epic"])
+    assert result.exit_code == 0, result.output
+    node = _read(tmp_graph)[0]
+    assert node["domain"] == "design"
+    assert node["size"] == "L"  # normalized to uppercase
+    assert node["type"] == "epic"
