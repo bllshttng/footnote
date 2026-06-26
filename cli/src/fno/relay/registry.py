@@ -52,11 +52,31 @@ class RegistryEntry:
     inject_handle: Optional[str] = None
     status: Optional[str] = None
     name: Optional[str] = None
+    transcript_path: Optional[str] = None  # the jsonl the OUT leg tails (G2 capture)
 
 
 def registry_path() -> Path:
     """``~/.fno/relay/registry.json`` (resolved against the active state dir)."""
     return paths.state_dir() / "relay" / "registry.json"
+
+
+def transcript_path_for(
+    session_id: str, *, projects_dir: Optional[Path] = None
+) -> Optional[str]:
+    """Resolve a session's transcript jsonl -- the OUT-leg capture source.
+
+    claude encodes the ``projects/`` subdir by replacing BOTH ``/`` and ``.`` in
+    the cwd with ``-``, so glob by the ``<session_id>.jsonl`` filename rather than
+    deriving the path from cwd (the naive ``/``->``-`` derivation misses the dot,
+    proven in the x-e4ac probe). Returns None when no transcript exists yet --
+    which on this host means the peer was spawned without scrubbing the parent's
+    ``CLAUDE_CODE_*`` env (see :func:`fno.relay.roundtrip.spawn_peer`)."""
+    base = projects_dir or (Path.home() / ".claude" / "projects")
+    try:
+        hits = sorted(base.glob(f"*/{session_id}.jsonl"))
+    except OSError:
+        return None
+    return str(hits[0]) if hits else None
 
 
 def _atomic_write_json(target: Path, data: dict) -> None:
@@ -110,6 +130,7 @@ def load(path: Optional[Path] = None) -> dict[str, RegistryEntry]:
             inject_handle=row.get("inject_handle"),
             status=row.get("status"),
             name=row.get("name"),
+            transcript_path=row.get("transcript_path"),
         )
     return out
 
@@ -158,6 +179,7 @@ def index(
                 inject_handle=None,  # hand-started: footnote owns no PTY for it
                 status=s.status,
                 name=s.handle,
+                transcript_path=transcript_path_for(s.session_id),
             )
     merged.update(load(path))  # persisted peers win
     return merged

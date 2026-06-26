@@ -72,6 +72,34 @@ def test_index_folds_discovered_claude_sessions(tmp_path, monkeypatch):
     assert idx["live-1"].status == "busy"
 
 
+def test_transcript_path_round_trips(tmp_path):
+    path = tmp_path / "registry.json"
+    reg.register(RegistryEntry(session_id="B", provider="claude", pid=1,
+                               transcript_path="/x/B.jsonl"), path=path)
+    assert reg.load(path)["B"].transcript_path == "/x/B.jsonl"
+
+
+def test_transcript_path_for_globs_by_session_id(tmp_path):
+    proj = tmp_path / "projects"
+    # claude encodes both "/" and "." in the cwd to "-", so the dir name is
+    # unpredictable; glob by the <session_id>.jsonl filename instead.
+    d = proj / "-Users-bb16--claude-jobs-x"
+    d.mkdir(parents=True)
+    (d / "sid-123.jsonl").write_text("{}")
+    assert reg.transcript_path_for("sid-123", projects_dir=proj) == str(d / "sid-123.jsonl")
+    assert reg.transcript_path_for("missing", projects_dir=proj) is None
+
+
+def test_index_populates_transcript_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(reg, "discover_live_sessions", lambda: [
+        DiscoveredSession(session_id="live-1", short_id="d", handle="a",
+                          pid=9, cwd="/t", project=None, status="idle", agent="claude")
+    ])
+    monkeypatch.setattr(reg, "transcript_path_for", lambda sid, **k: f"/tx/{sid}.jsonl")
+    idx = reg.index(path=tmp_path / "registry.json")
+    assert idx["live-1"].transcript_path == "/tx/live-1.jsonl"
+
+
 def test_persisted_peer_wins_session_id_clash(tmp_path, monkeypatch):
     path = tmp_path / "registry.json"
     reg.register(_peer(sid="dup", handle="pty:owned"), path=path)
