@@ -15,11 +15,21 @@ Two layers:
 from __future__ import annotations
 
 import os
+import pwd
 
 import pytest
 
 from fno.relay import roundtrip as rt_mod
 from fno.relay import round_trip
+
+
+def _restore_real_home(monkeypatch):
+    """conftest.py redirects $HOME to a throwaway tempdir for graph-state
+    isolation. A spawned claude peer inherits that HOME and cannot authenticate
+    (auth lives under the real home), so it boots but never replies. Live relay
+    tests must hand the peer the REAL home -- read from the passwd db, which
+    ignores the $HOME override."""
+    monkeypatch.setenv("HOME", pwd.getpwuid(os.getuid()).pw_dir)
 
 
 def _fake_peer(name: str) -> rt_mod.Peer:
@@ -110,23 +120,20 @@ def test_sentinel_capture_extracts_last_reply():
     not os.environ.get("FNO_LIVE_RELAY"),
     reason="spawns two real interactive claude PTY sessions; set FNO_LIVE_RELAY=1 to run",
 )
-def test_live_round_trip_human_out_of_loop():
-    """AC1-HP: two autonomous claude sessions round-trip with no human, proven by
-    reading BOTH panes.
+def test_live_round_trip_human_out_of_loop(monkeypatch):
+    """AC1-HP: two autonomous claude sessions round-trip with no human, both
+    replies captured FAITHFULLY from their own transcripts (default path).
 
-    Uses the DEFAULT pane.read path (transcript gate off). The transcript recipe
-    is NOT used here: live characterization (2026-06-26, 2/2 deterministic bob
-    timeout) showed the binary-findings recipe does NOT fix the 2-peer wake --
-    the second peer of a back-to-back spawn still wedges, so the recipe's
-    own-id-scrub is gated opt-in (``FNO_RELAY_TRANSCRIPT``) and the proven 2-peer
-    path stays pane.read. Faithful transcript capture is proven separately, for
-    a SINGLE peer, by ``test_live_single_peer_transcript_faithful`` below.
+    STAGGERED spawn (bob only after alice is wait_ready) is load-bearing: live
+    characterization (2026-06-26) showed two transcript-recipe peers booting
+    SIMULTANEOUSLY wedge the second (2/2), while staggered is reliable (3/3,
+    both replies faithful). This is the spawn-staggering contract in `spawn_peer`.
 
-    Reliability note: pane.read capture is timing-sensitive against a
-    plugin-heavy default claude config (a SessionStart banner churns the pane and
-    can drop injected keystrokes). For a robust green, point peers at a dedicated,
-    clean, pre-authed config via the env vars (one-time
-    ``CLAUDE_CONFIG_DIR=~/.fno/relay-claude claude`` login, then):
+    Reliability note: capture is timing-sensitive against a plugin-heavy default
+    claude config (a SessionStart banner churns the pane and can drop injected
+    keystrokes). For a robust green, point peers at a dedicated, clean, pre-authed
+    config via the env vars (one-time ``CLAUDE_CONFIG_DIR=~/.fno/relay-claude
+    claude`` login, then):
 
         FNO_RELAY_CLAUDE_CONFIG=~/.fno/relay-claude
         FNO_RELAY_CLAUDE_BIN=/abs/path/to/claude   # the real binary, bypassing
@@ -135,23 +142,33 @@ def test_live_round_trip_human_out_of_loop():
     A clean config removes the banner churn and reply pollution. Live runs draw
     the subscription weekly limit; a green run needs available budget.
     """
+    _restore_real_home(monkeypatch)
     a = b = None
     try:
+        # Staggered spawn -- see the spawn-staggering contract. Spawning both
+        # back-to-back wedges the second transcript-recipe peer.
         a = rt_mod.spawn_peer("alice", model="haiku")
-        b = rt_mod.spawn_peer("bob", model="haiku")
         rt_mod.wait_ready(a)
+        b = rt_mod.spawn_peer("bob", model="haiku")
         rt_mod.wait_ready(b)
 
         res = round_trip(a, b, "Hey, want to plan a picnic this Saturday?")
 
-        # B replied (read from B's pane) and A replied to it (read from A's pane).
+        # B replied and A replied to it -- both captured faithfully from their
+        # transcripts (not the space-collapsing pane).
         assert res.b_reply.strip(), "B produced no reply"
         assert res.a_reply.strip(), "A produced no reply"
+        # The pivot's payoff: a multi-word reply keeps its inter-word spaces.
+        assert " " in res.b_reply, f"B's reply not faithful (space-collapsed?): {res.b_reply!r}"
 
         # Lineage proof from A's pane: B's reply was injected into A (hop 2), so
-        # it must appear in A's pane output -- B's reply reached A, no human.
+        # it must appear in A's pane output. B's reply is faithful (transcript)
+        # but A's TUI echoes the injection with spaces collapsed, so collapse both
+        # sides to prove the SAME reply reached A regardless of pane rendering.
+        def collapse(s):
+            return "".join(s.split())
         a_pane = rt_mod._clean(a.buf)
-        assert res.b_reply in a_pane, (
+        assert collapse(res.b_reply) in collapse(a_pane), (
             "B's reply did not reach A's pane (human-out-of-loop lineage broken)"
         )
     finally:
@@ -182,6 +199,7 @@ def test_live_single_peer_transcript_faithful(monkeypatch):
 
     Point at the clean config (``FNO_RELAY_CLAUDE_CONFIG`` / ``_BIN``) as above.
     """
+    _restore_real_home(monkeypatch)
     monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "1")  # engage the transcript capture leg
     p = None
     try:
@@ -223,10 +241,19 @@ def test_peer_env_recipe(monkeypatch):
     assert env["FNO_RELAY_KEEP_ME"] == "yes"
 
 
-def test_peer_env_gate_off_is_unchanged(monkeypatch):
-    # Gate OFF (default): the peer inherits the parent env byte-for-byte -- the
-    # recipe's scrub/force-persist must NOT touch the default pane.read path.
+def test_transcript_default_on(monkeypatch):
+    # Transcript capture is default ON; FNO_RELAY_TRANSCRIPT=0 opts out to pane.
     monkeypatch.delenv("FNO_RELAY_TRANSCRIPT", raising=False)
+    assert rt_mod._transcript_enabled() is True
+    for off in ("0", "false", "off", "no", ""):
+        monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", off)
+        assert rt_mod._transcript_enabled() is False, off
+
+
+def test_peer_env_opt_out_is_unchanged(monkeypatch):
+    # Opt-OUT (FNO_RELAY_TRANSCRIPT=0): the peer inherits the parent env
+    # byte-for-byte -- the recipe's scrub/force-persist must NOT touch pane.read.
+    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "0")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent")
     monkeypatch.delenv("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", raising=False)
     env = rt_mod._peer_env()
@@ -320,10 +347,10 @@ def test_deliver_falls_back_to_pane_without_session_id(monkeypatch):
     assert out == "pane reply"
 
 
-def test_deliver_gate_off_uses_pane_even_with_session_id(monkeypatch):
-    # The opt-in gate's safety property: with FNO_RELAY_TRANSCRIPT unset the
-    # default path is pane.read (G1, unchanged) even when a session_id resolved.
-    monkeypatch.delenv("FNO_RELAY_TRANSCRIPT", raising=False)
+def test_deliver_opt_out_uses_pane_even_with_session_id(monkeypatch):
+    # The opt-out escape hatch: with FNO_RELAY_TRANSCRIPT=0 the path is pane.read
+    # (G1, unchanged) even when a session_id resolved.
+    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "0")
     assert rt_mod._transcript_enabled() is False
     peer = rt_mod.Peer(name="bob", proc=None, master_fd=-1, session_id="sid-B")
     monkeypatch.setattr(rt_mod, "_drain", lambda p, s: None)
