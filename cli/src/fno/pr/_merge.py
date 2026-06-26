@@ -264,6 +264,38 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         return 1
     pr_number = int(pr_raw)
 
+    # (0) Stub-manifest hold: a `contract`-tier dependent's PR must not merge
+    # while it carries an unreconciled stub-manifest (mocks would ship). Checked
+    # BEFORE the auto_merge gate so auto-merge cannot bypass it (AC7-EDGE), and
+    # it no-ops for every non-contract PR so the default `hard` path is unchanged
+    # (AC6-EDGE).
+    try:
+        from fno.stub_manifest import unreconciled_manifest_for_pr
+
+        # Resolve the repo top-level: manifests are written under the PROJECT
+        # root's `.fno/`, so a merge invoked from a subdirectory must not look
+        # under that subdir (codex P2). Falls back to `repo` if git can't say.
+        top = _git(["rev-parse", "--show-toplevel"], repo)
+        root = top.stdout.strip() if top.ok and top.stdout.strip() else repo
+        held = unreconciled_manifest_for_pr(pr_number, root)
+    except Exception:
+        held = None  # never let the guard's own failure block a normal merge
+    if held:
+        if held.get("_malformed"):
+            detail = "malformed stub-manifest (cannot prove stubs are gone)"
+        else:
+            detail = f"unreconciled stub-manifest ({len(held.get('stubs', []))} stub(s))"
+        _emit(
+            pr_number,
+            "held",
+            f"contract dependent {held.get('_node')} carries a {detail}; "
+            "reconcile before merge",
+            "none",
+            invoker,
+            err=False,
+        )
+        return 2
+
     # (1) Short-circuit if disabled or invoker not allowed.
     auto_merge = _load_auto_merge()
     if not auto_merge.is_allowed_for(invoker):

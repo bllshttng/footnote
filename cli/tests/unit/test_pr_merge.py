@@ -234,3 +234,51 @@ def test_session_satisfied_emitted_when_state_present(enabled, monkeypatch, tmp_
     assert line["type"] == "session_satisfied"
     assert line["data"]["source"] == "pr_merge"
     assert line["data"]["session_id"] == "20260613T000000Z-1-abc"
+
+
+# ---- stub-manifest draft-held guard (G3, x-24b7) ----
+
+
+def _held(*_a, **_k):
+    return {"_node": "x-9", "stubs": [{"stub_id": "a"}]}
+
+
+def test_unreconciled_stub_manifest_holds_merge_exit_2(enabled, monkeypatch, capsys, tmp_path):
+    # AC3-ERR / AC7-EDGE: auto_merge ENABLED, but a contract dependent's
+    # unreconciled manifest still refuses the merge, and the merge subcommand is
+    # never invoked (no mocks ship).
+    import fno.stub_manifest as sm
+    monkeypatch.setattr(sm, "unreconciled_manifest_for_pr", _held)
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert "x-9" in obj["reason"]
+    assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
+
+
+def test_hard_node_merges_unaffected_by_guard(enabled, monkeypatch, capsys, tmp_path):
+    # AC6-EDGE: guard returns None for a non-contract PR -> normal merge.
+    (tmp_path / ".fno").mkdir()
+    import fno.stub_manifest as sm
+    monkeypatch.setattr(sm, "unreconciled_manifest_for_pr", lambda *a, **k: None)
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_guard_own_failure_does_not_block_merge(enabled, monkeypatch, capsys, tmp_path):
+    # The guard is best-effort: if its own lookup raises, a normal merge proceeds.
+    (tmp_path / ".fno").mkdir()
+    import fno.stub_manifest as sm
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("graph wedged")
+
+    monkeypatch.setattr(sm, "unreconciled_manifest_for_pr", _boom)
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
