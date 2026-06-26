@@ -354,6 +354,18 @@ def cmd_write(
         typer.echo(f"stub-manifest: {exc}", err=True)
         raise typer.Exit(1)
     typer.echo(str(path))
+    # AC8: a contract dependent whose blocker merged BEFORE this first pass wrote
+    # the manifest left a pending `reconcile:<node>` sentinel. Now that the
+    # manifest exists, fire the reconcile dispatch exactly once. Best-effort and
+    # non-fatal: a write must never fail because the (optional) re-fire stumbled.
+    try:
+        from fno.backlog.reconcile_dispatch import fire_pending_reconcile
+
+        fired = fire_pending_reconcile(node, root)
+        if fired and fired.decision == "dispatched":
+            typer.echo(f"reconcile dispatched for pending sentinel: {node}", err=True)
+    except Exception as exc:  # noqa: BLE001 - the manifest write is the contract
+        typer.echo(f"stub-manifest: pending-reconcile re-fire skipped: {exc}", err=True)
 
 
 @stub_manifest_app.command("validate")
