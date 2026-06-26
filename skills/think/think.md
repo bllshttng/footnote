@@ -374,6 +374,55 @@ duplicating items.
 > design doc. The saved doc, the reviewer subagent (Step 8b), and `/blueprint`
 > must all treat the missing heading as a hard failure, not a style nit.
 
+### 6c. Interface Contract (cross-repo features only - becomes a versioned, Locked section)
+
+**Conditional, not mandatory.** Unlike Failure Modes, this section appears ONLY
+when the feature spans more than one repo/project: a frontend in one repo coding
+against a backend in another, two services sharing a wire format, a library and
+its consumer shipping in lockstep. A single-project feature skips this step
+entirely - no section, no version, no ceremony.
+
+When the feature IS cross-repo, pin the exact interface both sides will code to
+as a level-2 `## Interface Contract` section and capture it as a Locked Decision.
+This is the artifact downstream `contract`-tier execution stubs against, so it
+must be concrete enough that one side can build against it while the other
+implements it.
+
+**Required shape:**
+
+````markdown
+## Interface Contract
+
+**contract_version: 1**
+
+The schema / API / type surface both sides code to. Pin it concretely - the
+exact request/response shapes, field names, types, status codes, error bodies.
+
+- `POST /api/widgets` -> `{ id: string, name: string, createdAt: ISO8601 }`
+- `WidgetCreated` event: `{ widgetId: string, actorId: string }`
+- error: `409 { code: "duplicate", field: "name" }`
+````
+
+**Versioning rule.** `contract_version` starts at `1`. If a later `/think`
+iteration amends the pinned surface (a field renamed, a status code added), bump
+the integer and note what changed - never edit a shipped version in place. The
+version is the token the reconciliation pass validates the landed schema against,
+so a silent edit would let a drifted implementation de-stub against the wrong
+shape. When more than one version is live at once, keep each under its own
+`### Contract vN` subheading (newest first) so a parser can extract any
+still-active version without walking git history.
+
+**Lock it.** Add a Locked Decisions entry naming the contract and its version,
+e.g. `Interface Contract v1 is the single source of truth for the X<->Y surface;
+both the implementation and any stubs reference it.`
+
+**No pinnable contract => not `contract`-eligible.** If the interface genuinely
+cannot be pinned yet (still being discovered, depends on an unbuilt subsystem),
+do NOT fabricate one. Omit the section and record why in Open Questions. A
+cross-repo feature with no pinned contract falls back to `hard` serialization at
+`/blueprint` decompose time: the dependent waits for its blocker to land rather
+than building against stubs.
+
 ### 6.5 Executor Routing (capture as Locked Decision)
 
 By this point the architecture, user stories, and (for non-trivial designs)
@@ -494,6 +543,11 @@ Include:
 12. **Schema Reconciliation** (from Step 1e, when the repo is DB-backed; a
     top-level `## Schema Reconciliation` heading carrying the touched
     tables/enums and the dedup verdict)
+13. **Interface Contract** (from Step 6c, cross-repo features that pin a contract;
+    a top-level `## Interface Contract` heading carrying `contract_version` and the
+    pinned schema/API/type surface. A cross-repo feature that cannot pin a contract
+    yet omits this section and records why in Open Questions instead - do not add a
+    placeholder `contract_version`.)
 
 ### Locked Decisions Section (MANDATORY)
 
@@ -528,13 +582,17 @@ not as "we'll figure it out at implementation time":
   decision. See `docs/guides/per-task-executors.md`.
 - **Cross-project scope**: single-project (default) or `cross-project`
   with worktrees per repo?
+- **Interface Contract version** (cross-repo features, from Step 6c): when the
+  design pins a `## Interface Contract`, lock its `contract_version` so the
+  dependent stubs against a frozen surface and the reconciliation pass can
+  detect drift against a known shape.
 
 ### 8b. Spec Review Loop
 
 After saving the design document, spawn a Haiku reviewer subagent to critique it:
 
 1. Dispatch reviewer with the full design doc text
-2. Reviewer checks for: missing error states, incomplete acceptance criteria, contradictions between sections, vague implementation details, **a missing `## Failure Modes` heading** (hard fail), and missing sub-bullets (Boundaries / Errors / Invariants / Concurrency)
+2. Reviewer checks for: missing error states, incomplete acceptance criteria, contradictions between sections, vague implementation details, **a missing `## Failure Modes` heading** (hard fail), and missing sub-bullets (Boundaries / Errors / Invariants / Concurrency). For cross-repo features it also verifies a `## Interface Contract` section carrying `contract_version` and a Locked Decision referencing it (hard fail when the feature spans repos but pins no contract and does not explain the omission in Open Questions)
 3. If issues found: fix them, re-dispatch reviewer (max 3 iterations)
 4. If approved (or 3 iterations reached): present to user
 
