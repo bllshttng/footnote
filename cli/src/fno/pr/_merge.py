@@ -276,12 +276,15 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     except Exception:
         held = None  # never let the guard's own failure block a normal merge
     if held:
-        n_stubs = len(held.get("stubs", []))
+        if held.get("_malformed"):
+            detail = "malformed stub-manifest (cannot prove stubs are gone)"
+        else:
+            detail = f"unreconciled stub-manifest ({len(held.get('stubs', []))} stub(s))"
         _emit(
             pr_number,
             "held",
-            f"contract dependent {held.get('_node')} carries an unreconciled "
-            f"stub-manifest ({n_stubs} stub(s)); reconcile before merge",
+            f"contract dependent {held.get('_node')} carries a {detail}; "
+            "reconcile before merge",
             "none",
             invoker,
             err=False,
