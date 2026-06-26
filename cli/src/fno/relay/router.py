@@ -63,9 +63,10 @@ def _default_node_resolver(node_id: str) -> Optional[str]:
     (and tests can inject a fake resolver)."""
     try:
         from fno.graph.store import read_graph
+        graph = read_graph()
     except Exception:
         return None
-    for entry in read_graph():
+    for entry in graph:
         if entry.get("id") == node_id or entry.get("slug") == node_id:
             return entry.get("session_id")
     return None
