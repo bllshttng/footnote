@@ -697,10 +697,9 @@ PYEOF
   fi
 
   if [[ -n "$_NODE_ID" && -n "$local_session_id" ]]; then
-    # _NODE_OWNED: does THIS session own the node? Set by either claim layer
-    # succeeding. graph_node_id is decided once from it after both layers run,
-    # so a transient legacy-claim failure no longer nulls a node the modern
-    # `fno claim` actually won (defect 2 / AC1-ERR).
+    # Does THIS session own the node? Set by either claim layer; graph_node_id
+    # is decided once from it below, so a transient legacy failure no longer
+    # nulls a node the modern `fno claim` won.
     _NODE_OWNED=0
     if [[ -f "$_GRAPH_FILE" ]]; then
       _CURRENT_CLAIM=$(python3 - "$_GRAPH_FILE" "$_NODE_ID" <<'PYEOF' 2>/dev/null || echo ""
@@ -725,12 +724,10 @@ PYEOF
           rm -f "$_CLAIM_LOG"
           echo "target: graph node $_NODE_ID claimed for session $local_session_id" >&2
         else
-          # Transient legacy-claim failure (commonly the SessionStart
-          # `fno backlog reconcile` holding the graph flock). Preserve the real
-          # stderr (defect 1 / AC1-ERR) and DEFER graph_node_id: the modern
-          # `fno claim acquire` below is the authority, so a node it wins is
-          # still owned. Distinct message from the "already claimed" path so the
-          # operator is not misled into thinking a lock conflict occurred (AC1-UI).
+          # Transient legacy failure (usually the SessionStart reconcile holding
+          # the graph flock): keep the real stderr in $_CLAIM_LOG and defer to
+          # the modern claim below. Message distinct from "already claimed" so it
+          # is not misread as a lock conflict.
           echo "target: WARNING: graph node $_NODE_ID transient legacy-claim error (see $_CLAIM_LOG); deferring to fno claim" >&2
         fi
       else
@@ -847,10 +844,8 @@ PYEOF
         fi
       fi
     fi
-    # Single graph_node_id decision (AC1-FR: written exactly once at init).
-    # Owned iff a claim layer won AND the graph actually has the node; a missing
-    # graph.json stays null (Boundaries), while a transient legacy failure that
-    # the modern `fno claim` recovered resolves to the node id (defect 2 / AC1-ERR).
+    # graph_node_id written exactly once: the node id when a claim layer won and
+    # the graph has it, else null (a missing graph.json stays null).
     if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]]; then
       echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
     else
