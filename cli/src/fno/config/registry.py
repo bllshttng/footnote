@@ -56,7 +56,6 @@ FIELD_META: dict[str, Meta] = {
     "config.paths.agents_registry_path": Meta("never", "Override path to the agents registry.json."),
     "config.paths.handoffs_dir": Meta("never", "Override path to the handoffs dir."),
     "config.paths.retro_pending_dir": Meta("never", "Override path to the retro-pending dir."),
-    "config.paths.evals_history": Meta("never", "Override path to evals-history.jsonl."),
     "config.paths.bus_dir": Meta("never", "Override path to the cross-project mail bus dir."),
     # --- config.obsidian.* (a real decision) ---
     "config.obsidian.enabled": Meta(
@@ -121,8 +120,6 @@ FIELD_META: dict[str, Meta] = {
     "config.target.defaults.no_external": Meta("never", "Session-input default: skip external review (size-profile driven)."),
     "config.target.defaults.no_docs": Meta("never", "Session-input default: skip docs (size-profile driven)."),
     "config.target.defaults.max_iterations": Meta("advanced", "Session-input default: max pipeline iterations."),
-    # --- config.evals.* ---
-    "config.evals.staleness_days": Meta("never", "Age (days) before an eval sweep is considered stale."),
     # --- config.agents.* ---
     "config.agents.a2a.auto": Meta("advanced", "Allow agents to auto-open agent-to-agent threads."),
     "config.agents.a2a.turn_ceiling": Meta("advanced", "Max turns in an agent-to-agent thread."),

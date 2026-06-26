@@ -48,7 +48,6 @@ config:
   paths:
     graph_json: null         # default: <state_dir>/graph.json
     ledger_json: null        # default: <state_dir>/ledger.json
-    evals_history: null      # default: <state_dir>/evals-history.jsonl
     briefs_dir: null         # default: <state_dir>/briefs/
     fleet_dir: null          # default: <state_dir>/fleet/
     postmortems_dir: null    # default: <state_dir>/postmortems/

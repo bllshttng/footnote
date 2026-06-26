@@ -1,1 +1,1 @@
-"""fno.evals - golden-task fixture loading and TAP-lite output parsing."""
+"""fno.evals - research-brief grading (the ``grade`` green for /ship doc)."""

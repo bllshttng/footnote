@@ -1,5 +1,0 @@
-# budget_usd intentionally omitted to exercise the loader default (3.0)
-title: "Add slugify to textkit"
-tags: [feature]
-max_iterations: 8
-timeout_secs: 1800
