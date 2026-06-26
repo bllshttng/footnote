@@ -49,7 +49,6 @@ def _run_abi(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
 # These are the heaviest transitive imports that the lazy refactor defers.
 _FORBIDDEN_AFTER_HELP = [
     "fno.state.cli",
-    "fno.megawalk",
     "fno.megatron.cli",
     "fno.adapters.providers.cli",
     "fno.worker.cli",
@@ -89,7 +88,7 @@ import sys
 from fno import cli
 from typer.testing import CliRunner
 CliRunner().invoke(cli.app, ["paths", "state-dir"])
-found = [m for m in ["fno.megawalk", "fno.megatron.cli"] if m in sys.modules]
+found = [m for m in ["fno.megatron.cli"] if m in sys.modules]
 if found:
     print("FOUND:", ",".join(found), file=sys.stderr)
 sys.exit(len(found))
@@ -167,7 +166,6 @@ _EXPECTED_SUBCOMMANDS = [
     "paths",
     "mail",
     "agent",
-    "megawalk",
     "megatron",
     "providers",
     "review",
@@ -242,29 +240,6 @@ def test_executor_resolve_group_shape_preserved():
 # ---------------------------------------------------------------------------
 # Regression: info_overrides round-trip preserves extended help text
 # ---------------------------------------------------------------------------
-
-def test_megawalk_help_carries_extended_help():
-    """`fno megawalk --help` must surface the extended multi-line help.
-
-    Regression test for `info_overrides` plumbing through `TyperInfo`.
-    Without this mechanism, the extended help text that the old
-    `app.add_typer(megawalk_app, help=...)` registered at the parent
-    level is lost, and only the sub-app's own short help is shown.
-    Post ab-7303e5d7 the walker is the Rust loop and this app hosts only
-    the journal watcher, so the pinned marker is the loop-run pointer
-    rather than the deleted walker's exit-code table.
-    """
-    from fno.cli import app
-    from typer.testing import CliRunner
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["megawalk", "--help"])
-    assert result.exit_code == 0, f"fno megawalk --help failed: {result.output}"
-    assert "loop run --driver megawalk" in result.output, (
-        "Expected the loop-run pointer in `fno megawalk --help` output (proves "
-        f"info_overrides forwarding); got: {result.output[:500]}"
-    )
-
 
 def test_megatron_help_carries_exit_codes():
     """Same regression check for megatron's extended help."""

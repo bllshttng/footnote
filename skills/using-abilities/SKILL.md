@@ -11,12 +11,11 @@ This workspace has the `footnote` plugin installed. There are **two surfaces** f
 
 Invoke via `/fno:<verb>`. These compose multiple steps and require LLM reasoning. The full skill body loads when invoked.
 
-Six verbs are the advertised front door:
+Five verbs are the advertised front door:
 
 | Verb | Purpose |
 |------|---------|
 | `/fno:target` | End-to-end pipeline: think -> plan -> do -> review -> ship. The flagship execution front door. |
-| `/fno:megawalk` | Loop through the backlog until done. |
 | `/fno:think` | Reason about a design before building. Routes: `think` (design+BDD, default), `what-if` (stress test), `panel` (multi-persona debate). |
 | `/fno:review` | Review a diff. Routes: `sigma` (internal six-agent panel, default), `peer` (cross-model second opinion). |
 | `/fno:pr` | Drive a PR through its lifecycle. Routes: `create` (Haiku worker), `check` (poll + implement external review), `merged` (the post-merge ritual). |
@@ -40,7 +39,7 @@ Atomic, lock-protected, schema-validated. Callable from anywhere (bash, Python, 
 | `fno phase kill-check` | Kill criteria evaluation. |
 | `fno notify TITLE BODY` | OS notification. |
 | `fno state` | Read/write/validate state files. The ONLY legal post-init mutation on a target manifest is first-fill of an empty `plan_path` via `fno state set --field plan_path` (else exit 5). |
-| `fno-agents loop run --driver target\|megawalk\|megatron` | The unified Rust loop (step 5). Front doors: `scripts/run-target-loop.sh`, `/megawalk`, `fno megatron run`. The old `fno loop` verb is removed. |
+| `fno-agents loop run --driver target\|megawalk\|megatron` | The unified Rust loop (step 5). Front doors: `scripts/run-target-loop.sh`, `fno megatron run`. The old `fno loop` verb is removed. |
 | `fno whoami\|status` | Self-introspection. Run when confused after compaction. |
 | `fno mail send --to-project` / `fno mail reply\|unread\|ack` | Cross-project messaging: one namespace over the jsonl-canon bus log. `send` publishes (durable-first); `unread`/`ack` are the per-recipient cursor consume; `reply` correlates. (The legacy inbox + agents-send messaging surfaces are retired.) |
 | `fno agents spawn\|promote\|host\|ask\|watch ...` | Cross-CLI agent lifecycle (claude / codex / gemini). Per-provider support differs (e.g. `promote` adopts claude into a stream-json lane; `drive`/`grid` are codex/gemini-only; `watch` is claude-only) - see `docs/provider-command-matrix.md`. To message a peer, use `fno mail send`. |

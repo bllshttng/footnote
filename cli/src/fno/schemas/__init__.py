@@ -3,7 +3,6 @@
 Usage:
     from fno.schemas import load_schema
     Schema = load_schema("target")       # -> TargetState
-    Schema = load_schema("megawalk")   # -> MegawalkState (skill + CLI walker)
 """
 from __future__ import annotations
 
@@ -16,7 +15,7 @@ def load_schema(type_: str) -> Type[BaseModel]:
     """Return the pydantic model class for the given state type.
 
     Args:
-        type_: one of "target", "megawalk"
+        type_: "target"
 
     Returns:
         Pydantic model class with model_validate method.
@@ -27,9 +26,6 @@ def load_schema(type_: str) -> Type[BaseModel]:
     if type_ == "target":
         from fno.schemas.target import TargetState
         return TargetState
-    if type_ == "megawalk":
-        from fno.schemas.megawalk import MegawalkState
-        return MegawalkState
     raise ValueError(f"unknown state type: {type_!r}")
 
 

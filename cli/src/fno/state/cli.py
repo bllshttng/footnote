@@ -46,9 +46,6 @@ def _resolve_path(path: Optional[Path], type_: Optional[str]) -> Path:
 
 def _detect_type(path: Path) -> str:
     """Auto-detect state type from file name."""
-    name = path.name
-    if "megawalk" in name:
-        return "megawalk"
     return "target"
 
 
@@ -75,7 +72,7 @@ def _emit(ctx: typer.Context, data) -> None:
 def show(
     ctx: typer.Context,
     path: Optional[Path] = typer.Option(None, "--path", help="path to state file"),
-    type_: Optional[str] = typer.Option(None, "--type", help="state type: target|megawalk"),
+    type_: Optional[str] = typer.Option(None, "--type", help="state type: target"),
     field: Optional[str] = typer.Option(None, "--field", help="return a single field value"),
     v2: bool = typer.Option(
         False,
@@ -173,7 +170,7 @@ def _is_target_manifest(state_path: Path, type_: Optional[str], data: dict) -> b
 def set_field(
     ctx: typer.Context,
     path: Optional[Path] = typer.Option(None, "--path", help="path to state file"),
-    type_: Optional[str] = typer.Option(None, "--type", help="state type: target|megawalk"),
+    type_: Optional[str] = typer.Option(None, "--type", help="state type: target"),
     field: str = typer.Option(..., "--field", help="field name to update"),
     value: str = typer.Option(..., "--value", help="new value"),
 ) -> None:
@@ -266,7 +263,7 @@ def _output_validation_error(ctx: typer.Context, exc) -> None:
 def validate(
     ctx: typer.Context,
     path: Optional[Path] = typer.Option(None, "--path", help="path to state file"),
-    type_: Optional[str] = typer.Option(None, "--type", help="state type: target|megawalk"),
+    type_: Optional[str] = typer.Option(None, "--type", help="state type: target"),
 ) -> None:
     """Validate a state file against its schema."""
     from fno.state.io import read_frontmatter
@@ -312,7 +309,7 @@ def validate(
 @cli.command()
 def init(
     ctx: typer.Context,
-    type_: str = typer.Option("target", "--type", help="state type: target|megawalk"),
+    type_: str = typer.Option("target", "--type", help="state type: target"),
     output: Optional[Path] = typer.Option(None, "--output", help="output path (default: .fno/<type>-state.md)"),
     force: bool = typer.Option(False, "--force", "-F", help="overwrite existing file"),
     allow_stub: bool = typer.Option(
@@ -395,7 +392,7 @@ def archive(
 @cli.command(name="list-fields")
 def list_fields(
     ctx: typer.Context,
-    type_: str = typer.Option("target", "--type", help="state type: target|megawalk"),
+    type_: str = typer.Option("target", "--type", help="state type: target"),
 ) -> None:
     """List all known fields for a state type."""
     from fno.schemas import load_schema

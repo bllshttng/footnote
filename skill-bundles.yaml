@@ -80,42 +80,6 @@ bundles:
       - source: skills/_shared/worktree.md
         dest: references/worktree.md
 
-  - skill: megawalk
-    files:
-      # graph-resolve.sh: sourced from references/argument-parsing.md
-      # to resolve ab-XXXX backlog node IDs to plan_path.
-      - source: scripts/lib/graph-resolve.sh
-        dest: scripts/lib/graph-resolve.sh
-    references:
-      # Bundled from skills/_shared/ so the megawalk folder is self-contained.
-      - source: skills/_shared/auto-merge.md
-        dest: references/auto-merge.md
-      - source: skills/_shared/worktree.md
-        dest: references/worktree.md
-      - source: skills/_shared/megawalk-migration.md
-        dest: references/megawalk-migration.md
-    agents:
-      # Bundled subagent prompt for the per-task worker dispatched from
-      # megawalk's loop. Canonical is the /target SKILL.md body; the
-      # bundler strips skill frontmatter and prepends subagent frontmatter
-      # via rewrite_frontmatter: subagent. This removes the last Skill()
-      # runtime delegation from megawalk (the loop now dispatches via
-      # Task/Agent with this prompt instead of Skill("target", ...)).
-      - source: skills/target/SKILL.md
-        dest: agents/archer.md
-        rewrite_frontmatter: subagent
-        subagent_meta:
-          name: archer
-          description: "TDD-disciplined task executor spawned by megawalk per backlog task. Drives the full target pipeline (plan -> implement -> review -> ship) in isolated context. Returns RESULT: SUCCESS|FAILED|BLOCKED."
-          model: opus
-          tools:
-            - Read
-            - Write
-            - Edit
-            - Grep
-            - Glob
-            - Bash
-
   # Cluster router: /fix. The default fix loop (SKILL.md) and the investigate
   # flow (investigate.md) plus their references are canonical in the folder.
   # Only the shared iteration/verification references come from /target.
