@@ -57,10 +57,20 @@ def extract_contract_versions(doc_text: str) -> set[int]:
     back to `hard` (AC2-HP). Both the single-version (`**contract_version: N**`)
     and the multi-version (`### Contract vN`) layouts are read.
     """
-    if not _CONTRACT_HEADING_RE.search(doc_text or ""):
+    match = _CONTRACT_HEADING_RE.search(doc_text or "")
+    if not match:
         return set()
-    versions = {int(m.group(1)) for m in _CONTRACT_VERSION_RE.finditer(doc_text)}
-    versions |= {int(m.group(1)) for m in _CONTRACT_SUBHEADING_RE.finditer(doc_text)}
+    # Scope the version search to the section BODY (until the next level-1/2
+    # heading). A stray `**contract_version: N**` or `### Contract vN` in a later
+    # section (Locked Decisions, Open Questions, prose) must NOT satisfy the pin
+    # gate. A level-3 `### Contract vN` does not close the section, so the
+    # multi-version layout still parses.
+    body = doc_text[match.end():]
+    nxt = re.search(r"^##?[ \t]+", body, re.M)
+    if nxt:
+        body = body[: nxt.start()]
+    versions = {int(m.group(1)) for m in _CONTRACT_VERSION_RE.finditer(body)}
+    versions |= {int(m.group(1)) for m in _CONTRACT_SUBHEADING_RE.finditer(body)}
     return versions
 
 

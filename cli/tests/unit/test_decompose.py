@@ -756,6 +756,20 @@ def test_extract_contract_versions_no_heading_is_empty():
     assert extract_contract_versions("**contract_version: 1**") == set()
 
 
+def test_extract_contract_versions_ignores_stray_outside_section():
+    # Version markers outside the Interface Contract section body do not satisfy
+    # the pin gate (gemini HIGH / codex P2): only the v2 inside the section counts.
+    text = (
+        "## Discussion\n"
+        "We should upgrade from **contract_version: 1** to 2.\n\n"
+        "## Interface Contract\n"
+        "**contract_version: 2**\n\n"
+        "## Next Section\n"
+        "**contract_version: 3**\n"
+    )
+    assert extract_contract_versions(text) == {2}
+
+
 def test_extract_contract_versions_empty_doc():
     assert extract_contract_versions("") == set()
 

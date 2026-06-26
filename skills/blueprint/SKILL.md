@@ -1065,9 +1065,10 @@ is known):
    else keep `hard`:
    - **Pin gate:** the design doc has a `## Interface Contract` section with a
      `contract_version` (a G1 `/think` output). No pin ⇒ `hard`. The CLI
-     re-checks this and silently downgrades a `contract` request to `hard` if the
-     doc pins nothing, so an honest mistake never ships a mocked PR, but propose
-     `contract` only when the pin is really there.
+     re-checks this and downgrades a `contract` request to `hard` **loudly** (a
+     warning on stderr and in the JSON `downgrades`) if the doc pins nothing, so
+     an honest mistake never ships a mocked PR, but propose `contract` only when
+     the pin is really there.
    - **Independent-work gate:** the dependent has ≥ 1 wave of work that does NOT
      need the blocker landed (real parallelism to win). A dependent that only
      stubs ⇒ `hard`.
