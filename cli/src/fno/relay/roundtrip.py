@@ -10,14 +10,24 @@ own process holds the master fd) running subscription-billed INTERACTIVE claude
 messaging socket. The messaging socket is dead on claude 2.1.191
 (messagingSocketPath null, session suspended); see the design's Open Question #1.
 
-Reply capture (Locked Decision #4): the design prefers the transcript jsonl, but
-on this environment claude does not write a standard project transcript jsonl for
-spawned interactive sessions (the plugin/observer ecosystem suppresses it, proven
-empirically). So G1 uses the SANCTIONED alternative -- `pane.read`: read the PTY
-master output and extract the peer's reply. To keep that robust (not the fragile
-freeform grep the spike warned against), each peer is steered by an
-`--append-system-prompt` to wrap every reply in `<<<RELAY>>>...<<<ENDRELAY>>>`
-sentinels, and the PTY is sized wide so short replies do not wrap.
+Reply capture (Locked Decision #4): the design prefers the transcript jsonl
+(faithful text -- no TUI space-collapse). The default stays `pane.read`; the
+transcript leg is OPT-IN behind `FNO_RELAY_TRANSCRIPT` (see `_transcript_enabled`).
+G1 had fallen back to `pane.read` believing spawned interactive claude wrote no
+transcript here; that was mis-attributed -- the suppressor was the peer INHERITING
+the parent's session identity, so claude treated it as a sub-session and skipped
+its own transcript. The binary-findings recipe in `_peer_env` (scrub
+`CLAUDE_CODE_SESSION_ID` for an own transcript path, force persistence so the
+child writes anyway) restores a faithful own-id transcript -- PROVEN for a single
+peer (2026-06-26). The recipe ALSO keeps `CLAUDE_CODE_CHILD_SESSION` set on the
+theory that staying a child skips the top-level boot that wedges a second
+simultaneous peer; live runs DISPROVED that (2/2 deterministic 2-peer bob
+timeout), so the recipe does NOT fix the 2-peer wake and the proven 2-peer path
+stays `pane.read` (gate off). With the gate ON, `_deliver_and_capture` PREFERS
+the transcript and keeps `pane.read` as the fallback when no session_id resolved.
+Either way each peer is steered by an `--append-system-prompt` to wrap every reply
+in `<<<RELAY>>>...<<<ENDRELAY>>>` sentinels, and the PTY is sized wide so short
+replies do not wrap.
 
 Provenance (Locked Decision #3, now ALL hops): every hop is keystroke injection
 (human provenance), so every injected message is wrapped in explicit peer framing
@@ -34,6 +44,7 @@ round-trip is two send-keys hops::
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import select
@@ -43,7 +54,10 @@ import subprocess
 import termios
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
+
+from fno.relay.registry import transcript_path_for
 
 # Spawn defaults, env-configurable so the relay can point at a dedicated, clean,
 # pre-authed claude config (no personal plugins -> a stable, unpolluted pane;
@@ -86,6 +100,8 @@ class Peer:
     proc: subprocess.Popen
     master_fd: int
     buf: bytearray = field(default_factory=bytearray)
+    session_id: Optional[str] = None  # resolved in wait_ready; enables jsonl capture
+    config_dir: Optional[str] = None  # peer's CLAUDE_CONFIG_DIR; where it writes sessions/+projects/
 
 
 @dataclass(frozen=True)
@@ -98,6 +114,52 @@ class RoundTrip:
     b_name: str
     b_reply: str  # B's reply to A's seed, read from B's pane
     a_reply: str  # A's reply to B's reply, read from A's pane
+
+
+def _peer_env() -> dict:
+    """Env for a spawned peer that writes its OWN faithful transcript without
+    regressing the multi-peer wake. The "binary-findings recipe", reverse-engineered
+    from and validated against claude 2.1.193:
+
+    - scrub ``CLAUDE_CODE_SESSION_ID``: the peer mints its own UUID, so its
+      transcript lands at its own ``projects/<enc>/<id>.jsonl`` path, not the
+      parent's.
+    - KEEP ``CLAUDE_CODE_CHILD_SESSION``: the peer stays a "child" (``qUe()`` true)
+      on the theory that a child skips the top-level-session boot whose contention
+      wedges a SECOND simultaneous peer. NOTE: live runs (2026-06-26) DISPROVED
+      this -- a 2-peer back-to-back spawn still wedges bob (2/2 timeout), so
+      keeping CHILD_SESSION does NOT buy a reliable 2-peer wake. It is retained
+      because it is harmless single-peer and may help a STAGGERED spawn; the
+      reliable 2-peer path remains the gate-off ``pane.read``.
+    - set ``CLAUDE_CODE_FORCE_SESSION_PERSISTENCE``: overrides the child's
+      persistence-skip (``jUe()``'s first line) so it writes the transcript anyway.
+
+    Net: a faithful own-id transcript, PROVEN for a single peer (2026-06-26). The
+    2-peer simultaneous-spawn wake is NOT solved by this recipe -- hence the
+    opt-in gate below.
+
+    Gated on :func:`_transcript_enabled`: with the flag OFF (default) the peer
+    inherits the parent env UNCHANGED -- exactly G1 behavior -- so the recipe's
+    env mutation never touches the default ``pane.read`` path. The scrub only
+    earns its keep when we actually read the transcript."""
+    env = dict(os.environ)
+    if not _transcript_enabled():
+        return env  # G1 default: inherit parent env unchanged (pane.read path)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    env["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] = "1"
+    return env
+
+
+def _transcript_enabled() -> bool:
+    """Opt-in gate for transcript (jsonl) capture; default OFF -> pane.read.
+
+    The transcript path gives faithful text (no TUI space-collapse) but its
+    2-peer wake reliability on this heavy-plugin host is only "~baseline-flaky",
+    not proven solved (see the relay-transcript-pivot handoff). So the DEFAULT
+    stays the proven G1 ``pane.read`` -- byte-for-byte unchanged -- and the
+    transcript leg activates only under ``FNO_RELAY_TRANSCRIPT=1``. Flip it on
+    once a clean-config peer makes the wake deterministic."""
+    return os.environ.get("FNO_RELAY_TRANSCRIPT", "") not in ("", "0", "false")
 
 
 def _set_winsize(fd: int) -> None:
@@ -129,7 +191,7 @@ def spawn_peer(
     """
     claude_bin = claude_bin or _DEFAULT_CLAUDE_BIN
     config_dir = config_dir or _DEFAULT_CONFIG_DIR
-    env = dict(os.environ)
+    env = _peer_env()
     if config_dir:
         env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(config_dir)
     master, slave = os.openpty()
@@ -145,7 +207,8 @@ def spawn_peer(
         raise
     finally:
         os.close(slave)  # the parent never needs the slave end
-    return Peer(name=name, proc=proc, master_fd=master)
+    return Peer(name=name, proc=proc, master_fd=master,
+                config_dir=env.get("CLAUDE_CONFIG_DIR"))
 
 
 def _drain(peer: Peer, seconds: float) -> None:
@@ -199,6 +262,10 @@ def wait_ready(peer: Peer, *, timeout: float = 75.0) -> None:
     _drain(peer, 8.0)
     os.write(peer.master_fd, b"\r")  # accept the trust dialog (option 1 default)
     _quiet(peer, quiet_for=6.0, timeout=timeout)
+    # Best-effort: enables faithful transcript capture; None falls back to pane.
+    # Skip the resolve entirely when the gate is off -- no wasted retry latency.
+    if _transcript_enabled():
+        peer.session_id = resolve_session_id(peer)
 
 
 def _frame(from_name: str, body: str) -> str:
@@ -227,6 +294,71 @@ def _replies(buf: bytearray) -> list[str]:
     return [" ".join(m.split()) for m in _SENTINEL_RE.findall(_clean(buf))]
 
 
+def _claude_base(config_dir: Optional[str]) -> Path:
+    """Where the peer writes its claude state (sessions/ + projects/). Honors the
+    peer's ``CLAUDE_CONFIG_DIR`` -- a clean relay config relocates BOTH dirs, so
+    the resolvers must follow it, not assume ``~/.claude``."""
+    return Path(config_dir) if config_dir else Path.home() / ".claude"
+
+
+def _sessions_file(pid: int, config_dir: Optional[str] = None) -> Path:
+    return _claude_base(config_dir) / "sessions" / f"{pid}.json"
+
+
+def resolve_session_id(peer: Peer, *, retries: int = 12, delay: float = 0.3) -> Optional[str]:
+    """Read the peer's claude session_id from ``<config>/sessions/<pid>.json``.
+
+    Written once the (env-scrubbed) session boots -- wait_ready guarantees that,
+    but retry briefly. Returns None when the file never appears (e.g. the env
+    was not scrubbed), which is the signal to fall back to pane capture."""
+    if peer.proc is None:
+        return None
+    f = _sessions_file(peer.proc.pid, peer.config_dir)
+    for _ in range(retries):
+        if f.exists():
+            try:
+                sid = json.loads(f.read_text(encoding="utf-8")).get("sessionId")
+                if sid:
+                    return sid
+            except (json.JSONDecodeError, OSError):
+                pass
+        time.sleep(delay)
+    return None
+
+
+def _transcript_replies(session_id: str, config_dir: Optional[str] = None) -> list[str]:
+    """Sentinel-wrapped replies from the peer's transcript jsonl -- faithful
+    text (spaces intact), the reason G2 prefers this over the pane. Reads the
+    last assistant message blocks; a partial-write/parse error on one line is
+    skipped, never fatal. ``config_dir`` locates the peer's ``projects/`` when it
+    runs under a relocated ``CLAUDE_CONFIG_DIR``."""
+    projects_dir = _claude_base(config_dir) / "projects" if config_dir else None
+    tpath = transcript_path_for(session_id, projects_dir=projects_dir)
+    if tpath is None:
+        return []
+    try:
+        text = Path(tpath).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or '"assistant"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        content = (row.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                out.extend(" ".join(m.split())
+                           for m in _SENTINEL_RE.findall(block.get("text", "")))
+    return out
+
+
 def _deliver_and_capture(peer: Peer, framed: str, timeout: float) -> str:
     """Inject ``framed`` as a turn and capture the peer's next sentinel reply.
 
@@ -236,7 +368,12 @@ def _deliver_and_capture(peer: Peer, framed: str, timeout: float) -> str:
     text."""
     if _dead(peer):
         raise RuntimeError(f"peer {peer.name!r} is not running")
-    baseline = len(_replies(peer.buf))
+    if _transcript_enabled() and peer.session_id is None:
+        # late session-file write -> try once more, then cache
+        peer.session_id = resolve_session_id(peer, retries=3, delay=0.3)
+    use_tx = _transcript_enabled() and peer.session_id is not None
+    base_pane = len(_replies(peer.buf))
+    base_tx = len(_transcript_replies(peer.session_id, peer.config_dir)) if use_tx else 0
 
     def _inject() -> None:
         os.write(peer.master_fd, framed.encode())
@@ -254,12 +391,27 @@ def _deliver_and_capture(peer: Peer, framed: str, timeout: float) -> str:
         if _dead(peer):
             raise RuntimeError(f"peer {peer.name!r} exited before replying")
         _drain(peer, 1.0)
-        seen = _replies(peer.buf)
-        if len(seen) > baseline:
-            return seen[-1]
+        if use_tx:
+            # The transcript is authoritative for a COMPLETED turn (faithful
+            # text). Wait for it -- do NOT race the live pane, whose render
+            # collapses inter-word spaces and usually appears a beat earlier.
+            tx = _transcript_replies(peer.session_id, peer.config_dir)
+            if len(tx) > base_tx:
+                return tx[-1]
+        else:
+            seen = _replies(peer.buf)  # no session_id -> pane capture
+            if len(seen) > base_pane:
+                return seen[-1]
         if not retried and time.monotonic() > deadline - timeout * 0.6:
             _inject()
             retried = True
+    # Last resort: a session_id resolved but its transcript never produced a
+    # reply (e.g. it was never written). A collapsed pane reply beats a hard
+    # failure.
+    if use_tx:
+        seen = _replies(peer.buf)
+        if len(seen) > base_pane:
+            return seen[-1]
     raise TimeoutError(f"no reply from peer {peer.name!r} within {timeout:.0f}s")
 
 

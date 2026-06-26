@@ -114,6 +114,14 @@ def test_live_round_trip_human_out_of_loop():
     """AC1-HP: two autonomous claude sessions round-trip with no human, proven by
     reading BOTH panes.
 
+    Uses the DEFAULT pane.read path (transcript gate off). The transcript recipe
+    is NOT used here: live characterization (2026-06-26, 2/2 deterministic bob
+    timeout) showed the binary-findings recipe does NOT fix the 2-peer wake --
+    the second peer of a back-to-back spawn still wedges, so the recipe's
+    own-id-scrub is gated opt-in (``FNO_RELAY_TRANSCRIPT``) and the proven 2-peer
+    path stays pane.read. Faithful transcript capture is proven separately, for
+    a SINGLE peer, by ``test_live_single_peer_transcript_faithful`` below.
+
     Reliability note: pane.read capture is timing-sensitive against a
     plugin-heavy default claude config (a SessionStart banner churns the pane and
     can drop injected keystrokes). For a robust green, point peers at a dedicated,
@@ -124,10 +132,8 @@ def test_live_round_trip_human_out_of_loop():
         FNO_RELAY_CLAUDE_BIN=/abs/path/to/claude   # the real binary, bypassing
                                                    # any wrapper shim (e.g. cmux)
 
-    A clean config removes the banner churn and reply pollution. Note: even a
-    clean session does not write a standard transcript jsonl for this short-lived
-    spawn pattern, so capture stays on pane.read (LD#4). Live runs draw the
-    subscription weekly limit; a green run needs available budget.
+    A clean config removes the banner churn and reply pollution. Live runs draw
+    the subscription weekly limit; a green run needs available budget.
     """
     a = b = None
     try:
@@ -153,3 +159,205 @@ def test_live_round_trip_human_out_of_loop():
             rt_mod.close_peer(a)
         if b is not None:
             rt_mod.close_peer(b)
+
+
+@pytest.mark.slow_e2e
+@pytest.mark.skipif(
+    not os.environ.get("FNO_LIVE_RELAY"),
+    reason="spawns a real interactive claude PTY session; set FNO_LIVE_RELAY=1 to run",
+)
+def test_live_single_peer_transcript_faithful(monkeypatch):
+    """The transcript pivot's payoff, for a SINGLE peer (the case the
+    binary-findings recipe genuinely fixes): with ``FNO_RELAY_TRANSCRIPT=1`` the
+    peer writes its own jsonl and capture reads faithful text -- inter-word
+    spaces intact, which the TUI pane collapses. Single peer dodges the unsolved
+    2-peer simultaneous-spawn wedge.
+
+    The capture MECHANISM was proven live 2026-06-26 (own session file written
+    under the relocated config, ``_transcript_replies`` returned faithful text).
+    This e2e is budget-sensitive: once the subscription weekly limit throttles a
+    reply, the peer boots (session_id resolves) but emits a rate-limit notice
+    instead of a sentinel, so capture times out -- a quota signal, not a capture
+    defect. Run it with available budget. Billed.
+
+    Point at the clean config (``FNO_RELAY_CLAUDE_CONFIG`` / ``_BIN``) as above.
+    """
+    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "1")  # engage the transcript capture leg
+    p = None
+    try:
+        p = rt_mod.spawn_peer("solo", model="haiku")
+        rt_mod.wait_ready(p)
+        assert p.session_id, "recipe did not yield an own session_id (transcript path)"
+        framed = rt_mod._frame("peer", "Say hello there friend in one full sentence.")
+        reply = rt_mod._deliver_and_capture(p, framed, timeout=180.0)
+        assert reply.strip(), "no reply captured"
+        # The whole point: transcript text keeps the spaces the pane collapses.
+        assert " " in reply, f"reply not faithful (space-collapsed -> pane, not transcript?): {reply!r}"
+    finally:
+        if p is not None:
+            rt_mod.close_peer(p)
+
+
+# ---------------------------------------------------------------------------
+# G2 (x-e4ac): transcript-jsonl capture -- the OUT-leg pivot.
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+
+def test_peer_env_recipe(monkeypatch):
+    # The binary-findings recipe: own transcript without the multi-peer wake break.
+    # scrub SESSION_ID (own id), KEEP CHILD_SESSION (skip the wedging top-level
+    # boot), force-persist (write the transcript anyway). Only with the gate ON.
+    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent")
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+    monkeypatch.setenv("CMUX_PANEL_ID", "x")
+    monkeypatch.delenv("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", raising=False)
+    monkeypatch.setenv("FNO_RELAY_KEEP_ME", "yes")
+    env = rt_mod._peer_env()
+    assert "CLAUDE_CODE_SESSION_ID" not in env              # own id -> own transcript path
+    assert env["CLAUDE_CODE_CHILD_SESSION"] == "1"          # KEPT -> avoids the wake wedge
+    assert env["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] == "1"  # forces the write
+    assert env["CMUX_PANEL_ID"] == "x"                     # rest of env untouched
+    assert env["FNO_RELAY_KEEP_ME"] == "yes"
+
+
+def test_peer_env_gate_off_is_unchanged(monkeypatch):
+    # Gate OFF (default): the peer inherits the parent env byte-for-byte -- the
+    # recipe's scrub/force-persist must NOT touch the default pane.read path.
+    monkeypatch.delenv("FNO_RELAY_TRANSCRIPT", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent")
+    monkeypatch.delenv("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", raising=False)
+    env = rt_mod._peer_env()
+    assert env["CLAUDE_CODE_SESSION_ID"] == "parent"           # NOT scrubbed
+    assert "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE" not in env   # NOT forced
+    assert env == dict(os.environ)                             # exactly the ambient env
+
+
+def test_transcript_replies_faithful_text(tmp_path, monkeypatch):
+    # The whole point: transcript text keeps the spaces the pane collapses.
+    tx = tmp_path / "sess.jsonl"
+    rows = [
+        {"type": "user", "message": {"content": "hi"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "<<<RELAY>>>hello there friend<<<ENDRELAY>>>"}]}},
+    ]
+    tx.write_text("\n".join(json.dumps(r) for r in rows))
+    monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: str(tx))
+    assert rt_mod._transcript_replies("sid") == ["hello there friend"]
+
+
+def test_transcript_replies_empty_when_no_transcript(monkeypatch):
+    monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: None)
+    assert rt_mod._transcript_replies("sid") == []
+
+
+def test_resolvers_honor_config_dir(tmp_path):
+    # A peer under a relocated CLAUDE_CONFIG_DIR writes sessions/+projects/ THERE,
+    # not under ~/.claude. The resolvers must follow the config dir.
+    cfg = str(tmp_path / "relay-cfg")
+    assert rt_mod._sessions_file(4242, cfg) == rt_mod.Path(cfg) / "sessions" / "4242.json"
+    assert rt_mod._sessions_file(4242) == rt_mod.Path.home() / ".claude" / "sessions" / "4242.json"
+    # _transcript_replies globs projects/ under the config dir.
+    proj = rt_mod.Path(cfg) / "projects" / "enc"
+    proj.mkdir(parents=True)
+    (proj / "sess.jsonl").write_text(json.dumps(
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "<<<RELAY>>>a b c<<<ENDRELAY>>>"}]}}))
+    assert rt_mod._transcript_replies("sess", cfg) == ["a b c"]
+
+
+def test_deliver_prefers_transcript_over_pane(monkeypatch):
+    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "1")  # exercise the opt-in transcript leg
+    peer = rt_mod.Peer(name="bob", proc=None, master_fd=-1, session_id="sid-B")
+    monkeypatch.setattr(rt_mod, "_drain", lambda p, s: None)
+    monkeypatch.setattr(rt_mod.os, "write", lambda *a: None)
+    monkeypatch.setattr(rt_mod.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def fake_tx(sid, config_dir=None):
+        calls["n"] += 1
+        return [] if calls["n"] <= 1 else ["faithful reply with spaces"]
+
+    monkeypatch.setattr(rt_mod, "_transcript_replies", fake_tx)
+    out = rt_mod._deliver_and_capture(peer, "framed", timeout=5)
+    assert out == "faithful reply with spaces"
+
+
+def test_deliver_waits_for_transcript_not_pane(monkeypatch):
+    # use_tx True: even when the pane already shows a collapsed reply, capture
+    # waits for the faithful transcript reply rather than racing the pane.
+    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "1")  # exercise the opt-in transcript leg
+    peer = rt_mod.Peer(name="bob", proc=None, master_fd=-1, session_id="sid")
+    monkeypatch.setattr(rt_mod, "_drain", lambda p, s: None)
+    monkeypatch.setattr(rt_mod.os, "write", lambda *a: None)
+    monkeypatch.setattr(rt_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(rt_mod, "_replies", lambda buf: ["panecollapsed"])
+    n = {"i": 0}
+
+    def fake_tx(sid, config_dir=None):
+        n["i"] += 1
+        return ["faithful reply"] if n["i"] >= 3 else []
+
+    monkeypatch.setattr(rt_mod, "_transcript_replies", fake_tx)
+    assert rt_mod._deliver_and_capture(peer, "framed", timeout=30) == "faithful reply"
+
+
+def test_deliver_falls_back_to_pane_without_session_id(monkeypatch):
+    peer = rt_mod.Peer(name="bob", proc=None, master_fd=-1)  # session_id None
+    monkeypatch.setattr(rt_mod, "_drain", lambda p, s: None)
+    monkeypatch.setattr(rt_mod.os, "write", lambda *a: None)
+    monkeypatch.setattr(rt_mod.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def fake_replies(buf):
+        calls["n"] += 1
+        return [] if calls["n"] <= 1 else ["pane reply"]
+
+    monkeypatch.setattr(rt_mod, "_replies", fake_replies)
+    out = rt_mod._deliver_and_capture(peer, "framed", timeout=5)
+    assert out == "pane reply"
+
+
+def test_deliver_gate_off_uses_pane_even_with_session_id(monkeypatch):
+    # The opt-in gate's safety property: with FNO_RELAY_TRANSCRIPT unset the
+    # default path is pane.read (G1, unchanged) even when a session_id resolved.
+    monkeypatch.delenv("FNO_RELAY_TRANSCRIPT", raising=False)
+    assert rt_mod._transcript_enabled() is False
+    peer = rt_mod.Peer(name="bob", proc=None, master_fd=-1, session_id="sid-B")
+    monkeypatch.setattr(rt_mod, "_drain", lambda p, s: None)
+    monkeypatch.setattr(rt_mod.os, "write", lambda *a: None)
+    monkeypatch.setattr(rt_mod.time, "sleep", lambda s: None)
+    # Transcript would have a reply, but the gate is off so it must be ignored.
+    monkeypatch.setattr(rt_mod, "_transcript_replies", lambda sid, config_dir=None: ["ignored transcript"])
+    calls = {"n": 0}
+
+    def fake_replies(buf):
+        calls["n"] += 1
+        return [] if calls["n"] <= 1 else ["pane reply"]
+
+    monkeypatch.setattr(rt_mod, "_replies", fake_replies)
+    assert rt_mod._deliver_and_capture(peer, "framed", timeout=5) == "pane reply"
+
+
+def test_deliver_reresolves_late_session_id(monkeypatch):
+    # A peer whose session file lands after wait_ready's window: capture must
+    # re-resolve once and still take the faithful transcript path.
+    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "1")  # exercise the opt-in transcript leg
+    peer = rt_mod.Peer(name="bob", proc=None, master_fd=-1)  # starts None
+    monkeypatch.setattr(rt_mod, "resolve_session_id", lambda p, **k: "late-sid")
+    monkeypatch.setattr(rt_mod, "_drain", lambda p, s: None)
+    monkeypatch.setattr(rt_mod.os, "write", lambda *a: None)
+    monkeypatch.setattr(rt_mod.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def fake_tx(sid, config_dir=None):
+        assert sid == "late-sid"
+        calls["n"] += 1
+        return [] if calls["n"] <= 1 else ["faithful late"]
+
+    monkeypatch.setattr(rt_mod, "_transcript_replies", fake_tx)
+    out = rt_mod._deliver_and_capture(peer, "framed", timeout=5)
+    assert out == "faithful late"
+    assert peer.session_id == "late-sid"  # cached for the next hop
