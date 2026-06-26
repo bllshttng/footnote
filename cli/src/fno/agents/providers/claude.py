@@ -57,6 +57,12 @@ from fno.claims.io import global_claims_root
 # Locked Decision 6: 8 lowercase hex chars after "backgrounded · ".
 _SHORT_ID_PATTERN = re.compile(r"^backgrounded · ([0-9a-f]{8}) · ")
 
+# claude >= 2.1.191 colorizes the short-id in the --bg receipt even over a
+# non-TTY pipe (`backgrounded · \x1b[36m<id>\x1b[39m · <name>`), which the
+# anchored hex pattern above cannot match through. Strip CSI/SGR escapes
+# before matching so the parser is robust to color drift across versions.
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
 # AC1-EDGE / Locked Decision 5: route messages above this size via stdin.
 # Conservative threshold under both macOS argv limit (~256KB) and Linux
 # (~128KB), so dispatch is portable.
@@ -112,7 +118,7 @@ def parse_short_id(stdout: str) -> str:
     if not stdout:
         raise ProviderParseError(stdout_head="")
 
-    first_line = stdout.split("\n", 1)[0]
+    first_line = _ANSI_ESCAPE.sub("", stdout.split("\n", 1)[0])
     match = _SHORT_ID_PATTERN.match(first_line)
     if match is None:
         raise ProviderParseError(stdout_head=stdout[:_STDOUT_HEAD_LIMIT])
