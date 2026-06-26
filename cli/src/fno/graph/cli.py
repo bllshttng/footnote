@@ -635,7 +635,9 @@ def cmd_decompose(
                 pinned_versions = extract_contract_versions(
                     Path(base_box[0]).read_text(encoding="utf-8")
                 )
-            except OSError:
+            except (OSError, UnicodeDecodeError):
+                # No readable doc -> no pin -> contract falls back to hard. Never
+                # hard-fail decompose on a doc-read issue (mirrors the stamp path).
                 pinned_versions = set()
 
         # Refuse to orphan an already-shipped group child unless --force.

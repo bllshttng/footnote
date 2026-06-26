@@ -894,6 +894,21 @@ def test_redecompose_contract_to_hard_clears_stub_fields(tmp_path, monkeypatch):
     assert "contract_version" not in child
 
 
+def test_contract_non_utf8_doc_does_not_crash(tmp_path, monkeypatch):
+    """A non-UTF-8 epic doc must not hard-fail decompose; treat it as no pin."""
+    doc = tmp_path / "big.md"
+    doc.write_bytes(b"\xff\xfe## Interface Contract\n**contract_version: 1**\n")
+    epic = _node("ab-epic0001", title="Epic", plan_path=f"{doc}#anchor", cwd=str(tmp_path))
+    g, read_entries = _wire_graph(tmp_path, monkeypatch, epic)
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(_CONTRACT_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+    child = next(e for e in read_entries() if e["plan_path"].endswith("#group-2"))
+    assert "dep" not in child  # unreadable doc -> no pin -> hard
+
+
 def test_ac6_edge_pure_hard_decompose_adds_no_contract_fields(graph_env):
     """A decomposition with only hard deps stamps no contract metadata."""
     g, read_entries = graph_env
