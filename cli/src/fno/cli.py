@@ -79,20 +79,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "worktree":      ("fno.worktree_cli:app",              "Worktree management"),
     "evals":         ("fno.evals.cli:evals_app",           "Golden-task efficacy evals (run / report / diff)"),
     "pr-watch":      ("fno.pr_watch.cli:cli",              "PR-state watcher: auto-fire /pr check + /pr merged for open-PR backlog nodes"),
-    "megawalk": (
-        "fno.megawalk:app",
-        "Watch a backlog walk (the walk itself runs via `fno-agents loop run --driver megawalk`).",
-        {
-            "invoke_without_command": True,
-            "help": (
-                "Watch a backlog walk.\n\n"
-                "The walker is the Rust loop: `fno-agents loop run --driver megawalk`\n"
-                "(front door: the /megawalk skill). This app only hosts the journal\n"
-                "watcher.\n\n"
-                "Subcommands: watch\n"
-            ),
-        },
-    ),
     "megatron": (
         "fno.megatron.cli:app",
         "Cross-project fleet orchestration.",
