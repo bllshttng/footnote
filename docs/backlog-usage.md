@@ -26,14 +26,27 @@ column.
 
 ## Creating nodes
 
+There are three plan-less creation verbs. They overlap; pick by how much
+ceremony you need:
+
 | Goal | Command |
 |------|---------|
-| Capture a plan-less idea (minimal ceremony) | `fno backlog idea "title" --details "why"` |
-| Add a fuller node | `fno backlog add "title" --priority p2 --details "..."` |
+| Capture an idea, minimal ceremony | `fno backlog idea "title" --details "why"` |
+| Add a fuller node (type/size/blockers/parent) | `fno backlog add "title" --priority p2 --details "..."` |
+| Create one auto-scoped to the current git repo (carries source provenance) | `fno backlog new "title"` |
 | Pull an existing plan file in as a node | `fno backlog intake path/to/plan.md` |
 
-`idea` and `add` both accept `--details`/`--description`. A node with no
-`plan_path` derives to `_status: idea` until a plan is associated.
+Differences:
+
+- **`idea`** signals "skip the spec/plan ceremony for now"; the lightest verb.
+- **`add`** is the fullest manual form: also takes `--type`, `--size`,
+  `--blocked-by`, `--parent`, `--roadmap-id`.
+- **`new`** auto-scopes `project`/`cwd` from the current git repo (pass
+  `--unscoped` to opt out) and records `--source-*` provenance; built for
+  agent/automated creation.
+
+All three accept `--details`/`--description`. A node with no `plan_path`
+derives to `_status: idea` until a plan is associated.
 
 ## Editing a node
 
