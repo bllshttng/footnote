@@ -272,7 +272,12 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     try:
         from fno.stub_manifest import unreconciled_manifest_for_pr
 
-        held = unreconciled_manifest_for_pr(pr_number, repo)
+        # Resolve the repo top-level: manifests are written under the PROJECT
+        # root's `.fno/`, so a merge invoked from a subdirectory must not look
+        # under that subdir (codex P2). Falls back to `repo` if git can't say.
+        top = _git(["rev-parse", "--show-toplevel"], repo)
+        root = top.stdout.strip() if top.ok and top.stdout.strip() else repo
+        held = unreconciled_manifest_for_pr(pr_number, root)
     except Exception:
         held = None  # never let the guard's own failure block a normal merge
     if held:

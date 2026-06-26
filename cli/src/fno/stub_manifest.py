@@ -34,6 +34,7 @@ single hold signal.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -71,7 +72,12 @@ def validate(data: Any) -> dict:
     for i, stub in enumerate(stubs):
         if not isinstance(stub, dict):
             raise StubManifestError(f"stub #{i + 1} is not an object")
-        missing = [k for k in _STUB_REQUIRED if not str(stub.get(k, "")).strip()]
+        # An explicit null (`"stub_id": null`) must fail too -- str(None) is the
+        # non-empty "None", so check for None before string-coercing (gemini).
+        missing = [
+            k for k in _STUB_REQUIRED
+            if stub.get(k) is None or not str(stub.get(k)).strip()
+        ]
         if missing:
             raise StubManifestError(
                 f"stub #{i + 1} ({stub.get('stub_id', '?')}) missing: {', '.join(missing)}"
@@ -81,12 +87,17 @@ def validate(data: Any) -> dict:
 
 def load(path: Path) -> dict:
     """Read + validate. Raises FileNotFoundError if absent, StubManifestError if
-    malformed."""
-    with open(path, "r", encoding="utf-8") as fh:
-        try:
+    malformed OR unreadable (bad JSON / bad encoding / OS error). An unreadable
+    manifest must NOT escape as a raw exception: the merge guard's caller would
+    swallow it and let a mocked PR merge (gemini high). Surface it as malformed
+    so the guard holds instead."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        except json.JSONDecodeError as exc:
-            raise StubManifestError(f"{path}: invalid JSON ({exc})") from exc
+    except FileNotFoundError:
+        raise
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        raise StubManifestError(f"{path}: unreadable ({exc})") from exc
     return validate(data)
 
 
@@ -115,23 +126,41 @@ def write(
     return path
 
 
+def _node_pr_numbers(node: dict) -> set[int]:
+    """Every PR number a node carries: its primary `pr_number` plus any in
+    `additional_prs` (ints, or URLs ending `/pull/<n>`; codex P2). A contract
+    dependent whose PR is recorded only in `additional_prs` must still be found
+    or the merge guard is bypassed."""
+    out: set[int] = set()
+    candidates = [node.get("pr_number"), *(node.get("additional_prs") or [])]
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            out.add(int(raw))
+            continue
+        except (TypeError, ValueError):
+            pass
+        m = re.search(r"/pull/(\d+)", str(raw))
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
 def _node_for_pr(pr_number: int, graph_path: Optional[Path]) -> Optional[dict]:
     """The graph node carrying this pr_number, or None. Read-only; degrades to
-    None on any graph trouble (never crashes the merge path)."""
+    None on ANY graph trouble (the read AND the iteration are guarded, so a
+    non-iterable / mid-iteration error never escapes to the merge path; gemini)."""
     try:
         from fno.graph.store import read_graph
         from fno.paths import graph_json
 
         entries = read_graph(graph_path or graph_json())
+        for e in entries:
+            if pr_number in _node_pr_numbers(e):
+                return e
     except Exception:
         return None
-    for e in entries:
-        raw = e.get("pr_number")
-        try:
-            if raw is not None and int(raw) == pr_number:
-                return e
-        except (TypeError, ValueError):
-            continue
     return None
 
 
@@ -150,19 +179,21 @@ def unreconciled_manifest_for_pr(
     node_id = node.get("id")
     if not node_id:
         return None
-    path = manifest_path(node_id, root)
-    if not path.exists():
-        # No manifest carried -> nothing to hold against. Reconciliation retains
-        # the file (sets reconciled:true) rather than deleting it, so a missing
-        # file is not "reconciled-and-cleaned"; the draft-PR flag is the belt for
-        # the first-pass-not-yet-written window.
-        return None
+    # From here we KNOW this PR is a contract dependent, so fail CLOSED on any
+    # trouble (hold the merge) rather than letting mocks slip through (gemini):
+    # an existing-but-unreadable manifest, or an OS error reading it, all hold.
+    held_on_error = {"_node": node_id, "reconciled": False, "_malformed": True, "stubs": []}
     try:
+        path = manifest_path(node_id, root)
+        if not path.exists():
+            # No manifest carried -> nothing to hold against. Reconciliation
+            # retains the file (sets reconciled:true) rather than deleting it, so
+            # a missing file is not "reconciled-and-cleaned"; the draft-PR flag
+            # is the belt for the first-pass-not-yet-written window.
+            return None
         manifest = load(path)
-    except StubManifestError:
-        # A malformed manifest is itself a reason not to merge (can't prove the
-        # stubs are gone). Surface it as held with a diagnostic.
-        return {"_node": node_id, "reconciled": False, "_malformed": True, "stubs": []}
+    except (StubManifestError, OSError):
+        return held_on_error
     if manifest.get("reconciled") is True:
         return None
     manifest["_node"] = node_id
@@ -205,7 +236,7 @@ def cmd_write(
             node, stubs, root,
             contract_version=contract_version, contract_ref=contract_ref,
         )
-    except (StubManifestError, json.JSONDecodeError) as exc:
+    except (StubManifestError, json.JSONDecodeError, OSError) as exc:
         typer.echo(f"stub-manifest: {exc}", err=True)
         raise typer.Exit(1)
     typer.echo(str(path))
@@ -233,7 +264,11 @@ def cmd_check_pr(
     root: Path = typer.Option(Path("."), "--root", help="project root (default cwd)"),
 ) -> None:
     """Exit 2 (held) if merging this PR would ship unreconciled stubs, else 0."""
-    held = unreconciled_manifest_for_pr(pr, root)
+    try:
+        held = unreconciled_manifest_for_pr(pr, root)
+    except Exception as exc:  # noqa: BLE001 - clean CLI exit over a raw traceback
+        typer.echo(f"stub-manifest: check-pr failed: {exc}", err=True)
+        raise typer.Exit(1)
     if held:
         typer.echo(
             json.dumps(

@@ -41,6 +41,12 @@ def test_validate_rejects_stub_missing_locators():
         sm.validate({"node": "x-1", "stubs": [{"stub_id": "a", "file": ""}]})
 
 
+def test_validate_rejects_explicit_null_stub_id():
+    # str(None) == "None" must not sneak past the required-field check (gemini).
+    with pytest.raises(sm.StubManifestError):
+        sm.validate({"node": "x-1", "stubs": [{"stub_id": None, "file": "f", "kind": "fn"}]})
+
+
 def test_write_then_load_roundtrip(tmp_path):
     stubs = [{"stub_id": "create", "file": "api.ts", "symbol": "createUser",
               "contract_ref": "d.md#ic", "kind": "function"}]
@@ -102,3 +108,26 @@ def test_malformed_manifest_holds_conservatively(tmp_path):
     p.write_text("{bad", encoding="utf-8")
     held = sm.unreconciled_manifest_for_pr(42, tmp_path, graph_path=gp)
     assert held is not None and held.get("_malformed") is True
+
+
+def test_unreadable_manifest_holds_not_bypasses(tmp_path):
+    # gemini high: an unreadable (bad-encoding) manifest must HOLD, not raise an
+    # exception that the merge guard swallows to allow the merge.
+    gp = _graph(tmp_path, [{"id": "x-9", "pr_number": 42, "dep": "contract"}])
+    p = sm.manifest_path("x-9", tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\xff\xfe not utf-8")
+    held = sm.unreconciled_manifest_for_pr(42, tmp_path, graph_path=gp)
+    assert held is not None and held.get("_malformed") is True
+
+
+def test_pr_recorded_in_additional_prs_is_found(tmp_path):
+    # codex P2: a contract dependent whose PR sits in additional_prs must still
+    # be matched (ints and /pull/<n> URLs).
+    gp = _graph(tmp_path, [{
+        "id": "x-9", "pr_number": 7, "dep": "contract",
+        "additional_prs": [42, "https://github.com/o/r/pull/99"],
+    }])
+    sm.write("x-9", [{"stub_id": "a", "file": "f.ts", "kind": "function"}], tmp_path)
+    assert sm.unreconciled_manifest_for_pr(42, tmp_path, graph_path=gp) is not None
+    assert sm.unreconciled_manifest_for_pr(99, tmp_path, graph_path=gp) is not None
