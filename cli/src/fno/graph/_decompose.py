@@ -16,6 +16,13 @@ from typing import Optional, TypedDict
 # Slug must be filesystem/URL-safe so `#group-<slug>` is a stable plan fragment.
 GROUP_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 
+# Interface-contract pin markers (G1, PR #35): a `## Interface Contract` section
+# carries `**contract_version: N**` (single) or `### Contract vN` subheadings
+# (multi-version). These are what a `contract`-tier dependency stubs against.
+_CONTRACT_HEADING_RE = re.compile(r"^##[ \t]+Interface Contract[ \t]*$", re.M)
+_CONTRACT_VERSION_RE = re.compile(r"\*\*contract_version:\s*(\d+)\s*\*\*")
+_CONTRACT_SUBHEADING_RE = re.compile(r"^###[ \t]+Contract v(\d+)\b", re.M | re.I)
+
 
 class NormalizedGroup(TypedDict):
     """A validated group spec. All keys are guaranteed present.
@@ -24,6 +31,12 @@ class NormalizedGroup(TypedDict):
     the per-group routing for a child that belongs to a different repo (the
     cross-project decomposition path). cwd resolution from `project` happens in
     the CLI, outside the graph lock; validation here only checks shape.
+
+    `dep` is the dependency tier (`hard` default, `contract` opt-in). `contract`
+    means the dependent stubs against a pinned interface contract instead of
+    deferring until its blocker lands; the pin check (and possible fall-back to
+    `hard`) happens in the CLI, which can read the epic doc. `stub_against` is an
+    optional explicit contract-ref override; absent, the CLI derives it.
     """
 
     slug: str
@@ -32,6 +45,50 @@ class NormalizedGroup(TypedDict):
     blocked_by_groups: list[str]
     project: Optional[str]
     cwd: Optional[str]
+    dep: str
+    stub_against: Optional[str]
+
+
+def extract_contract_versions(doc_text: str) -> set[int]:
+    """Interface-contract versions pinned in a design doc, or an empty set.
+
+    A `contract`-tier dependency is eligible only when the epic doc pins a
+    `## Interface Contract` (G1). An empty set means no pin, so the dep falls
+    back to `hard` (AC2-HP). Both the single-version (`**contract_version: N**`)
+    and the multi-version (`### Contract vN`) layouts are read.
+    """
+    if not _CONTRACT_HEADING_RE.search(doc_text or ""):
+        return set()
+    versions = {int(m.group(1)) for m in _CONTRACT_VERSION_RE.finditer(doc_text)}
+    versions |= {int(m.group(1)) for m in _CONTRACT_SUBHEADING_RE.finditer(doc_text)}
+    return versions
+
+
+def classify_group_dep(
+    grp: NormalizedGroup, pinned_versions: set[int], base: str
+) -> tuple[str, Optional[str], Optional[int], Optional[str]]:
+    """Resolve a group's dependency tier to its persisted form.
+
+    Returns ``(dep, stub_against, contract_version, downgrade_reason)``:
+      - `hard` (the default): ``("hard", None, None, None)``.
+      - `contract` against a pinned contract: ``("contract", <ref>, max(pinned),
+        None)``; the dependent stubs against the newest pinned version.
+      - `contract` with no pin: downgraded to ``("hard", None, None, <reason>)``
+        (AC2-HP). The pin is the gate; an unpinned interface is not eligible.
+    """
+    if grp.get("dep") != "contract":
+        return ("hard", None, None, None)
+    if not pinned_versions:
+        return (
+            "hard",
+            None,
+            None,
+            f"group {grp['slug']!r} requested dep=contract but the epic doc pins "
+            "no ## Interface Contract; falling back to hard serialization",
+        )
+    version = max(pinned_versions)
+    stub_against = grp.get("stub_against") or f"{base}#interface-contract"
+    return ("contract", stub_against, version, None)
 
 
 class DecomposeError(ValueError):
@@ -166,6 +223,26 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
                 f"group {slug!r} cwd must be a non-empty string when set",
                 exit_code=1,
             )
+        # Optional dependency tier. Default `hard` (defer until the blocker
+        # lands, then dispatch fresh on merge, the existing behavior); `contract`
+        # opts the dependent into stubbing against a pinned interface contract.
+        # Whether a `contract` request actually sticks (vs falling back to
+        # `hard`) depends on the epic doc's pin, checked in the CLI; here we only
+        # validate shape so a typo'd tier fails before any graph write.
+        dep_tier = grp.get("dep", "hard")
+        if dep_tier not in ("hard", "contract"):
+            raise DecomposeError(
+                f"group {slug!r} dep must be 'hard' or 'contract' (got {dep_tier!r})",
+                exit_code=1,
+            )
+        stub_against = grp.get("stub_against")
+        if stub_against is not None and (
+            not isinstance(stub_against, str) or not stub_against.strip()
+        ):
+            raise DecomposeError(
+                f"group {slug!r} stub_against must be a non-empty string when set",
+                exit_code=1,
+            )
         normalized.append(
             {
                 "slug": slug,
@@ -174,6 +251,10 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
                 "blocked_by_groups": list(deps),
                 "project": project.strip() if isinstance(project, str) else None,
                 "cwd": cwd.strip() if isinstance(cwd, str) else None,
+                "dep": dep_tier,
+                "stub_against": (
+                    stub_against.strip() if isinstance(stub_against, str) else None
+                ),
             }
         )
 
@@ -185,6 +266,16 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
                     f"group {grp['slug']!r} depends on undeclared slug {dep!r}",
                     exit_code=1,
                 )
+
+    # A `contract` dependent must name the blocker it stubs against; stubbing
+    # against an interface with no blocker to reconcile back to is meaningless.
+    for grp in normalized:
+        if grp["dep"] == "contract" and not grp["blocked_by_groups"]:
+            raise DecomposeError(
+                f"group {grp['slug']!r} is dep=contract but has no "
+                "blocked_by_groups; a contract dependency must name its blocker",
+                exit_code=1,
+            )
 
     cycle = _first_cycle(normalized)
     if cycle:

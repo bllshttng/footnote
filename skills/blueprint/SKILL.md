@@ -1057,13 +1057,34 @@ is known):
    | 2 | 4-5 | API surface | 1 |
    | 3 | 6 | UI | 2 |
    ```
-5. Build the groups JSON and call the CLI (atomic + idempotent upsert):
+5. **Classify each cross-repo dependency `hard` or `contract`** (only for a
+   group that `blocked_by` a group in a *different* repo; same-repo edges are
+   always `hard`). Default is `hard` (the blocker must land before the dependent
+   builds). Propose `contract` (the dependent builds **now** against a
+   pinned interface, stubbing the unlanded parts) ONLY when **both** gates hold,
+   else keep `hard`:
+   - **Pin gate:** the design doc has a `## Interface Contract` section with a
+     `contract_version` (a G1 `/think` output). No pin ⇒ `hard`. The CLI
+     re-checks this and silently downgrades a `contract` request to `hard` if the
+     doc pins nothing, so an honest mistake never ships a mocked PR, but propose
+     `contract` only when the pin is really there.
+   - **Independent-work gate:** the dependent has ≥ 1 wave of work that does NOT
+     need the blocker landed (real parallelism to win). A dependent that only
+     stubs ⇒ `hard`.
+
+   `contract` is **model-proposed, human-confirmed** (Locked Decision 6): show
+   the author which edge you propose to mark `contract` and why, and proceed only
+   on confirmation. To mark a group, add `"dep": "contract"` to it; the CLI
+   stamps `contract_version` (read from the doc) and `stub_against` on the child.
+
+6. Build the groups JSON and call the CLI (atomic + idempotent upsert). A
+   `contract` group just carries `"dep": "contract"` (it must already
+   `blocked_by` its blocker); everything else is unchanged:
    ```bash
    cat > /tmp/groups-$$.json <<'JSON'
    [
-     {"slug": "1", "title": "Group 1: foundation + schema", "waves": "1-3", "blocked_by_groups": []},
-     {"slug": "2", "title": "Group 2: API surface", "waves": "4-5", "blocked_by_groups": ["1"]},
-     {"slug": "3", "title": "Group 3: UI", "waves": "6", "blocked_by_groups": ["2"]}
+     {"slug": "1", "title": "Group 1: backend API", "waves": "1-3", "blocked_by_groups": []},
+     {"slug": "2", "title": "Group 2: frontend", "waves": "4-6", "blocked_by_groups": ["1"], "dep": "contract"}
    ]
    JSON
    fno backlog decompose "$EPIC_ID" --max-prs "$N" --groups "@/tmp/groups-$$.json"

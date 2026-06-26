@@ -59,6 +59,13 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "cwd",
     "domain",
     "blocked_by",
+    # Contract-tier dependency classification (G2). Present ONLY on a
+    # `dep=contract` dependent (it stubs against a pinned ## Interface Contract);
+    # absent on the default `hard` path, so canonicalize keeps the hard-path
+    # serialization byte-for-byte unchanged.
+    "dep",
+    "stub_against",
+    "contract_version",
     "session_id",
     "claimed_at",
     "completed_at",
