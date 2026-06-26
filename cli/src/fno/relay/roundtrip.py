@@ -37,12 +37,21 @@ import fcntl
 import os
 import re
 import select
+import shutil
 import struct
 import subprocess
 import termios
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+
+# Spawn defaults, env-configurable so the relay can point at a dedicated, clean,
+# pre-authed claude config (no personal plugins -> a stable, unpolluted pane;
+# the polluted default config churns the pane at SessionStart and drops injected
+# keystrokes). FNO_RELAY_CLAUDE_BIN bypasses a wrapper shim (e.g. cmux) by naming
+# the real binary; FNO_RELAY_CLAUDE_CONFIG sets CLAUDE_CONFIG_DIR for peers.
+_DEFAULT_CLAUDE_BIN = os.environ.get("FNO_RELAY_CLAUDE_BIN") or shutil.which("claude") or "claude"
+_DEFAULT_CONFIG_DIR = os.environ.get("FNO_RELAY_CLAUDE_CONFIG") or None
 
 # claude turns are slow (the spike saw multi-second turns + model latency); give
 # each hop generous headroom.
@@ -98,20 +107,37 @@ def _set_winsize(fd: int) -> None:
         pass  # best-effort; a default 80-col PTY just risks wrapping long replies
 
 
-def spawn_peer(name: str, *, model: str = "haiku", cwd: Optional[str] = None) -> Peer:
+def spawn_peer(
+    name: str,
+    *,
+    model: str = "haiku",
+    cwd: Optional[str] = None,
+    claude_bin: Optional[str] = None,
+    config_dir: Optional[str] = None,
+) -> Peer:
     """Spawn a subscription-billed interactive claude in a footnote-owned PTY.
 
     NOT `claude -p` (Agent SDK credits) and NOT `--bare` (API key); plain
     interactive `claude` is OAuth/subscription-billed per Locked Decision #2.
     The trust dialog (first run in a fresh dir) is accepted by an Enter in
     :func:`wait_ready`.
+
+    ``claude_bin`` / ``config_dir`` default to the ``FNO_RELAY_CLAUDE_BIN`` /
+    ``FNO_RELAY_CLAUDE_CONFIG`` env vars. Point ``config_dir`` at a dedicated,
+    pre-authed, plugin-free config so the pane is clean (deterministic capture);
+    leave it unset to use the ambient config.
     """
+    claude_bin = claude_bin or _DEFAULT_CLAUDE_BIN
+    config_dir = config_dir or _DEFAULT_CONFIG_DIR
+    env = dict(os.environ)
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(config_dir)
     master, slave = os.openpty()
     _set_winsize(slave)
     proc = subprocess.Popen(
-        ["claude", "--model", model, "--append-system-prompt", RELAY_SYSTEM_PROMPT],
+        [claude_bin, "--model", model, "--append-system-prompt", RELAY_SYSTEM_PROMPT],
         cwd=cwd, stdin=slave, stdout=slave, stderr=slave,
-        start_new_session=True, close_fds=True,
+        start_new_session=True, close_fds=True, env=env,
     )
     os.close(slave)
     return Peer(name=name, proc=proc, master_fd=master)

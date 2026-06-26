@@ -99,10 +99,18 @@ def test_live_round_trip_human_out_of_loop():
 
     Reliability note: pane.read capture is timing-sensitive against a
     plugin-heavy default claude config (a SessionStart banner churns the pane and
-    can drop injected keystrokes). For a robust green, point ``spawn_peer`` at a
-    dedicated, clean, pre-authed config via ``CLAUDE_CONFIG_DIR`` (no personal
-    plugins -> a standard transcript jsonl is also written, enabling the
-    design-preferred jsonl capture). See the PR for the one-time-login setup.
+    can drop injected keystrokes). For a robust green, point peers at a dedicated,
+    clean, pre-authed config via the env vars (one-time
+    ``CLAUDE_CONFIG_DIR=~/.fno/relay-claude claude`` login, then):
+
+        FNO_RELAY_CLAUDE_CONFIG=~/.fno/relay-claude
+        FNO_RELAY_CLAUDE_BIN=/abs/path/to/claude   # the real binary, bypassing
+                                                   # any wrapper shim (e.g. cmux)
+
+    A clean config removes the banner churn and reply pollution. Note: even a
+    clean session does not write a standard transcript jsonl for this short-lived
+    spawn pattern, so capture stays on pane.read (LD#4). Live runs draw the
+    subscription weekly limit; a green run needs available budget.
     """
     a = rt_mod.spawn_peer("alice", model="haiku")
     b = rt_mod.spawn_peer("bob", model="haiku")
