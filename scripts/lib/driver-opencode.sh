@@ -45,10 +45,10 @@ driver_invoke() {
 }
 
 driver_check_promise() {
-  if [[ -s "${SIGNAL_FILE}" ]] && grep -q 'MISSION COMPLETE' "${SIGNAL_FILE}" 2>/dev/null; then
+  if [[ -s "${SIGNAL_FILE:-}" ]] && grep -q 'MISSION COMPLETE' "${SIGNAL_FILE:-}" 2>/dev/null; then
     return 0
   fi
-  if [[ -s "${OUTPUT_FILE}" ]] && grep -qE '<promise>[^<]*MISSION COMPLETE' "${OUTPUT_FILE}" 2>/dev/null; then
+  if [[ -s "${OUTPUT_FILE:-}" ]] && grep -qE '<promise>[^<]*MISSION COMPLETE' "${OUTPUT_FILE:-}" 2>/dev/null; then
     return 0
   fi
   return 1
@@ -64,6 +64,6 @@ driver_persist_history() {
     echo ""
     echo "### iteration ${iter}"
     echo ""
-    sed -E "s/${esc}\[[0-9;?]*[a-zA-Z]//g; s/\r\$//" "${OUTPUT_FILE}"
-  } >> "${HISTORY_FILE}"
+    sed -E "s/${esc}\[[0-9;?]*[a-zA-Z]//g; s/\r\$//" "${OUTPUT_FILE:-}"
+  } >> "${HISTORY_FILE:-}"
 }
