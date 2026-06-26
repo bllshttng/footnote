@@ -712,3 +712,222 @@ def test_set_expected_count_spawn_failure_is_failed_not_skipped(tmp_path, monkey
     status, detail = gcli._set_expected_count("/some/doc.md", 3)
     assert status == "failed"
     assert "spawn failed" in detail
+
+
+# -- G2: hard|contract dependency classification --
+
+from fno.graph._decompose import (  # noqa: E402
+    DecomposeError,
+    classify_group_dep,
+    extract_contract_versions,
+    validate_groups,
+)
+
+_CONTRACT_BODY = (
+    "## Interface Contract\n\n"
+    "**contract_version: 2**\n\n"
+    "- `POST /api/widgets` -> `{ id: string }`\n"
+)
+
+
+def _contract_doc(tmp_path: Path, body: str = _CONTRACT_BODY) -> Path:
+    doc = tmp_path / "big.md"
+    doc.write_text(f"---\ntitle: Big epic\nstatus: draft\n---\n# body\n\n{body}\n")
+    return doc
+
+
+# extract_contract_versions (pure) --------------------------------------------
+
+
+def test_extract_contract_versions_single():
+    assert extract_contract_versions(_CONTRACT_BODY) == {2}
+
+
+def test_extract_contract_versions_multi():
+    text = (
+        "## Interface Contract\n\n"
+        "### Contract v3\n...\n### Contract v2\n...\n"
+    )
+    assert extract_contract_versions(text) == {2, 3}
+
+
+def test_extract_contract_versions_no_heading_is_empty():
+    # A stray version marker with no `## Interface Contract` heading is not a pin.
+    assert extract_contract_versions("**contract_version: 1**") == set()
+
+
+def test_extract_contract_versions_ignores_stray_outside_section():
+    # Version markers outside the Interface Contract section body do not satisfy
+    # the pin gate (gemini HIGH / codex P2): only the v2 inside the section counts.
+    text = (
+        "## Discussion\n"
+        "We should upgrade from **contract_version: 1** to 2.\n\n"
+        "## Interface Contract\n"
+        "**contract_version: 2**\n\n"
+        "## Next Section\n"
+        "**contract_version: 3**\n"
+    )
+    assert extract_contract_versions(text) == {2}
+
+
+def test_extract_contract_versions_empty_doc():
+    assert extract_contract_versions("") == set()
+
+
+# classify_group_dep (pure) ---------------------------------------------------
+
+
+def test_classify_hard_is_default():
+    grp = {"slug": "1", "dep": "hard", "stub_against": None}
+    assert classify_group_dep(grp, {1, 2}, "doc.md") == ("hard", None, None, None)
+
+
+def test_classify_contract_with_pin_uses_newest_version():
+    grp = {"slug": "2", "dep": "contract", "stub_against": None}
+    dep, stub, ver, downgrade = classify_group_dep(grp, {1, 2}, "doc.md")
+    assert (dep, ver, downgrade) == ("contract", 2, None)
+    assert stub == "doc.md#interface-contract"
+
+
+def test_classify_contract_explicit_stub_against_override():
+    grp = {"slug": "2", "dep": "contract", "stub_against": "other.md#api-v1"}
+    _, stub, _, _ = classify_group_dep(grp, {1}, "doc.md")
+    assert stub == "other.md#api-v1"
+
+
+def test_classify_contract_no_pin_downgrades_to_hard():
+    grp = {"slug": "2", "dep": "contract", "stub_against": None}
+    dep, stub, ver, downgrade = classify_group_dep(grp, set(), "doc.md")
+    assert (dep, stub, ver) == ("hard", None, None)
+    assert downgrade and "falling back to hard" in downgrade
+
+
+# validate_groups (pure) ------------------------------------------------------
+
+
+def test_validate_rejects_unknown_dep_tier():
+    with pytest.raises(DecomposeError):
+        validate_groups([{"slug": "1", "title": "g", "dep": "soft"}], None)
+
+
+def test_validate_rejects_contract_without_blocker():
+    spec = [{"slug": "1", "title": "g", "dep": "contract", "blocked_by_groups": []}]
+    with pytest.raises(DecomposeError, match="must name its blocker"):
+        validate_groups(spec, None)
+
+
+def test_validate_rejects_empty_stub_against():
+    spec = [{"slug": "1", "title": "g", "stub_against": "   "}]
+    with pytest.raises(DecomposeError):
+        validate_groups(spec, None)
+
+
+def test_validate_defaults_dep_to_hard():
+    norm = validate_groups([{"slug": "1", "title": "g"}], None)
+    assert norm[0]["dep"] == "hard"
+    assert norm[0]["stub_against"] is None
+
+
+# CLI integration -------------------------------------------------------------
+
+
+def _contract_env(tmp_path, monkeypatch, body=_CONTRACT_BODY):
+    doc = _contract_doc(tmp_path, body)
+    epic = _node("ab-epic0001", title="Epic", plan_path=f"{doc}#anchor", cwd=str(tmp_path))
+    return _wire_graph(tmp_path, monkeypatch, epic) + (doc,)
+
+
+_CONTRACT_GROUPS = [
+    {"slug": "1", "title": "Group 1: backend", "waves": "1-2", "blocked_by_groups": []},
+    {
+        "slug": "2",
+        "title": "Group 2: frontend",
+        "waves": "3-4",
+        "blocked_by_groups": ["1"],
+        "dep": "contract",
+    },
+]
+
+
+def test_ac2_hp_contract_with_pin_stamps_child(tmp_path, monkeypatch):
+    g, read_entries, doc = _contract_env(tmp_path, monkeypatch)
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(_CONTRACT_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+
+    child = next(e for e in read_entries() if e["plan_path"].endswith("#group-2"))
+    assert child["dep"] == "contract"
+    assert child["contract_version"] == 2
+    assert child["stub_against"] == f"{doc}#interface-contract"
+    # The hard sibling carries none of the contract fields (AC6-EDGE).
+    sib = next(e for e in read_entries() if e["plan_path"].endswith("#group-1"))
+    assert "dep" not in sib and "stub_against" not in sib and "contract_version" not in sib
+
+
+def test_ac2_hp_contract_no_pin_downgrades_loudly(tmp_path, monkeypatch):
+    # Doc has frontmatter but no ## Interface Contract section -> no pin.
+    g, read_entries, doc = _contract_env(tmp_path, monkeypatch, body="# just a body\n")
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(_CONTRACT_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "falling back to hard" in result.output
+
+    child = next(e for e in read_entries() if e["plan_path"].endswith("#group-2"))
+    assert "dep" not in child
+    assert "contract_version" not in child
+
+
+def test_contract_downgrade_in_json_output(tmp_path, monkeypatch):
+    g, read_entries, doc = _contract_env(tmp_path, monkeypatch, body="# no contract\n")
+    result = _invoke(
+        ["--json", "backlog", "decompose", "ab-epic0001",
+         "--groups", _groups_json(_CONTRACT_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert len(payload["downgrades"]) == 1
+
+
+def test_redecompose_contract_to_hard_clears_stub_fields(tmp_path, monkeypatch):
+    g, read_entries, doc = _contract_env(tmp_path, monkeypatch)
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(_CONTRACT_GROUPS)])
+    child = next(e for e in read_entries() if e["plan_path"].endswith("#group-2"))
+    assert child["dep"] == "contract"
+
+    # Re-decompose group 2 back to hard (drop the dep field).
+    hard_again = [
+        _CONTRACT_GROUPS[0],
+        {**_CONTRACT_GROUPS[1], "dep": "hard"},
+    ]
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(hard_again)])
+    child = next(e for e in read_entries() if e["plan_path"].endswith("#group-2"))
+    assert "dep" not in child
+    assert "stub_against" not in child
+    assert "contract_version" not in child
+
+
+def test_contract_non_utf8_doc_does_not_crash(tmp_path, monkeypatch):
+    """A non-UTF-8 epic doc must not hard-fail decompose; treat it as no pin."""
+    doc = tmp_path / "big.md"
+    doc.write_bytes(b"\xff\xfe## Interface Contract\n**contract_version: 1**\n")
+    epic = _node("ab-epic0001", title="Epic", plan_path=f"{doc}#anchor", cwd=str(tmp_path))
+    g, read_entries = _wire_graph(tmp_path, monkeypatch, epic)
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(_CONTRACT_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+    child = next(e for e in read_entries() if e["plan_path"].endswith("#group-2"))
+    assert "dep" not in child  # unreadable doc -> no pin -> hard
+
+
+def test_ac6_edge_pure_hard_decompose_adds_no_contract_fields(graph_env):
+    """A decomposition with only hard deps stamps no contract metadata."""
+    g, read_entries = graph_env
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)])
+    for child in (e for e in read_entries() if e.get("parent") == "ab-epic0001"):
+        assert "dep" not in child
+        assert "stub_against" not in child
+        assert "contract_version" not in child

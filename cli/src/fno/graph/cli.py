@@ -525,6 +525,8 @@ def cmd_decompose(
     from fno.graph._decompose import (
         DecomposeError,
         child_plan_path,
+        classify_group_dep,
+        extract_contract_versions,
         find_orphans,
         is_shipped,
         plan_base,
@@ -621,6 +623,23 @@ def cmd_decompose(
         else:
             base_box[0] = base
 
+        # Read the epic doc's pinned interface-contract version(s). The doc is
+        # the single source of truth: a `contract`-tier group is eligible only
+        # when the doc pins a `## Interface Contract` (G1); with no pin every
+        # `contract` request falls back to `hard` (AC2-HP). A missing/unreadable
+        # doc -> no pin -> all hard (fail-safe; the downgrade is reported, never
+        # silent). Local file read under the lock is trivial (the doc is small).
+        pinned_versions: set[int] = set()
+        if base_box[0]:
+            try:
+                pinned_versions = extract_contract_versions(
+                    Path(base_box[0]).read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError):
+                # No readable doc -> no pin -> contract falls back to hard. Never
+                # hard-fail decompose on a doc-read issue (mirrors the stamp path).
+                pinned_versions = set()
+
         # Refuse to orphan an already-shipped group child unless --force.
         orphans = find_orphans(graph_entries, epic_resolved_id, base, keep_slugs)
         shipped_orphans = [o for o in orphans if is_shipped(o)]
@@ -701,6 +720,27 @@ def cmd_decompose(
             node["blocked_by"] = [slug_to_id[d] for d in grp["blocked_by_groups"]]
             r["blocked_by"] = list(node["blocked_by"])
 
+            # Classify the dependency tier against the doc's pin. Stamp the
+            # contract fields ONLY on a `contract` dep; pop them on `hard` so a
+            # re-decompose downgrade (contract -> hard) cleans up stale stub
+            # metadata and the pure-hard path serializes byte-for-byte unchanged
+            # (Invariant). The downgrade reason, if any, is surfaced after the lock.
+            dep, stub_against, cversion, downgrade = classify_group_dep(
+                grp, pinned_versions, base
+            )
+            if dep == "contract":
+                node["dep"] = "contract"
+                node["stub_against"] = stub_against
+                node["contract_version"] = cversion
+                r["dep"] = "contract"
+            else:
+                node.pop("dep", None)
+                node.pop("stub_against", None)
+                node.pop("contract_version", None)
+                r["dep"] = "hard"
+            if downgrade:
+                downgrade_box[0].append(downgrade)
+
         # Surface any unshipped orphans (slug dropped from the spec). They are
         # left in place, not deleted - deleting graph nodes is destructive.
         orphan_box[0] = [o["id"] for o in orphans]
@@ -708,6 +748,7 @@ def cmd_decompose(
 
     orphan_box: list[list[str]] = [[]]
     base_box: list = [None]
+    downgrade_box: list[list[str]] = [[]]
     try:
         locked_mutate_graph(_graph_path(), mutator)
     except DecomposeError as e:
@@ -716,11 +757,17 @@ def cmd_decompose(
 
     epic_resolved_id = epic_id_box[0]
     orphan_ids = orphan_box[0]
+    downgrades = downgrade_box[0]
 
     # 4. Report what happened (AC1-UI).
     if json_mode(ctx):
         typer.echo(json.dumps(
-            {"epic": epic_resolved_id, "groups": results, "orphaned": orphan_ids},
+            {
+                "epic": epic_resolved_id,
+                "groups": results,
+                "orphaned": orphan_ids,
+                "downgrades": downgrades,
+            },
             default=str,
         ))
     else:
@@ -729,13 +776,16 @@ def cmd_decompose(
         for r in results:
             waves = f" waves {r['waves']}" if r["waves"] else ""
             blk = f" blocked_by={r['blocked_by']}" if r["blocked_by"] else ""
-            typer.echo(f"  {r['action']}: {r['id']} (#group-{r['slug']}){waves}{blk}")
+            tier = " dep=contract" if r.get("dep") == "contract" else ""
+            typer.echo(f"  {r['action']}: {r['id']} (#group-{r['slug']}){waves}{blk}{tier}")
         if orphan_ids:
             typer.echo(
                 f"warning: {len(orphan_ids)} group child node(s) no longer in the spec, "
                 f"left in place: {', '.join(orphan_ids)}",
                 err=True,
             )
+        for msg in downgrades:
+            typer.echo(f"warning: {msg}", err=True)
 
     # 4b. Born-with-why (v2 A1): decompose mints child nodes; route each NEWLY
     #     created child through the shared birth hook so the epic's why can carry
