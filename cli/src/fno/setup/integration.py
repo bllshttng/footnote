@@ -34,7 +34,7 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 class IntegrationResult:
     """Outcome of one CLI's integration install."""
 
-    cli: str  # "claude" | "gemini" | "codex"
+    cli: str  # "claude" | "gemini" | "codex" | "opencode"
     label: str  # human name, e.g. "Claude Code"
     status: str  # "installed" | "already-installed" | "manual" | "failed"
     note: str = ""  # detail (e.g. "skills-dir", a manual step, a failure reason)
@@ -195,11 +195,59 @@ def _codex_install(run: Runner) -> IntegrationResult:
     return IntegrationResult("codex", label, "failed", note=_tail(res.stderr))
 
 
+# --- opencode ---------------------------------------------------------------
+# OpenCode is a loop-wrapper harness (scripts/lib/driver-opencode.sh), not a
+# native plugin-marketplace CLI. Its integration is a local-file plugin copied
+# into OpenCode's plugin dir - no npm publish needed (OpenCode loads .js files
+# from ~/.config/opencode/plugins/ directly). Unlike codex, the installed state
+# is verifiable (the file exists and matches the shipped source), so we can
+# claim "installed" honestly.
+
+def _opencode_plugin_src() -> Path:
+    return Path(__file__).parent / "assets" / "opencode" / "footnote.js"
+
+
+def _opencode_plugins_dir() -> Path:
+    return Path.home() / ".config" / "opencode" / "plugins"
+
+
+def _opencode_plugin_dest() -> Path:
+    return _opencode_plugins_dir() / "footnote.js"
+
+
+def _opencode_is_installed() -> bool:
+    # Installed == the dest file exists AND matches the shipped source, so a
+    # stale copy (older footnote) reports not-installed and gets refreshed.
+    dest = _opencode_plugin_dest()
+    if not dest.exists():
+        return False
+    try:
+        return dest.read_text(encoding="utf-8") == _opencode_plugin_src().read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return False
+
+
+def _opencode_install() -> IntegrationResult:
+    label = "OpenCode"
+    src = _opencode_plugin_src()
+    dest = _opencode_plugin_dest()
+    try:
+        src_text = src.read_text(encoding="utf-8")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(src_text, encoding="utf-8")
+    except OSError as exc:
+        return IntegrationResult("opencode", label, "failed", note=str(exc))
+    return IntegrationResult("opencode", label, "installed", note=f"plugin -> {dest}")
+
+
 def build_adapters(run: Runner = _run) -> "list[IntegrationAdapter]":
-    """The v1 adapter registry: claude (preferred + skills-dir fallback), gemini,
-    codex. hermes / openclaw are intentionally absent - their install surfaces
-    are unverified, and printing a command that does not exist is worse than
-    omitting them (locked decision 4).
+    """The adapter registry: claude (preferred + skills-dir fallback), gemini,
+    codex (native marketplace CLIs), and opencode (local-file plugin copy).
+    hermes / openclaw remain absent - their install surfaces are unverified, and
+    printing a command that does not exist is worse than omitting them (locked
+    decision 4).
     """
     return [
         IntegrationAdapter(
@@ -222,6 +270,13 @@ def build_adapters(run: Runner = _run) -> "list[IntegrationAdapter]":
             is_available=lambda: shutil.which("codex") is not None,
             is_installed=lambda: _codex_is_installed(run),
             install=lambda: _codex_install(run),
+        ),
+        IntegrationAdapter(
+            "opencode",
+            "OpenCode",
+            is_available=lambda: shutil.which("opencode") is not None,
+            is_installed=_opencode_is_installed,
+            install=_opencode_install,
         ),
     ]
 

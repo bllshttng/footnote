@@ -23,6 +23,7 @@ graph-resolve.sh
 driver-claude-code.sh
 driver-hermes.sh
 driver-openclaw.sh
+driver-opencode.sh
 driver-codex.sh
 driver-gemini.sh
 

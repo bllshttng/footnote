@@ -291,3 +291,35 @@ def test_manual_result_echoes_a_finish_step_not_installed():
     blob = "\n".join(lines)
     assert "needs a manual finish" in blob and "finish in browser" in blob
     assert "Codex CLI: installed" not in blob
+
+
+# --- opencode (local-file plugin install, x-6007) ---------------------------
+
+def test_opencode_install_copies_plugin_and_is_installed(tmp_path, monkeypatch):
+    # Redirect HOME so the plugin lands under a temp ~/.config/opencode/plugins/.
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert I._opencode_is_installed() is False
+
+    res = I._opencode_install()
+    assert res.ok and res.cli == "opencode"
+
+    dest = I._opencode_plugin_dest()
+    assert dest.exists()
+    assert dest.read_text(encoding="utf-8") == I._opencode_plugin_src().read_text(
+        encoding="utf-8"
+    )
+    assert I._opencode_is_installed() is True
+
+
+def test_opencode_is_installed_false_when_stale(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    dest = I._opencode_plugin_dest()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text("// stale older footnote plugin\n", encoding="utf-8")
+    assert I._opencode_is_installed() is False
+
+
+def test_opencode_adapter_registered():
+    clis = {a.cli for a in I.build_adapters()}
+    assert "opencode" in clis

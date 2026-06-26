@@ -29,7 +29,8 @@ use std::process::{Child, Command};
 /// Validate the driver name and confirm the driver lib file exists, the
 /// driver binary is on PATH, and the lib defines `driver_invoke`.
 ///
-/// `driver`: one of `claude-code`, `hermes`, `openclaw` (whitelist-enforced).
+/// `driver`: one of `claude-code`, `hermes`, `openclaw`, `opencode`
+///   (whitelist-enforced).
 /// `lib_dir`: directory containing `driver-<driver>.sh`.
 /// `cli_alias`: optional CLI alias from `--cli` flag (F2). Precedence for
 ///   binary resolution: `$CLAUDE_CLI` env > `cli_alias` > `$CLI` env > "claude".
@@ -44,7 +45,7 @@ pub fn preflight(
 ) -> Result<PathBuf, LoopError> {
     // Whitelist enforced exactly like run-target-loop.sh:144-150 to prevent
     // path traversal and shell injection via driver names.
-    const ALLOWED: &[&str] = &["claude-code", "hermes", "openclaw"];
+    const ALLOWED: &[&str] = &["claude-code", "hermes", "openclaw", "opencode"];
     if !ALLOWED.contains(&driver) {
         return Err(LoopError::Config(format!(
             "invalid dispatcher '{driver}': must be one of {:?} (whitelist)",
@@ -163,6 +164,7 @@ pub fn resolve_driver_binary(driver: &str, cli_alias: Option<&str>) -> String {
         }
         "hermes" => "hermes-agent".to_string(),
         "openclaw" => "openclaw".to_string(),
+        "opencode" => "opencode".to_string(),
         _ => "claude".to_string(), // unreachable after whitelist check
     }
 }
@@ -280,5 +282,20 @@ impl Dispatcher for ShelloutDispatcher {
             .map_err(|e| LoopError::Dispatch(format!("spawn bash driver_invoke: {e}")))?;
 
         Ok(Box::new(ShelloutSession { child }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_driver_binary;
+
+    // AC1-EDGE: opencode resolves to the `opencode` binary (loop-wrapper path,
+    // x-6007). The loop-wrapper drivers have fixed binary names (no env/alias
+    // precedence, unlike claude-code).
+    #[test]
+    fn loop_wrapper_drivers_resolve_to_fixed_binaries() {
+        assert_eq!(resolve_driver_binary("opencode", None), "opencode");
+        assert_eq!(resolve_driver_binary("openclaw", None), "openclaw");
+        assert_eq!(resolve_driver_binary("hermes", None), "hermes-agent");
     }
 }
