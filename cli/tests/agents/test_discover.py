@@ -552,3 +552,33 @@ def test_x_a1d5_resolve_adopts_projects_session(tmp_path, monkeypatch):
     )
     assert match is not None
     assert match.session_id == sid
+
+
+def test_x_a1d5_underscore_cwd_dir_preserved(tmp_path, monkeypatch):
+    """Codex P2: a CC build that preserves '_' in the dir name still resolves.
+
+    The transcript lives under the underscore-PRESERVING dir; discovery must try
+    both encodings and find it (the underscore-collapsing form would miss).
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    cwd = "/Users/x/code/my_app"
+    # Seed under the underscore-preserving dir name only.
+    pdir = projects / re.sub(r"[^a-zA-Z0-9_]", "-", cwd)
+    pdir.mkdir(parents=True, exist_ok=True)
+    f = pdir / "us-sid.jsonl"
+    f.write_text(json.dumps({"sessionId": "us-sid"}) + "\n", encoding="utf-8")
+    procs = [_claude_proc(4242, cwd)]
+    sessions = _run_projects(tmp_path, projects, procs)
+    assert [s.session_id for s in sessions] == ["us-sid"]
+
+
+def test_x_a1d5_exclude_adopted_session_by_full_id(tmp_path, monkeypatch):
+    """Codex P2: an adopted (registered) session is not re-listed by projects/."""
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    sid = "adopted-session-uuid"
+    _write_transcript(projects, cwd="/Users/x/code/proj", session_id=sid)
+    procs = [_claude_proc(4242, "/Users/x/code/proj")]
+    sessions = _run_projects(tmp_path, projects, procs, exclude_session_ids={sid})
+    assert sessions == []

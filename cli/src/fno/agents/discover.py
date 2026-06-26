@@ -164,12 +164,24 @@ def _read_registry_file(path: Path) -> Optional[dict]:
 # --------------------------------------------------------------------------
 
 
-# CC encodes a session's cwd into its projects subdir name by replacing every
-# non-alphanumeric char with ``-`` (verified round-tripping real dirs:
-# ``/Users/x/.claude/p`` -> ``-Users-x--claude-p``). The mapping is lossy, so we
-# never decode it; we encode a known cwd to FIND the dir.
+# CC encodes a session's cwd into its projects subdir name by replacing
+# separators with ``-`` (verified round-tripping real dirs: ``/`` and ``.`` both
+# map to ``-``, e.g. ``/Users/x/.claude/p`` -> ``-Users-x--claude-p``). The
+# mapping is lossy, so we never decode it; we encode a known cwd to FIND the dir.
+# Whether a given CC version preserves ``_`` is version-specific, so we try both
+# the underscore-collapsing and underscore-preserving forms and use whichever
+# directory actually exists (the common no-underscore path yields one name).
 def _encode_cwd(cwd: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+
+
+def _candidate_dir_names(cwd: str) -> list[str]:
+    names: list[str] = []
+    for pat in (r"[^a-zA-Z0-9]", r"[^a-zA-Z0-9_]"):
+        name = re.sub(pat, "-", cwd)
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def _live_claude_procs(psutil_mod) -> list[tuple[int, str]]:
@@ -243,6 +255,7 @@ def _discover_from_projects(
     *,
     psutil_mod,
     recency_seconds: float,
+    exclude_session_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> list[dict]:
     """Fallback discovery from the canonical transcript store (x-a1d5).
@@ -254,20 +267,29 @@ def _discover_from_projects(
     real. Returns candidate dicts shaped like the sidecar loop's rows so the
     shared dedup/alias pipeline consumes them unchanged.
 
+    ``exclude_session_ids`` drops sessions already adopted into the fno registry
+    (matched on full session_id, since a transcript row's short_id is the uuid
+    prefix, not the registry's hex handle) so the lane stays "live but unadopted".
+
     ponytail: one row per live cwd — two sessions sharing a cwd collapse to the
     newest transcript (rare; the sidecar lane handled per-pid). The mtime window
     only rejects a process whose transcript has gone quiet, so a real pid plus a
     fresh transcript is the liveness proof.
     """
     cutoff = (now if now is not None else time.time()) - recency_seconds
+    exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
     seen_cwd: set[str] = set()
     for pid, cwd in _live_claude_procs(psutil_mod):
         if cwd in seen_cwd:
             continue
         seen_cwd.add(cwd)
-        sid = _newest_recent_transcript(projects_dir / _encode_cwd(cwd), cutoff)
-        if not sid:
+        sid = None
+        for name in _candidate_dir_names(cwd):
+            sid = _newest_recent_transcript(projects_dir / name, cutoff)
+            if sid:
+                break
+        if not sid or sid in exclude_sids:
             continue
         rows.append(
             {
@@ -606,6 +628,7 @@ def discover_live_sessions(
     projects_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
     exclude_short_ids: Iterable[str] = (),
+    exclude_session_ids: Iterable[str] = (),
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
     psutil_mod=None,
 ) -> list[DiscoveredSession]:
@@ -667,7 +690,10 @@ def discover_live_sessions(
     if not candidates:
         pdir = projects_dir or default_projects_dir()
         project_rows = _discover_from_projects(
-            pdir, psutil_mod=psu, recency_seconds=_recency_seconds()
+            pdir,
+            psutil_mod=psu,
+            recency_seconds=_recency_seconds(),
+            exclude_session_ids=exclude_session_ids,
         )
         for r in project_rows:
             if r["short_id"] in exclude:
