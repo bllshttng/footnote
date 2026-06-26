@@ -16,7 +16,7 @@ Usage: run-target-loop.sh [OPTIONS]
 Exec shim over: fno-agents loop run --driver target [options]
 
 Options (mapped onto the Rust verb):
-  --driver <name>          Dispatcher: claude-code (default) | hermes | openclaw
+  --driver <name>          Dispatcher: claude-code (default) | hermes | openclaw | opencode
                            (maps to --dispatcher; --driver target is pinned)
   --cli <claude|opencode>  Legacy CLI alias (passed through)
   --max-iterations N       Max loop iterations (alias: --max-iter)
@@ -38,8 +38,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --driver)
       case "${2:-}" in
-        claude-code|hermes|openclaw) DISPATCHER="$2" ;;
-        *) echo "run-target-loop.sh: unknown --driver '${2:-}' (expected claude-code | hermes | openclaw)" >&2
+        claude-code|hermes|openclaw|opencode) DISPATCHER="$2" ;;
+        *) echo "run-target-loop.sh: unknown --driver '${2:-}' (expected claude-code | hermes | openclaw | opencode)" >&2
            exit 2 ;;
       esac
       shift 2 ;;
