@@ -280,6 +280,22 @@ def test_transcript_replies_empty_when_no_transcript(monkeypatch):
     assert rt_mod._transcript_replies("sid") == []
 
 
+def test_transcript_replies_robust_and_faithful(tmp_path, monkeypatch):
+    # Review fixes: a malformed (non-dict) row or a non-dict `message` must be
+    # skipped without crashing (gemini HIGH), and interior whitespace is preserved
+    # faithfully rather than collapsed (codex P2).
+    tx = tmp_path / "s.jsonl"
+    lines = [
+        json.dumps('a bare string containing "assistant" literally'),  # parses to str -> skip
+        json.dumps({"type": "assistant", "message": "assistant"}),     # message non-dict -> skip
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "<<<RELAY>>>hi   there\tfriend<<<ENDRELAY>>>"}]}}),
+    ]
+    tx.write_text("\n".join(lines))
+    monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: str(tx))
+    assert rt_mod._transcript_replies("s") == ["hi   there\tfriend"]  # ws preserved, no crash
+
+
 def test_transcript_replies_honors_config_dir(tmp_path):
     # A peer under a relocated CLAUDE_CONFIG_DIR writes projects/ THERE, not under
     # ~/.claude. _transcript_replies must glob projects/ under the config dir.

@@ -320,17 +320,18 @@ def _claude_base(config_dir: Optional[str]) -> Path:
 
 def _transcript_replies(session_id: str, config_dir: Optional[str] = None) -> list[str]:
     """Sentinel-wrapped replies from the peer's transcript jsonl -- faithful
-    text (spaces intact), the reason G2 prefers this over the pane. Reads the
-    last assistant message blocks; a partial-write/parse error on one line is
-    skipped, never fatal. ``config_dir`` locates the peer's ``projects/`` when it
-    runs under a relocated ``CLAUDE_CONFIG_DIR``."""
+    text (inter-word whitespace preserved, unlike the pane's collapse), the reason
+    G2 prefers this over the pane. Reads the assistant message text blocks; a
+    partial-write / parse / decode error or a malformed (non-dict) row is skipped,
+    never fatal. ``config_dir`` locates the peer's ``projects/`` under a relocated
+    ``CLAUDE_CONFIG_DIR``."""
     projects_dir = _claude_base(config_dir) / "projects" if config_dir else None
     tpath = transcript_path_for(session_id, projects_dir=projects_dir)
     if tpath is None:
         return []
     try:
         text = Path(tpath).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
         return []
     out: list[str] = []
     for line in text.splitlines():
@@ -341,12 +342,18 @@ def _transcript_replies(session_id: str, config_dir: Optional[str] = None) -> li
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        content = (row.get("message") or {}).get("content")
+        if not isinstance(row, dict):
+            continue
+        message = row.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             continue
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
-                out.extend(" ".join(m.split())
+                # strip outer whitespace only -- preserve the reply's interior
+                # spacing faithfully (the pivot's whole point); the injection path
+                # (_frame) re-normalizes to one line before sending the next hop.
+                out.extend(m.strip()
                            for m in _SENTINEL_RE.findall(block.get("text", "")))
     return out
 
