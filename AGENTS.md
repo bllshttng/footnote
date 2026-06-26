@@ -202,6 +202,10 @@ remains as a deprecated alias (hidden from top-level help) so old
 call sites keep working; new code should use `backlog`. Both names
 resolve to the same Typer app so behavior is byte-identical.
 
+For a practical day-to-day usage guide (creating, editing, moving cards
+between columns/swimlanes, lifecycle, priorities, the public roadmap) see
+[docs/backlog-usage.md](docs/backlog-usage.md).
+
 Node IDs are minted as `<prefix>-<hex>` (e.g. `fno-a3f9`). The prefix and hex
 width are set at `fno setup` and stored in `config.backlog.id_prefix` /
 `config.backlog.id_hex_width` (lowercase prefix ≤7 chars, not `cv-`/`fu-`/`tgt-`;
@@ -231,6 +235,9 @@ via `defer`; reversible via `undefer`).
 | `fno backlog advance [--closed <id>] [--project P]` | - | merge-triggered auto-continue: dispatch a fresh background `/target no-merge` worker for the next now-unblocked node after a PR merge. Opt-in (`config.auto_continue.enabled`, default off; `/megawalk auto-continue` arms a campaign) and decoupled from the loop driver, so megawalk / `/target` inherit it. Called by `reconcile` + `/pr merged`. Non-fatal; emits exactly one decision event (`advance_dispatched` / `advance_skipped{reason}` / `advance_failed`). See "Merge-Triggered Auto-Continue". |
 | `fno backlog get <id\|slug\|bare-hex>` | - | resolve a node by its canonical `<prefix>-<hex>` id, its title-derived **slug**, or a bare hex (re-prefixed to the active prefix). The deterministic resolution tiers used by `/agents spawn`'s VALIDATE step. |
 | `fno backlog backfill-slugs` | - | one-time, idempotent, lock-safe pass that assigns a title-derived slug to every node lacking one. Re-running is a no-op. New nodes are slugged automatically by every mutation; this is the explicit operator trigger for the legacy graph. |
+| `fno backlog roadmap [--project P] [--out PATH] [--html PATH]` | - | render a public, leak-free roadmap of nodes flagged `public: true` (via `fno backlog update --public`) for one project. Emits ONLY title/priority/size grouped Now/Next/Later/Shipped - never IDs, plan paths, or cwd. Reuses the live board's column + lane logic so it can't drift. Safe to commit to a public repo or host. |
+
+`fno backlog update` now also edits the create-only fields that previously forced a recreate-via-`idea` (and thus duplicates): `--details/--description` (rationale; `null` clears), `--domain`, `--size` (S/M/L), `--type`, and the `--public/--no-public` roadmap flag.
 
 ### Node Slugs
 
