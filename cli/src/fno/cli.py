@@ -65,6 +65,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "claim":         ("fno.claims.cli:cli",                 "Work-claim coordination primitive"),
     "carveout":      ("fno.carveout:carveout_app",          "Capture left-out work (deferred decisions, out-of-scope bugs) for retro-triage."),
     "retro":         ("fno.retro.cli:retro_app",            "Consume retro-triage triggers; file left-out work as backlog nodes."),
+    "think":         ("fno.provenance.cli:think_app",        "Context /think dispatch (explicit conversational verb)."),
     "phase":         ("fno.phase:phase_app",               "Phase utilities (kill-check via the fno-agents binary)"),
     "executor":      ("fno.executor:executor_app",         "Executor resolution (locked-decision parser + surface inference)"),
     "config":        ("fno.config_cli:app",                "Configuration management"),
