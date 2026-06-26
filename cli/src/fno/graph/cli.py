@@ -1226,6 +1226,19 @@ def cmd_update(
         typer.echo("Error: --project must be a non-empty string", err=True)
         raise typer.Exit(code=1)
 
+    # Validate size/type the same way priority is validated above, so update
+    # can't store garbage (e.g. `--size foo`). 'null' clears size.
+    if size is not None and size.lower() != "null" and size.upper() not in {"S", "M", "L"}:
+        typer.echo(f"Error: invalid size '{size}'. Must be one of: S, M, L", err=True)
+        raise typer.Exit(code=1)
+    _VALID_TYPES = {"feature", "epic", "bug", "roadmap"}
+    if type_ is not None and type_ not in _VALID_TYPES:
+        typer.echo(
+            f"Error: invalid type '{type_}'. Must be one of: {', '.join(sorted(_VALID_TYPES))}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     # Derive cwd from the work-map when --project is explicit but --cwd was
     # not given. Do this OUTSIDE the mutator so settings reads never happen
     # under the graph lock.

@@ -212,6 +212,21 @@ def test_update_domain_size_type(tmp_graph):
     assert node["type"] == "epic"
 
 
+def test_update_rejects_bad_size_and_type(tmp_graph):
+    # Validation guards against storing garbage (gemini HIGH on PR #48).
+    _seed(tmp_graph, [
+        {"id": "ab-feedface", "title": "Thing", "slug": "thing", "_status": "ready",
+         "domain": "code", "type": "feature", "project": "p"},
+    ])
+    bad_size = runner.invoke(app, ["backlog", "update", "ab-feedface", "--size", "foo"])
+    assert bad_size.exit_code == 1
+    bad_type = runner.invoke(app, ["backlog", "update", "ab-feedface", "--type", "widget"])
+    assert bad_type.exit_code == 1
+    # 'null' still clears size, and roadmap is a valid type.
+    assert runner.invoke(app, ["backlog", "update", "ab-feedface", "--size", "null"]).exit_code == 0
+    assert runner.invoke(app, ["backlog", "update", "ab-feedface", "--type", "roadmap"]).exit_code == 0
+
+
 # -- public roadmap ----------------------------------------------------------
 
 
