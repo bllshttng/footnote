@@ -60,6 +60,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "wake":          ("fno.wake.cli:wake_app",             "Wake-signal admin commands"),
     "plan":          ("fno.plan:plan_app",                 "Plan frontmatter stamping (in-package)"),
     "pr":            ("fno.pr:pr_app",                     "PR utilities (wraps scripts/lib/pr-*.sh)"),
+    "stub-manifest": ("fno.stub_manifest:stub_manifest_app", "Stub-manifest for contract-tier dependents (emit/validate/check-pr)."),
     "bundle":        ("fno.bundle:bundle_app",             "Skill bundle build + lint."),
     "lint":          ("fno.lint_cli:app",                  "Repository lint checks"),
     "claim":         ("fno.claims.cli:cli",                 "Work-claim coordination primitive"),

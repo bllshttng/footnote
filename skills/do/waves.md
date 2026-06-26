@@ -86,6 +86,7 @@ belongs to a project OTHER than the session's:
 
 - **Foreign node unblocked (ready):** `fno agents spawn --cwd <foreign-root> "/target <foreign-node>"`, mark the wave delegated, print a `spawned target-<node> --cwd <foreign-root>` receipt, and continue this session's own waves.
 - **Foreign node still blocked** (e.g. `blocked_by` the current, not-yet-merged node): do NOT spawn (the worker would refuse). Record a `fno carveout add --kind deferred` entry, print a `deferred <node> to <project>; dispatch on <blocker> merge` line, and rely on `fno backlog advance` to dispatch it after merge.
+- **Foreign node blocked but `dep=contract`** (the optimistic stub pass, G3): dispatch it **NOW** instead of deferring. The node carries `dep: contract` + `stub_against: <ref>` + `contract_version: N` (set by `fno backlog decompose`, G2). Spawn `fno agents spawn --cwd <foreign-root> "/target <foreign-node>"` and print a `stubbed <node> vs contract v<N>` receipt. The spawned first pass MUST: build against the pinned `## Interface Contract`, **stub** the surface that needs the blocker landed, open its PR as **draft** (`gh pr create --draft` - it must not merge with mocks), emit its manifest via `fno stub-manifest write --node <node> --contract-version <N> --contract-ref <ref> --stubs-json '[{stub_id,file,symbol,contract_ref,kind}, ...]'`, then **END**. Reconciliation is a later merge-triggered pass (G4); the first pass never waits for the blocker.
 - **Never** `cd` into the foreign repo and execute locally.
 
 A pure single-project plan (zero foreign waves) behaves byte-identically to
@@ -180,7 +181,10 @@ target-state node's `project`) and compare it to each `wave.project`:
   continue this session's own waves. Never `cd` into the foreign repo.
 - **foreign + blocked node**: do NOT spawn (a worker would refuse on the blocked
   node); record `fno carveout add --kind deferred ...` and rely on G1's
-  merge-triggered dispatch. Log the deferral.
+  merge-triggered dispatch. Log the deferral. **Exception - `dep=contract`:**
+  dispatch NOW (the optimistic stub pass); see the `dep=contract` bullet under
+  "Foreign-wave handling" above for the first-pass contract (build vs the pinned
+  contract, draft PR, `fno stub-manifest write`, then end).
 - **foreign + unmapped project** (`fno backlog project-root` exits 1) or
   **node-less foreign wave**: REFUSE by name; do not guess a cwd.
 

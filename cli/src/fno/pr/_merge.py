@@ -264,6 +264,30 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         return 1
     pr_number = int(pr_raw)
 
+    # (0) Stub-manifest hold: a `contract`-tier dependent's PR must not merge
+    # while it carries an unreconciled stub-manifest (mocks would ship). Checked
+    # BEFORE the auto_merge gate so auto-merge cannot bypass it (AC7-EDGE), and
+    # it no-ops for every non-contract PR so the default `hard` path is unchanged
+    # (AC6-EDGE).
+    try:
+        from fno.stub_manifest import unreconciled_manifest_for_pr
+
+        held = unreconciled_manifest_for_pr(pr_number, repo)
+    except Exception:
+        held = None  # never let the guard's own failure block a normal merge
+    if held:
+        n_stubs = len(held.get("stubs", []))
+        _emit(
+            pr_number,
+            "held",
+            f"contract dependent {held.get('_node')} carries an unreconciled "
+            f"stub-manifest ({n_stubs} stub(s)); reconcile before merge",
+            "none",
+            invoker,
+            err=False,
+        )
+        return 2
+
     # (1) Short-circuit if disabled or invoker not allowed.
     auto_merge = _load_auto_merge()
     if not auto_merge.is_allowed_for(invoker):
