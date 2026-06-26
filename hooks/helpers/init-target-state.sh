@@ -759,6 +759,10 @@ PYEOF
         _NODE_OWNED=1
       else
         _acq_rc=$?
+        # The modern claim is the authority: if it failed, this session does not
+        # own the node even if the legacy layer happened to win (the handoff
+        # retry below re-sets this on a successful re-acquire).
+        _NODE_OWNED=0
         echo "target: WARNING: fno claim acquire failed (rc=$_acq_rc) for $_CLAIM_KEY" >&2
         [[ -s "$STATE_DIR/.claim-err" ]] && cat "$STATE_DIR/.claim-err" >&2
         if [[ "$_acq_rc" -eq 1 ]]; then
@@ -845,8 +849,11 @@ PYEOF
       fi
     fi
     # graph_node_id written exactly once: the node id when a claim layer won and
-    # the graph has it, else null (a missing graph.json stays null).
-    if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]]; then
+    # the node actually exists in the graph, else null (a missing graph.json or an
+    # ab-id not present in the graph stays null - the modern claim is just a lock
+    # and does not prove the backlog row exists).
+    if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]] \
+         && grep -q "\"${_NODE_ID}\"" "$_GRAPH_FILE" 2>/dev/null; then
       echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
     else
       echo "graph_node_id: null" >> "$STATE_FILE"

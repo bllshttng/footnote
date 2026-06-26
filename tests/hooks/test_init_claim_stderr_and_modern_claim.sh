@@ -117,4 +117,31 @@ _count_b="$(grep -c '^graph_node_id:' "$STATE_B")"
 [[ "$_count_b" == "1" ]] || fail "(b): graph_node_id written ${_count_b}x, expected 1 (AC1-FR)"
 pass "(b): graph_node_id written exactly once"
 
+# ── (c) ab-id absent from an existing graph => null (codex P2 guard) ───
+log "(c): ab-id not present in an existing graph.json => graph_node_id null"
+
+make_repo TMP_C
+_ALL_TMPS+=("$TMP_C")
+# Graph exists but does NOT contain the requested ab-id. The legacy claim fails
+# ("node not found") yet the modern lock acquires fine; the node-presence grep
+# must still keep graph_node_id null so no successor is spawned for a bogus node.
+cat > "${TMP_C}/home/.fno/graph.json" <<'JSON'
+{"entries":[{"id":"tst-other0","title":"some other node","session_id":null}]}
+JSON
+
+(cd "$TMP_C" && \
+  HOME="${TMP_C}/home" \
+  TARGET_START=1 \
+  TARGET_INPUT="ab-deadbeef" \
+  TARGET_LOCATION_OK="main-acknowledged" \
+  bash "$INIT" >/dev/null 2>&1) \
+  || fail "(c): init exited non-zero"
+
+STATE_C="${TMP_C}/.fno/target-state.md"
+[[ -f "$STATE_C" ]] || fail "(c): target-state.md was not created"
+GNID_C="$(graph_node_id_of "$STATE_C")"
+[[ "$GNID_C" == "null" ]] \
+  || fail "(c): expected graph_node_id 'null' for ab-id absent from graph, got '${GNID_C}'"
+pass "(c): graph_node_id null when node id is absent from an existing graph"
+
 log "All init-claim scenarios passed"
