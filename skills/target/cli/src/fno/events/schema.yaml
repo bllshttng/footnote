@@ -1766,8 +1766,8 @@ event_types:
           description: "The freshly-filed node a /think was spawned for."
         trigger:
           type: string
-          enum: [birth, work-start, retro, conversational]
-          description: "Which dispatch moment fired: birth (A1), work-start or retro (A2 lifecycle, x-122a), or conversational (C explicit verb, x-0a9c)."
+          enum: [birth, work-start, retro]
+          description: "Which dispatch moment fired (x-122a): birth (A1), work-start or retro (A2 lifecycle)."
         think_session:
           type: string
           description: "Short id of the spawned claude /think bg worker (from the spawn receipt)."
@@ -1797,8 +1797,8 @@ event_types:
           description: "The freshly-filed node a /think handoff was offered for."
         trigger:
           type: string
-          enum: [birth, work-start, retro, conversational]
-          description: "Which dispatch moment fired: birth (A1), work-start or retro (A2 lifecycle, x-122a), or conversational (C explicit verb, x-0a9c)."
+          enum: [birth, work-start, retro]
+          description: "Which dispatch moment fired (x-122a): birth (A1), work-start or retro (A2 lifecycle)."
         presence:
           type: string
           enum: [attended]
@@ -1823,8 +1823,8 @@ event_types:
           description: "Why the dispatch spawned/offered nothing this evaluation."
         trigger:
           type: string
-          enum: [birth, work-start, retro, conversational]
-          description: "Which dispatch moment fired: birth (A1), work-start or retro (A2 lifecycle, x-122a), or conversational (C explicit verb, x-0a9c)."
+          enum: [birth, work-start, retro]
+          description: "Which dispatch moment fired (x-122a): birth (A1), work-start or retro (A2 lifecycle)."
         node_id:
           type: string
           description: "The candidate node, when the reason references one."
