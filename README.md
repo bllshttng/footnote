@@ -97,39 +97,7 @@ Not a sandbox. Not a babysitter. Not a hero-video launch. It runs your plans wit
 
 ## Roadmap
 
-Live, styled board: **[bllshttng.github.io/footnote/roadmap](https://bllshttng.github.io/footnote/roadmap/)**
-
-The table below is generated from the public backlog by `scripts/publish-roadmap.sh` and refreshed in place; edit the backlog, not this section.
-
-<!-- ROADMAP:START -->
-| When | Item | Priority |
-|------|------|----------|
-| Now | Cutlist: remove megawalk, evals, cost, megatron; cut inbox (keep bus+mail for relay) | p1 |
-| Next | Session auto-recovery: resume bg /target after abnormal turn termination | p2 |
-| Next | Cross-session agent relay (autonomous A2A, human out of loop) | p2 |
-| Next | Relay G4: cross-provider PTY-injection vehicle + structured reply capture | p2 |
-| Next | Provider resilience gaps: failover retry + cross-model sigma wiring | p2 |
-| Later | The current implementation of `is_child_alive` returns `false` if `try_wait()` returns an `Err`. Pe… | p2 |
-| Later | The `Drop` implementation performs an unbounded `join()` on the drainer thread. As noted in the "Se… | p2 |
-| Later | Return thread-spawn failure instead of panicking | p2 |
-| Later | Enforce nonzero backoff floor for sub-millisecond caps | p2 |
-| Later | Reject empty short IDs in constructor | p2 |
-| Later | Fix heartbeat count fallback producing non-numeric values | p2 |
-| Later | MegaralphState schema cleanup post-merge: status validator, ghost paused_reason, tasks_completed alias, List[Any] tightening | p3 |
-| Later | Autonomous wake-on-message inbox daemon with cross-provider routing | p3 |
-| Later | Wire Bandit into CI for the CLI SQL surface. Phase 5b Task 5.5 used a pytest AST guard (tests/cli/t… | p3 |
-| Later | rr id-batch --concurrency N: parallel Typst rendering deferred. Conflicts with the single-connectio… | p3 |
-| Shipped | opencode harness support | p2 |
-| Shipped | Context-carrying /think dispatch on every node-thought moment (born-with-why v2) | p2 |
-| Shipped | Relay G1: proven human-out-of-loop round-trip + automated test | p2 |
-| Shipped | Relay G2: persistent session registry + session-id address router | p2 |
-| Shipped | Relay G3: always-on relay daemon + envelope (dedup, ttl, cycle, provenance) | p2 |
-| Shipped | Finish autocorrect: wire git post-commit capture + schedule the review | p2 |
-| Shipped | Cut megawalk (megawalk_drivers, loop_megawalk.rs, skill) | p2 |
-| Shipped | Cut evals/ (cli.py-only importer) | p2 |
-| Shipped | Cut megatron (gate x-9c4c done; now clean) | p2 |
-| Shipped | Wire cmd_add into born-with-why on_node_born (decided: cmd_add only) | p3 |
-<!-- ROADMAP:END -->
+Live board: **[footnote.sh/roadmap](https://footnote.sh/roadmap)** - rendered from the public backlog and refreshed automatically (no commit per update). Flag items with `fno backlog update <id> --public`.
 
 ## Docs
 
