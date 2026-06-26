@@ -46,7 +46,6 @@ def _resolve_path(path: Optional[Path], type_: Optional[str]) -> Path:
 
 def _detect_type(path: Path) -> str:
     """Auto-detect state type from file name."""
-    name = path.name
     return "target"
 
 
