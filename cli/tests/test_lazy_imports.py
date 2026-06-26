@@ -1,7 +1,7 @@
 """Tests for the LazyTypeGroup lazy-import refactor.
 
 Acceptance criteria:
-  AC3-HP: fno paths state-dir does NOT import megawalk
+  AC3-HP: fno paths state-dir does NOT import heavy sub-apps
   AC3-EDGE: fno --help doesn't import any sub-app body
   AC3-FR: no functional regression in existing verbs
   AC1-ERR: misconfigured lazy entry fails loud
@@ -49,7 +49,6 @@ def _run_abi(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
 # These are the heaviest transitive imports that the lazy refactor defers.
 _FORBIDDEN_AFTER_HELP = [
     "fno.state.cli",
-    "fno.megawalk",
     "fno.adapters.providers.cli",
     "fno.worker.cli",
     "fno.graph.cli",
@@ -80,7 +79,7 @@ def test_abi_help_does_not_import_sub_app_modules():
 
 
 # ---------------------------------------------------------------------------
-# AC3-HP: fno paths state-dir does NOT import megawalk
+# AC3-HP: fno paths state-dir does NOT import heavy sub-apps
 # ---------------------------------------------------------------------------
 
 _CHECK_CODE_PATHS = """\
@@ -88,18 +87,18 @@ import sys
 from fno import cli
 from typer.testing import CliRunner
 CliRunner().invoke(cli.app, ["paths", "state-dir"])
-found = [m for m in ["fno.megawalk"] if m in sys.modules]
+found = [m for m in ["fno.adapters.providers.cli"] if m in sys.modules]
 if found:
     print("FOUND:", ",".join(found), file=sys.stderr)
 sys.exit(len(found))
 """
 
 
-def test_abi_paths_does_not_import_megawalk():
+def test_abi_paths_does_not_import_heavy_subapps():
     """AC3-HP: `fno paths state-dir` only loads the paths sub-app."""
     result = _run_py(_CHECK_CODE_PATHS)
     assert result.returncode == 0, (
-        f"megawalk imported during `fno paths state-dir`:\n{result.stderr}"
+        f"heavy sub-app imported during `fno paths state-dir`:\n{result.stderr}"
     )
 
 
@@ -166,7 +165,6 @@ _EXPECTED_SUBCOMMANDS = [
     "paths",
     "mail",
     "agent",
-    "megawalk",
     "providers",
     "review",
     "cost",
@@ -238,33 +236,6 @@ def test_executor_resolve_group_shape_preserved():
 
 
 # ---------------------------------------------------------------------------
-# Regression: info_overrides round-trip preserves extended help text
-# ---------------------------------------------------------------------------
-
-def test_megawalk_help_carries_extended_help():
-    """`fno megawalk --help` must surface the extended multi-line help.
-
-    Regression test for `info_overrides` plumbing through `TyperInfo`.
-    Without this mechanism, the extended help text that the old
-    `app.add_typer(megawalk_app, help=...)` registered at the parent
-    level is lost, and only the sub-app's own short help is shown.
-    Post ab-7303e5d7 the walker is the Rust loop and this app hosts only
-    the journal watcher, so the pinned marker is the loop-run pointer
-    rather than the deleted walker's exit-code table.
-    """
-    from fno.cli import app
-    from typer.testing import CliRunner
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["megawalk", "--help"])
-    assert result.exit_code == 0, f"fno megawalk --help failed: {result.output}"
-    assert "loop run --driver megawalk" in result.output, (
-        "Expected the loop-run pointer in `fno megawalk --help` output (proves "
-        f"info_overrides forwarding); got: {result.output[:500]}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Real-subprocess smoke for the installed entry point
 # ---------------------------------------------------------------------------
 
@@ -331,11 +302,11 @@ def test_did_you_mean_suggests_lazy_commands():
     from typer.testing import CliRunner
 
     runner = CliRunner()
-    # ``megawalk`` is a lazy entry; ``mehgawalk`` is a typo.
-    result = runner.invoke(app, ["mehgawalk"])
+    # ``backlog`` is a lazy entry; ``backlg`` is a typo.
+    result = runner.invoke(app, ["backlg"])
     assert result.exit_code != 0
-    assert "Did you mean 'megawalk'" in result.output, (
-        f"Missing megawalk suggestion: {result.output}"
+    assert "Did you mean 'backlog'" in result.output, (
+        f"Missing backlog suggestion: {result.output}"
     )
 
 

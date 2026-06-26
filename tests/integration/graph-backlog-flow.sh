@@ -133,7 +133,5 @@ HOME="$EMPTY_HOME" python3 scripts/triage.py propose 2>&1 | grep -q "no pending 
 # so future doc drift is caught here instead of during human review.
 grep -q "Backlog Lifecycle" docs/architecture/megawalk-pipeline.md \
     || fail "docs/architecture/megawalk-pipeline.md missing 'Backlog Lifecycle' section"
-grep -q "/triage" skills/megawalk/SKILL.md \
-    || fail "skills/megawalk/SKILL.md missing /triage cross-reference"
 
 echo "PASS: all assertions (intake, render, columns, cards, schema, apply, cycle, empty, docs)"

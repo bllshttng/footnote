@@ -99,7 +99,6 @@ class PathsBlock(BaseModel):
     agents_registry_path: Optional[str] = None
     handoffs_dir: Optional[str] = None
     retro_pending_dir: Optional[str] = None
-    evals_history: Optional[str] = None
     bus_dir: Optional[str] = None
 
     @field_validator(
@@ -116,7 +115,6 @@ class PathsBlock(BaseModel):
         "agents_registry_path",
         "handoffs_dir",
         "retro_pending_dir",
-        "evals_history",
         "bus_dir",
         mode="before",
     )
@@ -690,33 +688,6 @@ class TargetConfig(BaseModel):
         if isinstance(v, (dict, BlastConfig)):
             return v
         return {}
-
-
-class EvalsBlock(BaseModel):
-    """Evals-runner settings (nested under 'config.evals').
-
-    `staleness_days` controls when `fno evals report` prints a staleness
-    warning.  When the newest history row is older than this many days,
-    report prints an explicit warning so an operator knows the suite has
-    not run recently.  Default 14 days (Open Question 2 from the design
-    doc); set to a lower value in CI or a higher value for infrequent
-    manual sweeps.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    staleness_days: int = 14
-
-    @field_validator("staleness_days")
-    @classmethod
-    def staleness_days_positive(cls, v: int) -> int:
-        """A staleness window of 0 or less is nonsensical."""
-        if v < 1:
-            raise ValueError(
-                "config.evals.staleness_days must be >= 1; "
-                f"got {v}"
-            )
-        return v
 
 
 class A2aBlock(BaseModel):
@@ -1631,7 +1602,6 @@ class ConfigBlock(BaseModel):
     research: ResearchBlock = Field(default_factory=ResearchBlock)
     review: ReviewBlock = Field(default_factory=ReviewBlock)
     target: TargetConfig = Field(default_factory=TargetConfig)
-    evals: EvalsBlock = Field(default_factory=EvalsBlock)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     think_spawn: ThinkSpawnBlock = Field(default_factory=ThinkSpawnBlock)

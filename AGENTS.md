@@ -159,7 +159,6 @@ See [docs/provider-rotation.md](docs/provider-rotation.md) for the full schema, 
 | `/pr create` | Create a PR from commits (dispatches the Haiku `pr-creator` subagent) | **main** |
 | `/pr check` | Poll for external review, implement feedback | main |
 | `/setup` | Interactive settings.yaml wizard | main |
-| `fno evals run\|report\|diff` | Golden-task efficacy evals: run the real /target pipeline on fixture projects in advisory mode, append history, diff labeled sweeps (see [docs/architecture/efficacy-evals.md](docs/architecture/efficacy-evals.md)) | main |
 
 ## Execution Model
 
@@ -336,7 +335,6 @@ Paths marked with a resolver use `fno.paths` for lookup; the default column show
 | `.fno/SUMMARY.md` | project-relative | `.fno/SUMMARY.md` | Task completion notes | operator |
 | `.fno/00-INDEX.md` | project-relative | `.fno/00-INDEX.md` | Execution strategy | /blueprint |
 | `{plan_path}.artifacts/` | plan-relative | `{plan_path}.artifacts/` | Sidecar folder for quick-plan artifacts (COMPLETION.md, `scratchpad-archive/`). Applies only to single-file plans; folder plans keep artifacts inside the folder. Session-state files (HANDOFF/SUMMARY/STATE) are transient and not archived. | target stop hook |
-| `paths.evals_history()` | `config.paths.evals_history` | `~/.fno/evals-history.jsonl` | Golden-task eval run history (append-only) | fno evals |
 
 ### Path Configuration and Migration
 

@@ -351,15 +351,6 @@ def ledger_json() -> Path:
     return state_dir() / "ledger.json"
 
 
-def evals_history() -> Path:
-    """Return the path to evals-history.jsonl (golden-task eval run history)."""
-    settings = _settings()
-    override = settings.config.paths.evals_history
-    if override is not None:
-        return _resolve(override)
-    return state_dir() / "evals-history.jsonl"
-
-
 def bus_dir() -> Path:
     """Return the cross-agent bus directory (default: ~/.fno/bus/).
 

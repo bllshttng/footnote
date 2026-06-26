@@ -20,7 +20,6 @@
 | `config.paths.agents_registry_path` | str (optional) | _(none)_ | never | Override path to the agents registry.json. |
 | `config.paths.handoffs_dir` | str (optional) | _(none)_ | never | Override path to the handoffs dir. |
 | `config.paths.retro_pending_dir` | str (optional) | _(none)_ | never | Override path to the retro-pending dir. |
-| `config.paths.evals_history` | str (optional) | _(none)_ | never | Override path to evals-history.jsonl. |
 | `config.paths.bus_dir` | str (optional) | _(none)_ | never | Override path to the cross-project mail bus dir. |
 | `config.obsidian.enabled` | bool | `false` | always | Whether this project uses an Obsidian vault for plans/docs. |
 | `config.obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
@@ -51,7 +50,6 @@
 | `config.target.defaults.no_external` | bool | `false` | never | Session-input default: skip external review (size-profile driven). |
 | `config.target.defaults.no_docs` | bool | `false` | never | Session-input default: skip docs (size-profile driven). |
 | `config.target.defaults.max_iterations` | int | `40` | advanced | Session-input default: max pipeline iterations. |
-| `config.evals.staleness_days` | int | `14` | never | Age (days) before an eval sweep is considered stale. |
 | `config.agents.a2a.auto` | bool | `true` | advanced | Allow agents to auto-open agent-to-agent threads. |
 | `config.agents.a2a.turn_ceiling` | int | `6` | advanced | Max turns in an agent-to-agent thread. |
 | `config.agents.confirm` | str | `auto` | never | Agent-launch confirmation policy (auto/always/never). |

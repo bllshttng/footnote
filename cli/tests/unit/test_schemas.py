@@ -11,12 +11,6 @@ def test_ac1_hp_load_target():
     assert hasattr(Schema, "model_validate"), "must be a pydantic v2 model"
 
 
-def test_ac1_hp_load_megawalk():
-    """AC1-HP: load_schema('megawalk') returns a pydantic model class."""
-    Schema = load_schema("megawalk")
-    assert hasattr(Schema, "model_validate")
-
-
 def test_ac2_err_unknown_type_rejected():
     """AC2-ERR: load_schema('bogus') raises ValueError."""
     with pytest.raises(ValueError, match="unknown state type"):
@@ -64,12 +58,3 @@ def test_target_default_instantiation():
     Schema = load_schema("target")
     instance = Schema()
     assert instance.status == "IN_PROGRESS"
-
-
-def test_megawalk_has_campaign_fields():
-    """HP: MegawalkState has campaign_id, tick_count, last_reality_check_at."""
-    Schema = load_schema("megawalk")
-    instance = Schema()
-    assert hasattr(instance, "campaign_id")
-    assert hasattr(instance, "tick_count")
-    assert hasattr(instance, "last_reality_check_at")
