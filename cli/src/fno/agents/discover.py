@@ -5,7 +5,8 @@ read over Claude Code's own per-session registry at
 ``~/.claude/sessions/<pid>.json`` (Locked Decision 3: no MCP /
 register-channel dependency — the registry already exists on disk). Surfaces
 live, un-adopted sessions in ``fno agents list`` so they are addressable by a
-legible handle without a UUID.
+legible handle without a UUID. When that sidecar is absent or repurposed, it
+falls back to the canonical transcript store ``~/.claude/projects`` (x-a1d5).
 
 Host-local (Locked Decision 8): PID liveness is per-machine, so only this
 host's sessions are discovered; the lane never claims to see another host's.
@@ -44,6 +45,16 @@ NAME_MAP_FILENAME = "session-names.json"
 # reads the developer's real ~/.claude/sessions.
 SESSIONS_DIR_ENV = "FNO_CLAUDE_SESSIONS_DIR"
 
+# Canonical session store (x-a1d5). The ``<pid>.json`` sidecar above is absent
+# or repurposed on some hosts (observed live: a user syncs cleared/compacted
+# ``.md`` exports into ``~/.claude/sessions``), so the sidecar scan finds zero.
+# The canonical store is the transcript jsonl at
+# ``~/.claude/projects/<cwd-enc>/<session-id>.jsonl``. Test/operator seam +
+# recency window mirror the sidecar seam above.
+PROJECTS_DIR_ENV = "FNO_CLAUDE_PROJECTS_DIR"
+RECENCY_SECONDS_ENV = "FNO_CLAUDE_SESSION_RECENCY_SECONDS"
+_DEFAULT_RECENCY_SECONDS = 600.0
+
 
 def default_sessions_dir() -> Path:
     """Claude Code's per-session registry directory on this host."""
@@ -51,6 +62,27 @@ def default_sessions_dir() -> Path:
     if override:
         return Path(override)
     return Path(os.path.expanduser("~")) / ".claude" / "sessions"
+
+
+def default_projects_dir() -> Path:
+    """Claude Code's canonical transcript store on this host (x-a1d5)."""
+    override = os.environ.get(PROJECTS_DIR_ENV)
+    if override:
+        return Path(override)
+    return Path(os.path.expanduser("~")) / ".claude" / "projects"
+
+
+def _recency_seconds() -> float:
+    """Transcript-mtime liveness window (env-overridable, positive only)."""
+    raw = os.environ.get(RECENCY_SECONDS_ENV)
+    if raw:
+        try:
+            v = float(raw)
+        except ValueError:
+            v = 0.0
+        if v > 0:
+            return v
+    return _DEFAULT_RECENCY_SECONDS
 
 
 def default_name_map_path() -> Path:
@@ -125,6 +157,129 @@ def _read_registry_file(path: Path) -> Optional[dict]:
     except (ValueError, UnicodeDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+# --------------------------------------------------------------------------
+# Canonical transcript-store discovery (x-a1d5)
+# --------------------------------------------------------------------------
+
+
+# CC encodes a session's cwd into its projects subdir name by replacing every
+# non-alphanumeric char with ``-`` (verified round-tripping real dirs:
+# ``/Users/x/.claude/p`` -> ``-Users-x--claude-p``). The mapping is lossy, so we
+# never decode it; we encode a known cwd to FIND the dir.
+def _encode_cwd(cwd: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+
+
+def _live_claude_procs(psutil_mod) -> list[tuple[int, str]]:
+    """``(pid, cwd)`` for each running Claude Code CLI process on this host.
+
+    Selects the ``claude`` launcher and the versioned binary
+    (``.../claude/versions/<v>``) and drops the daemon infra that shares that
+    binary (``--bg-pty-host`` / ``--bg-spare`` etc.). This bounds the projects
+    scan below to live sessions' dirs only — never the full 454-dir / 13k-file
+    store (the plan's no-full-scan contract). Best-effort: any psutil failure
+    yields fewer rows, never raises.
+    """
+    out: list[tuple[int, str]] = []
+    try:
+        procs = list(psutil_mod.process_iter(["pid", "cmdline"]))
+    except Exception:  # noqa: BLE001 — psutil unavailable/erroring -> no rows
+        return out
+    for p in procs:
+        try:
+            cmd = (p.info.get("cmdline") if hasattr(p, "info") else None) or []
+        except Exception:  # noqa: BLE001
+            continue
+        if not cmd:
+            continue
+        arg0 = str(cmd[0])
+        is_claude = os.path.basename(arg0) == "claude" or "/claude/versions/" in arg0
+        if not is_claude:
+            continue
+        if any(isinstance(a, str) and a.startswith("--bg-") for a in cmd):
+            continue  # pty-host / spare daemon, not a session
+        try:
+            pid = int(p.info["pid"])
+            cwd = psutil_mod.Process(pid).cwd()
+        except Exception:  # noqa: BLE001 — vanished / not inspectable
+            continue
+        if cwd:
+            out.append((pid, cwd))
+    return out
+
+
+def _newest_recent_transcript(pdir: Path, cutoff: float) -> Optional[str]:
+    """Return the session_id of the newest non-stale transcript in ``pdir``.
+
+    Only the dir's top-level ``*.jsonl`` are transcripts (UUID subdirs are
+    ``tool-results``). A ``.sync-conflict-`` copy is skipped — the marker is an
+    infix (``<sid>.sync-conflict-<ts>.jsonl``), so a substring test. ``None`` if
+    the dir is absent or holds no transcript fresh enough to look live.
+    """
+    best_sid: Optional[str] = None
+    best_mt = cutoff
+    try:
+        entries = list(os.scandir(pdir))
+    except OSError:
+        return None
+    for e in entries:
+        name = e.name
+        if ".sync-conflict-" in name or not name.endswith(".jsonl"):
+            continue
+        try:
+            if not e.is_file() or e.stat().st_mtime < best_mt:
+                continue
+        except OSError:
+            continue
+        best_mt = e.stat().st_mtime
+        best_sid = name[: -len(".jsonl")]
+    return best_sid or None
+
+
+def _discover_from_projects(
+    projects_dir: Path,
+    *,
+    psutil_mod,
+    recency_seconds: float,
+    now: Optional[float] = None,
+) -> list[dict]:
+    """Fallback discovery from the canonical transcript store (x-a1d5).
+
+    The ``<pid>.json`` sidecar is gone, so liveness comes from a running
+    ``claude`` process (the plan's primary signal): each live process' cwd maps
+    to a projects subdir, and the newest non-stale ``*.jsonl`` there is its live
+    transcript (the session_id == filename). cwd comes from the process; pid is
+    real. Returns candidate dicts shaped like the sidecar loop's rows so the
+    shared dedup/alias pipeline consumes them unchanged.
+
+    ponytail: one row per live cwd — two sessions sharing a cwd collapse to the
+    newest transcript (rare; the sidecar lane handled per-pid). The mtime window
+    only rejects a process whose transcript has gone quiet, so a real pid plus a
+    fresh transcript is the liveness proof.
+    """
+    cutoff = (now if now is not None else time.time()) - recency_seconds
+    rows: list[dict] = []
+    seen_cwd: set[str] = set()
+    for pid, cwd in _live_claude_procs(psutil_mod):
+        if cwd in seen_cwd:
+            continue
+        seen_cwd.add(cwd)
+        sid = _newest_recent_transcript(projects_dir / _encode_cwd(cwd), cutoff)
+        if not sid:
+            continue
+        rows.append(
+            {
+                "session_id": sid,
+                "short_id": sid[:8],
+                "pid": pid,
+                "cwd": cwd,
+                "status": None,
+                "agent": "claude",
+            }
+        )
+    return rows
 
 
 def _create_time_epoch(pid: int, psutil_mod) -> Optional[float]:
@@ -412,6 +567,7 @@ def resolve_or_suggest(
     *,
     limit: int = 3,
     sessions_dir: Optional[Path] = None,
+    projects_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
     psutil_mod=None,
@@ -426,6 +582,7 @@ def resolve_or_suggest(
     """
     sessions = discover_live_sessions(
         sessions_dir=sessions_dir,
+        projects_dir=projects_dir,
         name_map_path=name_map_path,
         project_resolver=project_resolver,
         psutil_mod=psutil_mod,
@@ -446,6 +603,7 @@ def resolve_or_suggest(
 def discover_live_sessions(
     *,
     sessions_dir: Optional[Path] = None,
+    projects_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
     exclude_short_ids: Iterable[str] = (),
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
@@ -453,9 +611,15 @@ def discover_live_sessions(
 ) -> list[DiscoveredSession]:
     """Return live, host-local Claude Code sessions, deduped + aliased.
 
+    Reads the ``<pid>.json`` sidecar registry first; when that yields zero live
+    sessions (the sidecar is absent or repurposed, x-a1d5) it falls back to the
+    canonical transcript store at ``~/.claude/projects``. The fallback is
+    zero-effect on a host with a working sidecar, so adopted/sidecar behavior is
+    byte-for-byte unchanged there.
+
     ``exclude_short_ids`` drops sessions already present in the fno registry so
     the discovered lane means "live but not adopted" (no double-listing).
-    ``project_resolver`` / ``psutil_mod`` are test seams.
+    ``projects_dir`` / ``project_resolver`` / ``psutil_mod`` are test seams.
     """
     sdir = sessions_dir or default_sessions_dir()
     resolver = project_resolver or resolve_project_for_cwd
@@ -496,6 +660,19 @@ def discover_live_sessions(
                 "agent": str(data.get("agent") or "claude"),
             }
         )
+
+    # Fallback to the canonical transcript store only when the sidecar found
+    # nothing live (x-a1d5). Gating on empty keeps sidecar hosts unchanged and
+    # matches the bug: a repurposed sessions dir -> zero rows -> read projects/.
+    if not candidates:
+        pdir = projects_dir or default_projects_dir()
+        project_rows = _discover_from_projects(
+            pdir, psutil_mod=psu, recency_seconds=_recency_seconds()
+        )
+        for r in project_rows:
+            if r["short_id"] in exclude:
+                continue
+            candidates.append(r)
 
     # Dedup on session_id (Invariant: one row per live sessionId, not per pid).
     by_sid: dict[str, dict] = {}
