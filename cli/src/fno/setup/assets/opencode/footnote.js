@@ -40,7 +40,13 @@ function fnoSessionId(dir) {
     const txt = readFileSync(join(dir, ".fno", "target-state.md"), "utf8")
     const m = txt.match(/^session_id:\s*"?([^"\s]+)"?/m)
     return m ? m[1] : null
-  } catch {
+  } catch (e) {
+    // A missing manifest is the dominant case (plain native opencode session) -
+    // stay silent. Any OTHER read error (a present-but-unreadable manifest) is a
+    // real footnote session going dark, so surface it once instead of vanishing.
+    if (e?.code !== "ENOENT") {
+      console.error(`[footnote] cannot read target-state.md: ${e}`)
+    }
     return null
   }
 }
@@ -75,8 +81,11 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
       if (event?.type !== "session.idle") return
       const sid = event.properties?.sessionID
       if (!sid) return
-      // Only act on footnote sessions; a plain native opencode session no-ops.
-      if (!fnoSessionId(dir)) return
+      // Only act on THE footnote session: ignore both plain native sessions (no
+      // manifest) and any other session's idle (e.g. a child) whose id does not
+      // match the target's. Re-driving a non-target session would inject
+      // /target --resume into the wrong place.
+      if (fnoSessionId(dir) !== sid) return
       if (busy) return
       busy = true
 
@@ -88,7 +97,7 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
           const res = await client.session.messages({ path: { id: sid } })
           items = res?.data || []
         } catch (e) {
-          console.error(`[footnote] session.messages failed: ${e}; leaving session idle`)
+          console.error(`[footnote] session.messages(${sid}) failed: ${e}; leaving session idle`)
           return
         }
 
@@ -128,12 +137,18 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
       // the same session in-context. Fire-and-forget; the next turn's idle runs
       // the gate again. loop-check's NoProgress backstop bounds a stuck loop.
       if (decision.decision === "block") {
-        client.session
-          .prompt({
-            path: { id: sid },
-            body: { parts: [{ type: "text", text: "/target --resume" }] },
-          })
-          .catch((e) => console.error(`[footnote] re-drive prompt failed: ${e}`))
+        // try/catch covers a synchronous throw from prompt(); .catch() covers
+        // the async rejection. Either way a plugin hook must never throw.
+        try {
+          client.session
+            .prompt({
+              path: { id: sid },
+              body: { parts: [{ type: "text", text: "/target --resume" }] },
+            })
+            .catch((e) => console.error(`[footnote] re-drive prompt(${sid}) failed: ${e}`))
+        } catch (e) {
+          console.error(`[footnote] re-drive prompt(${sid}) threw: ${e}`)
+        }
       }
     },
   }

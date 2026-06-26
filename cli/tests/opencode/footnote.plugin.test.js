@@ -140,6 +140,21 @@ describe("opencode native stop-hook plugin", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  test("ignores a session.idle whose sessionID != the target session", async () => {
+    const dir = makeProject() // manifest session_id is "sess-123"
+    const client = fakeClient([assistantMsg("x")])
+    let shellCalled = false
+    const hooks = await FootnotePlugin({
+      directory: dir,
+      client,
+      $: () => { shellCalled = true; return { quiet() { return this }, async text() { return "" } } },
+    })
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "other-session" } } })
+    expect(shellCalled).toBe(false)
+    expect(client.prompts.length).toBe(0)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   test("ignores non-idle events", async () => {
     const dir = makeProject()
     const client = fakeClient([assistantMsg("x")])
