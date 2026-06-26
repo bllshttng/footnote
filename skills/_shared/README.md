@@ -12,7 +12,7 @@ consumer bundles in sync with these canonicals.
 
 ## Why this exists
 
-Driver skills (`/target`, `/megawalk`, `/megatron`) need to share content
+Driver skills (`/target`, `/megawalk`) need to share content
 without runtime cross-skill delegation. A path escape like
 `../../_shared/X.md` works inside the footnote repo but breaks the moment
 the skill folder is lifted into Codex, Gemini, or any other markdown-aware

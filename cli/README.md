@@ -120,7 +120,7 @@ Do not treat v2 as a layout you can opt into; use the canonical
 ## Subcommand trees
 
 Run `fno --help` for the full list. The main trees are `state`, `graph`
-(`backlog`), `runtime`, `worker`, `event`, `agents`, `megatron`, and
+(`backlog`), `runtime`, `worker`, `event`, `agents`, and
 `reality-check`.
 
 ### Backlog commands (top-level)

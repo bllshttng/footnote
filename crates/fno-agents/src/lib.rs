@@ -58,7 +58,6 @@ pub mod kill_criteria;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
-pub mod loop_megatron;
 pub mod loop_megawalk;
 pub mod loop_runtime;
 pub mod loop_target;

@@ -21,7 +21,7 @@ Five verbs are the advertised front door:
 | `/fno:pr` | Drive a PR through its lifecycle. Routes: `create` (Haiku worker), `check` (poll + implement external review), `merged` (the post-merge ritual). |
 | `/fno:fix` | Repair a broken state. Routes: `fix` (fast one-fix-per-iteration loop with auto-revert, default), `investigate` (scientific-method hypothesis loop). |
 
-**Everything else stays invocable by its full name** - it is just not surfaced at the top. Common non-advertised verbs: `/fno:blueprint` (plan authoring), `/fno:do` (execute a plan; `do waves` runs wave orchestration), `/fno:ship` (the deliverable umbrella: `ship pr` = `/pr`, `ship doc` ships a research brief), `/fno:setup`, `/fno:triage`, `/fno:megatron`, `/fno:agent`, `/fno:mail` (message a peer/project over `fno mail`), `/fno:inbox`, `/fno:ship-docs`, `/fno:audit`, `/fno:speculate`.
+**Everything else stays invocable by its full name** - it is just not surfaced at the top. Common non-advertised verbs: `/fno:blueprint` (plan authoring), `/fno:do` (execute a plan; `do waves` runs wave orchestration), `/fno:ship` (the deliverable umbrella: `ship pr` = `/pr`, `ship doc` ships a research brief), `/fno:setup`, `/fno:triage`, `/fno:agent`, `/fno:mail` (message a peer/project over `fno mail`), `/fno:inbox`, `/fno:ship-docs`, `/fno:audit`, `/fno:speculate`.
 
 The full skill catalog is in your session skill list - look for entries prefixed `footnote:`. The harness enumerates every skill with a description, so the non-advertised verbs remain discoverable; this curated set is the recommended entry point, not an access boundary.
 
@@ -39,7 +39,7 @@ Atomic, lock-protected, schema-validated. Callable from anywhere (bash, Python, 
 | `fno phase kill-check` | Kill criteria evaluation. |
 | `fno notify TITLE BODY` | OS notification. |
 | `fno state` | Read/write/validate state files. The ONLY legal post-init mutation on a target manifest is first-fill of an empty `plan_path` via `fno state set --field plan_path` (else exit 5). |
-| `fno-agents loop run --driver target\|megawalk\|megatron` | The unified Rust loop (step 5). Front doors: `scripts/run-target-loop.sh`, `fno megatron run`. The old `fno loop` verb is removed. |
+| `fno-agents loop run --driver target\|megawalk` | The unified Rust loop (step 5). Front door: `scripts/run-target-loop.sh`. The old `fno loop` verb is removed. |
 | `fno whoami\|status` | Self-introspection. Run when confused after compaction. |
 | `fno mail send --to-project` / `fno mail reply\|unread\|ack` | Cross-project messaging: one namespace over the jsonl-canon bus log. `send` publishes (durable-first); `unread`/`ack` are the per-recipient cursor consume; `reply` correlates. (The legacy inbox + agents-send messaging surfaces are retired.) |
 | `fno agents spawn\|promote\|host\|ask\|watch ...` | Cross-CLI agent lifecycle (claude / codex / gemini). Per-provider support differs (e.g. `promote` adopts claude into a stream-json lane; `drive`/`grid` are codex/gemini-only; `watch` is claude-only) - see `docs/provider-command-matrix.md`. To message a peer, use `fno mail send`. |

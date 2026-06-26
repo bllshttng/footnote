@@ -79,7 +79,7 @@ Run these locally before pushing:
 
 ## Skill self-containment
 
-Driver skills (`/target`, `/megawalk`, `/megatron`) must stay portable to any markdown-aware runtime. CI enforces four invariants: no `${REPO_ROOT}/scripts/` references, no `${SKILL_DIR}/../../scripts/` path escapes, no `Skill()` runtime calls between driver skills, and no `../../_shared/` or sibling-skill path escapes. Reuse shared content through the bundler, not through relative paths. See [docs/architecture/skill-encapsulation.md](docs/architecture/skill-encapsulation.md).
+Driver skills (`/target`, `/megawalk`) must stay portable to any markdown-aware runtime. CI enforces four invariants: no `${REPO_ROOT}/scripts/` references, no `${SKILL_DIR}/../../scripts/` path escapes, no `Skill()` runtime calls between driver skills, and no `../../_shared/` or sibling-skill path escapes. Reuse shared content through the bundler, not through relative paths. See [docs/architecture/skill-encapsulation.md](docs/architecture/skill-encapsulation.md).
 
 ## State files are CLI-owned
 

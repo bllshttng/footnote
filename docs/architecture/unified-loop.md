@@ -323,34 +323,9 @@ Two new event kinds join the loop stream. Schema in `events-schema.yaml` only; N
 
 ---
 
-## The megatron driver (group 3)
+## The megatron driver (removed)
 
-Megatron is the recursion the collapse doc promised: `work(unit)` at the mission altitude IS `loop()` one altitude below.
-
-### MegatronQueue + MegatronDispatcher (`loop_megatron.rs`)
-
-`MegatronQueue` dequeues fleet PROJECTS by shelling `fno megatron next <mission> --json` (the verb seam, grilled 7 applied at the fleet altitude - the Rust side never reads manifests, mission state, or the fleet directory). The verb's output contract:
-
-| Output | Meaning | Queue mapping |
-|---|---|---|
-| unit JSON (`project`, `wave`, `project_path`, ...) | next incomplete project | `Unit` (session key gets the `mt` infix) |
-| `null` | mission complete | Drained -> `NoWork` |
-| `{"pause": {policy, detail}}` | mission paused / manifest mutated / terminal | `pause:` error -> `walk_paused` + `NoProgress` |
-
-`MegatronDispatcher` runs each project as a full megawalk: it re-invokes the same `fno-agents` binary with `--driver megawalk --cwd <project_path> --mission <id> --termination-key <session_key>`. Two megawalk seams (added in this group, both reusable beyond megatron) make the recursion work with ZERO runtime changes:
-
-- **`--mission <id>`**: MegawalkQueue passes the filter through to `fno backlog next --mission <id>`, so a mission walk works ONLY the mission's nodes and never drifts into the project's general backlog.
-- **`--termination-key <key>`**: after the walk completes, `emit_walk_termination` journals a `termination` event keyed by the session key - the same contract a target session's loop-check satisfies one altitude down. The parent's unchanged `find_termination` observes it via the global-mirror fallback (the child runs in a different cwd). Reuses the existing `termination` kind: no new event kind, no 4-place lockstep edit.
-
-`MegatronQueue::close` shells `fno megatron complete <mission> --project P --wave N --outcome done|failed --reason R`. `done` (walk reason NoWork/DonePRGreen/DoneAdvisory) idempotently writes the completion JSON ledger - the same files worker ship gates write via `mission-emit.sh`; a worker-written record is never clobbered. `failed` pauses the mission (the wave partial-failure path); the next `next()` returns the pause.
-
-What died: the Python commander poll loop (`megatron/loop.py`, 687 LOC). The completion FILES survive as the mission record; the POLLING was replaced by journal reads. The mission wave logic (sha guard, dispatch-on-demand plan+intake, brief assembly for wave N+1) lives in `megatron/queue.py` behind the verbs.
-
-**Exit codes** preserve the `fno megatron run` contract: 0 complete, 2 usage, **3 commander already running** (the `fleet:<mission_id>` singleton claim moved from Python to the Rust glue), **4 paused**, 77 missing driver binary, 130 interrupted.
-
-**Front door:** `fno megatron run <mission>` is a strangler shim that execs `fno-agents loop run --driver megatron --mission <id>`. `--poll-interval` is accepted with an "ignored" notice (there is no polling cycle); `--combo` still sets `TARGET_COMBO` for the child walks' target sessions.
-
-**E2E smoke:** `tests/smoke-megatron-e2e.sh` exercises the REAL recursion - the debug binary re-invoking itself per project - across a 2-project mission, the partial-failure pause, restart idempotency, and the fleet-singleton exit-3 contract.
+The megatron fleet-orchestration driver (`loop_megatron.rs`, `cli/src/fno/megatron/`, the `/megatron` skill, and the `--driver megatron` arm) was removed in the cutlist (x-f539). `-P` spawn-into-project plus auto-worktree (x-9c4c) now covers multi-repo work, and a multi-repo feature is modeled as one backlog node per project linked by `blocked_by`, each shipping its own PR. The unified loop now exposes two drivers: `target` and `megawalk`.
 
 ### Batch-queue deprecation (task 3.2)
 

@@ -86,7 +86,6 @@ Each agent runs its own loop and they coordinate over a message bus. Claude, Cod
 
 - A six-agent review panel reads the diff before it ships, analyzing integration and UX-flow, not just unit tests, via `/review`.
 - Provider rotation with failover and per-model lockout, so a flaky or rate-limited model doesn't stall the loop.
-- `/megatron` runs the same loop across a fleet of repos for cross-project missions.
 
 ## What it is
 

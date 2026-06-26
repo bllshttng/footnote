@@ -75,14 +75,14 @@ FRONTMATTER_CHECKER="$SCRIPT_REPO_ROOT/scripts/lib/check-skill-frontmatter.py"
 # subdirs exist. Missing dirs are tolerated (lint just skips them)
 # so tests can fixture only the skills they care about.
 #
-#   DRIVER_SKILLS   - the pipeline drivers (target, megawalk, megatron).
+#   DRIVER_SKILLS   - the pipeline drivers (target, megawalk).
 #   CLUSTER_ROUTERS - the router+mode skills (epic ab-0d05a9b7). A router
 #                     folds sibling skills in as modes via bundled references,
 #                     so it must obey the same self-containment invariants:
 #                     no Skill() runtime calls, no ../../ path escapes, and an
 #                     `fno` binary declaration in frontmatter.
 # ---------------------------------------------------------------------------
-DRIVER_SKILLS=(target megawalk megatron)
+DRIVER_SKILLS=(target megawalk)
 CLUSTER_ROUTERS=(review fix think pr do)
 SELF_CONTAINED_SKILLS=("${DRIVER_SKILLS[@]}" "${CLUSTER_ROUTERS[@]}")
 EXIT=0

@@ -220,7 +220,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "unregister-channel": "Unregister an agent channel by id.",
     "push-channel": "Push a message to a registered agent channel.",
     "loop-check": "Stop-hook decision: external-truth done()/backstop check (read-only).",
-    "loop": "Unified driver loop: run --driver target|megawalk|megatron [options] (step 5).",
+    "loop": "Unified driver loop: run --driver target|megawalk [options] (step 5).",
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno phase kill-check`.",
     "verify-evidence": "Verify subagent/child-promise event evidence (folded from verify-event-evidence.sh); usually via `fno event verify-evidence`.",

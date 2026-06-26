@@ -266,7 +266,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut allow_merge = false;
     let mut parallel_cap: Option<u64> = None;
     let mut max_units: Option<u64> = None;
-    // Megawalk/megatron flags (group 3, ab-9fd662c6).
+    // Megawalk flags (group 3, ab-9fd662c6).
     let mut mission: Option<String> = None;
     let mut termination_key: Option<String> = None;
 
@@ -419,34 +419,6 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 termination_key,
             ));
         }
-        Some("megatron") => {
-            // Megatron recursion (group 3, ab-9fd662c6): Queue over a fleet
-            // mission's projects; each unit's work is a megawalk one altitude
-            // down. --termination-key is megawalk-only (the CHILD walks get
-            // theirs from the megatron dispatcher, not the operator).
-            if termination_key.is_some() {
-                eprintln!(
-                    "fno-agents loop run: --termination-key is only valid with --driver megawalk"
-                );
-                return Ok(2);
-            }
-            let Some(mission_id) = mission else {
-                eprintln!("fno-agents loop run: --driver megatron requires --mission <id>");
-                return Ok(2);
-            };
-            return Ok(crate::loop_megatron::run(
-                &dispatcher_name,
-                max_iterations,
-                max_turns,
-                budget_usd,
-                model.as_deref(),
-                cli_alias.as_deref(),
-                driver_lib_dir,
-                cwd,
-                allow_merge,
-                &mission_id,
-            ));
-        }
         Some("target") => {
             // --allow-merge is megawalk-only; reject with clear message.
             if allow_merge {
@@ -460,11 +432,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 eprintln!("fno-agents loop run: --max-units is only valid with --driver megawalk");
                 return Ok(2);
             }
-            // --mission / --termination-key are megawalk/megatron flags.
+            // --mission / --termination-key are megawalk flags.
             if mission.is_some() {
-                eprintln!(
-                    "fno-agents loop run: --mission is only valid with --driver megawalk|megatron"
-                );
+                eprintln!("fno-agents loop run: --mission is only valid with --driver megawalk");
                 return Ok(2);
             }
             if termination_key.is_some() {
@@ -478,7 +448,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         Some(other) => {
             eprintln!(
                 "fno-agents loop run: unknown --driver '{other}'; \
-                 supported: 'target', 'megawalk', 'megatron'"
+                 supported: 'target', 'megawalk'"
             );
             return Ok(2);
         }

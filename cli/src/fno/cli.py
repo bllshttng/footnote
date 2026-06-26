@@ -79,22 +79,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "worktree":      ("fno.worktree_cli:app",              "Worktree management"),
     "evals":         ("fno.evals.cli:evals_app",           "Golden-task efficacy evals (run / report / diff)"),
     "pr-watch":      ("fno.pr_watch.cli:cli",              "PR-state watcher: auto-fire /pr check + /pr merged for open-PR backlog nodes"),
-    "megatron": (
-        "fno.megatron.cli:app",
-        "Cross-project fleet orchestration.",
-        {
-            "help": (
-                "Cross-project fleet orchestration.\n\n"
-                "Subcommands: run, status, cancel, list\n\n"
-                "Exit codes:\n"
-                "  0  Success\n"
-                "  2  Mission unknown / manifest error\n"
-                "  3  Another commander already running\n"
-                "  4  Mission paused or state corrupt\n"
-            ),
-        },
-    ),
-
     # Individual commands (plain functions wrapped as single-command apps) -
     "whoami":        ("fno.agent.cli:whoami_command",       "Operating-stack summary: project + fleet + walker + session + provider."),
     "status":        ("fno.agent.cli:status_command",       "Session gate satisfaction + bounded events tail + inconsistencies."),
@@ -249,9 +233,7 @@ Unix-entrenched lowercase stays put: -h help, -n tail / -f follow
 (backlog pick), -I ideas (backlog next/ready).
 
 Canonical spellings: --session-id and --pr-number. The old --session /
---pr spellings still work as hidden deprecated aliases (exception:
-megatron reconcile --pr selects a 1-indexed merge candidate, not a PR
-number, so it keeps the short spelling).
+--pr spellings still work as hidden deprecated aliases.
 
 Run `fno help <command>` for any command's full flag list.\
 """
