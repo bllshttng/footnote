@@ -210,3 +210,60 @@ def test_update_domain_size_type(tmp_graph):
     assert node["domain"] == "design"
     assert node["size"] == "L"  # normalized to uppercase
     assert node["type"] == "epic"
+
+
+# -- public roadmap ----------------------------------------------------------
+
+
+def test_roadmap_only_public_no_leaks(tmp_graph):
+    _seed(tmp_graph, [
+        {"id": "ab-11111111", "title": "Public feature", "slug": "pub", "_status": "ready",
+         "priority": "p1", "size": "M", "project": "fno", "public": True,
+         "plan_path": "internal/fno/plans/secret.md", "cwd": "/private/x"},
+        {"id": "ab-22222222", "title": "Private thing", "slug": "priv", "_status": "ready",
+         "priority": "p2", "project": "fno"},  # not public -> excluded
+        {"id": "ab-33333333", "title": "Other project pub", "slug": "op", "_status": "ready",
+         "priority": "p1", "project": "other", "public": True},  # wrong project -> excluded
+    ])
+    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno"])
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "Public feature" in out
+    assert "Private thing" not in out
+    assert "Other project pub" not in out
+    # No internal fields leak.
+    assert "ab-11111111" not in out
+    assert "secret.md" not in out
+    assert "/private/x" not in out
+    # Grouped under the Now column (p1).
+    assert "## Now" in out
+
+
+def test_roadmap_html_escapes_and_filters(tmp_graph, tmp_path):
+    _seed(tmp_graph, [
+        {"id": "ab-44444444", "title": "Shipped <b>X</b>", "slug": "sx",
+         "_status": "ready", "priority": "p1", "project": "fno", "public": True,
+         "completed_at": "2026-01-01T00:00:00Z"},
+    ])
+    hp = tmp_path / "roadmap.html"
+    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)])
+    assert result.exit_code == 0, result.output
+    body = hp.read_text()
+    assert "Shipped &lt;b&gt;X&lt;/b&gt;" in body  # escaped, not raw HTML
+    assert "Shipped" in body  # Done column relabeled
+
+
+def test_roadmap_folds_triage_into_later(tmp_graph):
+    # A queued node routes to Triage internally; the public roadmap shows it
+    # under Later (Triage is not a public column).
+    _seed(tmp_graph, [
+        {"id": "ab-77777777", "title": "Queued p1 item", "slug": "q", "_status": "ready",
+         "priority": "p1", "project": "fno", "public": True, "queued_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-88888888", "title": "Plain p3 item", "slug": "p3", "_status": "ready",
+         "priority": "p3", "project": "fno", "public": True},
+    ])
+    out = runner.invoke(app, ["backlog", "roadmap", "--project", "fno"]).stdout
+    assert "## Later" in out
+    assert "Queued p1 item" in out   # folded in despite being Triage internally
+    assert "Plain p3 item" in out
+    assert "## Triage" not in out    # no public Triage column

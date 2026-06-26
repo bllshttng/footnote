@@ -1878,6 +1878,58 @@ def cmd_view() -> None:
         typer.echo(f"Could not launch opener: {e}", err=True)
 
 
+# -- roadmap (public, curated) --
+
+@cli.command("roadmap")
+def cmd_roadmap(
+    project: Optional[str] = typer.Option(
+        None,
+        "--project",
+        help="Project to render (defaults to the project mapped to the cwd).",
+    ),
+    out: Optional[str] = typer.Option(None, "--out", help="Write markdown to this path instead of stdout."),
+    html: Optional[str] = typer.Option(None, "--html", help="Also write a standalone HTML file to this path."),
+) -> None:
+    """Render a public, leak-free roadmap of `public`-flagged nodes.
+
+    Only nodes flagged via `fno backlog update --public` for the given
+    project appear, and only their title/priority/size - never IDs, plan
+    paths, or cwd. Safe to commit to a public repo or host on a site.
+    Grouped into Now / Next / Later / Shipped (reusing the live board's
+    column + lane logic, so it can't drift).
+    """
+    from pathlib import Path
+
+    from fno.graph._intake import detect_project_from_settings, repo_root
+    from fno.graph.roadmap_public import (
+        render_public_roadmap_html,
+        render_public_roadmap_md,
+    )
+    from fno.graph.store import read_graph
+
+    resolved_project = project or detect_project_from_settings(repo_root())
+    if not resolved_project:
+        typer.echo(
+            "Error: no project given and none mapped to the cwd; pass --project.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    entries = read_graph(_graph_path())
+    md = render_public_roadmap_md(entries, resolved_project)
+
+    if out:
+        Path(os.path.expanduser(out)).write_text(md)
+        typer.echo(os.path.expanduser(out))
+    else:
+        typer.echo(md, nl=False)
+
+    if html:
+        html_path = os.path.expanduser(html)
+        Path(html_path).write_text(render_public_roadmap_html(entries, resolved_project))
+        typer.echo(html_path)
+
+
 # -- tree --
 
 @cli.command("tree")
