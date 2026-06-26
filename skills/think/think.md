@@ -408,7 +408,9 @@ iteration amends the pinned surface (a field renamed, a status code added), bump
 the integer and note what changed - never edit a shipped version in place. The
 version is the token the reconciliation pass validates the landed schema against,
 so a silent edit would let a drifted implementation de-stub against the wrong
-shape.
+shape. When more than one version is live at once, keep each under its own
+`### Contract vN` subheading (newest first) so a parser can extract any
+still-active version without walking git history.
 
 **Lock it.** Add a Locked Decisions entry naming the contract and its version,
 e.g. `Interface Contract v1 is the single source of truth for the X<->Y surface;
@@ -541,9 +543,11 @@ Include:
 12. **Schema Reconciliation** (from Step 1e, when the repo is DB-backed; a
     top-level `## Schema Reconciliation` heading carrying the touched
     tables/enums and the dedup verdict)
-13. **Interface Contract** (from Step 6c, cross-repo features only; a top-level
-    `## Interface Contract` heading carrying `contract_version` and the pinned
-    schema/API/type surface)
+13. **Interface Contract** (from Step 6c, cross-repo features that pin a contract;
+    a top-level `## Interface Contract` heading carrying `contract_version` and the
+    pinned schema/API/type surface. A cross-repo feature that cannot pin a contract
+    yet omits this section and records why in Open Questions instead - do not add a
+    placeholder `contract_version`.)
 
 ### Locked Decisions Section (MANDATORY)
 
