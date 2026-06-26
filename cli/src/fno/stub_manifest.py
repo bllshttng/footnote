@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
@@ -108,14 +109,22 @@ def write(
     *,
     contract_version: Optional[int] = None,
     contract_ref: Optional[str] = None,
+    contract_test: Optional[str] = None,
     reconciled: bool = False,
 ) -> Path:
     """Validate and write the manifest, returning its path. Creates `.fno/` if
-    needed."""
+    needed.
+
+    ``contract_test`` is the shell command the blocker ships so the G4 reconcile
+    pass has an EXECUTABLE drift gate (Locked Decision 5). A manifest without it
+    has no gate, so reconciliation refuses to auto-de-stub (fail-loud, never
+    guess). Preserved verbatim through :func:`mark_reconciled`.
+    """
     data = {
         "node": node_id,
         "contract_version": contract_version,
         "contract_ref": contract_ref,
+        "contract_test": contract_test,
         "reconciled": reconciled,
         "stubs": stubs,
     }
@@ -201,6 +210,105 @@ def unreconciled_manifest_for_pr(
 
 
 # --------------------------------------------------------------------------- #
+# G4 reconciliation: the drift gate + de-stub finalize
+# --------------------------------------------------------------------------- #
+#
+# The merge-triggered reconcile pass (`/target --reconcile`, dispatched by
+# fno.backlog.reconcile_dispatch) calls reconcile_verdict() to decide whether it
+# is safe to auto-de-stub. The gate is EXECUTABLE, not a doc diff (Locked
+# Decision 5): run the blocker's contract-test suite against the now-landed
+# schema. A pass authorizes de-stub; a failure OR a missing suite refuses it and
+# flags for human (AC4-ERR). A missing/partial manifest also refuses (AC5-FR) --
+# never finalize a half-real PR.
+
+# Verdict outcomes (also the CLI exit-code contract; see cmd_reconcile_validate).
+AUTHORIZE = "authorize"            # exit 0: contract-test passed, safe to de-stub
+DRIFT = "drift"                    # exit 3: suite failed or absent -> refuse, flag
+MANIFEST_MISSING = "manifest-missing"  # exit 4: no/partial manifest -> refuse
+ALREADY_RECONCILED = "already-reconciled"  # exit 0: no-op, manifest already done
+
+
+def _run_contract_test(cmd: str, root: Path | str, *, timeout: int = 600) -> tuple[bool, str]:
+    """Run the blocker's contract-test command in the dependent's root.
+
+    Returns ``(passed, detail)``. The command is a trusted artifact written by
+    the first-pass worker (same trust boundary as a Makefile target), so it runs
+    via the shell.
+    # ponytail: shell=True over a manifest-authored command; the manifest is the
+    # trust boundary. If untrusted manifests ever land, switch to an allowlist.
+    """
+    try:
+        proc = subprocess.run(
+            cmd, shell=True, cwd=str(root),
+            capture_output=True, text=True, errors="replace", timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, f"contract-test did not complete: {exc}"
+    tail = (proc.stderr or proc.stdout or "").strip()[-300:]
+    return proc.returncode == 0, f"exit {proc.returncode}: {tail}"
+
+
+def reconcile_verdict(
+    node_id: str, root: Path | str, *, run_suite: bool = True
+) -> dict:
+    """Decide whether the contract dependent NODE_ID may auto-de-stub.
+
+    Returns ``{"outcome": <AUTHORIZE|DRIFT|MANIFEST_MISSING|ALREADY_RECONCILED>,
+    "node": node_id, "detail": str, "stubs": int}``. Pure read except the
+    contract-test subprocess; never mutates the manifest (finalize does that).
+    """
+    path = manifest_path(node_id, root)
+    if not path.exists():
+        return {"outcome": MANIFEST_MISSING, "node": node_id,
+                "detail": f"no manifest at {path}", "stubs": 0}
+    try:
+        manifest = load(path)
+    except StubManifestError as exc:
+        # A malformed/partial manifest is a refuse, not a crash (AC5-FR): the
+        # reconcile pass must surface the gap, never finalize a half-real PR.
+        return {"outcome": MANIFEST_MISSING, "node": node_id,
+                "detail": f"manifest unusable: {exc}", "stubs": 0}
+
+    n_stubs = len(manifest.get("stubs", []))
+    if manifest.get("reconciled") is True:
+        return {"outcome": ALREADY_RECONCILED, "node": node_id,
+                "detail": "manifest already reconciled", "stubs": n_stubs}
+
+    contract_test = manifest.get("contract_test")
+    if not (isinstance(contract_test, str) and contract_test.strip()):
+        # Locked Decision 5: no executable gate => refuse. A missing suite is
+        # treated exactly like a failing one -- never guess the schema is fine.
+        return {"outcome": DRIFT, "node": node_id,
+                "detail": "no contract-test suite in manifest; refusing auto-de-stub",
+                "stubs": n_stubs}
+
+    if not run_suite:
+        # Caller (tests / a dry-run) wants the verdict without executing.
+        return {"outcome": AUTHORIZE, "node": node_id,
+                "detail": "suite present (not executed: run_suite=False)", "stubs": n_stubs}
+
+    passed, detail = _run_contract_test(contract_test, root)
+    return {"outcome": AUTHORIZE if passed else DRIFT, "node": node_id,
+            "detail": f"contract-test {detail}", "stubs": n_stubs}
+
+
+def mark_reconciled(node_id: str, root: Path | str) -> Path:
+    """Flip the manifest's ``reconciled`` flag true, preserving every other field.
+
+    Called by the reconcile pass AFTER de-stubbing + tests pass. The manifest is
+    retained (not deleted) so "present and unreconciled" stays the single hold
+    signal and the de-stub is auditable. Raises FileNotFoundError if absent,
+    StubManifestError if malformed (caller must not finalize a broken manifest).
+    """
+    path = manifest_path(node_id, root)
+    manifest = load(path)  # raises if missing/malformed -- finalize must not guess
+    manifest["reconciled"] = True
+    validate(manifest)
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+# --------------------------------------------------------------------------- #
 # CLI surface (`fno stub-manifest ...`)
 # --------------------------------------------------------------------------- #
 
@@ -225,6 +333,11 @@ def cmd_write(
     ),
     contract_version: Optional[int] = typer.Option(None, "--contract-version"),
     contract_ref: Optional[str] = typer.Option(None, "--contract-ref"),
+    contract_test: Optional[str] = typer.Option(
+        None, "--contract-test",
+        help="shell command the G4 reconcile pass runs as the executable drift "
+        "gate (Locked Decision 5). Absent => reconciliation refuses to de-stub.",
+    ),
     root: Path = typer.Option(Path("."), "--root", help="project root (default cwd)"),
 ) -> None:
     """Write `.fno/stub-manifest-<node>.json` from a stubs JSON array."""
@@ -235,11 +348,24 @@ def cmd_write(
         path = write(
             node, stubs, root,
             contract_version=contract_version, contract_ref=contract_ref,
+            contract_test=contract_test,
         )
     except (StubManifestError, json.JSONDecodeError, OSError) as exc:
         typer.echo(f"stub-manifest: {exc}", err=True)
         raise typer.Exit(1)
     typer.echo(str(path))
+    # AC8: a contract dependent whose blocker merged BEFORE this first pass wrote
+    # the manifest left a pending `reconcile:<node>` sentinel. Now that the
+    # manifest exists, fire the reconcile dispatch exactly once. Best-effort and
+    # non-fatal: a write must never fail because the (optional) re-fire stumbled.
+    try:
+        from fno.backlog.reconcile_dispatch import fire_pending_reconcile
+
+        fired = fire_pending_reconcile(node, root)
+        if fired and fired.decision == "dispatched":
+            typer.echo(f"reconcile dispatched for pending sentinel: {node}", err=True)
+    except Exception as exc:  # noqa: BLE001 - the manifest write is the contract
+        typer.echo(f"stub-manifest: pending-reconcile re-fire skipped: {exc}", err=True)
 
 
 @stub_manifest_app.command("validate")
@@ -279,3 +405,64 @@ def cmd_check_pr(
         )
         raise typer.Exit(2)
     typer.echo(json.dumps({"pr": pr, "outcome": "clear"}, separators=(",", ":")))
+
+
+# Verdict -> CLI exit code. authorize/already-reconciled are success (0); drift
+# and manifest-missing are distinct non-zero codes so the reconcile pass can
+# branch (drift -> flag for human; missing -> surface the gap). AC4-ERR/AC5-FR.
+_VERDICT_EXIT = {
+    AUTHORIZE: 0,
+    ALREADY_RECONCILED: 0,
+    DRIFT: 3,
+    MANIFEST_MISSING: 4,
+}
+
+
+@stub_manifest_app.command("reconcile-validate")
+def cmd_reconcile_validate(
+    node: str = typer.Option(..., "--node", help="contract-dependent node id"),
+    root: Path = typer.Option(Path("."), "--root", help="project root (default cwd)"),
+    no_run: bool = typer.Option(
+        False, "--no-run",
+        help="report the verdict WITHOUT executing the contract-test suite "
+        "(presence-only; for dry-runs).",
+    ),
+) -> None:
+    """The G4 drift gate: may this dependent auto-de-stub?
+
+    Exit 0 authorize (suite passed / already reconciled), 3 drift (suite failed
+    or absent -> refuse + flag for human), 4 manifest-missing (refuse + surface
+    the gap). Emits the verdict as one JSON line.
+    """
+    try:
+        verdict = reconcile_verdict(node, root, run_suite=not no_run)
+    except Exception as exc:  # noqa: BLE001 - clean CLI exit, fail closed to drift
+        typer.echo(json.dumps(
+            {"node": node, "outcome": DRIFT, "detail": f"verdict error: {exc}"},
+            separators=(",", ":")))
+        raise typer.Exit(3)
+    typer.echo(json.dumps(verdict, separators=(",", ":")))
+    raise typer.Exit(_VERDICT_EXIT.get(verdict["outcome"], 3))
+
+
+@stub_manifest_app.command("reconcile-finalize")
+def cmd_reconcile_finalize(
+    node: str = typer.Option(..., "--node", help="contract-dependent node id"),
+    root: Path = typer.Option(Path("."), "--root", help="project root (default cwd)"),
+) -> None:
+    """Mark the manifest reconciled (call AFTER de-stub + tests pass).
+
+    Flips the single hold signal off so `fno pr merge` stops refusing the
+    dependent's PR. Does NOT flip the draft PR ready -- that gh action is the
+    reconcile skill's, kept out of this pure state write for testability.
+    """
+    try:
+        path = mark_reconciled(node, root)
+    except FileNotFoundError:
+        typer.echo(f"stub-manifest: no manifest for {node} under {root}", err=True)
+        raise typer.Exit(4)
+    except StubManifestError as exc:
+        typer.echo(f"stub-manifest: cannot finalize a broken manifest: {exc}", err=True)
+        raise typer.Exit(1)
+    typer.echo(json.dumps({"node": node, "reconciled": True, "path": str(path)},
+                          separators=(",", ":")))

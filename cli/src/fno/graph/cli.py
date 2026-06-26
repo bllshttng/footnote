@@ -3500,6 +3500,11 @@ def cmd_advance(
         # reconcile sweep and this explicit verb dispatches at most once.
         if closed:
             _advance_deps(closed_node_id=closed, closed_project=project, verbose=verbose)
+            # G4: route the closed node's contract dependents to a reconcile pass
+            # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
+            # advance paths so a node seen by all three dispatches at most once.
+            from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+            dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
     except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
         # advance() is designed non-fatal (every path emits + returns), but the
         # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
@@ -3674,6 +3679,15 @@ def cmd_reconcile(
                 _advance_deps(
                     closed_node_id=record.node_id,
                     closed_project=_adv_project,
+                    project_root=_adv_root,
+                )
+                # G4 (AC4-HP/AC8): route the closed node's contract dependents to
+                # a `/target --reconcile` de-stub pass (or a pending sentinel when
+                # their manifest is not yet written) - NOT the cold dispatch above
+                # (advance_deps skips a node with an open draft PR). Same dedup.
+                from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+                dispatch_reconcile_for_blocker(
+                    closed_node_id=record.node_id,
                     project_root=_adv_root,
                 )
             except Exception as _adv_exc:  # noqa: BLE001 - never abort the sweep

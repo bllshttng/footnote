@@ -213,6 +213,10 @@ Each line is one of `launched` / `already-running` / `parked` / `skipped-done` /
 
 Multi-CLI: `bg` requires `claude --bg` + `fno agents`; on a CLI without them the dispatch reports the failure and the node stays `ready` (degrade, never fake a launch).
 
+### 0b. Reconcile mode (`--reconcile <manifest>`)
+
+If ARGUMENTS carry a `--reconcile <manifest-path>` token, this is a **G4 de-stub pass** for a `contract` dependent whose blocker just merged (spawned by `fno backlog advance` / `backlog.reconcile_dispatch`). It is a constrained `/target`: pull main, run the executable drift gate (`fno stub-manifest reconcile-validate`), de-stub + finalize + flip the EXISTING draft PR ready on authorize, or refuse (carveout + draft-held PR comment) on drift/missing-manifest. It never creates a new PR and never merges. Load [references/reconcile-mode.md](references/reconcile-mode.md) for the full contract before proceeding.
+
 ### 1-3f. Initialization
 
 The full initialization sequence (load workspace config, codemap, project config, size profile, init state, detect input type, cross-project, Linear, plan validation, domain resolution, discovery gate, checkpoint, kill criteria) lives in [references/init-state.md](references/init-state.md).

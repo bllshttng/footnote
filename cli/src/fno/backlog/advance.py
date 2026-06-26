@@ -212,24 +212,32 @@ def _name_slug(raw: Optional[str]) -> str:
     return s[:30].rstrip("-")
 
 
-def _worker_agent_name(node_id: str, node_slug: Optional[str]) -> str:
-    """Provenance-carrying bg worker name: ``target-<full-node-id>-<slug>``.
+def _worker_agent_name(
+    node_id: str, node_slug: Optional[str], prefix: str = "target"
+) -> str:
+    """Provenance-carrying bg worker name: ``<prefix>-<full-node-id>-<slug>``.
 
-    Mirrors skills/target/scripts/dispatch-node.sh: the ``target`` verb prefix
-    plus the full node id and the node's title-derived slug (sanitized via
+    Mirrors skills/target/scripts/dispatch-node.sh: the verb prefix plus the
+    full node id and the node's title-derived slug (sanitized via
     ``_name_slug``), so the thread title reads at a glance (e.g.
     ``target-ab-4040eee8-cargo-bootstrapper``). A node with no usable slug
-    degrades to ``target-<full-node-id>``.
+    degrades to ``<prefix>-<full-node-id>``. ``prefix`` is ``reconcile`` for the
+    G4 de-stub pass so its worker name never collides with the (ended) first
+    pass's ``target-<id>-<slug>``.
     """
-    base = f"target-{node_id}"
+    base = f"{prefix}-{node_id}"
     slug = _name_slug(node_slug)
     return f"{base}-{slug}" if slug else base
 
 
 def _spawn_worker(
-    node_id: str, node_cwd: Optional[str], node_slug: Optional[str] = None
+    node_id: str,
+    node_cwd: Optional[str],
+    node_slug: Optional[str] = None,
+    *,
+    reconcile_manifest: Optional[str] = None,
 ) -> str:
-    """Dispatch a fire-and-forget ``/target no-merge <id>`` claude bg worker.
+    """Dispatch a fire-and-forget ``/target`` claude bg worker.
 
     Mirrors skills/target/scripts/dispatch-node.sh exactly: ``no-merge`` rides
     as a command token (NOT an env var; the shipped sibling proves this is the
@@ -237,16 +245,28 @@ def _spawn_worker(
     ``_worker_agent_name``), and the cwd resolves to the node's recorded root
     (``--cwd``) or canonical main (``--fresh``).
 
+    When ``reconcile_manifest`` is set (G4), the command becomes
+    ``/target no-merge --reconcile <manifest> <id>`` and the agent name carries
+    the ``reconcile`` prefix.
+
     Returns the spawn receipt's short_id. Raises SpawnAlreadyRunning on a
     name-collision (a peer beat us in the boot window) and SpawnError otherwise.
     """
-    agent_name = _worker_agent_name(node_id, node_slug)
+    is_reconcile = bool(reconcile_manifest)
+    agent_name = _worker_agent_name(
+        node_id, node_slug, prefix="reconcile" if is_reconcile else "target"
+    )
     cmd = ["fno", "agents", "spawn", "--provider", "claude"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
         cmd += ["--fresh"]
-    cmd += [agent_name, f"/target no-merge {node_id}"]
+    target_cmd = (
+        f"/target no-merge --reconcile {reconcile_manifest} {node_id}"
+        if is_reconcile
+        else f"/target no-merge {node_id}"
+    )
+    cmd += [agent_name, target_cmd]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
