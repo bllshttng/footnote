@@ -268,6 +268,29 @@ def test_roadmap_html_escapes_and_filters(tmp_graph, tmp_path):
     assert "Shipped" in body  # Done column relabeled
 
 
+def test_roadmap_html_omits_internal_status_flags(tmp_graph, tmp_path):
+    # Public HTML must not leak live-board workflow flags (codex P2 on PR #48):
+    # a blocked / plan-less node would otherwise render `blocked`/`needs plan`.
+    _seed(tmp_graph, [
+        {"id": "ab-aaaa0001", "title": "Blocker", "slug": "blk", "_status": "ready",
+         "priority": "p1", "project": "fno", "completed_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-aaaa0002", "title": "Public blocked plan-less", "slug": "pbp",
+         "priority": "p1", "project": "fno", "public": True,
+         "blocked_by": ["ab-aaaa0003"]},  # open blocker -> would flag "blocked"
+        {"id": "ab-aaaa0003", "title": "Open dep", "slug": "dep", "_status": "ready",
+         "priority": "p2", "project": "fno"},
+    ])
+    hp = tmp_path / "roadmap.html"
+    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)])
+    assert result.exit_code == 0, result.output
+    body = hp.read_text().lower()
+    assert "public blocked plan-less" in body  # the node still shows
+    # Check rendered markup, not the shared CSS (which still *defines* the
+    # .flag-* selectors). A leak is a flag badge element or a flag-tagged card.
+    assert '<span class="flag' not in body, "flag badge element leaked"
+    assert 'class="card flag' not in body, "card tagged with internal flag class"
+
+
 def test_roadmap_folds_triage_into_later(tmp_graph):
     # A queued node routes to Triage internally; the public roadmap shows it
     # under Later (Triage is not a public column).

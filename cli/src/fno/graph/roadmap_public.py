@@ -14,7 +14,6 @@ from __future__ import annotations
 import html as _html
 
 from fno.graph.render import (
-    UNSCOPED_LABEL,
     _kanban_column,
     _lane_sort_key,
     _project_key,
@@ -76,32 +75,25 @@ def render_public_roadmap_md(entries: list[dict], project: str) -> str:
 
 
 def _public_card_html(entry: dict) -> str:
-    """The real board's card, minus every internal/leaky field.
+    """A board-styled card carrying ONLY the public fields.
 
-    Keeps the visual chrome (priority chip, project chip, status flag,
-    title) but drops the eid copy-button, plan path, blocker IDs,
-    deferred reason, and PR URLs - so it looks like the live board
-    without exposing anything private.
+    Renders the priority chip, optional size, and title - matching the
+    documented "title/priority/size" guarantee and the markdown renderer.
+    Deliberately omits the eid copy-button, plan path, blocker IDs,
+    deferred reason, PR URLs, AND the live-board status flags
+    (blocked/queued/idea/needs-plan): those expose internal workflow state
+    that must not leak into a published roadmap.
     """
-    from fno.graph.render_html import _card_flags, _project_color
-
     esc = _html.escape
     title = esc((entry.get("title") or "").replace("\n", " ").strip() or "(untitled)")
     priority = esc(str(entry.get("priority") or "p2"))
-    project = _project_key(entry)
-    chip_color = _project_color(None if project == UNSCOPED_LABEL else project)
-    flags = _card_flags(entry)
-
-    classes = ["card"] + [fc for fc, _ in flags]
-    head = [
-        f'<header><span class="prio prio-{priority}">{priority}</span>',
-        f'<span class="chip" style="background:{chip_color}">{esc(project)}</span>',
-    ]
-    for fc, label in flags:
-        head.append(f'<span class="flag {fc}">{esc(label)}</span>')
+    head = [f'<header><span class="prio prio-{priority}">{priority}</span>']
+    size = entry.get("size")
+    if size:
+        head.append(f'<span class="chip" style="background:#888">{esc(str(size))}</span>')
     head.append("</header>")
     return (
-        f'<article class="{" ".join(classes)}">'
+        '<article class="card">'
         + "".join(head)
         + f'<h3 class="title">{title}</h3></article>'
     )
