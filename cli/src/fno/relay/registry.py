@@ -24,11 +24,13 @@ they carry the real ``inject_handle``). No daemon, no live injection -- that is 
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from fno import paths
 from fno.agents.discover import discover_live_sessions
@@ -59,9 +61,27 @@ def registry_path() -> Path:
 
 def _atomic_write_json(target: Path, data: dict) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
+    # Per-pid temp so two concurrent writers never collide on the temp path.
+    tmp = target.with_suffix(target.suffix + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, target)  # atomic; a kill -9 mid-write cannot corrupt target
+
+
+@contextmanager
+def _lock(path: Path) -> Iterator[None]:
+    """Serialize a registry read-modify-write across processes. The G3 daemon
+    spawns + registers peers concurrently, so an unlocked load->mutate->write
+    would let the later writer clobber the earlier peer (lost entry). Mirrors
+    the graph store's flock-on-a-sidecar pattern (codex P2 on PR #43)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def load(path: Optional[Path] = None) -> dict[str, RegistryEntry]:
@@ -103,17 +123,19 @@ def _write(entries: dict[str, RegistryEntry], path: Path) -> None:
 def register(entry: RegistryEntry, path: Optional[Path] = None) -> None:
     """Persist a footnote-owned peer (upsert on ``session_id``)."""
     path = path or registry_path()
-    entries = load(path)
-    entries[entry.session_id] = entry
-    _write(entries, path)
+    with _lock(path):
+        entries = load(path)
+        entries[entry.session_id] = entry
+        _write(entries, path)
 
 
 def unregister(session_id: str, path: Optional[Path] = None) -> None:
     """Drop a peer. Silent no-op if it was not registered."""
     path = path or registry_path()
-    entries = load(path)
-    if entries.pop(session_id, None) is not None:
-        _write(entries, path)
+    with _lock(path):
+        entries = load(path)
+        if entries.pop(session_id, None) is not None:
+            _write(entries, path)
 
 
 def index(
