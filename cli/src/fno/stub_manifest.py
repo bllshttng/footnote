@@ -260,7 +260,7 @@ def cmd_validate(
 
 @stub_manifest_app.command("check-pr")
 def cmd_check_pr(
-    pr: int = typer.Option(..., "--pr", help="PR number"),
+    pr: int = typer.Option(..., "--pr-number", help="PR number"),
     root: Path = typer.Option(Path("."), "--root", help="project root (default cwd)"),
 ) -> None:
     """Exit 2 (held) if merging this PR would ship unreconciled stubs, else 0."""
