@@ -104,3 +104,17 @@ def test_intake_fires_birth_hook_once(tmp_path, monkeypatch, capture_born):
 
     assert len(capture_born) == 1
     assert capture_born[0][0]  # the intaked node's real id reached the hook
+
+
+# -- add (born-with-why v2: cmd_add wiring, x-a552) --
+
+def test_add_fires_birth_hook_once(tmp_path, monkeypatch, capture_born):
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": []}\n')
+    _route_graph(g, tmp_path, monkeypatch)
+
+    r = _invoke("backlog", "add", "A new feature", "--project", "fno", "--cwd", "/tmp/proj")
+    assert r.exit_code == 0, r.output
+
+    assert len(capture_born) == 1
+    assert capture_born[0][0]  # the added node's real id reached the hook

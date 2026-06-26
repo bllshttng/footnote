@@ -176,3 +176,132 @@ def test_backfill_slugs_assigns_and_is_idempotent(tmp_graph):
     result2 = runner.invoke(app, ["backlog", "backfill-slugs"])
     assert result2.exit_code == 0, result2.output
     assert json.loads(result2.stdout)["slugs_assigned"] == 0
+
+
+# -- update --details --------------------------------------------------------
+
+
+def test_update_details_sets_and_clears(tmp_graph):
+    # `update --details` edits rationale in place (no recreate-via-idea dupe).
+    _seed(tmp_graph, [
+        {"id": "ab-deadbeef", "title": "Thing", "slug": "thing", "_status": "ready",
+         "domain": "code", "project": "p", "details": None},
+    ])
+    result = runner.invoke(app, ["backlog", "update", "ab-deadbeef", "--details", "the full rationale"])
+    assert result.exit_code == 0, result.output
+    assert _read(tmp_graph)[0]["details"] == "the full rationale"
+
+    # `null` clears it; --description is an accepted alias.
+    result = runner.invoke(app, ["backlog", "update", "ab-deadbeef", "--description", "null"])
+    assert result.exit_code == 0, result.output
+    assert _read(tmp_graph)[0]["details"] is None
+
+
+def test_update_domain_size_type(tmp_graph):
+    # Create-only fields are now editable, so a mistake never forces a recreate.
+    _seed(tmp_graph, [
+        {"id": "ab-feedface", "title": "Thing", "slug": "thing", "_status": "ready",
+         "domain": "code", "type": "feature", "project": "p"},
+    ])
+    result = runner.invoke(app, ["backlog", "update", "ab-feedface",
+                                 "--domain", "design", "--size", "l", "--type", "epic"])
+    assert result.exit_code == 0, result.output
+    node = _read(tmp_graph)[0]
+    assert node["domain"] == "design"
+    assert node["size"] == "L"  # normalized to uppercase
+    assert node["type"] == "epic"
+
+
+def test_update_rejects_bad_size_and_type(tmp_graph):
+    # Validation guards against storing garbage (gemini HIGH on PR #48).
+    _seed(tmp_graph, [
+        {"id": "ab-feedface", "title": "Thing", "slug": "thing", "_status": "ready",
+         "domain": "code", "type": "feature", "project": "p"},
+    ])
+    bad_size = runner.invoke(app, ["backlog", "update", "ab-feedface", "--size", "foo"])
+    assert bad_size.exit_code == 1
+    bad_type = runner.invoke(app, ["backlog", "update", "ab-feedface", "--type", "widget"])
+    assert bad_type.exit_code == 1
+    # 'null' still clears size, and roadmap is a valid type.
+    assert runner.invoke(app, ["backlog", "update", "ab-feedface", "--size", "null"]).exit_code == 0
+    assert runner.invoke(app, ["backlog", "update", "ab-feedface", "--type", "roadmap"]).exit_code == 0
+
+
+# -- public roadmap ----------------------------------------------------------
+
+
+def test_roadmap_only_public_no_leaks(tmp_graph):
+    _seed(tmp_graph, [
+        {"id": "ab-11111111", "title": "Public feature", "slug": "pub", "_status": "ready",
+         "priority": "p1", "size": "M", "project": "fno", "public": True,
+         "plan_path": "internal/fno/plans/secret.md", "cwd": "/private/x"},
+        {"id": "ab-22222222", "title": "Private thing", "slug": "priv", "_status": "ready",
+         "priority": "p2", "project": "fno"},  # not public -> excluded
+        {"id": "ab-33333333", "title": "Other project pub", "slug": "op", "_status": "ready",
+         "priority": "p1", "project": "other", "public": True},  # wrong project -> excluded
+    ])
+    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno"])
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "Public feature" in out
+    assert "Private thing" not in out
+    assert "Other project pub" not in out
+    # No internal fields leak.
+    assert "ab-11111111" not in out
+    assert "secret.md" not in out
+    assert "/private/x" not in out
+    # Grouped under the Now column (p1).
+    assert "## Now" in out
+
+
+def test_roadmap_html_escapes_and_filters(tmp_graph, tmp_path):
+    _seed(tmp_graph, [
+        {"id": "ab-44444444", "title": "Shipped <b>X</b>", "slug": "sx",
+         "_status": "ready", "priority": "p1", "project": "fno", "public": True,
+         "completed_at": "2026-01-01T00:00:00Z"},
+    ])
+    hp = tmp_path / "roadmap.html"
+    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)])
+    assert result.exit_code == 0, result.output
+    body = hp.read_text()
+    assert "Shipped &lt;b&gt;X&lt;/b&gt;" in body  # escaped, not raw HTML
+    assert "Shipped" in body  # Done column relabeled
+
+
+def test_roadmap_html_omits_internal_status_flags(tmp_graph, tmp_path):
+    # Public HTML must not leak live-board workflow flags (codex P2 on PR #48):
+    # a blocked / plan-less node would otherwise render `blocked`/`needs plan`.
+    _seed(tmp_graph, [
+        {"id": "ab-aaaa0001", "title": "Blocker", "slug": "blk", "_status": "ready",
+         "priority": "p1", "project": "fno", "completed_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-aaaa0002", "title": "Public blocked plan-less", "slug": "pbp",
+         "priority": "p1", "project": "fno", "public": True,
+         "blocked_by": ["ab-aaaa0003"]},  # open blocker -> would flag "blocked"
+        {"id": "ab-aaaa0003", "title": "Open dep", "slug": "dep", "_status": "ready",
+         "priority": "p2", "project": "fno"},
+    ])
+    hp = tmp_path / "roadmap.html"
+    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)])
+    assert result.exit_code == 0, result.output
+    body = hp.read_text().lower()
+    assert "public blocked plan-less" in body  # the node still shows
+    # Check rendered markup, not the shared CSS (which still *defines* the
+    # .flag-* selectors). A leak is a flag badge element or a flag-tagged card.
+    assert '<span class="flag' not in body, "flag badge element leaked"
+    assert 'class="card flag' not in body, "card tagged with internal flag class"
+
+
+def test_roadmap_folds_triage_into_later(tmp_graph):
+    # A queued node routes to Triage internally; the public roadmap shows it
+    # under Later (Triage is not a public column).
+    _seed(tmp_graph, [
+        {"id": "ab-77777777", "title": "Queued p1 item", "slug": "q", "_status": "ready",
+         "priority": "p1", "project": "fno", "public": True, "queued_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-88888888", "title": "Plain p3 item", "slug": "p3", "_status": "ready",
+         "priority": "p3", "project": "fno", "public": True},
+    ])
+    out = runner.invoke(app, ["backlog", "roadmap", "--project", "fno"]).stdout
+    assert "## Later" in out
+    assert "Queued p1 item" in out   # folded in despite being Triage internally
+    assert "Plain p3 item" in out
+    assert "## Triage" not in out    # no public Triage column

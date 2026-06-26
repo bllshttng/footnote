@@ -349,6 +349,7 @@ def cmd_add(
         blockers = [b.strip() for b in blocked_by.split(",") if b.strip()]
 
     new_id_holder: list[Optional[str]] = [None]
+    node_holder: list[Optional[dict]] = [None]
 
     def mutator(entries):
         new_id = mint_node_id({e.get("id") for e in entries})
@@ -370,9 +371,23 @@ def cmd_add(
         )
         node["id"] = new_id
         entries.append(node)
+        node_holder[0] = node
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Born-with-why v2: route cmd_add births through the shared birth hook,
+    # mirroring cmd_idea. Gate-first, durable slug re-read, and strict
+    # non-fatality all live in on_node_born, so a gate-OFF install is a no-op
+    # and a dispatch failure never wedges the filing of the node above.
+    if node_holder[0] is not None:
+        try:
+            from fno.provenance.spawn_think import on_node_born
+
+            on_node_born(node_holder[0])
+        except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
+            pass
+
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
 
@@ -1134,6 +1149,17 @@ def cmd_update(
     merge_status: Optional[str] = typer.Option(None, "--merge-status", help="Merge status"),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Update display title"),
+    details: Optional[str] = typer.Option(
+        None,
+        "--details",
+        "--description",
+        "-d",
+        help="Update free-form details/rationale (stored in `details`). Pass 'null' to clear.",
+    ),
+    domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
+    size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
+    type_: Optional[str] = typer.Option(None, "--type", help="Update node type (feature|epic|bug)"),
+    public: Optional[bool] = typer.Option(None, "--public/--no-public", help="Mark node for the public roadmap (fno backlog roadmap)"),
     project: Optional[str] = typer.Option(None, "--project", help="Reproject this node (use for migrating wrong-scope nodes)"),
     cwd: Optional[str] = typer.Option(None, "--cwd", "-c", help="Update cwd (pair with --project for migration)"),
     blocked_by: Optional[List[str]] = typer.Option(None, "--blocked-by", help="Replace blocked_by list"),
@@ -1198,6 +1224,19 @@ def cmd_update(
 
     if project is not None and (not isinstance(project, str) or not project.strip()):
         typer.echo("Error: --project must be a non-empty string", err=True)
+        raise typer.Exit(code=1)
+
+    # Validate size/type the same way priority is validated above, so update
+    # can't store garbage (e.g. `--size foo`). 'null' clears size.
+    if size is not None and size.lower() != "null" and size.upper() not in {"S", "M", "L"}:
+        typer.echo(f"Error: invalid size '{size}'. Must be one of: S, M, L", err=True)
+        raise typer.Exit(code=1)
+    _VALID_TYPES = {"feature", "epic", "bug", "roadmap"}
+    if type_ is not None and type_ not in _VALID_TYPES:
+        typer.echo(
+            f"Error: invalid type '{type_}'. Must be one of: {', '.join(sorted(_VALID_TYPES))}",
+            err=True,
+        )
         raise typer.Exit(code=1)
 
     # Derive cwd from the work-map when --project is explicit but --cwd was
@@ -1290,6 +1329,16 @@ def cmd_update(
                 typer.echo("Error: --title cannot be empty or whitespace-only", err=True)
                 raise typer.Exit(code=1)
             node["title"] = new_title
+        if details is not None:
+            node["details"] = None if details.lower() == "null" else details
+        if domain is not None:
+            node["domain"] = domain
+        if size is not None:
+            node["size"] = size.upper() if size.lower() != "null" else None
+        if type_ is not None:
+            node["type"] = type_
+        if public is not None:
+            node["public"] = public
         if acknowledge_collisions is not None:
             ids = [x.strip() for x in acknowledge_collisions.split(",") if x.strip()]
             node["collisions_acknowledged"] = ids
@@ -1840,6 +1889,58 @@ def cmd_view() -> None:
                 )
     except OSError as e:
         typer.echo(f"Could not launch opener: {e}", err=True)
+
+
+# -- roadmap (public, curated) --
+
+@cli.command("roadmap")
+def cmd_roadmap(
+    project: Optional[str] = typer.Option(
+        None,
+        "--project",
+        help="Project to render (defaults to the project mapped to the cwd).",
+    ),
+    out: Optional[str] = typer.Option(None, "--out", help="Write markdown to this path instead of stdout."),
+    html: Optional[str] = typer.Option(None, "--html", help="Also write a standalone HTML file to this path."),
+) -> None:
+    """Render a public, leak-free roadmap of `public`-flagged nodes.
+
+    Only nodes flagged via `fno backlog update --public` for the given
+    project appear, and only their title/priority/size - never IDs, plan
+    paths, or cwd. Safe to commit to a public repo or host on a site.
+    Grouped into Now / Next / Later / Shipped (reusing the live board's
+    column + lane logic, so it can't drift).
+    """
+    from pathlib import Path
+
+    from fno.graph._intake import detect_project_from_settings, repo_root
+    from fno.graph.roadmap_public import (
+        render_public_roadmap_html,
+        render_public_roadmap_md,
+    )
+    from fno.graph.store import read_graph
+
+    resolved_project = project or detect_project_from_settings(repo_root())
+    if not resolved_project:
+        typer.echo(
+            "Error: no project given and none mapped to the cwd; pass --project.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    entries = read_graph(_graph_path())
+    md = render_public_roadmap_md(entries, resolved_project)
+
+    if out:
+        Path(os.path.expanduser(out)).write_text(md)
+        typer.echo(os.path.expanduser(out))
+    else:
+        typer.echo(md, nl=False)
+
+    if html:
+        html_path = os.path.expanduser(html)
+        Path(html_path).write_text(render_public_roadmap_html(entries, resolved_project))
+        typer.echo(html_path)
 
 
 # -- tree --
