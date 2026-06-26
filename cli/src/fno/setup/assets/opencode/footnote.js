@@ -32,7 +32,7 @@
 // If there is no footnote session (no .fno/target-state.md in the project),
 // the plugin no-ops, so a plain native OpenCode session is unaffected.
 
-import { readFileSync, writeFileSync } from "node:fs"
+import { readFileSync, writeFileSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
 
 function fnoSessionId(dir) {
@@ -90,19 +90,21 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
       busy = true
 
       let decision = null
+      // Declared before the try so the finally can clean it up on every path.
+      const synth = join(dir, ".fno", `.opencode-loopcheck-${sid}.jsonl`)
       try {
         // 1. Read this session's assistant messages.
         let items = []
         try {
           const res = await client.session.messages({ path: { id: sid } })
-          items = res?.data || []
+          // Guard: a non-array data would make synthesizeTranscript's for...of throw.
+          items = Array.isArray(res?.data) ? res.data : []
         } catch (e) {
           console.error(`[footnote] session.messages(${sid}) failed: ${e}; leaving session idle`)
           return
         }
 
         // 2. Synthesize the transcript loop-check reads.
-        const synth = join(dir, ".fno", `.opencode-loopcheck-${sid}.jsonl`)
         try {
           writeFileSync(synth, synthesizeTranscript(items))
         } catch (e) {
@@ -124,6 +126,13 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
           return
         }
       } finally {
+        // Clean up the synth transcript (loop-check has already read it by now);
+        // ignore failures incl. ENOENT when an early return skipped the write.
+        try {
+          unlinkSync(synth)
+        } catch {
+          // nothing to clean up / already gone
+        }
         // Release before any re-drive so the re-driven turn's session.idle is
         // not dropped by this guard.
         busy = false
