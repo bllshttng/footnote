@@ -697,6 +697,11 @@ PYEOF
   fi
 
   if [[ -n "$_NODE_ID" && -n "$local_session_id" ]]; then
+    # _NODE_OWNED: does THIS session own the node? Set by either claim layer
+    # succeeding. graph_node_id is decided once from it after both layers run,
+    # so a transient legacy-claim failure no longer nulls a node the modern
+    # `fno claim` actually won (defect 2 / AC1-ERR).
+    _NODE_OWNED=0
     if [[ -f "$_GRAPH_FILE" ]]; then
       _CURRENT_CLAIM=$(python3 - "$_GRAPH_FILE" "$_NODE_ID" <<'PYEOF' 2>/dev/null || echo ""
 import json, sys
@@ -713,21 +718,25 @@ PYEOF
 )
       if [[ -z "$_CURRENT_CLAIM" ]]; then
         _ROADMAP_TASKS="${REPO_ROOT}/scripts/roadmap-tasks.py"
+        _CLAIM_LOG="$STATE_DIR/.init-claim.log"
         if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" \
-            --locked-by "$local_session_id" >/dev/null 2>&1; then
-          echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
+            --locked-by "$local_session_id" 2>"$_CLAIM_LOG" >/dev/null; then
+          _NODE_OWNED=1
+          rm -f "$_CLAIM_LOG"
           echo "target: graph node $_NODE_ID claimed for session $local_session_id" >&2
         else
-          echo "graph_node_id: null" >> "$STATE_FILE"
-          echo "target: WARNING: graph node $_NODE_ID claim failed (roadmap-tasks.py exited non-zero)" >&2
+          # Transient legacy-claim failure (commonly the SessionStart
+          # `fno backlog reconcile` holding the graph flock). Preserve the real
+          # stderr (defect 1 / AC1-ERR) and DEFER graph_node_id: the modern
+          # `fno claim acquire` below is the authority, so a node it wins is
+          # still owned. Distinct message from the "already claimed" path so the
+          # operator is not misled into thinking a lock conflict occurred (AC1-UI).
+          echo "target: WARNING: graph node $_NODE_ID transient legacy-claim error (see $_CLAIM_LOG); deferring to fno claim" >&2
         fi
       else
-        echo "graph_node_id: null" >> "$STATE_FILE"
         echo "graph_node_claim_refused: $_CURRENT_CLAIM" >> "$STATE_FILE"
         echo "target: WARNING: graph node $_NODE_ID already claimed by $_CURRENT_CLAIM - proceeding without claim" >&2
       fi
-    else
-      echo "graph_node_id: null" >> "$STATE_FILE"
     fi
 
     # fno claim acquire (global TTL lock; authoritative mutex)
@@ -750,6 +759,7 @@ PYEOF
         echo "target_claim_holder: \"$_CLAIM_HOLDER\"" >> "$STATE_FILE"
         echo "target_claim_ttl: \"$_CLAIM_TTL\"" >> "$STATE_FILE"
         rm -f "$STATE_DIR/.claim-err"
+        _NODE_OWNED=1
       else
         _acq_rc=$?
         echo "target: WARNING: fno claim acquire failed (rc=$_acq_rc) for $_CLAIM_KEY" >&2
@@ -820,6 +830,7 @@ PYEOF
               echo "target_claim_holder: \"$_CLAIM_HOLDER\"" >> "$STATE_FILE"
               echo "target_claim_ttl: \"$_CLAIM_TTL\"" >> "$STATE_FILE"
               rm -f "$STATE_DIR/.claim-err"
+              _NODE_OWNED=1
             else
               echo "target_claim_blocked_reason: handoff_claim_wait_timeout" >> "$STATE_FILE"
               echo "RESULT: BLOCKED" >&1
@@ -835,6 +846,15 @@ PYEOF
           echo "target_claim_blocked_reason: acquire_error_rc_${_acq_rc}" >> "$STATE_FILE"
         fi
       fi
+    fi
+    # Single graph_node_id decision (AC1-FR: written exactly once at init).
+    # Owned iff a claim layer won AND the graph actually has the node; a missing
+    # graph.json stays null (Boundaries), while a transient legacy failure that
+    # the modern `fno claim` recovered resolves to the node id (defect 2 / AC1-ERR).
+    if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]]; then
+      echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
+    else
+      echo "graph_node_id: null" >> "$STATE_FILE"
     fi
   else
     echo "graph_node_id: null" >> "$STATE_FILE"
