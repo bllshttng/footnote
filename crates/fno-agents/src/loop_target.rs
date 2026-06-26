@@ -434,9 +434,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             }
             // --mission / --termination-key are megawalk flags.
             if mission.is_some() {
-                eprintln!(
-                    "fno-agents loop run: --mission is only valid with --driver megawalk"
-                );
+                eprintln!("fno-agents loop run: --mission is only valid with --driver megawalk");
                 return Ok(2);
             }
             if termination_key.is_some() {
