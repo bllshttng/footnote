@@ -240,7 +240,7 @@ def _run_contract_test(cmd: str, root: Path | str, *, timeout: int = 600) -> tup
     try:
         proc = subprocess.run(
             cmd, shell=True, cwd=str(root),
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, errors="replace", timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, f"contract-test did not complete: {exc}"

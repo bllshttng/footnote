@@ -196,3 +196,10 @@ def test_mark_reconciled_flips_flag_and_preserves_fields(tmp_path):
 def test_mark_reconciled_missing_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         sm.mark_reconciled("x-nope", tmp_path)
+
+
+def test_verdict_tolerates_non_utf8_suite_output(tmp_path):
+    # gemini HIGH: a contract-test that emits non-UTF-8 bytes must not crash the
+    # gate with UnicodeDecodeError (errors="replace"). Exit 0 -> authorize.
+    sm.write("x-1", [], tmp_path, contract_test=r"printf '\377'")
+    assert sm.reconcile_verdict("x-1", tmp_path)["outcome"] == sm.AUTHORIZE
