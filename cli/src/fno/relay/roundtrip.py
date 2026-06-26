@@ -15,15 +15,17 @@ space-collapse) is the DEFAULT; `FNO_RELAY_TRANSCRIPT=0` opts out to `pane.read`
 (see `_transcript_enabled`). G1 had fallen back to `pane.read` believing spawned
 interactive claude wrote no transcript here; that was mis-attributed -- the
 suppressor was the peer INHERITING the parent's session identity, so claude
-treated it as a sub-session and skipped its own transcript. The binary-findings
-recipe in `_peer_env` (scrub `CLAUDE_CODE_SESSION_ID` for an own transcript path,
-force persistence so the child writes anyway) restores a faithful own-id
-transcript. Reliability (live 2026-06-26): single peer works; two peers work when
-spawned STAGGERED (3/3) -- the only failure is two peers booting SIMULTANEOUSLY
-(2/2 wedge), avoided by the spawn-staggering contract (spawn the next peer only
-after the previous is `wait_ready`; see `spawn_peer`). `_deliver_and_capture`
-PREFERS the transcript and keeps `pane.read` as the fallback when no session_id
-resolved. Either way each peer is steered by an `--append-system-prompt` to wrap
+treated it as a sub-session and skipped its own transcript. The fix: `spawn_peer`
+PINS a fresh `--session-id <uuid>` and force-persists (`_peer_env`), so the peer
+writes a faithful own-id transcript at the canonical `projects/<cwd-enc>/<id>.jsonl`
+and we read it by that pinned id directly -- NO `<config>/sessions/<pid>.json`
+sidecar (that path is host/config-specific and silently absent on a default
+config, which dropped capture to pane). Reliability (live 2026-06-26): single peer
+works; two peers work when spawned STAGGERED (3/3) -- the only failure is two peers
+booting SIMULTANEOUSLY (2/2 wedge), avoided by the spawn-staggering contract (spawn
+the next peer only after the previous is `wait_ready`; see `spawn_peer`).
+`_deliver_and_capture` PREFERS the transcript and keeps `pane.read` as the fallback
+when transcript is off. Either way each peer is steered by an `--append-system-prompt` to wrap
 every reply in `<<<RELAY>>>...<<<ENDRELAY>>>` sentinels, and the PTY is sized wide
 so short replies do not wrap.
 
@@ -51,6 +53,7 @@ import struct
 import subprocess
 import termios
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -119,9 +122,10 @@ def _peer_env() -> dict:
     regressing the multi-peer wake. The "binary-findings recipe", reverse-engineered
     from and validated against claude 2.1.193:
 
-    - scrub ``CLAUDE_CODE_SESSION_ID``: the peer mints its own UUID, so its
-      transcript lands at its own ``projects/<enc>/<id>.jsonl`` path, not the
-      parent's.
+    - scrub ``CLAUDE_CODE_SESSION_ID``: drop the inherited parent id so it cannot
+      cross-write the peer's turns into the parent's transcript. The peer's OWN id
+      is pinned explicitly via ``--session-id`` in :func:`spawn_peer` (not minted),
+      so its transcript lands at the known ``projects/<enc>/<id>.jsonl`` path.
     - KEEP ``CLAUDE_CODE_CHILD_SESSION``: the peer stays a "child" (``qUe()`` true).
       This does NOT by itself make two SIMULTANEOUS peers wake (live 2026-06-26:
       back-to-back spawn wedges the second, 2/2) -- the simultaneous-boot
@@ -199,11 +203,22 @@ def spawn_peer(
     env = _peer_env()
     if config_dir:
         env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(config_dir)
+    argv = [claude_bin, "--model", model, "--append-system-prompt", RELAY_SYSTEM_PROMPT]
+    session_id: Optional[str] = None
+    if _transcript_enabled():
+        # PIN the session id so the transcript path is known directly --
+        # projects/<cwd-enc>/<id>.jsonl, the canonical store -- with NO dependency
+        # on a <config>/sessions/<pid>.json sidecar. That sidecar is host/config-
+        # specific (absent under a default config, or colliding with a user's own
+        # synced sessions/ dir), so resolving the id through it silently failed and
+        # dropped capture to pane. The pinned id IS the address; we read projects/.
+        session_id = str(uuid.uuid4())
+        argv += ["--session-id", session_id]
     master, slave = os.openpty()
     try:
         _set_winsize(slave)
         proc = subprocess.Popen(
-            [claude_bin, "--model", model, "--append-system-prompt", RELAY_SYSTEM_PROMPT],
+            argv,
             cwd=cwd, stdin=slave, stdout=slave, stderr=slave,
             start_new_session=True, close_fds=True, env=env,
         )
@@ -213,7 +228,7 @@ def spawn_peer(
     finally:
         os.close(slave)  # the parent never needs the slave end
     return Peer(name=name, proc=proc, master_fd=master,
-                config_dir=env.get("CLAUDE_CONFIG_DIR"))
+                config_dir=env.get("CLAUDE_CONFIG_DIR"), session_id=session_id)
 
 
 def _drain(peer: Peer, seconds: float) -> None:
@@ -267,10 +282,7 @@ def wait_ready(peer: Peer, *, timeout: float = 75.0) -> None:
     _drain(peer, 8.0)
     os.write(peer.master_fd, b"\r")  # accept the trust dialog (option 1 default)
     _quiet(peer, quiet_for=6.0, timeout=timeout)
-    # Best-effort: enables faithful transcript capture; None falls back to pane.
-    # Skip the resolve entirely when the gate is off -- no wasted retry latency.
-    if _transcript_enabled():
-        peer.session_id = resolve_session_id(peer)
+    # session_id was pinned at spawn (see spawn_peer); no sidecar resolve needed.
 
 
 def _frame(from_name: str, body: str) -> str:
@@ -304,31 +316,6 @@ def _claude_base(config_dir: Optional[str]) -> Path:
     peer's ``CLAUDE_CONFIG_DIR`` -- a clean relay config relocates BOTH dirs, so
     the resolvers must follow it, not assume ``~/.claude``."""
     return Path(config_dir) if config_dir else Path.home() / ".claude"
-
-
-def _sessions_file(pid: int, config_dir: Optional[str] = None) -> Path:
-    return _claude_base(config_dir) / "sessions" / f"{pid}.json"
-
-
-def resolve_session_id(peer: Peer, *, retries: int = 12, delay: float = 0.3) -> Optional[str]:
-    """Read the peer's claude session_id from ``<config>/sessions/<pid>.json``.
-
-    Written once the (env-scrubbed) session boots -- wait_ready guarantees that,
-    but retry briefly. Returns None when the file never appears (e.g. the env
-    was not scrubbed), which is the signal to fall back to pane capture."""
-    if peer.proc is None:
-        return None
-    f = _sessions_file(peer.proc.pid, peer.config_dir)
-    for _ in range(retries):
-        if f.exists():
-            try:
-                sid = json.loads(f.read_text(encoding="utf-8")).get("sessionId")
-                if sid:
-                    return sid
-            except (json.JSONDecodeError, OSError):
-                pass
-        time.sleep(delay)
-    return None
 
 
 def _transcript_replies(session_id: str, config_dir: Optional[str] = None) -> list[str]:
@@ -373,9 +360,6 @@ def _deliver_and_capture(peer: Peer, framed: str, timeout: float) -> str:
     text."""
     if _dead(peer):
         raise RuntimeError(f"peer {peer.name!r} is not running")
-    if _transcript_enabled() and peer.session_id is None:
-        # late session-file write -> try once more, then cache
-        peer.session_id = resolve_session_id(peer, retries=3, delay=0.3)
     use_tx = _transcript_enabled() and peer.session_id is not None
     base_pane = len(_replies(peer.buf))
     base_tx = len(_transcript_replies(peer.session_id, peer.config_dir)) if use_tx else 0

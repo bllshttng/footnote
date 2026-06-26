@@ -280,13 +280,10 @@ def test_transcript_replies_empty_when_no_transcript(monkeypatch):
     assert rt_mod._transcript_replies("sid") == []
 
 
-def test_resolvers_honor_config_dir(tmp_path):
-    # A peer under a relocated CLAUDE_CONFIG_DIR writes sessions/+projects/ THERE,
-    # not under ~/.claude. The resolvers must follow the config dir.
+def test_transcript_replies_honors_config_dir(tmp_path):
+    # A peer under a relocated CLAUDE_CONFIG_DIR writes projects/ THERE, not under
+    # ~/.claude. _transcript_replies must glob projects/ under the config dir.
     cfg = str(tmp_path / "relay-cfg")
-    assert rt_mod._sessions_file(4242, cfg) == rt_mod.Path(cfg) / "sessions" / "4242.json"
-    assert rt_mod._sessions_file(4242) == rt_mod.Path.home() / ".claude" / "sessions" / "4242.json"
-    # _transcript_replies globs projects/ under the config dir.
     proj = rt_mod.Path(cfg) / "projects" / "enc"
     proj.mkdir(parents=True)
     (proj / "sess.jsonl").write_text(json.dumps(
@@ -368,23 +365,31 @@ def test_deliver_opt_out_uses_pane_even_with_session_id(monkeypatch):
     assert rt_mod._deliver_and_capture(peer, "framed", timeout=5) == "pane reply"
 
 
-def test_deliver_reresolves_late_session_id(monkeypatch):
-    # A peer whose session file lands after wait_ready's window: capture must
-    # re-resolve once and still take the faithful transcript path.
-    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "1")  # exercise the opt-in transcript leg
-    peer = rt_mod.Peer(name="bob", proc=None, master_fd=-1)  # starts None
-    monkeypatch.setattr(rt_mod, "resolve_session_id", lambda p, **k: "late-sid")
-    monkeypatch.setattr(rt_mod, "_drain", lambda p, s: None)
-    monkeypatch.setattr(rt_mod.os, "write", lambda *a: None)
-    monkeypatch.setattr(rt_mod.time, "sleep", lambda s: None)
-    calls = {"n": 0}
+def test_spawn_peer_pins_session_id(monkeypatch):
+    # The fix: spawn_peer PINS --session-id (so the transcript path is known by id,
+    # no <config>/sessions/<pid>.json hop) and records it on the Peer. Gate off ->
+    # no --session-id, session_id None (byte-for-byte G1 argv).
+    captured = {}
 
-    def fake_tx(sid, config_dir=None):
-        assert sid == "late-sid"
-        calls["n"] += 1
-        return [] if calls["n"] <= 1 else ["faithful late"]
+    class _FakeProc:
+        pid = 4321
 
-    monkeypatch.setattr(rt_mod, "_transcript_replies", fake_tx)
-    out = rt_mod._deliver_and_capture(peer, "framed", timeout=5)
-    assert out == "faithful late"
-    assert peer.session_id == "late-sid"  # cached for the next hop
+    def fake_popen(argv, **kw):
+        captured["argv"] = argv
+        return _FakeProc()
+
+    monkeypatch.setattr(rt_mod.os, "openpty", lambda: (7, 8))
+    monkeypatch.setattr(rt_mod, "_set_winsize", lambda fd: None)
+    monkeypatch.setattr(rt_mod.os, "close", lambda fd: None)
+    monkeypatch.setattr(rt_mod.subprocess, "Popen", fake_popen)
+
+    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "1")
+    peer = rt_mod.spawn_peer("alice", model="haiku")
+    assert "--session-id" in captured["argv"]
+    pinned = captured["argv"][captured["argv"].index("--session-id") + 1]
+    assert peer.session_id == pinned and len(pinned) == 36  # a uuid4
+
+    monkeypatch.setenv("FNO_RELAY_TRANSCRIPT", "0")
+    peer2 = rt_mod.spawn_peer("bob", model="haiku")
+    assert "--session-id" not in captured["argv"]
+    assert peer2.session_id is None
