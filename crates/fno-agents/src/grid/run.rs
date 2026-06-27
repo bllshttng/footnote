@@ -38,6 +38,7 @@ use tokio_tungstenite::WebSocketStream;
 use crate::client::{ensure_daemon, resolve_daemon_bin};
 use crate::grid::group::{self as group, GroupKey, RailState};
 use crate::grid::layout::{self as layout, LayoutError, PageLayout, TtySize};
+use crate::grid::palette::Palette;
 use crate::grid::pane::{CellColor, Pane, PaneSnapshot, RenderCell};
 use crate::grid::state::{
     off_screen_waiting_by_page, Compositor, CompositorAction, ConnAction, ConnEvent, ConnState,
@@ -386,6 +387,12 @@ struct ScreenBuffer {
     cols: u16,
     /// Row-major, length exactly `rows * cols`. Index via [`ScreenBuffer::idx`].
     cells: Vec<RenderCell>,
+    /// Foreground color applied to chrome cells written via `put_str`.
+    /// `CellColor::Default` preserves the pre-palette behavior.
+    chrome_fg: CellColor,
+    /// Background color applied to chrome cells written via `put_str`.
+    /// `CellColor::Default` preserves the pre-palette behavior.
+    chrome_bg: CellColor,
 }
 
 impl ScreenBuffer {
@@ -399,7 +406,20 @@ impl ScreenBuffer {
             rows,
             cols,
             cells: vec![RenderCell::default(); rows as usize * cols as usize],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         }
+    }
+
+    /// Like `blank`, but bakes a palette's chrome fg/bg into the buffer so
+    /// that `put_str` produces palette-colored cells instead of Default.
+    /// With `Palette::fixed()` colors (`CellColor::Default`), the result is
+    /// identical to `blank()`.
+    fn with_chrome(rows: u16, cols: u16, chrome_fg: CellColor, chrome_bg: CellColor) -> Self {
+        let mut buf = Self::blank(rows, cols);
+        buf.chrome_fg = chrome_fg;
+        buf.chrome_bg = chrome_bg;
+        buf
     }
 
     #[inline]
@@ -424,12 +444,16 @@ impl ScreenBuffer {
     }
 
     /// Write a plain chrome string starting at `(row, col)`, one cell per
-    /// char, optionally inverse-video (the focused title bar). All other
-    /// style fields stay default. Stops at the right edge.
+    /// char, optionally inverse-video (the focused title bar). Uses the
+    /// buffer's `chrome_fg`/`chrome_bg` for fg/bg (Default when created via
+    /// `blank()`; palette colors when created via `with_chrome()`). Stops at
+    /// the right edge.
     fn put_str(&mut self, row: u16, col: u16, s: &str, inverse: bool) {
         // Walk a column cursor rather than `col + i as u16`: the cast would
         // wrap if `s` ever exceeded 65535 chars (it cannot today, but the
         // cursor form removes the cast entirely). (gemini-code-assist, PR #386)
+        let chrome_fg = self.chrome_fg;
+        let chrome_bg = self.chrome_bg;
         let mut c = col;
         for ch in s.chars() {
             if c >= self.cols {
@@ -440,6 +464,8 @@ impl ScreenBuffer {
                 c,
                 RenderCell {
                     text: ch.to_string(),
+                    fg: chrome_fg,
+                    bg: chrome_bg,
                     inverse,
                     ..RenderCell::default()
                 },
@@ -547,10 +573,11 @@ fn build_frame(
     hint: Option<&str>,
     badges: &[(usize, usize)],
     cap_note: Option<(usize, usize)>,
+    palette: &Palette,
 ) -> ScreenBuffer {
     let rows = paged.footer.row + paged.footer.rows;
     let cols = paged.footer.col + paged.footer.cols;
-    let mut frame = ScreenBuffer::blank(rows, cols);
+    let mut frame = ScreenBuffer::with_chrome(rows, cols, palette.border, palette.bg);
 
     // `names`/`states` are GLOBAL (one entry per agent in the eager fleet);
     // `paged.tiles` and `vis_snapshots` cover only the current page's slots.
@@ -643,6 +670,9 @@ fn paint<W: Write>(
     rail_state: RailPaintArg<'_>,
     // When true, draw the `?` help overlay on top of the frame (E5c AC-3).
     help_open: bool,
+    // OSC 10/11 terminal palette for chrome coloring (E5c AC-4).
+    // `Palette::fixed()` yields the pre-palette Default behavior.
+    palette: &Palette,
 ) {
     // Domain Pitfall: a rail toggle / g re-partition changes the region map,
     // which invalidates the diff painter's assumption of a stable region. There
@@ -717,6 +747,7 @@ fn paint<W: Write>(
                                 &live_group,
                                 &page_members,
                                 hint,
+                                palette,
                             );
                         }
                     }
@@ -748,6 +779,7 @@ fn paint<W: Write>(
                     rs,
                     rows,
                     hint,
+                    palette,
                 );
             }
             // Terminal too narrow for the rail + a min pane, but a railless grid
@@ -787,6 +819,7 @@ fn paint<W: Write>(
                     hint,
                     &badges_page,
                     cap_note,
+                    palette,
                 )
             }
             Err(e) => build_too_small_frame(tty, &e),
@@ -850,6 +883,7 @@ fn render_to<W: Write>(
         hint,
         badges,
         cap_note,
+        &Palette::fixed(), // ponytail: test helper always uses fixed palette
     );
     queue!(out, terminal::Clear(terminal::ClearType::All))?;
     emit_full(&frame, out)?;
@@ -1273,11 +1307,12 @@ fn build_frame_rail(
     rail_state: &group::RailState,
     rows: &[serde_json::Value],
     hint: Option<&str>,
+    palette: &Palette,
 ) -> ScreenBuffer {
     let footer = &rail_layout.footer;
     let total_rows = footer.row + footer.rows;
     let total_cols = footer.col + footer.cols;
-    let mut frame = ScreenBuffer::blank(total_rows, total_cols);
+    let mut frame = ScreenBuffer::with_chrome(total_rows, total_cols, palette.border, palette.bg);
 
     // 1. Rail.
     raster_rail(
@@ -1335,11 +1370,12 @@ fn build_frame_rail_group(
     sel_group: &group::Group,
     page_members: &[usize],
     hint: Option<&str>,
+    palette: &Palette,
 ) -> ScreenBuffer {
     let footer = &rail_page.footer;
     let total_rows = footer.row + footer.rows;
     let total_cols = footer.col + footer.cols;
-    let mut frame = ScreenBuffer::blank(total_rows, total_cols);
+    let mut frame = ScreenBuffer::with_chrome(total_rows, total_cols, palette.border, palette.bg);
 
     // 1. Rail (unchanged from Single mode).
     raster_rail(
@@ -1916,6 +1952,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             return 1;
         }
     };
+    // Query the terminal's default fg/bg colors via OSC 10/11.
+    // Must run AFTER enable_raw_mode (raw mode is required to read the response)
+    // and BEFORE the EventStream loop (which consumes stdin). Degrades to
+    // Palette::fixed() (all-Default, unchanged chrome) on any failure or timeout.
+    let palette = crate::grid::palette::query_terminal_palette();
     let mut stderr = io::stderr();
 
     let mut reader = EventStream::new();
@@ -2068,6 +2109,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 cap_note,
                 Some((rs, &groups, &badges, &rail_rows)),
                 false, // help_open: overlay always starts closed
+                &palette,
             ),
             None => paint(
                 &mut stderr,
@@ -2082,6 +2124,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 cap_note,
                 None,
                 false, // help_open: overlay always starts closed
+                &palette,
             ),
         }
     }
@@ -2839,6 +2882,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             cap_note,
                             Some((rs, &groups, &badges, &rail_rows)),
                             help_open,
+                            &palette,
                         ),
                         None => paint(
                             &mut stderr,
@@ -2853,6 +2897,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             cap_note,
                             None,
                             help_open,
+                            &palette,
                         ),
                     };
                     dirty = false;
@@ -3746,6 +3791,7 @@ mod tests {
             None,
             &[],
             None,
+            &Palette::fixed(),
         );
         let b = a.clone();
         let mut buf = Vec::new();
@@ -3782,6 +3828,7 @@ mod tests {
             None,
             None,
             false,
+            &Palette::fixed(),
         );
         let s1 = String::from_utf8_lossy(&buf1);
         assert!(s1.contains(CLEAR_ALL), "first frame clears + full paints");
@@ -3802,6 +3849,7 @@ mod tests {
             None,
             None,
             false,
+            &Palette::fixed(),
         );
         let s2 = String::from_utf8_lossy(&buf2);
         assert!(
@@ -3841,6 +3889,7 @@ mod tests {
             None,
             None,
             false,
+            &Palette::fixed(),
         );
 
         // "hello" -> "hellX": only the 5th interior cell changes.
@@ -3858,6 +3907,7 @@ mod tests {
             None,
             None,
             false,
+            &Palette::fixed(),
         );
         let s = String::from_utf8_lossy(&buf);
         assert!(!s.contains(CLEAR_ALL), "diff path issues no clear");
@@ -3892,6 +3942,7 @@ mod tests {
             None,
             None,
             false,
+            &Palette::fixed(),
         );
         // Same size again -> diff, no clear.
         let mut b1 = Vec::new();
@@ -3908,6 +3959,7 @@ mod tests {
             None,
             None,
             false,
+            &Palette::fixed(),
         );
         assert!(
             !String::from_utf8_lossy(&b1).contains(CLEAR_ALL),
@@ -3928,6 +3980,7 @@ mod tests {
             None,
             None,
             false,
+            &Palette::fixed(),
         );
         assert!(
             String::from_utf8_lossy(&b2).contains(CLEAR_ALL),
@@ -3951,11 +4004,15 @@ mod tests {
             rows: 1,
             cols: 3,
             cells: vec![mk("a", false), mk("b", false), mk("c", false)],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         };
         let cur = ScreenBuffer {
             rows: 1,
             cols: 3,
             cells: vec![mk("你", false), mk("", true), mk("c", false)],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         };
         let mut buf = Vec::new();
         emit_diff(&prev, &cur, &mut buf).unwrap();
@@ -3983,12 +4040,16 @@ mod tests {
             rows: 1,
             cols: 2,
             cells: vec![mk("x"), mk("y")],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         };
         // col0 cleared to a blank (default) cell; col1 unchanged.
         let cur = ScreenBuffer {
             rows: 1,
             cols: 2,
             cells: vec![RenderCell::default(), mk("y")],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         };
         let mut buf = Vec::new();
         emit_diff(&prev, &cur, &mut buf).unwrap();
@@ -4329,6 +4390,7 @@ mod tests {
             &groups[0],
             &page_members,
             None,
+            &Palette::fixed(),
         );
 
         let all: String = (0..frame.rows)
@@ -4408,6 +4470,7 @@ mod tests {
             &groups[0],
             &page_members,
             None,
+            &Palette::fixed(),
         );
         let all: String = (0..frame.rows)
             .map(|r| row_text(&frame, r))
@@ -4532,6 +4595,7 @@ mod tests {
             &live,
             &page_members,
             None,
+            &Palette::fixed(),
         );
 
         let t0 = tile_title_text(&frame, &rail_page.main.tiles[0]);
@@ -4621,6 +4685,7 @@ mod tests {
             &rs,
             &rows,
             None,
+            &Palette::fixed(),
         );
         let footer_line = row_text(&frame, rail_layout.footer.row);
         assert!(
@@ -4959,5 +5024,92 @@ mod tests {
             "overlay border missing"
         );
         assert!(rendered.contains('?'), "overlay content must mention ?");
+    }
+
+    // ── E5c AC-4: OSC 10/11 palette integration ────────────────────────────
+
+    /// AC4-HP: A ScreenBuffer created with `with_chrome` applies the palette
+    /// fg/bg to cells written by `put_str`.
+    #[test]
+    fn screen_buffer_with_chrome_colors_put_str_cells() {
+        let palette = crate::grid::palette::Palette::from_terminal(
+            (200, 200, 200), // fg
+            (10, 10, 10),    // bg
+        );
+        let mut buf = ScreenBuffer::with_chrome(1, 10, palette.border, palette.bg);
+        buf.put_str(0, 0, "hi", false);
+        let cell = buf.get(0, 0).unwrap();
+        assert_ne!(
+            cell.fg,
+            CellColor::Default,
+            "with_chrome put_str cell fg must be palette.border, not Default"
+        );
+        assert_eq!(cell.fg, palette.border, "cell fg must equal palette.border");
+    }
+
+    /// AC4-HP: `build_frame` with a non-default palette produces border cells
+    /// with the palette's border color, not CellColor::Default.
+    #[test]
+    fn build_frame_palette_applied_to_border_cells() {
+        let tty = TtySize::new(24, 80);
+        let names = vec!["wkA".to_string()];
+        let states = vec![ConnState::Watching];
+        let comp = Compositor::new(1);
+        let paged = layout::compute_page(tty, 1, 0).unwrap();
+        let mut snaps = vec![one_pane(b"hello").pop().unwrap().snapshot()];
+        let palette = crate::grid::palette::Palette::from_terminal(
+            (220, 220, 220), // fg
+            (10, 10, 10),    // bg
+        );
+        let frame = build_frame(
+            &paged,
+            &names,
+            &mut snaps,
+            &states,
+            &comp,
+            &[true],
+            None,
+            &[],
+            None,
+            &palette,
+        );
+        // The top-left cell is the border corner (┌). Its fg should be palette.border.
+        let tile = &paged.tiles[0];
+        let corner = frame.get(tile.row, tile.col).unwrap();
+        assert_eq!(
+            corner.fg, palette.border,
+            "border corner fg must be palette.border"
+        );
+    }
+
+    /// AC4-VERIFY: `Palette::fixed()` yields the same behavior as the pre-palette
+    /// chrome: all chrome cells keep CellColor::Default fg/bg.
+    #[test]
+    fn build_frame_fixed_palette_preserves_default_colors() {
+        let tty = TtySize::new(24, 80);
+        let names = vec!["wkA".to_string()];
+        let states = vec![ConnState::Watching];
+        let comp = Compositor::new(1);
+        let paged = layout::compute_page(tty, 1, 0).unwrap();
+        let mut snaps = vec![one_pane(b"hello").pop().unwrap().snapshot()];
+        let frame = build_frame(
+            &paged,
+            &names,
+            &mut snaps,
+            &states,
+            &comp,
+            &[true],
+            None,
+            &[],
+            None,
+            &crate::grid::palette::Palette::fixed(),
+        );
+        let tile = &paged.tiles[0];
+        let corner = frame.get(tile.row, tile.col).unwrap();
+        assert_eq!(
+            corner.fg,
+            CellColor::Default,
+            "fixed palette: border corner fg must remain Default"
+        );
     }
 }
