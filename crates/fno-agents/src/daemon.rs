@@ -1580,7 +1580,9 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     // response shape is byte-unchanged.
     let mut payload = json!({"short_id": short_id, "provider": provider, "status": "live"});
     if interactive && provider == "claude" {
-        if let Some(sid) = resume_id.clone().or_else(|| {
+        // `resume_id` is consumed here (its last use): resume precedes a fresh
+        // host's session_id, the same resolution the claim guard + registry use.
+        if let Some(sid) = resume_id.or_else(|| {
             p.get("session_id")
                 .and_then(|v| v.as_str())
                 .map(String::from)
