@@ -5059,7 +5059,7 @@ fn now_compact() -> String {
 }
 
 /// RFC3339-like timestamp for the registry's `created_at` / `last_message_at`.
-fn now_rfc3339_like() -> String {
+pub(crate) fn now_rfc3339_like() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
