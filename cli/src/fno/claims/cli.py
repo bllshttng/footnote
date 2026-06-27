@@ -78,20 +78,16 @@ def _parse_metadata(value: str) -> dict:
 
 
 def _node_aware_root(key: str):
-    """Resolve the claims root for a key, defaulting node claims to the global
-    root so operator commands work without the env var (ab-fcf9cec5).
+    """Resolve the claims root for a key (delegates to the shared helper).
 
-    `node:<id>` claims are written to the global ``~/.fno/claims`` (the
-    shell lifecycle sets ``FNO_CLAIMS_ROOT=$HOME``). A bare
-    ``fno claim status node:ab-...`` run from a project checkout has no env
-    override, so without this it would read ``cwd/.fno/claims`` and miss
-    the live lock. ``global_claims_root()`` still honors an explicit
-    ``FNO_CLAIMS_ROOT``. Non-node keys keep the cwd/env default (None).
+    Global-id kinds (``node:``/``dispatch:``/``reconcile:``) route to the global
+    ``~/.fno/claims`` so operator commands work without the env var
+    (ab-fcf9cec5); repo-local keys keep the cwd/env default. See
+    :func:`fno.claims.io.claims_root_for` for the single source of truth.
     """
-    if key.startswith("node:"):
-        from .io import global_claims_root
-        return global_claims_root()
-    return None
+    from .io import claims_root_for
+
+    return claims_root_for(key)
 
 
 @cli.command()

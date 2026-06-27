@@ -455,13 +455,13 @@ def cmd_spawn_guard(
     from fno.claims.core import ClaimHeldByOther, acquire_claim, claim_status
 
     def _root_for(key: str):
-        # Mirror fno.claims.cli._node_aware_root: node:<id> claims live in the
-        # global root; dispatch:<id> uses the cwd/env default (FNO_CLAIMS_ROOT).
-        if key.startswith("node:"):
-            from fno.claims.io import global_claims_root
+        # Delegate to the shared routing rule (fno.claims.io.claims_root_for):
+        # node:/dispatch:/reconcile: (global-id kinds) live in the global root,
+        # so spawn-guard dedups dispatch:<id> against advance/reconcile across
+        # repos; repo-local keys keep the cwd/env default.
+        from fno.claims.io import claims_root_for
 
-            return global_claims_root()
-        return None
+        return claims_root_for(key)
 
     node_key = f"node:{node_id}"
     res_key = f"dispatch:{node_id}"

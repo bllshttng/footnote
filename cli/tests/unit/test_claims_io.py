@@ -16,8 +16,10 @@ from fno.claims.io import (
     atomic_create_exclusive,
     claim_path,
     claims_dir,
+    claims_root_for,
     decode_key,
     encode_key,
+    global_claims_root,
     read_claim_file,
     serialize_claim,
 )
@@ -275,3 +277,46 @@ def test_global_claims_root_env_then_home(tmp_path, monkeypatch):
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert global_claims_root() == tmp_path / "home"
+
+
+# ---------------------------------------------------------------------------
+# claims_root_for: identity-based routing (node/dispatch/reconcile -> global)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("prefix", ["node", "dispatch", "reconcile"])
+def test_claims_root_for_global_id_kinds_route_global(prefix, monkeypatch):
+    """node:/dispatch:/reconcile: all root at the global root, regardless of env.
+
+    AC1-HP: a global-id key returns global_claims_root() with no
+    FNO_CLAIMS_ROOT set, and the same root that node: resolves to.
+    """
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    assert claims_root_for(f"{prefix}:x-abcd") == global_claims_root()
+    # All three global-id kinds for the same id land in the SAME directory.
+    assert claims_root_for(f"{prefix}:x-abcd") == claims_root_for("node:x-abcd")
+
+
+def test_claims_root_for_honors_env_override(tmp_path, monkeypatch):
+    """global-id kinds follow $FNO_CLAIMS_ROOT (via global_claims_root)."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    assert claims_root_for("dispatch:x-abcd") == tmp_path
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "walker:/some/repo",
+        "fleet:m-123",
+        "colonless",
+        "",
+        "unknown:x-abcd",
+        # A bare prefix with no colon is NOT a global-id key (needs "<prefix>:<id>").
+        "node",
+        "dispatch",
+        "reconcile",
+    ],
+)
+def test_claims_root_for_repo_local_and_unknown_keys_return_none(key):
+    """AC1-ERR: repo-local / unrecognized / colon-less keys keep the default (None)."""
+    assert claims_root_for(key) is None
