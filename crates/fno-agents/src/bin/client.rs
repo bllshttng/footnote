@@ -158,6 +158,12 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "logs" {
         return fno_agents::client_verbs::run_logs(&args[1..], &AgentsHome::from_env()).await;
     }
+    // Inside-leg state push (E3.2): a per-turn hook reports {working|blocked|done}.
+    // Dispatched here (no build_request) because it sends to an ALREADY-RUNNING
+    // daemon and must never lazy-start one.
+    if verb == "report" {
+        return fno_agents::client_verbs::run_report(&args[1..], &AgentsHome::from_env()).await;
+    }
 
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to
     // describe it as up. A down daemon is exit 13 (AC10-ERR).
@@ -1596,6 +1602,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "attach <name>",
     "logs <name> [--follow] [options]",
     "loop run --driver target|megawalk [options]",
+    "report --session-id <uuid> --seq <n> --state working|blocked|done [--reason <text>] [--ttl-ms <n>]",
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`
