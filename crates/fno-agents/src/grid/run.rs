@@ -2245,6 +2245,24 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             .iter()
             .map(|s| matches!(s, ConnState::Exited { .. }))
             .collect();
+        // Inside-leg authority (E3.3): the middle tier between PTY-exit and the
+        // scraper. Parsed from `rail_rows` (the same index `waiting`/`exited`
+        // use), so it is snapshot-bound to startup like the rest of `rail_rows`;
+        // the TTL gate (`now_secs`) makes that safe - a stale `working` ages out
+        // and the scraper takes over rather than pinning forever. A live
+        // per-frame registry refresh is the run loop's already-noted follow-up.
+        let inside_leg: Vec<Option<crate::state::InsideLegReport>> = rail_rows
+            .iter()
+            .map(|row| {
+                row.get("inside_leg")
+                    .filter(|v| !v.is_null())
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+            })
+            .collect();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         // The attention filter (`a`) reduces the rendered groups to waiting-only;
         // badges then derive from the visible set, so the global footer summary
         // matches what the rail shows (`!N`, no `xM` once exited are filtered out).
@@ -2252,7 +2270,8 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
         if rs.attention_filter {
             groups = group::attention_view(&groups, &waiting);
         }
-        let badges = group::compute_badges_from_live(&groups, &waiting, &exited);
+        let badges =
+            group::compute_badges_from_live(&groups, &waiting, &exited, &inside_leg, now_secs);
         (groups, badges)
     }
 
@@ -4415,7 +4434,7 @@ mod tests {
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
         let waiting = vec![false, false, false];
         let exited = vec![true, false, false]; // wkA (idx 0) exited
-        let badges = group::compute_badges_from_live(&groups, &waiting, &exited);
+        let badges = group::compute_badges_from_live(&groups, &waiting, &exited, &[], 0);
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
         rs.selected_agent_idx = Some(1); // wkB selected
 
@@ -4456,7 +4475,7 @@ mod tests {
             .map(|(n, c, p, s)| json!({"name": n, "cwd": c, "provider": p, "status": s}))
             .collect();
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
-        let badges = group::compute_badges_from_live(&groups, &vec![false; 8], &vec![false; 8]);
+        let badges = group::compute_badges_from_live(&groups, &vec![false; 8], &vec![false; 8], &[], 0);
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
         rs.selected_agent_idx = Some(7); // wk7, the last member
 
@@ -4590,7 +4609,7 @@ mod tests {
             json!({"name": "wkB", "cwd": "/repo/x", "provider": "codex", "status": "live"}),
         ];
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
-        let badges = group::compute_badges_from_live(&groups, &[false, false], &[false, false]);
+        let badges = group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
         let names = vec!["wkA".to_string(), "wkB".to_string()];
         let states = vec![ConnState::Watching, ConnState::Watching];
 
@@ -4675,7 +4694,7 @@ mod tests {
             json!({"name": "wkB", "cwd": "/x", "provider": "codex", "status": "live"}),
         ];
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
-        let badges = group::compute_badges_from_live(&groups, &[false, false], &[false, false]);
+        let badges = group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
         let names = vec!["wkA".to_string(), "wkB".to_string()];
         let states = vec![ConnState::Watching, ConnState::Watching];
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
@@ -4797,7 +4816,7 @@ mod tests {
             ConnState::Watching,
         ];
         let badges =
-            group::compute_badges_from_live(&groups, &[false, false, false], &[false, true, false]);
+            group::compute_badges_from_live(&groups, &[false, false, false], &[false, true, false], &[], 0);
 
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
         rs.main_mode = group::MainMode::GroupTile;
@@ -4905,7 +4924,7 @@ mod tests {
         // End-to-end: a waiting agent rolls up into the footer attention summary.
         let rows = vec![json!({"name": "wkA", "cwd": "/x", "provider": "codex", "status": "live"})];
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
-        let badges = group::compute_badges_from_live(&groups, &[true], &[false]); // wkA waiting
+        let badges = group::compute_badges_from_live(&groups, &[true], &[false], &[], 0); // wkA waiting
         let names = vec!["wkA".to_string()];
         let states = vec![ConnState::Watching];
         let mut rs = group::RailState::new(group::GroupKey::Cwd);

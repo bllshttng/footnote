@@ -16,6 +16,7 @@
 //!   `layout::compute` with pane_count 0 (AC1-EDGE).
 //! - Sum invariant: `groups.iter().map(|g| g.members.len()).sum() == in_scope_count`.
 
+use crate::state::{InsideLegReport, InsideLegState};
 use serde_json::Value;
 
 /// Which field to partition on. `g` cycles through in this order.
@@ -170,18 +171,81 @@ impl GroupBadge {
     }
 }
 
+/// One member's attention contribution under the 3-tier authority lattice
+/// (inside-out E3.3): `Exited (PTY) > inside-leg (within ttl) > scraper >
+/// unknown`. Pure and total over its inputs so it is unit-testable without a
+/// pane or a registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberAttention {
+    /// PTY process exited - tier 1, beats everything (umbrella D4).
+    Exited,
+    /// Needs the operator: a live inside-leg `blocked`, or (no live inside-leg
+    /// authority) the scraper's `waiting` readiness signal.
+    NeedsInput,
+    /// No attention: working (live inside-leg, busy) or genuinely idle.
+    None,
+}
+
+/// Resolve one member's attention under the 3-tier authority lattice. `exited`
+/// is PTY liveness (`ConnState::Exited`), `report` the registry's latest
+/// inside-leg state, `now_secs` the wall clock for the TTL gate, `scraper_waiting`
+/// the screen-scan readiness (`Pane::is_waiting`).
+///
+/// - **Tier 1 (PTY exit)** wins outright: a dead pane is never resurrected by a
+///   stale inside-leg badge (umbrella Locked Decision D4).
+/// - **Tier 2 (inside-leg, within TTL)** is authoritative over the scraper while
+///   live: `working` suppresses the scraper's false "needs input" when a prompt
+///   glyph is mid-render (AC-X2-3); `blocked` raises attention; `done` means the
+///   turn finished, so it yields to the scraper (tier 3).
+/// - **Tier 3 (scraper)** decides when there is no live inside-leg authority
+///   (absent, expired per AC-X2-2, or `done`).
+/// - **Tier 4 (unknown)** is "no attention" - the `None` default.
+fn member_attention(
+    exited: bool,
+    report: Option<&InsideLegReport>,
+    now_secs: u64,
+    scraper_waiting: bool,
+) -> MemberAttention {
+    if exited {
+        return MemberAttention::Exited;
+    }
+    if let Some(rep) = report {
+        if rep.is_live_at(now_secs) {
+            match rep.state {
+                InsideLegState::Working => return MemberAttention::None,
+                InsideLegState::Blocked => return MemberAttention::NeedsInput,
+                // `done`: the turn completed; fall through to the scraper, which
+                // reads the agent's now-idle/waiting screen state.
+                InsideLegState::Done => {}
+            }
+        }
+    }
+    if scraper_waiting {
+        MemberAttention::NeedsInput
+    } else {
+        MemberAttention::None
+    }
+}
+
 /// Compute attention badges for a set of groups from the **live** per-agent
 /// signals the run loop already tracks: `waiting[i]` (the focused-pane
-/// readiness scan, `Pane::is_waiting`) and `exited[i]` (`ConnState::Exited`).
-/// Both slices are indexed by agent index - the same index `Group::members`
-/// holds - so a member out of range is treated as "no signal" (defensive
-/// `.get`, never panics).
+/// readiness scan, `Pane::is_waiting`), `exited[i]` (`ConnState::Exited`), and
+/// `inside_leg[i]` (the registry's latest inside-leg report for that agent, the
+/// 3-tier authority's middle tier - inside-out E3.3). All slices are indexed by
+/// agent index - the same index `Group::members` holds - so a member out of
+/// range is treated as "no signal" (defensive `.get`, never panics); pass an
+/// empty `inside_leg` slice when no reports apply. `now_secs` is the wall clock
+/// the TTL gate ages reports against (AC-X2-2).
 ///
 /// This deliberately does NOT read the registry `status` string: an `--all`
 /// fleet is pre-filtered to alive-ish statuses (ready/idle/busy/live/spawning),
 /// and `rail_rows` is a frozen startup snapshot, so a status-based badge could
 /// never fire for a running agent that later exits or starts waiting. The live
-/// signal is the only correct source (sigma-review, ab-ecf48467).
+/// signal is the only correct source (sigma-review, ab-ecf48467). The inside-leg
+/// report is snapshot-bound to that same `rail_rows` today, but the TTL gate
+/// makes it self-correcting: a stale `working` ages out and the live scraper
+/// takes over, so the badge never pins a forever-`working` even without a
+/// per-frame registry refresh (which the run loop's own comment defers).
 ///
 /// Kept pure and separate from `group_by` so it can be recomputed every frame
 /// without re-partitioning.
@@ -189,19 +253,24 @@ pub fn compute_badges_from_live(
     groups: &[Group],
     waiting: &[bool],
     exited: &[bool],
+    inside_leg: &[Option<InsideLegReport>],
+    now_secs: u64,
 ) -> Vec<GroupBadge> {
     groups
         .iter()
         .map(|g| {
             let mut badge = GroupBadge::default();
             for &idx in &g.members {
-                // Exited takes priority: a dead pane is never also "waiting"
-                // (`is_waiting` excludes non-scannable states), but the explicit
-                // ordering keeps the two counts mutually exclusive regardless.
-                if exited.get(idx).copied().unwrap_or(false) {
-                    badge.exited += 1;
-                } else if waiting.get(idx).copied().unwrap_or(false) {
-                    badge.needs_input += 1;
+                let att = member_attention(
+                    exited.get(idx).copied().unwrap_or(false),
+                    inside_leg.get(idx).and_then(|o| o.as_ref()),
+                    now_secs,
+                    waiting.get(idx).copied().unwrap_or(false),
+                );
+                match att {
+                    MemberAttention::Exited => badge.exited += 1,
+                    MemberAttention::NeedsInput => badge.needs_input += 1,
+                    MemberAttention::None => {}
                 }
             }
             badge
@@ -847,7 +916,7 @@ mod tests {
         let groups = group_by(&rows, GroupKey::Cwd);
         let waiting = vec![true, false, false]; // wkA (idx 0) is waiting for input
         let exited = vec![false, false, false];
-        let badges = compute_badges_from_live(&groups, &waiting, &exited);
+        let badges = compute_badges_from_live(&groups, &waiting, &exited, &[], 0);
 
         // /alpha group: wkA is needs-input.
         let alpha_idx = groups.iter().position(|g| g.header == "/alpha").unwrap();
@@ -871,10 +940,102 @@ mod tests {
         let groups = group_by(&rows, GroupKey::Cwd);
         let waiting = vec![false, false];
         let exited = vec![true, false]; // wkA exited since startup
-        let badges = compute_badges_from_live(&groups, &waiting, &exited);
+        let badges = compute_badges_from_live(&groups, &waiting, &exited, &[], 0);
         assert_eq!(badges[0].exited, 1);
         assert_eq!(badges[0].needs_input, 0);
         assert!(!badges[0].is_empty());
+    }
+
+    // ── 3-tier authority (inside-out E3.3): Exited > inside-leg(ttl) > scraper ──
+
+    fn report_at(state: InsideLegState, received_at: &str, ttl_ms: Option<u64>) -> InsideLegReport {
+        InsideLegReport {
+            state,
+            seq: 1,
+            reason: None,
+            received_at: received_at.into(),
+            ttl_ms,
+        }
+    }
+
+    #[test]
+    fn ac_x2_3_inside_leg_working_beats_scraper_idle() {
+        // The scraper would read a prompt glyph as idle/needs-input (waiting=true),
+        // but a live inside-leg `working` report says the agent is busy. The hook
+        // wins while live: NO needs_input badge (AC-X2-3).
+        let rows = make_rows(&[("wkA", "/a", "claude", "live")]);
+        let groups = group_by(&rows, GroupKey::Cwd);
+        let now = crate::state::rfc3339_like_to_secs("2026-06-27T00:00:00Z").unwrap();
+        let inside_leg = vec![Some(report_at(
+            InsideLegState::Working,
+            "2026-06-27T00:00:00Z",
+            Some(5000),
+        ))];
+        let badges = compute_badges_from_live(&groups, &[true], &[false], &inside_leg, now);
+        assert!(badges[0].is_empty(), "live working suppresses the scraper's false needs_input");
+    }
+
+    #[test]
+    fn ac_x2_2_expired_working_ages_out_to_scraper() {
+        // Same working report, but the clock is past received_at + ttl. The badge
+        // must NOT stay working: it ages out and the live scraper (waiting=true)
+        // takes over -> needs_input (AC-X2-2, never a permanent stale working).
+        let rows = make_rows(&[("wkA", "/a", "claude", "live")]);
+        let groups = group_by(&rows, GroupKey::Cwd);
+        let recv = crate::state::rfc3339_like_to_secs("2026-06-27T00:00:00Z").unwrap();
+        let inside_leg = vec![Some(report_at(
+            InsideLegState::Working,
+            "2026-06-27T00:00:00Z",
+            Some(5000),
+        ))];
+        let badges = compute_badges_from_live(&groups, &[true], &[false], &inside_leg, recv + 6);
+        assert_eq!(badges[0].needs_input, 1, "expired working yields to the scraper");
+    }
+
+    #[test]
+    fn inside_leg_blocked_raises_attention_even_when_scraper_quiet() {
+        let rows = make_rows(&[("wkA", "/a", "claude", "live")]);
+        let groups = group_by(&rows, GroupKey::Cwd);
+        let now = crate::state::rfc3339_like_to_secs("2026-06-27T00:00:00Z").unwrap();
+        let inside_leg = vec![Some(report_at(
+            InsideLegState::Blocked,
+            "2026-06-27T00:00:00Z",
+            Some(5000),
+        ))];
+        // scraper not waiting, but a live `blocked` still needs the operator.
+        let badges = compute_badges_from_live(&groups, &[false], &[false], &inside_leg, now);
+        assert_eq!(badges[0].needs_input, 1);
+    }
+
+    #[test]
+    fn exited_pty_beats_live_inside_leg_working() {
+        // Tier 1: a dead pane is never resurrected by a stale `working` (D4).
+        let rows = make_rows(&[("wkA", "/a", "claude", "live")]);
+        let groups = group_by(&rows, GroupKey::Cwd);
+        let now = crate::state::rfc3339_like_to_secs("2026-06-27T00:00:00Z").unwrap();
+        let inside_leg = vec![Some(report_at(
+            InsideLegState::Working,
+            "2026-06-27T00:00:00Z",
+            Some(5000),
+        ))];
+        let badges = compute_badges_from_live(&groups, &[false], &[true], &inside_leg, now);
+        assert_eq!(badges[0].exited, 1);
+        assert_eq!(badges[0].needs_input, 0);
+    }
+
+    #[test]
+    fn inside_leg_done_yields_to_scraper() {
+        // `done` = turn finished; the scraper decides idle vs waiting (tier 3).
+        let rows = make_rows(&[("wkA", "/a", "claude", "live")]);
+        let groups = group_by(&rows, GroupKey::Cwd);
+        let now = crate::state::rfc3339_like_to_secs("2026-06-27T00:00:00Z").unwrap();
+        let done = vec![Some(report_at(InsideLegState::Done, "2026-06-27T00:00:00Z", Some(5000)))];
+        // scraper waiting -> needs_input passes through.
+        let badges = compute_badges_from_live(&groups, &[true], &[false], &done, now);
+        assert_eq!(badges[0].needs_input, 1);
+        // scraper quiet -> no attention.
+        let badges = compute_badges_from_live(&groups, &[false], &[false], &done, now);
+        assert!(badges[0].is_empty());
     }
 
     // ── AC5-FR: sum invariant under churn ─────────────────────────────────
