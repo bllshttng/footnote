@@ -1738,7 +1738,7 @@ event_types:
     consumers: [operator]
 
   - name: advance_dispatched
-    description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target no-merge worker for the next now-unblocked node after a PR merge. Also emitted by advance_dependents when it dispatches a now-unblocked direct blocked_by dependent: cross-project into its own work-map repo (cross_project=true, G1) or same-project into the node's own recorded root (cross_project=false, RC1/x-33b2). Surfaced in the next SessionStart reconcile reminder line."
+    description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target no-merge worker for the next now-unblocked node after a PR merge. Also emitted by advance_dependents when it dispatches a now-unblocked direct blocked_by dependent: cross-project into its own work-map repo (cross_project=true, G1) or same-project into its own project root (cross_project=false, RC1/x-33b2; work-map resolved, recorded cwd as fallback). Surfaced in the next SessionStart reconcile reminder line."
     sources: [backlog]
     data:
       required: [node_id]
@@ -1757,7 +1757,7 @@ event_types:
           description: "The just-merged node whose close triggered this advance (keying for AC1-RACE)."
         cross_project:
           type: boolean
-          description: "True when this dispatch followed a blocked_by edge into a DIFFERENT project (G1 advance_dependents), spawned with --cwd the dependent's own work-map root. False for a same-project dispatch: either the next-node advance, or a same-project direct dependent spawned with --cwd the node's own recorded root (RC1/x-33b2)."
+          description: "True when this dispatch followed a blocked_by edge into a DIFFERENT project (G1 advance_dependents), spawned with --cwd the dependent's own work-map root. False for a same-project dispatch: either the next-node advance, or a same-project direct dependent spawned with --cwd its own project root (RC1/x-33b2; work-map resolved, recorded cwd as fallback)."
     consumers: [operator]
 
   - name: advance_skipped
