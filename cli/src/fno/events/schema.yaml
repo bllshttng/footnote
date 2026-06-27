@@ -1334,6 +1334,19 @@ event_types:
         session_id:
           type: string
 
+  - name: drive_refused_busy_elsewhere
+    description: "A claude grid-drive was refused because the session's cross-process claim is held by another writer (X1 single-writer interlock)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        agent:
+          type: string
+        holder:
+          type: string
+        session_uuid:
+          type: string
+
   - name: drive_takeover_after_stale
     description: "A new drive session took over from a stale session (heartbeat expired)."
     sources: [daemon]
