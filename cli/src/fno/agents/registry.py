@@ -73,7 +73,12 @@ KNOWN_STATUSES = frozenset(
 # Valid host_mode values (interactive-drive node). A missing/null key coerces to
 # "exec" in load_registry; any other concrete value is rejected like an alien
 # status, so a typo ("intractive") cannot silently fall back to exec behavior.
-KNOWN_HOST_MODES = frozenset({"exec", "interactive"})
+# "attached" is an ADOPTED claude --bg session footnote drives over the daemon
+# control.sock (G1 held-attach substrate, x-26df) -- its process is Claude's, not
+# footnote's, so it is neither "exec" (one-shot) nor "interactive" (a
+# footnote-spawned PTY worker); listed here so a row the Rust adopt path writes
+# stays load_registry-readable from Python instead of bricking the registry.
+KNOWN_HOST_MODES = frozenset({"exec", "interactive", "attached"})
 
 # Single source of truth for "which stored field is a provider's resume
 # target". Consumed by both AgentEntry.session_id (real entries) and

@@ -1245,6 +1245,40 @@ def test_host_mode_alien_value_rejected(tmp_path: Path, monkeypatch) -> None:
         load_registry(path=registry_path)
 
 
+def test_host_mode_attached_value_accepted(tmp_path: Path, monkeypatch) -> None:
+    """An adopted claude --bg row (host_mode="attached", G1 x-26df) written by the
+    Rust adopt path loads cleanly from Python instead of bricking the registry
+    with RegistryVersionError (codex P1)."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 5,
+                "agents": [
+                    {
+                        "name": "cc-a1b2c3d4",
+                        "provider": "claude",
+                        "cwd": "/tmp",
+                        "log_path": None,
+                        "claude_session_uuid": "a1b2c3d4-1111-2222-3333-444455556666",
+                        "claude_short_id": "a1b2c3d4",
+                        "status": "live",
+                        "host_mode": "attached",
+                        "pid": 5001,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_registry(path=registry_path)
+    assert loaded[0].host_mode == "attached"
+
+
 # ---------------------------------------------------------------------------
 # claude_session_uuid (Task 1.1 - full UUID resume target, distinct from jobId)
 # ---------------------------------------------------------------------------

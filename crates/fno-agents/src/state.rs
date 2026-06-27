@@ -317,6 +317,13 @@ pub struct RegistryEntry {
 pub const HOST_MODE_EXEC: &str = "exec";
 /// `host_mode` value for a long-lived drivable interactive session.
 pub const HOST_MODE_INTERACTIVE: &str = "interactive";
+/// `host_mode` value for an ADOPTED `claude --bg` session footnote holds live via
+/// a daemon `control.sock` attach (G1 held-attach substrate, x-26df). Distinct
+/// from `interactive` (a footnote-SPAWNED PTY worker): an `attached` row's process
+/// is Claude's, not footnote's, and it is driven over the held attach, not a
+/// worker socket. G2 teaches grid to consume it; the standard worker reconcile
+/// must not treat it as a managed PTY worker.
+pub const HOST_MODE_ATTACHED: &str = "attached";
 
 /// Claude spawn `mode` (D2, inside-out-multiplexer E1). Disambiguates the two
 /// claude PTY lanes WITHIN an interactive `host_mode`: `stream_json` is the
