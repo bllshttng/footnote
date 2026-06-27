@@ -48,6 +48,12 @@ pub struct CreateContext {
     /// Yolo / sandbox-bypass opt-in (codex/gemini); maps to provider-specific
     /// flags. Claude ignores it.
     pub yolo: bool,
+    /// Optional system prompt appended at spawn (interactive claude only, the
+    /// "sentinel-prompt seam", inside-out-multiplexer E4.1): a relay-targeted
+    /// spawn passes the `<<<RELAY>>>` sentinel prompt so its replies are
+    /// parseable; a grid-spawned claude passes `None` and runs unsteered. One
+    /// PTY, two consumers with different prompts (the seam the design flags).
+    pub append_system_prompt: Option<String>,
 }
 
 /// Inputs for continuing an existing session (`fno agents ask`).
@@ -314,6 +320,17 @@ impl ClaudeInteractiveProvider {
         if let Some(sid) = ctx.session_id.as_deref().filter(|s| !s.is_empty()) {
             argv.push("--session-id".into());
             argv.push(sid.to_string());
+        }
+        // Sentinel-prompt seam (E4.1): a relay-targeted spawn steers replies via
+        // `--append-system-prompt`; absent, the pane runs unsteered. Pushed before
+        // the positional message (which must stay last).
+        if let Some(prompt) = ctx
+            .append_system_prompt
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            argv.push("--append-system-prompt".into());
+            argv.push(prompt.to_string());
         }
         if !ctx.message.is_empty() {
             argv.push(ctx.message.clone());
@@ -971,6 +988,7 @@ mod tests {
             from_name: None,
             session_id: None,
             yolo: false,
+            append_system_prompt: None,
         }
     }
 
@@ -1341,6 +1359,7 @@ mod tests {
             from_name: None,
             session_id: session_id.map(String::from),
             yolo: false,
+            append_system_prompt: None,
         }
     }
 
@@ -1380,6 +1399,45 @@ mod tests {
                 .unwrap(),
             vec!["claude", "hi"]
         );
+    }
+
+    /// Sentinel-prompt seam (E4.1): a relay-targeted spawn carries
+    /// `--append-system-prompt <prompt>` (pushed before the positional message,
+    /// which stays last); an absent/empty prompt leaves the pane unsteered.
+    #[test]
+    fn claude_interactive_argv_appends_system_prompt() {
+        let mut ctx = claude_ctx("hello", Some("s1"));
+        ctx.append_system_prompt = Some("relay sentinel prompt".into());
+        assert_eq!(
+            ClaudeInteractiveProvider
+                .create_interactive_argv(&ctx)
+                .unwrap(),
+            vec![
+                "claude",
+                "--session-id",
+                "s1",
+                "--append-system-prompt",
+                "relay sentinel prompt",
+                "hello"
+            ]
+        );
+        // Absent -> no flag (grid-spawned, unsteered).
+        assert!(!claude_argv_has_append_prompt(&claude_ctx(
+            "hello",
+            Some("s1")
+        )));
+        // Empty string is treated as absent (no dangling flag).
+        let mut empty = claude_ctx("hello", Some("s1"));
+        empty.append_system_prompt = Some(String::new());
+        assert!(!claude_argv_has_append_prompt(&empty));
+    }
+
+    fn claude_argv_has_append_prompt(ctx: &CreateContext) -> bool {
+        ClaudeInteractiveProvider
+            .create_interactive_argv(ctx)
+            .unwrap()
+            .iter()
+            .any(|a| a == "--append-system-prompt")
     }
 
     /// Interactive resume reattaches the TUI by session id, still never `-p`.

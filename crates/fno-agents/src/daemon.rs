@@ -1121,6 +1121,17 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                             None
                         },
                         yolo,
+                        // Sentinel-prompt seam (E4.1): the relay passes its
+                        // `<<<RELAY>>>` system prompt so the spawned pane's
+                        // replies are parseable; grid spawns omit it. Interactive
+                        // claude only - codex/gemini keep their argv byte-unchanged.
+                        append_system_prompt: if interactive && provider == "claude" {
+                            p.get("append_system_prompt")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        } else {
+                            None
+                        },
                     };
                     // Interactive routes to the host/promote argv; a provider
                     // with no interactive form (claude) returns None and is
@@ -1561,10 +1572,25 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         &json!({"name": name, "provider": provider, "short_id": short_id}),
     );
 
-    Response::ok(
-        req.id,
-        json!({"short_id": short_id, "provider": provider, "status": "live"}),
-    )
+    // E4.1: return the interactive-claude session uuid (the same one the argv
+    // pinned and the claim keyed on) so the relay learns the transcript glob key
+    // back over the RPC and reads projects/<cwd-enc>/<session-id>.jsonl with no
+    // PTY of its own. resume_id (resume) precedes session_id (fresh host),
+    // mirroring claude_session_uuid above. Codex/gemini omit the key so their
+    // response shape is byte-unchanged.
+    let mut payload = json!({"short_id": short_id, "provider": provider, "status": "live"});
+    if interactive && provider == "claude" {
+        // `resume_id` is consumed here (its last use): resume precedes a fresh
+        // host's session_id, the same resolution the claim guard + registry use.
+        if let Some(sid) = resume_id.or_else(|| {
+            p.get("session_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        }) {
+            payload["session_id"] = json!(sid);
+        }
+    }
+    Response::ok(req.id, payload)
 }
 
 // ---------------------------------------------------------------------------
