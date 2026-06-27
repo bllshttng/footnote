@@ -244,3 +244,55 @@ def test_singleton_second_daemon_refuses(bus, events, tmp_path, monkeypatch):
     daemon.run_forever(deliver=rec, holder="relay-daemon:second", events_path=events, max_passes=1)
     assert any(x["kind"] == "relay_daemon_already_running" for x in _read_events(events))
     assert rec.calls == []  # the second instance never routed
+
+
+# ---------------------------------------------------------------------------
+# daemon_deliver: the single-writer session: claim guard (E4.3 / AC-E4-3).
+# ---------------------------------------------------------------------------
+
+def _resolution(sid):
+    from fno.relay.router import Resolution
+    return Resolution(session_id=sid, provider="claude", inject_handle=f"pty:{sid}")
+
+
+def test_daemon_deliver_routes_when_session_daemon_held(tmp_path, monkeypatch):
+    """Finding session:X held by the daemon is the signal to route THROUGH the
+    held handle (worker.submit), never spawn a second --session-id writer."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    from fno.claims.core import acquire_claim
+    from fno.relay import roundtrip as rt
+    acquire_claim("session:sidA", "relay-daemon:THE-DAEMON")  # the daemon holds it (E1)
+
+    seen = {}
+    monkeypatch.setattr(
+        rt, "deliver_session",
+        lambda sid, framed, **kw: seen.update(sid=sid, framed=framed) or "the reply",
+    )
+    deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
+    out = deliver(_resolution("sidA"), "framed text")
+    assert out == "the reply"
+    assert seen == {"sid": "sidA", "framed": "framed text"}
+
+
+def test_daemon_deliver_refuses_when_session_free_and_holds_no_claim(tmp_path, monkeypatch):
+    """A FREE claim means no daemon host -> no handle to route through. The relay
+    must refuse rather than spawn a second writer, and must NOT end up holding the
+    session: claim itself (it releases the probe)."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    from fno.claims.core import claim_status
+    from fno.relay import roundtrip as rt
+    monkeypatch.setattr(rt, "deliver_session",
+                        lambda *a, **k: pytest.fail("must not inject when session is free"))
+
+    deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
+    with pytest.raises(RuntimeError, match="not daemon-held"):
+        deliver(_resolution("sidFree"), "framed")
+    # The relay released its probe -> it is never a second holder of session:X.
+    assert claim_status("session:sidFree")["state"] == "free"
+
+
+def test_daemon_deliver_raises_without_session_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    deliver = daemon.daemon_deliver()
+    with pytest.raises(RuntimeError, match="no session_id"):
+        deliver(_resolution(""), "framed")
