@@ -38,6 +38,7 @@ use tokio_tungstenite::WebSocketStream;
 use crate::client::{ensure_daemon, resolve_daemon_bin};
 use crate::grid::group::{self as group, GroupKey, RailState};
 use crate::grid::layout::{self as layout, LayoutError, PageLayout, TtySize};
+use crate::grid::palette::Palette;
 use crate::grid::pane::{CellColor, Pane, PaneSnapshot, RenderCell};
 use crate::grid::state::{
     off_screen_waiting_by_page, Compositor, CompositorAction, ConnAction, ConnEvent, ConnState,
@@ -525,6 +526,12 @@ struct ScreenBuffer {
     cols: u16,
     /// Row-major, length exactly `rows * cols`. Index via [`ScreenBuffer::idx`].
     cells: Vec<RenderCell>,
+    /// Foreground color applied to chrome cells written via `put_str`.
+    /// `CellColor::Default` preserves the pre-palette behavior.
+    chrome_fg: CellColor,
+    /// Background color applied to chrome cells written via `put_str`.
+    /// `CellColor::Default` preserves the pre-palette behavior.
+    chrome_bg: CellColor,
 }
 
 impl ScreenBuffer {
@@ -538,7 +545,20 @@ impl ScreenBuffer {
             rows,
             cols,
             cells: vec![RenderCell::default(); rows as usize * cols as usize],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         }
+    }
+
+    /// Like `blank`, but bakes a palette's chrome fg/bg into the buffer so
+    /// that `put_str` produces palette-colored cells instead of Default.
+    /// With `Palette::fixed()` colors (`CellColor::Default`), the result is
+    /// identical to `blank()`.
+    fn with_chrome(rows: u16, cols: u16, chrome_fg: CellColor, chrome_bg: CellColor) -> Self {
+        let mut buf = Self::blank(rows, cols);
+        buf.chrome_fg = chrome_fg;
+        buf.chrome_bg = chrome_bg;
+        buf
     }
 
     #[inline]
@@ -563,12 +583,16 @@ impl ScreenBuffer {
     }
 
     /// Write a plain chrome string starting at `(row, col)`, one cell per
-    /// char, optionally inverse-video (the focused title bar). All other
-    /// style fields stay default. Stops at the right edge.
+    /// char, optionally inverse-video (the focused title bar). Uses the
+    /// buffer's `chrome_fg`/`chrome_bg` for fg/bg (Default when created via
+    /// `blank()`; palette colors when created via `with_chrome()`). Stops at
+    /// the right edge.
     fn put_str(&mut self, row: u16, col: u16, s: &str, inverse: bool) {
         // Walk a column cursor rather than `col + i as u16`: the cast would
         // wrap if `s` ever exceeded 65535 chars (it cannot today, but the
         // cursor form removes the cast entirely). (gemini-code-assist, PR #386)
+        let chrome_fg = self.chrome_fg;
+        let chrome_bg = self.chrome_bg;
         let mut c = col;
         for ch in s.chars() {
             if c >= self.cols {
@@ -579,6 +603,8 @@ impl ScreenBuffer {
                 c,
                 RenderCell {
                     text: ch.to_string(),
+                    fg: chrome_fg,
+                    bg: chrome_bg,
                     inverse,
                     ..RenderCell::default()
                 },
@@ -686,10 +712,11 @@ fn build_frame(
     hint: Option<&str>,
     badges: &[(usize, usize)],
     cap_note: Option<(usize, usize)>,
+    palette: &Palette,
 ) -> ScreenBuffer {
     let rows = paged.footer.row + paged.footer.rows;
     let cols = paged.footer.col + paged.footer.cols;
-    let mut frame = ScreenBuffer::blank(rows, cols);
+    let mut frame = ScreenBuffer::with_chrome(rows, cols, palette.border, palette.bg);
 
     // `names`/`states` are GLOBAL (one entry per agent in the eager fleet);
     // `paged.tiles` and `vis_snapshots` cover only the current page's slots.
@@ -839,6 +866,11 @@ fn paint<W: Write>(
     // paginated tiled grid. `rows` is the same registry-row slice group_by
     // consumed (ab-1fab1fdf, Phase 1).
     rail_state: RailPaintArg<'_>,
+    // When true, draw the `?` help overlay on top of the frame (E5c AC-3).
+    help_open: bool,
+    // OSC 10/11 terminal palette for chrome coloring (E5c AC-4).
+    // `Palette::fixed()` yields the pre-palette Default behavior.
+    palette: &Palette,
 ) {
     // Domain Pitfall: a rail toggle / g re-partition changes the region map,
     // which invalidates the diff painter's assumption of a stable region. There
@@ -848,7 +880,7 @@ fn paint<W: Write>(
     // is None or its dimensions differ from the current frame; otherwise it
     // diffs. So the caller's `prev_frame = None` is the full-paint trigger.
 
-    let cur = 'build: {
+    let mut cur = 'build: {
         if let Some((rs, groups, badges, rows)) = rail_state {
             // Rail mode + GroupTile (US3): tile the selected group's current
             // page in the main area. Falls through to the Single render below
@@ -913,6 +945,7 @@ fn paint<W: Write>(
                                 &live_group,
                                 &page_members,
                                 hint,
+                                palette,
                             );
                         }
                     }
@@ -944,6 +977,7 @@ fn paint<W: Write>(
                     rs,
                     rows,
                     hint,
+                    palette,
                 );
             }
             // Terminal too narrow for the rail + a min pane, but a railless grid
@@ -983,11 +1017,21 @@ fn paint<W: Write>(
                     hint,
                     &badges_page,
                     cap_note,
+                    palette,
                 )
             }
             Err(e) => build_too_small_frame(tty, &e),
         }
     };
+
+    // Overlay the `?` help box AFTER the base frame is built but BEFORE the
+    // diff / emit step. The diff path handles overlay appear/disappear naturally:
+    // cells that change are re-emitted; the rest are not. (E5c AC-3)
+    if help_open {
+        let rail_on = rail_state.is_some();
+        let lines = help_overlay_lines(rail_on);
+        raster_help_overlay(&mut cur, &lines);
+    }
 
     let mut buf: Vec<u8> = Vec::with_capacity(8192);
     match prev_frame.as_ref() {
@@ -1037,6 +1081,7 @@ fn render_to<W: Write>(
         hint,
         badges,
         cap_note,
+        &Palette::fixed(), // ponytail: test helper always uses fixed palette
     );
     queue!(out, terminal::Clear(terminal::ClearType::All))?;
     emit_full(&frame, out)?;
@@ -1460,11 +1505,12 @@ fn build_frame_rail(
     rail_state: &group::RailState,
     rows: &[serde_json::Value],
     hint: Option<&str>,
+    palette: &Palette,
 ) -> ScreenBuffer {
     let footer = &rail_layout.footer;
     let total_rows = footer.row + footer.rows;
     let total_cols = footer.col + footer.cols;
-    let mut frame = ScreenBuffer::blank(total_rows, total_cols);
+    let mut frame = ScreenBuffer::with_chrome(total_rows, total_cols, palette.border, palette.bg);
 
     // 1. Rail.
     raster_rail(
@@ -1522,11 +1568,12 @@ fn build_frame_rail_group(
     sel_group: &group::Group,
     page_members: &[usize],
     hint: Option<&str>,
+    palette: &Palette,
 ) -> ScreenBuffer {
     let footer = &rail_page.footer;
     let total_rows = footer.row + footer.rows;
     let total_cols = footer.col + footer.cols;
-    let mut frame = ScreenBuffer::blank(total_rows, total_cols);
+    let mut frame = ScreenBuffer::with_chrome(total_rows, total_cols, palette.border, palette.bg);
 
     // 1. Rail (unchanged from Single mode).
     raster_rail(
@@ -2118,6 +2165,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             return 1;
         }
     };
+    // Query the terminal's default fg/bg colors via OSC 10/11.
+    // Must run AFTER enable_raw_mode (raw mode is required to read the response)
+    // and BEFORE the EventStream loop (which consumes stdin). Degrades to
+    // Palette::fixed() (all-Default, unchanged chrome) on any failure or timeout.
+    let palette = crate::grid::palette::query_terminal_palette();
     let mut stderr = io::stderr();
 
     let mut reader = EventStream::new();
@@ -2210,18 +2262,36 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // Mutable so an E5b live-added worker pushes a row in lockstep with its
     // pane, keeping rail_rows 1:1 with panes (codex peer-review P2).
     let mut rail_rows: Vec<Value> = initial_rail_rows;
-    // If launched with --rail, size the focused pane to the rail main area so
-    // the agent fills the full width from the first frame rather than the
-    // smaller tiled-grid tile it was opened at (gemini HIGH).
-    if rail_state.is_some() {
-        resize_rail_focus(
-            tty,
-            comp.focus(),
-            &mut panes,
-            &mut watch_sinks,
-            &mut driver_sinks,
-        )
-        .await;
+    // If launched with the rail, size the panes for the INITIAL main_mode so
+    // the first frame is correct without waiting for a resize event. GroupTile
+    // is the E5c default (AC-2), so a space with >1 live agent must tile its
+    // members from frame one; Single sizes the focused pane to the full main
+    // area (gemini HIGH). Mirrors the `Tab`-toggle resize paths (codex P2).
+    if let Some(rs) = rail_state.as_ref() {
+        match rs.main_mode {
+            group::MainMode::GroupTile => {
+                apply_group_tile_resize(
+                    rs,
+                    tty,
+                    &rail_rows,
+                    &states,
+                    &mut panes,
+                    &mut watch_sinks,
+                    &mut driver_sinks,
+                )
+                .await;
+            }
+            group::MainMode::Single => {
+                resize_rail_focus(
+                    tty,
+                    comp.focus(),
+                    &mut panes,
+                    &mut watch_sinks,
+                    &mut driver_sinks,
+                )
+                .await;
+            }
+        }
     }
 
     /// Helper: compute groups + LIVE attention badges. Groups partition the
@@ -2290,6 +2360,8 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 hint.as_deref(),
                 cap_note,
                 Some((rs, &groups, &badges, &rail_rows)),
+                false, // help_open: overlay always starts closed
+                &palette,
             ),
             None => paint(
                 &mut stderr,
@@ -2303,10 +2375,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 hint.as_deref(),
                 cap_note,
                 None,
+                false, // help_open: overlay always starts closed
+                &palette,
             ),
         }
     }
     let mut dirty = false;
+    // `?` help overlay (E5c AC-3): toggled by `?` in WATCH; false = hidden.
+    let mut help_open = false;
 
     loop {
         tokio::select! {
@@ -2318,6 +2394,8 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         // buffer; nothing reaches the panes or compositor. With
                         // panes present the buffer shows as a footer line; on
                         // the empty front door the front-door paint renders it.
+                        // Checked FIRST so the modal front door owns input (e.g.
+                        // `?` is typed into the goal, not stolen by the help gate).
                         if launcher.is_some() {
                             match launcher.as_mut().unwrap().apply(launcher_key(key)) {
                                 LauncherOutcome::Stay => {
@@ -2407,6 +2485,32 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             }
                             dirty = true;
                             continue;
+                        }
+                        // ── ? help overlay key gate (E5c AC-3) ──────────────
+                        // Checked when the launcher is closed. BEFORE the rail
+                        // handler and key_to_input so the overlay intercepts keys
+                        // without altering the normal keymap. Ctrl-C passes through
+                        // (Passthrough); when open, Inert swallows keys incl. `n`.
+                        match help_key_action(key, comp.mode(), help_open) {
+                            HelpAction::Toggle => {
+                                help_open = !help_open;
+                                prev_frame = None; // overlay appears/disappears -> full-paint
+                                dirty = true;
+                                continue;
+                            }
+                            HelpAction::Close => {
+                                help_open = false;
+                                prev_frame = None; // overlay disappears -> full-paint
+                                dirty = true;
+                                continue;
+                            }
+                            HelpAction::Inert => {
+                                // Key swallowed; overlay stays open.
+                                continue;
+                            }
+                            HelpAction::Passthrough => {
+                                // Fall through to the normal key handling below.
+                            }
                         }
                         // E5b: `n` in WATCH opens the goal launcher (panes
                         // present; the empty front door already starts open).
@@ -3148,6 +3252,8 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             hint.as_deref(),
                             cap_note,
                             Some((rs, &groups, &badges, &rail_rows)),
+                            help_open,
+                            &palette,
                         ),
                         None => paint(
                             &mut stderr,
@@ -3161,6 +3267,8 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             hint.as_deref(),
                             cap_note,
                             None,
+                            help_open,
+                            &palette,
                         ),
                     };
                     dirty = false;
@@ -3335,6 +3443,126 @@ async fn handle_action(
         }
     }
     false
+}
+
+// ── ? help overlay (E5c AC-3) ─────────────────────────────────────────────────
+
+/// Decision the run loop takes for a key event while the help overlay may be open.
+/// Pure + testable; the run loop dispatches on this rather than inlining the match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelpAction {
+    /// Open the overlay (overlay was closed) or close it (overlay was open).
+    Toggle,
+    /// Close the overlay (e.g. Esc / `q` while open).
+    Close,
+    /// Swallow this key; the overlay is open and this key navigates nothing.
+    Inert,
+    /// Let the caller (run loop) handle the key via normal key_to_input logic.
+    Passthrough,
+}
+
+/// Pure decision fn for `?`-overlay key events. The run loop calls this BEFORE
+/// `key_to_input` so the overlay can intercept keys without altering the normal
+/// keymap. Ctrl-C is NOT intercepted here - `key_to_input` handles it, and this
+/// fn returns `Passthrough` so the caller hits `key_to_input` as usual.
+fn help_key_action(key: KeyEvent, mode: Mode, help_open: bool) -> HelpAction {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Ctrl-C: always let the outer handler deal with it (Quit path).
+    if ctrl {
+        return HelpAction::Passthrough;
+    }
+    match (mode, help_open, key.code) {
+        // The help overlay is WATCH-only. DRIVE forwards every key to the agent
+        // and SCROLLBACK keeps its own scroll keymap, so both fall through to
+        // key_to_input untouched (codex peer P2: `?` must not toggle outside WATCH).
+        (Mode::Watch, _, KeyCode::Char('?')) => HelpAction::Toggle,
+        // WATCH + overlay open: Esc / q close; everything else is inert.
+        (Mode::Watch, true, KeyCode::Char('q') | KeyCode::Esc) => HelpAction::Close,
+        (Mode::Watch, true, _) => HelpAction::Inert,
+        // Everything else (DRIVE, SCROLLBACK, overlay closed + not `?`): pass through.
+        _ => HelpAction::Passthrough,
+    }
+}
+
+/// Build the help text lines for the `?` overlay.
+/// Pure - no I/O, no state, easy to unit-test.
+/// `rail_on`: when true, adds the rail-mode bindings (g/a/Tab).
+fn help_overlay_lines(rail_on: bool) -> Vec<String> {
+    let mut lines = vec![
+        " Keybindings ".to_string(),
+        String::new(),
+        "  Tab / arrows   focus next/prev pane".to_string(),
+        "  Enter          drive focused pane".to_string(),
+        "  Esc            release drive -> WATCH".to_string(),
+        "  ] / [          next / previous page".to_string(),
+        "  Space          enter scrollback".to_string(),
+        "  q              quit".to_string(),
+        "  ?              close this help".to_string(),
+    ];
+    if rail_on {
+        lines.push(String::new());
+        lines.push("  Rail (when active):".to_string());
+        lines.push("  g              cycle group-by".to_string());
+        lines.push("  a              toggle attention filter".to_string());
+        lines.push("  Tab            tile / zoom selected group".to_string());
+    }
+    lines
+}
+
+/// Draw the help overlay as a centered bordered box OVER `frame`.
+/// Uses the same box-drawing glyphs as `raster_border` (light border, not heavy).
+/// Content is truncated to fit the box interior. Called only when help_open.
+fn raster_help_overlay(frame: &mut ScreenBuffer, lines: &[String]) {
+    // Compute box dimensions: pad by 1 on each side, width = longest line + 2 border cols.
+    let content_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    // Box is content + 2 (left/right border). Clamp to frame width - 2.
+    let box_cols = ((content_width + 2) as u16).min(frame.cols.saturating_sub(2));
+    // Height = lines count + 2 (top/bottom border). Clamp to frame height - 2.
+    let box_rows = ((lines.len() + 2) as u16).min(frame.rows.saturating_sub(2));
+
+    // Center the box.
+    let start_row = frame.rows.saturating_sub(box_rows) / 2;
+    let start_col = frame.cols.saturating_sub(box_cols) / 2;
+
+    let inner_cols = box_cols.saturating_sub(2) as usize;
+
+    // Top border: ┌───┐
+    let top: String = std::iter::once('┌')
+        .chain(std::iter::repeat_n(
+            '─',
+            box_cols.saturating_sub(2) as usize,
+        ))
+        .chain(std::iter::once('┐'))
+        .collect();
+    frame.put_str(start_row, start_col, &top, false);
+
+    // Content rows.
+    for (i, line) in lines.iter().enumerate() {
+        let r = start_row + 1 + i as u16;
+        if r >= start_row + box_rows.saturating_sub(1) {
+            break;
+        }
+        let padded = format!("{:<width$}", line, width = inner_cols);
+        let truncated = truncate(&padded, inner_cols);
+        frame.put_str(r, start_col, "│", false);
+        frame.put_str(r, start_col + 1, &truncated, false);
+        frame.put_str(r, start_col + box_cols.saturating_sub(1), "│", false);
+    }
+
+    // Bottom border: └───┘
+    let bottom: String = std::iter::once('└')
+        .chain(std::iter::repeat_n(
+            '─',
+            box_cols.saturating_sub(2) as usize,
+        ))
+        .chain(std::iter::once('┘'))
+        .collect();
+    frame.put_str(
+        start_row + box_rows.saturating_sub(1),
+        start_col,
+        &bottom,
+        false,
+    );
 }
 
 #[cfg(test)]
@@ -4055,6 +4283,7 @@ mod tests {
             None,
             &[],
             None,
+            &Palette::fixed(),
         );
         let b = a.clone();
         let mut buf = Vec::new();
@@ -4090,6 +4319,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            &Palette::fixed(),
         );
         let s1 = String::from_utf8_lossy(&buf1);
         assert!(s1.contains(CLEAR_ALL), "first frame clears + full paints");
@@ -4109,6 +4340,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            &Palette::fixed(),
         );
         let s2 = String::from_utf8_lossy(&buf2);
         assert!(
@@ -4147,6 +4380,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            &Palette::fixed(),
         );
 
         // "hello" -> "hellX": only the 5th interior cell changes.
@@ -4163,6 +4398,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            &Palette::fixed(),
         );
         let s = String::from_utf8_lossy(&buf);
         assert!(!s.contains(CLEAR_ALL), "diff path issues no clear");
@@ -4196,6 +4433,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            &Palette::fixed(),
         );
         // Same size again -> diff, no clear.
         let mut b1 = Vec::new();
@@ -4211,6 +4450,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            &Palette::fixed(),
         );
         assert!(
             !String::from_utf8_lossy(&b1).contains(CLEAR_ALL),
@@ -4230,6 +4471,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            &Palette::fixed(),
         );
         assert!(
             String::from_utf8_lossy(&b2).contains(CLEAR_ALL),
@@ -4253,11 +4496,15 @@ mod tests {
             rows: 1,
             cols: 3,
             cells: vec![mk("a", false), mk("b", false), mk("c", false)],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         };
         let cur = ScreenBuffer {
             rows: 1,
             cols: 3,
             cells: vec![mk("你", false), mk("", true), mk("c", false)],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         };
         let mut buf = Vec::new();
         emit_diff(&prev, &cur, &mut buf).unwrap();
@@ -4285,12 +4532,16 @@ mod tests {
             rows: 1,
             cols: 2,
             cells: vec![mk("x"), mk("y")],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         };
         // col0 cleared to a blank (default) cell; col1 unchanged.
         let cur = ScreenBuffer {
             rows: 1,
             cols: 2,
             cells: vec![RenderCell::default(), mk("y")],
+            chrome_fg: CellColor::Default,
+            chrome_bg: CellColor::Default,
         };
         let mut buf = Vec::new();
         emit_diff(&prev, &cur, &mut buf).unwrap();
@@ -4631,6 +4882,7 @@ mod tests {
             &groups[0],
             &page_members,
             None,
+            &Palette::fixed(),
         );
 
         let all: String = (0..frame.rows)
@@ -4710,6 +4962,7 @@ mod tests {
             &groups[0],
             &page_members,
             None,
+            &Palette::fixed(),
         );
         let all: String = (0..frame.rows)
             .map(|r| row_text(&frame, r))
@@ -4834,6 +5087,7 @@ mod tests {
             &live,
             &page_members,
             None,
+            &Palette::fixed(),
         );
 
         let t0 = tile_title_text(&frame, &rail_page.main.tiles[0]);
@@ -4923,6 +5177,7 @@ mod tests {
             &rs,
             &rows,
             None,
+            &Palette::fixed(),
         );
         let footer_line = row_text(&frame, rail_layout.footer.row);
         assert!(
@@ -4942,6 +5197,8 @@ mod tests {
             cols: 80,
         };
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
+        // E5c flips the default to GroupTile; force Single for this leg.
+        rs.main_mode = group::MainMode::Single;
 
         // Single mode -> the mode token reads `single |` (and never `tile |`).
         let mut frame = ScreenBuffer::blank(1, 80);
@@ -5118,6 +5375,233 @@ mod tests {
             rs.selected_agent_idx,
             Some(0),
             "no survivor -> selection unchanged"
+        );
+    }
+
+    // ── E5c AC-3: ? help overlay ──────────────────────────────────────────────
+
+    /// AC-E5c-3: help_overlay_lines returns non-empty content and mentions `?`.
+    #[test]
+    fn ac_e5c_3_help_overlay_lines_non_empty_and_mentions_question_mark() {
+        // AC-E5c-3: every variant must list bindings and include `?` (the close key).
+        let rail_off = help_overlay_lines(false);
+        assert!(!rail_off.is_empty(), "no-rail lines must not be empty");
+        let joined_off = rail_off.join("\n");
+        assert!(joined_off.contains('?'), "no-rail lines must mention ?");
+
+        let rail_on = help_overlay_lines(true);
+        assert!(!rail_on.is_empty(), "rail lines must not be empty");
+        let joined_on = rail_on.join("\n");
+        assert!(joined_on.contains('?'), "rail lines must mention ?");
+    }
+
+    /// AC-E5c-3: help_overlay_lines includes the core WATCH bindings.
+    #[test]
+    fn ac_e5c_3_help_overlay_lines_contains_core_bindings() {
+        // AC-E5c-3: core keys (q, Enter, Esc, ]/[, Space) present in no-rail variant.
+        let lines = help_overlay_lines(false);
+        let text = lines.join("\n");
+        assert!(text.contains('q'), "missing q");
+        assert!(text.contains("Enter"), "missing Enter");
+        assert!(text.contains("Esc"), "missing Esc");
+        assert!(text.contains(']'), "missing ]");
+        assert!(text.contains('['), "missing [");
+        assert!(text.contains("Space"), "missing Space");
+    }
+
+    /// AC-E5c-3: rail variant adds g/a/Tab bindings.
+    #[test]
+    fn ac_e5c_3_help_overlay_lines_rail_includes_extra_bindings() {
+        // AC-E5c-3: rail keys (g, a, Tab) appear only in the rail=true variant.
+        let text_rail = help_overlay_lines(true).join("\n");
+        assert!(text_rail.contains('g'), "rail lines must mention g");
+        assert!(text_rail.contains('a'), "rail lines must mention a");
+        assert!(text_rail.contains("Tab"), "rail lines must mention Tab");
+    }
+
+    /// AC-E5c-3: ? in WATCH toggles to Open; ? in DRIVE forwards as Keystroke.
+    #[test]
+    fn ac_e5c_3_help_key_action_question_mark_watch_vs_drive() {
+        // AC-E5c-3: WATCH ? -> Toggle; DRIVE ? -> Passthrough (agent gets the byte).
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(
+            help_key_action(k(KeyCode::Char('?')), Mode::Watch, false),
+            HelpAction::Toggle,
+        );
+        assert_eq!(
+            help_key_action(k(KeyCode::Char('?')), Mode::Watch, true),
+            HelpAction::Toggle,
+        );
+        // In DRIVE ? must go to the agent, not open/close the overlay.
+        assert_eq!(
+            help_key_action(k(KeyCode::Char('?')), Mode::Drive, false),
+            HelpAction::Passthrough,
+        );
+    }
+
+    /// AC-E5c-3: while the overlay is open, navigation keys are inert.
+    #[test]
+    fn ac_e5c_3_help_key_action_inert_while_open() {
+        // AC-E5c-3: Tab / arrows must NOT navigate underneath a visible overlay.
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(
+            help_key_action(k(KeyCode::Tab), Mode::Watch, true),
+            HelpAction::Inert,
+        );
+        assert_eq!(
+            help_key_action(k(KeyCode::Right), Mode::Watch, true),
+            HelpAction::Inert,
+        );
+        assert_eq!(
+            help_key_action(k(KeyCode::Char('q')), Mode::Watch, true),
+            HelpAction::Close,
+        );
+    }
+
+    /// AC-E5c-3: Esc closes the overlay when it is open.
+    #[test]
+    fn ac_e5c_3_help_key_action_esc_closes() {
+        // AC-E5c-3: Esc with overlay open -> Close; closed -> Passthrough (normal Esc handling).
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(
+            help_key_action(k(KeyCode::Esc), Mode::Watch, true),
+            HelpAction::Close,
+        );
+        // Esc with overlay closed is irrelevant to this fn; Passthrough means
+        // the run loop handles it via key_to_input as usual.
+        assert_eq!(
+            help_key_action(k(KeyCode::Esc), Mode::Watch, false),
+            HelpAction::Passthrough,
+        );
+    }
+
+    /// AC-E5c-3: Ctrl-C always quits regardless of overlay state.
+    #[test]
+    fn ac_e5c_3_help_key_action_ctrl_c_always_quits() {
+        // AC-E5c-3: Ctrl-C is the operator escape hatch; it must quit even with overlay open.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(
+            help_key_action(ctrl_c, Mode::Watch, true),
+            HelpAction::Passthrough, // let the outer loop handle Ctrl-C via key_to_input
+        );
+    }
+
+    /// AC-E5c-3: overlay render does not corrupt the frame and is visible.
+    #[test]
+    fn ac_e5c_3_raster_help_overlay_writes_visible_content() {
+        // AC-E5c-3: a 40x80 buffer gets overlay lines; content appears, borders present.
+        let mut frame = ScreenBuffer::blank(40, 80);
+        let lines = help_overlay_lines(false);
+        raster_help_overlay(&mut frame, &lines);
+        let mut rendered = String::new();
+        for r in 0..frame.rows {
+            for c in 0..frame.cols {
+                let ch = frame
+                    .get(r, c)
+                    .map(|cell| {
+                        if cell.text.is_empty() {
+                            ' '
+                        } else {
+                            cell.text.chars().next().unwrap_or(' ')
+                        }
+                    })
+                    .unwrap_or(' ');
+                rendered.push(ch);
+            }
+            rendered.push('\n');
+        }
+        // Box-drawing border and at least one binding line must appear.
+        assert!(
+            rendered.contains('┌') || rendered.contains('┏'),
+            "overlay border missing"
+        );
+        assert!(rendered.contains('?'), "overlay content must mention ?");
+    }
+
+    // ── E5c AC-4: OSC 10/11 palette integration ────────────────────────────
+
+    /// AC4-HP: A ScreenBuffer created with `with_chrome` applies the palette
+    /// fg/bg to cells written by `put_str`.
+    #[test]
+    fn screen_buffer_with_chrome_colors_put_str_cells() {
+        let palette = crate::grid::palette::Palette::from_terminal(
+            (200, 200, 200), // fg
+            (10, 10, 10),    // bg
+        );
+        let mut buf = ScreenBuffer::with_chrome(1, 10, palette.border, palette.bg);
+        buf.put_str(0, 0, "hi", false);
+        let cell = buf.get(0, 0).unwrap();
+        assert_ne!(
+            cell.fg,
+            CellColor::Default,
+            "with_chrome put_str cell fg must be palette.border, not Default"
+        );
+        assert_eq!(cell.fg, palette.border, "cell fg must equal palette.border");
+    }
+
+    /// AC4-HP: `build_frame` with a non-default palette produces border cells
+    /// with the palette's border color, not CellColor::Default.
+    #[test]
+    fn build_frame_palette_applied_to_border_cells() {
+        let tty = TtySize::new(24, 80);
+        let names = vec!["wkA".to_string()];
+        let states = vec![ConnState::Watching];
+        let comp = Compositor::new(1);
+        let paged = layout::compute_page(tty, 1, 0).unwrap();
+        let mut snaps = vec![one_pane(b"hello").pop().unwrap().snapshot()];
+        let palette = crate::grid::palette::Palette::from_terminal(
+            (220, 220, 220), // fg
+            (10, 10, 10),    // bg
+        );
+        let frame = build_frame(
+            &paged,
+            &names,
+            &mut snaps,
+            &states,
+            &comp,
+            &[true],
+            None,
+            &[],
+            None,
+            &palette,
+        );
+        // The top-left cell is the border corner (┌). Its fg should be palette.border.
+        let tile = &paged.tiles[0];
+        let corner = frame.get(tile.row, tile.col).unwrap();
+        assert_eq!(
+            corner.fg, palette.border,
+            "border corner fg must be palette.border"
+        );
+    }
+
+    /// AC4-VERIFY: `Palette::fixed()` yields the same behavior as the pre-palette
+    /// chrome: all chrome cells keep CellColor::Default fg/bg.
+    #[test]
+    fn build_frame_fixed_palette_preserves_default_colors() {
+        let tty = TtySize::new(24, 80);
+        let names = vec!["wkA".to_string()];
+        let states = vec![ConnState::Watching];
+        let comp = Compositor::new(1);
+        let paged = layout::compute_page(tty, 1, 0).unwrap();
+        let mut snaps = vec![one_pane(b"hello").pop().unwrap().snapshot()];
+        let frame = build_frame(
+            &paged,
+            &names,
+            &mut snaps,
+            &states,
+            &comp,
+            &[true],
+            None,
+            &[],
+            None,
+            &crate::grid::palette::Palette::fixed(),
+        );
+        let tile = &paged.tiles[0];
+        let corner = frame.get(tile.row, tile.col).unwrap();
+        assert_eq!(
+            corner.fg,
+            CellColor::Default,
+            "fixed palette: border corner fg must remain Default"
         );
     }
 }
