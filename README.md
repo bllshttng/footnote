@@ -95,6 +95,10 @@ An orchestration loop for shipping software, packaged as a plugin. Most loops re
 
 Not a sandbox. Not a babysitter. Not a hero-video launch. It runs your plans with your credentials on your machine and assumes you meant what you asked for. [docs/security-posture.md](docs/security-posture.md) draws the trust boundary. Read it before you point this at anything you'd hate to hand a robot.
 
+## Roadmap
+
+Live board: **[footnote.sh/roadmap](https://footnote.sh/roadmap)** - rendered from the public backlog and refreshed automatically (no commit per update). Flag items with `fno backlog update <id> --public`.
+
 ## Docs
 
 - [Getting started](docs/getting-started.md): install, setup, and the commands you'll actually run
