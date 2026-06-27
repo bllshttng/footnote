@@ -35,13 +35,19 @@ pub fn adopted_name(short_id: &str) -> String {
 /// Build the registry row for an adopted held session. Pure (the `now` stamp is
 /// injected) so the row shape is asserted without a clock or a live spawn.
 /// `host_mode = "attached"` distinguishes it from a footnote-spawned interactive
-/// PTY; `claude_session_uuid` is the full resume key, `pid`/`pid_start_time` are
-/// the EXTERNAL claude worker's (for reuse-detection on the row).
+/// PTY; `claude_session_uuid` is the full resume key AND the row's identity,
+/// `pid`/`pid_start_time` are the EXTERNAL claude worker's (for reuse-detection).
+///
+/// The `short_id` FIELD is left empty: footnote-side addressing keys on the full
+/// `claude_session_uuid`, never the wire-derived 8-hex short. That short lives in
+/// `claude_short_id` (the value the `control.sock` boundary + the `pty:<short>`
+/// claim holder use); it is not an fno-worker-socket identity, which is what the
+/// `short_id` field means.
 pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
     let short = w.short_id().to_string();
     RegistryEntry {
         name: adopted_name(&short),
-        short_id: short.clone(),
+        short_id: String::new(),
         provider: "claude".into(),
         cwd: w.cwd.clone(),
         project_root: w.worktree_path.clone().unwrap_or_else(|| w.cwd.clone()),
@@ -65,15 +71,17 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
     }
 }
 
-/// Upsert an adopted row into `registry.json` (replace by `short_id`, else push).
+/// Upsert an adopted row into `registry.json`, keyed by the full
+/// `claude_session_uuid` (the row identity), replacing in place or pushing.
 /// Idempotent: re-adopting the same session refreshes the row rather than
 /// duplicating it.
 pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<(), StateError> {
     update_registry(registry_path, |reg| {
+        let key = entry.claude_session_uuid.clone();
         if let Some(existing) = reg
             .entries
             .iter_mut()
-            .find(|e| e.short_id == entry.short_id)
+            .find(|e| key.is_some() && e.claude_session_uuid == key)
         {
             *existing = entry;
         } else {
@@ -164,6 +172,56 @@ pub fn reanchor_pty_claim(uuid: &str, holder: &str, holder_pid: u32) {
         .spawn();
 }
 
+/// Adopt a roster worker: take the `pty:<short>` single-writer claim (refusing if
+/// another live writer holds the session), pin the claim to `holder_pid` (the
+/// long-lived caller, not the transient `fno claim` subprocess), then mint +
+/// upsert its fno registry row. Returns the row so the caller can drive it via
+/// [`crate::claude_drive`]. No keepalive is taken -- the Phase-0 spike retired the
+/// held-attach layer; idle `claude --bg` sessions persist on their own.
+///
+/// ponytail: live glue -- shells the real `fno claim` CLI, so it is not
+/// unit-tested; every composed piece (mint, upsert, claim argv) is.
+pub fn adopt(
+    registry_path: &Path,
+    worker: &RosterWorker,
+    holder_pid: u32,
+) -> Result<RegistryEntry, AdoptError> {
+    let short = worker.short_id().to_string();
+    let holder = pty_claim_holder(&short);
+
+    match acquire_pty_claim(&worker.session_id, &holder) {
+        ClaimOutcome::HeldByOther(who) => {
+            return Err(AdoptError::HeldByOther(who));
+        }
+        ClaimOutcome::Acquired | ClaimOutcome::Unavailable(_) => {}
+    }
+    reanchor_pty_claim(&worker.session_id, &holder, holder_pid);
+
+    let entry = mint_adopted_entry(worker, &crate::daemon::now_rfc3339_like());
+    upsert_adopted_row(registry_path, entry.clone()).map_err(AdoptError::Registry)?;
+    Ok(entry)
+}
+
+/// Why an adopt did not complete.
+#[derive(Debug)]
+pub enum AdoptError {
+    /// Another live writer holds the session; refused (AC1-EDGE).
+    HeldByOther(String),
+    /// The registry write failed.
+    Registry(StateError),
+}
+
+impl std::fmt::Display for AdoptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdoptError::HeldByOther(who) => write!(f, "session already held by {who}"),
+            AdoptError::Registry(e) => write!(f, "registry write failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for AdoptError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,10 +250,11 @@ mod tests {
     fn mint_sets_attached_marker_and_resume_key() {
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
         assert_eq!(e.name, "cc-a1b2c3d4");
-        assert_eq!(e.short_id, "a1b2c3d4");
         assert_eq!(e.provider, "claude");
         assert_eq!(e.host_mode.as_deref(), Some("attached"));
-        // The full uuid is the resume key, not the 8-hex short.
+        // Addressing identity is the full uuid; the worker-socket short_id field
+        // is empty (no fno worker), the wire short lives in claude_short_id.
+        assert_eq!(e.short_id, "");
         assert_eq!(
             e.claude_session_uuid.as_deref(),
             Some("a1b2c3d4-1111-2222-3333-444455556666")
@@ -213,11 +272,12 @@ mod tests {
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
         assert!(!e.is_interactive());
         assert_ne!(e.host_mode_or_default(), HOST_MODE_INTERACTIVE);
-        assert!(!e.is_one_shot_ask(), "has a short_id + pid");
+        // Empty short_id but a live pid -> not a one-shot ask either.
+        assert!(!e.is_one_shot_ask(), "empty short_id but pid present");
     }
 
     #[test]
-    fn upsert_replaces_by_short_id() {
+    fn upsert_replaces_by_session_uuid() {
         let dir = std::env::temp_dir().join(format!(
             "fno-adopt-upsert-{}-{}",
             std::process::id(),
@@ -240,7 +300,9 @@ mod tests {
         let rows: Vec<_> = loaded
             .entries
             .iter()
-            .filter(|e| e.short_id == "a1b2c3d4")
+            .filter(|e| {
+                e.claude_session_uuid.as_deref() == Some("a1b2c3d4-1111-2222-3333-444455556666")
+            })
             .collect();
         assert_eq!(rows.len(), 1, "upsert must not duplicate");
         assert_eq!(rows[0].cwd, "/Users/x/code/moved");

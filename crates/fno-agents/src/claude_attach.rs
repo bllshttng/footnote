@@ -1,11 +1,13 @@
-//! Hold a `claude --bg` session live via a programmatic `control.sock` attach.
+//! Speak Claude's daemon `control.sock`: the `op:'attach'` handshake + the
+//! newline-delimited JSON transport.
 //!
-//! G1 held-attach substrate (epic x-07c1, node x-26df). This module speaks
-//! Claude's daemon `control.sock` (an `op`-dispatched server) to ATTACH to an
-//! adopted worker -- the attach is what (per the load-bearing bet) keeps the
-//! session from auto-suspending. The roster read + path resolution is in
-//! [`crate::claude_roster`]; the adopt orchestration (mint + claim + hold) is in
-//! [`crate::claude_adopt`].
+//! G1 substrate (epic x-07c1, node x-26df). The Phase-0 spike retired the
+//! held-attach *keepalive* premise (an idle `claude --bg` session and an un-held
+//! control both survived 65min idle, so the attach was not what kept it live).
+//! So footnote does NOT hold a session for liveness. `op:'attach'` survives for a
+//! different reason: G2/grid attaches to pull the PTY frame STREAM for rendering a
+//! tile. The drive primitive (`op:'reply'` + transcript confirm) lives in
+//! [`crate::claude_drive`]; the roster read is [`crate::claude_roster`].
 //!
 //! Wire contracts pinned to claude-code **2.1.195** (readiness brief
 //! `2026-06-27-phase0-held-attach-readiness.md`):
@@ -13,12 +15,10 @@
 //!   - attach request zod: `{proto:1, op:'attach', short:/^[a-f0-9]{8}$/,
 //!     auth?:string, cols:int, rows:int, caps:{terminal,mux,ssh,...}}`. `[corroborated]`
 //!   - attach-OK reply: `{ok:true, op:'attach', decModes, via, tempo, state}`. `[corroborated]`
-//!   - a non-TTY attach is ACCEPTED (`ok:true`) and held open. `[corroborated]`
+//!   - auth = the daemon `control.key` (32-hex), NOT the per-worker `ptyAuth`.
 //!
-//! The live socket sits behind [`ControlTransport`] so the handshake + frame
-//! classification are unit-tested with a fake. The contested bits (ping/pong
-//! frame shape) are isolated and marked `TODO(spike)`; correcting them after the
-//! Phase-0 spike is a localized edit.
+//! The live socket sits behind [`ControlTransport`] so the handshake is
+//! unit-tested with a fake; the live `UnixStream` path is one thin type.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -36,7 +36,8 @@ pub const ATTACH_PROTO: u32 = 1;
 /// is readable we present it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttachRequest {
-    /// 8-hex worker short id (the roster map key).
+    /// 8-hex worker short id (the roster map key) -- a wire value, used only here
+    /// at the `control.sock` boundary, never as a footnote-side identity.
     pub short: String,
     /// Daemon control key, or `None` for the same-uid no-auth path.
     pub auth: Option<String>,
@@ -45,15 +46,20 @@ pub struct AttachRequest {
 }
 
 impl AttachRequest {
-    /// Build the request for a non-renderable holder: a small fixed window (we
-    /// never render in G1 -- that is G2's drive half), minimal `caps`.
-    pub fn for_hold(short: impl Into<String>, auth: Option<String>) -> Self {
+    /// Construct an attach with an explicit window size.
+    pub fn new(short: impl Into<String>, auth: Option<String>, cols: u32, rows: u32) -> Self {
         AttachRequest {
             short: short.into(),
             auth,
-            cols: 80,
-            rows: 24,
+            cols,
+            rows,
         }
+    }
+
+    /// Attach to pull the PTY frame stream (G2 tile render). A modest default
+    /// window; the daemon accepts a non-TTY attacher and streams frames.
+    pub fn for_frame_stream(short: impl Into<String>, auth: Option<String>) -> Self {
+        Self::new(short, auth, 80, 24)
     }
 
     /// Serialize to the newline-terminated JSON line the daemon reads. `caps` is a
@@ -135,9 +141,8 @@ pub fn parse_attach_reply(line: &str) -> Result<AttachOk, AttachError> {
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     if ok {
-        // Field rename: decModes -> dec_modes via an explicit pull (the reply is
-        // camelCase; we keep AttachOk snake-cased without forcing a rename attr on
-        // a hand-parsed value).
+        // The reply is camelCase; pull decModes -> dec_modes explicitly so AttachOk
+        // stays snake-cased without a rename attr on a hand-parsed value.
         let dec_modes = v
             .get("decModes")
             .and_then(serde_json::Value::as_array)
@@ -174,48 +179,14 @@ pub fn parse_attach_reply(line: &str) -> Result<AttachOk, AttachError> {
     }
 }
 
-/// A frame arriving from the daemon while a hold is open.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Incoming {
-    /// A heartbeat the holder must answer (else dropped after ~3 missed). The
-    /// exact frame shape is `[strings-only, spike to confirm]`.
-    Ping,
-    /// A PTY render frame (drained, ignored in G1 -- rendering is G2).
-    PtyFrame(String),
-    /// Anything else (control replies, status), kept for forensics.
-    Other(String),
-}
-
-/// Classify a drained line. `TODO(spike)`: confirm the ping frame shape on
-/// 2.1.195; the most-evidenced guess is an `op:"ping"` control frame.
-pub fn classify_incoming(line: &str) -> Incoming {
-    let trimmed = line.trim();
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        match v.get("op").and_then(serde_json::Value::as_str) {
-            Some("ping") => return Incoming::Ping,
-            Some(_) => return Incoming::Other(trimmed.to_string()),
-            None => {}
-        }
-    }
-    // Non-JSON (or no `op`) is a raw PTY frame.
-    Incoming::PtyFrame(line.to_string())
-}
-
-/// The pong a holder writes back for each [`Incoming::Ping`]. `TODO(spike)`:
-/// confirm the expected ack shape on 2.1.195.
-pub fn pong_line() -> String {
-    "{\"op\":\"pong\"}\n".to_string()
-}
-
 /// The newline-delimited JSON transport over a daemon socket. Behind a trait so
-/// the handshake/hold logic is exercised with a fake in unit tests and the real
-/// `UnixStream` path is the only thing that needs a live daemon.
+/// the handshake + the drive inject ([`crate::claude_drive`]) are exercised with a
+/// fake in unit tests and the real `UnixStream` path is the only thing that needs
+/// a live daemon.
 pub trait ControlTransport {
     /// Write one already-newline-terminated line.
     fn send_line(&mut self, line: &str) -> io::Result<()>;
-    /// Read the next line (without the trailing newline). `Ok(None)` == EOF (the
-    /// daemon closed the socket -- a dropped hold silently re-enables suspend, so
-    /// the supervisor must reattach).
+    /// Read the next line (without the trailing newline). `Ok(None)` == EOF.
     fn recv_line(&mut self) -> io::Result<Option<String>>;
 }
 
@@ -227,12 +198,10 @@ pub struct UnixControlTransport {
 
 impl UnixControlTransport {
     /// Connect to the daemon `control.sock` at `path`. A non-draining reader gets
-    /// `c.destroy()`'d (lane-a backpressure), so the holder must keep calling
-    /// `recv_line`.
+    /// `c.destroy()`'d (lane-a backpressure), so a frame-stream consumer must keep
+    /// calling `recv_line`.
     pub fn connect(path: &Path) -> io::Result<Self> {
         let stream = UnixStream::connect(path)?;
-        // A read timeout lets the holder loop wake to answer pings / notice a
-        // dropped hold rather than blocking forever on a quiet socket.
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         let read = BufReader::new(stream.try_clone()?);
         Ok(UnixControlTransport {
@@ -259,7 +228,8 @@ impl ControlTransport for UnixControlTransport {
 }
 
 /// Perform the attach handshake over `t`: send the request, read + parse the
-/// first reply. Used by the holder to (re)establish a hold.
+/// first reply. The precursor a frame-stream consumer (G2) or the drive primitive
+/// runs before it streams frames / injects a turn.
 pub fn perform_attach<T: ControlTransport>(
     t: &mut T,
     req: &AttachRequest,
@@ -312,7 +282,7 @@ mod tests {
 
     #[test]
     fn attach_request_serializes_to_pinned_schema() {
-        let req = AttachRequest::for_hold("a1b2c3d4", Some("deadbeef".into()));
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", Some("deadbeef".into()));
         let line = req.to_json_line();
         assert!(line.ends_with('\n'));
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
@@ -322,7 +292,6 @@ mod tests {
         assert_eq!(v["auth"], "deadbeef");
         assert_eq!(v["cols"], 80);
         assert_eq!(v["rows"], 24);
-        // caps: terminal/mux null, ssh false, no stray keys.
         assert!(v["caps"]["terminal"].is_null());
         assert!(v["caps"]["mux"].is_null());
         assert_eq!(v["caps"]["ssh"], false);
@@ -331,7 +300,7 @@ mod tests {
 
     #[test]
     fn attach_request_omits_auth_for_same_uid_path() {
-        let req = AttachRequest::for_hold("a1b2c3d4", None);
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
         let v: serde_json::Value = serde_json::from_str(req.to_json_line().trim()).unwrap();
         assert!(v.get("auth").is_none(), "no-auth path must omit the key");
     }
@@ -370,26 +339,12 @@ mod tests {
     }
 
     #[test]
-    fn classify_ping_frame_and_pty_frame() {
-        assert_eq!(classify_incoming(r#"{"op":"ping"}"#), Incoming::Ping);
-        assert_eq!(
-            classify_incoming(r#"{"op":"status","state":"running"}"#),
-            Incoming::Other(r#"{"op":"status","state":"running"}"#.to_string())
-        );
-        assert_eq!(
-            classify_incoming("\x1b[2J raw bytes"),
-            Incoming::PtyFrame("\x1b[2J raw bytes".to_string())
-        );
-    }
-
-    #[test]
     fn perform_attach_happy_path() {
         let mut t =
             FakeTransport::new(vec![Some(r#"{"ok":true,"op":"attach","state":"running"}"#)]);
-        let req = AttachRequest::for_hold("a1b2c3d4", None);
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
         let ok = perform_attach(&mut t, &req).unwrap();
         assert_eq!(ok.state.as_deref(), Some("running"));
-        // The request was actually written.
         assert_eq!(t.sent.len(), 1);
         assert!(t.sent[0].contains("\"op\":\"attach\""));
     }
@@ -397,7 +352,7 @@ mod tests {
     #[test]
     fn perform_attach_eof_is_refused() {
         let mut t = FakeTransport::new(vec![None]);
-        let req = AttachRequest::for_hold("a1b2c3d4", None);
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
         let err = perform_attach(&mut t, &req).unwrap_err();
         assert!(matches!(err, AttachError::Refused { .. }));
     }
@@ -406,7 +361,7 @@ mod tests {
     fn perform_attach_recv_error_is_malformed() {
         let mut t = FakeTransport::new(vec![]);
         t.recv_err = true;
-        let req = AttachRequest::for_hold("a1b2c3d4", None);
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
         let err = perform_attach(&mut t, &req).unwrap_err();
         assert!(matches!(err, AttachError::Malformed(_)));
     }
