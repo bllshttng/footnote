@@ -517,17 +517,21 @@ pub fn load_manifest(
         let path = dir.join(format!("{agent}.toml"));
         // A PRESENT override file is honoured as the operator's intent and fails
         // loud: a parse-bad TOML surfaces ManifestError::Toml, and a present file
-        // that won't read (invalid UTF-8, permission-denied) surfaces
-        // ManifestError::Io - neither silently falls back to bundled. Only a
-        // genuinely absent override (is_file() == false) falls through to bundled.
-        if path.is_file() {
-            return Some(match std::fs::read_to_string(&path) {
-                Ok(text) => Manifest::parse(&text),
-                Err(e) => Err(ManifestError::Io {
+        // that won't read (invalid UTF-8, permission-denied, lookup error)
+        // surfaces ManifestError::Io. ONLY a genuinely absent override (a
+        // NotFound read error) falls through to bundled. We match on the read
+        // error kind rather than pre-checking is_file(), because is_file()
+        // collapses every metadata error (permission, symlink loop) to false and
+        // would silently fall back to bundled on a real error (codex peer P2).
+        match std::fs::read_to_string(&path) {
+            Ok(text) => return Some(Manifest::parse(&text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Some(Err(ManifestError::Io {
                     path: path.display().to_string(),
                     detail: e.to_string(),
-                }),
-            });
+                }))
+            }
         }
     }
     bundled_manifest(agent).map(Manifest::parse)
