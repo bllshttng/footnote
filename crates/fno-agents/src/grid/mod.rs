@@ -258,7 +258,10 @@ mod tests {
     fn all_flag_defaults_rail_on() {
         let a = GridArgs::parse(&argv(&["--all"])).unwrap();
         assert!(a.all);
-        assert!(a.rail, "--all with no names defaults rail on (fleet = spaces)");
+        assert!(
+            a.rail,
+            "--all with no names defaults rail on (fleet = spaces)"
+        );
     }
 
     #[test]

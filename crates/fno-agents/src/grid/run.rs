@@ -641,6 +641,8 @@ fn paint<W: Write>(
     // paginated tiled grid. `rows` is the same registry-row slice group_by
     // consumed (ab-1fab1fdf, Phase 1).
     rail_state: RailPaintArg<'_>,
+    // When true, draw the `?` help overlay on top of the frame (E5c AC-3).
+    help_open: bool,
 ) {
     // Domain Pitfall: a rail toggle / g re-partition changes the region map,
     // which invalidates the diff painter's assumption of a stable region. There
@@ -650,7 +652,7 @@ fn paint<W: Write>(
     // is None or its dimensions differ from the current frame; otherwise it
     // diffs. So the caller's `prev_frame = None` is the full-paint trigger.
 
-    let cur = 'build: {
+    let mut cur = 'build: {
         if let Some((rs, groups, badges, rows)) = rail_state {
             // Rail mode + GroupTile (US3): tile the selected group's current
             // page in the main area. Falls through to the Single render below
@@ -790,6 +792,15 @@ fn paint<W: Write>(
             Err(e) => build_too_small_frame(tty, &e),
         }
     };
+
+    // Overlay the `?` help box AFTER the base frame is built but BEFORE the
+    // diff / emit step. The diff path handles overlay appear/disappear naturally:
+    // cells that change are re-emitted; the rest are not. (E5c AC-3)
+    if help_open {
+        let rail_on = rail_state.is_some();
+        let lines = help_overlay_lines(rail_on);
+        raster_help_overlay(&mut cur, &lines);
+    }
 
     let mut buf: Vec<u8> = Vec::with_capacity(8192);
     match prev_frame.as_ref() {
@@ -2056,6 +2067,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 hint.as_deref(),
                 cap_note,
                 Some((rs, &groups, &badges, &rail_rows)),
+                false, // help_open: overlay always starts closed
             ),
             None => paint(
                 &mut stderr,
@@ -2069,16 +2081,45 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 hint.as_deref(),
                 cap_note,
                 None,
+                false, // help_open: overlay always starts closed
             ),
         }
     }
     let mut dirty = false;
+    // `?` help overlay (E5c AC-3): toggled by `?` in WATCH; false = hidden.
+    let mut help_open = false;
 
     loop {
         tokio::select! {
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
+                        // ── ? help overlay key gate (E5c AC-3) ──────────────
+                        // Check this BEFORE the rail handler and key_to_input so
+                        // the overlay can intercept keys without altering the
+                        // normal keymap. Ctrl-C is handled via Passthrough below.
+                        match help_key_action(key, comp.mode(), help_open) {
+                            HelpAction::Toggle => {
+                                help_open = !help_open;
+                                prev_frame = None; // overlay appears/disappears -> full-paint
+                                dirty = true;
+                                continue;
+                            }
+                            HelpAction::Close => {
+                                help_open = false;
+                                prev_frame = None; // overlay disappears -> full-paint
+                                dirty = true;
+                                continue;
+                            }
+                            HelpAction::Inert => {
+                                // Key swallowed; overlay stays open.
+                                continue;
+                            }
+                            HelpAction::Passthrough => {
+                                // Fall through to the normal key handling below.
+                            }
+                        }
+
                         // ── Rail-mode key handling (ab-1fab1fdf, Phase 1) ──
                         // Intercept rail keys BEFORE key_to_input so `g`/`t`/`d`/
                         // Up/Down/Enter/Esc are not forwarded to the existing
@@ -2797,6 +2838,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             hint.as_deref(),
                             cap_note,
                             Some((rs, &groups, &badges, &rail_rows)),
+                            help_open,
                         ),
                         None => paint(
                             &mut stderr,
@@ -2810,6 +2852,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             hint.as_deref(),
                             cap_note,
                             None,
+                            help_open,
                         ),
                     };
                     dirty = false;
@@ -2979,6 +3022,128 @@ async fn handle_action(
         }
     }
     false
+}
+
+// ── ? help overlay (E5c AC-3) ─────────────────────────────────────────────────
+
+/// Decision the run loop takes for a key event while the help overlay may be open.
+/// Pure + testable; the run loop dispatches on this rather than inlining the match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelpAction {
+    /// Open the overlay (overlay was closed) or close it (overlay was open).
+    Toggle,
+    /// Close the overlay (e.g. Esc / `q` while open).
+    Close,
+    /// Swallow this key; the overlay is open and this key navigates nothing.
+    Inert,
+    /// Let the caller (run loop) handle the key via normal key_to_input logic.
+    Passthrough,
+}
+
+/// Pure decision fn for `?`-overlay key events. The run loop calls this BEFORE
+/// `key_to_input` so the overlay can intercept keys without altering the normal
+/// keymap. Ctrl-C is NOT intercepted here - `key_to_input` handles it, and this
+/// fn returns `Passthrough` so the caller hits `key_to_input` as usual.
+fn help_key_action(key: KeyEvent, mode: Mode, help_open: bool) -> HelpAction {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Ctrl-C: always let the outer handler deal with it (Quit path).
+    if ctrl {
+        return HelpAction::Passthrough;
+    }
+    match (mode, help_open, key.code) {
+        // DRIVE: all keys pass through to the agent, never intercepted.
+        (Mode::Drive, _, _) => HelpAction::Passthrough,
+        // WATCH: `?` always toggles regardless of current state.
+        (Mode::Watch | Mode::Scrollback, _, KeyCode::Char('?')) => HelpAction::Toggle,
+        // WATCH + overlay open: Esc / q close; everything else is inert.
+        (Mode::Watch | Mode::Scrollback, true, KeyCode::Char('q') | KeyCode::Esc) => {
+            HelpAction::Close
+        }
+        (Mode::Watch | Mode::Scrollback, true, _) => HelpAction::Inert,
+        // Everything else (overlay closed, not `?`): pass through for key_to_input.
+        _ => HelpAction::Passthrough,
+    }
+}
+
+/// Build the help text lines for the `?` overlay.
+/// Pure - no I/O, no state, easy to unit-test.
+/// `rail_on`: when true, adds the rail-mode bindings (g/a/Tab).
+fn help_overlay_lines(rail_on: bool) -> Vec<String> {
+    let mut lines = vec![
+        " Keybindings ".to_string(),
+        String::new(),
+        "  Tab / arrows   focus next/prev pane".to_string(),
+        "  Enter          drive focused pane".to_string(),
+        "  Esc            release drive -> WATCH".to_string(),
+        "  ] / [          next / previous page".to_string(),
+        "  Space          enter scrollback".to_string(),
+        "  q              quit".to_string(),
+        "  ?              close this help".to_string(),
+    ];
+    if rail_on {
+        lines.push(String::new());
+        lines.push("  Rail (when active):".to_string());
+        lines.push("  g              cycle group-by".to_string());
+        lines.push("  a              toggle attention filter".to_string());
+        lines.push("  Tab            tile / zoom selected group".to_string());
+    }
+    lines
+}
+
+/// Draw the help overlay as a centered bordered box OVER `frame`.
+/// Uses the same box-drawing glyphs as `raster_border` (light border, not heavy).
+/// Content is truncated to fit the box interior. Called only when help_open.
+fn raster_help_overlay(frame: &mut ScreenBuffer, lines: &[String]) {
+    // Compute box dimensions: pad by 1 on each side, width = longest line + 2 border cols.
+    let content_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    // Box is content + 2 (left/right border). Clamp to frame width - 2.
+    let box_cols = ((content_width + 2) as u16).min(frame.cols.saturating_sub(2));
+    // Height = lines count + 2 (top/bottom border). Clamp to frame height - 2.
+    let box_rows = ((lines.len() + 2) as u16).min(frame.rows.saturating_sub(2));
+
+    // Center the box.
+    let start_row = frame.rows.saturating_sub(box_rows) / 2;
+    let start_col = frame.cols.saturating_sub(box_cols) / 2;
+
+    let inner_cols = box_cols.saturating_sub(2) as usize;
+
+    // Top border: ┌───┐
+    let top: String = std::iter::once('┌')
+        .chain(std::iter::repeat_n(
+            '─',
+            box_cols.saturating_sub(2) as usize,
+        ))
+        .chain(std::iter::once('┐'))
+        .collect();
+    frame.put_str(start_row, start_col, &top, false);
+
+    // Content rows.
+    for (i, line) in lines.iter().enumerate() {
+        let r = start_row + 1 + i as u16;
+        if r >= start_row + box_rows.saturating_sub(1) {
+            break;
+        }
+        let padded = format!("{:<width$}", line, width = inner_cols);
+        let truncated = truncate(&padded, inner_cols);
+        frame.put_str(r, start_col, "│", false);
+        frame.put_str(r, start_col + 1, &truncated, false);
+        frame.put_str(r, start_col + box_cols.saturating_sub(1), "│", false);
+    }
+
+    // Bottom border: └───┘
+    let bottom: String = std::iter::once('└')
+        .chain(std::iter::repeat_n(
+            '─',
+            box_cols.saturating_sub(2) as usize,
+        ))
+        .chain(std::iter::once('┘'))
+        .collect();
+    frame.put_str(
+        start_row + box_rows.saturating_sub(1),
+        start_col,
+        &bottom,
+        false,
+    );
 }
 
 #[cfg(test)]
@@ -3616,6 +3781,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let s1 = String::from_utf8_lossy(&buf1);
         assert!(s1.contains(CLEAR_ALL), "first frame clears + full paints");
@@ -3635,6 +3801,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let s2 = String::from_utf8_lossy(&buf2);
         assert!(
@@ -3673,6 +3840,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         // "hello" -> "hellX": only the 5th interior cell changes.
@@ -3689,6 +3857,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let s = String::from_utf8_lossy(&buf);
         assert!(!s.contains(CLEAR_ALL), "diff path issues no clear");
@@ -3722,6 +3891,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         // Same size again -> diff, no clear.
         let mut b1 = Vec::new();
@@ -3737,6 +3907,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         assert!(
             !String::from_utf8_lossy(&b1).contains(CLEAR_ALL),
@@ -3756,6 +3927,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         assert!(
             String::from_utf8_lossy(&b2).contains(CLEAR_ALL),
@@ -4647,5 +4819,145 @@ mod tests {
             Some(0),
             "no survivor -> selection unchanged"
         );
+    }
+
+    // ── E5c AC-3: ? help overlay ──────────────────────────────────────────────
+
+    /// AC-E5c-3: help_overlay_lines returns non-empty content and mentions `?`.
+    #[test]
+    fn ac_e5c_3_help_overlay_lines_non_empty_and_mentions_question_mark() {
+        // AC-E5c-3: every variant must list bindings and include `?` (the close key).
+        let rail_off = help_overlay_lines(false);
+        assert!(!rail_off.is_empty(), "no-rail lines must not be empty");
+        let joined_off = rail_off.join("\n");
+        assert!(joined_off.contains('?'), "no-rail lines must mention ?");
+
+        let rail_on = help_overlay_lines(true);
+        assert!(!rail_on.is_empty(), "rail lines must not be empty");
+        let joined_on = rail_on.join("\n");
+        assert!(joined_on.contains('?'), "rail lines must mention ?");
+    }
+
+    /// AC-E5c-3: help_overlay_lines includes the core WATCH bindings.
+    #[test]
+    fn ac_e5c_3_help_overlay_lines_contains_core_bindings() {
+        // AC-E5c-3: core keys (q, Enter, Esc, ]/[, Space) present in no-rail variant.
+        let lines = help_overlay_lines(false);
+        let text = lines.join("\n");
+        assert!(text.contains('q'), "missing q");
+        assert!(text.contains("Enter"), "missing Enter");
+        assert!(text.contains("Esc"), "missing Esc");
+        assert!(text.contains(']'), "missing ]");
+        assert!(text.contains('['), "missing [");
+        assert!(text.contains("Space"), "missing Space");
+    }
+
+    /// AC-E5c-3: rail variant adds g/a/Tab bindings.
+    #[test]
+    fn ac_e5c_3_help_overlay_lines_rail_includes_extra_bindings() {
+        // AC-E5c-3: rail keys (g, a, Tab) appear only in the rail=true variant.
+        let text_rail = help_overlay_lines(true).join("\n");
+        assert!(text_rail.contains('g'), "rail lines must mention g");
+        assert!(text_rail.contains('a'), "rail lines must mention a");
+        assert!(text_rail.contains("Tab"), "rail lines must mention Tab");
+    }
+
+    /// AC-E5c-3: ? in WATCH toggles to Open; ? in DRIVE forwards as Keystroke.
+    #[test]
+    fn ac_e5c_3_help_key_action_question_mark_watch_vs_drive() {
+        // AC-E5c-3: WATCH ? -> Toggle; DRIVE ? -> Passthrough (agent gets the byte).
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(
+            help_key_action(k(KeyCode::Char('?')), Mode::Watch, false),
+            HelpAction::Toggle,
+        );
+        assert_eq!(
+            help_key_action(k(KeyCode::Char('?')), Mode::Watch, true),
+            HelpAction::Toggle,
+        );
+        // In DRIVE ? must go to the agent, not open/close the overlay.
+        assert_eq!(
+            help_key_action(k(KeyCode::Char('?')), Mode::Drive, false),
+            HelpAction::Passthrough,
+        );
+    }
+
+    /// AC-E5c-3: while the overlay is open, navigation keys are inert.
+    #[test]
+    fn ac_e5c_3_help_key_action_inert_while_open() {
+        // AC-E5c-3: Tab / arrows must NOT navigate underneath a visible overlay.
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(
+            help_key_action(k(KeyCode::Tab), Mode::Watch, true),
+            HelpAction::Inert,
+        );
+        assert_eq!(
+            help_key_action(k(KeyCode::Right), Mode::Watch, true),
+            HelpAction::Inert,
+        );
+        assert_eq!(
+            help_key_action(k(KeyCode::Char('q')), Mode::Watch, true),
+            HelpAction::Close,
+        );
+    }
+
+    /// AC-E5c-3: Esc closes the overlay when it is open.
+    #[test]
+    fn ac_e5c_3_help_key_action_esc_closes() {
+        // AC-E5c-3: Esc with overlay open -> Close; closed -> Passthrough (normal Esc handling).
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(
+            help_key_action(k(KeyCode::Esc), Mode::Watch, true),
+            HelpAction::Close,
+        );
+        // Esc with overlay closed is irrelevant to this fn; Passthrough means
+        // the run loop handles it via key_to_input as usual.
+        assert_eq!(
+            help_key_action(k(KeyCode::Esc), Mode::Watch, false),
+            HelpAction::Passthrough,
+        );
+    }
+
+    /// AC-E5c-3: Ctrl-C always quits regardless of overlay state.
+    #[test]
+    fn ac_e5c_3_help_key_action_ctrl_c_always_quits() {
+        // AC-E5c-3: Ctrl-C is the operator escape hatch; it must quit even with overlay open.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(
+            help_key_action(ctrl_c, Mode::Watch, true),
+            HelpAction::Passthrough, // let the outer loop handle Ctrl-C via key_to_input
+        );
+    }
+
+    /// AC-E5c-3: overlay render does not corrupt the frame and is visible.
+    #[test]
+    fn ac_e5c_3_raster_help_overlay_writes_visible_content() {
+        // AC-E5c-3: a 40x80 buffer gets overlay lines; content appears, borders present.
+        let mut frame = ScreenBuffer::blank(40, 80);
+        let lines = help_overlay_lines(false);
+        raster_help_overlay(&mut frame, &lines);
+        let mut rendered = String::new();
+        for r in 0..frame.rows {
+            for c in 0..frame.cols {
+                let ch = frame
+                    .get(r, c)
+                    .map(|cell| {
+                        if cell.text.is_empty() {
+                            ' '
+                        } else {
+                            cell.text.chars().next().unwrap_or(' ')
+                        }
+                    })
+                    .unwrap_or(' ');
+                rendered.push(ch);
+            }
+            rendered.push('\n');
+        }
+        // Box-drawing border and at least one binding line must appear.
+        assert!(
+            rendered.contains('┌') || rendered.contains('┏'),
+            "overlay border missing"
+        );
+        assert!(rendered.contains('?'), "overlay content must mention ?");
     }
 }
