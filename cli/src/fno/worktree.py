@@ -84,11 +84,36 @@ def _use_conductor_canonical(repo_root: Path) -> bool:
     return bool(wt_cfg.get("use_conductor_canonical", False))
 
 
-def _canonical_base_dir(repo_root: Path) -> Path:
-    """Compute ~/conductor/workspaces/<repo_root.name> as the canonical worktree home.
+def _worktrees_base_override(repo_root: Path) -> Optional[Path]:
+    """Return config.paths.worktrees_base for ``repo_root``, or None when unset.
 
-    Matches the contract in .claude/rules/worktrees.md and the plugin
-    WorktreeCreate hook (hooks/worktree-setup.sh).
+    Read directly from ``{repo_root}/.fno/settings.yaml`` (same rationale as
+    ``_use_conductor_canonical``: the walker runs from arbitrary cwds, so it
+    must not depend on the global loader's cwd/caching). A leading ``~`` is
+    expanded. Any load/parse failure returns None -> caller falls back to the
+    next resolution rung.
+    """
+    settings_path = repo_root / ".fno" / "settings.yaml"
+    if not settings_path.exists():
+        return None
+    try:
+        import yaml  # type: ignore[import-untyped]
+        data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    base = ((data.get("config") or {}).get("paths") or {}).get("worktrees_base")
+    if not isinstance(base, str) or not base:
+        return None
+    return Path(os.path.expanduser(base))
+
+
+def _canonical_base_dir(repo_root: Path) -> Path:
+    """Compute ~/conductor/workspaces/<repo_root.name> as the conductor worktree home.
+
+    The DEPRECATED ``worktree.use_conductor_canonical`` back-compat target.
+    Prefer ``config.paths.worktrees_base`` (honored ahead of this in
+    ``WorktreeManager.__init__``); this literal is retained only so the legacy
+    flag keeps landing under conductor.
     """
     return Path.home() / "conductor" / "workspaces" / repo_root.name
 
@@ -134,12 +159,12 @@ class WorktreeManager:
     repo_root:
         Absolute path to the repository root (where .git lives).
     base_dir:
-        Where worktrees are placed. When omitted, the default honors the
-        `config.worktree.use_conductor_canonical` flag in
+        Where worktrees are placed. When omitted, resolution reads
         `<repo_root>/.fno/settings.yaml`:
-        - True (recommended for fno-ecosystem projects): defaults to
-          `~/conductor/workspaces/{repo_root.name}` per .claude/rules/worktrees.md.
-        - False (default for non-fno projects): `repo_root/.claude/worktrees`.
+        1. `config.paths.worktrees_base` set -> `{base}/{repo_root.name}`.
+        2. else `config.worktree.use_conductor_canonical: true` (DEPRECATED)
+           -> `~/conductor/workspaces/{repo_root.name}` (back-compat).
+        3. else -> harness-native `repo_root/.claude/worktrees` (OSS default).
         Tests should pass an explicit ``base_dir`` to avoid touching real
         filesystem state under $HOME.
     """
@@ -148,10 +173,14 @@ class WorktreeManager:
         self.repo_root = repo_root
         if base_dir is not None:
             self.base_dir = base_dir
-        elif _use_conductor_canonical(repo_root):
-            self.base_dir = _canonical_base_dir(repo_root)
         else:
-            self.base_dir = repo_root / ".claude" / "worktrees"
+            override = _worktrees_base_override(repo_root)
+            if override is not None:
+                self.base_dir = override / repo_root.name
+            elif _use_conductor_canonical(repo_root):
+                self.base_dir = _canonical_base_dir(repo_root)
+            else:
+                self.base_dir = repo_root / ".claude" / "worktrees"
         # Rolling snapshot: maps worktree path -> last seen git status bytes
         self._git_status_snapshots: dict[Path, bytes] = {}
 

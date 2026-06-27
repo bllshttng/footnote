@@ -304,6 +304,41 @@ class TestCanonicalWorktreeWiring:
         wm = WorktreeManager(repo_root=repo_root)
         assert wm.base_dir == repo_root / ".claude" / "worktrees"
 
+    def test_worktrees_base_routes_default_base_dir(self, tmp_path):
+        """config.paths.worktrees_base set -> {base}/{repo_root.name} (x-33e9)."""
+        from fno.worktree import WorktreeManager
+        repo_root = tmp_path / "based-repo"
+        (repo_root / ".fno").mkdir(parents=True)
+        (repo_root / ".fno" / "settings.yaml").write_text(
+            "config:\n  paths:\n    worktrees_base: " + str(tmp_path / "wtroot") + "\n"
+        )
+        wm = WorktreeManager(repo_root=repo_root)
+        assert wm.base_dir == tmp_path / "wtroot" / "based-repo"
+
+    def test_worktrees_base_expands_tilde(self, tmp_path):
+        """A leading ~ in worktrees_base expands to $HOME."""
+        from fno.worktree import WorktreeManager
+        repo_root = tmp_path / "tilde-repo"
+        (repo_root / ".fno").mkdir(parents=True)
+        (repo_root / ".fno" / "settings.yaml").write_text(
+            "config:\n  paths:\n    worktrees_base: ~/myworktrees\n"
+        )
+        wm = WorktreeManager(repo_root=repo_root)
+        assert wm.base_dir == Path.home() / "myworktrees" / "tilde-repo"
+
+    def test_worktrees_base_wins_over_conductor_flag(self, tmp_path):
+        """worktrees_base takes precedence over the deprecated conductor flag."""
+        from fno.worktree import WorktreeManager
+        repo_root = tmp_path / "both-repo"
+        (repo_root / ".fno").mkdir(parents=True)
+        (repo_root / ".fno" / "settings.yaml").write_text(
+            "config:\n"
+            "  paths:\n    worktrees_base: " + str(tmp_path / "wtroot") + "\n"
+            "  worktree:\n    use_conductor_canonical: true\n"
+        )
+        wm = WorktreeManager(repo_root=repo_root)
+        assert wm.base_dir == tmp_path / "wtroot" / "both-repo"
+
     def test_create_invokes_setup_worktree_hook_when_script_exists(self, tmp_git_repo, monkeypatch):
         """After `git worktree add`, create() shells out to
         scripts/setup/setup-worktree.sh if present, passing CANONICAL +

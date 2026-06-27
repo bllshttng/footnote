@@ -64,6 +64,17 @@ def test_rescope_project_null_conductor_worktree_repo_hint():
     assert fixes[0].new_cwd == "/home/u/code/etl"
 
 
+def test_rescope_project_null_harness_native_worktree_repo_hint():
+    """Harness-native worktree layout <repo>/.claude/worktrees/<name> (x-33e9):
+    the segment before .claude/worktrees/ is the repo hint."""
+    fixes = m.detect_rescope_fixes(
+        [_n("ab-4b", project=None, cwd="/home/u/code/etl/.claude/worktrees/bar")], WS
+    )
+    assert len(fixes) == 1
+    assert fixes[0].new_project == "etl"
+    assert fixes[0].new_cwd == "/home/u/code/etl"
+
+
 def test_rescope_correct_node_is_noop():
     fixes = m.detect_rescope_fixes(
         [_n("ab-5", project="fno", cwd="/home/u/code/abilities")], WS

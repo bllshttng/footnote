@@ -114,15 +114,24 @@ class RescopeFix:
     new_cwd: str
 
 
-# A conductor worktree path is ``.../conductor/workspaces/<repo>/<name>``; the
-# ``<repo>`` segment names the project (per .claude/rules/worktrees.md). Used to
-# recover the project for a project-null node whose cwd is a worktree (so it does
-# not map directly to a canonical workspace path).
+# Recover the repo-name segment from a worktree cwd of a project-null node (so
+# it does not map directly to a canonical workspace path). Two layouts are
+# recognized; the caller guards the result with ``hint in workspaces``, so a
+# segment that is not a known project simply declines (never mis-scopes):
+#   - harness-native (the worktrees_base default, x-33e9):
+#       ``<repo>/.claude/worktrees/<name>``     -> ``<repo>``
+#   - conductor back-compat (use_conductor_canonical / worktrees_base set to it):
+#       ``.../conductor/workspaces/<repo>/<name>`` -> ``<repo>``
+# LIMITATION: a CUSTOM ``config.paths.worktrees_base`` (neither of the above,
+# e.g. ``~/myroot/<repo>/<name>``) is not recognized here - such a node simply
+# is not auto-rescoped rather than being mis-scoped.
+_CLAUDE_WORKTREE_RE = re.compile(r"/([^/]+)/\.claude/worktrees/")
 _CONDUCTOR_WORKTREE_RE = re.compile(r"/conductor/workspaces/([^/]+)/")
 
 
 def _worktree_repo_hint(norm_cwd: str) -> Optional[str]:
-    m = _CONDUCTOR_WORKTREE_RE.search(norm_cwd + "/")
+    probe = norm_cwd + "/"
+    m = _CLAUDE_WORKTREE_RE.search(probe) or _CONDUCTOR_WORKTREE_RE.search(probe)
     return m.group(1) if m else None
 
 
