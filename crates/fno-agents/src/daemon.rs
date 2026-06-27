@@ -1465,6 +1465,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                 .into_owned(),
         ),
         last_reconciled_at: None,
+        inside_leg: None,
     };
     // Reserve the name atomically UNDER the exclusive registry lock. The
     // lock-free collision check above can be passed by two concurrent
@@ -1761,6 +1762,7 @@ fn build_claude_stream_entry(
         pid_start_time,
         log_path: Some(log_path.to_string_lossy().into_owned()),
         last_reconciled_at: None,
+        inside_leg: None,
     }
 }
 
@@ -4862,6 +4864,7 @@ mod tests {
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -4923,6 +4926,7 @@ mod tests {
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -4967,6 +4971,7 @@ mod tests {
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -5077,6 +5082,7 @@ mod tests {
                 pid_start_time: Some(1),
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -5158,6 +5164,7 @@ mod tests {
             pid_start_time: None,
             log_path: None,
             last_reconciled_at: None,
+            inside_leg: None,
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -5187,6 +5194,7 @@ mod tests {
             pid_start_time: None,
             log_path: None,
             last_reconciled_at: last_reconciled.map(String::from),
+            inside_leg: None,
         }
     }
 
@@ -5867,6 +5875,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -6525,6 +6534,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -6749,6 +6759,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -6807,6 +6818,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -6857,6 +6869,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -6917,6 +6930,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -7028,6 +7042,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -7188,6 +7203,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -7305,6 +7321,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();
@@ -7413,6 +7430,7 @@ done
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();

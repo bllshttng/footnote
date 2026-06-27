@@ -373,10 +373,11 @@ const KNOWN_STATUSES: &[&str] = &[
 ];
 /// Registry schema versions Python's `load_registry` reads (current v4 plus
 /// the older shapes it synthesizes in memory). v4 is the host_mode forward-compat
-/// bump (ab-a171ceb2); back-compat reads of v1..=v3 are retained. Anything else
-/// is a hard error - which is the point of the bump: a pre-host_mode reader
-/// pinned to {1,2,3} rejects a v4 store instead of mis-reconciling it.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4];
+/// bump (ab-a171ceb2) and v5 the inside_leg one (inside-out E3.1); back-compat
+/// reads of v1..=v4 are retained. Anything else is a hard error - which is the
+/// point of each bump: a pre-inside-leg reader pinned to {1,2,3,4} rejects a v5
+/// store instead of silently dropping the inside-leg report.
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -1854,8 +1855,15 @@ mod tests {
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
-        // Current v4 (host_mode forward-compat bump, ab-a171ceb2) is accepted,
-        // and v1 back-compat reads are retained (the widened accepted set).
+        // Current v5 (inside_leg forward-compat bump, inside-out E3.1) and the
+        // prior v4 (host_mode bump) are accepted, and v1 back-compat reads are
+        // retained (the widened accepted set).
+        fs::write(
+            &reg,
+            format!(r#"{{"schema_version":5,"agents":[{valid}]}}"#),
+        )
+        .unwrap();
+        assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
         fs::write(
             &reg,
             format!(r#"{{"schema_version":4,"agents":[{valid}]}}"#),
@@ -1870,10 +1878,10 @@ mod tests {
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v5 is the future-drift case a pre-bump reader would have on v4.
+        // v6 is the future-drift case a pre-bump reader would have on v5.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":5,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":6,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // Unknown provider -> Err.

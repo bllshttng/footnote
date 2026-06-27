@@ -33,7 +33,14 @@ use std::path::{Path, PathBuf};
 /// and orphan a live TUI during reconcile. Readers stay backward-compatible:
 /// the accepted-version set still spans 1..=4 (see ACCEPTED_SCHEMA_VERSIONS in
 /// client_verbs.rs and the Python load_registry range check).
-pub const REGISTRY_SCHEMA_VERSION: u32 = 4;
+///
+/// v5 (inside-out E3.1, X2/X3) is the same kind of forward-compat bump for the
+/// additive `inside_leg` field: structurally identical to v4 (an absent
+/// `inside_leg` reads as `None`), but stamping v5 forces a pre-inside-leg reader
+/// to REJECT rather than silently DROP a stored inside-leg report on write-back
+/// (Rust serde has no `deny_unknown_fields`, so an old daemon would otherwise
+/// round-trip the field out of existence). Accepted set widens to 1..=5.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 5;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -88,7 +95,43 @@ impl Registry {
     }
 }
 
-/// One registry row (design schema v4). Optional fields default to `None` and
+/// Inside-leg agent state (inside-out multiplexer E3, "contract v2"). The inside
+/// leg is a hook that reports a claude pane's lifecycle state WITHOUT spawning or
+/// sending keystrokes; the daemon stores its latest report on the registry row.
+/// Serializes lowercase (`working` / `blocked` / `done`) to match herdr's
+/// `report_agent` wire shape. PTY liveness (`ConnState::Exited`) always overrides
+/// this badge -- a dead pane is never resurrected by a stale inside-leg state
+/// (umbrella Locked Decision D4).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum InsideLegState {
+    Working,
+    Blocked,
+    Done,
+}
+
+/// The stored form of one inside-leg report (contract v2: X2). The wire payload
+/// the daemon receives is `{session_id, seq, state, reason?, ttl_ms?}`; the
+/// daemon adds `received_at` and stores the rest here on the [`RegistryEntry`].
+/// `seq` is per-`session_id` monotonic so a reordered/duplicate report can be
+/// dropped (`seq <= last_seq`); `ttl_ms` bounds how long the badge stays live
+/// before it ages to unknown. NOTE (E3.1 scope): this struct is the storage
+/// CONTRACT only -- the seq-drop, TTL-aging, and 3-tier authority BEHAVIOUR that
+/// consume these fields land in E3.2/E3.3. Mirrored in Python's `AgentEntry`
+/// (`inside_leg: Optional[dict]`, a lossless passthrough) so a row round-trips
+/// across the mixed-language registry (X3 / ab-b946b59c).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InsideLegReport {
+    pub state: InsideLegState,
+    pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub received_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+}
+
+/// One registry row (design schema v5). Optional fields default to `None` and
 /// are preserved across `update_registry` because the whole row round-trips
 /// through this typed struct.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -186,6 +229,14 @@ pub struct RegistryEntry {
     /// mirrored in Python's `AgentEntry` (ab-b946b59c); skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reconciled_at: Option<String>,
+    /// Latest inside-leg report for this row's claude pane (inside-out E3,
+    /// contract v2). `None` for every non-inside-leg row (the default for every
+    /// pre-existing row, and for any provider/lane that does not run a hook).
+    /// Skip-when-`None` so a row without a report stays slim and a stale reader
+    /// rejects via the v5 schema bump rather than silently dropping it. Mirrored
+    /// in Python's `AgentEntry` as `inside_leg: Optional[dict]` (X3 / ab-b946b59c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inside_leg: Option<InsideLegReport>,
 }
 
 /// `host_mode` value for a one-shot exec session (the default when absent).
@@ -437,8 +488,8 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
     // the raw client path (client_verbs::load_registry_entries) already rejects
     // unsupported versions, but the daemon reads through here and previously
     // accepted any u32. Reject anything outside 1..=REGISTRY_SCHEMA_VERSION so a
-    // pre-host_mode daemon refuses a v4 store (instead of treating an interactive
-    // row as exec) and the current daemon refuses a future v5 store.
+    // pre-inside-leg daemon refuses a v5 store (instead of silently dropping the
+    // inside-leg report) and the current daemon refuses a future v6 store.
     if reg.schema_version < 1 || reg.schema_version > REGISTRY_SCHEMA_VERSION {
         return Err(StateError::UnsupportedSchemaVersion {
             found: reg.schema_version,
@@ -670,6 +721,7 @@ mod tests {
             pid_start_time: None,
             log_path: None,
             last_reconciled_at: None,
+            inside_leg: None,
         }
     }
 
@@ -813,6 +865,80 @@ mod tests {
     }
 
     #[test]
+    fn inside_leg_cross_language_round_trip_parity() {
+        // inside-out E3.1 (X2/X3): the additive `inside_leg` field must round-trip
+        // both directions across the Rust<->Python registry boundary, like every
+        // prior additive RegistryEntry field.
+
+        // (a) Rust READS a Python-written row that OMITS inside_leg -> None.
+        let no_key = r#"{"schema_version":5,"agents":[
+            {"name":"legacy","provider":"codex","cwd":"/p","log_path":"/l",
+             "created_at":"2026-05-26T00:00:00Z","status":"live"}]}"#;
+        let reg: Registry = serde_json::from_str(no_key).unwrap();
+        assert_eq!(reg.entries[0].inside_leg, None);
+
+        // (b) Rust READS a full inside-leg report -> Some, lowercase state parses,
+        // optional reason/ttl_ms present.
+        let with_report = r#"{"schema_version":5,"agents":[
+            {"name":"pane","provider":"claude","cwd":"/p","log_path":"/l",
+             "created_at":"2026-05-26T00:00:00Z","status":"live",
+             "inside_leg":{"state":"working","seq":7,"reason":"running tests",
+                           "received_at":"2026-06-27T00:00:00Z","ttl_ms":5000}}]}"#;
+        let reg: Registry = serde_json::from_str(with_report).unwrap();
+        let rep = reg.entries[0].inside_leg.as_ref().unwrap();
+        assert_eq!(rep.state, InsideLegState::Working);
+        assert_eq!(rep.seq, 7);
+        assert_eq!(rep.reason.as_deref(), Some("running tests"));
+        assert_eq!(rep.received_at, "2026-06-27T00:00:00Z");
+        assert_eq!(rep.ttl_ms, Some(5000));
+
+        // (c) Rust WRITES a row without a report -> key OMITTED (skip_serializing_if),
+        // so a Python AgentEntry(**row) does not gain an unexpected key and a stale
+        // reader never sees the field.
+        let mut bare = sample_entry("w");
+        bare.inside_leg = None;
+        let mut reg = Registry::default();
+        reg.entries.push(bare);
+        let out: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert!(
+            out["agents"][0].get("inside_leg").is_none(),
+            "row without a report must omit inside_leg (skip_serializing_if)"
+        );
+
+        // (d) Rust WRITES a report -> present, state lowercase, absent reason/ttl
+        // omitted (skip_serializing_if on the nested struct).
+        let mut withrep = sample_entry("pane");
+        withrep.inside_leg = Some(InsideLegReport {
+            state: InsideLegState::Done,
+            seq: 12,
+            reason: None,
+            received_at: "2026-06-27T01:00:00Z".into(),
+            ttl_ms: None,
+        });
+        let mut reg = Registry::default();
+        reg.entries.push(withrep);
+        let out: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        let badge = &out["agents"][0]["inside_leg"];
+        assert_eq!(badge["state"], "done");
+        assert_eq!(badge["seq"], 12);
+        assert!(badge.get("reason").is_none(), "absent reason omitted");
+        assert!(badge.get("ttl_ms").is_none(), "absent ttl_ms omitted");
+
+        // (e) Full round-trip preserves the report unchanged.
+        let reg2: Registry = serde_json::from_value(out).unwrap();
+        assert_eq!(
+            reg2.entries[0].inside_leg,
+            Some(InsideLegReport {
+                state: InsideLegState::Done,
+                seq: 12,
+                reason: None,
+                received_at: "2026-06-27T01:00:00Z".into(),
+                ttl_ms: None,
+            })
+        );
+    }
+
+    #[test]
     fn rust_reads_python_row_with_explicit_empty_and_null_fields() {
         // ab-b946b59c: Python's `AgentEntry` now mirrors the Rust-only PTY
         // fields, so its `asdict` emits them for EVERY row -- short_id/
@@ -920,15 +1046,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v5, or - for an old daemon -
-        // a v4 it cannot interpret), while v1..=v4 still read.
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v6, or - for an old daemon -
+        // a v5 it cannot interpret), while v1..=v5 still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":5,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":6,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 5);
+                assert_eq!(found, 6);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),

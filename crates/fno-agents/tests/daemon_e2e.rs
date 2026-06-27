@@ -543,6 +543,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
             pid_start_time: None,
             log_path: None,
             last_reconciled_at: None,
+            inside_leg: None,
         });
     })
     .unwrap();
@@ -948,6 +949,7 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
             pid_start_time: None,
             log_path: None,
             last_reconciled_at: None,
+            inside_leg: None,
         });
     })
     .unwrap();

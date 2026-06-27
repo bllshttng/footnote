@@ -251,8 +251,8 @@ def test_ac3_hp_flock_blocks_concurrent_write(tmp_path: Path, monkeypatch) -> No
 def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> None:
     """AC4-ERR: loading a file with a future schema_version raises RegistryVersionError.
 
-    SCHEMA_VERSION is now 4 (ab-a171ceb2 host_mode forward-compat bump); v5 is
-    the future-drift case.
+    SCHEMA_VERSION is now 5 (inside-out E3.1 inside_leg forward-compat bump); v6
+    is the future-drift case.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -261,15 +261,15 @@ def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> No
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
-        json.dumps({"schema_version": 5, "agents": []}), encoding="utf-8"
+        json.dumps({"schema_version": 6, "agents": []}), encoding="utf-8"
     )
 
     with pytest.raises(RegistryVersionError) as exc_info:
         load_registry(path=registry_path)
 
     msg = str(exc_info.value)
-    assert "5" in msg  # read version present
-    assert "4" in msg  # expected version present
+    assert "6" in msg  # read version present
+    assert "5" in msg  # expected version present
 
 
 def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatch) -> None:
@@ -547,14 +547,14 @@ def test_ac5_hp_write_registry_uses_paths_default(tmp_path: Path, monkeypatch) -
 
 
 def test_us2_schema_version_is_three() -> None:
-    """The on-disk schema version is 4 after the ab-a171ceb2 host_mode bump.
+    """The on-disk schema version is 5 after the inside-out E3.1 inside_leg bump.
 
     (Test name retained for greppability of the original US2 commit;
     the value tracks the latest bump.)
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
 
 
 def test_us2_agent_entry_has_status_and_last_message_at() -> None:
@@ -672,11 +672,12 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
 ) -> None:
     """The v4 host_mode forward-compat bump reads cleanly with host_mode
     preserved, and the widened accepted range still reads v1..=v4 (the bump
-    must not drop back-compat reads; ab-a171ceb2)."""
+    must not drop back-compat reads; ab-a171ceb2). The current SCHEMA_VERSION
+    is 5 after the inside-out E3.1 inside_leg bump."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import SCHEMA_VERSION, load_registry
 
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -710,6 +711,86 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
         loaded = load_registry(path=registry_path)
         assert len(loaded) == 1, f"v{v} must still read after the bump"
         assert loaded[0].host_mode == "exec", f"v{v} absent host_mode => exec"
+
+
+def test_inside_leg_round_trips_across_registry_boundary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """inside-out E3.1: the additive `inside_leg` field round-trips losslessly.
+
+    Python is a pure passthrough custodian of the Rust-authored report blob, so a
+    row carrying inside_leg must (a) read into AgentEntry without bricking the
+    typed `AgentEntry(**row)` path, (b) survive a write/load cycle unchanged, and
+    (c) default to None when absent.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import (
+        AgentEntry,
+        load_registry,
+        write_registry,
+    )
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+    report = {
+        "state": "working",
+        "seq": 7,
+        "reason": "running tests",
+        "received_at": "2026-06-27T00:00:00Z",
+        "ttl_ms": 5000,
+    }
+
+    # (a) A Rust-written row carrying inside_leg loads as an opaque dict.
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 5,
+                "agents": [
+                    {
+                        "name": "pane",
+                        "provider": "claude",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/pane.log",
+                        "created_at": "2026-06-27T00:00:00Z",
+                        "status": "live",
+                        "inside_leg": report,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_registry(path=registry_path)
+    assert len(loaded) == 1
+    assert loaded[0].inside_leg == report
+
+    # (b) write -> load preserves the blob byte-for-value.
+    write_registry(loaded, path=registry_path)
+    reloaded = load_registry(path=registry_path)
+    assert reloaded[0].inside_leg == report
+
+    # (c) A row without inside_leg defaults to None, and a fresh AgentEntry too.
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 5,
+                "agents": [
+                    {
+                        "name": "bare",
+                        "provider": "codex",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/bare.log",
+                        "created_at": "2026-06-27T00:00:00Z",
+                        "status": "live",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_registry(path=registry_path)[0].inside_leg is None
+    assert AgentEntry(name="x", provider="claude", cwd="/t", log_path="/t/x.log").inside_leg is None
 
 
 def test_us2_v1_entries_synthesized_at_read(tmp_path: Path, monkeypatch) -> None:
