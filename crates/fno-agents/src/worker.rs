@@ -190,6 +190,20 @@ async fn serve_connection(pty: &PtySession, mut stream: UnixStream) -> bool {
     }
 }
 
+/// Default and ceiling for the `worker.submit` settle gap. The relay's per-turn
+/// settle is ~1s; the ceiling bounds a bad/hostile RPC value (e.g. minutes-as-ms
+/// or `u64::MAX`) that would otherwise park this single-client worker inside
+/// `serve_connection` for that whole duration - blocking shutdown/status and
+/// leaving the turn unsubmitted (codex P2 on PR #60).
+const DEFAULT_SETTLE_MS: u64 = 1000;
+const MAX_SETTLE_MS: u64 = 5000;
+
+/// Resolve the settle gap from the RPC param: default when absent, capped at the
+/// ceiling. Pure so the clamp contract is testable without an actual sleep.
+fn clamp_settle(raw: Option<u64>) -> u64 {
+    raw.unwrap_or(DEFAULT_SETTLE_MS).min(MAX_SETTLE_MS)
+}
+
 /// The text->settle->separate-CR submit state machine, ported off the relay's
 /// `roundtrip.py` `_inject` (inside-out-multiplexer E4.2) onto the daemon
 /// send-keys RPC. claude's TUI reads a single `text+"\r"` write as a PASTE and
@@ -200,19 +214,16 @@ async fn serve_connection(pty: &PtySession, mut stream: UnixStream) -> bool {
 ///
 /// Reply capture + the reply-driven bounded re-inject stay relay-side (they need
 /// the transcript sentinel signal, which never touched the PTY): the relay
-/// re-calls this RPC if no reply lands by its timeout. `settle_ms` (default
-/// 1000) is the gap between the text and the CR; a polluted SessionStart banner
-/// is why it is deliberately generous.
+/// re-calls this RPC if no reply lands by its timeout. `settle_ms` is the gap
+/// between the text and the CR (default `DEFAULT_SETTLE_MS`, capped at
+/// `MAX_SETTLE_MS` via `clamp_settle`); generous because a polluted SessionStart
+/// banner can still be churning when the text lands.
 async fn submit_keys(pty: &PtySession, req: &Request) -> Response {
     let text = match req.params.get("data").and_then(|v| v.as_str()) {
         Some(t) => t,
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `data` (string)"),
     };
-    let settle_ms = req
-        .params
-        .get("settle_ms")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1000);
+    let settle_ms = clamp_settle(req.params.get("settle_ms").and_then(|v| v.as_u64()));
     // 1. write the text (no trailing CR).
     if let Err(e) = pty.write_input(text.as_bytes()) {
         return Response::err(
@@ -714,6 +725,15 @@ mod tests {
         assert_eq!(r.result().unwrap()["shutdown"], true);
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn clamp_settle_defaults_and_caps() {
+        // codex P2 on PR #60: an unbounded settle parks the single-client worker.
+        assert_eq!(clamp_settle(None), DEFAULT_SETTLE_MS);
+        assert_eq!(clamp_settle(Some(250)), 250);
+        assert_eq!(clamp_settle(Some(MAX_SETTLE_MS + 1)), MAX_SETTLE_MS);
+        assert_eq!(clamp_settle(Some(u64::MAX)), MAX_SETTLE_MS);
     }
 
     #[tokio::test(flavor = "current_thread")]
