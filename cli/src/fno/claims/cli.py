@@ -80,8 +80,8 @@ def _parse_metadata(value: str) -> dict:
 def _node_aware_root(key: str):
     """Resolve the claims root for a key (delegates to the shared helper).
 
-    Global-id kinds (``node:``/``dispatch:``/``reconcile:``) route to the global
-    ``~/.fno/claims`` so operator commands work without the env var
+    Global-id kinds (``node:``/``dispatch:``/``reconcile:``/``session:``) route to
+    the global ``~/.fno/claims`` so operator commands work without the env var
     (ab-fcf9cec5); repo-local keys keep the cwd/env default. See
     :func:`fno.claims.io.claims_root_for` for the single source of truth.
     """

@@ -223,7 +223,10 @@ impl ControlTransport for UnixControlTransport {
         if n == 0 {
             return Ok(None); // EOF
         }
-        Ok(Some(buf.trim_end_matches(['\n', '\r']).to_string()))
+        // Trim trailing newline in place rather than allocating a fresh String.
+        let len = buf.trim_end_matches(['\n', '\r']).len();
+        buf.truncate(len);
+        Ok(Some(buf))
     }
 }
 

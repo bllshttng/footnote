@@ -284,9 +284,9 @@ def test_global_claims_root_env_then_home(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("prefix", ["node", "dispatch", "reconcile"])
+@pytest.mark.parametrize("prefix", ["node", "dispatch", "reconcile", "session"])
 def test_claims_root_for_global_id_kinds_route_global(prefix, monkeypatch):
-    """node:/dispatch:/reconcile: all root at the global root, regardless of env.
+    """node:/dispatch:/reconcile:/session: all root at the global root regardless of env.
 
     AC1-HP: a global-id key returns global_claims_root() with no
     FNO_CLAIMS_ROOT set, and the same root that node: resolves to.
@@ -315,6 +315,7 @@ def test_claims_root_for_honors_env_override(tmp_path, monkeypatch):
         "node",
         "dispatch",
         "reconcile",
+        "session",
     ],
 )
 def test_claims_root_for_repo_local_and_unknown_keys_return_none(key):

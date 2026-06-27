@@ -7,11 +7,13 @@
 //! The roster read is [`crate::claude_roster`]; the held attach is
 //! [`crate::claude_attach`].
 //!
-//! The claim is **pid-reanchored to the long-lived HOLDER** (footnote's
-//! attach-holder process), never to the transient `fno claim` subprocess -- a
-//! claim anchored to a shell that exits goes instantly `stale` and clobbers the
-//! good claim (the daemon-claim-reanchor lesson, PR#53). Mirrors the daemon's
-//! `session:<uuid>` claim machinery but for the adopt lane.
+//! The claim is **anchored to the long-lived HOLDER pid from the first acquire**
+//! (footnote's attach-holder process via `--pid`), never to the transient `fno
+//! claim` subprocess -- a claim anchored to a process that exits the instant the
+//! acquire returns goes instantly `stale` and a concurrent adopter could reclaim
+//! it (the daemon-claim-reanchor lesson, PR#53; codex P1 on this PR). The
+//! `session:<uuid>` key routes to the host-global claims root, so two checkouts
+//! cannot take separate project-local claims for the same session.
 
 use std::path::Path;
 
@@ -77,15 +79,17 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
 /// duplicating it.
 pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<(), StateError> {
     update_registry(registry_path, |reg| {
-        let key = entry.claude_session_uuid.clone();
-        if let Some(existing) = reg
-            .entries
-            .iter_mut()
-            .find(|e| key.is_some() && e.claude_session_uuid == key)
-        {
-            *existing = entry;
-        } else {
-            reg.entries.push(entry);
+        // Find the row index by the session uuid first (the borrow of `entry`
+        // ends here), then move `entry` into place -- no clone of the key.
+        let key = entry.claude_session_uuid.as_deref();
+        let idx = key.and_then(|k| {
+            reg.entries
+                .iter()
+                .position(|e| e.claude_session_uuid.as_deref() == Some(k))
+        });
+        match idx {
+            Some(i) => reg.entries[i] = entry,
+            None => reg.entries.push(entry),
         }
     })
 }
@@ -103,21 +107,15 @@ pub enum ClaimOutcome {
     Unavailable(String),
 }
 
-/// `fno claim acquire session:<uuid> --holder <holder> -J` -- the acquire argv.
-fn claim_acquire_argv(uuid: &str, holder: &str) -> Vec<String> {
-    vec![
-        "claim".into(),
-        "acquire".into(),
-        format!("session:{uuid}"),
-        "--holder".into(),
-        holder.into(),
-        "-J".into(),
-    ]
-}
-
-/// `fno claim acquire session:<uuid> --holder <holder> --pid <pid>` -- the
-/// pid-reanchor argv (re-acquire pinning liveness to the long-lived holder pid).
-fn claim_acquire_pid_argv(uuid: &str, holder: &str, pid: u32) -> Vec<String> {
+/// `fno claim acquire session:<uuid> --holder <holder> --pid <pid> -J` -- the
+/// acquire argv. `--pid` anchors PID-liveness to the LONG-LIVED holder from the
+/// very first acquire: an omitted `--pid` would record the transient `fno claim`
+/// subprocess (which exits the instant `.output()` returns), so the claim would be
+/// `stale` before any reanchor could fire and a concurrent adopter could reclaim
+/// it -- defeating the single-writer guard (codex P1). `session:<uuid>` keys route
+/// to the host-global claims root in the CLI, so two checkouts cannot take
+/// separate project-local claims for the same session.
+fn claim_acquire_argv(uuid: &str, holder: &str, holder_pid: u32) -> Vec<String> {
     vec![
         "claim".into(),
         "acquire".into(),
@@ -125,16 +123,18 @@ fn claim_acquire_pid_argv(uuid: &str, holder: &str, pid: u32) -> Vec<String> {
         "--holder".into(),
         holder.into(),
         "--pid".into(),
-        pid.to_string(),
+        holder_pid.to_string(),
+        "-J".into(),
     ]
 }
 
-/// Acquire the `session:<uuid>` claim held by `holder`. Shells the Python `fno
-/// claim` CLI (the claim substrate is Python-only + cross-worktree), exactly as
-/// the daemon does. Fails OPEN on an unconsultable substrate.
-pub fn acquire_pty_claim(uuid: &str, holder: &str) -> ClaimOutcome {
+/// Acquire the `session:<uuid>` claim for `holder`, anchored to `holder_pid` (the
+/// long-lived attach holder). Shells the Python `fno claim` CLI (the claim
+/// substrate is Python-only + cross-worktree). Fails OPEN on an unconsultable
+/// substrate.
+pub fn acquire_pty_claim(uuid: &str, holder: &str, holder_pid: u32) -> ClaimOutcome {
     let output = std::process::Command::new("fno")
-        .args(claim_acquire_argv(uuid, holder))
+        .args(claim_acquire_argv(uuid, holder, holder_pid))
         .stdin(std::process::Stdio::null())
         .output();
     match output {
@@ -157,27 +157,14 @@ pub fn acquire_pty_claim(uuid: &str, holder: &str) -> ClaimOutcome {
     }
 }
 
-/// Re-acquire the claim pinned to `holder_pid` (the long-lived attach holder).
-/// Fire-and-forget: the daemon idle-tick reaps it, and a failure here only means
-/// the claim keeps its prior (session-pid) anchor, never a wrong one.
-pub fn reanchor_pty_claim(uuid: &str, holder: &str, holder_pid: u32) {
-    if uuid.is_empty() {
-        return;
-    }
-    let _ = std::process::Command::new("fno")
-        .args(claim_acquire_pid_argv(uuid, holder, holder_pid))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
-
-/// Adopt a roster worker: take the `pty:<short>` single-writer claim (refusing if
-/// another live writer holds the session), pin the claim to `holder_pid` (the
-/// long-lived caller, not the transient `fno claim` subprocess), then mint +
-/// upsert its fno registry row. Returns the row so the caller can drive it via
-/// [`crate::claude_drive`]. No keepalive is taken -- the Phase-0 spike retired the
-/// held-attach layer; idle `claude --bg` sessions persist on their own.
+/// Adopt a roster worker: take the `pty:<short>` single-writer claim ANCHORED to
+/// `holder_pid` (the long-lived caller, not the transient `fno claim` subprocess)
+/// in one acquire, refusing if another live writer holds the session, THEN mint +
+/// upsert its fno registry row. The claim is secured before the row is published,
+/// so a concurrent adopter cannot reclaim the session in a stale window. Returns
+/// the row so the caller can drive it via [`crate::claude_drive`]. No keepalive is
+/// taken -- the Phase-0 spike retired the held-attach layer; idle `claude --bg`
+/// sessions persist on their own.
 ///
 /// ponytail: live glue -- shells the real `fno claim` CLI, so it is not
 /// unit-tested; every composed piece (mint, upsert, claim argv) is.
@@ -189,13 +176,13 @@ pub fn adopt(
     let short = worker.short_id().to_string();
     let holder = pty_claim_holder(&short);
 
-    match acquire_pty_claim(&worker.session_id, &holder) {
+    // Claim anchored to the holder pid FIRST (no stale window), then publish.
+    match acquire_pty_claim(&worker.session_id, &holder, holder_pid) {
         ClaimOutcome::HeldByOther(who) => {
             return Err(AdoptError::HeldByOther(who));
         }
         ClaimOutcome::Acquired | ClaimOutcome::Unavailable(_) => {}
     }
-    reanchor_pty_claim(&worker.session_id, &holder, holder_pid);
 
     let entry = mint_adopted_entry(worker, &crate::daemon::now_rfc3339_like());
     upsert_adopted_row(registry_path, entry.clone()).map_err(AdoptError::Registry)?;
@@ -310,20 +297,12 @@ mod tests {
     }
 
     #[test]
-    fn claim_argv_shapes() {
+    fn claim_argv_anchors_to_holder_pid_from_the_first_acquire() {
+        // The single acquire carries --pid <holder_pid> (not the transient fno
+        // subprocess) AND -J, so the claim is holder-anchored immediately and
+        // parseable -- no separate reanchor, no stale window (codex P1).
         assert_eq!(
-            claim_acquire_argv("uuid-1", "pty:a1b2c3d4"),
-            vec![
-                "claim",
-                "acquire",
-                "session:uuid-1",
-                "--holder",
-                "pty:a1b2c3d4",
-                "-J"
-            ]
-        );
-        assert_eq!(
-            claim_acquire_pid_argv("uuid-1", "pty:a1b2c3d4", 4242),
+            claim_acquire_argv("uuid-1", "pty:a1b2c3d4", 4242),
             vec![
                 "claim",
                 "acquire",
@@ -331,14 +310,9 @@ mod tests {
                 "--holder",
                 "pty:a1b2c3d4",
                 "--pid",
-                "4242"
+                "4242",
+                "-J"
             ]
         );
-    }
-
-    #[test]
-    fn reanchor_noops_on_empty_uuid() {
-        // Must not shell anything for an empty uuid (no claim to reanchor).
-        reanchor_pty_claim("", "pty:x", 1);
     }
 }

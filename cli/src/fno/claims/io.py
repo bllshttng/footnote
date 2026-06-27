@@ -83,18 +83,23 @@ def global_claims_root() -> Path:
 # - dispatch:<id>  the boot-window bridge token (same id space as node:)
 # - reconcile:<id> the merge-context sentinel (written in the blocker's repo,
 #                  read in the dependent's repo)
+# - session:<uuid> the single-writer guard for a claude session (G1 adopt, x-26df):
+#                  a session is durable + cross-checkout, so two project checkouts
+#                  must coordinate on the SAME lock or both could drive its
+#                  transcript (codex P1).
 # Keys whose identifier is a repo-local resource (walker:<repo_root>) embed
 # their own scope and are NOT listed here; they keep the cwd/env default.
-_GLOBAL_ID_PREFIXES = frozenset({"node", "dispatch", "reconcile"})
+_GLOBAL_ID_PREFIXES = frozenset({"node", "dispatch", "reconcile", "session"})
 
 
 def claims_root_for(key: str) -> Path | None:
     """Resolve the claims root for ``key`` by what its identifier refers to.
 
-    A claim keyed on a globally-unique node id (``node:``/``dispatch:``/
-    ``reconcile:`` -- all three name the same global graph node) is rooted at
-    the global ($HOME / ``$FNO_CLAIMS_ROOT``) root, so a writer and a reader in
-    different repos/worktrees coordinate on the SAME lock. A claim keyed on a
+    A claim keyed on a globally-unique id (``node:``/``dispatch:``/
+    ``reconcile:`` name the same global graph node; ``session:`` names a durable
+    claude session) is rooted at the global ($HOME / ``$FNO_CLAIMS_ROOT``) root,
+    so a writer and a reader in different repos/worktrees coordinate on the SAME
+    lock. A claim keyed on a
     repo-local resource (``walker:<repo_root>``) or any unrecognized / colon-less
     key returns ``None`` -> the cwd/env default resolved by :func:`claims_dir`.
 
