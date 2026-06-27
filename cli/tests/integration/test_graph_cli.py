@@ -1400,6 +1400,19 @@ def test_graph_ready_orders_epic_children_before_loose(tmp_graph):
     assert ids.index("ab-child") < ids.index("ab-loose")
 
 
+def test_graph_ready_excludes_epics(tmp_graph):
+    """x-33b2 (codex P2 on PR #69): `fno backlog ready` - which the
+    `dispatch-node.sh --all-ready` bulk path enumerates - must NOT list a
+    container, or that path would launch a /target worker against the box.
+    Shares the epic filter with `next` so the two surfaces agree."""
+    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries()}) + "\n")
+    r = _invoke("graph", "ready", "--all")
+    ids = [e["id"] for e in json.loads(r.stdout)]
+    assert "ab-epic" not in ids        # the container is excluded
+    assert "ab-child" in ids           # its buildable leaf is listed
+    assert "ab-loose" in ids
+
+
 def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
     """x-33b2: an in-progress epic (its child done, the epic itself the top-ranked
     ready node) must NOT be selected - `next` falls through to a real leaf instead

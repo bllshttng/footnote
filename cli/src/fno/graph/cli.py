@@ -89,6 +89,23 @@ def _has_unmerged_open_pr(e: dict) -> bool:
     return bool(e.get("pr_number"))
 
 
+def _container_ids(entries: list[dict]) -> set[str]:
+    """Ids of nodes that are some other node's ``parent`` - i.e. epics/containers.
+
+    A container is never directly buildable (its work lives in its decomposed
+    children), so every work-SELECTION surface must drop it from the candidate
+    pool - else an in-progress epic ranks first and is repeatedly picked, or a
+    bulk `--all-ready` dispatch launches a `/target` worker against the box
+    (x-33b2). Shared by `next` (_pick_ready) and `ready` (cmd_ready) so the two
+    surfaces cannot drift; `advance_dependents` applies the same rule on the
+    merge edge-following path.
+    """
+    return {
+        e.get("parent") for e in entries
+        if isinstance(e, dict) and isinstance(e.get("parent"), str)
+    }
+
+
 @cli.callback()
 def _graph_callback(
     ctx: typer.Context,
@@ -1522,12 +1539,9 @@ def cmd_next(
         # repeatedly re-selected as the head, starving the genuinely-ready leaf
         # below it. Build the leaves, not the box. Parent ids come from the FULL
         # graph so a parent already filtered out of `candidates` still suppresses
-        # correctly, and the epic's leaves are unaffected.
-        parent_ids = {
-            e.get("parent") for e in entries
-            if isinstance(e, dict) and isinstance(e.get("parent"), str)
-        }
-        candidates = [e for e in candidates if e.get("id") not in parent_ids]
+        # correctly, and the epic's leaves are unaffected. Shared with cmd_ready.
+        container_ids = _container_ids(entries)
+        candidates = [e for e in candidates if e.get("id") not in container_ids]
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.
@@ -1646,6 +1660,13 @@ def cmd_ready(
         e for e in ready
         if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
     ]
+    # Containers are never actionable work (x-33b2 / codex P2 on PR #69): drop
+    # epics (a node that is some other node's `parent`) so `fno backlog ready` -
+    # and the `dispatch-node.sh --all-ready` bulk path that enumerates it - never
+    # presents/launches the box instead of its leaves. Shares _container_ids with
+    # `next`'s _pick_ready so the two selection surfaces cannot drift.
+    container_ids = _container_ids(entries)
+    ready = [e for e in ready if e.get("id") not in container_ids]
     # Epics-first, then flat priority (C3, Locked Decision 7); key built
     # from the full graph so epic parents always resolve.
     ready.sort(key=make_selection_sort_key(entries))
