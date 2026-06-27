@@ -487,10 +487,11 @@ fn target_worker_name(goal: &str, n: usize) -> String {
 /// auto-merge (dispatch Locked Decision 4). `$FNO_BIN` overrides the binary
 /// (tests / non-PATH installs). Returns Ok once the worker is launched.
 async fn spawn_target_worker(name: &str, goal: &str) -> Result<(), String> {
-    let fno = std::env::var("FNO_BIN")
-        .ok()
+    // var_os (not var): FNO_BIN is a path and may carry non-UTF-8 bytes;
+    // Command::new takes an OsStr, so no lossy conversion is needed.
+    let fno = std::env::var_os("FNO_BIN")
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "fno".to_string());
+        .unwrap_or_else(|| "fno".into());
     let cmd = format!("/target no-merge {goal}");
     let out = tokio::process::Command::new(&fno)
         .args(["agents", "spawn", "--provider", "claude", name, &cmd])
@@ -2336,7 +2337,6 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                     let (rows, cols) = target_pane_inner(&paged, new_idx);
                                                     let (pane, state, sink) =
                                                         open_watch_pane(home, &name, new_idx, rows, cols, &tx).await;
-                                                    names.push(name.clone());
                                                     // A /target worker is interactive claude.
                                                     host_interactive.push(true);
                                                     panes.push(pane);
@@ -2347,6 +2347,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                     comp.set_focus(new_idx);
                                                     resize_all_panes(&paged, &mut panes, &mut watch_sinks, &mut driver_sinks).await;
                                                     hint = Some(format!("launched {name}"));
+                                                    // Push last (move, no clone): name's
+                                                    // final use is the hint above.
+                                                    names.push(name);
                                                 }
                                                 Err(_) => {
                                                     // Worker is running; the terminal
