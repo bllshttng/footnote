@@ -4668,7 +4668,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         entry.inside_leg = Some(state::InsideLegReport {
             state,
             seq,
-            reason: reason.clone(),
+            reason,
             received_at: now_rfc3339_like(),
             ttl_ms,
         });

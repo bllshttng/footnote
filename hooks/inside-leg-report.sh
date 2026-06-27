@@ -45,9 +45,9 @@ PARSED=$(python3 -c '
 import sys, json, time
 try:
     d = json.load(sys.stdin)
+    sid = d.get("session_id") or "" if isinstance(d, dict) else ""
 except Exception:
     sys.exit(0)
-sid = d.get("session_id") or ""
 if not sid:
     sys.exit(0)
 print(f"{sid}\t{int(time.time() * 1000)}")
