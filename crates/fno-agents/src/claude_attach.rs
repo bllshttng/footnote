@@ -250,10 +250,60 @@ pub fn perform_attach<T: ControlTransport>(
     }
 }
 
+/// A raw PTY byte stream from a `control.sock` `op:'attach'`. After the single
+/// newline-terminated attach-OK JSON line, the daemon streams the terminal's raw
+/// VT/ANSI bytes -- pinned live on 2.1.195: NOT JSON-wrapped, NOT length-prefixed
+/// (the daemon unwraps the internal ptySock framing before streaming to
+/// attachers). So G2 renders a tile by feeding these bytes straight into its
+/// terminal-emulator pane. `\r`/`\n` are ordinary terminal content here, so the
+/// stream is read as raw bytes, never line-split.
+#[derive(Debug)]
+pub struct FrameStream<R: io::Read> {
+    reader: BufReader<R>,
+}
+
+impl<R: io::Read> io::Read for FrameStream<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
+/// Attach for the frame stream: send the `op:'attach'` request on `writer`, read
+/// + parse the one handshake line from `reader`, then hand back a [`FrameStream`]
+/// positioned at the first raw PTY byte. Bytes the handshake read buffered past
+/// the reply's `\n` are preserved -- they are the first frame bytes, so they must
+/// not be dropped. Reader and writer are split so a live caller passes a
+/// `try_clone`'d `UnixStream` writer plus the stream as the reader, while tests
+/// pass a `Vec`/`Cursor`.
+pub fn attach_for_frames<R: io::Read, W: Write>(
+    mut writer: W,
+    reader: R,
+    req: &AttachRequest,
+) -> Result<(AttachOk, FrameStream<R>), AttachError> {
+    writer
+        .write_all(req.to_json_line().as_bytes())
+        .and_then(|()| writer.flush())
+        .map_err(|e| AttachError::Malformed(format!("send: {e}")))?;
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) => Err(AttachError::Refused {
+            code: Some("EOF".into()),
+            detail: "daemon closed before attach reply".into(),
+        }),
+        Ok(_) => {
+            let ok = parse_attach_reply(&line)?;
+            Ok((ok, FrameStream { reader }))
+        }
+        Err(e) => Err(AttachError::Malformed(format!("recv: {e}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::io::{Cursor, Read};
 
     /// A scripted in-memory transport: replays queued reply lines, records sends.
     struct FakeTransport {
@@ -367,5 +417,80 @@ mod tests {
         let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
         let err = perform_attach(&mut t, &req).unwrap_err();
         assert!(matches!(err, AttachError::Malformed(_)));
+    }
+
+    // Build the server-side bytes a daemon would write back: one attach-OK line
+    // then the raw PTY tail.
+    fn server_bytes(reply: &str, raw_tail: &[u8]) -> Cursor<Vec<u8>> {
+        let mut v = format!("{reply}\n").into_bytes();
+        v.extend_from_slice(raw_tail);
+        Cursor::new(v)
+    }
+
+    #[test]
+    fn attach_for_frames_returns_ok_then_raw_tail() {
+        let raw = b"\x1b[2J\x1b[Hhello world";
+        let reader = server_bytes(r#"{"ok":true,"op":"attach","state":"running"}"#, raw);
+        let mut writer: Vec<u8> = Vec::new();
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", Some("k".into()));
+        let (ok, mut stream) = attach_for_frames(&mut writer, reader, &req).unwrap();
+        assert_eq!(ok.state.as_deref(), Some("running"));
+        // The attach request went out on the writer.
+        assert!(String::from_utf8_lossy(&writer).contains("\"op\":\"attach\""));
+        // Everything after the handshake line is the raw frame stream, intact.
+        let mut got = Vec::new();
+        stream.read_to_end(&mut got).unwrap();
+        assert_eq!(got, raw);
+    }
+
+    #[test]
+    fn attach_for_frames_keeps_tail_buffered_with_handshake() {
+        // The raw tail arrives in the SAME recv as the handshake line; it must not
+        // be lost when read_line stops at the newline.
+        let raw = b"first-frame-bytes";
+        let reader = server_bytes(r#"{"ok":true,"op":"attach"}"#, raw);
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
+        let (_ok, mut stream) = attach_for_frames(Vec::new(), reader, &req).unwrap();
+        let mut got = Vec::new();
+        stream.read_to_end(&mut got).unwrap();
+        assert_eq!(got, raw);
+    }
+
+    #[test]
+    fn attach_for_frames_tail_with_embedded_newlines_is_not_split() {
+        // PTY content contains \r and \n as ordinary bytes; the stream must hand
+        // them back verbatim, never line-framed.
+        let raw = b"line1\r\nline2\nline3";
+        let reader = server_bytes(r#"{"ok":true,"op":"attach"}"#, raw);
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
+        let (_ok, mut stream) = attach_for_frames(Vec::new(), reader, &req).unwrap();
+        let mut got = Vec::new();
+        stream.read_to_end(&mut got).unwrap();
+        assert_eq!(got, raw);
+    }
+
+    #[test]
+    fn attach_for_frames_refused_propagates() {
+        let reader = server_bytes(
+            r#"{"ok":false,"code":"EPROTO","error":"restart claude"}"#,
+            b"",
+        );
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
+        let err = attach_for_frames(Vec::new(), reader, &req).unwrap_err();
+        assert_eq!(
+            err,
+            AttachError::Refused {
+                code: Some("EPROTO".into()),
+                detail: "restart claude".into()
+            }
+        );
+    }
+
+    #[test]
+    fn attach_for_frames_eof_before_reply_is_refused() {
+        let reader = Cursor::new(Vec::new());
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
+        let err = attach_for_frames(Vec::new(), reader, &req).unwrap_err();
+        assert!(matches!(err, AttachError::Refused { .. }));
     }
 }
