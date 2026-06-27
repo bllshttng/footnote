@@ -240,8 +240,17 @@ def submit_via_worker(sock_path: Path, framed: str, *, settle_ms: int = DEFAULT_
     """Inject one framed turn through the daemon ``worker.submit`` RPC. Returns
     True iff the daemon acknowledged the submit (the text + settle + separate-CR
     ran). A falsy return means the worker socket is gone/unreachable -- the worker
-    is dead and the caller must not pretend the turn landed."""
-    res = _worker_rpc(sock_path, "worker.submit", {"data": framed, "settle_ms": settle_ms})
+    is dead and the caller must not pretend the turn landed.
+
+    The daemon sleeps ``settle_ms`` server-side BEFORE replying (worker.rs), so the
+    RPC read must outwait the settle or a turn that DID submit is misread as a
+    failure. Size the read timeout off settle (+4s slack) rather than the 5s
+    default, which would expire on a high-settle caller."""
+    read_timeout = max(5.0, settle_ms / 1000.0 + 4.0)
+    res = _worker_rpc(
+        sock_path, "worker.submit", {"data": framed, "settle_ms": settle_ms},
+        read_timeout=read_timeout,
+    )
     return bool(res and res.get("submitted"))
 
 
@@ -258,9 +267,10 @@ def deliver_session(
 
     The relay owns no PTY: injection is the daemon ``worker.submit`` RPC (which
     runs the text -> settle -> separate-CR state machine), and capture is the
-    transcript jsonl alone (no pane fallback -- AC-E4-4). One bounded re-inject at
-    60% of the timeout covers a keystroke dropped while a heavy SessionStart banner
-    was still churning; the newest sentinel wins, so a duplicate turn is harmless.
+    transcript jsonl alone (no pane fallback -- AC-E4-4). One bounded re-inject,
+    fired once 60% of the timeout remains (40% elapsed), covers a keystroke dropped
+    while a heavy SessionStart banner was still churning; the newest sentinel wins,
+    so a duplicate turn is harmless.
 
     Raises RuntimeError when no live daemon worker hosts the session (resolution
     miss or the first submit fails -- the worker is dead), and TimeoutError when a

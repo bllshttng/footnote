@@ -165,6 +165,16 @@ def test_submit_via_worker_true_on_ack(monkeypatch):
     assert seen["params"] == {"data": "framed text", "settle_ms": 250}
 
 
+def test_submit_via_worker_read_timeout_outwaits_settle(monkeypatch):
+    # The daemon sleeps settle_ms server-side BEFORE replying (worker.rs), so the
+    # RPC read must outwait the settle or a submitted turn is misread as a failure.
+    seen = {}
+    monkeypatch.setattr(rt_mod, "_worker_rpc",
+                        lambda *a, **k: seen.update(k) or {"submitted": True})
+    rt_mod.submit_via_worker(rt_mod.Path("/x/worker.sock"), "f", settle_ms=5000)
+    assert seen["read_timeout"] >= 5000 / 1000.0, seen
+
+
 def test_submit_via_worker_false_when_unreachable(monkeypatch):
     monkeypatch.setattr(rt_mod, "_worker_rpc", lambda *a, **k: None)
     assert rt_mod.submit_via_worker(rt_mod.Path("/x/worker.sock"), "f") is False
