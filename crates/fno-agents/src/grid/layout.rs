@@ -323,6 +323,21 @@ impl PageLayout {
         self.page_count <= 1
     }
 
+    /// Map a 0-indexed screen coordinate to the global pane index of the tile
+    /// containing it, or `None` if `(col, row)` falls outside every visible
+    /// tile (the footer row, or an inter-tile remainder gutter). The result is
+    /// global — `page_start + slot`, matching `tiles[slot]`'s pane — so a click
+    /// on a later page resolves to the right absolute pane. (E5a mouse-native.)
+    pub fn pane_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.tiles
+            .iter()
+            .position(|t| {
+                let (row_end, col_end) = t.end();
+                row >= t.row && row < row_end && col >= t.col && col < col_end
+            })
+            .map(|slot| self.page_start + slot)
+    }
+
     /// The uniform inner `(rows, cols)` every pane (including off-screen ones)
     /// should be sized to in the multi-page case, so a page flip is warm. The
     /// inner size strips the 1-cell border on each edge. `None` in the
@@ -907,6 +922,41 @@ mod tests {
             compute_page(tty(24, 80), 0, 0).unwrap_err(),
             LayoutError::ZeroPanes
         );
+    }
+
+    /// E5a hit-test: a screen coord inside tile slot `i` maps to the global
+    /// pane index `page_start + i`; the footer row and coords outside every
+    /// tile map to `None`.
+    #[test]
+    fn pane_at_maps_coord_to_global_pane_index() {
+        let paged = compute_page(tty(24, 80), 4, 0).unwrap();
+        assert_eq!(paged.page_count, 1, "4 panes fit a single page at 24x80");
+        for (slot, t) in paged.tiles.iter().enumerate() {
+            // The tile's own origin hits its own slot.
+            assert_eq!(paged.pane_at(t.col, t.row), Some(paged.page_start + slot));
+            // A cell strictly inside the tile also hits it.
+            let mid_col = t.col + t.cols / 2;
+            let mid_row = t.row + t.rows / 2;
+            assert_eq!(
+                paged.pane_at(mid_col, mid_row),
+                Some(paged.page_start + slot)
+            );
+        }
+        // The footer row belongs to no pane.
+        assert_eq!(paged.pane_at(paged.footer.col, paged.footer.row), None);
+        // Far outside the grid → None.
+        assert_eq!(paged.pane_at(9999, 9999), None);
+    }
+
+    /// On a later page, slot 0 maps to the global index `page_start`, not 0.
+    #[test]
+    fn pane_at_is_page_relative() {
+        // 7x20 → capacity 1 → 4 panes across 4 pages; render page index 2.
+        let paged = compute_page(tty(7, 20), 4, 2).unwrap();
+        assert_eq!(paged.capacity, 1);
+        assert_eq!(paged.page_start, 2);
+        let t = &paged.tiles[0];
+        assert_eq!(paged.pane_at(t.col, t.row), Some(2));
     }
 
     /// `isqrt_ceil` is well-defined for the edge cases we hit.
