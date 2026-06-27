@@ -193,6 +193,17 @@ pub const HOST_MODE_EXEC: &str = "exec";
 /// `host_mode` value for a long-lived drivable interactive session.
 pub const HOST_MODE_INTERACTIVE: &str = "interactive";
 
+/// Claude spawn `mode` (D2, inside-out-multiplexer E1). Disambiguates the two
+/// claude PTY lanes WITHIN an interactive `host_mode`: `stream_json` is the
+/// Agent-SDK adoption lane (`claude -p --resume`, billed against the SDK pool);
+/// `interactive` is the subscription-billed `ClaudeProvider` PTY lane (the
+/// keystone). Absent reads as `stream_json` so every existing promote call site
+/// keeps its current behavior; grid/relay request `interactive` explicitly. The
+/// daemon routes on this field, never on a guess.
+pub const CLAUDE_MODE_STREAM_JSON: &str = "stream_json";
+/// See [`CLAUDE_MODE_STREAM_JSON`]: the interactive subscription-billed lane.
+pub const CLAUDE_MODE_INTERACTIVE: &str = "interactive";
+
 impl RegistryEntry {
     /// The hosting mode with the absent==exec rule applied in one place.
     /// `None` on disk (and the legacy rows that predate the field) read as

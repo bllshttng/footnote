@@ -999,55 +999,89 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         // the `fno claim session:<uuid>` coordination record, mirroring how
         // codex/gemini enforce one host per session below.
         if provider == "claude" {
-            let explicit_argv = p.get("argv").and_then(|v| v.as_array()).map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect::<Vec<String>>()
-            });
-            return spawn_claude_stream_lane(
-                ctx,
-                req,
-                &name,
-                &cwd,
-                resume_id.as_deref(),
-                explicit_argv,
-            )
-            .await;
-        }
-        if let Some(uuid) = resume_id.as_deref() {
-            let registry = load_registry_offloaded(ctx.home.registry_json()).await;
-            match admit_promote(&registry.entries, uuid) {
-                PromoteAdmission::Ok { provider: inferred } => provider = inferred,
-                PromoteAdmission::Reject(reason) => {
-                    let _ = ctx.emitter.emit(
-                        "agent_spawn_failed",
-                        &json!({"name": name, "reason": "promote_rejected", "detail": reason}),
-                    );
-                    return Response::err(req.id, ErrorCode::InvalidParams, reason);
+            // D2 (inside-out-multiplexer E1): an interactive claude has TWO lanes,
+            // disambiguated by the explicit `mode` field, never a guess. Absent
+            // reads as `stream_json` so every existing promote call site keeps its
+            // behavior; grid/relay request `interactive` for the new PTY lane.
+            let claude_mode = p
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or(crate::state::CLAUDE_MODE_STREAM_JSON);
+            if claude_mode != crate::state::CLAUDE_MODE_INTERACTIVE {
+                // stream_json lane: the Agent-SDK adoption thread (`claude -p
+                // --resume`), unchanged from before E1.
+                let explicit_argv = p.get("argv").and_then(|v| v.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<String>>()
+                });
+                return spawn_claude_stream_lane(
+                    ctx,
+                    req,
+                    &name,
+                    &cwd,
+                    resume_id.as_deref(),
+                    explicit_argv,
+                )
+                .await;
+            }
+            // interactive PTY lane (the keystone): require a pinned session id (the
+            // `session:<uuid>` claim interlock + transcript discovery key on it),
+            // then fall through to the generic PTY path below. Skip admit_promote
+            // (claude needs no codex/gemini source row) and the codex/gemini-only
+            // provider gate.
+            let has_sid = p
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_sid {
+                let _ = ctx.emitter.emit(
+                    "agent_spawn_failed",
+                    &json!({"name": name, "reason": "interactive_claude_needs_session_id"}),
+                );
+                return Response::err(
+                    req.id,
+                    ErrorCode::InvalidParams,
+                    "interactive claude requires a pinned session id (pass session_id); the daemon's single-writer claim and transcript discovery key on it",
+                );
+            }
+        } else {
+            if let Some(uuid) = resume_id.as_deref() {
+                let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+                match admit_promote(&registry.entries, uuid) {
+                    PromoteAdmission::Ok { provider: inferred } => provider = inferred,
+                    PromoteAdmission::Reject(reason) => {
+                        let _ = ctx.emitter.emit(
+                            "agent_spawn_failed",
+                            &json!({"name": name, "reason": "promote_rejected", "detail": reason}),
+                        );
+                        return Response::err(req.id, ErrorCode::InvalidParams, reason);
+                    }
                 }
             }
-        }
-        // Validate the (possibly inferred) provider for BOTH fresh host and
-        // promote (AC3-ERR). Only codex/gemini are PTY-hostable here; claude took
-        // the stream-json branch above, so any provider that reaches this point is
-        // either an unknown CLI (no PTY impl) or a promote whose source row
-        // resolved to one. This runs AFTER promote's provider inference so a
-        // promote whose source resolves to claude/unknown is rejected here with a
-        // clear message rather than failing later with a confusing PTY-missing
-        // error (Gemini review HIGH on PR #373 -- the prior `else if` skipped this
-        // for the promote path).
-        if provider != "codex" && provider != "gemini" {
-            let _ = ctx.emitter.emit(
-                "agent_spawn_failed",
-                &json!({"name": name, "reason": "bad_interactive_provider", "provider": provider}),
-            );
-            return Response::err(
-                req.id,
-                ErrorCode::InvalidParams,
-                format!(
-                    "interactive host_mode supports only codex, gemini, or claude (stream-json adopt via `promote --from <uuid> --provider claude`), not '{provider}'"
-                ),
-            );
+            // Validate the (possibly inferred) provider for BOTH fresh host and
+            // promote (AC3-ERR). Only codex/gemini are PTY-hostable here; claude
+            // took its own lanes above, so any provider that reaches this point is
+            // either an unknown CLI (no PTY impl) or a promote whose source row
+            // resolved to one. This runs AFTER promote's provider inference so a
+            // promote whose source resolves to claude/unknown is rejected here with
+            // a clear message rather than failing later with a confusing
+            // PTY-missing error (Gemini review HIGH on PR #373 -- the prior
+            // `else if` skipped this for the promote path).
+            if provider != "codex" && provider != "gemini" {
+                let _ = ctx.emitter.emit(
+                    "agent_spawn_failed",
+                    &json!({"name": name, "reason": "bad_interactive_provider", "provider": provider}),
+                );
+                return Response::err(
+                    req.id,
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "interactive host_mode supports only codex, gemini, or claude (interactive PTY via `mode: interactive`, or stream-json adopt via `promote --from <uuid> --provider claude`), not '{provider}'"
+                    ),
+                );
+            }
         }
     }
 
@@ -1065,7 +1099,17 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                         message: message.clone(),
                         cwd: cwd.clone(),
                         from_name: from_name.clone(),
-                        session_id: None,
+                        // Pin the caller-supplied session id for interactive
+                        // claude only (its argv needs `--session-id <uuid>`);
+                        // codex/gemini keep their prior None so their create argv
+                        // is byte-unchanged (E1).
+                        session_id: if interactive && provider == "claude" {
+                            p.get("session_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        } else {
+                            None
+                        },
                         yolo,
                     };
                     // Interactive routes to the host/promote argv; a provider
@@ -1124,6 +1168,24 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         return Response::err(req.id, ErrorCode::InvalidParams, "empty argv");
     }
 
+    // D2 billing guard (AC1-ERR, inside-out-multiplexer E1): a multiplexer-hosted
+    // claude MUST be interactive (subscription-billed). Reject any claude argv
+    // carrying `-p`/`--print` (the Agent-SDK-credit stream-json form) before
+    // spawning anything. The explicit-argv escape hatch flows through here too, so
+    // a caller/test cannot smuggle `-p` past the guard. `spawn_claude_stream_lane`
+    // remains the explicit, separate opt-in for the headless `-p` lane.
+    if provider == "claude" && !claude_argv_is_interactive(&argv) {
+        let _ = ctx.emitter.emit(
+            "agent_spawn_failed",
+            &json!({"name": name, "reason": "non_interactive_claude"}),
+        );
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            "refusing to PTY-host claude with -p/--print (that bills the Agent SDK pool); the multiplexer spawns interactive subscription-billed claude",
+        );
+    }
+
     // Collision check.
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
     if let Some(existing) = registry.find(&name) {
@@ -1137,6 +1199,67 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         );
     }
     let short_id = derive_short_id(&name, &registry);
+
+    // E1 claim interlock (Locked Decision 1 / the E1 interlock forced by the
+    // stress test): acquire the single-writer `session:<uuid>` claim BEFORE
+    // spawning interactive claude, so two processes never pin one `--session-id`
+    // (transcript corruption). The RAII guard releases on every early return
+    // below until it is disarmed at successful registration. This is the safety
+    // floor that ships with E1 even though the relay does not consume it until E4
+    // (it routes through the held claim instead of double-spawning). codex/gemini
+    // PTY rows rely on the registry one-host re-check; only claude shares its
+    // session id with an out-of-daemon writer, so only claude takes the file claim.
+    let claude_claim_guard: Option<DaemonClaimGuard> = if interactive && provider == "claude" {
+        let uuid = p
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let holder = interactive_claim_holder(&short_id);
+        let uuid_acq = uuid.clone();
+        let holder_acq = holder.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || acquire_session_claim(&uuid_acq, &holder_acq))
+                .await
+                .unwrap_or_else(|e| ClaimOutcome::Unavailable(format!("claim task panicked: {e}")));
+        match outcome {
+            ClaimOutcome::Acquired => Some(DaemonClaimGuard {
+                session_uuid: uuid,
+                holder,
+                armed: true,
+            }),
+            ClaimOutcome::HeldByOther(who) => {
+                let _ = ctx.emitter.emit(
+                    "agent_spawn_failed",
+                    &json!({"name": name, "reason": "session_claimed", "detail": who}),
+                );
+                return Response::err(
+                    req.id,
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "session '{uuid}' is held by another writer ({who}); refusing a second writer on one session id"
+                    ),
+                );
+            }
+            ClaimOutcome::Unavailable(why) => {
+                // Fail OPEN: the registry name reservation + one-host re-check
+                // under the lock is the authoritative in-daemon guard; the file
+                // claim is the best-effort cross-process coordination record (the
+                // relay reads it in E4). A disarmed guard keeps the rest uniform.
+                let _ = ctx.emitter.emit(
+                    "agent_stream_claim_unavailable",
+                    &json!({"name": name, "session_uuid": uuid, "detail": why}),
+                );
+                Some(DaemonClaimGuard {
+                    session_uuid: uuid,
+                    holder,
+                    armed: false,
+                })
+            }
+        }
+    } else {
+        None
+    };
 
     // Spawn the worker in its own process group (Outcome B: survives a kill of
     // the daemon's group; SIGKILL to the daemon pid alone never propagates).
@@ -1265,7 +1388,16 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             .and_then(|v| v.as_str())
             .map(String::from),
         claude_short_id: None,
-        claude_session_uuid: None,
+        // Interactive claude (E1) pins its session UUID via `--session-id`;
+        // record it so the one-host invariant + reconcile (and the relay's E4
+        // lookup) can match the session. Other rows: None.
+        claude_session_uuid: if interactive && provider == "claude" {
+            p.get("session_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        } else {
+            None
+        },
         messaging_socket_path: None,
         // An interactive promote resumes a known session UUID; record it in the
         // provider-specific id field so the one-host-per-session invariant
@@ -1363,6 +1495,12 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             return Response::err(req.id, ErrorCode::Internal, format!("registry write: {e}"));
         }
     }
+    // The row is registered live: the worker now owns the session's liveness, so
+    // the daemon must NOT release the interactive-claude claim on drop (E1). Every
+    // early-return failure path above kept it armed and released exactly once.
+    if let Some(guard) = claude_claim_guard {
+        guard.disarm();
+    }
     let _ = ctx.emitter.emit(
         "agent_spawned",
         &json!({"name": name, "provider": provider, "short_id": short_id}),
@@ -1384,6 +1522,23 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
 /// worker's RAII release must agree on it.
 fn stream_claim_holder(short_id: &str) -> String {
     format!("stream:{short_id}")
+}
+
+/// The single-writer claim holder for an interactive PTY-hosted claude (E1),
+/// derived from its short_id (stable + unique per worker). Distinct prefix from
+/// [`stream_claim_holder`] so the relay (E4) can tell which lane holds the
+/// session when it reads the claim record.
+fn interactive_claim_holder(short_id: &str) -> String {
+    format!("pty:{short_id}")
+}
+
+/// Billing guard predicate (D2 / AC1-ERR): a multiplexer-hosted claude argv is
+/// "interactive" iff it carries NO `-p`/`--print` (the Agent-SDK stream-json
+/// form bills the wrong pool). Pure so the guard decision is unit-tested without
+/// a live spawn; the daemon emits `agent_spawn_failed{reason:non_interactive_claude}`
+/// and refuses when this returns false.
+fn claude_argv_is_interactive(argv: &[String]) -> bool {
+    !argv.iter().any(|a| a == "-p" || a == "--print")
 }
 
 /// Is this row a LIVE writer for the one-host guard? Narrower than
@@ -1913,7 +2068,12 @@ fn provider_for_pty(provider: &str) -> Option<Box<dyn crate::provider::ProviderW
     match provider {
         "codex" => Some(Box::new(crate::provider::CodexProvider)),
         "gemini" => Some(Box::new(crate::provider::GeminiProvider)),
-        // claude uses a shellout path (as_pty() -> None); not supported here.
+        // claude has TWO faces: the shellout `--bg` exec provider (as_pty -> None,
+        // never reaches here) and the interactive PTY provider (E1 keystone). The
+        // spawn path only calls this on the interactive `mode` route, so resolving
+        // claude to the interactive provider is correct; the exec `claude --bg`
+        // path does not pass through provider_for_pty.
+        "claude" => Some(Box::new(crate::provider::ClaudeInteractiveProvider)),
         _ => None,
     }
 }
@@ -5414,8 +5574,8 @@ mod tests {
     // Task 4.1: provider_for_pty + handle_spawn provider-derived argv
     // -----------------------------------------------------------------------
 
-    /// AC1-HP: provider_for_pty returns Some for known PTY providers (codex/gemini)
-    /// and None for unknown or non-PTY providers (claude).
+    /// provider_for_pty returns Some for the PTY providers (codex/gemini and,
+    /// since E1, interactive claude) and None for unknown names.
     #[test]
     fn provider_for_pty_known_providers() {
         assert!(
@@ -5426,15 +5586,51 @@ mod tests {
             provider_for_pty("gemini").is_some(),
             "gemini must have a PTY provider"
         );
-        // claude is a shellout provider: as_pty() -> None
+        // E1 keystone: claude resolves to the interactive PTY provider on the
+        // interactive `mode` route (the exec `claude --bg` path never reaches here).
         assert!(
-            provider_for_pty("claude").is_none(),
-            "claude is not PTY-managed; provider_for_pty must return None"
+            provider_for_pty("claude").is_some(),
+            "claude must resolve to the interactive PTY provider (E1)"
         );
         // unknown provider
         assert!(
             provider_for_pty("nonexistent").is_none(),
             "unknown provider must return None"
+        );
+    }
+
+    /// E1 billing guard (D2 / AC1-ERR): the pure predicate accepts an interactive
+    /// claude argv and rejects any `-p`/`--print` form, so the daemon refuses a
+    /// non-interactive (Agent-SDK-billed) claude before spawning anything.
+    #[test]
+    fn claude_argv_billing_guard() {
+        // Interactive subscription-billed form (what ClaudeInteractiveProvider emits).
+        assert!(claude_argv_is_interactive(&[
+            "claude".into(),
+            "--session-id".into(),
+            "11111111-2222-3333-4444-555555555555".into(),
+        ]));
+        // The Agent-SDK stream-json form is rejected, in either spelling.
+        assert!(!claude_argv_is_interactive(&[
+            "claude".into(),
+            "-p".into(),
+            "--resume".into(),
+            "uuid".into(),
+        ]));
+        assert!(!claude_argv_is_interactive(&[
+            "claude".into(),
+            "--print".into(),
+        ]));
+    }
+
+    /// E1 claim holder is per-worker and distinct from the stream lane's, so the
+    /// relay (E4) can tell which lane holds a session from the claim record.
+    #[test]
+    fn interactive_claim_holder_is_pty_scoped() {
+        assert_eq!(interactive_claim_holder("ab12cd34"), "pty:ab12cd34");
+        assert_ne!(
+            interactive_claim_holder("ab12cd34"),
+            stream_claim_holder("ab12cd34")
         );
     }
 
