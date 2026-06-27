@@ -82,9 +82,9 @@ def _pending_holder(node_id: str) -> str:
 def _sentinel_is_live(node_id: str) -> bool:
     """Liveness of ``reconcile:<node>`` at the GLOBAL root.
 
-    advance._claim_is_live routes only ``node:`` to global, so it would probe the
-    wrong (cwd) root for a ``reconcile:`` key. This checks where the sentinel
-    actually lives.
+    Routes the probe through ``_claims_root_for`` (the shared claims_root_for
+    helper), which roots ``reconcile:`` globally -- the same root the sentinel
+    was written at, even when read from a different repo.
     """
     from fno.claims.core import claim_status
 
