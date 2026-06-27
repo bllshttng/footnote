@@ -4475,7 +4475,8 @@ mod tests {
             .map(|(n, c, p, s)| json!({"name": n, "cwd": c, "provider": p, "status": s}))
             .collect();
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
-        let badges = group::compute_badges_from_live(&groups, &vec![false; 8], &vec![false; 8], &[], 0);
+        let badges =
+            group::compute_badges_from_live(&groups, &vec![false; 8], &vec![false; 8], &[], 0);
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
         rs.selected_agent_idx = Some(7); // wk7, the last member
 
@@ -4609,7 +4610,8 @@ mod tests {
             json!({"name": "wkB", "cwd": "/repo/x", "provider": "codex", "status": "live"}),
         ];
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
-        let badges = group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
+        let badges =
+            group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
         let names = vec!["wkA".to_string(), "wkB".to_string()];
         let states = vec![ConnState::Watching, ConnState::Watching];
 
@@ -4694,7 +4696,8 @@ mod tests {
             json!({"name": "wkB", "cwd": "/x", "provider": "codex", "status": "live"}),
         ];
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
-        let badges = group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
+        let badges =
+            group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
         let names = vec!["wkA".to_string(), "wkB".to_string()];
         let states = vec![ConnState::Watching, ConnState::Watching];
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
@@ -4815,8 +4818,13 @@ mod tests {
             ConnState::Exited { code: 0 },
             ConnState::Watching,
         ];
-        let badges =
-            group::compute_badges_from_live(&groups, &[false, false, false], &[false, true, false], &[], 0);
+        let badges = group::compute_badges_from_live(
+            &groups,
+            &[false, false, false],
+            &[false, true, false],
+            &[],
+            0,
+        );
 
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
         rs.main_mode = group::MainMode::GroupTile;

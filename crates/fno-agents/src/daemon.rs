@@ -4859,7 +4859,10 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                         "inside_leg_report_buffered",
                         &json!({"session_id": session_id, "seq": seq, "state": state_label}),
                     );
-                    Response::ok(req.id, json!({"stored": false, "buffered": true, "seq": seq}))
+                    Response::ok(
+                        req.id,
+                        json!({"stored": false, "buffered": true, "seq": seq}),
+                    )
                 }
                 BufferOutcome::StaleSeq { last } => {
                     drop(buf);
@@ -4878,10 +4881,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                         "inside_leg_report_dropped",
                         &json!({"session_id": session_id, "seq": seq, "reason": "buffer_full"}),
                     );
-                    Response::ok(
-                        req.id,
-                        json!({"stored": false, "dropped": "buffer_full"}),
-                    )
+                    Response::ok(req.id, json!({"stored": false, "dropped": "buffer_full"}))
                 }
             },
             // Poisoned buffer lock: degrade to the old hard-drop rather than
@@ -4891,7 +4891,10 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                     "inside_leg_report_dropped",
                     &json!({"session_id": session_id, "seq": seq, "reason": "unknown_session"}),
                 );
-                Response::ok(req.id, json!({"stored": false, "dropped": "unknown_session"}))
+                Response::ok(
+                    req.id,
+                    json!({"stored": false, "dropped": "unknown_session"}),
+                )
             }
         },
     }
@@ -5915,7 +5918,11 @@ mod tests {
             .filter_map(|l| serde_json::from_str(l).ok())
             .filter(|v: &serde_json::Value| v["kind"] == "inside_leg_completed")
             .collect();
-        assert_eq!(events.len(), 1, "exactly one completion, only for the report-bearing row");
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one completion, only for the report-bearing row"
+        );
         let ev = &events[0];
         assert_eq!(ev["name"], "pane");
         assert_eq!(ev["session_id"], "sess-uuid");
@@ -5949,7 +5956,10 @@ mod tests {
             buffer_pending_report(&mut map, "s1", rep(1)),
             BufferOutcome::StaleSeq { last: 2 }
         ));
-        assert_eq!(map["s1"].seq, 2, "stale early push must not regress the buffer");
+        assert_eq!(
+            map["s1"].seq, 2,
+            "stale early push must not regress the buffer"
+        );
 
         // A newer push for the same session advances it.
         assert!(matches!(
@@ -6004,16 +6014,26 @@ mod tests {
         let flushed = peek_and_seed_inside_leg(&ctx, &mut entry);
         assert!(flushed.is_some());
         assert_eq!(entry.inside_leg.as_ref().map(|r| r.seq), Some(4));
-        assert!(ctx.pending_inside_leg.lock().unwrap().contains_key("uuid-x"));
+        assert!(ctx
+            .pending_inside_leg
+            .lock()
+            .unwrap()
+            .contains_key("uuid-x"));
 
         // Commit (insert won): buffer entry removed, event emitted.
         commit_inside_leg_flush(&ctx, "pane", flushed);
-        assert!(!ctx.pending_inside_leg.lock().unwrap().contains_key("uuid-x"));
+        assert!(!ctx
+            .pending_inside_leg
+            .lock()
+            .unwrap()
+            .contains_key("uuid-x"));
         let events = read_events(&home);
-        assert!(events.iter().any(|e| e["kind"] == "inside_leg_buffer_flushed"
-            && e["name"] == "pane"
-            && e["session_id"] == "uuid-x"
-            && e["seq"] == 4));
+        assert!(events
+            .iter()
+            .any(|e| e["kind"] == "inside_leg_buffer_flushed"
+                && e["name"] == "pane"
+                && e["session_id"] == "uuid-x"
+                && e["seq"] == 4));
 
         // A row with no pinned uuid is a no-op.
         let mut plain = rentry("plain", AgentStatus::Live, None);
@@ -6264,7 +6284,7 @@ mod tests {
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
             pid_start_time: process_start_time(std::process::id()),
             drives: crate::drive::new_table(),
-        pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -6284,7 +6304,7 @@ mod tests {
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
             pid_start_time: process_start_time(std::process::id()),
             drives: crate::drive::new_table(),
-        pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -7274,7 +7294,11 @@ done
         assert!(reg.entries.is_empty(), "no phantom row created");
         // The report is held in the pending buffer keyed by session_id.
         assert_eq!(
-            ctx.pending_inside_leg.lock().unwrap().get("uuid-nope").map(|r| r.seq),
+            ctx.pending_inside_leg
+                .lock()
+                .unwrap()
+                .get("uuid-nope")
+                .map(|r| r.seq),
             Some(1)
         );
 

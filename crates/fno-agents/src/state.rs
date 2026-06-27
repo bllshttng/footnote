@@ -164,14 +164,17 @@ impl InsideLegReport {
 pub fn rfc3339_like_to_secs(s: &str) -> Option<u64> {
     let b = s.as_bytes();
     // "2026-06-27T00:00:00Z" == 20 bytes, separators at fixed offsets.
-    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':'
-        || b[16] != b':' || b[19] != b'Z'
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
     {
         return None;
     }
-    let num = |lo: usize, hi: usize| -> Option<i64> {
-        s.get(lo..hi)?.parse::<i64>().ok()
-    };
+    let num = |lo: usize, hi: usize| -> Option<i64> { s.get(lo..hi)?.parse::<i64>().ok() };
     let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
     let (h, mi, se) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
     if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
@@ -1003,8 +1006,14 @@ mod tests {
         // `date -u -d <stamp> +%s`. Proves the days-from-civil inverse matches the
         // daemon's civil() forward direction (the producer of received_at).
         assert_eq!(rfc3339_like_to_secs("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(rfc3339_like_to_secs("2026-06-27T00:00:00Z"), Some(1_782_518_400));
-        assert_eq!(rfc3339_like_to_secs("2026-06-27T00:00:05Z"), Some(1_782_518_405));
+        assert_eq!(
+            rfc3339_like_to_secs("2026-06-27T00:00:00Z"),
+            Some(1_782_518_400)
+        );
+        assert_eq!(
+            rfc3339_like_to_secs("2026-06-27T00:00:05Z"),
+            Some(1_782_518_405)
+        );
     }
 
     #[test]
@@ -1015,13 +1024,13 @@ mod tests {
         for bad in [
             "",
             "2026-06-27",
-            "2026-06-27T00:00:00",            // no Z
-            "2026/06/27T00:00:00Z",           // wrong separators
-            "20260627T000000Z",               // compact form, wrong length
-            "2026-13-27T00:00:00Z",           // month 13
-            "2026-06-27T24:00:00Z",           // hour 24
-            "2026-06-27T00:00:00.5Z",         // fractional (21 bytes)
-            "abcd-ef-ghTij:kl:mnZ",           // non-digit
+            "2026-06-27T00:00:00",    // no Z
+            "2026/06/27T00:00:00Z",   // wrong separators
+            "20260627T000000Z",       // compact form, wrong length
+            "2026-13-27T00:00:00Z",   // month 13
+            "2026-06-27T24:00:00Z",   // hour 24
+            "2026-06-27T00:00:00.5Z", // fractional (21 bytes)
+            "abcd-ef-ghTij:kl:mnZ",   // non-digit
         ] {
             assert_eq!(rfc3339_like_to_secs(bad), None, "must reject {bad:?}");
         }

@@ -972,7 +972,10 @@ mod tests {
             Some(5000),
         ))];
         let badges = compute_badges_from_live(&groups, &[true], &[false], &inside_leg, now);
-        assert!(badges[0].is_empty(), "live working suppresses the scraper's false needs_input");
+        assert!(
+            badges[0].is_empty(),
+            "live working suppresses the scraper's false needs_input"
+        );
     }
 
     #[test]
@@ -989,7 +992,10 @@ mod tests {
             Some(5000),
         ))];
         let badges = compute_badges_from_live(&groups, &[true], &[false], &inside_leg, recv + 6);
-        assert_eq!(badges[0].needs_input, 1, "expired working yields to the scraper");
+        assert_eq!(
+            badges[0].needs_input, 1,
+            "expired working yields to the scraper"
+        );
     }
 
     #[test]
@@ -1029,7 +1035,11 @@ mod tests {
         let rows = make_rows(&[("wkA", "/a", "claude", "live")]);
         let groups = group_by(&rows, GroupKey::Cwd);
         let now = crate::state::rfc3339_like_to_secs("2026-06-27T00:00:00Z").unwrap();
-        let done = vec![Some(report_at(InsideLegState::Done, "2026-06-27T00:00:00Z", Some(5000)))];
+        let done = vec![Some(report_at(
+            InsideLegState::Done,
+            "2026-06-27T00:00:00Z",
+            Some(5000),
+        ))];
         // scraper waiting -> needs_input passes through.
         let badges = compute_badges_from_live(&groups, &[true], &[false], &done, now);
         assert_eq!(badges[0].needs_input, 1);
