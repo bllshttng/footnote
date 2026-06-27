@@ -76,6 +76,35 @@ def global_claims_root() -> Path:
     return Path(override) if override else Path.home()
 
 
+# Claim prefixes whose identifier is a globally-unique graph node id. Node ids
+# are global (like ~/.fno/graph.json), so EVERY claim keyed on one must
+# coordinate across worktrees/repos via the global root, never a cwd-local dir.
+# - node:<id>      the canonical work-claim
+# - dispatch:<id>  the boot-window bridge token (same id space as node:)
+# - reconcile:<id> the merge-context sentinel (written in the blocker's repo,
+#                  read in the dependent's repo)
+# Keys whose identifier is a repo-local resource (walker:<repo_root>) embed
+# their own scope and are NOT listed here; they keep the cwd/env default.
+_GLOBAL_ID_PREFIXES = frozenset({"node", "dispatch", "reconcile"})
+
+
+def claims_root_for(key: str) -> Path | None:
+    """Resolve the claims root for ``key`` by what its identifier refers to.
+
+    A claim keyed on a globally-unique node id (``node:``/``dispatch:``/
+    ``reconcile:`` -- all three name the same global graph node) is rooted at
+    the global ($HOME / ``$FNO_CLAIMS_ROOT``) root, so a writer and a reader in
+    different repos/worktrees coordinate on the SAME lock. A claim keyed on a
+    repo-local resource (``walker:<repo_root>``) or any unrecognized / colon-less
+    key returns ``None`` -> the cwd/env default resolved by :func:`claims_dir`.
+
+    This is the single source of truth the dispatch surfaces (``claims.cli``,
+    ``backlog.advance``, ``backlog.reconcile_dispatch``, ``agents.cli``)
+    delegate to, so their routing cannot drift.
+    """
+    return global_claims_root() if key.split(":", 1)[0] in _GLOBAL_ID_PREFIXES else None
+
+
 def claims_dir(root: Path | None = None) -> Path:
     """Return the claims directory under the given repo root.
 
