@@ -30,8 +30,13 @@ use crate::readiness::ScreenView;
 use regex::Regex;
 
 /// Max nesting depth for a [`Gate`] tree. A pathological manifest (deeply nested
-/// `all`/`any`/`not`) is refused at parse rather than risking a stack blow at
-/// evaluate. 16 is far past any real rule (herdr's deepest is ~3).
+/// `all`/`any`/`not`) is refused while building the [`Gate`] so `evaluate`'s
+/// recursion is bounded. 16 is far past any real rule (herdr's deepest is ~3).
+///
+/// Note: this caps OUR tree-walk, not `toml::from_str`, which builds the nested
+/// `toml::Value` first. For locally-authored (trusted) manifests that is fine;
+/// when remote/cached resolution lands (the logged fast-follow) the input must be
+/// nesting-bounded BEFORE `toml::from_str`. Tracked as a carveout.
 const MAX_GATE_DEPTH: usize = 16;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -91,6 +96,14 @@ impl Region {
                     rule: rule.to_string(),
                     field: "region (bottom_non_empty_lines arg)".to_string(),
                 })?;
+            if n == 0 {
+                // bottom(0) is an empty region: a degenerate rule that never
+                // fires. Reject it rather than silently never-match (fail closed).
+                return Err(ManifestError::Field {
+                    rule: rule.to_string(),
+                    field: "region (bottom_non_empty_lines arg must be > 0)".to_string(),
+                });
+            }
             return Ok(Region::BottomNonEmptyLines(n));
         }
         match s {
@@ -225,6 +238,14 @@ impl Gate {
         rule: &str,
         depth: usize,
     ) -> Result<Vec<Gate>, ManifestError> {
+        // An empty `all`/`any` is fail-open: `all([])` matches every screen
+        // (vacuous truth), so a high-priority rule with `all = []` would pin its
+        // state on every poll. Reject it at parse rather than mis-fire silently.
+        if arr.is_empty() {
+            return Err(ManifestError::BadGate {
+                rule: rule.to_string(),
+            });
+        }
         arr.iter()
             .map(|child| Gate::parse(child, rule, depth + 1))
             .collect()
@@ -269,6 +290,14 @@ impl ManifestRule {
                 field: "id".to_string(),
             })?
             .to_string();
+        if id.trim().is_empty() {
+            // The id seasons every error and rides in the Verdict; an empty one
+            // makes both useless. Require it non-blank.
+            return Err(ManifestError::Field {
+                rule: "<unnamed>".to_string(),
+                field: "id (must be non-empty)".to_string(),
+            });
+        }
         let str_field = |f: &str| {
             v.get(f)
                 .and_then(|x| x.as_str())
@@ -326,7 +355,9 @@ pub struct Manifest {
     /// unused, so a later remote manifest can gate"). Defaults to 0.
     pub min_engine_version: u32,
     /// Rules sorted by `priority` descending; ties keep TOML order (stable sort).
-    pub rules: Vec<ManifestRule>,
+    /// Private so the sort invariant `evaluate` relies on can only be established
+    /// by [`parse`](Manifest::parse); read via [`rules`](Manifest::rules).
+    rules: Vec<ManifestRule>,
 }
 
 impl Manifest {
@@ -359,6 +390,12 @@ impl Manifest {
             min_engine_version,
             rules,
         })
+    }
+
+    /// The parsed rules, highest-priority-first. Read-only: the sort invariant is
+    /// owned by [`parse`](Manifest::parse).
+    pub fn rules(&self) -> &[ManifestRule] {
+        &self.rules
     }
 
     /// Return the highest-priority rule whose gate matches the screen, or `None`
@@ -421,9 +458,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.min_engine_version, 2);
-        assert_eq!(m.rules.len(), 2);
-        assert_eq!(m.rules[0].id, "high", "highest priority sorts first");
-        assert_eq!(m.rules[1].id, "low");
+        assert_eq!(m.rules().len(), 2);
+        assert_eq!(m.rules()[0].id, "high", "highest priority sorts first");
+        assert_eq!(m.rules()[1].id, "low");
     }
 
     #[test]
@@ -620,7 +657,7 @@ mod tests {
     #[test]
     fn empty_manifest_parses_to_no_rules() {
         let m = Manifest::parse("min_engine_version = 1").unwrap();
-        assert!(m.rules.is_empty());
+        assert!(m.rules().is_empty());
         assert!(m.evaluate(&view("anything")).is_none());
     }
 
@@ -721,5 +758,53 @@ mod tests {
         assert!(m.evaluate(&view(screen)).is_none());
         // needle in the last two lines -> match.
         assert!(m.evaluate(&view("filler\nfiller\nneedle\nlast")).is_some());
+    }
+
+    #[test]
+    fn empty_composite_gate_is_rejected_not_fail_open() {
+        // `all = []` is vacuously true and would pin its state on every screen.
+        // Both empty `all` and empty `any` must be parse errors.
+        for body in ["all = []", "any = []"] {
+            let err = Manifest::parse(&format!(
+                "[[rule]]\nid = \"r\"\nstate = \"x\"\npriority = 1\nregion = \"whole_recent\"\ngate = {{ {body} }}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(err, ManifestError::BadGate { rule } if rule == "r"),
+                "{body} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn bottom_non_empty_lines_zero_is_rejected() {
+        let err = Manifest::parse(
+            r#"
+            [[rule]]
+            id = "r"
+            state = "x"
+            priority = 1
+            region = "bottom_non_empty_lines(0)"
+            gate = { contains = "x" }
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ManifestError::Field { rule, .. } if rule == "r"));
+    }
+
+    #[test]
+    fn empty_id_is_rejected() {
+        let err = Manifest::parse(
+            r#"
+            [[rule]]
+            id = ""
+            state = "x"
+            priority = 1
+            region = "whole_recent"
+            gate = { contains = "x" }
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ManifestError::Field { field, .. } if field.starts_with("id")));
     }
 }
