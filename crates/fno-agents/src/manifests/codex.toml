@@ -1,0 +1,58 @@
+# Codex readiness manifest (E6.3) - declarative port of the hardcoded
+# `CodexReadinessDetector` / `prompt_ready` in `readiness.rs`.
+#
+# State vocabulary (consumed by the daemon badge when E2 wires evaluate() in):
+#   idle    -> the CLI is waiting for input (the old `is_ready == true`)
+#   working -> mid-render / mid-turn, do NOT send input (`is_ready == false`)
+#   blocked -> a wall the operator must clear first; never false-ready
+# No matching rule -> the engine returns None and the caller refuses to guess
+# (readiness.rs Open Question #9: no byte-count fallback).
+#
+# Arbitration reproduces `prompt_ready`'s short-circuit exactly:
+#   auth_wall (980) > busy (900) > idle_prompt (100)
+# so a screen showing both a prompt glyph AND an auth wall / busy marker
+# resolves to blocked/working (not-ready), matching the imperative early return.
+#
+# The bottom_non_empty_lines(3) region IS the old STATUS_REGION_LINES = 3: it
+# scopes the wall/busy match to the composer + status bar so a model reply that
+# merely mentions "Working" up in scrollback does not pin the agent not-ready
+# (the original Codex review P1 fix). idle_prompt reads only the last line,
+# matching `last.trim_end().ends_with(glyph)`.
+#
+# ponytail: glyphs/markers mirror readiness.rs (PROMPT_GLYPHS, BUSY_MARKERS,
+# WALL_MARKERS); pin them against a live codex TUI via
+# cli/scripts/smoke/capture-readiness-grid.sh when E2 lands. Conservative bias
+# holds: a wrong glyph is a false-NOT-ready (daemon waits), never a false-ready.
+
+[[rule]]
+id = "auth_wall"
+state = "blocked"
+priority = 980
+region = "bottom_non_empty_lines(3)"
+gate = { any = [
+  { contains = "Waiting for auth" },
+  { contains = "waiting for auth" },
+  { contains = "Do you trust" },
+  { contains = "Login required" },
+] }
+
+[[rule]]
+id = "busy"
+state = "working"
+priority = 900
+region = "bottom_non_empty_lines(3)"
+gate = { any = [
+  { contains = "esc to interrupt" },
+  { contains = "Esc to interrupt" },
+  { contains = "Working" },
+  { contains = "Thinking" },
+] }
+
+# Last non-blank line ends with a prompt glyph (❯ › ▌), optional trailing space.
+# Literal (single-quoted) TOML string so the backslash reaches the regex engine.
+[[rule]]
+id = "idle_prompt"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(1)"
+gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }

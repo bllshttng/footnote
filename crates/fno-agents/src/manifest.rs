@@ -12,13 +12,14 @@
 //! rule's `state` (and its `skip_state_update` flag) - so a "yes" buried in
 //! scrollback never out-votes a live-region rule that out-prioritizes it.
 //!
-//! Scope (design `2026-06-26-inside-out-detection-manifests.md`, the E6.2 leaf):
-//! parser + region vocabulary + gate evaluator + priority arbiter. NOT in scope:
-//! the actual `claude.toml`/`codex.toml`/`gemini.toml` rule files (E6.3) and
-//! wiring the verdict into the daemon state badge (E6.3+E2), so nothing here is
-//! `include_str!`'d or called from the runtime yet. Remote/cached/version-gated
-//! resolution is a logged fast-follow (`min_engine_version` is parsed now so a
-//! later remote manifest can gate, but is otherwise unused).
+//! Scope: E6.2 built the parser + region vocabulary + gate evaluator + priority
+//! arbiter; E6.3 added the bundled `claude.toml`/`codex.toml`/`gemini.toml` rule
+//! files and the [`load_manifest`] resolution chain (bundled + local override).
+//! Still NOT wired into the runtime: the daemon state badge consumes
+//! [`Manifest::evaluate`] only once E2 lands live claude panes to tune against.
+//! Remote/cached/version-gated resolution is a logged fast-follow
+//! (`min_engine_version` is parsed now so a later remote manifest can gate, but
+//! is otherwise unused).
 //!
 //! ponytail: a rule's regexes recompile on each `evaluate` (regions are tiny,
 //! evaluate runs at human-perception cadence on readiness polls); cache compiled
@@ -28,6 +29,7 @@
 
 use crate::readiness::ScreenView;
 use regex::Regex;
+use std::path::Path;
 
 /// Max nesting depth for a [`Gate`] tree. A pathological manifest (deeply nested
 /// `all`/`any`/`not`) is refused while building the [`Gate`] so `evaluate`'s
@@ -43,6 +45,8 @@ const MAX_GATE_DEPTH: usize = 16;
 pub enum ManifestError {
     #[error("manifest is not valid TOML: {0}")]
     Toml(String),
+    #[error("manifest io error for {path}: {detail}")]
+    Io { path: String, detail: String },
     #[error("rule {rule}: missing or wrong-typed field '{field}'")]
     Field { rule: String, field: String },
     #[error("rule {rule}: unknown region selector '{region}'")]
@@ -151,8 +155,9 @@ impl Region {
 /// takes the bottommost `╰`/`╭` pair, so a scrollback table can be extracted as
 /// stale "prompt body" and let a rule false-match (codex peer P2). Disambiguating
 /// composer-vs-scrollback needs ground truth (the box near the status area / on the
-/// cursor row), which is E6.3's job against a live claude TUI; deliberately not
-/// guessed here. No rule consumes this region until E6.3.
+/// cursor row) against a live claude TUI; deliberately not guessed here. E6.3's
+/// `claude.toml` `live_prompt_box` rule consumes this region, so that
+/// disambiguation is its load-bearing follow-up (carveout, pinned when E2 lands).
 fn prompt_box_body(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let Some(bottom) = lines.iter().rposition(|l| l.contains('╰')) else {
@@ -479,6 +484,57 @@ impl Manifest {
             })
         })
     }
+}
+
+/// The detection manifest compiled into the binary for a known agent (E6.3).
+/// Returns `None` for an unknown agent - the caller fails loud rather than
+/// guessing a manifest (mirrors `readiness.rs`'s Open Question #9: no
+/// fail-open default).
+pub fn bundled_manifest(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" => Some(include_str!("manifests/claude.toml")),
+        "codex" => Some(include_str!("manifests/codex.toml")),
+        "gemini" => Some(include_str!("manifests/gemini.toml")),
+        _ => None,
+    }
+}
+
+/// Resolve and parse an agent's manifest. v1 resolution chain (design: bundled +
+/// local override; remote/cached deferred): a readable `<agent>.toml` in
+/// `override_dir` wins over the bundled copy, so an operator can hand-author a
+/// rule file without a rebuild.
+///
+/// Returns `None` when no manifest exists for `agent` (unknown agent, no
+/// override) - the caller decides what "no manifest" means and never guesses.
+/// `Some(Err(..))` is a present-but-malformed manifest (the override or bundled
+/// TOML failed to parse), surfaced verbatim so a bad hand edit fails loud
+/// instead of silently falling back.
+pub fn load_manifest(
+    agent: &str,
+    override_dir: Option<&Path>,
+) -> Option<Result<Manifest, ManifestError>> {
+    if let Some(dir) = override_dir {
+        let path = dir.join(format!("{agent}.toml"));
+        // A PRESENT override file is honoured as the operator's intent and fails
+        // loud: a parse-bad TOML surfaces ManifestError::Toml, and a present file
+        // that won't read (invalid UTF-8, permission-denied, lookup error)
+        // surfaces ManifestError::Io. ONLY a genuinely absent override (a
+        // NotFound read error) falls through to bundled. We match on the read
+        // error kind rather than pre-checking is_file(), because is_file()
+        // collapses every metadata error (permission, symlink loop) to false and
+        // would silently fall back to bundled on a real error (codex peer P2).
+        match std::fs::read_to_string(&path) {
+            Ok(text) => return Some(Manifest::parse(&text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Some(Err(ManifestError::Io {
+                    path: path.display().to_string(),
+                    detail: e.to_string(),
+                }))
+            }
+        }
+    }
+    bundled_manifest(agent).map(Manifest::parse)
 }
 
 #[cfg(test)]
@@ -973,5 +1029,194 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ManifestError::Field { field, .. } if field.starts_with("id")));
+    }
+
+    // ---- E6.3: bundled rule files (claude/codex/gemini) ----
+
+    use crate::readiness::{CodexReadinessDetector, GeminiReadinessDetector, ReadinessDetector};
+
+    fn bundled(agent: &str) -> Manifest {
+        Manifest::parse(bundled_manifest(agent).expect("bundled manifest exists"))
+            .expect("bundled manifest parses")
+    }
+
+    /// Derive the old boolean readiness from a manifest verdict: ready only when
+    /// the live state is `idle` and the rule did not ask us to hold state. This
+    /// is the mapping the daemon badge will use when E2 wires evaluate() in.
+    fn manifest_ready(m: &Manifest, screen: &ScreenView) -> bool {
+        matches!(m.evaluate(screen), Some(v) if v.state == "idle" && !v.skip_state_update)
+    }
+
+    #[test]
+    fn bundled_manifests_all_parse() {
+        for agent in ["claude", "codex", "gemini"] {
+            let m = bundled(agent);
+            assert!(!m.rules().is_empty(), "{agent}.toml has rules");
+        }
+        assert!(
+            bundled_manifest("opencode").is_none(),
+            "unknown agent -> None"
+        );
+    }
+
+    // AC-E6-4: codex/gemini ported to TOML reproduce the hardcoded
+    // CodexReadinessDetector/GeminiReadinessDetector decisions on the exact
+    // readiness.rs test inputs, INCLUDING gemini's "Waiting for auth" false-ready.
+    #[test]
+    fn ac_e6_4_codex_gemini_toml_match_hardcoded_detectors() {
+        let codex_m = bundled("codex");
+        let gemini_m = bundled("gemini");
+        // (input, expected ready) - mirrors readiness.rs's detector tests.
+        let cases: &[(&str, bool)] = &[
+            ("codex 0.130\n\n  build feature X\n\u{276f} ", true), // idle prompt
+            ("running tool...\nEsc to interrupt\n\u{276f}", false), // busy beats glyph
+            ("loading a 5000 byte banner of text", false),         // no glyph -> not ready
+            ("Waiting for auth...\n\u{276f}", false),              // gemini false-ready trap
+            ("Gemini ready\n\u{203a} ", true),                     // › idle glyph
+            // "Working"/"Thinking" up in scrollback must NOT block (Codex P1).
+            (
+                "I am Working on the Thinking task you asked about.\n\
+                 Here is a long reply that mentions Working again.\n\
+                 filler line\nanother filler\n\u{276f} ",
+                true,
+            ),
+        ];
+        for (text, want) in cases {
+            let trimmed = text.trim_end();
+            let screen = view(trimmed);
+            assert_eq!(
+                manifest_ready(&codex_m, &screen),
+                *want,
+                "codex.toml readiness mismatch for {trimmed:?}"
+            );
+            // Cross-check against the real hardcoded detector: the TOML must
+            // agree with the Rust it replaces, not just with `want`.
+            assert_eq!(
+                manifest_ready(&codex_m, &screen),
+                CodexReadinessDetector.is_ready(&screen).unwrap(),
+                "codex.toml diverges from CodexReadinessDetector for {trimmed:?}"
+            );
+            assert_eq!(
+                manifest_ready(&gemini_m, &screen),
+                GeminiReadinessDetector.is_ready(&screen).unwrap(),
+                "gemini.toml diverges from GeminiReadinessDetector for {trimmed:?}"
+            );
+        }
+    }
+
+    // AC-E6-2: claude.toml's braille-spinner osc_title_working rule badges
+    // `working` from the title alone, with the grid showing only scrollback.
+    #[test]
+    fn ac_e6_2_claude_osc_title_spinner_badges_working() {
+        let m = bundled("claude");
+        // Grid is pure scrollback (no spinner glyph); the title carries U+280B.
+        let screen = view_title("old output\nmore scrollback\n", "\u{280b} Compiling");
+        let v = m.evaluate(&screen).expect("spinner title matches");
+        assert_eq!(v.state, "working");
+        assert_eq!(v.rule_id, "osc_title_working");
+        // No title at all -> the title rule cannot fire (engine never guesses).
+        assert!(m
+            .evaluate(&view("old output\nmore scrollback"))
+            .is_none_or(|v| v.rule_id != "osc_title_working"));
+    }
+
+    // AC-E6-3: skip_state_update on claude.toml's transcript_viewer keeps a
+    // ctrl+o transcript pager from flipping the badge to idle.
+    #[test]
+    fn ac_e6_3_claude_transcript_viewer_holds_state() {
+        let m = bundled("claude");
+        let v = m
+            .evaluate(&view("scrollback line\nmore scrollback\n(END)"))
+            .expect("transcript pager marker matches");
+        assert_eq!(v.rule_id, "transcript_viewer");
+        assert!(
+            v.skip_state_update,
+            "pager rule must hold state, not set idle"
+        );
+    }
+
+    // AC-E6-5: highest-priority match wins. A claude whose grid shows an idle
+    // composer box still badges `working` when the OSC title spinner is up,
+    // because osc_title_working (1100) out-prioritizes live_prompt_box (950) -
+    // the title is the authority a scraped grid cannot fake.
+    #[test]
+    fn ac_e6_5_claude_title_spinner_outranks_idle_grid_box() {
+        let m = bundled("claude");
+        let grid = "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\n\
+                    \u{2502} \u{276f} type here \u{2502}\n\
+                    \u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}";
+        // Sanity: with no title, the idle composer box wins -> idle.
+        let v_idle = m.evaluate(&view(grid)).expect("idle box matches");
+        assert_eq!(v_idle.state, "idle");
+        assert_eq!(v_idle.rule_id, "live_prompt_box");
+        // With the spinner title up, working out-prioritizes the same idle box.
+        let v_working = m
+            .evaluate(&view_title(grid, "\u{280b} Working"))
+            .expect("spinner title matches");
+        assert_eq!(v_working.state, "working");
+        assert_eq!(v_working.rule_id, "osc_title_working");
+    }
+
+    // A live permission prompt outranks an idle composer box drawn beneath it:
+    // badging `idle` while a prompt is up would be a false-ready (forbidden).
+    #[test]
+    fn ac_e6_5_claude_permission_prompt_outranks_idle_box() {
+        let m = bundled("claude");
+        // A permission prompt with the composer box still rendered below it.
+        let screen = "do you want to proceed?\n\
+                      1. Yes\n\
+                      2. No\n\
+                      \u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\n\
+                      \u{2502} \u{276f} type \u{2502}\n\
+                      \u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}";
+        let v = m.evaluate(&view(screen)).expect("a rule matches");
+        assert_eq!(
+            v.state, "blocked",
+            "permission prompt must beat the idle box"
+        );
+        assert_eq!(v.rule_id, "permission_prompt");
+    }
+
+    #[test]
+    fn load_manifest_prefers_override_then_bundled_then_none() {
+        // No override dir -> bundled.
+        let m = load_manifest("claude", None)
+            .expect("known agent")
+            .expect("parses");
+        assert!(!m.rules().is_empty());
+        // Unknown agent, no override -> None (caller fails loud).
+        assert!(load_manifest("opencode", None).is_none());
+
+        // A readable <agent>.toml override wins over the bundled copy.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("codex.toml"),
+            "[[rule]]\nid = \"override_only\"\nstate = \"idle\"\npriority = 1\nregion = \"whole_recent\"\ngate = { contains = \"OVR\" }\n",
+        )
+        .unwrap();
+        let m = load_manifest("codex", Some(dir.path()))
+            .expect("override present")
+            .expect("override parses");
+        assert_eq!(m.rules().len(), 1);
+        assert_eq!(m.rules()[0].id, "override_only");
+        // A missing override file for another agent falls through to bundled.
+        let m = load_manifest("gemini", Some(dir.path()))
+            .expect("falls back to bundled")
+            .expect("parses");
+        assert!(m.rules().iter().any(|r| r.id == "idle_prompt"));
+        // A present-but-malformed override surfaces the parse error (no silent
+        // fallback to bundled - a bad hand edit must fail loud).
+        std::fs::write(dir.path().join("claude.toml"), "this = is = not = toml").unwrap();
+        assert!(matches!(
+            load_manifest("claude", Some(dir.path())),
+            Some(Err(ManifestError::Toml(_)))
+        ));
+        // A present override that won't read (invalid UTF-8) also fails loud as
+        // an Io error, NOT a silent fallback to bundled (gemini review).
+        std::fs::write(dir.path().join("gemini.toml"), [0xff, 0xfe, 0x00]).unwrap();
+        assert!(matches!(
+            load_manifest("gemini", Some(dir.path())),
+            Some(Err(ManifestError::Io { .. }))
+        ));
     }
 }

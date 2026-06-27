@@ -1,0 +1,49 @@
+# Gemini readiness manifest (E6.3) - declarative port of the hardcoded
+# `GeminiReadinessDetector` / `prompt_ready` in `readiness.rs`.
+#
+# Identical in rule shape to codex.toml today (gemini shares PROMPT_GLYPHS and
+# the same prompt_ready logic). Kept as its own file because manifests resolve
+# per agent id and these WILL diverge when each is pinned against its live TUI;
+# collapsing them would break the per-agent resolution the engine relies on.
+#
+# The load-bearing case (design Open Question #3): gemini's "Waiting for auth"
+# is a known FALSE-READY - a prompt glyph is on screen but the CLI is at an auth
+# wall. The auth_wall rule (priority 980, above idle_prompt's 100) is what keeps
+# it from badging idle. See readiness.rs WALL_MARKERS.
+#
+# State vocabulary + arbitration: see codex.toml header (same contract).
+#
+# ponytail: glyphs/markers mirror readiness.rs; pin against a live gemini TUI
+# (capture-readiness-grid.sh) when E2 lands. Conservative bias: a wrong glyph is
+# false-NOT-ready, never false-ready.
+
+[[rule]]
+id = "auth_wall"
+state = "blocked"
+priority = 980
+region = "bottom_non_empty_lines(3)"
+gate = { any = [
+  { contains = "Waiting for auth" },
+  { contains = "waiting for auth" },
+  { contains = "Do you trust" },
+  { contains = "Login required" },
+] }
+
+[[rule]]
+id = "busy"
+state = "working"
+priority = 900
+region = "bottom_non_empty_lines(3)"
+gate = { any = [
+  { contains = "esc to interrupt" },
+  { contains = "Esc to interrupt" },
+  { contains = "Working" },
+  { contains = "Thinking" },
+] }
+
+[[rule]]
+id = "idle_prompt"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(1)"
+gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }
