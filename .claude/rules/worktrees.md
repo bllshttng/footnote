@@ -4,13 +4,18 @@ The single place that says where git worktrees go for this repo and what to do a
 
 ## The rule
 
-**Create worktrees at `~/conductor/workspaces/abilities/<name>` and nowhere else.**
+**The worktree root is config-driven via `config.paths.worktrees_base`.**
 
-After `git worktree add`, run the canonical setup script:
+- **Unset (OSS-neutral default):** harness-native `<repo>/.claude/worktrees/<name>`. That directory is gitignored, so `rg`/Grep already skip it. No relocation, zero config.
+- **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>`.
+- **This repo's setup:** the maintainer sets `config.paths.worktrees_base: ~/conductor/workspaces` in their **global** `~/.fno/settings.yaml`, so every footnote worktree lands at `~/conductor/workspaces/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`, e.g. `footnote`).
+- **`worktree.use_conductor_canonical: true` is DEPRECATED:** it still works (behaves as `worktrees_base = ~/conductor/workspaces`), but prefer `config.paths.worktrees_base`. The single knob is honored by the `WorktreeCreate` hook, `cli/src/fno/worktree.py` (the megawalk walker), and `cli/src/fno/worktree_paths.py` (the agents runtime; its own neutral default is `~/.fno/worktrees/{proj}-{name}`).
+
+After `git worktree add`, run the canonical setup script (paths below assume the maintainer's `~/conductor/workspaces` base; substitute your own base or the harness-native default):
 
 ```bash
-git worktree add ~/conductor/workspaces/abilities/<name> <branch>
-cd ~/conductor/workspaces/abilities/<name>
+git worktree add ~/conductor/workspaces/<repo>/<name> <branch>
+cd ~/conductor/workspaces/<repo>/<name>
 bash scripts/setup/setup-worktree.sh
 ```
 
@@ -24,9 +29,9 @@ bash scripts/setup/archive-worktree.sh <name|path>
 
 It enforces strict pre-removal checks (clean working tree, no unpushed commits, no live target session), prompts before SIGTERM'ing any process rooted in the worktree path, runs `git worktree remove` + `git worktree prune`, and preserves the branch. Flags: `--force` (skip checks), `--yes` (skip process-kill prompt), `--delete-branch` (drop the branch with `git branch -D` after removal). The plain alternative is `git worktree remove <path>`; never use `rm -rf` (leaves dangling refs in `.git/worktrees/`).
 
-## Why the conductor location is canonical
+## Why this repo keeps the conductor location (via the knob)
 
-- Every existing footnote worktree already lives under `~/conductor/workspaces/abilities/` (athens, davis, milan-v1, montpelier, nairobi-v1, ...). Consistency keeps `git worktree list` legible and avoids inventorying multiple roots.
+- Every existing footnote worktree already lives under `~/conductor/workspaces/footnote/` (athens, davis, milan-v1, montpelier, nairobi-v1, ...). Consistency keeps `git worktree list` legible and avoids inventorying multiple roots. This is a per-environment choice set with `config.paths.worktrees_base: ~/conductor/workspaces`, not a hardcoded default - an OSS user who sets nothing gets harness-native `.claude/worktrees/`.
 - Conductor itself drops worktrees there and calls `scripts/setup/setup-worktree.sh` via `conductor.json`. Other creation paths converging on the same location means agents, Conductor, and the CLI all produce the same end state.
 - `setup-worktree.sh` symlinks `.fno/` state per-file from canonical, so target gates, the backlog graph, events.jsonl, the inbox, and the ledger stay coherent across worktrees. A worktree somewhere else either misses these links or has to reinvent them.
 - `internal/` at the worktree root is symlinked absolutely to the canonical's `internal/` by `setup-worktree.sh`, so the Obsidian vault references resolve regardless of worktree depth, but only when the setup script has run.
@@ -36,8 +41,8 @@ It enforces strict pre-removal checks (clean working tree, no unpushed commits, 
 | Path | Triggered by | How it lands at the canonical location |
 |---|---|---|
 | Conductor | Conductor UI | `conductor.json` `scripts.setup` runs `setup-worktree.sh`; worktree path is set by Conductor itself |
-| Raw `git worktree add` | Agent or terminal | Agent reads `AGENTS.md`, sees this rule, places at `~/conductor/workspaces/abilities/...`, then runs the setup script |
-| `claude --worktree <name>` (footnote-ecosystem project) | Claude Code CLI + footnote plugin | The plugin's `WorktreeCreate` hook (`hooks/worktree-setup.sh`) reads `worktree.use_conductor_canonical: true` from `.fno/settings.yaml` and redirects to `~/conductor/workspaces/<repo>/<name>` before running its existing setup (env copy, dep install, verification). Repo name from `basename $(git rev-parse --show-toplevel)`. |
+| Raw `git worktree add` | Agent or terminal | Agent reads `AGENTS.md`, sees this rule, places at the configured base (`<worktrees_base>/<repo>/<name>`, e.g. `~/conductor/workspaces/footnote/...`) or harness-native `.claude/worktrees/<name>` when unset, then runs the setup script |
+| `claude --worktree <name>` (footnote-ecosystem project) | Claude Code CLI + footnote plugin | The plugin's `WorktreeCreate` hook (`hooks/worktree-setup.sh`) reads `config.paths.worktrees_base` from `.fno/settings.yaml` (via `fno config get`). Set -> relocate to `<base>/<repo>/<name>`; the deprecated `worktree.use_conductor_canonical: true` -> `~/conductor/workspaces/<repo>/<name>`; unset -> leave harness-native `<repo>/.claude/worktrees/<name>` in place. Then runs its existing setup (env copy, dep install, verification). Repo name from `basename $(git rev-parse --show-toplevel)`. |
 | `claude --worktree <name>` (non-footnote project) | Claude Code CLI | Wire `scripts/setup/worktree-create-hook.sh` into your **user-global** `~/.claude/settings.json` (recipe below). Falls back to Claude's default `.claude/worktrees/<name>` if not wired. |
 | Warp tab from `git worktree add` | Warp UI | Place the worktree at the canonical location first; point Warp at it after (see Warp TOML snippet in `AGENTS.md` history). |
 
@@ -66,25 +71,20 @@ Wire the script into `~/.claude/settings.json` so `claude --worktree <name>` red
 
 The script reads the repo name from `git rev-parse --path-format=absolute --git-common-dir`, so the same wiring works for every repo. After redirecting it runs `scripts/setup/setup-worktree.sh` if present; absent that, the worktree is bare. If the host repo has its own bootstrap (env copy, dep install), point its own setup script from `WorktreeCreate` instead - the footnote script is one option, not the only one.
 
-For footnote-ecosystem projects, prefer the plugin hook over this recipe (it also handles dep install and verification automatically). The two hooks must not both fire for the same project; the plugin hook gates on `worktree.use_conductor_canonical: true` in `.fno/settings.yaml`, so a project that doesn't set the flag falls through to whatever user-global hook you have.
+For footnote-ecosystem projects, prefer the plugin hook over this recipe (it also handles dep install and verification automatically). The two hooks must not both fire for the same project; the plugin hook always runs in a footnote project (it relocates when `config.paths.worktrees_base` / the deprecated `use_conductor_canonical` is set, else leaves the worktree harness-native), so do not also wire a user-global hook for the same repo.
 
-## Forbidden locations
+## Location by config
 
-Do NOT create worktrees at any of:
+- **`worktrees_base` unset:** `<repo>/.claude/worktrees/<name>` is the harness-native default (gitignored, so search-clean). This is now allowed - the old blanket "inside-checkout is forbidden" rule is retired.
+- **`worktrees_base` set (e.g. this repo's `~/conductor/workspaces`):** worktrees land at `<base>/<repo>/<name>`; the `WorktreeCreate` hook relocates `claude --worktree` there, so don't hand-place a worktree in `.claude/worktrees/` in that environment.
 
-- `.claude/worktrees/<name>` (Claude Code's default for `--worktree`, the `superpowers:using-git-worktrees` skill default, and the `fno:git-worktrees` skill default). The `WorktreeCreate` hook now redirects `claude --worktree` here, so you should not see Claude Code land in `.claude/worktrees/` for general worktree creation.
-- `~/.warp/worktrees/abilities/<name>` (Warp's own worktree directory). Sprawl; setup script does not run there automatically.
-- `<repo>/worktrees/<name>` or any path inside the canonical checkout. Confuses `find`, breaks `.gitignore` reasoning.
+Still forbidden regardless of config (sprawl / un-inventoriable / no setup script):
+
+- `~/.warp/worktrees/<repo>/<name>` (Warp's own worktree directory). Setup script does not run there automatically.
+- `<repo>/worktrees/<name>` or any non-`.claude` path inside the canonical checkout. Confuses `find`, breaks `.gitignore` reasoning.
 - `../<name>` or any sibling-of-canonical path. Hard to inventory.
 
-**Exceptions (sanctioned inside-checkout placement):** two flows intentionally write worktrees at `.claude/worktrees/<name>` and are exempt from the inside-checkout redirect:
-
-- the cross-project pipeline (`/target cross-project`) writes per-project worktrees at `.claude/worktrees/{feature}` in each participating repo (scoped, short-lived, torn down per feature; see `AGENTS.md` "Cross-Project Worktrees"). It creates them via `git worktree add` directly, not the `WorktreeCreate` hook, so the redirect never fires for it.
-- `/speculate` materializes its parallel variations at `.claude/worktrees/<name>` via its own copy of the setup script (`skills/speculate/scripts/worktree-setup.sh`), which deliberately does NOT carry the inside-checkout guard.
-
-Do not generalize either; both are scoped, documented exceptions.
-
-If a skill or tool defaults to one of these paths for a general-purpose worktree, override with `~/conductor/workspaces/abilities/<name>` at invocation time.
+**`/speculate`** keeps its own `.claude/worktrees/<name>` placement (via `skills/speculate/scripts/worktree-setup.sh`, which deliberately omits the relocation block) even when `worktrees_base` is set - a scoped, documented exception. Do not generalize it.
 
 ## Enforcement
 
@@ -92,7 +92,7 @@ The rule is actively enforced (not just documented) by three mechanisms that sha
 
 - **SessionStart heads-up (universal, advisory).** `hooks/session-start.sh` consults the verdict on every session, including `claude --bg`, and surfaces a non-blocking note when the session is on the canonical checkout's protected branch and/or a nested worktree exists under `.claude/worktrees/`. It never blocks a session.
 - **Implementation-entry refusal (`/target`, `/do`, `/fix`).** All three consult the same verdict before the first write. On `canonical-protected` they refuse with the branch name and the `TARGET_LOCATION_OK=main-acknowledged` escape (`/do` and `/fix` via a Step 0 preflight; `init-target-state.sh` keeps the hard refusal for `/target`). Attended `/target` additionally OFFERs to create a conductor worktree and continue there. One shared verdict means no per-skill drift.
-- **Inside-checkout prevention.** The `WorktreeCreate` hook (`hooks/worktree-setup.sh`) redirects any worktree path resolving inside `.claude/worktrees/` to `~/conductor/workspaces/<repo>/<name>`, regardless of the `worktree.use_conductor_canonical` flag; the flag only chooses the redirect target, never whether inside-checkout is allowed (the `/speculate` exception above keeps its own placement).
+- **Config-driven relocation.** The `WorktreeCreate` hook (`hooks/worktree-setup.sh`) relocates `claude --worktree` to `<config.paths.worktrees_base>/<repo>/<name>` when that knob is set (or `~/conductor/workspaces/<repo>/<name>` for the deprecated `worktree.use_conductor_canonical: true`); when unset it leaves the worktree harness-native in `.claude/worktrees/` (the `/speculate` exception keeps its own placement regardless).
 
 ## What gets linked vs left local
 
