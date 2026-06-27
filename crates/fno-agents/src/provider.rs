@@ -29,8 +29,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::envelope::{Envelope, JsonEnvelope};
-use crate::readiness::{CodexReadinessDetector, GeminiReadinessDetector, ReadinessDetector};
+use crate::envelope::{Envelope, JsonEnvelope, NoEnvelope};
+use crate::readiness::{
+    AgyReadinessDetector, CodexReadinessDetector, GeminiReadinessDetector, ReadinessDetector,
+};
 use crate::supervisor::RestartPolicy;
 use crate::ParsedEvent;
 
@@ -882,6 +884,135 @@ impl ProviderWithPty for GeminiProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Agy — PTY-managed pane, PLAIN-TEXT (no JSON envelope, no session id).
+// ---------------------------------------------------------------------------
+
+/// Agy (Antigravity CLI) provider. Runs Gemini models under the hood but, unlike
+/// gemini, has NO `--output-format json` — it emits plain text. So its envelope
+/// is [`NoEnvelope`] (no structural JSON wrapper) and it carries no parseable
+/// session id (reachability is always inconclusive; the headless one-shot path
+/// lives in `agy_ask.rs`). `-p`/`--print` takes the prompt as its VALUE, so it
+/// is appended LAST in every argv.
+pub struct AgyProvider;
+
+impl AgyProvider {
+    /// Yolo posture: agy's never-prompt full-auto is
+    /// `--dangerously-skip-permissions`. Empty otherwise (interactive panes keep
+    /// agy's approval UI for a human).
+    fn yolo(yolo: bool) -> Vec<String> {
+        if yolo {
+            vec!["--dangerously-skip-permissions".into()]
+        } else {
+            vec![]
+        }
+    }
+}
+
+impl Provider for AgyProvider {
+    fn name(&self) -> &'static str {
+        "agy"
+    }
+
+    fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
+        // Headless create is the autonomous lane: ALWAYS never-prompt so an
+        // unattended agy cannot wedge on its first approval prompt.
+        let mut argv = vec!["agy".into(), "--dangerously-skip-permissions".into()];
+        argv.push("-p".into());
+        argv.push(ctx.message.clone());
+        argv
+    }
+
+    fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
+        // agy resume keys on the conversation id (`--conversation <id>`); plain
+        // -p prompt as the value, last.
+        let mut argv = vec![
+            "agy".into(),
+            "--dangerously-skip-permissions".into(),
+            "--conversation".into(),
+            ctx.session_id.clone(),
+        ];
+        argv.push("-p".into());
+        argv.push(ctx.message.clone());
+        argv
+    }
+
+    fn create_interactive_argv(&self, ctx: &CreateContext) -> Option<Vec<String>> {
+        // Fresh interactive agy. `-i/--prompt-interactive` seeds a prompt then
+        // stays interactive; an empty task opens a bare interactive session.
+        let mut argv = vec!["agy".into()];
+        if !ctx.message.is_empty() {
+            argv.push("-i".into());
+            argv.push(ctx.message.clone());
+        }
+        argv.extend(Self::yolo(ctx.yolo));
+        Some(argv)
+    }
+
+    fn resume_interactive_argv(&self, ctx: &ResumeContext) -> Option<Vec<String>> {
+        // Promote: `agy --conversation <id>` resumes a prior session into the
+        // interactive TUI; an optional `-i <task>` injects a new prompt.
+        let mut argv = vec![
+            "agy".into(),
+            "--conversation".into(),
+            ctx.session_id.clone(),
+        ];
+        if !ctx.message.is_empty() {
+            argv.push("-i".into());
+            argv.push(ctx.message.clone());
+        }
+        argv.extend(Self::yolo(ctx.yolo));
+        Some(argv)
+    }
+
+    fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
+        // agy has no structured stream — the whole chunk is the reply text. An
+        // empty chunk is Unknown (nothing to surface).
+        if chunk.trim().is_empty() {
+            ParsedEvent::Unknown {
+                raw: chunk.to_string(),
+            }
+        } else {
+            ParsedEvent::ReplyComplete {
+                text: chunk.to_string(),
+                duration_ms: 0,
+            }
+        }
+    }
+
+    fn reachability(
+        &self,
+        _entry: &AgentEntry,
+        _timeout: Duration,
+    ) -> Result<bool, ReachabilityProbeError> {
+        // agy carries no easily-probed session store and no parseable session id,
+        // so a probe is ALWAYS inconclusive — never false-orphan a live agy pane.
+        Err(ReachabilityProbeError::new(
+            "agy",
+            "agy sessions are not probeable (plain-text, no session store)",
+        ))
+    }
+
+    fn as_pty(&self) -> Option<&dyn ProviderWithPty> {
+        Some(self)
+    }
+}
+
+impl ProviderWithPty for AgyProvider {
+    fn readiness_detector(&self) -> Box<dyn ReadinessDetector> {
+        Box::new(AgyReadinessDetector)
+    }
+
+    fn envelope(&self) -> Box<dyn Envelope> {
+        // Plain-text stdin: no JSON wrapper (agy has no structured input).
+        Box::new(NoEnvelope)
+    }
+
+    fn default_restart_policy(&self) -> RestartPolicy {
+        RestartPolicy::default()
+    }
+}
+
 /// Parse gemini's single JSON document. Gemini emits one blob at EOF (the
 /// structural cleavage from codex), so this expects the COMPLETE document;
 /// partial input parses as [`ParsedEvent::Unknown`].
@@ -972,6 +1103,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "claude" => Some(Box::new(ClaudeProvider)),
         "codex" => Some(Box::new(CodexProvider)),
         "gemini" => Some(Box::new(GeminiProvider)),
+        "agy" => Some(Box::new(AgyProvider)),
         _ => None,
     }
 }
