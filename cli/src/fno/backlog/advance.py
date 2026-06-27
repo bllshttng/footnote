@@ -510,17 +510,23 @@ def advance(
 
 
 def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> list[dict]:
-    """Ready, cross-project, direct ``blocked_by`` dependents of the closed node.
+    """Ready, direct ``blocked_by`` dependents of the closed node.
 
     Reads the graph (``read_graph`` recomputes ``_status`` at read), so a
     dependent whose only open blocker was the just-closed node already reads
-    ``ready`` here. Returns minimal dicts ``{id, project, slug, cwd}``.
+    ``ready`` here. Returns minimal dicts
+    ``{id, project, slug, cwd, cross_project}``.
 
-    Cross-project ONLY (``project != closed_project``): same-project successors
-    stay with advance()'s project-scoped ``next`` selection so existing behavior
-    is byte-identical (Boundaries: a pure single-project plan dispatches nothing
-    new here). Raises on a graph read error so advance_dependents skips rather
-    than guessing (Failure Modes: Errors).
+    RC1 (x-33b2): returns BOTH same-project and cross-project dependents, each
+    tagged with ``cross_project = (project != closed_project)``. The caller routes
+    a same-project dependent through the node's OWN recorded ``cwd`` (advance()'s
+    same-project spawn) and a cross-project one through its work-map root. The two
+    routes share the same ``dispatch:<id>`` + ``node:<id>`` dedup so a successor
+    seen by both this path and advance()'s ``next`` selection dispatches at most
+    once. advance_dependents fails closed when ``closed_project`` is None (it
+    cannot classify, so prefers dispatching nothing over a misroute). Raises on a
+    graph read error so advance_dependents skips rather than guessing (Failure
+    Modes: Errors).
     """
     from fno.graph.store import read_graph
     from fno.paths import graph_json
@@ -546,16 +552,20 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
         # in-flight signal behind, so this field guard is the durable one.
         if e.get("pr_number") and not e.get("completed_at"):
             continue
-        if (e.get("project") or None) == (closed_project or None):
-            continue  # same-project -> advance()'s `next` owns it
         node_id = e.get("id")
         if not node_id:
             continue
+        # RC1: no longer exclude same-project successors here. advance()'s `next`
+        # selection can skip past an already-claimed/epic head and never reach a
+        # genuinely-unblocked same-project dependent (the reported starvation);
+        # tag the dependent so the caller spawns it via the same-project route
+        # (cwd = its own root), deduped against `next` by dispatch:<id>+node:<id>.
         out.append({
             "id": node_id,
             "project": e.get("project"),
             "slug": e.get("slug") or e.get("title"),
             "cwd": e.get("cwd"),
+            "cross_project": (e.get("project") or None) != (closed_project or None),
         })
     return out
 
@@ -582,11 +592,15 @@ def _dispatch_one_dependent(
 ) -> AdvanceResult:
     """Resolve one dependent's own project root, dedup, and spawn its worker.
 
-    Reuses advance()'s claim + spawn + event machinery so a cross-project
-    dispatch is byte-for-byte the same launch as a same-project one, only with a
-    different (mapped) ``--cwd`` root.
+    Reuses advance()'s claim + spawn + event machinery. The ``--cwd`` root
+    differs by route (RC1 / LD#2): a CROSS-project dependent launches in its
+    work-map root; a SAME-project dependent launches in the node's OWN recorded
+    ``cwd`` (NEVER the work-map root, which for a foreign-shaped record could land
+    it on a protected branch where the bg worker dies). Everything downstream of
+    root resolution - dedup, spawn, single decision event - is identical.
     """
     node_id = dep["id"]
+    cross_project = bool(dep.get("cross_project"))
 
     def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
         data: dict = {"reason": reason, "node_id": node_id, "closed_node_id": closed_node_id}
@@ -603,17 +617,28 @@ def _dispatch_one_dependent(
         )
         return AdvanceResult("failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error)
 
-    # Resolve the dependent's OWN project root from the work map. Reject (never
-    # guess a cwd for) an unmapped project, surfacing it by name so the operator
-    # sees which project is missing from config.work.workspaces (Boundaries).
     project = dep.get("project")
     if not project:
         return skip("no-project")
-    from fno.graph._intake import project_root_from_settings
 
-    root = project_root_from_settings(project)
-    if not root:
-        return skip("unmapped-project", detail=project)
+    if cross_project:
+        # Cross-project: resolve the dependent's OWN project root from the work
+        # map. Reject (never guess a cwd for) an unmapped project, surfacing it by
+        # name so the operator sees which project is missing from
+        # config.work.workspaces (Boundaries).
+        from fno.graph._intake import project_root_from_settings
+
+        root = project_root_from_settings(project)
+        if not root:
+            return skip("unmapped-project", detail=project)
+    else:
+        # Same-project (RC1 / LD#2): launch in the node's OWN recorded root, the
+        # same cwd advance()'s `next` path would have used. No work-map lookup,
+        # and never the cross-project root. A record with no cwd is unspawnable
+        # here (fail closed rather than guess canonical main).
+        root = dep.get("cwd")
+        if not root:
+            return skip("no-cwd")
 
     # The spawned worker runs in the DEPENDENT's repo, not this one. If that
     # project already has a live walker, let it claim the node - spawning here
@@ -636,7 +661,7 @@ def _dispatch_one_dependent(
             dispatch_key,
             holder,
             ttl_ms=_DISPATCH_TTL_MS,
-            reason=f"cross-project dispatch for {node_id} (dep of {closed_node_id})",
+            reason=f"dependent dispatch for {node_id} (dep of {closed_node_id})",
             root=dispatch_root,
         )
     except ClaimHeldByOther:
@@ -660,13 +685,14 @@ def _dispatch_one_dependent(
             "short_id": short_id,
             "closed_node_id": closed_node_id,
             "agent_name": _worker_agent_name(node_id, dep.get("slug")),
-            "cross_project": True,
+            "cross_project": cross_project,
         },
         ev_path,
     )
     if verbose:
+        _kind = "cross-project" if cross_project else "same-project"
         print(
-            f"advance: dispatched cross-project dependent {node_id} -> "
+            f"advance: dispatched {_kind} dependent {node_id} -> "
             f"target worker {short_id} (--cwd {root})",
             file=sys.stderr,
         )
@@ -681,13 +707,15 @@ def advance_dependents(
     events_path: Optional[Path] = None,
     verbose: bool = False,
 ) -> list[AdvanceResult]:
-    """Dispatch the closed node's now-unblocked cross-project dependents (G1).
+    """Dispatch the closed node's now-unblocked direct dependents (G1 + RC1).
 
     Called alongside advance() on the merge event (reconcile + ``backlog
     advance --closed``). Gated on the same opt-in as advance() and strictly
-    non-fatal. Emits exactly one decision event per dependent (dispatched /
-    skipped / failed); a clean run with no cross-project dependents emits
-    nothing and returns ``[]`` (Boundaries: a zero-dependent close is a no-op).
+    non-fatal. Covers BOTH same-project dependents (RC1, x-33b2: advance()'s
+    `next` can skip past an unbuildable head and starve them) and cross-project
+    dependents (G1). Emits exactly one decision event per dependent (dispatched /
+    skipped / failed); a clean run with no dependents emits nothing and returns
+    ``[]`` (Boundaries: a zero-dependent close is a no-op).
     """
     ev_path = events_path if events_path is not None else _events_path(project_root)
 
@@ -698,6 +726,20 @@ def advance_dependents(
         return []
     if _claim_is_live(_walker_key()):
         return []
+
+    # Fail closed (RC1 Errors / LD#2): without the closed node's project we cannot
+    # tell a same-project dependent (spawn --cwd its own root) from a cross-project
+    # one (spawn --cwd its work-map root). Misrouting a same-project node through
+    # the cross-project path lands it on a protected branch where the bg worker
+    # dies, so prefer dispatching nothing. RC2 ensures both callers now resolve
+    # closed_project from the graph, so None here is the genuine last resort.
+    if closed_project is None:
+        _emit(
+            EVENT_SKIPPED,
+            {"reason": "closed-project-unknown", "closed_node_id": closed_node_id},
+            ev_path,
+        )
+        return [AdvanceResult("skipped", EVENT_SKIPPED, reason="closed-project-unknown")]
 
     try:
         deps = _direct_dependents(closed_node_id, closed_project)

@@ -3592,6 +3592,24 @@ def cmd_advance(
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
 
+    # RC2 (x-33b2): closed_project is the CLOSED NODE's own project, read from the
+    # graph - NEVER the --project next-selection flag. --project restricts which
+    # project advance() picks `next` from; it is normally OMITTED on a manual
+    # `advance --closed A`, which left closed_project=None and defeated
+    # advance_dependents' same-project guard, misrouting a same-project dependent
+    # through the cross-project --cwd path onto a protected branch where the bg
+    # worker dies. Mirror the reconcile path (cli.py reads the node's .project).
+    closed_project: Optional[str] = None
+    if closed:
+        try:
+            from fno.graph._intake import _find_node
+            from fno.graph.store import read_graph
+
+            _cn = _find_node(read_graph(_graph_path()), closed)
+            closed_project = _cn.get("project") if _cn else None
+        except Exception:  # noqa: BLE001 - non-fatal; advance_deps fails closed on None
+            closed_project = None
+
     try:
         result = _advance(closed_node_id=closed, project=project, verbose=verbose)
         # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
@@ -3600,7 +3618,7 @@ def cmd_advance(
         # dispatch:<id> dedup with reconcile's call so a node seen by both the
         # reconcile sweep and this explicit verb dispatches at most once.
         if closed:
-            _advance_deps(closed_node_id=closed, closed_project=project, verbose=verbose)
+            _advance_deps(closed_node_id=closed, closed_project=closed_project, verbose=verbose)
             # G4: route the closed node's contract dependents to a reconcile pass
             # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
             # advance paths so a node seen by all three dispatches at most once.
