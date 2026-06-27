@@ -45,6 +45,8 @@ const MAX_GATE_DEPTH: usize = 16;
 pub enum ManifestError {
     #[error("manifest is not valid TOML: {0}")]
     Toml(String),
+    #[error("manifest io error for {path}: {detail}")]
+    Io { path: String, detail: String },
     #[error("rule {rule}: missing or wrong-typed field '{field}'")]
     Field { rule: String, field: String },
     #[error("rule {rule}: unknown region selector '{region}'")]
@@ -513,12 +515,19 @@ pub fn load_manifest(
 ) -> Option<Result<Manifest, ManifestError>> {
     if let Some(dir) = override_dir {
         let path = dir.join(format!("{agent}.toml"));
-        // A readable override is honoured as the operator's intent: a parse-bad
-        // override surfaces its error (no silent fallback to bundled). An
-        // unreadable file (absent, permission-denied, a directory) is treated
-        // like "no override" and falls through to bundled - the same as missing.
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            return Some(Manifest::parse(&text));
+        // A PRESENT override file is honoured as the operator's intent and fails
+        // loud: a parse-bad TOML surfaces ManifestError::Toml, and a present file
+        // that won't read (invalid UTF-8, permission-denied) surfaces
+        // ManifestError::Io - neither silently falls back to bundled. Only a
+        // genuinely absent override (is_file() == false) falls through to bundled.
+        if path.is_file() {
+            return Some(match std::fs::read_to_string(&path) {
+                Ok(text) => Manifest::parse(&text),
+                Err(e) => Err(ManifestError::Io {
+                    path: path.display().to_string(),
+                    detail: e.to_string(),
+                }),
+            });
         }
     }
     bundled_manifest(agent).map(Manifest::parse)
@@ -1194,6 +1203,16 @@ mod tests {
         // A present-but-malformed override surfaces the parse error (no silent
         // fallback to bundled - a bad hand edit must fail loud).
         std::fs::write(dir.path().join("claude.toml"), "this = is = not = toml").unwrap();
-        assert!(load_manifest("claude", Some(dir.path())).unwrap().is_err());
+        assert!(matches!(
+            load_manifest("claude", Some(dir.path())),
+            Some(Err(ManifestError::Toml(_)))
+        ));
+        // A present override that won't read (invalid UTF-8) also fails loud as
+        // an Io error, NOT a silent fallback to bundled (gemini review).
+        std::fs::write(dir.path().join("gemini.toml"), [0xff, 0xfe, 0x00]).unwrap();
+        assert!(matches!(
+            load_manifest("gemini", Some(dir.path())),
+            Some(Err(ManifestError::Io { .. }))
+        ));
     }
 }

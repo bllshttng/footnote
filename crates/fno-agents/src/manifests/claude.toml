@@ -69,10 +69,13 @@ id = "live_blocked_form"
 state = "blocked"
 priority = 980
 region = "bottom_non_empty_lines(8)"
+# Case-tolerant: claude's exact casing is unpinned (header carveout) and a missed
+# match here would let an idle rule win while a menu is up - a false-ready. Both
+# cases is the safe direction (it can only make `blocked` fire more readily).
 gate = { all = [
-  { contains = "enter to select" },
-  { contains = "esc to cancel" },
-  { not = { contains = "esc to interrupt" } },
+  { any = [ { contains = "enter to select" }, { contains = "Enter to select" } ] },
+  { any = [ { contains = "esc to cancel" }, { contains = "Esc to cancel" } ] },
+  { not = { any = [ { contains = "esc to interrupt" }, { contains = "Esc to interrupt" } ] } },
 ] }
 
 # Idle composer box: a line in the box body starts with ❯ and is not a select
@@ -84,7 +87,7 @@ priority = 950
 region = "prompt_box_body"
 gate = { all = [
   { line_regex = '^\s*\x{276f}' },
-  { not = { contains = "enter to select" } },
+  { not = { any = [ { contains = "enter to select" }, { contains = "Enter to select" } ] } },
 ] }
 
 # Permission prompt ("do you want to proceed?" + a 1. Yes / 2. No menu). Scoped
@@ -97,8 +100,11 @@ id = "permission_prompt"
 state = "blocked"
 priority = 960
 region = "bottom_non_empty_lines(8)"
+# Case-tolerant on the question (header carveout): a missed match would ignore a
+# live permission prompt and let the idle box win - the false-ready Open Q #9
+# forbids. Both cases only makes `blocked` fire more readily (the safe direction).
 gate = { all = [
-  { contains = "do you want to proceed?" },
+  { any = [ { contains = "do you want to proceed?" }, { contains = "Do you want to proceed?" } ] },
   { any = [ { contains = "1. Yes" }, { contains = "1. yes" } ] },
 ] }
 
