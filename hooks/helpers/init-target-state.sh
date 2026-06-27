@@ -457,35 +457,45 @@ trap _init_release_lock EXIT
 # Two orphan signals, checked in order:
 #   1. An explicit terminal status (COMPLETE/BLOCKED/ABORTED) - legacy
 #      manifests that still carried a mutable status field.
-#   2. A dead owner_pid - the immutable manifest carries NO status field, so
-#      liveness of the owning process is the real orphan signal. Without this,
-#      a completed session's manifest survives in the shared .fno and every
-#      new session (even in a fresh worktree, via the .fno symlink) trips on
-#      it and has to hand-clear it.
-# A live owner_pid is preserved: it is either this process resuming or a
-# concurrent sibling that will refuse on the claim. This block only runs under
-# TARGET_START (new-session intent), so reaping a dead owner is always safe.
+#   2. A node claim that is no longer live. The immutable manifest dropped its
+#      status field, so without this a completed session's manifest survives in
+#      the shared .fno and every new session (even in a fresh worktree, via the
+#      .fno symlink) trips on it and hand-clears it. The reap keys on the CLAIM,
+#      NOT owner_pid: owner_pid is the transient `fno target init` wrapper pid
+#      (dead ~1s after init returns, per cli/src/fno/claims/session_pid.py), so
+#      it cannot tell a completed session from a live one. The node claim is
+#      acquired with the DURABLE session pid (nearest claude ancestor) + TTL, so
+#      its liveness is the real signal. A LIVE claim is preserved: a concurrent
+#      or resuming sibling still owns this slot and the claim-acquire layer
+#      below handles the collision - we must never clobber its live manifest
+#      (codex P1 on PR #61). A manifest with no claim key (free-text/plan run)
+#      is preserved conservatively. Degrade-safe: if `fno claim status` errors
+#      or is unparseable, _CLAIM_STATE is empty and we do NOT reap.
+# This block only runs under TARGET_START (new-session intent).
 if [[ -f "$STATE_FILE" ]]; then
-  _STALE_STATUS=$(sed -n 's/^status:[[:space:]]*//p' "$STATE_FILE" | head -1 | xargs 2>/dev/null || true)
-  _OWNER_PID=$(sed -n 's/^owner_pid:[[:space:]]*//p' "$STATE_FILE" | head -1 | xargs 2>/dev/null || true)
+  # sed with `q` quits after the first match: avoids a `head -1` pipeline that
+  # could SIGPIPE the upstream sed under `set -o pipefail` (gemini medium).
+  _STALE_STATUS=$(sed -n '/^status:[[:space:]]*/{s/^status:[[:space:]]*//p;q;}' "$STATE_FILE" | xargs 2>/dev/null || true)
+  _STALE_CLAIM_KEY=$(sed -n '/^target_claim_key:[[:space:]]*/{s/^target_claim_key:[[:space:]]*//p;q;}' "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)
   _STALE_REASON=""
   case "${_STALE_STATUS:-}" in
     COMPLETE|BLOCKED|ABORTED) _STALE_REASON="status $_STALE_STATUS" ;;
   esac
-  # Reuse the lock section's _init_process_alive (ps -p, not kill -0, which
-  # can't disambiguate EPERM from ESRCH). ponytail: no owner_started_at
-  # provenance check here - unlike the lock path, a PID-reuse false "alive"
-  # only skips the reap (benign fallback to today's behavior), never clobbers
-  # a live session.
-  if [[ -z "$_STALE_REASON" && "$_OWNER_PID" =~ ^[0-9]+$ ]] && ! _init_process_alive "$_OWNER_PID"; then
-    _STALE_REASON="dead owner_pid $_OWNER_PID"
+  if [[ -z "$_STALE_REASON" && -n "$_STALE_CLAIM_KEY" ]]; then
+    # `fno claim status --json` is single-line; parse `state` and reap only on a
+    # definitively-not-live verdict. Empty (error/unparseable) -> do NOT reap.
+    _CLAIM_STATE=$(fno claim status "$_STALE_CLAIM_KEY" --json 2>/dev/null \
+      | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' || true)
+    if [[ -n "$_CLAIM_STATE" && "$_CLAIM_STATE" != "live" ]]; then
+      _STALE_REASON="dead claim $_STALE_CLAIM_KEY ($_CLAIM_STATE)"
+    fi
   fi
   if [[ -n "$_STALE_REASON" ]]; then
     _ARCHIVE_PATH="$STATE_DIR/target-state.terminal.$(date -u +%Y%m%dT%H%M%SZ).md"
     mv "$STATE_FILE" "$_ARCHIVE_PATH"
     echo "target: prior session ($_STALE_REASON); archived to $(basename "$_ARCHIVE_PATH"); writing fresh state" >&2
   fi
-  unset _STALE_STATUS _OWNER_PID _STALE_REASON _ARCHIVE_PATH
+  unset _STALE_STATUS _STALE_CLAIM_KEY _STALE_REASON _CLAIM_STATE _ARCHIVE_PATH
 fi
 
 # ── Scratchpad scaffolding ────────────────────────────────────────────

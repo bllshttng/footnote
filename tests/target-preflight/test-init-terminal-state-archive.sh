@@ -57,24 +57,49 @@ iteration: 1
 EOF
 }
 
-# Plant a real-shaped immutable manifest: owner_pid, NO status field. This is
-# what `fno target init` actually writes today; liveness of owner_pid is the
-# only orphan signal (the status-string reaper never fires for these).
-plant_pid_state() {
+# Plant a real-shaped immutable manifest: a transient (always-dead) owner_pid,
+# NO status field, and an optional target_claim_key. This is what
+# `fno target init` actually writes today. The reap keys on the CLAIM's
+# liveness, not owner_pid (which is the transient init wrapper pid, dead ~1s
+# after init returns - codex P1 on PR #61). Pass an empty key for the no-claim
+# free-text case (must be preserved).
+plant_claim_state() {
     local dir="$1"
-    local pid="$2"
+    local key="${2:-}"
     mkdir -p "$dir/.fno"
-    cat > "$dir/.fno/target-state.md" <<EOF
----
-session_id: planted-pid-fixture-20260626
-created_at: 2026-06-26T00:00:00Z
-input: "x-prior"
-owner_pid: $pid
-owner_cwd: "/some/other/worktree"
----
+    {
+        echo "---"
+        echo "session_id: planted-claim-fixture-20260626"
+        echo "created_at: 2026-06-26T00:00:00Z"
+        echo 'input: "x-prior"'
+        echo "owner_pid: 999999"   # transient/dead: must NOT drive the reap
+        echo 'owner_cwd: "/some/other/worktree"'
+        [[ -n "$key" ]] && echo "target_claim_key: \"$key\""
+        echo "---"
+        echo ""
+        echo "# Planted immutable manifest (claim-based fixture)"
+    } > "$dir/.fno/target-state.md"
+}
 
-# Planted immutable manifest (owner_pid, no status)
-EOF
+# Stub `fno` on PATH so the reaper's `fno claim status <key> --json` is
+# deterministic: a key containing "live" reports state live, anything else
+# reports free. No-input fresh init makes no other fno calls, so the stub need
+# not pass anything through.
+make_fno_stub() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/fno" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "claim" && "$2" == "status" ]]; then
+    case "$3" in
+        *live*) printf '{"key": "%s", "state": "live"}\n' "$3" ;;
+        *)      printf '{"key": "%s", "state": "free"}\n' "$3" ;;
+    esac
+    exit 0
+fi
+exit 0
+STUB
+    chmod +x "$dir/fno"
 }
 
 run_init() {
@@ -103,7 +128,7 @@ if [[ $EC -eq 0 ]]; then
 else
     fail "AC1: expected exit 0, got $EC. Output: $OUT"
 fi
-if echo "$OUT" | grep -q "prior session (status COMPLETE)"; then
+if grep -q "prior session (status COMPLETE)" <<<"$OUT"; then
     pass "AC1: archive announcement names COMPLETE"
 else
     fail "AC1: archive announcement missing. Got: $OUT"
@@ -137,7 +162,7 @@ if [[ $EC -eq 0 ]]; then
 else
     fail "AC2: expected exit 0, got $EC. Output: $OUT"
 fi
-if echo "$OUT" | grep -q "prior session (status BLOCKED)"; then
+if grep -q "prior session (status BLOCKED)" <<<"$OUT"; then
     pass "AC2: archive announcement names BLOCKED"
 else
     fail "AC2: archive announcement missing. Got: $OUT"
@@ -161,7 +186,7 @@ if [[ $EC -eq 0 ]]; then
 else
     fail "AC3: expected exit 0, got $EC. Output: $OUT"
 fi
-if echo "$OUT" | grep -q "prior session (status ABORTED)"; then
+if grep -q "prior session (status ABORTED)" <<<"$OUT"; then
     pass "AC3: archive announcement names ABORTED"
 else
     fail "AC3: archive announcement missing. Got: $OUT"
@@ -221,62 +246,95 @@ else
     fail "AC5: no archive file found"
 fi
 
-# --- AC6: dead owner_pid archived (real immutable manifest, no status) -----
+# --- AC6: dead (free) claim archived; transient owner_pid ignored ----------
 echo ""
-echo "--- AC6: dead owner_pid archived ---"
-T="$TMP_BASE/ac6-dead-pid"
+echo "--- AC6: non-live claim archived ---"
+T="$TMP_BASE/ac6-dead-claim"
 make_repo "$T" "feature/x"
-# PID 999999 is well above typical pid_max and reliably dead.
-plant_pid_state "$T" "999999"
-OUT=$(run_init "$T" 2>&1)
+STUB6="$TMP_BASE/stub6"; make_fno_stub "$STUB6"
+# Claim key without "live" -> stub reports state free -> orphan -> reap.
+# owner_pid is the always-dead 999999; it must NOT be what drives the reap.
+plant_claim_state "$T" "node:gone-test"
+OUT=$(run_init "$T" PATH="$STUB6:$PATH" 2>&1)
 EC=$?
 if [[ $EC -eq 0 ]]; then
-    pass "AC6: init succeeds when prior owner_pid is dead"
+    pass "AC6: init succeeds when prior claim is not live"
 else
     fail "AC6: expected exit 0, got $EC. Output: $OUT"
 fi
-if echo "$OUT" | grep -q "dead owner_pid 999999"; then
-    pass "AC6: archive announcement names the dead owner_pid"
+if grep -q "dead claim node:gone-test (free)" <<<"$OUT"; then
+    pass "AC6: archive announcement names the dead claim"
 else
-    fail "AC6: dead-pid archive announcement missing. Got: $OUT"
+    fail "AC6: dead-claim archive announcement missing. Got: $OUT"
 fi
 if ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
     pass "AC6: archive file present"
 else
     fail "AC6: no archive found; orphan manifest survived (the original bug)"
 fi
-# Fresh init must have run: the planted session_id must be gone from the live file.
-if ! grep -q "planted-pid-fixture" "$T/.fno/target-state.md" 2>/dev/null; then
+if ! grep -q "planted-claim-fixture" "$T/.fno/target-state.md" 2>/dev/null; then
     pass "AC6: live manifest is fresh (planted orphan replaced)"
 else
     fail "AC6: live manifest still the planted orphan"
 fi
 
-# --- AC7: live owner_pid preserved (resume / concurrent sibling) -----------
+# --- AC7: live claim preserved (concurrent / resuming sibling) -------------
 echo ""
-echo "--- AC7: live owner_pid preserved ---"
-T="$TMP_BASE/ac7-live-pid"
+echo "--- AC7: live claim preserved ---"
+T="$TMP_BASE/ac7-live-claim"
 make_repo "$T" "feature/x"
-# $$ is this test process: guaranteed alive for the duration of run_init.
-plant_pid_state "$T" "$$"
+STUB7="$TMP_BASE/stub7"; make_fno_stub "$STUB7"
+# Claim key contains "live" -> stub reports state live -> must be preserved,
+# even though owner_pid 999999 is dead. This is the codex P1 guarantee: never
+# clobber a live session's manifest off a transient owner_pid.
+plant_claim_state "$T" "node:live-sess"
 PLANTED_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
-OUT=$(run_init "$T" 2>&1)
+OUT=$(run_init "$T" PATH="$STUB7:$PATH" 2>&1)
 EC=$?
 if [[ $EC -eq 0 ]]; then
-    pass "AC7: init succeeds with a live owner_pid"
+    pass "AC7: init succeeds with a live claim"
 else
     fail "AC7: expected exit 0, got $EC. Output: $OUT"
 fi
 LIVE_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
 if [[ "$LIVE_SID" == "$PLANTED_SID" ]]; then
-    pass "AC7: live-owner manifest preserved (no clobber)"
+    pass "AC7: live-claim manifest preserved (no clobber, dead owner_pid ignored)"
 else
-    fail "AC7: live-owner manifest changed. Planted: $PLANTED_SID, Live: $LIVE_SID"
+    fail "AC7: live-claim manifest changed. Planted: $PLANTED_SID, Live: $LIVE_SID"
 fi
 if ! ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
-    pass "AC7: no archive file (correctly preserved live owner)"
+    pass "AC7: no archive file (correctly preserved live claim)"
 else
-    fail "AC7: archived a live-owner manifest"
+    fail "AC7: archived a live-claim manifest"
+fi
+
+# --- AC8: no claim key preserved conservatively (free-text/plan run) -------
+echo ""
+echo "--- AC8: no-claim manifest preserved ---"
+T="$TMP_BASE/ac8-no-claim"
+make_repo "$T" "feature/x"
+STUB8="$TMP_BASE/stub8"; make_fno_stub "$STUB8"
+# No target_claim_key at all + dead owner_pid 999999. The reaper must NOT reap
+# on the transient owner_pid; a no-claim manifest is preserved.
+plant_claim_state "$T" ""
+PLANTED_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
+OUT=$(run_init "$T" PATH="$STUB8:$PATH" 2>&1)
+EC=$?
+if [[ $EC -eq 0 ]]; then
+    pass "AC8: init succeeds with a no-claim manifest"
+else
+    fail "AC8: expected exit 0, got $EC. Output: $OUT"
+fi
+LIVE_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
+if [[ "$LIVE_SID" == "$PLANTED_SID" ]]; then
+    pass "AC8: no-claim manifest preserved (transient owner_pid not used)"
+else
+    fail "AC8: no-claim manifest changed. Planted: $PLANTED_SID, Live: $LIVE_SID"
+fi
+if ! ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
+    pass "AC8: no archive file (correctly preserved no-claim manifest)"
+else
+    fail "AC8: archived a no-claim manifest off a transient owner_pid"
 fi
 
 echo ""
