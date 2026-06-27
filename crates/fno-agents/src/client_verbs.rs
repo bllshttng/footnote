@@ -1560,10 +1560,183 @@ fn run_logs_claude(entry: &Value, args: &LogsArgs) -> i32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// report (inside-leg state push, E3.2)
+// ---------------------------------------------------------------------------
+
+/// Parse a `report` invocation into the `agent.report` params object, or an
+/// error string for a malformed call (mapped to exit 2). Split out from
+/// [`run_report`] so the flag/validation grammar is unit-testable without a
+/// daemon: required `--session-id`/`--seq`/`--state`, optional
+/// `--reason`/`--ttl-ms`.
+fn build_report_params(rest: &[String]) -> Result<Value, String> {
+    let args = expand_eq(rest);
+    let mut session_id: Option<String> = None;
+    let mut seq: Option<u64> = None;
+    let mut state: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut ttl_ms: Option<u64> = None;
+
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--session-id" => session_id = it.next(),
+            "--state" => state = it.next(),
+            "--reason" => reason = it.next(),
+            "--seq" => {
+                seq = Some(
+                    it.next()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .ok_or("--seq needs a non-negative integer")?,
+                )
+            }
+            "--ttl-ms" => {
+                ttl_ms = Some(
+                    it.next()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .ok_or("--ttl-ms needs a non-negative integer")?,
+                )
+            }
+            other => return Err(format!("unknown flag: {other}")),
+        }
+    }
+
+    let session_id = match session_id {
+        Some(s) if !s.is_empty() => s,
+        _ => return Err("report needs --session-id".into()),
+    };
+    let seq = seq.ok_or("report needs --seq")?;
+    let state = match state.as_deref() {
+        Some("working") => "working",
+        Some("blocked") => "blocked",
+        Some("done") => "done",
+        _ => return Err("report needs --state working|blocked|done".into()),
+    };
+
+    let mut params = serde_json::Map::new();
+    params.insert("session_id".into(), Value::String(session_id));
+    params.insert("seq".into(), Value::Number(seq.into()));
+    params.insert("state".into(), Value::String(state.into()));
+    if let Some(r) = reason {
+        params.insert("reason".into(), Value::String(r));
+    }
+    if let Some(t) = ttl_ms {
+        params.insert("ttl_ms".into(), Value::Number(t.into()));
+    }
+    Ok(Value::Object(params))
+}
+
+/// `fno-agents report --session-id <uuid> --seq <n> --state
+/// working|blocked|done [--reason <text>] [--ttl-ms <n>]` -- the inside-leg state
+/// push (E3.2). A per-turn hook calls this; it builds the `agent.report` RPC and
+/// sends it to an ALREADY-RUNNING daemon (never lazy-starts one -- a hook must
+/// not boot the daemon). Fire-and-forget: a down daemon is exit 0 (no grid to
+/// report to), a successful store/drop is exit 0; only a malformed invocation
+/// (exit 2) or a real transport error (exit 1) is loud, so a per-turn hook never
+/// reds a turn.
+pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
+    let params = match build_report_params(rest) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("fno-agents: {msg}");
+            return 2;
+        }
+    };
+    let req = crate::protocol::Request::new(1, "agent.report", params);
+    match crate::client::call_if_running(home, &req).await {
+        Ok(_) => 0,
+        Err(crate::client::ClientError::DaemonNotRunning) => 0,
+        Err(e) => {
+            eprintln!("fno-agents: report failed: {e}");
+            1
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn report_params_full_payload() {
+        let p = build_report_params(&[
+            "--session-id".into(),
+            "uuid-x".into(),
+            "--seq".into(),
+            "7".into(),
+            "--state".into(),
+            "blocked".into(),
+            "--reason".into(),
+            "awaiting input".into(),
+            "--ttl-ms".into(),
+            "5000".into(),
+        ])
+        .unwrap();
+        assert_eq!(p["session_id"], "uuid-x");
+        assert_eq!(p["seq"], 7);
+        assert_eq!(p["state"], "blocked");
+        assert_eq!(p["reason"], "awaiting input");
+        assert_eq!(p["ttl_ms"], 5000);
+    }
+
+    #[test]
+    fn report_params_minimal_omits_optionals() {
+        let p = build_report_params(&[
+            "--session-id=uuid-y".into(), // also exercises --k=v expansion
+            "--seq".into(),
+            "1".into(),
+            "--state".into(),
+            "working".into(),
+        ])
+        .unwrap();
+        assert_eq!(p["session_id"], "uuid-y");
+        assert!(p.get("reason").is_none());
+        assert!(p.get("ttl_ms").is_none());
+    }
+
+    #[test]
+    fn report_params_rejects_bad_input() {
+        assert!(build_report_params(&[
+            "--seq".into(),
+            "1".into(),
+            "--state".into(),
+            "working".into()
+        ])
+        .is_err()); // no session
+        assert!(build_report_params(&[
+            "--session-id".into(),
+            "x".into(),
+            "--state".into(),
+            "working".into()
+        ])
+        .is_err()); // no seq
+        assert!(build_report_params(&[
+            "--session-id".into(),
+            "x".into(),
+            "--seq".into(),
+            "1".into()
+        ])
+        .is_err()); // no state
+        assert!(build_report_params(&[
+            "--session-id".into(),
+            "x".into(),
+            "--seq".into(),
+            "1".into(),
+            "--state".into(),
+            "idle".into()
+        ])
+        .is_err()); // bad state
+        assert!(build_report_params(&[
+            "--session-id".into(),
+            "x".into(),
+            "--seq".into(),
+            "nope".into(),
+            "--state".into(),
+            "working".into()
+        ])
+        .is_err()); // non-int seq
+    }
 
     #[test]
     fn python_json_uses_spaced_separators() {

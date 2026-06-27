@@ -790,6 +790,9 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         // it stays on the async runtime rather than the blocking pool.
         Some("status") => handle_status(ctx, req).await,
         Some("reconcile") => run_blocking(ctx, req, handle_reconcile).await,
+        // Inside-leg state push (E3.2): a per-turn hook stores the latest
+        // {working|blocked|done} on the matching claude row. Pure flock + CPU.
+        Some("report") => run_blocking(ctx, req, handle_report).await,
         _ => Response::err(
             req.id,
             ErrorCode::UnknownMethod,
@@ -4587,6 +4590,128 @@ fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
+/// `agent.report` — the inside-leg state push (inside-out E3.2). A per-turn hook
+/// calls `fno agents report --session-id <uuid> --seq <n> --state
+/// working|blocked|done [--reason ...] [--ttl-ms <n>]`; the daemon stamps
+/// `received_at` and STORES the report on the matching registry row's
+/// [`RegistryEntry::inside_leg`] field (contract v2 / X2). Storage-only: the
+/// seq-drop (a `seq <= last_seq` is rejected so a reordered/duplicate report
+/// cannot clobber a newer one, AC-X2-1) and the unknown-session drop (no phantom
+/// row, AC-X2-5) live here; TTL-aging, the 3-tier render authority, and the
+/// ordered exit teardown are E3.3. The row is matched by the daemon-pinned
+/// session id via [`entry_holds_session`], so a claude pane reports under the
+/// same UUID E1 recorded. A DROP is non-fatal: an unregistered session (the row
+/// not up yet) or a stale seq returns `ok` with `stored:false`, so the hook stays
+/// fire-and-forget and never reds a turn.
+fn handle_report(ctx: &Ctx, req: &Request) -> Response {
+    let session_id = match req.params.get("session_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return Response::err(req.id, ErrorCode::InvalidParams, "missing `session_id`"),
+    };
+    let seq = match req.params.get("seq").and_then(|v| v.as_u64()) {
+        Some(n) => n,
+        None => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "missing or non-integer `seq`",
+            )
+        }
+    };
+    // Validate against the wire vocabulary; keep the label for the event payload
+    // and map to the typed enum for storage.
+    let state_label = match req.params.get("state").and_then(|v| v.as_str()) {
+        Some(s @ ("working" | "blocked" | "done")) => s.to_string(),
+        _ => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "`state` must be working|blocked|done",
+            )
+        }
+    };
+    let state = match state_label.as_str() {
+        "working" => state::InsideLegState::Working,
+        "blocked" => state::InsideLegState::Blocked,
+        _ => state::InsideLegState::Done,
+    };
+    let reason = req
+        .params
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let ttl_ms = req.params.get("ttl_ms").and_then(|v| v.as_u64());
+
+    // The store/drop decision is made UNDER the registry flock so two concurrent
+    // reporters on one session id can't both pass the seq gate.
+    enum Outcome {
+        Stored,
+        StaleSeq { last: u64 },
+        Unknown,
+    }
+    let mut outcome = Outcome::Unknown;
+    if let Err(e) = state::update_registry(&ctx.home.registry_json(), |r| {
+        let Some(entry) = r
+            .entries
+            .iter_mut()
+            .find(|e| entry_holds_session(e, &session_id))
+        else {
+            outcome = Outcome::Unknown;
+            return;
+        };
+        if let Some(prev) = &entry.inside_leg {
+            if seq <= prev.seq {
+                outcome = Outcome::StaleSeq { last: prev.seq };
+                return;
+            }
+        }
+        entry.inside_leg = Some(state::InsideLegReport {
+            state,
+            seq,
+            reason,
+            received_at: now_rfc3339_like(),
+            ttl_ms,
+        });
+        outcome = Outcome::Stored;
+    }) {
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("registry write failed during inside-leg report: {e}"),
+        );
+    }
+
+    match outcome {
+        Outcome::Stored => {
+            let _ = ctx.emitter.emit(
+                "inside_leg_report",
+                &json!({"session_id": session_id, "seq": seq, "state": state_label}),
+            );
+            Response::ok(req.id, json!({"stored": true, "seq": seq}))
+        }
+        Outcome::StaleSeq { last } => {
+            let _ = ctx.emitter.emit(
+                "inside_leg_report_dropped",
+                &json!({"session_id": session_id, "seq": seq, "last_seq": last, "reason": "stale_seq"}),
+            );
+            Response::ok(
+                req.id,
+                json!({"stored": false, "dropped": "stale_seq", "last_seq": last}),
+            )
+        }
+        Outcome::Unknown => {
+            let _ = ctx.emitter.emit(
+                "inside_leg_report_dropped",
+                &json!({"session_id": session_id, "seq": seq, "reason": "unknown_session"}),
+            );
+            Response::ok(
+                req.id,
+                json!({"stored": false, "dropped": "unknown_session"}),
+            )
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // channel.* (Phase 5 integration point; minimal Wave 3 surface).
 // ---------------------------------------------------------------------------
@@ -6698,6 +6823,129 @@ done
             "{not json",
             "gate file must not be rewritten on parse failure"
         );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    // ---- inside-leg report (E3.2) ------------------------------------------
+
+    /// AC-X2 store: a report for a registered claude session lands on the row's
+    /// `inside_leg` field with the daemon-stamped `received_at`, and emits
+    /// `inside_leg_report`.
+    #[test]
+    fn handle_report_stores_on_matching_row() {
+        let home = tmp_home("report-store");
+        seed_stream_row(&home, "worker-A", "repA"); // claude_session_uuid = uuid-repA
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.report",
+            json!({"session_id": "uuid-repA", "seq": 3, "state": "working", "reason": "running tests"}),
+        );
+        let resp = handle_report(&ctx, &req);
+        assert!(!resp.is_err(), "report must return Ok: {resp:?}");
+        assert_eq!(resp.result().unwrap()["stored"], true);
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let rep = reg.entries[0]
+            .inside_leg
+            .as_ref()
+            .expect("inside_leg stored");
+        assert_eq!(rep.state, state::InsideLegState::Working);
+        assert_eq!(rep.seq, 3);
+        assert_eq!(rep.reason.as_deref(), Some("running tests"));
+        assert!(!rep.received_at.is_empty(), "daemon stamps received_at");
+
+        let events = read_events(&home);
+        assert!(
+            events.iter().any(|e| e["kind"] == "inside_leg_report"),
+            "inside_leg_report not emitted: {events:?}"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC-X2-1 seq: a `seq <= last_seq` is dropped (the newer report wins) and
+    /// emits `inside_leg_report_dropped`.
+    #[test]
+    fn handle_report_drops_stale_seq() {
+        let home = tmp_home("report-stale");
+        seed_stream_row(&home, "worker-A", "repB");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        // seq=2 stored, then a reordered seq=1 arrives.
+        let _ = handle_report(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.report",
+                json!({"session_id": "uuid-repB", "seq": 2, "state": "working"}),
+            ),
+        );
+        let resp = handle_report(
+            &ctx,
+            &Request::new(
+                2,
+                "agent.report",
+                json!({"session_id": "uuid-repB", "seq": 1, "state": "done"}),
+            ),
+        );
+        assert!(!resp.is_err());
+        assert_eq!(resp.result().unwrap()["stored"], false);
+        assert_eq!(resp.result().unwrap()["dropped"], "stale_seq");
+
+        // The badge still reflects seq=2/working, not the late seq=1/done.
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let rep = reg.entries[0].inside_leg.as_ref().unwrap();
+        assert_eq!(rep.seq, 2);
+        assert_eq!(rep.state, state::InsideLegState::Working);
+
+        let events = read_events(&home);
+        assert!(events
+            .iter()
+            .any(|e| e["kind"] == "inside_leg_report_dropped" && e["reason"] == "stale_seq"));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// AC-X2-5 unknown session: a push for an unregistered session id is dropped
+    /// with a logged event and adds no phantom row.
+    #[test]
+    fn handle_report_drops_unknown_session() {
+        let home = tmp_home("report-unknown");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let resp = handle_report(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.report",
+                json!({"session_id": "uuid-nope", "seq": 1, "state": "working"}),
+            ),
+        );
+        assert!(!resp.is_err());
+        assert_eq!(resp.result().unwrap()["stored"], false);
+        assert_eq!(resp.result().unwrap()["dropped"], "unknown_session");
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.is_empty(), "no phantom row created");
+
+        let events = read_events(&home);
+        assert!(events
+            .iter()
+            .any(|e| e["kind"] == "inside_leg_report_dropped" && e["reason"] == "unknown_session"));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// Missing/invalid params fail closed with InvalidParams (no registry write).
+    #[test]
+    fn handle_report_rejects_bad_params() {
+        let home = tmp_home("report-bad");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        for params in [
+            json!({"seq": 1, "state": "working"}),          // no session_id
+            json!({"session_id": "x", "state": "working"}), // no seq
+            json!({"session_id": "x", "seq": 1}),           // no state
+            json!({"session_id": "x", "seq": 1, "state": "idle"}), // bad state
+        ] {
+            let resp = handle_report(&ctx, &Request::new(1, "agent.report", params.clone()));
+            assert!(resp.is_err(), "expected InvalidParams for {params}");
+        }
         std::fs::remove_dir_all(home.root()).ok();
     }
 
