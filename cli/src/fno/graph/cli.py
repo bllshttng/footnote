@@ -1515,6 +1515,19 @@ def cmd_next(
             e for e in candidates
             if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
         ]
+        # Containers are never directly buildable (x-33b2): a node that is some
+        # other node's `parent` is an epic whose work lives in its decomposed
+        # children. `next` must never return it - an in-progress epic otherwise
+        # ranks first among its siblings (make_selection_sort_key) and is
+        # repeatedly re-selected as the head, starving the genuinely-ready leaf
+        # below it. Build the leaves, not the box. Parent ids come from the FULL
+        # graph so a parent already filtered out of `candidates` still suppresses
+        # correctly, and the epic's leaves are unaffected.
+        parent_ids = {
+            e.get("parent") for e in entries
+            if isinstance(e, dict) and isinstance(e.get("parent"), str)
+        }
+        candidates = [e for e in candidates if e.get("id") not in parent_ids]
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.

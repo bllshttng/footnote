@@ -68,7 +68,32 @@ def _lane_sort_key(entry: dict) -> tuple:
     )
 
 
-def _kanban_column(entry: dict) -> str | None:
+def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
+    """Parent ids whose work is underway: an epic with a done or claimed child.
+
+    Sessions claim the leaf CHILDREN of an epic, never the container, so an
+    in-progress epic carries no claim/session of its own and would otherwise sit
+    in its priority column. The board surfaces it in Now by id, derived purely
+    from its children - the epic's own ``_status`` is never mutated, so the
+    ``claimed => session_id`` invariant holds (x-33b2). Mirrors the epics-first
+    in-progress signal in ``_intake.make_selection_sort_key``.
+    """
+    children_by_parent: dict[str, list[dict]] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        pid = e.get("parent")
+        if isinstance(pid, str):
+            children_by_parent.setdefault(pid, []).append(e)
+    return frozenset(
+        pid for pid, kids in children_by_parent.items()
+        if any(k.get("completed_at") or k.get("_status") == "claimed" for k in kids)
+    )
+
+
+def _kanban_column(
+    entry: dict, in_progress_epics: frozenset[str] = frozenset()
+) -> str | None:
     """Return the kanban column for a graph entry, or None to exclude.
 
     Mapping (intent-based, with claimed override):
@@ -95,6 +120,12 @@ def _kanban_column(entry: dict) -> str | None:
     if status in ("deferred", "superseded"):
         return None
     if status == "claimed":
+        return "Now"
+    # In-progress epic (x-33b2): a container with a done/claimed child has no
+    # claim of its own (sessions claim the children) but is genuinely underway,
+    # so surface it in Now. The set is derived from children by the caller; the
+    # epic's `_status` stays honest (never a claim without a session_id).
+    if entry.get("id") in in_progress_epics:
         return "Now"
     # Queued is orthogonal to _status (the field stays set across blocked,
     # idea, etc.). It routes to the Triage lane - a queued node is "awaiting
@@ -189,9 +220,10 @@ def render_graph_md(
     """
     id_to_entry = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
 
+    epics = in_progress_epic_ids(entries)
     columns: dict[str, list[dict]] = {col: [] for col in KANBAN_COLUMNS}
     for entry in entries:
-        col = _kanban_column(entry)
+        col = _kanban_column(entry, epics)
         if col is None:
             continue
         columns[col].append(entry)

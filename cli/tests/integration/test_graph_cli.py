@@ -1400,6 +1400,43 @@ def test_graph_ready_orders_epic_children_before_loose(tmp_graph):
     assert ids.index("ab-child") < ids.index("ab-loose")
 
 
+def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
+    """x-33b2: an in-progress epic (its child done, the epic itself the top-ranked
+    ready node) must NOT be selected - `next` falls through to a real leaf instead
+    of repeatedly returning the container ('it keeps assuming this one is next')."""
+    entries = [
+        # Epic: ready, p0 -> would rank ahead of everything if selectable.
+        {"id": "ab-epic", "title": "Epic", "_status": "ready", "priority": "p0",
+         "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": "x.md"},
+        # Its only child is DONE (the work the epic 'contained' is finished).
+        {"id": "ab-child", "title": "Child", "_status": "done", "priority": "p2",
+         "created_at": "2026-01-02", "project": "p", "parent": "ab-epic",
+         "completed_at": "2026-01-03", "blocked_by": [], "plan_path": "x.md"},
+        # A genuinely buildable loose leaf elsewhere.
+        {"id": "ab-leaf", "title": "Leaf", "_status": "ready", "priority": "p2",
+         "created_at": "2026-01-04", "project": "p", "blocked_by": [], "plan_path": "x.md"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    r = _invoke("graph", "next", "--all")
+    out = json.loads(r.stdout)
+    assert out is not None and out["id"] == "ab-leaf"  # the epic was skipped
+
+
+def test_graph_next_returns_null_when_only_epics_left(tmp_graph):
+    """x-33b2: with only a container (epic) and its done child left, `next` returns
+    nothing rather than the un-buildable epic."""
+    entries = [
+        {"id": "ab-epic", "title": "Epic", "_status": "ready", "priority": "p0",
+         "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": "x.md"},
+        {"id": "ab-child", "title": "Child", "_status": "done", "priority": "p2",
+         "created_at": "2026-01-02", "project": "p", "parent": "ab-epic",
+         "completed_at": "2026-01-03", "blocked_by": [], "plan_path": "x.md"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    r = _invoke("graph", "next", "--all")
+    assert json.loads(r.stdout) is None
+
+
 # ---------------------------------------------------------------------------
 # _resolved_cwd derivation in cmd_get
 # ---------------------------------------------------------------------------
