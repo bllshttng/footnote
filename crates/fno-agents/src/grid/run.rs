@@ -2012,18 +2012,6 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // opens with no panes and the goal launcher active; the operator types a
     // goal and the grid spawns + tiles a `/target` worker live. `names` and
     // `host_interactive` are now mutable so a live-added pane can append.
-    // Per-pane host_mode (interactive => Enter drives it; exec => watch only).
-    // Resolved once per agent; live-added panes push their own entry.
-    let mut host_interactive = resolve_host_modes(&names, home);
-    // Alignment is load-bearing: every reader indexes host_interactive by pane
-    // index == names index. resolve_host_modes maps over names so this holds by
-    // construction; assert it so a future change that breaks the 1:1 mapping
-    // trips in debug/tests rather than silently mislabeling panes.
-    debug_assert_eq!(
-        host_interactive.len(),
-        names.len(),
-        "host_interactive must be 1:1 with names"
-    );
 
     // Soft fleet cap (Locked Decision 5): the eager connection policy opens
     // one watcher WS per agent for the whole session, so an unbounded fleet
@@ -2031,12 +2019,29 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // and warn explicitly (Open Question 1: warn-and-truncate, so the grid
     // still works). The note rides the footer so it stays visible on the
     // alternate screen; the eprintln lands in the operator's scrollback.
+    //
+    // Cap BEFORE resolving host modes: host_interactive must be resolved on the
+    // CAPPED names so it stays 1:1 with names/panes. Resolving first then
+    // truncating leaves stale tail entries, and a live-added pane at panes.len()
+    // would then read a dropped agent's host mode (codex peer-review P2).
     let total_requested = names.len();
     let (mut names, soft_warn) = apply_soft_cap(names, max_panes());
     if let Some(w) = &soft_warn {
         eprintln!("fno-agents grid: {w}");
     }
     let cap_note: Option<(usize, usize)> = soft_warn.map(|_| (names.len(), total_requested));
+
+    // Per-pane host_mode (interactive => Enter drives it; exec => watch only).
+    // Resolved once per agent on the capped names; live-added panes push their
+    // own entry. Alignment is load-bearing: every reader indexes
+    // host_interactive by pane index == names index, so assert the 1:1 mapping
+    // (now post-cap) trips in debug/tests rather than silently mislabeling panes.
+    let mut host_interactive = resolve_host_modes(&names, home);
+    debug_assert_eq!(
+        host_interactive.len(),
+        names.len(),
+        "host_interactive must be 1:1 with names"
+    );
 
     let daemon_bin = resolve_daemon_bin();
     if let Err(e) = ensure_daemon(home, &daemon_bin).await {
@@ -2050,19 +2055,23 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // `comp.current_page()`.
     let (tty_cols, tty_rows) = terminal::size().unwrap_or((80, 24));
     let mut tty = TtySize::new(tty_rows, tty_cols);
-    // `.max(1)`: with the zero-config front door `names` can be empty, but the
-    // ZeroPanes arm below would exit. A phantom 1-pane layout is harmless (the
-    // pane-construction loop iterates `names`, so it builds nothing) and only
-    // seeds an initial capacity; the front-door paint path ignores it.
-    let paged0 = match layout::compute_page(tty, names.len().max(1), 0) {
-        Ok(p) => p,
-        Err(LayoutError::TerminalTooSmall { rows, cols }) => {
-            eprintln!("fno-agents grid: terminal too small ({rows}x{cols})");
-            return 2;
-        }
-        Err(LayoutError::ZeroPanes) => {
-            eprintln!("fno-agents grid: no agents to tile");
-            return 2;
+    // Zero-config front door: with no panes there is nothing to tile, so skip
+    // the layout entirely - the launcher renderer truncates to any terminal
+    // size, and a too-small terminal must NOT exit the bare front door
+    // (codex peer-review P2). `paged0` is None then; downstream uses guard it.
+    let paged0: Option<PageLayout> = if names.is_empty() {
+        None
+    } else {
+        match layout::compute_page(tty, names.len(), 0) {
+            Ok(p) => Some(p),
+            Err(LayoutError::TerminalTooSmall { rows, cols }) => {
+                eprintln!("fno-agents grid: terminal too small ({rows}x{cols})");
+                return 2;
+            }
+            Err(LayoutError::ZeroPanes) => {
+                eprintln!("fno-agents grid: no agents to tile");
+                return 2;
+            }
         }
     };
 
@@ -2077,7 +2086,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     let mut states: Vec<ConnState> = Vec::with_capacity(names.len());
 
     for (idx, name) in names.iter().enumerate() {
-        let (rows, cols) = target_pane_inner(&paged0, idx);
+        // Non-empty fleet => paged0 is Some (only the empty front door is None).
+        let layout0 = paged0.as_ref().expect("non-empty fleet has a layout");
+        let (rows, cols) = target_pane_inner(layout0, idx);
         let (pane, state, sink) = open_watch_pane(home, name, idx, rows, cols, &tx).await;
         panes.push(pane);
         states.push(state);
@@ -2086,8 +2097,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
 
     let mut comp = Compositor::new(panes.len());
     // Seed pagination with the real capacity so page_count / current_page are
-    // correct from the first frame.
-    comp.recompute_pagination(paged0.capacity);
+    // correct from the first frame. The empty front door (paged0 None) has no
+    // panes; capacity 1 is a harmless placeholder until the first live-add.
+    comp.recompute_pagination(paged0.as_ref().map(|p| p.capacity).unwrap_or(1));
     // Take-over driver sinks, keyed by pane index. Present only while a pane
     // is being driven.
     let mut driver_sinks: BTreeMap<usize, WsSink> = BTreeMap::new();
