@@ -225,6 +225,27 @@ STUB
     cleanup
 }
 
+# ── T9: workspacePaths[0] resolves the manifest from a FOREIGN cwd ────────────
+log "T9: workspacePaths[0] locates the manifest (run from elsewhere)"
+{
+    setup_env  # manifest lives under $TMP_DIR/.fno
+    OTHER="$(mktemp -d)"  # an unrelated cwd with no manifest
+    STUB="${TMP_DIR}/fno-agents"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+echo '{"decision":"block","termination_reason":null,"message":"found it","fires":1,"fingerprint":"x"}'
+STUB
+    INPUT="{\"transcriptPath\":\"${TRANSCRIPT_FILE}\",\"fullyIdle\":true,\"conversationId\":\"c9\",\"workspacePaths\":[\"${TMP_DIR}\"]}"
+    run_hook "$OTHER" "$INPUT" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+    t9=true
+    # Run from OTHER (no manifest there); workspacePaths[0]=$TMP_DIR must be used,
+    # so loop-check is reached and its block becomes continue (not a bare {} allow).
+    [[ "$(stdout_decision)" == "continue" ]] || { fail "T9: expected continue via workspacePaths, got $HOOK_STDOUT"; t9=false; }
+    rm -rf "$OTHER" 2>/dev/null || true
+    [[ "$t9" == true ]] && pass "T9: manifest resolved from workspacePaths[0]"
+    cleanup
+}
+
 echo ""
 printf '[agy] Results: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP_COUNT"
 [[ "$FAIL" -gt 0 ]] && exit 1

@@ -48,6 +48,19 @@ FULLY_IDLE=$(printf '%s' "$HOOK_INPUT" | jq -r '.fullyIdle' 2>/dev/null || true)
 TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.transcriptPath // empty' 2>/dev/null || true)
 CONVERSATION_ID=$(printf '%s' "$HOOK_INPUT" | jq -r '.conversationId // empty' 2>/dev/null || true)
 
+# Resolve the WORKSPACE ROOT, not $PWD. agy can fire Stop from a subdirectory, or
+# via the global ~/.gemini/config/hooks.json with an unrelated cwd; a relative
+# .fno/target-state.md lookup would then miss the manifest init writes at the git
+# root and stop an active target. agy's stdin carries workspacePaths[]; fall back
+# to the git toplevel, then $PWD. Every downstream path (state, synth, logs,
+# events, --cwd) hangs off ROOT so they all agree.
+WORKSPACE_ROOT=$(printf '%s' "$HOOK_INPUT" | jq -r '.workspacePaths[0] // empty' 2>/dev/null || true)
+if [[ -n "$WORKSPACE_ROOT" && -d "$WORKSPACE_ROOT" ]]; then
+    ROOT="$WORKSPACE_ROOT"
+else
+    ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+fi
+
 # ── 2. Background tasks still running -> never allow a terminal stop ───────────
 # Only an EXPLICIT false blocks; a missing/empty field falls through to loop-check
 # (the real authority), so a contract change can't wedge us into a forever-continue.
@@ -57,7 +70,7 @@ fi
 
 # ── 3. State file: no footnote session here -> allow the stop ──────────────────
 # A plain native agy session (no manifest) is unaffected by this hook.
-STATE_FILE=".fno/target-state.md"
+STATE_FILE="$ROOT/.fno/target-state.md"
 if [[ ! -f "$STATE_FILE" ]]; then
     emit '{}'
 fi
@@ -95,7 +108,7 @@ synthesize_transcript() {
 }
 
 SYNTH="${STATE_FILE%/*}/.agy-loopcheck-${CONVERSATION_ID:-session}.jsonl"
-mkdir -p ".fno" 2>/dev/null || true
+mkdir -p "$ROOT/.fno" 2>/dev/null || true
 if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
     synthesize_transcript "$TRANSCRIPT_PATH" > "$SYNTH" 2>/dev/null || : > "$SYNTH"
 else
@@ -107,7 +120,7 @@ fi
 trap 'rm -f "$SYNTH" 2>/dev/null || true' EXIT
 
 # ── 5. Resolve the fno-agents binary (most-local wins; same order as the shim) ─
-REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
 BIN=""
 if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
     BIN="$FNO_AGENTS_BIN"
@@ -132,8 +145,8 @@ emit_event() {
         '{ts:$ts,type:$kind,source:"hook",data:{session_id:$sid,harness:"agy"}}' 2>/dev/null || true)
     [[ -z "$ev" ]] && return 0
     # ${HOME:-} (not ${HOME}): under set -u an unset HOME would abort the script.
-    mkdir -p ".fno" "${HOME:-}/.fno" 2>/dev/null || true
-    printf '%s\n' "$ev" >> ".fno/events.jsonl" 2>/dev/null || true
+    mkdir -p "$ROOT/.fno" "${HOME:-}/.fno" 2>/dev/null || true
+    printf '%s\n' "$ev" >> "$ROOT/.fno/events.jsonl" 2>/dev/null || true
     printf '%s\n' "$ev" >> "${HOME:-}/.fno/events.jsonl" 2>/dev/null || true
 }
 
@@ -155,8 +168,8 @@ verb_rc=0
 DECISION_JSON=$("$BIN" loop-check \
     --state "$STATE_FILE" \
     --transcript "$SYNTH" \
-    --cwd "$PWD" \
-    2>>".fno/agy-loop-check.stderr.log") || verb_rc=$?
+    --cwd "$ROOT" \
+    2>>"$ROOT/.fno/agy-loop-check.stderr.log") || verb_rc=$?
 
 # ── 8. Transient failure of a present binary -> continue (retry next fire) ────
 # The plan's rule: when loop-check can't return a verdict, do NOT fabricate a
@@ -165,7 +178,7 @@ DECISION_JSON=$("$BIN" loop-check \
 if [[ $verb_rc -ne 0 ]] || ! printf '%s' "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
     emit_event "loop_check_gh_error"
     echo "agy stop-hook: WARNING: loop-check unavailable (rc=$verb_rc / non-JSON); continuing" >&2
-    tail -n 5 ".fno/agy-loop-check.stderr.log" >&2 2>/dev/null || true
+    tail -n 5 "$ROOT/.fno/agy-loop-check.stderr.log" >&2 2>/dev/null || true
     emit '{"decision":"continue","reason":"loop-check unavailable; will retry on the next stop"}'
 fi
 
@@ -190,9 +203,9 @@ if [[ -n "$TERMINATION_REASON" ]]; then
     FINALIZE_OUT="$("$BIN" finalize \
         --state "$STATE_FILE" \
         --transcript "$SYNTH" \
-        --cwd "$PWD" \
+        --cwd "$ROOT" \
         --reason "$TERMINATION_REASON" 2>&1)" || true
-    [[ -n "$FINALIZE_OUT" ]] && printf '%s\n' "$FINALIZE_OUT" >> ".fno/finalize.stderr.log" 2>/dev/null || true
+    [[ -n "$FINALIZE_OUT" ]] && printf '%s\n' "$FINALIZE_OUT" >> "$ROOT/.fno/finalize.stderr.log" 2>/dev/null || true
 fi
 
 # Allow the stop. loop-check already emitted its own `termination` event on a
