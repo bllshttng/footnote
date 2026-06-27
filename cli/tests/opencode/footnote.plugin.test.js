@@ -10,13 +10,18 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { FootnotePlugin } from "../../src/fno/setup/assets/opencode/footnote.js"
 
+// The manifest carries footnote's OWN session_id namespace (timestamp-PID-random),
+// which is deliberately DIFFERENT from OpenCode's event sessionID below. This
+// guards the codex-P1 regression: the plugin must act on presence, not on the
+// two ids being equal (they never are in a real session).
+const FNO_SESSION_ID = "20260626T214709Z-12237-a9e3c2"
 function makeProject({ footnote = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "fno-oc-"))
   mkdirSync(join(dir, ".fno"), { recursive: true })
   if (footnote) {
     writeFileSync(
       join(dir, ".fno", "target-state.md"),
-      'session_id: "sess-123"\nplan_path: "x"\n',
+      `session_id: "${FNO_SESSION_ID}"\nplan_path: "x"\n`,
     )
   }
   return dir
@@ -54,7 +59,9 @@ function fakeClient(messages) {
   }
 }
 
-const idleEvent = { type: "session.idle", properties: { sessionID: "sess-123" } }
+// OpenCode's sessionID - a DIFFERENT namespace from the manifest's FNO_SESSION_ID.
+const OC_SESSION_ID = "ses_7a1b2c3d_opencode"
+const idleEvent = { type: "session.idle", properties: { sessionID: OC_SESSION_ID } }
 const assistantMsg = (text) => ({ info: { role: "assistant" }, parts: [{ type: "text", text }] })
 
 describe("opencode native stop-hook plugin", () => {
@@ -68,7 +75,9 @@ describe("opencode native stop-hook plugin", () => {
     })
     await hooks.event({ event: idleEvent })
     expect(client.prompts.length).toBe(1)
-    expect(client.prompts[0].path.id).toBe("sess-123")
+    // Re-drives OpenCode's session id from the event, NOT the manifest's id -
+    // and it fires despite the two ids differing (the codex-P1 regression guard).
+    expect(client.prompts[0].path.id).toBe(OC_SESSION_ID)
     expect(client.prompts[0].body.parts[0].text).toBe("/target --resume")
     rmSync(dir, { recursive: true, force: true })
   })
@@ -137,21 +146,6 @@ describe("opencode native stop-hook plugin", () => {
     resolve()
     await first
     expect(client.prompts.length).toBe(1) // only the first fire re-drove
-    rmSync(dir, { recursive: true, force: true })
-  })
-
-  test("ignores a session.idle whose sessionID != the target session", async () => {
-    const dir = makeProject() // manifest session_id is "sess-123"
-    const client = fakeClient([assistantMsg("x")])
-    let shellCalled = false
-    const hooks = await FootnotePlugin({
-      directory: dir,
-      client,
-      $: () => { shellCalled = true; return { quiet() { return this }, async text() { return "" } } },
-    })
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "other-session" } } })
-    expect(shellCalled).toBe(false)
-    expect(client.prompts.length).toBe(0)
     rmSync(dir, { recursive: true, force: true })
   })
 

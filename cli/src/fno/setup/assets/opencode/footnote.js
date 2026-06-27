@@ -81,11 +81,15 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
       if (event?.type !== "session.idle") return
       const sid = event.properties?.sessionID
       if (!sid) return
-      // Only act on THE footnote session: ignore both plain native sessions (no
-      // manifest) and any other session's idle (e.g. a child) whose id does not
-      // match the target's. Re-driving a non-target session would inject
-      // /target --resume into the wrong place.
-      if (fnoSessionId(dir) !== sid) return
+      // Presence guard only: target-state.md's session_id is footnote's OWN
+      // generated loop key (timestamp-PID-random), a different namespace from
+      // OpenCode's event sessionID - they never match, so this is "is footnote
+      // running here?", not an equality check. A plain native session (no
+      // manifest) no-ops; the event's sessionID (sid) drives the SDK calls.
+      // ponytail: if OpenCode ever runs parallel sub-sessions under one footnote
+      // run, bind the first idle's sid in a sidecar and match against it; for the
+      // Sequential opencode harness one active session makes presence sufficient.
+      if (!fnoSessionId(dir)) return
       if (busy) return
       busy = true
 
