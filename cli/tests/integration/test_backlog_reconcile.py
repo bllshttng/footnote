@@ -442,6 +442,56 @@ def test_reconcile_self_heals_pre_existing_stranded_epic(cli_env, monkeypatch):
     assert "ab-strandep0" in dep_ids                     # its dependent dispatched
 
 
+def test_reconcile_node_scoped_skips_global_epic_sweep(cli_env, monkeypatch):
+    """codex P2: `reconcile --node <id>` must not close/dispatch UNRELATED stranded
+    epics - the global self-heal sweep is suppressed on a node-scoped run."""
+    graph_path, _ = cli_env
+    _make_graph(
+        graph_path,
+        [
+            # An unrelated stranded all-done epic that must be left alone.
+            _node("ab-otherepic", project="web"),
+            _node("ab-otherkid1", project="web", parent="ab-otherepic",
+                  completed_at="2026-01-01T00:00:00Z"),
+            # The targeted node (has a merged PR so the node-scoped scan closes it).
+            _node("ab-target001", pr_number=900, project="fno"),
+        ],
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({900: "MERGED"}))
+    import fno.backlog.advance as advmod
+    monkeypatch.setattr(advmod, "advance",
+                        lambda **kw: advmod.AdvanceResult("skipped", "advance_skipped", reason="disabled"))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--node", "ab-target001"])
+    assert result.exit_code == 0, result.output
+    nodes = {e["id"]: e for e in _read_entries(graph_path)}
+    assert nodes["ab-target001"]["completed_at"] is not None   # target closed
+    assert nodes["ab-otherepic"].get("completed_at") is None   # unrelated epic untouched
+
+
+def test_reconcile_dry_run_previews_stranded_epics(cli_env, monkeypatch):
+    """codex P3: --dry-run previews the stranded all-done epics that WOULD heal,
+    and mutates nothing."""
+    graph_path, _ = cli_env
+    _make_graph(
+        graph_path,
+        [
+            _node("ab-strandep0", project="web"),
+            _node("ab-donekid01", project="web", parent="ab-strandep0",
+                  completed_at="2026-01-01T00:00:00Z"),
+        ],
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["healed_epics"] == ["ab-strandep0"]         # previewed
+    # Nothing mutated.
+    epic = next(e for e in _read_entries(graph_path) if e["id"] == "ab-strandep0")
+    assert epic.get("completed_at") is None
+
+
 def test_reconcile_advance_failure_does_not_abort_sweep(cli_env, monkeypatch):
     """Task 2.1: a raising advance is non-fatal - the node still closes and the
     reconcile run still exits 0 (the sweep is never wedged by auto-continue)."""

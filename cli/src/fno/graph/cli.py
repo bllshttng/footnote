@@ -3864,10 +3864,14 @@ def cmd_reconcile(
 
     # Pre-existing stranded all-done epics to self-heal this sweep (codex P2 on
     # PR #69). Read-only check so a reconcile with no drift AND nothing to heal
-    # still skips the lock entirely.
-    strandable = _strandable_epic_ids(entries)
+    # still skips the lock entirely. ONLY on a full reconcile: a node-scoped
+    # `reconcile --node <id>` must not close/dispatch unrelated epics (codex P2),
+    # so the global sweep is suppressed there (the targeted node's own cascade
+    # still fires).
+    strandable = _strandable_epic_ids(entries) if node is None else set()
 
     closed: list[dict] = []
+    healed_epics: list[str] = []
 
     if not dry_run and (closeable or strandable):
         # Apply every close in ONE locked mutation rather than locking once
@@ -3898,10 +3902,12 @@ def cmd_reconcile(
                     actually_closed.append(record)
             # Self-heal pre-existing stranded all-done epics (codex P2): close any
             # open epic whose children are already all done, even with no drift
-            # this sweep. Going forward the cascade prevents new ones, so this is
-            # a no-op once migrated. Their dependents auto-continue via the same
-            # cascade_closed_acc dispatch loop.
-            cascade_closed_acc.extend(_sweep_close_done_epics(entries))
+            # this sweep. Full reconcile only - a node-scoped run must not touch
+            # unrelated epics. Going forward the cascade prevents new ones, so
+            # this is a no-op once migrated. Their dependents auto-continue via
+            # the same cascade_closed_acc dispatch loop.
+            if node is None:
+                cascade_closed_acc.extend(_sweep_close_done_epics(entries))
             return entries
 
         # Capture the POST-lock graph (codex P2): resolving a closed node's
@@ -4013,6 +4019,10 @@ def cmd_reconcile(
                     f"warning: auto-continue after cascade-closing {_pid} failed: {_exc}",
                     err=True,
                 )
+        # Epics the cascade/sweep auto-closed this run, for user-visible accounting
+        # (codex P3): the close summaries below otherwise only describe PR-drift
+        # records and would report "in sync" even after healing epics.
+        healed_epics = sorted(_seen_parents)
 
     if json_out:
         payload = {
@@ -4027,6 +4037,9 @@ def cmd_reconcile(
                 for r in closeable
             ],
             "closed": closed,
+            # Auto-closed container epics (cascade + self-heal sweep). On --dry-run
+            # this previews the stranded epics that WOULD heal (codex P3).
+            "healed_epics": sorted(strandable) if dry_run else healed_epics,
             "failures": [
                 {"node_id": r.node_id, "pr_number": r.pr_number, "error": r.error}
                 for r in failures
@@ -4039,7 +4052,7 @@ def cmd_reconcile(
             raise typer.Exit(code=4)
         return
 
-    if not closeable and not failures:
+    if not closeable and not failures and not strandable and not healed_epics:
         typer.echo("No merged-PR drift found. Backlog is in sync.")
         return
 
@@ -4047,6 +4060,11 @@ def cmd_reconcile(
         typer.echo(f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):")
         for r in closeable:
             typer.echo(f"  {r.node_id}  PR #{r.pr_number} MERGED  {r.pr_url or ''}".rstrip())
+        if strandable:
+            typer.echo(
+                f"Would self-heal {len(strandable)} stranded all-done epic(s): "
+                + ", ".join(sorted(strandable))
+            )
     else:
         typer.echo(f"Closed {len(closed)} node(s):")
         for c in closed:
@@ -4054,6 +4072,11 @@ def cmd_reconcile(
             typer.echo(f"  {c['node_id']}  PR #{c['pr_number']}{stamp_note}")
         if closed:
             typer.echo(f"Retro sentinels written under {retro_pending_dir()}")
+        if healed_epics:
+            typer.echo(
+                f"Auto-closed {len(healed_epics)} container epic(s) "
+                f"(all children complete): " + ", ".join(healed_epics)
+            )
 
     if failures:
         typer.echo(f"{len(failures)} node(s) could not be resolved:", err=True)
