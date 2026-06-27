@@ -404,6 +404,44 @@ def test_reconcile_advances_cascade_closed_parent_epic(cli_env, monkeypatch):
     assert epic["completed_at"] is not None
 
 
+def test_reconcile_self_heals_pre_existing_stranded_epic(cli_env, monkeypatch):
+    """x-33b2 (codex P2 migration): an epic whose children were ALL completed
+    before the cascade shipped gets no future child-close event, and containers
+    are hidden from next/ready - so it would strand forever. Reconcile self-heals
+    it (closes it + dispatches its dependents) even with NO merged-PR drift."""
+    graph_path, _ = cli_env
+    _make_graph(
+        graph_path,
+        [
+            # Open epic, but BOTH children already done -> stranded, no PR drift.
+            _node("ab-strandep0", project="web", cwd="/proj/web"),
+            _node("ab-donekid01", project="web", parent="ab-strandep0",
+                  completed_at="2026-01-01T00:00:00Z"),
+            _node("ab-donekid02", project="web", parent="ab-strandep0",
+                  completed_at="2026-01-02T00:00:00Z"),
+            _node("ab-stranddep", project="api", blocked_by=["ab-strandep0"]),
+        ],
+    )
+    # No merged-PR drift: scan finds nothing closeable.
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({}))
+
+    dep_ids = []
+    import fno.backlog.advance as advmod
+    import fno.backlog.reconcile_dispatch as recdisp
+    monkeypatch.setattr(advmod, "advance",
+                        lambda **kw: advmod.AdvanceResult("skipped", "advance_skipped", reason="disabled"))
+    monkeypatch.setattr(advmod, "advance_dependents",
+                        lambda **kw: dep_ids.append(kw.get("closed_node_id")) or [])
+    monkeypatch.setattr(recdisp, "dispatch_reconcile_for_blocker", lambda **kw: None)
+
+    result = runner.invoke(app, ["backlog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    epic = next(e for e in _read_entries(graph_path) if e["id"] == "ab-strandep0")
+    assert epic["completed_at"] is not None              # self-healed closed
+    assert "auto-closed" in (epic.get("completion_note") or "")
+    assert "ab-strandep0" in dep_ids                     # its dependent dispatched
+
+
 def test_reconcile_advance_failure_does_not_abort_sweep(cli_env, monkeypatch):
     """Task 2.1: a raising advance is non-fatal - the node still closes and the
     reconcile run still exits 0 (the sweep is never wedged by auto-continue)."""

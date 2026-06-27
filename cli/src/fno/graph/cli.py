@@ -3146,6 +3146,66 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     return closed
 
 
+def _strandable_epic_ids(entries: list[dict]) -> set[str]:
+    """Open epics (parents) whose children are ALL done - closeable right now.
+
+    Read-only. The cascade (_cascade_close_parents) only fires on a child-CLOSE
+    event, so an epic whose children were all completed BEFORE this code shipped
+    (or whose last child closed via a path that did not cascade) is stranded:
+    open, all children done, and - now that containers are hidden from
+    next/ready - unreachable for closure. This identifies them so reconcile can
+    self-heal (codex P2 on PR #69).
+    """
+    children_by_parent: dict[str, list[dict]] = {}
+    for e in entries:
+        if isinstance(e, dict) and isinstance(e.get("parent"), str):
+            children_by_parent.setdefault(e["parent"], []).append(e)
+    id_to_entry = {
+        e["id"]: e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    out: set[str] = set()
+    for pid, kids in children_by_parent.items():
+        parent = id_to_entry.get(pid)
+        if (
+            parent is not None
+            and not parent.get("completed_at")
+            and all(k.get("completed_at") for k in kids)
+        ):
+            out.add(pid)
+    return out
+
+
+def _sweep_close_done_epics(entries: list[dict]) -> list[str]:
+    """Close every open epic whose children are all done (self-heal/migration).
+
+    Idempotent, mutating, run inside a close mutator. Repeats to a fixpoint so a
+    freshly-closed epic heals ITS parent too (grandparent chains). Returns the
+    ids it closed so the caller can auto-continue their dependents. Reconcile
+    runs this so pre-existing stranded all-done epics (codex P2 on PR #69) heal
+    on the next reconcile pass - going forward the cascade prevents new ones, so
+    this is a no-op once migrated.
+    """
+    id_to_entry = {
+        e["id"]: e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    closed: list[str] = []
+    for _ in range(64):  # fixpoint, depth-capped against a malformed cycle
+        ready = _strandable_epic_ids(entries)
+        if not ready:
+            break
+        for pid in ready:
+            parent = id_to_entry.get(pid)
+            if parent is None or parent.get("completed_at"):
+                continue
+            _apply_completion_fields(parent)
+            if not parent.get("completion_note"):
+                parent["completion_note"] = "auto-closed: all children complete"
+            closed.append(pid)
+    return closed
+
+
 def _stamp_and_graduate_plan(
     plan_path: str,
     *,
@@ -3802,9 +3862,14 @@ def cmd_reconcile(
     closeable = [r for r in records if r.closeable]
     failures = [r for r in records if r.error is not None]
 
+    # Pre-existing stranded all-done epics to self-heal this sweep (codex P2 on
+    # PR #69). Read-only check so a reconcile with no drift AND nothing to heal
+    # still skips the lock entirely.
+    strandable = _strandable_epic_ids(entries)
+
     closed: list[dict] = []
 
-    if not dry_run and closeable:
+    if not dry_run and (closeable or strandable):
         # Apply every close in ONE locked mutation rather than locking once
         # per node: locked_mutate_graph acquires a file lock and rewrites the
         # whole graph, so a per-node loop is O(N) lock+rewrite cycles. The
@@ -3831,6 +3896,12 @@ def cmd_reconcile(
                         _cascade_close_parents(entries, record.node_id)
                     )
                     actually_closed.append(record)
+            # Self-heal pre-existing stranded all-done epics (codex P2): close any
+            # open epic whose children are already all done, even with no drift
+            # this sweep. Going forward the cascade prevents new ones, so this is
+            # a no-op once migrated. Their dependents auto-continue via the same
+            # cascade_closed_acc dispatch loop.
+            cascade_closed_acc.extend(_sweep_close_done_epics(entries))
             return entries
 
         # Capture the POST-lock graph (codex P2): resolving a closed node's
