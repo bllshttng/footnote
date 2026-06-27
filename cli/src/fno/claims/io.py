@@ -102,7 +102,10 @@ def claims_root_for(key: str) -> Path | None:
     ``backlog.advance``, ``backlog.reconcile_dispatch``, ``agents.cli``)
     delegate to, so their routing cannot drift.
     """
-    return global_claims_root() if key.split(":", 1)[0] in _GLOBAL_ID_PREFIXES else None
+    # partition (not split) so a colon-less key equal to a prefix (e.g. the bare
+    # token "node") does NOT match -- a global-id key is always "<prefix>:<id>".
+    prefix, colon, _ = key.partition(":")
+    return global_claims_root() if colon and prefix in _GLOBAL_ID_PREFIXES else None
 
 
 def claims_dir(root: Path | None = None) -> Path:

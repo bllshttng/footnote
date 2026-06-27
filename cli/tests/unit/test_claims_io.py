@@ -305,7 +305,17 @@ def test_claims_root_for_honors_env_override(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "key",
-    ["walker:/some/repo", "fleet:m-123", "colonless", "", "unknown:x-abcd"],
+    [
+        "walker:/some/repo",
+        "fleet:m-123",
+        "colonless",
+        "",
+        "unknown:x-abcd",
+        # A bare prefix with no colon is NOT a global-id key (needs "<prefix>:<id>").
+        "node",
+        "dispatch",
+        "reconcile",
+    ],
 )
 def test_claims_root_for_repo_local_and_unknown_keys_return_none(key):
     """AC1-ERR: repo-local / unrecognized / colon-less keys keep the default (None)."""
