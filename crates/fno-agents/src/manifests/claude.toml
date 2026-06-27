@@ -1,0 +1,111 @@
+# Claude readiness manifest (E6.3) - new, mirroring herdr's claude detection
+# rules. Claude's TUI is richer than codex/gemini's single composer line, so its
+# rules use more of the engine: the OSC title (authoritative, survives
+# scrollback/wrap/resize), the box-drawn composer body, and skip_state_update
+# for the ctrl+o transcript pager.
+#
+# State vocabulary (consumed by the daemon badge when E2 wires evaluate() in):
+#   working -> mid-turn, do NOT send input
+#   idle    -> waiting for input
+#   blocked -> a prompt the operator must answer (permission / selection)
+# skip_state_update -> hold the current state, do not apply this rule's `state`
+# (the transcript pager must not flip a working claude to idle).
+#
+# Priority order (highest wins; the OSC title is primary because it is the one
+# signal grid-scraping cannot fake):
+#   1100 osc_title_working   - braille spinner in the title => working
+#   1000 transcript_viewer   - ctrl+o pager open => hold state (skip update)
+#    980 live_blocked_form    - a selection menu is up => blocked
+#    960 permission_prompt    - "do you want to proceed?" box => blocked
+#    950 live_prompt_box      - idle composer box, no select hint => idle
+#    250 osc_title_idle       - "✳ " idle title, last-resort idle signal
+#
+# Both blocking prompts (live_blocked_form, permission_prompt) outrank the idle
+# composer box on purpose. herdr orders permission BELOW the box; we diverge
+# because prompt_box_body is unpinned and could match a composer box still drawn
+# beneath a permission prompt - and badging `idle` while a prompt is up is a
+# false-ready, the one direction readiness.rs Open Question #9 forbids. A blocked
+# prompt winning the tie costs at most a false-BLOCKED (the daemon waits), which
+# is the safe failure direction.
+#
+# AC-E6-5 in practice: a working claude whose grid shows an idle-looking
+# composer box still badges `working`, because osc_title_working (1100) beats
+# live_prompt_box (950). The title is the authority, not the scraped grid.
+#
+# ponytail: the braille spinner (U+2800-28FF) and "✳ " idle title are grounded
+# in osc.rs; the transcript-pager / permission / select-menu MARKER STRINGS and
+# the bottom_non_empty_lines(N) window sizes are from herdr's design and are NOT
+# yet pinned against a live claude TUI (no live pane until E2 lands - same
+# constraint readiness.rs documents in its SMOKE-PINNING NOTE). Pin them via
+# cli/scripts/smoke/capture-readiness-grid.sh when E2 lands. Conservative bias
+# holds: a wrong marker is a brief false/late badge, never input sent into the
+# wrong state. herdr splits bash-vs-generic permission prompts; folded into one
+# `permission_prompt` here until the bash-specific marker is pinned (carveout).
+
+# OSC title carries a braille spinner (U+2800-28FF) while claude is working.
+# Literal (single-quoted) TOML string so the backslash reaches the regex engine.
+[[rule]]
+id = "osc_title_working"
+state = "working"
+priority = 1100
+region = "osc_title"
+gate = { regex = '^[\x{2800}-\x{28FF}]' }
+
+# ctrl+o transcript pager open: hold whatever state we were in (a working claude
+# scrolling its transcript must not read as idle). Marker tunable (see header).
+[[rule]]
+id = "transcript_viewer"
+state = "idle"
+priority = 1000
+region = "bottom_non_empty_lines(3)"
+skip_state_update = true
+gate = { contains = "(END)" }
+
+# A live selection menu ("enter to select" + "esc to cancel") that is NOT the
+# mid-turn interrupt line. Scoped to the bottom status region so a menu quoted
+# up in scrollback does not match.
+[[rule]]
+id = "live_blocked_form"
+state = "blocked"
+priority = 980
+region = "bottom_non_empty_lines(8)"
+gate = { all = [
+  { contains = "enter to select" },
+  { contains = "esc to cancel" },
+  { not = { contains = "esc to interrupt" } },
+] }
+
+# Idle composer box: a line in the box body starts with ❯ and is not a select
+# hint. prompt_box_body already scopes to the composer, so scrollback is out.
+[[rule]]
+id = "live_prompt_box"
+state = "idle"
+priority = 950
+region = "prompt_box_body"
+gate = { all = [
+  { line_regex = '^\s*\x{276f}' },
+  { not = { contains = "enter to select" } },
+] }
+
+# Permission prompt ("do you want to proceed?" + a 1. Yes / 2. No menu). Scoped
+# to the live bottom region so a "yes" or the question in scrollback cannot fake
+# it (AC-E6-5). Priority 960 (above live_prompt_box 950) so a permission prompt
+# beats an idle composer box drawn beneath it - never false-ready into the box.
+# herdr's bash-vs-generic split folded into one (header carveout).
+[[rule]]
+id = "permission_prompt"
+state = "blocked"
+priority = 960
+region = "bottom_non_empty_lines(8)"
+gate = { all = [
+  { contains = "do you want to proceed?" },
+  { any = [ { contains = "1. Yes" }, { contains = "1. yes" } ] },
+] }
+
+# Last-resort idle signal: the idle window title starts with "✳ " (U+2733).
+[[rule]]
+id = "osc_title_idle"
+state = "idle"
+priority = 250
+region = "osc_title"
+gate = { regex = '^\x{2733}' }
