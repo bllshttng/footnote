@@ -574,6 +574,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         exe_fingerprint,
         pid_start_time,
         drives: crate::drive::new_table(),
+        pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     // Active-backlog drain supervisor (node x-c070). Opt-in via
@@ -680,7 +681,21 @@ struct Ctx {
     /// In-memory drive registry (Wave 4): active drivers/watchers per agent,
     /// for caps, single-driver enforcement, and stale takeover.
     drives: crate::drive::DriveTable,
+    /// Early-push buffer (inside-out E3.3, buffer-on-early-push): inside-leg
+    /// reports keyed by session_id that arrived before their registry row
+    /// existed (a per-turn hook can fire faster than the daemon registers the
+    /// pane). Flushed onto the row at creation (`handle_spawn` /
+    /// `spawn_claude_stream_lane`). Bounded by [`PENDING_INSIDE_LEG_CAP`] so a
+    /// flood of pushes for sessions that never register cannot grow without
+    /// limit. Highest seq wins per session.
+    pending_inside_leg: std::sync::Mutex<std::collections::HashMap<String, state::InsideLegReport>>,
 }
+
+/// Cap on the early-push buffer (E3.3). A report for a NEW session is dropped
+/// (logged `buffer_full`) once the buffer is at cap; an already-buffered
+/// session's seq still advances (no new key). 64 covers any realistic burst of
+/// panes registering at once while staying a hard ceiling.
+const PENDING_INSIDE_LEG_CAP: usize = 64;
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
@@ -1417,7 +1432,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     }
 
     // Register.
-    let entry = RegistryEntry {
+    let mut entry = RegistryEntry {
         name: name.clone(),
         short_id: short_id.clone(),
         provider: provider.clone(),
@@ -1502,6 +1517,10 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             None
         }
     });
+    // E3.3 buffer-on-early-push: seed any report that arrived before this row
+    // existed. Peek+seed now (so it rides the insert); commit the buffer removal
+    // + event only after the insert wins, so a losing race leaves it buffered.
+    let flushed_inside_leg = peek_and_seed_inside_leg(ctx, &mut entry);
     let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
         if r.entries.iter().any(|e| e.name == entry.name) {
             return false;
@@ -1527,7 +1546,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     })
     .await;
     match insert {
-        Ok(true) => {}
+        Ok(true) => commit_inside_leg_flush(ctx, &name, flushed_inside_leg),
         Ok(false) => {
             // Lost a concurrent spawn race for this name: our just-started worker
             // is a duplicate. Shut it down so we don't leak it, then report the
@@ -2108,7 +2127,7 @@ async fn spawn_claude_stream_lane(
     //    one-host UUID guard) means exactly one inserts. The loser shuts its
     //    just-started worker down (which releases the claim via the worker's RAII
     //    guard) so it is never leaked untracked.
-    let entry = build_claude_stream_entry(
+    let mut entry = build_claude_stream_entry(
         name,
         &short_id,
         cwd,
@@ -2117,6 +2136,9 @@ async fn spawn_claude_stream_lane(
         worker_pid_start_time,
         ctx.home.timeline_jsonl(&short_id),
     );
+    // E3.3 buffer-on-early-push: seed any report buffered before this stream row
+    // existed; commit the buffer removal + event only after the insert wins.
+    let flushed_inside_leg = peek_and_seed_inside_leg(ctx, &mut entry);
     let uuid_for_lock = uuid.to_string();
     let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
         if r.entries.iter().any(|e| e.name == entry.name) {
@@ -2134,7 +2156,7 @@ async fn spawn_claude_stream_lane(
     })
     .await;
     match insert {
-        Ok(true) => {}
+        Ok(true) => commit_inside_leg_flush(ctx, name, flushed_inside_leg),
         Ok(false) => {
             best_effort_worker_shutdown(&sock).await;
             let _ = ctx.emitter.emit(
@@ -4649,6 +4671,81 @@ fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
 /// same UUID E1 recorded. A DROP is non-fatal: an unregistered session (the row
 /// not up yet) or a stale seq returns `ok` with `stored:false`, so the hook stays
 /// fire-and-forget and never reds a turn.
+/// Outcome of trying to buffer an early-push inside-leg report (E3.3).
+enum BufferOutcome {
+    /// Held in the pending buffer until the row registers.
+    Buffered,
+    /// A reordered/duplicate early push (`seq <= buffered seq`); dropped.
+    StaleSeq { last: u64 },
+    /// The buffer is at cap and this is a new session; dropped (logged).
+    Full,
+}
+
+/// Insert an early-push report into the bounded pending buffer, highest-seq-wins
+/// per session (a reorder cannot regress a buffered report, the same seq rule the
+/// registered path enforces). Pure over the map so it is unit-testable without a
+/// daemon (inside-out E3.3, buffer-on-early-push).
+fn buffer_pending_report(
+    map: &mut std::collections::HashMap<String, state::InsideLegReport>,
+    session_id: &str,
+    report: state::InsideLegReport,
+) -> BufferOutcome {
+    if let Some(prev) = map.get(session_id) {
+        if report.seq <= prev.seq {
+            return BufferOutcome::StaleSeq { last: prev.seq };
+        }
+        map.insert(session_id.to_string(), report);
+        return BufferOutcome::Buffered;
+    }
+    if map.len() >= PENDING_INSIDE_LEG_CAP {
+        return BufferOutcome::Full;
+    }
+    map.insert(session_id.to_string(), report);
+    BufferOutcome::Buffered
+}
+
+/// Peek a buffered early-push report for a freshly-built claude row and seed it
+/// onto `entry.inside_leg` BEFORE the row is inserted (E3.3 flush). Returns
+/// `(session_uuid, report)` so the caller commits the buffer removal + the
+/// `inside_leg_buffer_flushed` event only AFTER its insert wins
+/// ([`commit_inside_leg_flush`]): a losing concurrent insert then leaves the
+/// report buffered for the winning row rather than stranding it. A no-op
+/// (returns `None`) for a row with no pinned claude session uuid or no buffered
+/// report. Poisoned lock degrades to `None` (the report stays buffered).
+fn peek_and_seed_inside_leg(
+    ctx: &Ctx,
+    entry: &mut RegistryEntry,
+) -> Option<(String, state::InsideLegReport)> {
+    let uuid = entry.claude_session_uuid.clone()?;
+    let rep = ctx.pending_inside_leg.lock().ok()?.get(&uuid).cloned()?;
+    entry.inside_leg = Some(rep.clone());
+    Some((uuid, rep))
+}
+
+/// Commit a flushed early-push report after its row insert won: remove it from
+/// the pending buffer and publish `inside_leg_buffer_flushed`. A no-op when
+/// nothing was flushed.
+fn commit_inside_leg_flush(
+    ctx: &Ctx,
+    name: &str,
+    flushed: Option<(String, state::InsideLegReport)>,
+) {
+    if let Some((uuid, rep)) = flushed {
+        if let Ok(mut buf) = ctx.pending_inside_leg.lock() {
+            buf.remove(&uuid);
+        }
+        let _ = ctx.emitter.emit(
+            "inside_leg_buffer_flushed",
+            &json!({
+                "name": name,
+                "session_id": uuid,
+                "state": format!("{:?}", rep.state).to_lowercase(),
+                "seq": rep.seq,
+            }),
+        );
+    }
+}
+
 fn handle_report(ctx: &Ctx, req: &Request) -> Response {
     let session_id = match req.params.get("session_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s.to_string(),
@@ -4688,6 +4785,17 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         .map(String::from);
     let ttl_ms = req.params.get("ttl_ms").and_then(|v| v.as_u64());
 
+    // Build the report once; a clone moves into the locked store path, the
+    // original is reused for the early-push buffer when no row exists yet.
+    let report = state::InsideLegReport {
+        state,
+        seq,
+        reason,
+        received_at: now_rfc3339_like(),
+        ttl_ms,
+    };
+    let report_for_store = report.clone();
+
     // The store/drop decision is made UNDER the registry flock so two concurrent
     // reporters on one session id can't both pass the seq gate.
     enum Outcome {
@@ -4711,13 +4819,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                 return;
             }
         }
-        entry.inside_leg = Some(state::InsideLegReport {
-            state,
-            seq,
-            reason,
-            received_at: now_rfc3339_like(),
-            ttl_ms,
-        });
+        entry.inside_leg = Some(report_for_store);
         outcome = Outcome::Stored;
     }) {
         return Response::err(
@@ -4745,16 +4847,53 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                 json!({"stored": false, "dropped": "stale_seq", "last_seq": last}),
             )
         }
-        Outcome::Unknown => {
-            let _ = ctx.emitter.emit(
-                "inside_leg_report_dropped",
-                &json!({"session_id": session_id, "seq": seq, "reason": "unknown_session"}),
-            );
-            Response::ok(
-                req.id,
-                json!({"stored": false, "dropped": "unknown_session"}),
-            )
-        }
+        // E3.3 buffer-on-early-push: the row is not up yet (the hook fired before
+        // the daemon registered the pane). Hold the report in the bounded buffer
+        // instead of dropping it; the spawn path flushes it onto the row at
+        // creation. Still fire-and-forget: every branch returns `ok`.
+        Outcome::Unknown => match ctx.pending_inside_leg.lock() {
+            Ok(mut buf) => match buffer_pending_report(&mut buf, &session_id, report) {
+                BufferOutcome::Buffered => {
+                    drop(buf);
+                    let _ = ctx.emitter.emit(
+                        "inside_leg_report_buffered",
+                        &json!({"session_id": session_id, "seq": seq, "state": state_label}),
+                    );
+                    Response::ok(req.id, json!({"stored": false, "buffered": true, "seq": seq}))
+                }
+                BufferOutcome::StaleSeq { last } => {
+                    drop(buf);
+                    let _ = ctx.emitter.emit(
+                        "inside_leg_report_dropped",
+                        &json!({"session_id": session_id, "seq": seq, "last_seq": last, "reason": "stale_seq"}),
+                    );
+                    Response::ok(
+                        req.id,
+                        json!({"stored": false, "dropped": "stale_seq", "last_seq": last}),
+                    )
+                }
+                BufferOutcome::Full => {
+                    drop(buf);
+                    let _ = ctx.emitter.emit(
+                        "inside_leg_report_dropped",
+                        &json!({"session_id": session_id, "seq": seq, "reason": "buffer_full"}),
+                    );
+                    Response::ok(
+                        req.id,
+                        json!({"stored": false, "dropped": "buffer_full"}),
+                    )
+                }
+            },
+            // Poisoned buffer lock: degrade to the old hard-drop rather than
+            // panicking a fire-and-forget hook.
+            Err(_) => {
+                let _ = ctx.emitter.emit(
+                    "inside_leg_report_dropped",
+                    &json!({"session_id": session_id, "seq": seq, "reason": "unknown_session"}),
+                );
+                Response::ok(req.id, json!({"stored": false, "dropped": "unknown_session"}))
+            }
+        },
     }
 }
 
@@ -5787,6 +5926,104 @@ mod tests {
     }
 
     #[test]
+    fn buffer_pending_report_highest_seq_wins_and_is_bounded() {
+        use std::collections::HashMap;
+        let rep = |seq| state::InsideLegReport {
+            state: state::InsideLegState::Working,
+            seq,
+            reason: None,
+            received_at: "2026-06-27T00:00:00Z".into(),
+            ttl_ms: None,
+        };
+        let mut map: HashMap<String, state::InsideLegReport> = HashMap::new();
+
+        // First buffer for a session: stored.
+        assert!(matches!(
+            buffer_pending_report(&mut map, "s1", rep(2)),
+            BufferOutcome::Buffered
+        ));
+        assert_eq!(map["s1"].seq, 2);
+
+        // A reordered/duplicate early push (seq <= buffered) is dropped, buffer unchanged.
+        assert!(matches!(
+            buffer_pending_report(&mut map, "s1", rep(1)),
+            BufferOutcome::StaleSeq { last: 2 }
+        ));
+        assert_eq!(map["s1"].seq, 2, "stale early push must not regress the buffer");
+
+        // A newer push for the same session advances it.
+        assert!(matches!(
+            buffer_pending_report(&mut map, "s1", rep(5)),
+            BufferOutcome::Buffered
+        ));
+        assert_eq!(map["s1"].seq, 5);
+
+        // Fill to cap with distinct sessions, then a NEW session is dropped (Full),
+        // while an existing session still advances.
+        for i in 0..PENDING_INSIDE_LEG_CAP {
+            buffer_pending_report(&mut map, &format!("fill{i}"), rep(1));
+        }
+        assert!(map.len() >= PENDING_INSIDE_LEG_CAP);
+        assert!(matches!(
+            buffer_pending_report(&mut map, "brand-new", rep(1)),
+            BufferOutcome::Full
+        ));
+        assert!(!map.contains_key("brand-new"));
+        assert!(
+            matches!(
+                buffer_pending_report(&mut map, "s1", rep(9)),
+                BufferOutcome::Buffered
+            ),
+            "an already-buffered session advances even at cap (no new key)"
+        );
+    }
+
+    #[test]
+    fn peek_and_commit_flushes_buffered_report_onto_a_new_row() {
+        // E3.3 flush: a report buffered for an unregistered session is seeded onto
+        // the row at creation and removed from the buffer, with a logged event.
+        let home = tmp_home("inside-leg-flush");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        ctx.pending_inside_leg.lock().unwrap().insert(
+            "uuid-x".into(),
+            state::InsideLegReport {
+                state: state::InsideLegState::Working,
+                seq: 4,
+                reason: None,
+                received_at: "2026-06-27T00:00:00Z".into(),
+                ttl_ms: Some(5000),
+            },
+        );
+
+        let mut entry = rentry("pane", AgentStatus::Live, None);
+        entry.provider = "claude".into();
+        entry.claude_session_uuid = Some("uuid-x".into());
+
+        // Peek+seed: the report lands on the entry; the buffer still holds it
+        // (removal is deferred until the insert wins).
+        let flushed = peek_and_seed_inside_leg(&ctx, &mut entry);
+        assert!(flushed.is_some());
+        assert_eq!(entry.inside_leg.as_ref().map(|r| r.seq), Some(4));
+        assert!(ctx.pending_inside_leg.lock().unwrap().contains_key("uuid-x"));
+
+        // Commit (insert won): buffer entry removed, event emitted.
+        commit_inside_leg_flush(&ctx, "pane", flushed);
+        assert!(!ctx.pending_inside_leg.lock().unwrap().contains_key("uuid-x"));
+        let events = read_events(&home);
+        assert!(events.iter().any(|e| e["kind"] == "inside_leg_buffer_flushed"
+            && e["name"] == "pane"
+            && e["session_id"] == "uuid-x"
+            && e["seq"] == 4));
+
+        // A row with no pinned uuid is a no-op.
+        let mut plain = rentry("plain", AgentStatus::Live, None);
+        plain.claude_session_uuid = None;
+        assert!(peek_and_seed_inside_leg(&ctx, &mut plain).is_none());
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
     fn reconcile_defers_remaining_when_budget_exhausted() {
         let entries = vec![
             rentry("a", AgentStatus::Live, None),
@@ -6027,6 +6264,7 @@ mod tests {
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
             pid_start_time: process_start_time(std::process::id()),
             drives: crate::drive::new_table(),
+        pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -6046,6 +6284,7 @@ mod tests {
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
             pid_start_time: process_start_time(std::process::id()),
             drives: crate::drive::new_table(),
+        pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -7008,10 +7247,11 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    /// AC-X2-5 unknown session: a push for an unregistered session id is dropped
-    /// with a logged event and adds no phantom row.
+    /// AC-X2-5 + E3.3 buffer-on-early-push: a push for an unregistered session id
+    /// is BUFFERED (no longer hard-dropped) with a logged event and adds no
+    /// phantom row. The buffered report is flushed onto the row at creation.
     #[test]
-    fn handle_report_drops_unknown_session() {
+    fn handle_report_buffers_early_push_for_unknown_session() {
         let home = tmp_home("report-unknown");
         let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
         let resp = handle_report(
@@ -7024,15 +7264,24 @@ done
         );
         assert!(!resp.is_err());
         assert_eq!(resp.result().unwrap()["stored"], false);
-        assert_eq!(resp.result().unwrap()["dropped"], "unknown_session");
+        assert_eq!(
+            resp.result().unwrap()["buffered"],
+            true,
+            "an early push is held, not dropped (E3.3)"
+        );
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert!(reg.entries.is_empty(), "no phantom row created");
+        // The report is held in the pending buffer keyed by session_id.
+        assert_eq!(
+            ctx.pending_inside_leg.lock().unwrap().get("uuid-nope").map(|r| r.seq),
+            Some(1)
+        );
 
         let events = read_events(&home);
         assert!(events
             .iter()
-            .any(|e| e["kind"] == "inside_leg_report_dropped" && e["reason"] == "unknown_session"));
+            .any(|e| e["kind"] == "inside_leg_report_buffered" && e["session_id"] == "uuid-nope"));
         std::fs::remove_dir_all(home.root()).ok();
     }
 
