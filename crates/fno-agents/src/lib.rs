@@ -661,6 +661,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "drive_crashed",
     "drive_force_close_timeout",
     "drive_keystroke_stepped",
+    "drive_refused_busy_elsewhere",
     "drive_takeover_after_stale",
     "drive_watch_input_rejected",
     // Reconcile (daemon-emitted)
