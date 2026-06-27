@@ -96,6 +96,45 @@ def test_acquire_with_ttl(cwd_tmp):
     assert parsed["expires_at"] is not None
 
 
+def test_acquire_omitted_pid_defaults_to_session_ancestor(cwd_tmp, monkeypatch):
+    # ponytail hardening: an omitted --pid anchors to the durable session
+    # (nearest agent ancestor), not the transient acquiring process. os.getppid()
+    # is a real, live, DISTINCT pid so this proves the wiring (not the old
+    # os.getpid() default).
+    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid",
+                        lambda from_pid=None: os.getppid())
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["pid"] == os.getppid() and parsed["pid"] != os.getpid()
+
+
+def test_acquire_omitted_pid_degrades_when_no_session(cwd_tmp, monkeypatch):
+    # No agent ancestor (standalone use) -> resolve returns None -> the prior
+    # os.getpid() default is preserved byte-for-byte.
+    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid",
+                        lambda from_pid=None: None)
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["pid"] == os.getpid()
+
+
+def test_acquire_explicit_pid_overrides_session_default(cwd_tmp, monkeypatch):
+    # An explicit --pid always wins; resolve_session_pid is never consulted.
+    called = {"n": 0}
+
+    def _should_not_run(from_pid=None):
+        called["n"] += 1
+        return 4242
+
+    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", _should_not_run)
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h",
+                                 "--pid", str(os.getppid()), "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["pid"] == os.getppid()
+    assert called["n"] == 0
+
+
 def test_acquire_invalid_ttl_format(cwd_tmp):
     result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--ttl", "garbage"])
     assert result.exit_code != 0
