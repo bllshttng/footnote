@@ -55,16 +55,16 @@ _PENDING_TTL_MS = 6 * 60 * 60 * 1000  # 6h
 def _claims_root_for(key: str):
     """Route reconcile claims so writer and reader agree across repos.
 
-    ``node:`` and ``reconcile:`` go to the GLOBAL ($HOME) root: the sentinel is
+    Delegates to fno.claims.io.claims_root_for: ``node:``/``reconcile:``/
+    ``dispatch:`` all go to the GLOBAL ($HOME) root. The reconcile sentinel is
     written in the BLOCKER's merge context and read in the DEPENDENT's first-pass
-    context (possibly a different repo), so a cwd-relative root would lose it.
-    ``dispatch:`` stays on the cwd default to share advance's dedup token.
+    context (possibly a different repo), so a cwd-relative root would lose it;
+    ``dispatch:`` is now global too (it keys on the same global node id), so it
+    still shares advance's dedup token -- globally, across repos.
     """
-    if key.startswith("node:") or key.startswith("reconcile:"):
-        from fno.claims.io import global_claims_root
+    from fno.claims.io import claims_root_for
 
-        return global_claims_root()
-    return None
+    return claims_root_for(key)
 
 
 def _pending_holder(node_id: str) -> str:

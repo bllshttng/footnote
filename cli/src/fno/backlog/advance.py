@@ -303,15 +303,17 @@ def _spawn_worker(
 
 
 def _claims_root_for(key: str):
-    """node:* claims live in the global ($HOME) root; others use the cwd/env
-    default (canonical repo root, honoring FNO_CLAIMS_ROOT). Mirrors
-    fno.claims.cli._node_aware_root so advance reads/writes the SAME
-    location the init shell + the Rust walker use."""
-    if key.startswith("node:"):
-        from fno.claims.io import global_claims_root
+    """Resolve the claims root for a key (delegates to the shared helper).
 
-        return global_claims_root()
-    return None
+    Global-id kinds (``node:``/``dispatch:``/``reconcile:``) live in the global
+    ($HOME) root; repo-local keys use the cwd/env default (canonical repo root,
+    honoring FNO_CLAIMS_ROOT). Delegating to fno.claims.io.claims_root_for keeps
+    advance, reconcile_dispatch, spawn-guard, and the `fno claim` CLI on ONE
+    routing rule so they cannot drift -- and roots the boot-window dispatch:<id>
+    token globally so cross-repo dispatchers dedup against each other."""
+    from fno.claims.io import claims_root_for
+
+    return claims_root_for(key)
 
 
 def _walker_key() -> str:
