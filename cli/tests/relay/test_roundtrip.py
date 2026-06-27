@@ -282,51 +282,58 @@ def test_deliver_session_times_out_with_live_worker(monkeypatch):
 @pytest.mark.slow_e2e
 @pytest.mark.skipif(
     not os.environ.get("FNO_LIVE_RELAY"),
-    reason="spawns a real interactive claude via the daemon; set FNO_LIVE_RELAY=1 to run",
+    reason="drives the live daemon RPC substrate; set FNO_LIVE_RELAY=1 to run",
 )
 def test_live_deliver_via_daemon_worker(monkeypatch):
     """AC-E4-5: the relay injects through the daemon ``worker.submit`` RPC behind
     the daemon-held ``session:`` claim, and reads the reply faithfully from the
     transcript -- the real RPC substrate, not the mocked CI.
 
-    Requires a running fno-agents daemon (supervisor.sock) and real claude auth.
-    Steps:
-      1. spawn interactive claude via the daemon ``agent.spawn`` RPC, carrying the
-         sentinel system prompt; read back the daemon-minted session uuid (E4.1).
-      2. assert the daemon HOLDS ``session:<uuid>`` (E1 acquire) -- the relay must
-         find it daemon-held, never spawn a second writer (AC-E4-3).
-      3. deliver_session() injects via worker.submit and captures the sentinel
-         reply from the transcript (faithful inter-word spacing).
+    PRECONDITION (the daemon's claude-interactive contract is ADOPT, not mint --
+    confirmed live 2026-06-27: ``agent.spawn`` with a fresh uuid returns "claude has
+    no fresh interactive host; adopt an idle session"). So this test needs an idle
+    claude session that was STARTED relay-targeted, i.e. with
+    ``--append-system-prompt`` carrying :data:`RELAY_SYSTEM_PROMPT` (else its
+    transcript has no sentinels and capture times out -- the sentinel-seam contract).
+    Provide its session uuid via ``FNO_LIVE_RELAY_SESSION``.
+
+    Steps (run against a live fno-agents daemon + real claude auth):
+      1. ``fno agents promote`` adopts that session into the daemon host lane, which
+         acquires ``session:<uuid>`` (E1) and stands up its worker socket.
+      2. assert the daemon HOLDS ``session:<uuid>`` -- the relay finds it daemon-held
+         and routes through the held handle, never a second writer (AC-E4-3).
+      3. ``deliver_session`` injects via ``worker.submit`` and captures the sentinel
+         reply faithfully from the transcript (AC-E4-2 / AC-E4-4).
     Billed; draws the subscription weekly limit.
     """
-    import uuid as _uuid
+    import subprocess
 
-    from fno.agents.dispatch import _daemon_rpc
     from fno.claims.core import claim_status
 
     _restore_real_home(monkeypatch)
-    sid = str(_uuid.uuid4())
-    spawn = _daemon_rpc("agent.spawn", {
-        "name": f"relay-live-{sid[:8]}",
-        "provider": "claude",
-        "host_mode": "interactive",
-        "session_id": sid,
-        "append_system_prompt": rt_mod.RELAY_SYSTEM_PROMPT,
-    }, connect_timeout=5.0, read_timeout=60.0)
-    if spawn is None:
-        pytest.skip("daemon unreachable (no supervisor.sock); start the daemon to run this")
-    # E4.1: the spawn echoes the session uuid back.
-    assert spawn.get("session_id") == sid, f"daemon did not echo session uuid: {spawn!r}"
-
-    # AC-E4-3: the daemon holds the single-writer claim (E1 acquire + re-anchor).
-    st = claim_status(f"session:{sid}")
-    assert st["state"] == "live", f"daemon should hold session:{sid}, got {st}"
+    sid = os.environ.get("FNO_LIVE_RELAY_SESSION")
+    if not sid:
+        pytest.skip(
+            "set FNO_LIVE_RELAY_SESSION=<uuid of an idle claude session started with "
+            "RELAY_SYSTEM_PROMPT> -- the daemon adopts (does not mint) interactive claude"
+        )
+    name = f"relay-live-{sid[:8]}"
+    promote = subprocess.run(
+        ["fno", "agents", "promote", name, "--from", sid, "--provider", "claude"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if promote.returncode != 0:
+        pytest.skip(f"promote failed (daemon down / session not adoptable): {promote.stderr.strip()}")
 
     try:
+        # AC-E4-3: the daemon holds the single-writer claim (E1 acquire + re-anchor).
+        st = claim_status(f"session:{sid}")
+        assert st["state"] == "live", f"daemon should hold session:{sid}, got {st}"
+
         framed = rt_mod._frame("peer", "Say hello there friend in one full sentence.")
         reply = rt_mod.deliver_session(sid, framed, timeout=180.0)
         assert reply.strip(), "no reply captured from the transcript"
         # The transcript pivot's payoff: faithful text keeps inter-word spaces.
         assert " " in reply, f"reply not faithful (space-collapsed?): {reply!r}"
     finally:
-        _daemon_rpc("agent.stop", {"name": f"relay-live-{sid[:8]}"})
+        subprocess.run(["fno", "agents", "stop", name], capture_output=True, timeout=30)
