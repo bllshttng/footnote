@@ -107,20 +107,56 @@ pub fn contains_detach_sentinel(text: &str) -> bool {
     DETACH_SENTINELS.iter().any(|s| text.contains(s))
 }
 
-/// Build the `op:'reply'` inject line (newline-delimited JSON). Refuses text
-/// carrying a detach sentinel. `auth` is omitted on the same-uid no-auth path.
+/// The sender of an a2a turn, rendered as a legible Claude-native tag. Mirrors
+/// Claude's own `<IMPORTANT MESSAGE>` convention so an adopted session treats a
+/// `<FNO ...>` line as structure natively (which closes most of the recipient-side
+/// gap with no custom primer).
+///
+/// `fid` is the SHORT 8-hex sessionId of the driving session -- the identity, since
+/// sessionIds ARE names (never a display name; the registry row + claim still key
+/// on the FULL session_uuid underneath, the tag uses the short purely for
+/// legibility). `harness`/`model` are context for later reference. This is legible
+/// context, NOT unforgeable trust: the serde-escaped envelope is deliberately
+/// deferred until a parser actually makes a trust decision on `fid` (nothing does
+/// yet).
+pub struct A2aFrom<'a> {
+    /// Short 8-hex sessionId of the sender.
+    pub fid: &'a str,
+    /// Sender harness: `claude-code` / `codex` / `gemini`.
+    pub harness: &'a str,
+    /// Sender model id.
+    pub model: &'a str,
+}
+
+/// Render the a2a tag prefix: `<FNO harness={h} model={m} fid={fid}>`.
+pub fn a2a_tag(from: &A2aFrom) -> String {
+    format!(
+        "<FNO harness={} model={} fid={}>",
+        from.harness, from.model, from.fid
+    )
+}
+
+/// Build the `op:'reply'` inject line. When `from` is set, the turn text is
+/// prefixed with the legible a2a tag (`<FNO ...> {text}`) so the recipient sees
+/// it as agent-to-agent structure, not a human typing. Refuses text carrying a
+/// detach sentinel. `auth` is omitted on the same-uid no-auth path.
 pub fn build_reply_request(
     short: &str,
     text: &str,
     auth: Option<&str>,
+    from: Option<&A2aFrom>,
 ) -> Result<String, DriveError> {
     if contains_detach_sentinel(text) {
         return Err(DriveError::UnsafeText);
     }
+    let body = match from {
+        Some(f) => format!("{} {}", a2a_tag(f), text),
+        None => text.to_string(),
+    };
     let mut obj = serde_json::Map::new();
     obj.insert("op".into(), "reply".into());
     obj.insert("short".into(), short.into());
-    obj.insert("text".into(), text.into());
+    obj.insert("text".into(), body.into());
     if let Some(a) = auth {
         obj.insert("auth".into(), a.into());
     }
@@ -129,15 +165,17 @@ pub fn build_reply_request(
     Ok(line)
 }
 
-/// Inject a turn over `t` via `op:'reply'`. Writing succeeded does NOT mean the
-/// turn landed -- confirm with [`confirm_marker_after`] against the transcript.
+/// Inject a turn over `t` via `op:'reply'`, tagged as a2a from `from`. Writing
+/// succeeded does NOT mean the turn landed -- confirm with [`confirm_marker_after`]
+/// against the transcript.
 pub fn inject_reply<T: ControlTransport>(
     t: &mut T,
     short: &str,
     text: &str,
     auth: Option<&str>,
+    from: Option<&A2aFrom>,
 ) -> Result<(), DriveError> {
-    let line = build_reply_request(short, text, auth)?;
+    let line = build_reply_request(short, text, auth, from)?;
     t.send_line(&line)
         .map_err(|e| DriveError::Io(e.to_string()))
 }
@@ -183,10 +221,18 @@ fn line_is_assistant(line: &str) -> bool {
         == Some("assistant")
 }
 
+/// One a2a turn to drive: the `text` (which must embed `marker` for the transcript
+/// confirm), and the `from` identity that becomes the legible `<FNO ...>` tag.
+pub struct DriveTurn<'a> {
+    pub text: &'a str,
+    pub marker: &'a str,
+    pub from: Option<&'a A2aFrom<'a>>,
+}
+
 /// Drive one turn end to end and confirm delivery: attach, baseline the
-/// transcript, inject `text` (which must embed `marker`), then poll the
-/// transcript for a confirming assistant turn until `attempts` * `interval`
-/// elapses. Live glue (real socket + real transcript); the unit-tested pieces are
+/// transcript, inject `turn.text` tagged as a2a, then poll the transcript for a
+/// confirming assistant turn until `attempts` * `interval` elapses. Live glue
+/// (real socket + real transcript); the unit-tested pieces are
 /// [`build_reply_request`], [`confirm_marker_after`], [`find_transcript`].
 ///
 /// ponytail: the poll loop sleeps for real; it is not unit-tested. Every decision
@@ -195,8 +241,7 @@ pub fn drive_and_confirm<T: ControlTransport>(
     transport: &mut T,
     attach: &AttachRequest,
     session_uuid: &str,
-    text: &str,
-    marker: &str,
+    turn: &DriveTurn,
     attempts: u32,
     interval: std::time::Duration,
 ) -> Result<(), DriveError> {
@@ -206,10 +251,16 @@ pub fn drive_and_confirm<T: ControlTransport>(
         .ok_or_else(|| DriveError::Io(format!("no transcript for session {session_uuid}")))?;
     let baseline = transcript_len(&transcript);
 
-    inject_reply(transport, &attach.short, text, attach.auth.as_deref())?;
+    inject_reply(
+        transport,
+        &attach.short,
+        turn.text,
+        attach.auth.as_deref(),
+        turn.from,
+    )?;
 
     for _ in 0..attempts.max(1) {
-        if confirm_marker_after(&transcript, marker, baseline)
+        if confirm_marker_after(&transcript, turn.marker, baseline)
             .map_err(|e| DriveError::Io(e.to_string()))?
         {
             return Ok(());
@@ -261,9 +312,27 @@ mod tests {
         assert!(!is_session_uuid("g1b2c3d4-1111-2222-3333-444455556666")); // non-hex
     }
 
+    fn from_orchestrator() -> A2aFrom<'static> {
+        A2aFrom {
+            fid: "7d1f8bdc",
+            harness: "claude-code",
+            model: "opus-4.8",
+        }
+    }
+
     #[test]
-    fn build_reply_request_schema() {
-        let line = build_reply_request("a1b2c3d4", "hello world", Some("deadbeef")).unwrap();
+    fn a2a_tag_is_legible_native_shape() {
+        // <FNO harness= model= fid=short-sid>, fid is the SHORT 8-hex sessionId,
+        // no JSON, no name field.
+        assert_eq!(
+            a2a_tag(&from_orchestrator()),
+            "<FNO harness=claude-code model=opus-4.8 fid=7d1f8bdc>"
+        );
+    }
+
+    #[test]
+    fn build_reply_request_untagged_when_no_from() {
+        let line = build_reply_request("a1b2c3d4", "hello world", Some("deadbeef"), None).unwrap();
         assert!(line.ends_with('\n'));
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(v["op"], "reply");
@@ -273,8 +342,21 @@ mod tests {
     }
 
     #[test]
+    fn build_reply_request_prefixes_a2a_tag() {
+        let from = from_orchestrator();
+        let line = build_reply_request("a1b2c3d4", "ship it MARKER42", None, Some(&from)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        let text = v["text"].as_str().unwrap();
+        // The turn is tagged legibly, and the marker survives for the confirm.
+        assert_eq!(
+            text,
+            "<FNO harness=claude-code model=opus-4.8 fid=7d1f8bdc> ship it MARKER42"
+        );
+    }
+
+    #[test]
     fn build_reply_request_omits_auth() {
-        let line = build_reply_request("a1b2c3d4", "hi", None).unwrap();
+        let line = build_reply_request("a1b2c3d4", "hi", None, None).unwrap();
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         assert!(v.get("auth").is_none());
     }
@@ -283,11 +365,11 @@ mod tests {
     fn build_reply_request_refuses_detach_sentinel() {
         let evil = format!("hi {}", DETACH_SENTINELS[0]);
         assert!(matches!(
-            build_reply_request("a1b2c3d4", &evil, None),
+            build_reply_request("a1b2c3d4", &evil, None, None),
             Err(DriveError::UnsafeText)
         ));
         assert!(matches!(
-            build_reply_request("a1b2c3d4", DETACH_SENTINELS[1], None),
+            build_reply_request("a1b2c3d4", DETACH_SENTINELS[1], None, None),
             Err(DriveError::UnsafeText)
         ));
     }
@@ -295,12 +377,13 @@ mod tests {
     #[test]
     fn inject_reply_writes_one_line_and_guards_sentinels() {
         let mut t = Fake { sent: Vec::new() };
-        inject_reply(&mut t, "a1b2c3d4", "ping MARKER42", None).unwrap();
+        inject_reply(&mut t, "a1b2c3d4", "ping MARKER42", None, None).unwrap();
         assert_eq!(t.sent.len(), 1);
         assert!(t.sent[0].contains("\"op\":\"reply\""));
+        assert!(t.sent[0].contains("MARKER42"));
 
         let mut t2 = Fake { sent: Vec::new() };
-        assert!(inject_reply(&mut t2, "a1b2c3d4", DETACH_SENTINELS[0], None).is_err());
+        assert!(inject_reply(&mut t2, "a1b2c3d4", DETACH_SENTINELS[0], None, None).is_err());
         assert!(t2.sent.is_empty(), "must not write unsafe text");
     }
 
