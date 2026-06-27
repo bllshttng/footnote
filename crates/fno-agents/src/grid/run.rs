@@ -2503,7 +2503,15 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         // turns on all-motion tracking, so a Moved event fires on
                         // every cursor move; those must NOT allocate a tile Vec
                         // (codex efficiency note).
-                        if rail_state.is_none() {
+                        //
+                        // Gate on whether the TILED grid is actually rendered, not on
+                        // rail_state alone: a --rail session too narrow for the rail
+                        // falls back to tiles, and the key path treats input as tiled
+                        // (rail_fits=false). Mirror that here so mouse works in the
+                        // fallback too (codex P2).
+                        let tiled_grid = rail_state.is_none()
+                            || layout::compute_with_rail(tty, layout::RAIL_COLS, 1).is_err();
+                        if tiled_grid {
                             match m.kind {
                                 MouseEventKind::Down(MouseButton::Left)
                                     if comp.mode() == Mode::Watch =>
