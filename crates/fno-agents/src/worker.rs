@@ -23,7 +23,7 @@ use crate::AgentStatus;
 use base64::Engine as _;
 use portable_pty::CommandBuilder;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 
@@ -358,7 +358,32 @@ fn build_child_command(cfg: &WorkerConfig) -> CommandBuilder {
     // targets this short_id, never on a window driving some unrelated agent.
     cmd.env("FNO_AGENTS_SELF_SHORT_ID", &cfg.short_id);
     cmd.env("FNO_AGENTS_HOME", cfg.home.as_os_str());
+    // Interactive-claude persistence recipe (inside-out-multiplexer E4.1): the
+    // daemon-side equivalent of the relay's roundtrip.py `_peer_env`. Force the
+    // PTY child to write its OWN faithful transcript at
+    // projects/<cwd-enc>/<session-id>.jsonl - which the relay then globs+reads
+    // with no PTY of its own (AC-E4-1) - by overriding the child's
+    // persistence-skip and dropping any inherited parent session id that would
+    // cross-write the child's turns into the parent's transcript. The child's own
+    // id is pinned via `--session-id` in the argv. Gated to interactive claude so
+    // codex/gemini panes (and the daemon's own env) are byte-unchanged.
+    if is_interactive_claude(&cfg.argv) {
+        cmd.env("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "1");
+        cmd.env_remove("CLAUDE_CODE_SESSION_ID");
+    }
     cmd
+}
+
+/// True when this PTY child is interactive subscription-billed claude (E4.1): the
+/// program is `claude` and no `-p`/`--print` Agent-SDK flag is present. Mirrors
+/// the daemon's `claude_argv_is_interactive` billing guard, kept local so the
+/// recipe is self-contained in the worker.
+fn is_interactive_claude(argv: &[String]) -> bool {
+    argv.first()
+        .and_then(|p| Path::new(p).file_name())
+        .map(|f| f == "claude")
+        .unwrap_or(false)
+        && !argv.iter().any(|a| a == "-p" || a == "--print")
 }
 
 #[cfg(test)]
@@ -367,6 +392,12 @@ mod tests {
     use crate::protocol::{read_response, write_request};
     use std::ffi::OsStr;
     use std::time::Instant;
+
+    // Serializes the env-mutating tests below: lib tests run concurrently in one
+    // process and every `CommandBuilder::new()` reads `std::env::vars_os()`, so a
+    // bare `set_var` here would race a concurrent read. Same idiom as
+    // `agents_config::tests::ENV_LOCK` / `provider::tests::HOME_LOCK`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // --- ab-1e86b88e: drive-authority LD3 identity stamp regression tests ----
     //
@@ -417,6 +448,61 @@ mod tests {
             cmd.get_env("FNO_AGENTS_HOME"),
             Some(home.as_os_str()),
             "FNO_AGENTS_HOME must be stamped with the worker's home path"
+        );
+    }
+
+    #[test]
+    fn build_child_command_applies_claude_persistence_recipe() {
+        // E4.1: interactive claude gets the persistence recipe so it writes its
+        // own transcript jsonl (the relay's AC-E4-1 capture key). Inherited
+        // CLAUDE_CODE_SESSION_ID must be dropped so the child does not cross-write
+        // the parent's transcript.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_SESSION_ID", "inherited-parent-id");
+        let cfg = WorkerConfig::new(
+            "wk-claude",
+            PathBuf::from("/tmp/abi-test-home-3"),
+            PathBuf::from("/tmp"),
+            vec![
+                "claude".to_string(),
+                "--session-id".to_string(),
+                "u1".to_string(),
+            ],
+        );
+        let cmd = build_child_command(&cfg);
+        // Capture before cleanup so a failing assert can't leak the var to the
+        // next test that takes the lock.
+        let force = cmd
+            .get_env("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE")
+            .map(|s| s.to_owned());
+        let inherited_sid = cmd.get_env("CLAUDE_CODE_SESSION_ID").map(|s| s.to_owned());
+        std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+        drop(_g);
+        assert_eq!(
+            force.as_deref(),
+            Some(OsStr::new("1")),
+            "interactive claude must force session persistence so the jsonl exists"
+        );
+        assert_eq!(
+            inherited_sid, None,
+            "the inherited parent session id must be dropped for the claude child"
+        );
+    }
+
+    #[test]
+    fn build_child_command_skips_recipe_for_codex() {
+        // The recipe is claude-only: a codex pane's env stays byte-unchanged.
+        let cfg = WorkerConfig::new(
+            "wk-codex",
+            PathBuf::from("/tmp/abi-test-home-4"),
+            PathBuf::from("/tmp"),
+            vec!["codex".to_string()],
+        );
+        let cmd = build_child_command(&cfg);
+        assert_eq!(
+            cmd.get_env("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"),
+            None,
+            "non-claude panes must not get the claude persistence recipe"
         );
     }
 
