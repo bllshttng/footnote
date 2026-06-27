@@ -9,6 +9,7 @@ fallback when `claude plugin install` is unavailable/errors).
 """
 from __future__ import annotations
 
+import json
 import subprocess
 
 from fno.setup import integration as I
@@ -323,3 +324,82 @@ def test_opencode_is_installed_false_when_stale(tmp_path, monkeypatch):
 def test_opencode_adapter_registered():
     clis = {a.cli for a in I.build_adapters()}
     assert "opencode" in clis
+
+
+# --- agy (native Stop-hook registration, x-bcfb) ----------------------------
+
+def _fake_agy_adapter(tmp_path, monkeypatch):
+    """Point _agy_adapter_path at a real tmp file so install is deterministic
+    (independent of whether the test env can resolve the real plugin root)."""
+    adapter = tmp_path / "plugin" / "hooks" / "agy-target-stop-hook.sh"
+    adapter.parent.mkdir(parents=True, exist_ok=True)
+    adapter.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(I, "_agy_adapter_path", lambda: adapter)
+    return adapter
+
+
+def test_agy_install_registers_stop_hook_and_is_installed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)  # keep the .agent/rules breadcrumb in the tmp tree
+    adapter = _fake_agy_adapter(tmp_path, monkeypatch)
+
+    assert I._agy_is_installed() is False
+
+    res = I._agy_install()
+    assert res.ok and res.cli == "agy"
+
+    hooks = I._agy_hooks_json()
+    data = json.loads(hooks.read_text(encoding="utf-8"))
+    stop = data["footnote"]["Stop"]
+    assert stop[0]["command"] == str(adapter)
+    assert stop[0]["type"] == "command"
+    assert I._agy_is_installed() is True
+    # context breadcrumb dropped under the workspace's .agent/rules
+    assert (tmp_path / ".agent" / "rules" / "footnote.md").exists()
+
+
+def test_agy_install_preserves_other_namespace_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    _fake_agy_adapter(tmp_path, monkeypatch)
+    hooks = I._agy_hooks_json()
+    hooks.parent.mkdir(parents=True, exist_ok=True)
+    hooks.write_text(json.dumps({"someOtherTool": {"Stop": [{"x": 1}]}}), encoding="utf-8")
+
+    I._agy_install()
+
+    data = json.loads(hooks.read_text(encoding="utf-8"))
+    assert data["someOtherTool"] == {"Stop": [{"x": 1}]}  # untouched
+    assert "footnote" in data
+
+
+def test_agy_install_manual_when_adapter_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(I, "_agy_adapter_path", lambda: None)
+    res = I._agy_install()
+    # A CLI-only install can't wire a path that doesn't exist -> manual, never ok.
+    assert res.status == "manual" and not res.ok
+
+
+def test_agy_is_installed_false_on_malformed_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _fake_agy_adapter(tmp_path, monkeypatch)
+    hooks = I._agy_hooks_json()
+    hooks.parent.mkdir(parents=True, exist_ok=True)
+    hooks.write_text("{not json", encoding="utf-8")
+    assert I._agy_is_installed() is False
+
+
+def test_agy_is_installed_false_on_null_stop(tmp_path, monkeypatch):
+    # {"footnote": {"Stop": null}} must not TypeError on the any() iteration.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _fake_agy_adapter(tmp_path, monkeypatch)
+    hooks = I._agy_hooks_json()
+    hooks.parent.mkdir(parents=True, exist_ok=True)
+    hooks.write_text(json.dumps({"footnote": {"Stop": None}}), encoding="utf-8")
+    assert I._agy_is_installed() is False
+
+
+def test_agy_adapter_registered():
+    clis = {a.cli for a in I.build_adapters()}
+    assert "agy" in clis

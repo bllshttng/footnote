@@ -200,6 +200,27 @@ The get-shit-done project uses install-time transformation (4,479-line installer
 
 Gemini/Codex provide the last assistant message directly in hook input — they may not provide `transcript_path` at all. Making the guard Claude-only prevents the hook from exiting early on platforms that don't need transcripts.
 
+### agy (Antigravity CLI): a native `Stop`-hook adapter, not a fork
+
+agy is its own lane. Its hooks use Claude-shaped event names (`PreToolUse`/`PostToolUse`/`Stop`/...) but a Gemini-family wire format, so `target-stop-hook.sh` is NOT reused verbatim. Instead `hooks/agy-target-stop-hook.sh` is a thin translator over the SAME `fno-agents loop-check` authority (the OpenCode model, different surface). The deltas the adapter bridges:
+
+| Aspect | Claude Code `Stop` | agy `Stop` |
+|--------|--------------------|------------|
+| stdin keys | `transcript_path`, `last_assistant_message` (snake_case) | `transcriptPath`, `conversationId`, `fullyIdle`, `terminationReason` (camelCase) |
+| keep-working signal | exit 2 (or `{"decision":"block"}`) | `{"decision":"continue","reason":"..."}` (no exit-2 path) |
+| allow-stop signal | exit 0 / no output | any other JSON, incl. `{}` |
+| stdout discipline | freeform stderr ok | silence rule: stdout must be ONLY the final JSON |
+| transcript schema | claude JSONL (`/message/role`=="assistant", `/message/content`) | Gemini-family (`role:"model"`, `parts:[{text}]`) — does NOT match loop-check's scan as-is |
+
+Because agy's transcript would be skipped by loop-check's `role=="assistant"` filter, the adapter **synthesizes** a claude-shaped transcript (normalizing the Gemini `model`/`parts` shape, plus flat and claude shapes) before shelling `loop-check`. It then translates the verdict back: `block` → `continue`; a terminal `allow` → `{}` after the idempotent `finalize` writer runs (ledger + ship stamp). Two safety rules preserve the invariant that loop-check is the SOLE completion authority and the adapter never fabricates a termination:
+
+- `fullyIdle == false` → always `continue` (never allow a terminal stop while agy's background tasks are live).
+- a **missing** `fno-agents` binary allows the stop (a never-installed checker can't be fixed mid-session, and an unstoppable `continue`-loop is worse), while a **transient** failure of a present binary returns `continue` and retries on the next firing.
+
+`fno setup` registers the adapter in agy's `hooks.json` (`~/.gemini/config/hooks.json`, the global customization dir) under the `footnote` namespace key, referencing the plugin-shipped adapter path; a CLI-only install with no `hooks/` degrades to a manual finish.
+
+The remaining build-time unknown is agy's exact `transcript.jsonl` line schema; the synthesizer handles the documented-likely shapes and skips anything it can't parse (safe: no promise detected → keep working). A captured sample will tighten the filter.
+
 ## Graceful Degradation
 
 | Feature | Claude Code | Gemini/Codex |

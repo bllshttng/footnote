@@ -34,7 +34,7 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 class IntegrationResult:
     """Outcome of one CLI's integration install."""
 
-    cli: str  # "claude" | "gemini" | "codex" | "opencode"
+    cli: str  # "claude" | "gemini" | "codex" | "opencode" | "agy"
     label: str  # human name, e.g. "Claude Code"
     status: str  # "installed" | "already-installed" | "manual" | "failed"
     note: str = ""  # detail (e.g. "skills-dir", a manual step, a failure reason)
@@ -242,12 +242,126 @@ def _opencode_install() -> IntegrationResult:
     return IntegrationResult("opencode", label, "installed", note=f"plugin -> {dest}")
 
 
+# --- agy (Antigravity CLI) --------------------------------------------------
+# agy is a native Stop-hook harness (like opencode, not a plugin-marketplace CLI).
+# Its hooks are Claude-shaped event names with a Gemini-family wire format, so the
+# integration registers footnote's Stop adapter in agy's hooks.json customization
+# file (~/.gemini/config/hooks.json, the global dir - one install covers every
+# project). The command references the adapter that ships in the plugin
+# (hooks/agy-target-stop-hook.sh), resolved via the plugin-root pointer; a CLI-only
+# install (uv/curl) carries no hooks/, so it degrades to a "manual" finish rather
+# than wiring a path that does not exist.
+
+_AGY_CONTEXT_STUB = """\
+# footnote
+
+This project uses the footnote delivery pipeline. See AGENTS.md for the full
+context. Quick start: `fno help` for the CLI verbs, `/fno:target` to take a
+feature from idea to a shipped PR.
+"""
+
+
+def _agy_hooks_json() -> Path:
+    return Path.home() / ".gemini" / "config" / "hooks.json"
+
+
+def _agy_adapter_path() -> "Optional[Path]":
+    # The adapter ships in the plugin (hooks/), which the uv/curl wheel does NOT
+    # carry. resolve_plugin_script always returns a path (last fallback may not
+    # exist), so gate on is_file(): None means "not in this install" -> manual.
+    from fno.paths import resolve_plugin_script
+
+    p = resolve_plugin_script("hooks/agy-target-stop-hook.sh")
+    return p if p.is_file() else None
+
+
+def _agy_install_context() -> None:
+    # agy reads .agent/rules in the workspace. Drop a small breadcrumb in the
+    # current project so an agy session surfaces footnote's entry points. Best-
+    # effort: a write failure must never fail the hook install, and an existing
+    # file is left untouched. (Whether agy ALSO reads AGENTS.md natively is an
+    # open probe - this .agent/rules path works regardless.)
+    try:
+        rules = Path.cwd() / ".agent" / "rules"
+        dest = rules / "footnote.md"
+        if dest.exists():
+            return
+        rules.mkdir(parents=True, exist_ok=True)
+        dest.write_text(_AGY_CONTEXT_STUB, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _agy_is_installed() -> bool:
+    hooks = _agy_hooks_json()
+    if not hooks.is_file():
+        return False
+    try:
+        data = json.loads(hooks.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    fn = data.get("footnote")
+    if not isinstance(fn, dict):
+        return False
+    stop = fn.get("Stop")
+    if not isinstance(stop, list):
+        # Absent or malformed (e.g. {"Stop": null}); not a TypeError on iteration.
+        return False
+    adapter = _agy_adapter_path()
+    if adapter is None:
+        # Can't verify the command targets the live adapter; installed iff ANY
+        # footnote Stop handler is registered.
+        return bool(stop)
+    return any(
+        isinstance(h, dict) and h.get("command") == str(adapter) for h in stop
+    )
+
+
+def _agy_install() -> IntegrationResult:
+    label = "Antigravity CLI"
+    adapter = _agy_adapter_path()
+    if adapter is None:
+        return IntegrationResult(
+            "agy",
+            label,
+            "manual",
+            note="adapter ships in the plugin (not this CLI-only install); wire "
+            "hooks/agy-target-stop-hook.sh into ~/.gemini/config/hooks.json by hand",
+        )
+    hooks = _agy_hooks_json()
+    # Merge the footnote Stop handler into hooks.json, preserving any other tool's
+    # namespace key. A corrupt/non-dict file is overwritten (we can't safely merge
+    # into garbage); only the parseable-dict case is preserved.
+    data: "dict[str, object]" = {}
+    if hooks.is_file():
+        try:
+            loaded = json.loads(hooks.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (ValueError, OSError):
+            data = {}
+    fn = data.get("footnote")
+    if not isinstance(fn, dict):
+        fn = {}
+    fn["Stop"] = [{"type": "command", "command": str(adapter), "timeout": 60}]
+    data["footnote"] = fn
+    try:
+        hooks.parent.mkdir(parents=True, exist_ok=True)
+        hooks.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        return IntegrationResult("agy", label, "failed", note=str(exc))
+    _agy_install_context()
+    return IntegrationResult("agy", label, "installed", note=f"Stop hook -> {hooks}")
+
+
 def build_adapters(run: Runner = _run) -> "list[IntegrationAdapter]":
     """The adapter registry: claude (preferred + skills-dir fallback), gemini,
-    codex (native marketplace CLIs), and opencode (local-file plugin copy).
-    hermes / openclaw remain absent - their install surfaces are unverified, and
-    printing a command that does not exist is worse than omitting them (locked
-    decision 4).
+    codex (native marketplace CLIs), opencode (local-file plugin copy), and agy
+    (native Stop-hook registration). hermes / openclaw remain absent - their
+    install surfaces are unverified, and printing a command that does not exist is
+    worse than omitting them (locked decision 4).
     """
     return [
         IntegrationAdapter(
@@ -277,6 +391,13 @@ def build_adapters(run: Runner = _run) -> "list[IntegrationAdapter]":
             is_available=lambda: shutil.which("opencode") is not None,
             is_installed=_opencode_is_installed,
             install=_opencode_install,
+        ),
+        IntegrationAdapter(
+            "agy",
+            "Antigravity CLI",
+            is_available=lambda: shutil.which("agy") is not None,
+            is_installed=_agy_is_installed,
+            install=_agy_install,
         ),
     ]
 
