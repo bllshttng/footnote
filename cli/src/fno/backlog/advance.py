@@ -532,6 +532,14 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     from fno.paths import graph_json
 
     entries = read_graph(graph_json())
+    # Containers are never dispatched as workers (x-33b2): a dependent that is
+    # itself some other node's `parent` is an epic, and `/target` builds its
+    # leaves, not the box. Mirror cmd_next's `_pick_ready` exclusion on this
+    # edge-following path so a now-unblocked epic dependent is skipped here too.
+    parent_ids = {
+        e.get("parent") for e in entries
+        if isinstance(e, dict) and isinstance(e.get("parent"), str)
+    }
     out: list[dict] = []
     for e in entries:
         if not isinstance(e, dict):
@@ -555,6 +563,8 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
         node_id = e.get("id")
         if not node_id:
             continue
+        if node_id in parent_ids:
+            continue  # epic/container dependent - build its leaves, not the box
         # RC1: no longer exclude same-project successors here. advance()'s `next`
         # selection can skip past an already-claimed/epic head and never reach a
         # genuinely-unblocked same-project dependent (the reported starvation);

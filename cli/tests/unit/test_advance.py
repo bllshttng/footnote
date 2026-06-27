@@ -884,6 +884,22 @@ def test_direct_dependents_skips_non_dict_and_idless(monkeypatch):
     assert [d["id"] for d in deps] == ["B"]
 
 
+def test_direct_dependents_skips_epic_dependent(monkeypatch):
+    """x-33b2: a now-unblocked dependent that is itself a container (some node's
+    `parent`) is NOT dispatched on merge - build its leaves, not the box. Mirrors
+    cmd_next's epic exclusion on the edge-following dependent path."""
+    entries = [
+        # E is a ready dependent of A, but it is also B's parent -> an epic.
+        {"id": "E", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+        {"id": "B", "project": "web", "_status": "ready", "parent": "E"},
+        # L is a ready leaf dependent of A (no children) -> dispatched.
+        {"id": "L", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    deps = adv._direct_dependents("A", "etl")
+    assert [d["id"] for d in deps] == ["L"]  # epic E skipped, leaf L kept
+
+
 def test_dependents_honors_dependent_repo_walker(iso, monkeypatch):
     """codex P2: a live walker in the DEPENDENT's repo suppresses the spawn (the
     walker will claim the node itself; spawning would double-launch there)."""
