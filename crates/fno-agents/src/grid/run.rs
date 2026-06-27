@@ -104,18 +104,38 @@ pub(crate) fn resolve_agent_names(
     Ok(filter_pty_agents(&rows))
 }
 
-/// PTY-driveable providers. claude is excluded (Locked Decision #6).
-const PTY_PROVIDERS: &[&str] = &["codex", "gemini"];
+/// PTY-driveable providers. claude joins codex/gemini in E2, but ONLY in its
+/// interactive face (see `filter_pty_agents`): the daemon PTY-hosts interactive
+/// subscription-billed claude via the generic worker path (E1 keystone), while
+/// the `claude -p` stream-json lane is headless, Agent-SDK-billed, and not a
+/// drivable TUI - it stays out of the grid.
+const PTY_PROVIDERS: &[&str] = &["codex", "gemini", "claude"];
 /// Registry statuses we will try to tile under `--all` (alive-ish).
 const ALIVE_STATUSES: &[&str] = &["ready", "idle", "busy", "live", "spawning"];
 
 /// Filter registry rows to live PTY-managed agent names (pure; testable).
+///
+/// claude is admitted only when `host_mode == "interactive"`: the interactive
+/// provider is the tileable, sub-billed PTY (E1/E2), whereas an exec/stream
+/// claude row (default or absent host_mode) is the headless `--bg`/`-p` lane
+/// with no drivable TUI. codex/gemini are unconditional (their grid behavior is
+/// unchanged).
 fn filter_pty_agents(rows: &[Value]) -> Vec<String> {
     rows.iter()
         .filter_map(|row| {
             let provider = row.get("provider").and_then(Value::as_str)?;
             if !PTY_PROVIDERS.contains(&provider) {
                 return None;
+            }
+            if provider == "claude" {
+                // Only interactive claude tiles; absent/`exec` host_mode is the
+                // headless lane and reads as not-drivable (matches the
+                // absent==exec coercion used elsewhere in fno-agents).
+                let interactive =
+                    row.get("host_mode").and_then(Value::as_str) == Some(HOST_MODE_INTERACTIVE);
+                if !interactive {
+                    return None;
+                }
             }
             let status = row.get("status").and_then(Value::as_str).unwrap_or("live");
             if !ALIVE_STATUSES.contains(&status) {
@@ -2704,17 +2724,21 @@ mod tests {
     }
 
     #[test]
-    fn filter_pty_agents_drops_claude_and_dead() {
+    fn filter_pty_agents_keeps_interactive_claude_drops_exec_and_dead() {
         let rows = vec![
             json!({"name": "wkA", "provider": "codex", "status": "idle"}),
-            json!({"name": "wkClaude", "provider": "claude", "status": "live"}),
+            // Interactive claude (E2): tileable, sub-billed PTY -> KEPT.
+            json!({"name": "wkClaudeInt", "provider": "claude", "status": "live", "host_mode": "interactive"}),
+            // Exec/stream claude (absent host_mode == exec): headless lane -> dropped.
+            json!({"name": "wkClaudeExec", "provider": "claude", "status": "live"}),
             json!({"name": "wkG", "provider": "gemini", "status": "busy"}),
             json!({"name": "wkDead", "provider": "codex", "status": "exited"}),
             json!({"name": "wkNoStatus", "provider": "gemini"}),
         ];
         let got = filter_pty_agents(&rows);
-        // codex+idle, gemini+busy, gemini+(default live) kept; claude + exited dropped.
-        assert_eq!(got, vec!["wkA", "wkG", "wkNoStatus"]);
+        // codex+idle, interactive claude, gemini+busy, gemini+(default live) kept;
+        // exec claude + exited dropped.
+        assert_eq!(got, vec!["wkA", "wkClaudeInt", "wkG", "wkNoStatus"]);
     }
 
     #[test]
