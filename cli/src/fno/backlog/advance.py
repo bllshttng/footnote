@@ -732,8 +732,10 @@ def advance_dependents(
     # one (spawn --cwd its work-map root). Misrouting a same-project node through
     # the cross-project path lands it on a protected branch where the bg worker
     # dies, so prefer dispatching nothing. RC2 ensures both callers now resolve
-    # closed_project from the graph, so None here is the genuine last resort.
-    if closed_project is None:
+    # closed_project from the graph, so a falsy value here is the genuine last
+    # resort. `not closed_project` (vs `is None`) also catches an empty-string
+    # project, which would otherwise misclassify every dependent as cross-project.
+    if not closed_project:
         _emit(
             EVENT_SKIPPED,
             {"reason": "closed-project-unknown", "closed_node_id": closed_node_id},

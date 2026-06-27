@@ -696,12 +696,17 @@ def test_dependents_fail_closed_on_unknown_closed_project(iso, monkeypatch):
     )
     monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
 
-    results = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
-
-    assert len(results) == 1
-    assert results[0].decision == "skipped" and results[0].reason == "closed-project-unknown"
-    evs = _events(iso)
-    assert len(evs) == 1 and evs[0]["data"]["reason"] == "closed-project-unknown"
+    # None (the normal last-resort) AND an empty-string project both fail closed:
+    # an empty string would otherwise tag every dependent cross_project=True and
+    # misroute it (gemini: `not closed_project` over `is None`).
+    for bad in (None, ""):
+        kwargs = {"closed_node_id": "ab-1111aaaa", "events_path": iso}
+        if bad is not None:
+            kwargs["closed_project"] = bad
+        results = adv.advance_dependents(**kwargs)
+        assert len(results) == 1
+        assert results[0].decision == "skipped"
+        assert results[0].reason == "closed-project-unknown"
 
 
 def test_dependents_dispatch_independent_of_next_selection(iso, monkeypatch):
