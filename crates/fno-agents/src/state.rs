@@ -131,6 +131,65 @@ pub struct InsideLegReport {
     pub ttl_ms: Option<u64>,
 }
 
+impl InsideLegReport {
+    /// True when this report is still authoritative at `now_secs` (epoch
+    /// seconds), the TTL half of the 3-tier authority lattice (inside-out E3.3,
+    /// AC-X2-2). A report with no `ttl_ms` never ages out on its own -- it is
+    /// cleared only by the ordered exit teardown, a `done`, or a newer report.
+    /// A report WITH a ttl expires once `received_at + ttl_ms` has passed, so a
+    /// `working` whose inside-leg process died (PTY still alive, exit-override
+    /// never fires) cannot pin a permanent stale badge. A `received_at` that
+    /// does not parse fails CLOSED (treated as expired -> the scraper takes
+    /// over), never as live: a corrupt stamp must not be the thing that pins a
+    /// forever-`working`.
+    pub fn is_live_at(&self, now_secs: u64) -> bool {
+        let Some(ttl_ms) = self.ttl_ms else {
+            return true;
+        };
+        match rfc3339_like_to_secs(&self.received_at) {
+            Some(recv) => now_secs.saturating_sub(recv).saturating_mul(1000) <= ttl_ms,
+            None => false,
+        }
+    }
+}
+
+/// Parse the fixed `YYYY-MM-DDThh:mm:ssZ` UTC stamp the registry writes
+/// (`now_rfc3339_like`) back to epoch seconds. Inverse of the daemon's `civil`
+/// (epoch -> civil) helper, using Howard Hinnant's days-from-civil. Returns
+/// `None` for any shape that is not exactly that form (wrong length, non-digit
+/// fields, missing separators) so a malformed or legacy stamp fails the TTL
+/// gate closed rather than pinning a stale badge. Fractional seconds / offsets
+/// are intentionally unsupported: the only producer is `now_rfc3339_like`,
+/// which never emits them.
+pub fn rfc3339_like_to_secs(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    // "2026-06-27T00:00:00Z" == 20 bytes, separators at fixed offsets.
+    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':'
+        || b[16] != b':' || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |lo: usize, hi: usize| -> Option<i64> {
+        s.get(lo..hi)?.parse::<i64>().ok()
+    };
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, se) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
+        return None;
+    }
+    // days_from_civil (Hinnant): days since 1970-01-01 for a proleptic Gregorian
+    // y/m/d. Mirrors the daemon's `civil` constants in reverse.
+    let yy = if mo <= 2 { y - 1 } else { y };
+    let era = if yy >= 0 { yy } else { yy - 399 } / 400;
+    let yoe = yy - era * 400;
+    let mp = if mo > 2 { mo - 3 } else { mo + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + h * 3600 + mi * 60 + se;
+    u64::try_from(secs).ok()
+}
+
 /// One registry row (design schema v5). Optional fields default to `None` and
 /// are preserved across `update_registry` because the whole row round-trips
 /// through this typed struct.
@@ -936,6 +995,66 @@ mod tests {
                 ttl_ms: None,
             })
         );
+    }
+
+    #[test]
+    fn rfc3339_like_to_secs_round_trips_known_stamps() {
+        // The unix epoch and a couple of fixed dates; values cross-checked against
+        // `date -u -d <stamp> +%s`. Proves the days-from-civil inverse matches the
+        // daemon's civil() forward direction (the producer of received_at).
+        assert_eq!(rfc3339_like_to_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_like_to_secs("2026-06-27T00:00:00Z"), Some(1_782_518_400));
+        assert_eq!(rfc3339_like_to_secs("2026-06-27T00:00:05Z"), Some(1_782_518_405));
+    }
+
+    #[test]
+    fn rfc3339_like_to_secs_rejects_malformed() {
+        // Wrong length, bad separators, non-digit, out-of-range fields, and the
+        // fractional/offset forms now_rfc3339_like never emits -- all None so the
+        // TTL gate fails closed rather than trusting a garbage stamp.
+        for bad in [
+            "",
+            "2026-06-27",
+            "2026-06-27T00:00:00",            // no Z
+            "2026/06/27T00:00:00Z",           // wrong separators
+            "20260627T000000Z",               // compact form, wrong length
+            "2026-13-27T00:00:00Z",           // month 13
+            "2026-06-27T24:00:00Z",           // hour 24
+            "2026-06-27T00:00:00.5Z",         // fractional (21 bytes)
+            "abcd-ef-ghTij:kl:mnZ",           // non-digit
+        ] {
+            assert_eq!(rfc3339_like_to_secs(bad), None, "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn inside_leg_is_live_at_ttl_gate() {
+        let recv = "2026-06-27T00:00:00Z";
+        let recv_secs = rfc3339_like_to_secs(recv).unwrap();
+        let rep = |ttl| InsideLegReport {
+            state: InsideLegState::Working,
+            seq: 1,
+            reason: None,
+            received_at: recv.into(),
+            ttl_ms: ttl,
+        };
+
+        // No ttl -> never ages out on its own (cleared by teardown/done/newer report).
+        assert!(rep(None).is_live_at(recv_secs + 10_000));
+
+        // ttl=5000ms: live at +4s, live exactly at +5s (<=), expired at +6s (AC-X2-2).
+        assert!(rep(Some(5000)).is_live_at(recv_secs + 4));
+        assert!(rep(Some(5000)).is_live_at(recv_secs + 5));
+        assert!(!rep(Some(5000)).is_live_at(recv_secs + 6));
+
+        // A clock that reads BEFORE received_at (skew) is still live (saturating_sub).
+        assert!(rep(Some(5000)).is_live_at(recv_secs.saturating_sub(100)));
+
+        // An unparseable received_at with a ttl fails CLOSED (expired), so a corrupt
+        // stamp can never pin a permanent badge.
+        let mut corrupt = rep(Some(5000));
+        corrupt.received_at = "not-a-stamp".into();
+        assert!(!corrupt.is_live_at(recv_secs));
     }
 
     #[test]
