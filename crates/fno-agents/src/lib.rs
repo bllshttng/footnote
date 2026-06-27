@@ -42,6 +42,7 @@
 pub mod active_backlog;
 pub mod agents_config;
 pub mod claude_ask;
+pub mod claude_attach;
 pub mod claude_roster;
 pub mod client;
 pub mod client_verbs;
