@@ -755,7 +755,7 @@ fn build_too_small_frame(tty: TtySize, err: &LayoutError) -> ScreenBuffer {
 /// panes. Centers a title + prompt and renders the live goal buffer the
 /// operator is typing. The input line is anchored at a fixed column so the
 /// caret area does not jump as characters are typed. Pure over its inputs.
-fn build_front_door_frame(tty: TtySize, goal: &str) -> ScreenBuffer {
+fn build_front_door_frame(tty: TtySize, goal: &str, hint: Option<&str>) -> ScreenBuffer {
     let mut frame = ScreenBuffer::blank(tty.rows, tty.cols);
     let cols = tty.cols.max(1) as usize;
     let title = truncate("footnote grid", cols);
@@ -775,6 +775,12 @@ fn build_front_door_frame(tty: TtySize, goal: &str) -> ScreenBuffer {
         cols.saturating_sub(pcol as usize).max(1),
     );
     frame.put_str(mid.saturating_add(2), pcol, &line, true);
+    // Status line (e.g. "launch failed: ..."): without it a failed submit on
+    // the empty front door would clear back to a blank prompt with no feedback.
+    if let Some(h) = hint {
+        let h = truncate(h, cols);
+        frame.put_str(mid.saturating_add(4), col_of(&h), &h, false);
+    }
     frame
 }
 
@@ -786,8 +792,9 @@ fn paint_front_door<W: Write>(
     prev_frame: &mut Option<ScreenBuffer>,
     tty: TtySize,
     goal: &str,
+    hint: Option<&str>,
 ) {
-    let cur = build_front_door_frame(tty, goal);
+    let cur = build_front_door_frame(tty, goal, hint);
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     match prev_frame.as_ref() {
         Some(prev) if prev.rows == cur.rows && prev.cols == cur.cols => {
@@ -2245,6 +2252,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             &mut prev_frame,
             tty,
             launcher.as_ref().map(|l| l.buffer.as_str()).unwrap_or(""),
+            hint.as_deref(),
         );
     } else {
         let rail_arg = rail_state.as_ref().map(|rs| {
@@ -2355,6 +2363,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             hint = Some(format!("launch failed: {e}"));
                                             prev_frame = None;
                                         }
+                                    }
+                                    // Front door: if the submit added no pane,
+                                    // reopen the launcher so input stays modal -
+                                    // otherwise a stray nav key would reach
+                                    // comp.step(_, &[]) and Quit the grid. The
+                                    // hint renders on the front-door status line.
+                                    if panes.is_empty() {
+                                        launcher = Some(Launcher::new());
                                     }
                                 }
                             }
@@ -3080,6 +3096,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         &mut prev_frame,
                         tty,
                         launcher.as_ref().map(|l| l.buffer.as_str()).unwrap_or(""),
+                        hint.as_deref(),
                     );
                     dirty = false;
                 } else if dirty {
@@ -3428,7 +3445,7 @@ mod tests {
     #[test]
     fn front_door_frame_renders_prompt_and_goal() {
         let tty = TtySize::new(24, 80);
-        let frame = build_front_door_frame(tty, "add auth");
+        let frame = build_front_door_frame(tty, "add auth", None);
         let all: String = (0..tty.rows)
             .map(|r| row_text(&frame, r))
             .collect::<Vec<_>>()
@@ -3439,11 +3456,27 @@ mod tests {
     }
 
     #[test]
+    fn front_door_frame_renders_hint_status_line() {
+        // A failed submit on the empty front door must show feedback, not a
+        // blank prompt (sigma-review finding).
+        let tty = TtySize::new(24, 80);
+        let frame = build_front_door_frame(tty, "", Some("launch failed: daemon down"));
+        let all: String = (0..tty.rows)
+            .map(|r| row_text(&frame, r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all.contains("launch failed: daemon down"),
+            "hint shown: {all:?}"
+        );
+    }
+
+    #[test]
     fn front_door_paint_clears_and_writes_goal() {
         let tty = TtySize::new(24, 80);
         let mut prev: Option<ScreenBuffer> = None;
         let mut buf = Vec::new();
-        paint_front_door(&mut buf, &mut prev, tty, "do it");
+        paint_front_door(&mut buf, &mut prev, tty, "do it", None);
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains(CLEAR_ALL), "first front-door frame clears");
         assert!(s.contains("goal> do it"), "renders the goal buffer");
