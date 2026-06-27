@@ -1099,15 +1099,18 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                 }
             }
             // Validate the (possibly inferred) provider for BOTH fresh host and
-            // promote (AC3-ERR). Only codex/gemini are PTY-hostable here; claude
-            // took its own lanes above, so any provider that reaches this point is
-            // either an unknown CLI (no PTY impl) or a promote whose source row
-            // resolved to one. This runs AFTER promote's provider inference so a
-            // promote whose source resolves to claude/unknown is rejected here with
-            // a clear message rather than failing later with a confusing
-            // PTY-missing error (Gemini review HIGH on PR #373 -- the prior
-            // `else if` skipped this for the promote path).
-            if provider != "codex" && provider != "gemini" {
+            // promote (AC3-ERR). Only codex/gemini/agy are PTY-hostable here;
+            // claude took its own lanes above, so any provider that reaches this
+            // point is either an unknown CLI (no PTY impl) or a promote whose
+            // source row resolved to one. This runs AFTER promote's provider
+            // inference so a promote whose source resolves to claude/unknown is
+            // rejected here with a clear message rather than failing later with a
+            // confusing PTY-missing error (Gemini review HIGH on PR #373 -- the
+            // prior `else if` skipped this for the promote path). agy is added
+            // alongside its provider_for_pty registration (codex P2 on PR #73):
+            // it implements create_interactive_argv, so the gate must admit it or
+            // `host --provider agy` always returns this error.
+            if provider != "codex" && provider != "gemini" && provider != "agy" {
                 let _ = ctx.emitter.emit(
                     "agent_spawn_failed",
                     &json!({"name": name, "reason": "bad_interactive_provider", "provider": provider}),
@@ -1116,7 +1119,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                     req.id,
                     ErrorCode::InvalidParams,
                     format!(
-                        "interactive host_mode supports only codex, gemini, or claude (interactive PTY via `mode: interactive`, or stream-json adopt via `promote --from <uuid> --provider claude`), not '{provider}'"
+                        "interactive host_mode supports only codex, gemini, agy, or claude (interactive PTY via `mode: interactive`, or stream-json adopt via `promote --from <uuid> --provider claude`), not '{provider}'"
                     ),
                 );
             }
@@ -2211,6 +2214,7 @@ fn provider_readiness_detector(provider: &str) -> Box<dyn crate::readiness::Read
     match provider {
         "codex" => crate::provider::CodexProvider.readiness_detector(),
         "gemini" => crate::provider::GeminiProvider.readiness_detector(),
+        "agy" => crate::provider::AgyProvider.readiness_detector(),
         // E1 (codex review P2): interactive claude rows need a real detector, else
         // `agent.ask` polls NoSignalDetector and times out with "no readiness
         // signal" despite ClaudeReadinessDetector existing. Same source of truth.
@@ -2234,6 +2238,7 @@ fn provider_for_pty(provider: &str) -> Option<Box<dyn crate::provider::ProviderW
     match provider {
         "codex" => Some(Box::new(crate::provider::CodexProvider)),
         "gemini" => Some(Box::new(crate::provider::GeminiProvider)),
+        "agy" => Some(Box::new(crate::provider::AgyProvider)),
         // claude has TWO faces: the shellout `--bg` exec provider (as_pty -> None,
         // never reaches here) and the interactive PTY provider (E1 keystone). The
         // spawn path only calls this on the interactive `mode` route, so resolving
@@ -6232,6 +6237,10 @@ mod tests {
         assert!(
             provider_for_pty("gemini").is_some(),
             "gemini must have a PTY provider"
+        );
+        assert!(
+            provider_for_pty("agy").is_some(),
+            "agy must have a PTY provider"
         );
         // E1 keystone: claude resolves to the interactive PTY provider on the
         // interactive `mode` route (the exec `claude --bg` path never reaches here).

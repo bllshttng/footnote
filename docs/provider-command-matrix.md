@@ -1,6 +1,8 @@
 # Provider × command capability matrix
 
-`fno agents` is one surface over three CLIs (`claude`, `codex`, `gemini`), but the CLIs are not symmetric: some verbs are claude-only, some are codex/gemini-only, and the live-conversation transport differs per provider. This page is the source of truth for which `fno agents <verb>` works against which provider. (The deep transport internals are maintained internally.)
+`fno agents` is one surface over four CLIs (`claude`, `codex`, `gemini`, `agy`), but the CLIs are not symmetric: some verbs are claude-only, some are codex/gemini-only, and the live-conversation transport differs per provider. This page is the source of truth for which `fno agents <verb>` works against which provider. (The deep transport internals are maintained internally.)
+
+> **agy (Antigravity CLI), Phase C.** agy is a dispatchable worker via `spawn --provider agy --once` (a one-shot `agy -p`, plain-text reply) and resolves a PTY pane for interactive `spawn`. It is held to the columns below only where verified: `spawn` **yes**. Because agy v1.0.x emits plain text with **no parseable session id**, it is **stateless** — `ask`-by-name resume is refused (use a fresh `--once`), `resume`/`attach` are **no**, and reachability is always inconclusive (never orphaned). `host`/`promote`/`drive`/`grid` are untested for agy this release.
 
 ## The matrix
 

@@ -311,6 +311,12 @@ async fn run(args: Vec<String>) -> i32 {
         if let Some(code) = maybe_run_gemini_ask(&home, &params, &agent_name) {
             return code;
         }
+        // Agy `ask` is intercepted client-side (Phase C): agy is plain-text with
+        // no session id, so a stateful resume is unsupported — this surfaces a
+        // clear error directing the caller to `spawn --provider agy --once`.
+        if let Some(code) = maybe_run_agy_ask(&home, &params, &agent_name) {
+            return code;
+        }
         // Unconditional flip (ab-73da4ac2): `ask` now auto-routes to this
         // client for every provider, so an ask that matched none of the three
         // provider hooks is a create with no/unknown `--provider`. Surface
@@ -515,6 +521,13 @@ fn maybe_run_gemini_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
     fno_agents::gemini_ask::maybe_run_gemini_ask(home, params, name)
 }
 
+/// Route an agy `ask` to the client-side stateless guard (Phase C). agy is
+/// plain-text with no session id, so a stateful resume is unsupported; this
+/// returns `Some(2)` with a redirect error for an agy target, else `None`.
+fn maybe_run_agy_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
+    fno_agents::agy_ask::maybe_run_agy_ask(home, params, name)
+}
+
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
 ///
 /// - claude + no --once: dispatch_claude_spawn (persistent bg thread, JSON receipt).
@@ -525,6 +538,7 @@ fn maybe_run_gemini_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
 ///
 /// Returns `Some(exit_code)` when handled client-side, `None` to fall through.
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
+    use fno_agents::agy_ask::dispatch_agy_once;
     use fno_agents::claude_ask::{dispatch_claude_spawn, py_repr, ClaudeHome};
     use fno_agents::codex_ask::dispatch_codex_once;
     use fno_agents::gemini_ask::dispatch_gemini_once;
@@ -565,7 +579,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         Some(p) => p,
         None => {
             eprintln!(
-                "provider is required to spawn a new agent {}; pass --provider one of: claude, codex, gemini",
+                "provider is required to spawn a new agent {}; pass --provider one of: claude, codex, gemini, agy",
                 py_repr(name)
             );
             return Some(2);
@@ -596,6 +610,8 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         .get("yolo")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // agy honors an optional --model (exact agy model name); other providers ignore it.
+    let model = params.get("model").and_then(|v| v.as_str());
 
     match provider {
         "claude" => {
@@ -645,11 +661,24 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             }
             Some(outcome.exit_code)
         }
-        // codex/gemini without --once: fall through to the daemon PTY worker.
-        "codex" | "gemini" => None,
+        "agy" if once => {
+            // agy is stateless (plain text, no session id): a one-shot `agy -p`.
+            // It ignores `yolo` (headless create always passes
+            // --dangerously-skip-permissions) and honors an optional --model.
+            let outcome = dispatch_agy_once(home, name, message, from_name, &cwd, model, timeout);
+            if !outcome.stderr.is_empty() {
+                eprint!("{}", outcome.stderr);
+            }
+            if !outcome.stdout.is_empty() {
+                print!("{}", outcome.stdout);
+            }
+            Some(outcome.exit_code)
+        }
+        // codex/gemini/agy without --once: fall through to the daemon PTY worker.
+        "codex" | "gemini" | "agy" => None,
         other => {
             eprintln!(
-                "unknown provider {}; supported: claude, codex, gemini",
+                "unknown provider {}; supported: claude, codex, gemini, agy",
                 py_repr(other)
             );
             Some(2)
@@ -665,18 +694,18 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
 /// prints to stderr verbatim). Never routes to the daemon (Locked Decision 3).
 fn unresolvable_ask_exit(params: &Value, name: &str) -> i32 {
     use fno_agents::claude_ask::py_repr;
-    const KNOWN: [&str; 3] = ["claude", "codex", "gemini"];
+    const KNOWN: [&str; 4] = ["claude", "codex", "gemini", "agy"];
     let provider_param = params.get("provider").and_then(|v| v.as_str());
     let msg = match provider_param {
         // `select_provider` validates the requested provider FIRST, so an
         // unknown `--provider` surfaces the "unknown provider" error.
         Some(p) if !KNOWN.contains(&p) => format!(
-            "unknown provider {}; supported: claude, codex, gemini",
+            "unknown provider {}; supported: claude, codex, gemini, agy",
             py_repr(p)
         ),
         // New agent with no resolvable provider.
         _ => format!(
-            "provider is required for new agent {}; pass --provider one of: claude, codex, gemini",
+            "provider is required for new agent {}; pass --provider one of: claude, codex, gemini, agy",
             py_repr(name)
         ),
     };
@@ -830,6 +859,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--status",
         "--from-name",
         "--timeout",
+        "--model",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -910,6 +940,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--force" | "-F" => {
                 params.insert("force".into(), Value::Bool(true));
+            }
+            "--model" => {
+                // agy honors an exact model name (`agy models`); other providers
+                // ignore the param. Forwarded so `spawn --provider agy --once
+                // --model <name>` reaches dispatch_agy_once (codex P2).
+                params.insert("model".into(), str_arg(&mut it, "--model")?);
             }
             "--from-name" => {
                 // NOTE: --from-name is accepted and forwarded to the daemon, but
@@ -2140,6 +2176,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p2["cwd"], "/a=b");
+    }
+
+    /// codex P2 (PR #73): `--model` must reach the request, else
+    /// `spawn --provider agy --once --model <name>` fails with "unknown flag"
+    /// before dispatch_agy_once sees it. Both space- and equals-form parse.
+    #[test]
+    fn spawn_forwards_model_flag() {
+        let (_m, space) = build_request(
+            "spawn",
+            &[
+                "wk".to_string(),
+                "--provider".to_string(),
+                "agy".to_string(),
+                "--once".to_string(),
+                "--model".to_string(),
+                "Gemini 3.5 Flash (High)".to_string(),
+            ],
+        )
+        .expect("--model must parse");
+        assert_eq!(space["model"], "Gemini 3.5 Flash (High)");
+        let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--model=pro".to_string()])
+            .expect("--model= must parse");
+        assert_eq!(eq["model"], "pro");
     }
 
     /// ab-3ff64151 AC1 (Rust-path parity): `agents ask` accepts the phone shorts

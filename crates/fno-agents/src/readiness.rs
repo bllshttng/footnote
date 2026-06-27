@@ -203,6 +203,23 @@ impl ReadinessDetector for GeminiReadinessDetector {
     }
 }
 
+/// Agy interactive-composer readiness (Phase C, agy harness). agy runs Gemini
+/// models under the hood and draws the same prompt-glyph family as the other
+/// CLIs, so the shared [`prompt_ready`] logic applies unchanged. The
+/// conservative bias (a wrong glyph is false-NOT-ready, never false-ready) holds
+/// here as for the others. Glyphs tune against a live agy capture (deferred).
+pub struct AgyReadinessDetector;
+
+impl ReadinessDetector for AgyReadinessDetector {
+    fn provider_name(&self) -> &str {
+        "agy"
+    }
+
+    fn is_ready(&self, screen: &ScreenView) -> Result<bool, ReadinessError> {
+        Ok(prompt_ready(screen, PROMPT_GLYPHS))
+    }
+}
+
 /// Claude interactive-composer readiness (inside-out-multiplexer E1). Claude's
 /// TUI composer draws the same prompt-glyph family as codex/gemini and its
 /// mid-turn "esc to interrupt" status line is already in [`BUSY_MARKERS`], so
