@@ -1323,11 +1323,6 @@ def cmd_update(
                 current = [b for b in current if b not in remove_blockers]
                 node["blocked_by"] = current
 
-        if completed:
-            node["completed_at"] = datetime.now(timezone.utc).isoformat()
-            # Cascade-close now-all-done ancestor epics (x-33b2), same as the
-            # done/reconcile close paths.
-            _cascade_close_parents(entries, node["id"])
         if locked_by is not None:
             session = locked_by if locked_by != "null" else None
             node["session_id"] = session
@@ -1420,6 +1415,15 @@ def cmd_update(
                     )
                     raise typer.Exit(code=1)
                 node["parent"] = target["id"]
+
+        # Completion runs LAST so it sees the FINAL parent edge (codex P2): a
+        # combined `--completed --parent <epic>` must cascade against the new
+        # parent. Use the shared _apply_completion_fields so the close clears
+        # session/claim/defer/queue state in lockstep with done/reconcile, then
+        # cascade-close now-all-done ancestor epics (x-33b2).
+        if completed and not node.get("completed_at"):
+            _apply_completion_fields(node)
+            _cascade_close_parents(entries, node["id"])
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -3808,20 +3812,40 @@ def cmd_reconcile(
         # closed or removed out-of-band between the read-only scan and the lock
         # is skipped) so the post-lock work only touches genuinely-closed nodes.
         actually_closed: list = []
+        # Ancestor epics the cascade closed this sweep (x-33b2). Their OWN
+        # dependents (a node blocked_by the epic) must be auto-continued too, so
+        # we accumulate the ids here and run the same dispatch path for them
+        # after the lock - else an epic-level dependent stalls.
+        cascade_closed_acc: list = []
 
         def mutator(entries):
             actually_closed.clear()
+            cascade_closed_acc.clear()
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
                     _apply_completion_fields(node_obj)
                     # Cascade-close now-all-done ancestor epics (x-33b2), uniform
                     # across projects (follows the parent edge, not a filter).
-                    _cascade_close_parents(entries, record.node_id)
+                    cascade_closed_acc.extend(
+                        _cascade_close_parents(entries, record.node_id)
+                    )
                     actually_closed.append(record)
             return entries
 
         locked_mutate_graph(_graph_path(), mutator)
+
+        def _auto_continue_after_close(node_id, project, root):
+            """Merge-triggered auto-continue dispatch for one just-closed node:
+            same-project `next`, cross-project dependents, and contract de-stub.
+            Shared by directly-closed records AND cascade-closed ancestor epics
+            (x-33b2) so an epic-level dependent is dispatched, not stranded."""
+            from fno.backlog.advance import advance as _advance
+            from fno.backlog.advance import advance_dependents as _advance_deps
+            from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+            _advance(closed_node_id=node_id, project=project, project_root=root)
+            _advance_deps(closed_node_id=node_id, closed_project=project, project_root=root)
+            dispatch_reconcile_for_blocker(closed_node_id=node_id, project_root=root)
 
         # Post-mutation work outside the lock (mirrors `done`): stamp the plan
         # and drop the retro sentinel for each node we actually closed.
@@ -3883,38 +3907,35 @@ def cmd_reconcile(
                 # reconcile run from project A can close a node belonging to
                 # project B, and B's campaign-arm marker lives under B's root.
                 _adv_cwd = _adv_node.get("cwd") if _adv_node else None
-                from fno.backlog.advance import advance as _advance
-                from fno.backlog.advance import advance_dependents as _advance_deps
-
                 _adv_root = Path(_adv_cwd) if _adv_cwd else None
-                _advance(
-                    closed_node_id=record.node_id,
-                    project=_adv_project,
-                    project_root=_adv_root,
-                )
-                # G1 (AC5-FR): also dispatch the closed node's now-unblocked
-                # CROSS-project dependents into their own repos. advance() above
-                # only reaches same-project successors (project-scoped `next`);
-                # this follows blocked_by edges across projects. Shares the
-                # dispatch:<id> dedup so a node observed by both dispatches once.
-                _advance_deps(
-                    closed_node_id=record.node_id,
-                    closed_project=_adv_project,
-                    project_root=_adv_root,
-                )
-                # G4 (AC4-HP/AC8): route the closed node's contract dependents to
-                # a `/target --reconcile` de-stub pass (or a pending sentinel when
-                # their manifest is not yet written) - NOT the cold dispatch above
-                # (advance_deps skips a node with an open draft PR). Same dedup.
-                from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
-                dispatch_reconcile_for_blocker(
-                    closed_node_id=record.node_id,
-                    project_root=_adv_root,
-                )
+                # next (same-project) + cross-project dependents (G1) + contract
+                # de-stub (G4), in one shared helper.
+                _auto_continue_after_close(record.node_id, _adv_project, _adv_root)
             except Exception as _adv_exc:  # noqa: BLE001 - never abort the sweep
                 typer.echo(
                     f"warning: auto-continue advance after closing "
                     f"{record.node_id} failed: {_adv_exc}",
+                    err=True,
+                )
+
+        # x-33b2: a cascade-closed parent epic unblocks its OWN dependents (a node
+        # blocked_by the epic). The per-record loop above only dispatched the
+        # directly-closed children, so run the same auto-continue for each
+        # cascade-closed ancestor too - else an epic-level dependent stalls.
+        # Deduped; project/cwd read from the (close-stable) graph.
+        _seen_parents: set = set()
+        for _pid in cascade_closed_acc:
+            if _pid in _seen_parents:
+                continue
+            _seen_parents.add(_pid)
+            try:
+                _pn = _find_node(entries, _pid)
+                _pproj = _pn.get("project") if _pn else None
+                _proot = Path(_pn["cwd"]) if _pn and _pn.get("cwd") else None
+                _auto_continue_after_close(_pid, _pproj, _proot)
+            except Exception as _exc:  # noqa: BLE001 - never abort the sweep
+                typer.echo(
+                    f"warning: auto-continue after cascade-closing {_pid} failed: {_exc}",
                     err=True,
                 )
 

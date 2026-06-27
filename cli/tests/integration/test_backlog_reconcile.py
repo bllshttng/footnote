@@ -357,6 +357,41 @@ def test_reconcile_triggers_advance_after_close(cli_env, monkeypatch):
     }]
 
 
+def test_reconcile_advances_cascade_closed_parent_epic(cli_env, monkeypatch):
+    """x-33b2 (codex P1): when closing a child cascade-closes its parent epic,
+    reconcile must run auto-continue for the PARENT too - else a node blocked_by
+    the epic stalls. advance is called for BOTH the child and the cascade-closed
+    epic (with the epic's own project)."""
+    graph_path, _ = cli_env
+    _make_graph(
+        graph_path,
+        [
+            _node("ab-epicclose", project="web", cwd="/proj/web"),
+            _node("ab-lastkid01", pr_number=810, project="fno", cwd="/proj/fno",
+                  parent="ab-epicclose"),
+        ],
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    closed_ids = []
+    import fno.backlog.advance as advmod
+
+    def _capture(**kwargs):
+        closed_ids.append(kwargs.get("closed_node_id"))
+        return advmod.AdvanceResult("skipped", "advance_skipped", reason="disabled")
+
+    monkeypatch.setattr(advmod, "advance", _capture)
+
+    result = runner.invoke(app, ["backlog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    # Both the directly-closed child AND the cascade-closed parent epic are advanced.
+    assert "ab-lastkid01" in closed_ids
+    assert "ab-epicclose" in closed_ids
+    # The epic actually closed (cascade fired).
+    epic = next(e for e in _read_entries(graph_path) if e["id"] == "ab-epicclose")
+    assert epic["completed_at"] is not None
+
+
 def test_reconcile_advance_failure_does_not_abort_sweep(cli_env, monkeypatch):
     """Task 2.1: a raising advance is non-fatal - the node still closes and the
     reconcile run still exits 0 (the sweep is never wedged by auto-continue)."""
