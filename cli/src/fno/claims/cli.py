@@ -105,15 +105,28 @@ def acquire(
         None,
         "--pid",
         help=(
-            "PID-liveness anchor (omit => this process's PID). Pin the claim to a "
-            "LONG-LIVED owner (e.g. a stream worker) rather than the transient "
-            "acquiring process so PID-liveness does not mark it stale instantly."
+            "PID-liveness anchor (omit => nearest agent session, else this process's "
+            "PID). Pin the claim to a LONG-LIVED owner (e.g. a stream worker) rather "
+            "than the transient acquiring process so PID-liveness does not mark it "
+            "stale instantly."
         ),
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON to stdout"),
     verbose: bool = typer.Option(False, "--verbose", help="More detail on stderr"),
 ) -> None:
     """Acquire a claim on KEY for HOLDER. Idempotent re-acquire if HOLDER matches."""
+    # ponytail: an omitted --pid used to anchor to the TRANSIENT acquiring process
+    # (a one-shot `fno claim acquire` from a shell dies ~1s later, so the claim went
+    # instantly STALE -- the footgun). Default instead to the durable session
+    # (nearest claude ancestor) when one exists; degrade to the prior os.getpid()
+    # default when not (standalone use, no agent session). Reuses the exact walk
+    # init-target-state.sh already runs via `fno claim session-pid`.
+    if pid is None:
+        try:
+            from .session_pid import resolve_session_pid
+            pid = resolve_session_pid()
+        except Exception:
+            pid = None  # degrade to acquire_claim's os.getpid() default
     try:
         claim = acquire_claim(
             key=key,

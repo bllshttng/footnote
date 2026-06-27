@@ -725,10 +725,10 @@ PYEOF
           echo "target: graph node $_NODE_ID claimed for session $local_session_id" >&2
         else
           # Transient legacy failure (usually the SessionStart reconcile holding
-          # the graph flock): keep the real stderr in $_CLAIM_LOG and defer to
-          # the modern claim below. Message distinct from "already claimed" so it
-          # is not misread as a lock conflict.
-          echo "target: WARNING: graph node $_NODE_ID transient legacy-claim error (see $_CLAIM_LOG); deferring to fno claim" >&2
+          # the graph flock): best-effort only; `fno claim` below is authoritative.
+          # A non-fatal NOTE (not a warning) so an agent does not misread it as a
+          # claim failure and manually claim (a manual claim from a shell goes stale).
+          echo "target: note: legacy graph-claim skipped (non-fatal; see $_CLAIM_LOG). The authoritative 'fno claim' runs next - do NOT claim manually." >&2
         fi
       else
         echo "graph_node_claim_refused: $_CURRENT_CLAIM" >> "$STATE_FILE"
