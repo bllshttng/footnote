@@ -613,3 +613,27 @@ def test_backlog_add_records_canonical_cwd(tmp_path):
         assert result.exit_code == 0, result.output
         node = _read_entries(graph_file)[-1]
         assert node["cwd"] == str(worktree)
+
+
+def test_backlog_idea_has_add_flag_parity(tmp_path):
+    """`idea` is sugar for `add`: it accepts the same parent/size/domain flags,
+    so a fresh idea need not be patched with a follow-up `fno backlog update`."""
+    from typer.testing import CliRunner
+    from fno.graph.cli import cli
+
+    graph_file = tmp_path / "graph.json"
+    graph_file.write_text(json.dumps({"entries": []}) + "\n")
+
+    runner = CliRunner()
+    with patch("fno.graph.cli._graph_path", return_value=graph_file), \
+         patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)):
+        result = runner.invoke(
+            cli,
+            ["idea", "t", "--parent", "ab-1234abcd", "--size", "M", "--domain", "infra"],
+        )
+        assert result.exit_code == 0, result.output
+
+    node = _read_entries(graph_file)[-1]
+    assert node["parent"] == "ab-1234abcd"
+    assert node["size"] == "M"
+    assert node["domain"] == "infra"

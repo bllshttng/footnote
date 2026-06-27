@@ -293,46 +293,37 @@ def _build_backlog_node(
     }
 
 
-# -- add --
-
-@cli.command("add")
-def cmd_add(
-    title: str = typer.Argument(..., help="Feature title"),
-    domain: str = typer.Option("code", help="Domain profile"),
-    priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
-    blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
-    parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
-    type_: str = typer.Option("feature", "--type", "-t", help="Node type: roadmap|feature|task"),
-    project: Optional[str] = typer.Option(
-        None,
-        help=(
-            "Project name. Defaults to the project whose `path:` in "
-            "settings.yaml matches the current working directory."
-        ),
-    ),
-    cwd: Optional[str] = typer.Option(
-        None,
-        "--cwd",
-        "-c",
-        help="Project working directory. Defaults to the current working directory.",
-    ),
-    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id", help="Roadmap group ID"),
-    vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
-    details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
-    description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
-    ),
-    size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
-    batch: Optional[str] = typer.Option(None, help="Execution batch group"),
+def _create_node_impl(
+    *,
+    title: str,
+    type_: str = "feature",
+    parent: Optional[str] = None,
+    project: Optional[str] = None,
+    cwd: Optional[str] = None,
+    priority: str = "p2",
+    domain: str = "code",
+    blocked_by: Optional[str] = None,
+    roadmap_id: Optional[str] = None,
+    vision_path: Optional[str] = None,
+    details: Optional[str] = None,
+    description: Optional[str] = None,
+    size: Optional[str] = None,
+    batch: Optional[str] = None,
 ) -> None:
+    """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
+
+    Both verbs create a plan-less node (which derives to ``_status: idea``);
+    ``idea`` is just sugar for ``add``. Centralizing the body keeps their flag
+    sets and behavior from drifting - the divergence that used to force a second
+    ``fno backlog update`` just to set parent/size/domain on a fresh idea.
+    """
     from fno.graph._constants import PRIORITY_ORDER, mint_node_id
     from fno.graph.store import locked_mutate_graph
-    from fno.graph._intake import detect_project_from_settings, project_root_from_settings, repo_root
+    from fno.graph._intake import (
+        detect_project_from_settings,
+        project_root_from_settings,
+        repo_root,
+    )
 
     if priority not in PRIORITY_ORDER:
         typer.echo(
@@ -343,24 +334,17 @@ def cmd_add(
         raise typer.Exit(code=1)
 
     if details is not None and description is not None:
-        typer.echo(
-            "Error: pass --details or --description, not both",
-            err=True,
-        )
+        typer.echo("Error: pass --details or --description, not both", err=True)
         raise typer.Exit(code=1)
     resolved_details = details if details is not None else description
 
     # Store an absolute path so downstream `detect_project()` (which compares
-    # against `repo_root()` via normpath) finds matches. A relative cwd like
-    # "." would normpath to "." and silently fail to match any project.
-    # No explicit --cwd: record the canonical main checkout (repo_root()), not
-    # os.getcwd(). A backlog node is durable and outlives the worktree it was
-    # filed from, so a worktree cwd would dangle once that worktree is archived.
+    # against `repo_root()` via normpath) finds matches. No explicit --cwd:
+    # record the canonical main checkout (repo_root()), not os.getcwd() - a
+    # backlog node outlives the worktree it was filed from.
     if cwd is not None:
         resolved_cwd = os.path.abspath(os.path.expanduser(cwd))
     elif project is not None:
-        # Explicit --project: derive cwd from the work-map so project and cwd
-        # are consistent even when filed from a foreign working directory.
         resolved_cwd = project_root_from_settings(project) or repo_root()
     else:
         resolved_cwd = repo_root()
@@ -400,10 +384,9 @@ def cmd_add(
 
     locked_mutate_graph(_graph_path(), mutator)
 
-    # Born-with-why v2: route cmd_add births through the shared birth hook,
-    # mirroring cmd_idea. Gate-first, durable slug re-read, and strict
-    # non-fatality all live in on_node_born, so a gate-OFF install is a no-op
-    # and a dispatch failure never wedges the filing of the node above.
+    # Born-with-why: route births through the shared birth hook. Gate-first and
+    # strictly non-fatal, so a gate-OFF install is a no-op and a dispatch
+    # failure never wedges the filing of the node above.
     if node_holder[0] is not None:
         try:
             from fno.provenance.spawn_think import on_node_born
@@ -415,19 +398,71 @@ def cmd_add(
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
 
+# -- add --
+
+@cli.command("add")
+def cmd_add(
+    title: str = typer.Argument(..., help="Feature title"),
+    domain: str = typer.Option("code", help="Domain profile"),
+    priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
+    blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
+    parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
+    type_: str = typer.Option("feature", "--type", "-t", help="Node type: roadmap|feature|task"),
+    project: Optional[str] = typer.Option(
+        None,
+        help=(
+            "Project name. Defaults to the project whose `path:` in "
+            "settings.yaml matches the current working directory."
+        ),
+    ),
+    cwd: Optional[str] = typer.Option(
+        None,
+        "--cwd",
+        "-c",
+        help="Project working directory. Defaults to the current working directory.",
+    ),
+    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id", help="Roadmap group ID"),
+    vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
+    details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
+    description: Optional[str] = typer.Option(
+        None,
+        "--description",
+        help=(
+            "Alias for --details. Reads more naturally for an idea-stage "
+            "row. Mutually exclusive with --details."
+        ),
+    ),
+    size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
+    batch: Optional[str] = typer.Option(None, help="Execution batch group"),
+) -> None:
+    _create_node_impl(
+        title=title,
+        type_=type_,
+        parent=parent,
+        project=project,
+        cwd=cwd,
+        priority=priority,
+        domain=domain,
+        blocked_by=blocked_by,
+        roadmap_id=roadmap_id,
+        vision_path=vision_path,
+        details=details,
+        description=description,
+        size=size,
+        batch=batch,
+    )
+
+
 # -- idea (sugar verb) --
 
 @cli.command("idea")
 def cmd_idea(
     title: str = typer.Argument(..., help="Idea title - what is this?"),
-    description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        "--details",
-        "-d",
-        help="Optional free-form description (stored in `details`).",
-    ),
+    domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
+    blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
+    parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
+    type_: str = typer.Option("feature", "--type", "-t", help="Node type: roadmap|feature|task"),
     project: Optional[str] = typer.Option(
         None,
         help=(
@@ -441,6 +476,19 @@ def cmd_idea(
         "-c",
         help="Working directory. Defaults to the current working directory.",
     ),
+    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id", help="Roadmap group ID"),
+    vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
+    details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
+    description: Optional[str] = typer.Option(
+        None,
+        "--description",
+        help=(
+            "Alias for --details. Reads more naturally for an idea-stage "
+            "row. Mutually exclusive with --details."
+        ),
+    ),
+    size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
+    batch: Optional[str] = typer.Option(None, help="Execution batch group"),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
@@ -448,73 +496,25 @@ def cmd_idea(
     spec/plan ceremony for now. The new node has no ``plan_path`` and so
     derives to ``_status: idea`` until a plan is associated (via
     ``fno backlog intake`` or by setting ``--plan-path`` on
-    ``fno backlog update``).
+    ``fno backlog update``). Shares ``add``'s full option set so a fresh idea
+    can carry parent/size/domain without a follow-up ``fno backlog update``.
     """
-    from fno.graph._constants import PRIORITY_ORDER, mint_node_id
-    from fno.graph.store import locked_mutate_graph
-    from fno.graph._intake import detect_project_from_settings, project_root_from_settings, repo_root
-
-    if priority not in PRIORITY_ORDER:
-        typer.echo(
-            f"Error: invalid priority '{priority}'. "
-            f"Must be: {', '.join(PRIORITY_ORDER.keys())}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # Store an absolute path so downstream `detect_project()` (which compares
-    # against `repo_root()` via normpath) finds matches. A relative cwd like
-    # "." would normpath to "." and silently fail to match any project.
-    # No explicit --cwd: record the canonical main checkout (repo_root()), not
-    # os.getcwd(). A backlog node is durable and outlives the worktree it was
-    # filed from, so a worktree cwd would dangle once that worktree is archived.
-    if cwd is not None:
-        resolved_cwd = os.path.abspath(os.path.expanduser(cwd))
-    elif project is not None:
-        # Explicit --project: derive cwd from the work-map so project and cwd
-        # are consistent even when filed from a foreign working directory.
-        resolved_cwd = project_root_from_settings(project) or repo_root()
-    else:
-        resolved_cwd = repo_root()
-    resolved_project = project
-    if resolved_project is None:
-        resolved_project = detect_project_from_settings(resolved_cwd)
-
-    new_id_holder: list[Optional[str]] = [None]
-    node_holder: list[Optional[dict]] = [None]
-
-    def mutator(entries):
-        new_id = mint_node_id({e.get("id") for e in entries})
-        new_id_holder[0] = new_id
-        node = _build_backlog_node(
-            title=title,
-            project=resolved_project,
-            cwd=resolved_cwd,
-            priority=priority,
-            details=description,
-        )
-        node["id"] = new_id
-        entries.append(node)
-        node_holder[0] = node
-        return entries
-
-    locked_mutate_graph(_graph_path(), mutator)
-
-    # Born-with-why (x-6a10 / v2 A1): after the node persists, route the
-    # context-carrying /think dispatch through the shared birth hook. Gate-first,
-    # durable slug re-read, and strict non-fatality all live in on_node_born, so a
-    # gate-OFF install is a complete no-op and a dispatch failure never wedges the
-    # filing of the node above. The import guard keeps even an import error
-    # non-fatal to birth.
-    if node_holder[0] is not None:
-        try:
-            from fno.provenance.spawn_think import on_node_born
-
-            on_node_born(node_holder[0])
-        except Exception:  # noqa: BLE001 - born-with-why is additive; never block birth
-            pass
-
-    typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
+    _create_node_impl(
+        title=title,
+        type_=type_,
+        parent=parent,
+        project=project,
+        cwd=cwd,
+        priority=priority,
+        domain=domain,
+        blocked_by=blocked_by,
+        roadmap_id=roadmap_id,
+        vision_path=vision_path,
+        details=details,
+        description=description,
+        size=size,
+        batch=batch,
+    )
 
 
 # -- decompose (bounded epic -> group child nodes) --
