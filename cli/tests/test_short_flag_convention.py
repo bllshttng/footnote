@@ -72,8 +72,11 @@ PHASE2_LOWERCASE_MAP: dict[tuple[str, str], dict[str, str]] = {
     ("graph/cli.py", "cmd_add"): {
         "--priority": "-p", "--cwd": "-c", "--details": "-d", "--type": "-t",
     },
+    # cmd_idea was unified with cmd_add (x-9ac9): it now shares add's full option
+    # set, so -d rides --details (with --description as the no-short alias),
+    # matching cmd_add above instead of idea's old --description/-d primary.
     ("graph/cli.py", "cmd_idea"): {
-        "--description": "-d", "--priority": "-p", "--cwd": "-c",
+        "--details": "-d", "--priority": "-p", "--cwd": "-c",
     },
     ("graph/cli.py", "cmd_intake"): {"--title": "-t", "--priority": "-p"},
     ("graph/cli.py", "cmd_update"): {
