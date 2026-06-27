@@ -4468,6 +4468,8 @@ mod tests {
             cols: 80,
         };
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
+        // E5c flips the default to GroupTile; force Single for this leg.
+        rs.main_mode = group::MainMode::Single;
 
         // Single mode -> the mode token reads `single |` (and never `tile |`).
         let mut frame = ScreenBuffer::blank(1, 80);

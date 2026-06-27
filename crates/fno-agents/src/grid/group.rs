@@ -278,9 +278,10 @@ pub enum FocusAxis {
 /// What the main area renders (US3). Toggled live with `Tab`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainMode {
-    /// One focused agent fills the main area at full width (Phase 1 default).
+    /// One focused agent fills the main area at full width (Tab zooms here).
     Single,
     /// The selected agent's whole group tiles side-by-side in the main area.
+    /// The E5c default (AC-2): a space shows its members auto-tiled.
     GroupTile,
 }
 
@@ -313,7 +314,10 @@ impl RailState {
             selected_agent_idx: None,
             axis: FocusAxis::RailNav,
             group_key,
-            main_mode: MainMode::Single,
+            // E5c AC-2: a space auto-tiles its members. GroupTile is the
+            // default so >1 agent in one project shows as tiled panes without a
+            // Tab toggle; a single-member space tiles as one full-width pane.
+            main_mode: MainMode::GroupTile,
             attention_filter: false,
         }
     }
@@ -1064,11 +1068,31 @@ mod tests {
     #[test]
     fn ac3_ui_toggle_flips_main_mode() {
         let mut rs = RailState::new(GroupKey::Cwd);
-        assert_eq!(rs.main_mode, MainMode::Single, "Single is the default");
+        assert_eq!(
+            rs.main_mode,
+            MainMode::GroupTile,
+            "GroupTile (auto-tile) is the E5c default"
+        );
         rs.toggle_main_mode();
-        assert_eq!(rs.main_mode, MainMode::GroupTile);
+        assert_eq!(rs.main_mode, MainMode::Single, "Tab zooms to a single pane");
         rs.toggle_main_mode();
-        assert_eq!(rs.main_mode, MainMode::Single, "Tab toggles back to Single");
+        assert_eq!(
+            rs.main_mode,
+            MainMode::GroupTile,
+            "Tab toggles back to GroupTile"
+        );
+    }
+
+    #[test]
+    fn ac_e5c_2_space_auto_tiles_members_by_default() {
+        // E5c AC-2: two agents in one project (cwd) render as two tiled panes
+        // within that space BY DEFAULT - GroupTile, no Tab toggle required.
+        let rs = RailState::new(GroupKey::Cwd);
+        assert_eq!(
+            rs.main_mode,
+            MainMode::GroupTile,
+            "a space auto-tiles its members by default (E5c AC-2)"
+        );
     }
 
     #[test]
@@ -1169,13 +1193,20 @@ mod tests {
 
     #[test]
     fn ac4_fr_main_mode_survives_group_key_cycle() {
-        // GroupTile must persist across a `g` re-partition; only the key changes.
+        // The chosen main_mode must persist across a `g` re-partition; only the
+        // key changes. Toggle off the GroupTile default to prove a non-default
+        // choice survives too.
         let mut rs = RailState::new(GroupKey::Cwd);
-        rs.toggle_main_mode();
-        assert_eq!(rs.main_mode, MainMode::GroupTile);
+        assert_eq!(rs.main_mode, MainMode::GroupTile, "E5c default");
+        rs.toggle_main_mode(); // -> Single
+        assert_eq!(rs.main_mode, MainMode::Single);
         rs.cycle_group_key();
         assert_eq!(rs.group_key, GroupKey::Session);
-        assert_eq!(rs.main_mode, MainMode::GroupTile, "regroup keeps GroupTile");
+        assert_eq!(
+            rs.main_mode,
+            MainMode::Single,
+            "regroup keeps the chosen main_mode"
+        );
     }
 
     // ── AC3-FR: live_members filters exited panes for GroupTile reflow ────────
