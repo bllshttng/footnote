@@ -330,8 +330,9 @@ fn run_agy(
 
     let mut watchdog = crate::subprocess_ask::AskWatchdog::spawn(pid, timeout);
 
-    // Read the whole stdout blob (agy emits plain text). Lossy-decode so a stray
-    // non-UTF-8 byte can't hard-fail the read.
+    // Read the whole stdout blob (agy emits plain text). agy output is UTF-8 in
+    // practice, so try a zero-copy `from_utf8` first and only pay the lossy copy
+    // on the rare invalid-byte path (a stray byte can't hard-fail the read).
     let mut stdout_bytes: Vec<u8> = Vec::new();
     {
         let mut reader = stdout_pipe;
@@ -339,7 +340,8 @@ fn run_agy(
             eprintln!("agy provider: stdout stream read error: {}", e);
         }
     }
-    let stdout_text = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let stdout_text = String::from_utf8(stdout_bytes)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
 
     // Tee the stdout blob under the shared lock (after EOF).
     if !stdout_text.is_empty() {
@@ -363,7 +365,12 @@ fn run_agy(
 
     let duration_ms = started.elapsed().as_millis() as u64;
     let was_timed_out = watchdog.timed_out();
-    let stderr_text = stderr_capture.lock().map(|s| s.clone()).unwrap_or_default();
+    // The stderr drain thread has been joined, so we are the sole owner — move
+    // the captured text out of the mutex instead of cloning up to 256 KB.
+    let stderr_text = stderr_capture
+        .lock()
+        .map(|mut s| std::mem::take(&mut *s))
+        .unwrap_or_default();
 
     // Operator Ctrl-C wins over every other classification.
     if crate::subprocess_ask::ask_interrupted() {
@@ -455,11 +462,45 @@ pub fn dispatch_agy_once(
     model: Option<&str>,
     timeout: Option<Duration>,
 ) -> AskOutcome {
+    use crate::claude_ask::py_repr;
     if let Err(msg) = crate::claude_ask::validate_spawn_inputs(name, from_name) {
         return AskOutcome::err(msg, 2);
     }
 
     let events = home.events_jsonl();
+
+    // Authoritative registry read, fail-closed (codex P2): `maybe_run_spawn`'s
+    // collision check uses an ADVISORY `unwrap_or_default()`, so a corrupt /
+    // unreadable registry would be treated as empty and agy launched anyway. The
+    // codex/gemini one-shots surface exit 12 here before running the CLI; agy
+    // matches that, and re-checks the name collision under this read.
+    let registry = match crate::state::load_registry(&home.registry_json()) {
+        Ok(r) => r,
+        Err(e) => {
+            emit_event(
+                &events,
+                "agent_ask_failed",
+                &[
+                    ("stage", "registry-read".into()),
+                    ("name", name.into()),
+                    ("provider", "agy".into()),
+                    ("error", e.to_string().into()),
+                ],
+            );
+            return AskOutcome::err(format!("registry read failed: {}", e), 12);
+        }
+    };
+    if registry.find(name).is_some() {
+        return AskOutcome::err(
+            format!(
+                "agent {} already exists; use 'fno agents rm {}' first or pick another name",
+                py_repr(name),
+                name
+            ),
+            2,
+        );
+    }
+
     // spawn allows an empty initial message; default it to "hello" (Python parity).
     let effective_message = if message.is_empty() { "hello" } else { message };
     let log_path = derive_log_path(home, name);
@@ -513,8 +554,10 @@ pub fn maybe_run_agy_ask(home: &AgentsHome, params: &serde_json::Value, name: &s
             return Some(12);
         }
     };
-    let existing_provider = registry.find(name).map(|e| e.provider.clone());
-    let resolved = existing_provider.as_deref().or(provider_param);
+    // Borrow the provider string (lives until the function returns) instead of
+    // cloning it (gemini review).
+    let existing_provider = registry.find(name).map(|e| e.provider.as_str());
+    let resolved = existing_provider.or(provider_param);
     if resolved != Some("agy") {
         return None; // not an agy target; fall through
     }

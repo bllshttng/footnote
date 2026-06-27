@@ -1099,15 +1099,18 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                 }
             }
             // Validate the (possibly inferred) provider for BOTH fresh host and
-            // promote (AC3-ERR). Only codex/gemini are PTY-hostable here; claude
-            // took its own lanes above, so any provider that reaches this point is
-            // either an unknown CLI (no PTY impl) or a promote whose source row
-            // resolved to one. This runs AFTER promote's provider inference so a
-            // promote whose source resolves to claude/unknown is rejected here with
-            // a clear message rather than failing later with a confusing
-            // PTY-missing error (Gemini review HIGH on PR #373 -- the prior
-            // `else if` skipped this for the promote path).
-            if provider != "codex" && provider != "gemini" {
+            // promote (AC3-ERR). Only codex/gemini/agy are PTY-hostable here;
+            // claude took its own lanes above, so any provider that reaches this
+            // point is either an unknown CLI (no PTY impl) or a promote whose
+            // source row resolved to one. This runs AFTER promote's provider
+            // inference so a promote whose source resolves to claude/unknown is
+            // rejected here with a clear message rather than failing later with a
+            // confusing PTY-missing error (Gemini review HIGH on PR #373 -- the
+            // prior `else if` skipped this for the promote path). agy is added
+            // alongside its provider_for_pty registration (codex P2 on PR #73):
+            // it implements create_interactive_argv, so the gate must admit it or
+            // `host --provider agy` always returns this error.
+            if provider != "codex" && provider != "gemini" && provider != "agy" {
                 let _ = ctx.emitter.emit(
                     "agent_spawn_failed",
                     &json!({"name": name, "reason": "bad_interactive_provider", "provider": provider}),
@@ -1116,7 +1119,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                     req.id,
                     ErrorCode::InvalidParams,
                     format!(
-                        "interactive host_mode supports only codex, gemini, or claude (interactive PTY via `mode: interactive`, or stream-json adopt via `promote --from <uuid> --provider claude`), not '{provider}'"
+                        "interactive host_mode supports only codex, gemini, agy, or claude (interactive PTY via `mode: interactive`, or stream-json adopt via `promote --from <uuid> --provider claude`), not '{provider}'"
                     ),
                 );
             }

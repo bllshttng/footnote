@@ -859,6 +859,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--status",
         "--from-name",
         "--timeout",
+        "--model",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -939,6 +940,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--force" | "-F" => {
                 params.insert("force".into(), Value::Bool(true));
+            }
+            "--model" => {
+                // agy honors an exact model name (`agy models`); other providers
+                // ignore the param. Forwarded so `spawn --provider agy --once
+                // --model <name>` reaches dispatch_agy_once (codex P2).
+                params.insert("model".into(), str_arg(&mut it, "--model")?);
             }
             "--from-name" => {
                 // NOTE: --from-name is accepted and forwarded to the daemon, but
@@ -2169,6 +2176,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p2["cwd"], "/a=b");
+    }
+
+    /// codex P2 (PR #73): `--model` must reach the request, else
+    /// `spawn --provider agy --once --model <name>` fails with "unknown flag"
+    /// before dispatch_agy_once sees it. Both space- and equals-form parse.
+    #[test]
+    fn spawn_forwards_model_flag() {
+        let (_m, space) = build_request(
+            "spawn",
+            &[
+                "wk".to_string(),
+                "--provider".to_string(),
+                "agy".to_string(),
+                "--once".to_string(),
+                "--model".to_string(),
+                "Gemini 3.5 Flash (High)".to_string(),
+            ],
+        )
+        .expect("--model must parse");
+        assert_eq!(space["model"], "Gemini 3.5 Flash (High)");
+        let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--model=pro".to_string()])
+            .expect("--model= must parse");
+        assert_eq!(eq["model"], "pro");
     }
 
     /// ab-3ff64151 AC1 (Rust-path parity): `agents ask` accepts the phone shorts
