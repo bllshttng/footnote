@@ -1034,11 +1034,14 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             // then fall through to the generic PTY path below. Skip admit_promote
             // (claude needs no codex/gemini source row) and the codex/gemini-only
             // provider gate.
-            let has_sid = p
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
+            // The session uuid may arrive as `resume_id` (an interactive resume of
+            // an existing session) OR `session_id` (a fresh host pinning a new id);
+            // either satisfies the requirement (gemini review HIGH).
+            let has_sid = resume_id.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+                || p.get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
             if !has_sid {
                 let _ = ctx.emitter.emit(
                     "agent_spawn_failed",
@@ -1047,7 +1050,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                 return Response::err(
                     req.id,
                     ErrorCode::InvalidParams,
-                    "interactive claude requires a pinned session id (pass session_id); the daemon's single-writer claim and transcript discovery key on it",
+                    "interactive claude requires a pinned session id (pass session_id, or resume_id to resume); the daemon's single-writer claim and transcript discovery key on it",
                 );
             }
         } else {
@@ -1214,11 +1217,17 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     // PTY rows rely on the registry one-host re-check; only claude shares its
     // session id with an out-of-daemon writer, so only claude takes the file claim.
     let claude_claim_guard: Option<DaemonClaimGuard> = if interactive && provider == "claude" {
-        let uuid = p
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+        // resume_id (resume) takes precedence over session_id (fresh host); the
+        // claim must key on the SAME uuid the argv resumes, never default to empty
+        // and bypass the interlock on a resume (gemini review HIGH).
+        let uuid = resume_id
+            .clone()
+            .or_else(|| {
+                p.get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_default();
         let holder = interactive_claim_holder(&short_id);
         let uuid_acq = uuid.clone();
         let holder_acq = holder.clone();
@@ -1392,13 +1401,17 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             .and_then(|v| v.as_str())
             .map(String::from),
         claude_short_id: None,
-        // Interactive claude (E1) pins its session UUID via `--session-id`;
-        // record it so the one-host invariant + reconcile (and the relay's E4
-        // lookup) can match the session. Other rows: None.
+        // Interactive claude (E1) records its session UUID so the one-host
+        // invariant + reconcile (and the relay's E4 lookup) can match it. resume_id
+        // (resume) takes precedence over session_id (fresh host), mirroring the
+        // claim + argv, so a resumed row is matchable by entry_holds_session and
+        // not silently None (gemini review HIGH).
         claude_session_uuid: if interactive && provider == "claude" {
-            p.get("session_id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
+            resume_id.clone().or_else(|| {
+                p.get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
         } else {
             None
         },
