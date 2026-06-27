@@ -457,6 +457,55 @@ impl Launcher {
     }
 }
 
+/// Derive a legible, unique-ish worker name from a goal + a monotonic counter:
+/// `target-<slug>-<n>`. The slug is the goal's leading alphanumeric words,
+/// lowercased and dash-joined (capped), so the name reads cleanly in
+/// `fno agents list` and the rail. Pure + testable.
+fn target_worker_name(goal: &str, n: usize) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = true; // suppress a leading dash
+    for c in goal.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_dash = false;
+            if slug.len() >= 24 {
+                break;
+            }
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "goal" } else { slug };
+    format!("target-{slug}-{n}")
+}
+
+/// Spawn a `/target` worker for `goal` via the same primitive dispatch uses:
+/// `fno agents spawn --provider claude <name> "/target no-merge <goal>"`.
+/// `no-merge` keeps an autonomous worker landing a PR for review, never an
+/// auto-merge (dispatch Locked Decision 4). `$FNO_BIN` overrides the binary
+/// (tests / non-PATH installs). Returns Ok once the worker is launched.
+async fn spawn_target_worker(name: &str, goal: &str) -> Result<(), String> {
+    let fno = std::env::var("FNO_BIN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "fno".to_string());
+    let cmd = format!("/target no-merge {goal}");
+    let out = tokio::process::Command::new(&fno)
+        .args(["agents", "spawn", "--provider", "claude", name, &cmd])
+        .output()
+        .await
+        .map_err(|e| format!("spawn exec failed: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let last = stderr.lines().last().unwrap_or("unknown").trim();
+        Err(format!("spawn failed: {last}"))
+    }
+}
+
 // ── Rendering ───────────────────────────────────────────────────────────
 
 /// A full-terminal cell grid. The compositor rasterizes one frame into this,
@@ -2266,9 +2315,47 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 }
                                 LauncherOutcome::Submitted(goal) => {
                                     launcher = None;
-                                    // T4 replaces this stub with spawn + live tile.
-                                    hint = Some(format!("would launch /target: {goal}"));
-                                    prev_frame = None;
+                                    launch_seq += 1;
+                                    let name = target_worker_name(&goal, launch_seq);
+                                    match spawn_target_worker(&name, &goal).await {
+                                        Ok(()) => {
+                                            // Live-add the worker's pane: open a
+                                            // watcher at the next global index, grow
+                                            // the parallel vectors, re-tile, focus it.
+                                            let new_idx = panes.len();
+                                            match layout::compute_page(tty, new_idx + 1, comp.current_page()) {
+                                                Ok(paged) => {
+                                                    let (rows, cols) = target_pane_inner(&paged, new_idx);
+                                                    let (pane, state, sink) =
+                                                        open_watch_pane(home, &name, new_idx, rows, cols, &tx).await;
+                                                    names.push(name.clone());
+                                                    // A /target worker is interactive claude.
+                                                    host_interactive.push(true);
+                                                    panes.push(pane);
+                                                    states.push(state);
+                                                    watch_sinks.push(sink);
+                                                    comp.set_pane_count(panes.len());
+                                                    comp.recompute_pagination(paged.capacity);
+                                                    comp.set_focus(new_idx);
+                                                    resize_all_panes(&paged, &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                                    hint = Some(format!("launched {name}"));
+                                                }
+                                                Err(_) => {
+                                                    // Worker is running; the terminal
+                                                    // just can't tile another pane yet.
+                                                    hint = Some(format!(
+                                                        "{name} launched (terminal too small to tile it)"
+                                                    ));
+                                                }
+                                            }
+                                            prev_frame = None; // region map changed -> full repaint
+                                        }
+                                        Err(e) => {
+                                            // No pane added; keep the operator informed.
+                                            hint = Some(format!("launch failed: {e}"));
+                                            prev_frame = None;
+                                        }
+                                    }
                                 }
                             }
                             dirty = true;
@@ -3321,6 +3408,21 @@ mod tests {
         let mut l = Launcher::new();
         l.apply(LauncherAction::Append('x'));
         assert_eq!(l.apply(LauncherAction::Cancel), LauncherOutcome::Cancelled);
+    }
+
+    #[test]
+    fn target_worker_name_slugs_goal() {
+        assert_eq!(
+            target_worker_name("Add user auth!", 1),
+            "target-add-user-auth-1"
+        );
+        // All-punctuation / blank goal falls back to a stable stem.
+        assert_eq!(target_worker_name("   ", 2), "target-goal-2");
+        // Long goals are capped and never leave a trailing dash.
+        let n = target_worker_name("a very long goal string that keeps going forever", 3);
+        assert!(n.starts_with("target-a-very-long-goal"), "got {n}");
+        assert!(n.ends_with("-3"));
+        assert!(!n.contains("--"));
     }
 
     #[test]
