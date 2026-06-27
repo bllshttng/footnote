@@ -1037,7 +1037,10 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             // The session uuid may arrive as `resume_id` (an interactive resume of
             // an existing session) OR `session_id` (a fresh host pinning a new id);
             // either satisfies the requirement (gemini review HIGH).
-            let has_sid = resume_id.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+            let has_sid = resume_id
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
                 || p.get("session_id")
                     .and_then(|v| v.as_str())
                     .map(|s| !s.trim().is_empty())
