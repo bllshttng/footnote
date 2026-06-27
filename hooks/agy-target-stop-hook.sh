@@ -131,9 +131,10 @@ emit_event() {
         --arg kind "$kind" \
         '{ts:$ts,type:$kind,source:"hook",data:{session_id:$sid,harness:"agy"}}' 2>/dev/null || true)
     [[ -z "$ev" ]] && return 0
-    mkdir -p ".fno" "${HOME}/.fno" 2>/dev/null || true
+    # ${HOME:-} (not ${HOME}): under set -u an unset HOME would abort the script.
+    mkdir -p ".fno" "${HOME:-}/.fno" 2>/dev/null || true
     printf '%s\n' "$ev" >> ".fno/events.jsonl" 2>/dev/null || true
-    printf '%s\n' "$ev" >> "${HOME}/.fno/events.jsonl" 2>/dev/null || true
+    printf '%s\n' "$ev" >> "${HOME:-}/.fno/events.jsonl" 2>/dev/null || true
 }
 
 # ── 6. Binary genuinely MISSING -> allow stop (don't trap an unstoppable loop) ─

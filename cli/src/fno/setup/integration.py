@@ -302,8 +302,13 @@ def _agy_is_installed() -> bool:
         return False
     if not isinstance(data, dict):
         return False
-    fn = data.get("footnote", {})
-    stop = fn.get("Stop", []) if isinstance(fn, dict) else []
+    fn = data.get("footnote")
+    if not isinstance(fn, dict):
+        return False
+    stop = fn.get("Stop")
+    if not isinstance(stop, list):
+        # Absent or malformed (e.g. {"Stop": null}); not a TypeError on iteration.
+        return False
     adapter = _agy_adapter_path()
     if adapter is None:
         # Can't verify the command targets the live adapter; installed iff ANY

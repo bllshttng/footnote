@@ -390,6 +390,16 @@ def test_agy_is_installed_false_on_malformed_json(tmp_path, monkeypatch):
     assert I._agy_is_installed() is False
 
 
+def test_agy_is_installed_false_on_null_stop(tmp_path, monkeypatch):
+    # {"footnote": {"Stop": null}} must not TypeError on the any() iteration.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _fake_agy_adapter(tmp_path, monkeypatch)
+    hooks = I._agy_hooks_json()
+    hooks.parent.mkdir(parents=True, exist_ok=True)
+    hooks.write_text(json.dumps({"footnote": {"Stop": None}}), encoding="utf-8")
+    assert I._agy_is_installed() is False
+
+
 def test_agy_adapter_registered():
     clis = {a.cli for a in I.build_adapters()}
     assert "agy" in clis
