@@ -110,7 +110,8 @@ pub struct GridArgs {
     /// `--all` selects every PTY-managed running agent from the registry.
     /// Resolution happens at runtime against [`AgentsHome::registry_path`].
     pub all: bool,
-    /// Left navigation rail (the "spaces" view; ab-1fab1fdf Phase 1).
+    /// Left navigation rail listing "sidelines" - one repo's agents each
+    /// (ab-1fab1fdf Phase 1; "sideline" is the footnote term, not herdr's "space").
     /// E5c Locked Decision 2 made this the default: a bare `grid` / `grid --all`
     /// drops into the rail (grouped by cwd), and explicit names or `--no-rail`
     /// fall back to the railless tiled grid.
@@ -126,7 +127,7 @@ impl GridArgs {
     /// The grammar is intentionally tiny:
     ///
     /// ```text
-    /// grid                                 # bare → live fleet spaces (rail); E5b front door if the fleet is empty
+    /// grid                                 # bare → live fleet sidelines (rail); E5b front door if the fleet is empty
     /// grid --all                           # every PTY-managed agent, rail on
     /// grid <name>...                       # explicit names, railless (escape hatch)
     /// grid --no-rail                       # fleet, railless tiled grid
@@ -169,15 +170,15 @@ impl GridArgs {
             return Err(GridArgError::AllWithNames(names.join(" ")));
         }
         // E5c Locked Decision 2: a bare invocation (no names, no `--all`)
-        // defaults to the live fleet, so `fno agents grid` shows the spaces
-        // view over running agents. When that fleet resolves EMPTY at runtime,
+        // defaults to the live fleet, so `fno agents grid` shows the sidelines
+        // (one per repo) over running agents. When that fleet resolves EMPTY at runtime,
         // the run loop falls through to E5b's zero-config goal-launcher front
         // door (the operator types a goal and the grid spawns a `/target`
         // worker) instead of an empty grid.
         if names.is_empty() && !all {
             all = true;
         }
-        // Rail defaults ON for the fleet/spaces view (no explicit names) and
+        // Rail defaults ON for the fleet/sidelines view (no explicit names) and
         // OFF when explicit names are given (the railless escape hatch).
         // `--rail` / `--no-rail` override the default either way.
         let rail = rail_override.unwrap_or(names.is_empty());
@@ -261,7 +262,7 @@ mod tests {
         let a = GridArgs::parse(&[]).unwrap();
         assert!(a.names.is_empty());
         assert!(a.all, "bare invocation defaults to --all (the live fleet)");
-        assert!(a.rail, "bare invocation defaults to the rail (spaces view)");
+        assert!(a.rail, "bare invocation defaults to the rail (sidelines)");
         assert_eq!(a.initial_group_key(), group::GroupKey::Cwd);
     }
 
@@ -271,7 +272,7 @@ mod tests {
         assert!(a.all);
         assert!(
             a.rail,
-            "--all with no names defaults rail on (fleet = spaces)"
+            "--all with no names defaults rail on (fleet = sidelines)"
         );
     }
 
