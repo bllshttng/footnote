@@ -88,13 +88,14 @@ PROVIDER_SESSION_ID_FIELDS = {
 
 from fno import paths
 
-# v4 (ab-a171ceb2) is the host_mode forward-compat bump. v4 is structurally
-# identical to v3 - host_mode is additive-optional and read version-independently
-# (absent==exec, below) - but stamping v4 makes a pre-host_mode reader (which
-# accepts only {1,2,3} and lacks host_mode code) reject a v4 store instead of
-# silently treating an interactive row as exec and orphaning a live TUI. Reads
-# stay backward-compatible: load_registry accepts 1..=SCHEMA_VERSION.
-SCHEMA_VERSION = 4
+# v4 (ab-a171ceb2) is the host_mode forward-compat bump. v5 (inside-out E3.1) is
+# the same kind of bump for the additive `inside_leg` field: structurally
+# identical to v4 (inside_leg is additive-optional, an absent key reads as None),
+# but stamping v5 makes a pre-inside-leg reader (which accepts only {1,2,3,4})
+# reject a v5 store instead of silently dropping the inside-leg report on
+# write-back. Reads stay backward-compatible: load_registry accepts
+# 1..=SCHEMA_VERSION.
+SCHEMA_VERSION = 5
 
 
 class RegistryVersionError(RuntimeError):
@@ -199,6 +200,16 @@ class AgentEntry:
     pid: Optional[int] = None
     pid_start_time: Optional[int] = None
     last_reconciled_at: Optional[str] = None
+    # Latest inside-leg report for this row's claude pane (inside-out E3.1,
+    # "contract v2"; mirrors the Rust `RegistryEntry.inside_leg` /
+    # `InsideLegReport`). A lossless PASSTHROUGH: the daemon (Rust) is the sole
+    # writer and owns all inside-leg behaviour (seq-drop, TTL aging, authority);
+    # Python only custodies the blob so a row round-trips across the mixed-language
+    # registry (X3 / ab-b946b59c). Kept as an opaque dict (not a typed dataclass)
+    # because no Python consumer reads its fields yet; type it when one does.
+    # None for every non-inside-leg row; asdict re-emits it (None -> null, which
+    # Rust reads back as None). Additive-optional, gated by the v5 schema bump.
+    inside_leg: Optional[dict] = None
 
     @property
     def session_id(self) -> Optional[str]:

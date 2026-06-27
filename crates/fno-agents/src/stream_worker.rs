@@ -1651,6 +1651,7 @@ cat >/dev/null
                 pid_start_time: None,
                 log_path: None,
                 last_reconciled_at: None,
+                inside_leg: None,
             });
         })
         .unwrap();

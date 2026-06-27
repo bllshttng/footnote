@@ -1025,6 +1025,7 @@ fn dispatch_create(
         pid_start_time: None,
         log_path: Some(output_path.to_string_lossy().to_string()),
         last_reconciled_at: None,
+        inside_leg: None,
     };
 
     match update_registry(registry_path, |reg| {

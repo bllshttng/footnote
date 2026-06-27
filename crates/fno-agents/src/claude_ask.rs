@@ -1980,6 +1980,7 @@ fn create(
         pid_start_time: None,
         log_path: Some(log_path.to_string_lossy().to_string()),
         last_reconciled_at: None,
+        inside_leg: None,
     };
 
     // Re-check the name UNDER the registry lock before appending. The per-agent
