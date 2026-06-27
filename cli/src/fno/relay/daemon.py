@@ -16,10 +16,11 @@ Three safety properties are structural, not best-effort:
   (``relay_dropped{unframed-cross-provider}``) -- the spike's Alice-rejection
   failure made impossible by construction.
 
-The vehicle (``deliver``) is injected: the real claude vehicle wraps G1's
-``roundtrip._deliver_and_capture`` (PTY send-keys); tests pass a fake recorder.
-This keeps the routing core a pure, deterministic function over the real jsonl
-bus -- AC3/AC4/AC5 are testable with no claude spawn.
+The vehicle (``deliver``) is injected: the real claude vehicle
+(:func:`daemon_deliver`) routes through the daemon's interactive-claude worker
+(the ``worker.submit`` RPC, behind the daemon-held ``session:`` claim); tests pass
+a fake recorder. This keeps the routing core a pure, deterministic function over
+the real jsonl bus -- AC3/AC4/AC5 are testable with no claude spawn.
 
 Singleton via :mod:`fno.claims` (``relay:daemon`` key): two daemon instances must
 not both route the same bus message (Concurrency). The internal "delivery queue"
@@ -122,9 +123,10 @@ def route_message(
 
     # Deliver (inject) and capture any reply. A deliver that RAISES is surfaced as
     # relay_deliver_failed and never crashes the daemon (design Failure Mode
-    # "Errors"). The vehicle (G1's _deliver_and_capture) owns the bounded keystroke
-    # retry for recoverable drops; an exception escaping it is unrecoverable (no
-    # live peer / dead handle), so the daemon surfaces it and moves on -- a single
+    # "Errors"). The vehicle (daemon_deliver -> deliver_session) owns the bounded
+    # worker.submit retry for recoverable drops; an exception escaping it is
+    # unrecoverable (no daemon-held handle / dead worker), so the daemon surfaces
+    # it and moves on -- a single
     # decision event, no head-of-line block, no per-pass event flood. (A pre-peer
     # arrival race is a peer-manager concern: register before announcing ready.)
     try:
@@ -282,25 +284,74 @@ def run_forever(
 
 
 # ---------------------------------------------------------------------------
-# Real claude vehicle (thin wrapper over G1's PTY send-keys primitive)
+# Real claude vehicle: route through the daemon-held session: handle (E4.3).
 # ---------------------------------------------------------------------------
 
-def claude_pty_deliver(peers: dict[str, "object"]) -> Deliver:
-    """Build a ``deliver`` that injects into a footnote-owned claude PTY peer and
-    reads the reply from its pane (G1's sanctioned capture). ``peers`` maps
-    ``session_id -> Peer``; a recipient with no live peer raises so the daemon
-    surfaces ``relay_deliver_failed`` rather than silently dropping.
+def daemon_deliver(
+    *,
+    holder: Optional[str] = None,
+    settle_ms: int = 1000,
+    timeout: float = 180.0,
+) -> Deliver:
+    """Build a ``deliver`` that routes a hop through the DAEMON's interactive-claude
+    worker (E4.3), replacing the retired footnote-owned PTY peer.
 
-    Not unit-tested (it needs a live claude spawn -- that is G1's round-trip test
-    and G4's cross-provider test); it is a thin adapter to the proven primitive.
+    Single-writer claim guard (Locked Decision #1 / AC-E4-3): before injecting,
+    the relay ACQUIRES ``session:<uuid>``. Finding it held by another (the daemon,
+    which acquired + re-anchored it at spawn -- E1) is the signal that a live
+    handle exists to route THROUGH: the relay calls
+    :func:`fno.relay.roundtrip.deliver_session` (the daemon ``worker.submit`` RPC +
+    transcript capture). A SUCCESSFUL acquire means the claim is FREE -- no daemon
+    host owns this session -- so there is no handle; the relay RELEASES the probe
+    claim and refuses, rather than spawning a second ``--session-id X`` writer
+    (two processes pinned to one session id corrupt the transcript). The relay
+    therefore never ends up holding a ``session:`` claim itself.
+
+    A vehicle exception is surfaced by :func:`route_message` as
+    ``relay_deliver_failed`` (it never crashes the daemon). Not unit-tested end to
+    end (the live RPC substrate is the ``FNO_LIVE_RELAY`` gate, AC-E4-5); the claim
+    guard and the resolution/capture primitives are unit-tested.
     """
-    from fno.relay.roundtrip import _deliver_and_capture  # noqa: PLC0415
+    from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim  # noqa: PLC0415
+    from fno.relay.roundtrip import (  # noqa: PLC0415
+        deliver_session, interactive_claim_holder, resolve_worker_short_id,
+    )
+
+    holder = holder or f"relay-daemon:{_pid()}"
 
     def _deliver(res: Resolution, framed: str) -> Optional[str]:
-        peer = peers.get(res.session_id)
-        if peer is None:
-            raise RuntimeError(f"relay_deliver_failed: no live PTY peer for {res.session_id}")
-        return _deliver_and_capture(peer, framed, 180.0)
+        sid = res.session_id
+        if not sid:
+            raise RuntimeError("relay_deliver_failed: resolution carries no session_id")
+        # Routing needs BOTH a live daemon worker row AND the session: claim held by
+        # THAT worker's interactive lane. Resolve the worker first so the lane check
+        # below can bind the claim holder to it.
+        short_id = resolve_worker_short_id(sid)
+        if short_id is None:
+            raise RuntimeError(f"relay_deliver_failed: no live daemon worker for session {sid}")
+        key = f"session:{sid}"
+        try:
+            acquire_claim(key, holder, reason="relay routing probe")
+        except ClaimHeldByOther as exc:
+            # Held by another -> route ONLY if that holder is the daemon's
+            # interactive PTY lane for THIS worker (``pty:<short_id>``, the
+            # lane-tagged holder the daemon writes for E1). A ``stream:<id>`` lane or
+            # any other external writer holding session:<uuid> is NOT a worker.submit
+            # target; refuse rather than inject into a session the daemon does not
+            # PTY-host (single-writer guard, AC-E4-3).
+            expected = interactive_claim_holder(short_id)
+            if exc.holder != expected:
+                raise RuntimeError(
+                    f"relay_deliver_failed: session:{sid} held by {exc.holder!r}, not the daemon "
+                    f"interactive lane ({expected!r}); refusing to route"
+                )
+            return deliver_session(sid, framed, settle_ms=settle_ms, timeout=timeout, short_id=short_id)
+        # Free (or stale-reclaimed): no daemon host -> no handle. Drop the probe
+        # claim so the relay is never a second holder, then refuse.
+        release_claim(key, holder)
+        raise RuntimeError(
+            f"relay_deliver_failed: session:{sid} not daemon-held (no live handle to route through)"
+        )
 
     return _deliver
 
@@ -318,11 +369,13 @@ def _main(argv: Optional[list[str]] = None) -> int:
     """Run the relay router daemon: ``python -m fno.relay.daemon``.
 
     Tails the bus and routes peer-to-peer with the singleton claim held. This is
-    the operator/launchd entrypoint. Live claude PTY peers are supplied by the
-    peer-lifecycle manager (the remaining G3->G4 wiring -- see the PR carveouts);
-    until that lands, a delivery to a session this process owns no peer for
-    surfaces ``relay_deliver_failed`` rather than silently dropping, so the
-    routing/singleton/ttl machinery is observable from a real run today.
+    the operator/launchd entrypoint. Each hop is routed through the daemon's
+    interactive-claude worker via :func:`daemon_deliver`: the relay finds the
+    recipient's ``session:<uuid>`` claim daemon-held and injects through the
+    ``worker.submit`` RPC (E4.3). A recipient with no live daemon worker surfaces
+    ``relay_deliver_failed`` rather than silently dropping. The retired
+    peer-lifecycle manager (the old in-process PTY ``peers`` dict) is gone -- the
+    Rust daemon's worker model owns the PTYs now.
     """
     import argparse
 
@@ -332,9 +385,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
                         help="bound the loop (default: run until interrupted)")
     args = parser.parse_args(argv)
 
-    peers: dict[str, object] = {}  # populated by the peer-lifecycle manager (follow-up)
     run_forever(
-        deliver=claude_pty_deliver(peers),
+        deliver=daemon_deliver(),
         poll_interval=args.poll_interval,
         max_passes=args.max_passes,
     )
