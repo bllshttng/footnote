@@ -304,8 +304,9 @@ class TestCanonicalWorktreeWiring:
         wm = WorktreeManager(repo_root=repo_root)
         assert wm.base_dir == repo_root / ".claude" / "worktrees"
 
-    def test_worktrees_base_routes_default_base_dir(self, tmp_path):
+    def test_worktrees_base_routes_default_base_dir(self, tmp_path, monkeypatch):
         """config.paths.worktrees_base set -> {base}/{repo_root.name} (x-33e9)."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))  # isolate global settings
         from fno.worktree import WorktreeManager
         repo_root = tmp_path / "based-repo"
         (repo_root / ".fno").mkdir(parents=True)
@@ -315,8 +316,9 @@ class TestCanonicalWorktreeWiring:
         wm = WorktreeManager(repo_root=repo_root)
         assert wm.base_dir == tmp_path / "wtroot" / "based-repo"
 
-    def test_worktrees_base_expands_tilde(self, tmp_path):
+    def test_worktrees_base_expands_tilde(self, tmp_path, monkeypatch):
         """A leading ~ in worktrees_base expands to $HOME."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         from fno.worktree import WorktreeManager
         repo_root = tmp_path / "tilde-repo"
         (repo_root / ".fno").mkdir(parents=True)
@@ -326,8 +328,9 @@ class TestCanonicalWorktreeWiring:
         wm = WorktreeManager(repo_root=repo_root)
         assert wm.base_dir == Path.home() / "myworktrees" / "tilde-repo"
 
-    def test_worktrees_base_wins_over_conductor_flag(self, tmp_path):
+    def test_worktrees_base_wins_over_conductor_flag(self, tmp_path, monkeypatch):
         """worktrees_base takes precedence over the deprecated conductor flag."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         from fno.worktree import WorktreeManager
         repo_root = tmp_path / "both-repo"
         (repo_root / ".fno").mkdir(parents=True)
@@ -338,6 +341,30 @@ class TestCanonicalWorktreeWiring:
         )
         wm = WorktreeManager(repo_root=repo_root)
         assert wm.base_dir == tmp_path / "wtroot" / "both-repo"
+
+    def test_worktrees_base_read_from_global_settings(self, tmp_path, monkeypatch):
+        """A GLOBALLY-set worktrees_base (the maintainer's setup) is honored even
+        when the repo has no local setting (gemini HIGH on PR #67)."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        (Path.home() / ".fno").mkdir(parents=True)
+        (Path.home() / ".fno" / "settings.yaml").write_text(
+            "config:\n  paths:\n    worktrees_base: " + str(tmp_path / "gbase") + "\n"
+        )
+        from fno.worktree import WorktreeManager
+        repo_root = tmp_path / "global-repo"
+        (repo_root / ".fno").mkdir(parents=True)  # no local worktrees_base
+        wm = WorktreeManager(repo_root=repo_root)
+        assert wm.base_dir == tmp_path / "gbase" / "global-repo"
+
+    def test_malformed_config_falls_back_to_local_default(self, tmp_path, monkeypatch):
+        """A non-dict config block must not raise (gemini HIGH: dict guards)."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        from fno.worktree import WorktreeManager
+        repo_root = tmp_path / "bad-repo"
+        (repo_root / ".fno").mkdir(parents=True)
+        (repo_root / ".fno" / "settings.yaml").write_text("config: not-a-dict\n")
+        wm = WorktreeManager(repo_root=repo_root)
+        assert wm.base_dir == repo_root / ".claude" / "worktrees"
 
     def test_create_invokes_setup_worktree_hook_when_script_exists(self, tmp_git_repo, monkeypatch):
         """After `git worktree add`, create() shells out to

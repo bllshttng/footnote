@@ -80,20 +80,17 @@ def _use_conductor_canonical(repo_root: Path) -> bool:
         data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
     except Exception:
         return False
-    wt_cfg = ((data.get("config") or {}).get("worktree") or {})
-    return bool(wt_cfg.get("use_conductor_canonical", False))
+    config = data.get("config") if isinstance(data, dict) else None
+    wt_cfg = config.get("worktree") if isinstance(config, dict) else None
+    return bool(wt_cfg.get("use_conductor_canonical", False)) if isinstance(wt_cfg, dict) else False
 
 
-def _worktrees_base_override(repo_root: Path) -> Optional[Path]:
-    """Return config.paths.worktrees_base for ``repo_root``, or None when unset.
+def _read_worktrees_base_from(settings_path: Path) -> Optional[str]:
+    """Return config.paths.worktrees_base from one settings file, or None.
 
-    Read directly from ``{repo_root}/.fno/settings.yaml`` (same rationale as
-    ``_use_conductor_canonical``: the walker runs from arbitrary cwds, so it
-    must not depend on the global loader's cwd/caching). A leading ``~`` is
-    expanded. Any load/parse failure returns None -> caller falls back to the
-    next resolution rung.
+    Every intermediate key is isinstance-checked so a malformed settings.yaml
+    (e.g. ``config:`` set to a string) returns None instead of raising.
     """
-    settings_path = repo_root / ".fno" / "settings.yaml"
     if not settings_path.exists():
         return None
     try:
@@ -101,10 +98,33 @@ def _worktrees_base_override(repo_root: Path) -> Optional[Path]:
         data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
     except Exception:
         return None
-    base = ((data.get("config") or {}).get("paths") or {}).get("worktrees_base")
-    if not isinstance(base, str) or not base:
+    if not isinstance(data, dict):
         return None
-    return Path(os.path.expanduser(base))
+    config = data.get("config")
+    paths = config.get("paths") if isinstance(config, dict) else None
+    base = paths.get("worktrees_base") if isinstance(paths, dict) else None
+    return base if isinstance(base, str) and base else None
+
+
+def _worktrees_base_override(repo_root: Path) -> Optional[Path]:
+    """Return config.paths.worktrees_base for ``repo_root``, or None when unset.
+
+    Reads ``{repo_root}/.fno/settings.yaml`` then the global
+    ``~/.fno/settings.yaml`` directly (project-local wins, global fallback) -
+    matching the precedence the hook gets from ``fno config get`` and how the
+    maintainer sets the base GLOBALLY. Read directly (not via the settings
+    loader) for the same reason as ``_use_conductor_canonical``: the walker runs
+    from arbitrary cwds and must not depend on the loader's cwd/caching. A
+    leading ``~`` is expanded; any load/parse failure falls through to None.
+    """
+    for settings_path in (
+        repo_root / ".fno" / "settings.yaml",
+        Path.home() / ".fno" / "settings.yaml",
+    ):
+        base = _read_worktrees_base_from(settings_path)
+        if base is not None:
+            return Path(os.path.expanduser(base))
+    return None
 
 
 def _canonical_base_dir(repo_root: Path) -> Path:
