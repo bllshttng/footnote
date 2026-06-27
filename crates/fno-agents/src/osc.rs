@@ -108,9 +108,15 @@ impl OscCapture {
                         // ST terminator (ESC \).
                         self.finish();
                         self.state = State::Ground;
+                    } else if b == b']' {
+                        // `ESC ]` is a new OSC introducer: an unterminated OSC
+                        // ran straight into the next one. Drop the partial body
+                        // and start the new sequence rather than losing it.
+                        self.buffer.clear();
+                        self.state = State::Osc;
                     } else {
-                        // ESC inside the body not followed by `\`: the OSC is
-                        // interrupted. Drop the partial body and return to
+                        // ESC inside the body not followed by `\` or `]`: the
+                        // OSC is interrupted. Drop the partial body and return to
                         // Ground, re-arming if this byte is itself an ESC (the
                         // only byte Ground reacts to, so nothing else is lost).
                         self.buffer.clear();
@@ -218,6 +224,15 @@ mod tests {
     fn latest_title_wins() {
         let mut osc = OscCapture::new();
         osc.feed(b"\x1b]2;first\x07\x1b]2;second\x07");
+        assert_eq!(osc.title(), Some("second"));
+    }
+
+    #[test]
+    fn unterminated_osc_running_into_next_osc_captures_the_second() {
+        // An OSC with no BEL/ST, immediately followed by another OSC: the `ESC ]`
+        // mid-body is the next sequence's introducer, not garbage to abort on.
+        let mut osc = OscCapture::new();
+        osc.feed(b"\x1b]2;first\x1b]2;second\x07");
         assert_eq!(osc.title(), Some("second"));
     }
 
