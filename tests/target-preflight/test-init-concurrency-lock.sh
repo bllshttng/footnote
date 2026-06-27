@@ -172,10 +172,15 @@ fi
 # EPERM/ESRCH-ambiguous kill -0.
 echo ""
 echo "--- AC5: structural assertions ---"
+# Precompute the script's non-comment lines ONCE into a variable, then match
+# with here-strings below. A `grep -vE … | grep -q …` pipeline flakes under
+# `set -o pipefail`: grep -q closes the pipe on first match, the upstream grep
+# gets SIGPIPE (141), and pipefail reports the whole pipeline as failed.
+_AC5_CODE=$(grep -vE '^[[:space:]]*#' "$INIT_SCRIPT")
 # Atomic acquire via temp-file + hardlink. The `ln` call is what makes
 # the lock visible exactly when its contents are visible (no partial-
 # write window from a noclobber-write race).
-if grep -vE '^[[:space:]]*#' "$INIT_SCRIPT" | grep -qE 'ln "\$tmp" "\$INIT_LOCK_FILE"'; then
+if grep -qE 'ln "\$tmp" "\$INIT_LOCK_FILE"' <<<"$_AC5_CODE"; then
     pass "AC5: lock acquisition uses temp-file + hardlink (no partial-write window)"
 else
     fail "AC5: hardlink-from-tempfile acquisition pattern missing"
@@ -190,7 +195,7 @@ fi
 # Match `kill -0` only in code lines (lines that don't start with `#` after
 # leading whitespace). The script contains a comment explaining WHY we
 # don't use kill -0 — that mention should not trip this assertion.
-if ! grep -vE '^[[:space:]]*#' "$INIT_SCRIPT" | grep -q "kill -0"; then
+if ! grep -q "kill -0" <<<"$_AC5_CODE"; then
     pass "AC5: liveness check uses ps -p, not kill -0 (avoids EPERM/ESRCH ambiguity)"
 else
     fail "AC5: init script still uses kill -0 for liveness (EPERM/ESRCH cannot be disambiguated in bash)"

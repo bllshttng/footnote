@@ -121,6 +121,13 @@ RUST_CLIENT_VERBS = frozenset(
         # these entries exist so the client.rs<->router parity test stays in sync.
         "kill-check",
         "verify-evidence",
+        # Inside-leg state push (inside-out E3.2): a per-turn hook calls
+        # `fno agents report --session-id <uuid> --seq <n> --state <s>` and the
+        # Rust client sends the agent.report RPC to an already-running daemon
+        # (never lazy-starts). Dispatched directly in client.rs before
+        # build_request (no Python impl); this entry keeps the
+        # client.rs<->router parity test in sync and provides the help line.
+        "report",
     }
 )
 
@@ -224,6 +231,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno phase kill-check`.",
     "verify-evidence": "Verify subagent/child-promise event evidence (folded from verify-event-evidence.sh); usually via `fno event verify-evidence`.",
+    "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",
 }
 
 

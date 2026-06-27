@@ -62,6 +62,7 @@ pub mod loop_megawalk;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
+pub mod manifest;
 pub mod nudge;
 pub mod osc;
 pub mod paths;
@@ -683,6 +684,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "active_backlog_task_crashed",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
+    // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook
+    // stored its latest {working|blocked|done} on the matching claude row, or the
+    // daemon dropped a report (stale seq / unknown session) without storing it.
+    "inside_leg_report",
+    "inside_leg_report_dropped",
 ];
 
 /// Build the Branch B (Rust/fno-agents) envelope JSON Schema and the

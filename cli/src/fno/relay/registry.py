@@ -12,9 +12,9 @@ Two sources, two durability models:
   here: pid-liveness is the live truth, and persisting a dead session row is the
   exact cmux/herdr flaw inverted. They re-derive from disk on every read, so they
   "survive restarts" for free.
-- **footnote-owned relay peers.** A peer footnote spawned in its own PTY (G1's
-  :func:`fno.relay.roundtrip.spawn_peer`) is the routable participant, but nothing
-  else on disk records it. THIS is what the registry file persists. Its
+- **footnote-owned relay peers.** A peer the daemon spawns as interactive claude
+  (E4.1) is the routable participant, but nothing else on disk records it. THIS is
+  what the registry file persists. Its
   ``inject_handle`` is a durable pointer (``pty:<pid>``) the G3 daemon will resolve
   to the live PTY fd; the fd itself is process-local and not persistable, so it is
   deliberately not stored here.
@@ -70,7 +70,7 @@ def transcript_path_for(
     deriving the path from cwd (the naive ``/``->``-`` derivation misses the dot,
     proven in the x-e4ac probe). Returns None when no transcript exists yet --
     which on this host means the peer was spawned without scrubbing the parent's
-    ``CLAUDE_CODE_*`` env (see :func:`fno.relay.roundtrip.spawn_peer`)."""
+    ``CLAUDE_CODE_*`` env (the daemon spawn recipe, E4.1, applies that scrub)."""
     base = projects_dir or (Path.home() / ".claude" / "projects")
     try:
         hits = sorted(base.glob(f"*/{session_id}.jsonl"))

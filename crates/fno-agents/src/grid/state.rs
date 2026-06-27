@@ -487,14 +487,19 @@ pub struct Compositor {
 }
 
 impl Compositor {
+    /// `pane_count == 0` is legal: the zero-config front door (E5b) starts the
+    /// grid with no panes and tiles them live as goals spawn workers. Every
+    /// count-sensitive path (`recompute_pagination` / `set_pane_count` /
+    /// `set_focus` / `page_count`) already guards the empty case, so the only
+    /// thing `new` must do is not assume a first pane exists.
     pub fn new(pane_count: usize) -> Self {
-        assert!(pane_count > 0, "Compositor needs >= 1 pane");
         Compositor {
             mode: Mode::Watch,
             focus: 0,
             pane_count,
             // Single page until the run loop's first recompute_pagination.
-            capacity: pane_count,
+            // max(1) keeps capacity a valid divisor even with zero panes.
+            capacity: pane_count.max(1),
             current_page: 0,
         }
     }
@@ -1372,6 +1377,37 @@ mod tests {
         assert_eq!(c.capacity(), 5);
         assert_eq!(c.page_count(), 1);
         assert_eq!(c.current_page(), 0);
+    }
+
+    /// E5b zero-config front door: the grid starts with no panes, so the
+    /// compositor must construct cleanly at count 0 and keep the
+    /// `page_count >= 1` invariant (capacity is divided by `.max(1)`).
+    #[test]
+    fn new_compositor_allows_zero_panes() {
+        let c = Compositor::new(0);
+        assert_eq!(c.pane_count(), 0);
+        assert_eq!(c.page_count(), 1);
+        assert_eq!(c.current_page(), 0);
+        assert_eq!(c.focus(), 0);
+    }
+
+    /// E5b one-tap orchestration: a goal spawns a worker and the run loop
+    /// grows the count live. The compositor must adopt the new panes without a
+    /// panic, then accept focus on the freshly added one.
+    #[test]
+    fn grow_from_zero_focuses_new_pane() {
+        let mut c = Compositor::new(0);
+        c.set_pane_count(2);
+        c.recompute_pagination(2);
+        assert_eq!(c.pane_count(), 2);
+        assert_eq!(c.page_count(), 1);
+        // The run loop focuses the just-added pane (global index 1).
+        c.set_focus(1);
+        assert_eq!(c.focus(), 1);
+        // step() also self-syncs pane_count against the live states slice.
+        let panes = watching_panes(3);
+        c.step(InputEvent::FocusNext, &panes);
+        assert_eq!(c.pane_count(), 3);
     }
 
     /// recompute_pagination derives page_count from (pane_count, capacity).

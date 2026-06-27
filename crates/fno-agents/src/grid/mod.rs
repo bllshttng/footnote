@@ -126,7 +126,7 @@ impl GridArgs {
     /// The grammar is intentionally tiny:
     ///
     /// ```text
-    /// grid                                 # bare → live fleet, rail (spaces) on
+    /// grid                                 # bare → live fleet spaces (rail); E5b front door if the fleet is empty
     /// grid --all                           # every PTY-managed agent, rail on
     /// grid <name>...                       # explicit names, railless (escape hatch)
     /// grid --no-rail                       # fleet, railless tiled grid
@@ -169,8 +169,11 @@ impl GridArgs {
             return Err(GridArgError::AllWithNames(names.join(" ")));
         }
         // E5c Locked Decision 2: a bare invocation (no names, no `--all`)
-        // defaults to the live fleet, so `fno agents grid` "just works" as the
-        // spaces view instead of erroring out.
+        // defaults to the live fleet, so `fno agents grid` shows the spaces
+        // view over running agents. When that fleet resolves EMPTY at runtime,
+        // the run loop falls through to E5b's zero-config goal-launcher front
+        // door (the operator types a goal and the grid spawns a `/target`
+        // worker) instead of an empty grid.
         if names.is_empty() && !all {
             all = true;
         }
@@ -253,6 +256,8 @@ mod tests {
     #[test]
     fn bare_defaults_to_all_rail_cwd() {
         // `fno agents grid` with no args → fleet view, rail on, grouped by cwd.
+        // (When the resolved fleet is empty, the run loop shows E5b's front-door
+        // launcher instead - that is a runtime behavior, not a parse contract.)
         let a = GridArgs::parse(&[]).unwrap();
         assert!(a.names.is_empty());
         assert!(a.all, "bare invocation defaults to --all (the live fleet)");

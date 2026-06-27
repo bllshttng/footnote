@@ -1117,6 +1117,36 @@ event_types:
         backend:
           type: string
 
+  - name: inside_leg_report
+    description: "Signal that an inside-leg state push (E3.2) was stored. Carries session_id/seq/state; the full stored report (reason/ttl_ms/received_at) lives on the matching claude registry row, which is the audit source -- this event is not a reconstruction record."
+    sources: [daemon]
+    data:
+      required: [session_id, seq, state]
+      properties:
+        session_id:
+          type: string
+        seq:
+          type: integer
+        state:
+          type: string
+          enum: [working, blocked, done]
+
+  - name: inside_leg_report_dropped
+    description: "An inside-leg report was dropped without storing it (stale seq, or unknown session)."
+    sources: [daemon]
+    data:
+      required: [session_id, seq, reason]
+      properties:
+        session_id:
+          type: string
+        seq:
+          type: integer
+        reason:
+          type: string
+          enum: [stale_seq, unknown_session]
+        last_seq:
+          type: integer
+
   - name: drive_attached
     description: "An interactive drive window was opened for an agent."
     sources: [daemon]

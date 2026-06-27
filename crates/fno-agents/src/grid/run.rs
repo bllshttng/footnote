@@ -369,6 +369,145 @@ fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
     }
 }
 
+// ── Launcher (E5b: zero-config front door + one-tap orchestration) ───────
+
+/// What the goal-launcher line should do with a key. Pure + testable,
+/// mirroring [`key_to_input`]. The launcher is a modal one-line text input the
+/// operator opens to type a goal; on submit the grid spawns a `/target` worker
+/// for it and tiles the worker live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LauncherAction {
+    /// Append a printable char to the goal buffer.
+    Append(char),
+    /// Delete the last char.
+    Backspace,
+    /// Submit the buffer (spawn a `/target` worker).
+    Submit,
+    /// Close the launcher without spawning (Esc / Ctrl-C).
+    Cancel,
+    /// Inert key.
+    Ignore,
+}
+
+/// Map a key to a [`LauncherAction`]. Esc / Ctrl-C cancel; Enter submits;
+/// Backspace edits; any non-control printable char accumulates. Everything
+/// else is inert (arrows etc. are intentionally not cursor-movement in this
+/// minimal single-line input).
+fn launcher_key(key: KeyEvent) -> LauncherAction {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl && matches!(key.code, KeyCode::Char('c')) {
+        return LauncherAction::Cancel;
+    }
+    match key.code {
+        KeyCode::Esc => LauncherAction::Cancel,
+        KeyCode::Enter => LauncherAction::Submit,
+        KeyCode::Backspace => LauncherAction::Backspace,
+        KeyCode::Char(c) if !ctrl && !c.is_control() => LauncherAction::Append(c),
+        _ => LauncherAction::Ignore,
+    }
+}
+
+/// What the run loop must do after feeding a key to the launcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LauncherOutcome {
+    /// Buffer changed or key ignored: keep the launcher open.
+    Stay,
+    /// Operator cancelled: close the launcher.
+    Cancelled,
+    /// Operator submitted a non-blank goal: close the launcher and spawn it.
+    Submitted(String),
+}
+
+/// Run-loop state for the goal launcher. Present (`Some`) only while the
+/// operator is typing a goal.
+struct Launcher {
+    buffer: String,
+}
+
+impl Launcher {
+    fn new() -> Self {
+        Launcher {
+            buffer: String::new(),
+        }
+    }
+
+    /// Apply a launcher action to the buffer and report what the run loop
+    /// should do. A blank (whitespace-only) Submit is a no-op (AC1-EDGE): the
+    /// launcher stays open rather than spawning an empty `/target`.
+    fn apply(&mut self, action: LauncherAction) -> LauncherOutcome {
+        match action {
+            LauncherAction::Append(c) => {
+                self.buffer.push(c);
+                LauncherOutcome::Stay
+            }
+            LauncherAction::Backspace => {
+                self.buffer.pop();
+                LauncherOutcome::Stay
+            }
+            LauncherAction::Cancel => LauncherOutcome::Cancelled,
+            LauncherAction::Submit => {
+                let goal = self.buffer.trim().to_string();
+                if goal.is_empty() {
+                    LauncherOutcome::Stay
+                } else {
+                    LauncherOutcome::Submitted(goal)
+                }
+            }
+            LauncherAction::Ignore => LauncherOutcome::Stay,
+        }
+    }
+}
+
+/// Derive a legible, unique-ish worker name from a goal + a monotonic counter:
+/// `target-<slug>-<n>`. The slug is the goal's leading alphanumeric words,
+/// lowercased and dash-joined (capped), so the name reads cleanly in
+/// `fno agents list` and the rail. Pure + testable.
+fn target_worker_name(goal: &str, n: usize) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = true; // suppress a leading dash
+    for c in goal.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_dash = false;
+            if slug.len() >= 24 {
+                break;
+            }
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "goal" } else { slug };
+    format!("target-{slug}-{n}")
+}
+
+/// Spawn a `/target` worker for `goal` via the same primitive dispatch uses:
+/// `fno agents spawn --provider claude <name> "/target no-merge <goal>"`.
+/// `no-merge` keeps an autonomous worker landing a PR for review, never an
+/// auto-merge (dispatch Locked Decision 4). `$FNO_BIN` overrides the binary
+/// (tests / non-PATH installs). Returns Ok once the worker is launched.
+async fn spawn_target_worker(name: &str, goal: &str) -> Result<(), String> {
+    // var_os (not var): FNO_BIN is a path and may carry non-UTF-8 bytes;
+    // Command::new takes an OsStr, so no lossy conversion is needed.
+    let fno = std::env::var_os("FNO_BIN")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "fno".into());
+    let cmd = format!("/target no-merge {goal}");
+    let out = tokio::process::Command::new(&fno)
+        .args(["agents", "spawn", "--provider", "claude", name, &cmd])
+        .output()
+        .await
+        .map_err(|e| format!("spawn exec failed: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let last = stderr.lines().last().unwrap_or("unknown").trim();
+        Err(format!("spawn failed: {last}"))
+    }
+}
+
 // ── Rendering ───────────────────────────────────────────────────────────
 
 /// A full-terminal cell grid. The compositor rasterizes one frame into this,
@@ -638,6 +777,65 @@ fn build_too_small_frame(tty: TtySize, err: &LayoutError) -> ScreenBuffer {
     let msg = truncate(&err.to_string(), tty.cols.max(1) as usize);
     frame.put_str(0, 0, &msg, false);
     frame
+}
+
+/// Build the E5b zero-config front-door frame, shown whenever the grid has no
+/// panes. Centers a title + prompt and renders the live goal buffer the
+/// operator is typing. The input line is anchored at a fixed column so the
+/// caret area does not jump as characters are typed. Pure over its inputs.
+fn build_front_door_frame(tty: TtySize, goal: &str, hint: Option<&str>) -> ScreenBuffer {
+    let mut frame = ScreenBuffer::blank(tty.rows, tty.cols);
+    let cols = tty.cols.max(1) as usize;
+    let title = truncate("footnote grid", cols);
+    let prompt = truncate(
+        "Type a goal and press Enter to launch a /target run. Esc to quit.",
+        cols,
+    );
+    // Center each line on its own width; the input line is anchored under the
+    // prompt's start column so it stays put while typing.
+    let col_of = |s: &str| -> u16 { ((cols - s.chars().count().min(cols)) / 2) as u16 };
+    let mid = tty.rows / 2;
+    let pcol = col_of(&prompt);
+    frame.put_str(mid.saturating_sub(2), col_of(&title), &title, false);
+    frame.put_str(mid, pcol, &prompt, false);
+    let line = truncate(
+        &format!("goal> {goal}\u{2588}"),
+        cols.saturating_sub(pcol as usize).max(1),
+    );
+    frame.put_str(mid.saturating_add(2), pcol, &line, true);
+    // Status line (e.g. "launch failed: ..."): without it a failed submit on
+    // the empty front door would clear back to a blank prompt with no feedback.
+    if let Some(h) = hint {
+        let h = truncate(h, cols);
+        frame.put_str(mid.saturating_add(4), col_of(&h), &h, false);
+    }
+    frame
+}
+
+/// Paint the front-door frame through the same diff/emit machinery as [`paint`]
+/// (so it shares the no-re-clear steady state). Called from the run loop's
+/// paint sites whenever `panes` is empty.
+fn paint_front_door<W: Write>(
+    out: &mut W,
+    prev_frame: &mut Option<ScreenBuffer>,
+    tty: TtySize,
+    goal: &str,
+    hint: Option<&str>,
+) {
+    let cur = build_front_door_frame(tty, goal, hint);
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    match prev_frame.as_ref() {
+        Some(prev) if prev.rows == cur.rows && prev.cols == cur.cols => {
+            let _ = emit_diff(prev, &cur, &mut buf);
+        }
+        _ => {
+            let _ = queue!(buf, terminal::Clear(terminal::ClearType::All));
+            let _ = emit_full(&cur, &mut buf);
+        }
+    }
+    let _ = out.write_all(&buf);
+    let _ = out.flush();
+    *prev_frame = Some(cur);
 }
 
 /// Render one frame to `out`, choosing the cheapest correct paint path:
@@ -1857,23 +2055,10 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // `--all` never tiles a non-drivable phantom claude pane (codex review P2).
     // codex/gemini pass through without a probe.
     let names = prune_non_pty_claude(names, home).await;
-    if names.is_empty() {
-        eprintln!("fno-agents grid: no agents to tile (try: grid <name>... or grid --all with running agents)");
-        return 2;
-    }
-    // Per-pane host_mode (interactive => Enter drives it; exec => watch only).
-    // Resolved once: an agent's host_mode is fixed at spawn, and pane indices
-    // are stable (panes transition state but are never removed mid-run). (ab-7fd7ae49)
-    let host_interactive = resolve_host_modes(&names, home);
-    // Alignment is load-bearing: every reader indexes host_interactive by pane
-    // index == names index. resolve_host_modes maps over names so this holds by
-    // construction; assert it so a future change that breaks the 1:1 mapping
-    // trips in debug/tests rather than silently mislabeling panes.
-    debug_assert_eq!(
-        host_interactive.len(),
-        names.len(),
-        "host_interactive must be 1:1 with names"
-    );
+    // E5b zero-config front door: an empty fleet no longer exits. The grid
+    // opens with no panes and the goal launcher active; the operator types a
+    // goal and the grid spawns + tiles a `/target` worker live. `names` and
+    // `host_interactive` are now mutable so a live-added pane can append.
 
     // Soft fleet cap (Locked Decision 5): the eager connection policy opens
     // one watcher WS per agent for the whole session, so an unbounded fleet
@@ -1881,12 +2066,29 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // and warn explicitly (Open Question 1: warn-and-truncate, so the grid
     // still works). The note rides the footer so it stays visible on the
     // alternate screen; the eprintln lands in the operator's scrollback.
+    //
+    // Cap BEFORE resolving host modes: host_interactive must be resolved on the
+    // CAPPED names so it stays 1:1 with names/panes. Resolving first then
+    // truncating leaves stale tail entries, and a live-added pane at panes.len()
+    // would then read a dropped agent's host mode (codex peer-review P2).
     let total_requested = names.len();
-    let (names, soft_warn) = apply_soft_cap(names, max_panes());
+    let (mut names, soft_warn) = apply_soft_cap(names, max_panes());
     if let Some(w) = &soft_warn {
         eprintln!("fno-agents grid: {w}");
     }
     let cap_note: Option<(usize, usize)> = soft_warn.map(|_| (names.len(), total_requested));
+
+    // Per-pane host_mode (interactive => Enter drives it; exec => watch only).
+    // Resolved once per agent on the capped names; live-added panes push their
+    // own entry. Alignment is load-bearing: every reader indexes
+    // host_interactive by pane index == names index, so assert the 1:1 mapping
+    // (now post-cap) trips in debug/tests rather than silently mislabeling panes.
+    let mut host_interactive = resolve_host_modes(&names, home);
+    debug_assert_eq!(
+        host_interactive.len(),
+        names.len(),
+        "host_interactive must be 1:1 with names"
+    );
 
     let daemon_bin = resolve_daemon_bin();
     if let Err(e) = ensure_daemon(home, &daemon_bin).await {
@@ -1900,15 +2102,23 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // `comp.current_page()`.
     let (tty_cols, tty_rows) = terminal::size().unwrap_or((80, 24));
     let mut tty = TtySize::new(tty_rows, tty_cols);
-    let paged0 = match layout::compute_page(tty, names.len(), 0) {
-        Ok(p) => p,
-        Err(LayoutError::TerminalTooSmall { rows, cols }) => {
-            eprintln!("fno-agents grid: terminal too small ({rows}x{cols})");
-            return 2;
-        }
-        Err(LayoutError::ZeroPanes) => {
-            eprintln!("fno-agents grid: no agents to tile");
-            return 2;
+    // Zero-config front door: with no panes there is nothing to tile, so skip
+    // the layout entirely - the launcher renderer truncates to any terminal
+    // size, and a too-small terminal must NOT exit the bare front door
+    // (codex peer-review P2). `paged0` is None then; downstream uses guard it.
+    let paged0: Option<PageLayout> = if names.is_empty() {
+        None
+    } else {
+        match layout::compute_page(tty, names.len(), 0) {
+            Ok(p) => Some(p),
+            Err(LayoutError::TerminalTooSmall { rows, cols }) => {
+                eprintln!("fno-agents grid: terminal too small ({rows}x{cols})");
+                return 2;
+            }
+            Err(LayoutError::ZeroPanes) => {
+                eprintln!("fno-agents grid: no agents to tile");
+                return 2;
+            }
         }
     };
 
@@ -1923,7 +2133,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     let mut states: Vec<ConnState> = Vec::with_capacity(names.len());
 
     for (idx, name) in names.iter().enumerate() {
-        let (rows, cols) = target_pane_inner(&paged0, idx);
+        // Non-empty fleet => paged0 is Some (only the empty front door is None).
+        let layout0 = paged0.as_ref().expect("non-empty fleet has a layout");
+        let (rows, cols) = target_pane_inner(layout0, idx);
         let (pane, state, sink) = open_watch_pane(home, name, idx, rows, cols, &tx).await;
         panes.push(pane);
         states.push(state);
@@ -1932,8 +2144,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
 
     let mut comp = Compositor::new(panes.len());
     // Seed pagination with the real capacity so page_count / current_page are
-    // correct from the first frame.
-    comp.recompute_pagination(paged0.capacity);
+    // correct from the first frame. The empty front door (paged0 None) has no
+    // panes; capacity 1 is a harmless placeholder until the first live-add.
+    comp.recompute_pagination(paged0.as_ref().map(|p| p.capacity).unwrap_or(1));
     // Take-over driver sinks, keyed by pane index. Present only while a pane
     // is being driven.
     let mut driver_sinks: BTreeMap<usize, WsSink> = BTreeMap::new();
@@ -1976,6 +2189,16 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // Transient one-line footer message (e.g. the exec watch-only hint).
     // Cleared on the next operator key so it never lingers. (ab-7fd7ae49)
     let mut hint: Option<String> = None;
+
+    // E5b launcher: Some while the operator is typing a goal. Starts open on
+    // the zero-config front door (no panes); otherwise opened with `n` in
+    // WATCH. `launch_seq` makes each spawned worker name unique.
+    let mut launcher: Option<Launcher> = if names.is_empty() {
+        Some(Launcher::new())
+    } else {
+        None
+    };
+    let mut launch_seq: usize = 0;
 
     // ── Rail state (ab-1fab1fdf, Phase 1) ────────────────────────────────
     // `rail_state`: Some when rail mode is active (`--rail` flag or `t` toggle).
@@ -2036,7 +2259,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     };
     // Registry rows shadowing the current names list (rebuilt on `t` toggle
     // and after registry refreshes; stable within a session for Phase 1).
-    let rail_rows: Vec<Value> = initial_rail_rows;
+    // Mutable so an E5b live-added worker pushes a row in lockstep with its
+    // pane, keeping rail_rows 1:1 with panes (codex peer-review P2).
+    let mut rail_rows: Vec<Value> = initial_rail_rows;
     // If launched with the rail, size the panes for the INITIAL main_mode so
     // the first frame is correct without waiting for a resize event. GroupTile
     // is the E5c default (AC-2), so a space with >1 live agent must tile its
@@ -2105,7 +2330,16 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // (Clear + emit_full). Every subsequent dirty tick diffs against the frame
     // recorded here, so the steady-state repaint never re-clears the screen.
     let mut prev_frame: Option<ScreenBuffer> = None;
-    {
+    if panes.is_empty() {
+        // E5b front door: no panes yet, render the goal launcher.
+        paint_front_door(
+            &mut stderr,
+            &mut prev_frame,
+            tty,
+            launcher.as_ref().map(|l| l.buffer.as_str()).unwrap_or(""),
+            hint.as_deref(),
+        );
+    } else {
         let rail_arg = rail_state.as_ref().map(|rs| {
             let (groups, badges) = rail_groups_and_badges(&rail_rows, rs, &panes, &states);
             (rs, groups, badges)
@@ -2155,10 +2389,108 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
+                        // ── E5b launcher (modal) ──────────────────────────
+                        // While the launcher is open every key edits the goal
+                        // buffer; nothing reaches the panes or compositor. With
+                        // panes present the buffer shows as a footer line; on
+                        // the empty front door the front-door paint renders it.
+                        // Checked FIRST so the modal front door owns input (e.g.
+                        // `?` is typed into the goal, not stolen by the help gate).
+                        if launcher.is_some() {
+                            match launcher.as_mut().unwrap().apply(launcher_key(key)) {
+                                LauncherOutcome::Stay => {
+                                    if !panes.is_empty() {
+                                        hint = Some(format!(
+                                            "goal> {}",
+                                            launcher.as_ref().unwrap().buffer
+                                        ));
+                                    }
+                                }
+                                LauncherOutcome::Cancelled => {
+                                    launcher = None;
+                                    if panes.is_empty() {
+                                        break; // front door: nothing else to show
+                                    }
+                                    hint = None;
+                                    prev_frame = None; // clear the footer overlay
+                                }
+                                LauncherOutcome::Submitted(goal) => {
+                                    launcher = None;
+                                    launch_seq += 1;
+                                    let name = target_worker_name(&goal, launch_seq);
+                                    match spawn_target_worker(&name, &goal).await {
+                                        Ok(()) => {
+                                            // Live-add the worker's pane: open a
+                                            // watcher at the next global index, grow
+                                            // the parallel vectors, re-tile, focus it.
+                                            let new_idx = panes.len();
+                                            match layout::compute_page(tty, new_idx + 1, comp.current_page()) {
+                                                Ok(paged) => {
+                                                    let (rows, cols) = target_pane_inner(&paged, new_idx);
+                                                    let (pane, state, sink) =
+                                                        open_watch_pane(home, &name, new_idx, rows, cols, &tx).await;
+                                                    // A /target worker is interactive claude.
+                                                    host_interactive.push(true);
+                                                    panes.push(pane);
+                                                    states.push(state);
+                                                    watch_sinks.push(sink);
+                                                    comp.set_pane_count(panes.len());
+                                                    comp.recompute_pagination(paged.capacity);
+                                                    comp.set_focus(new_idx);
+                                                    resize_all_panes(&paged, &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                                    // Keep rail_rows 1:1 with panes so a
+                                                    // worker launched while rail mode is
+                                                    // active appears in the grouping
+                                                    // (codex P2). Synthetic row mirrors the
+                                                    // explicit-name startup path; the worker
+                                                    // spawns in this grid's cwd, so cwd
+                                                    // grouping lands it with its siblings.
+                                                    rail_rows.push(json!({
+                                                        "name": name.as_str(),
+                                                        "provider": "claude",
+                                                        "cwd": std::env::current_dir()
+                                                            .ok()
+                                                            .and_then(|p| p.to_str().map(str::to_string)),
+                                                    }));
+                                                    hint = Some(format!("launched {name}"));
+                                                    // Push last (move, no clone): name's
+                                                    // final use is the hint above.
+                                                    names.push(name);
+                                                }
+                                                Err(_) => {
+                                                    // Worker is running; the terminal
+                                                    // just can't tile another pane yet.
+                                                    hint = Some(format!(
+                                                        "{name} launched (terminal too small to tile it)"
+                                                    ));
+                                                }
+                                            }
+                                            prev_frame = None; // region map changed -> full repaint
+                                        }
+                                        Err(e) => {
+                                            // No pane added; keep the operator informed.
+                                            hint = Some(format!("launch failed: {e}"));
+                                            prev_frame = None;
+                                        }
+                                    }
+                                    // Front door: if the submit added no pane,
+                                    // reopen the launcher so input stays modal -
+                                    // otherwise a stray nav key would reach
+                                    // comp.step(_, &[]) and Quit the grid. The
+                                    // hint renders on the front-door status line.
+                                    if panes.is_empty() {
+                                        launcher = Some(Launcher::new());
+                                    }
+                                }
+                            }
+                            dirty = true;
+                            continue;
+                        }
                         // ── ? help overlay key gate (E5c AC-3) ──────────────
-                        // Check this BEFORE the rail handler and key_to_input so
-                        // the overlay can intercept keys without altering the
-                        // normal keymap. Ctrl-C is handled via Passthrough below.
+                        // Checked when the launcher is closed. BEFORE the rail
+                        // handler and key_to_input so the overlay intercepts keys
+                        // without altering the normal keymap. Ctrl-C passes through
+                        // (Passthrough); when open, Inert swallows keys incl. `n`.
                         match help_key_action(key, comp.mode(), help_open) {
                             HelpAction::Toggle => {
                                 help_open = !help_open;
@@ -2180,7 +2512,18 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // Fall through to the normal key handling below.
                             }
                         }
-
+                        // E5b: `n` in WATCH opens the goal launcher (panes
+                        // present; the empty front door already starts open).
+                        if launcher.is_none()
+                            && comp.mode() == Mode::Watch
+                            && matches!(key.code, KeyCode::Char('n'))
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            launcher = Some(Launcher::new());
+                            hint = Some("goal> ".to_string());
+                            dirty = true;
+                            continue;
+                        }
                         // ── Rail-mode key handling (ab-1fab1fdf, Phase 1) ──
                         // Intercept rail keys BEFORE key_to_input so `g`/`t`/`d`/
                         // Up/Down/Enter/Esc are not forwarded to the existing
@@ -2881,7 +3224,17 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             _ = tick.tick() => {
                 // Paint at most once per frame, and only if something
                 // changed. No change -> no write -> no buffer pressure.
-                if dirty {
+                if dirty && panes.is_empty() {
+                    // E5b front door: no panes, render the goal launcher.
+                    paint_front_door(
+                        &mut stderr,
+                        &mut prev_frame,
+                        tty,
+                        launcher.as_ref().map(|l| l.buffer.as_str()).unwrap_or(""),
+                        hint.as_deref(),
+                    );
+                    dirty = false;
+                } else if dirty {
                     let rail_arg = rail_state.as_ref().map(|rs| {
                         let (groups, badges) = rail_groups_and_badges(&rail_rows, rs, &panes, &states);
                         (rs, groups, badges)
@@ -2923,7 +3276,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             }
             _ = ping.tick() => {
                 ping_open_sinks(&mut watch_sinks, &mut driver_sinks, &mut states).await;
-                if matches!(comp.observe_pane_states(&states), CompositorAction::Quit) {
+                // E5b: with the front door up (no panes) observe_pane_states
+                // would report Quit on its 0-pane guard. Don't tear down the
+                // grid while the operator is at the launcher.
+                if !panes.is_empty()
+                    && matches!(comp.observe_pane_states(&states), CompositorAction::Quit)
+                {
                     break;
                 }
                 // codex P2: a driver ping failure drops the sink and
@@ -3264,6 +3622,124 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(key_to_input(key, Mode::Watch), Some(InputEvent::Quit));
         assert_eq!(key_to_input(key, Mode::Drive), Some(InputEvent::Quit));
+    }
+
+    // ── Launcher (E5b) ──────────────────────────────────────────────────
+
+    #[test]
+    fn launcher_key_maps_actions() {
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(launcher_key(k(KeyCode::Esc)), LauncherAction::Cancel);
+        assert_eq!(launcher_key(k(KeyCode::Enter)), LauncherAction::Submit);
+        assert_eq!(
+            launcher_key(k(KeyCode::Backspace)),
+            LauncherAction::Backspace
+        );
+        assert_eq!(
+            launcher_key(k(KeyCode::Char('a'))),
+            LauncherAction::Append('a')
+        );
+        // Ctrl-C cancels the launcher (escape hatch); arrows are inert.
+        assert_eq!(
+            launcher_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            LauncherAction::Cancel
+        );
+        assert_eq!(launcher_key(k(KeyCode::Up)), LauncherAction::Ignore);
+    }
+
+    #[test]
+    fn launcher_accumulates_and_edits() {
+        let mut l = Launcher::new();
+        assert_eq!(l.apply(LauncherAction::Append('h')), LauncherOutcome::Stay);
+        l.apply(LauncherAction::Append('i'));
+        assert_eq!(l.buffer, "hi");
+        assert_eq!(l.apply(LauncherAction::Backspace), LauncherOutcome::Stay);
+        assert_eq!(l.buffer, "h");
+        // Backspace on the way to empty never panics.
+        l.apply(LauncherAction::Backspace);
+        l.apply(LauncherAction::Backspace);
+        assert_eq!(l.buffer, "");
+    }
+
+    #[test]
+    fn launcher_submit_trims_and_blank_is_noop() {
+        // AC1-EDGE: a whitespace-only goal does not spawn.
+        let mut l = Launcher::new();
+        l.apply(LauncherAction::Append(' '));
+        l.apply(LauncherAction::Append(' '));
+        assert_eq!(l.apply(LauncherAction::Submit), LauncherOutcome::Stay);
+        // A real goal submits, trimmed.
+        let mut l = Launcher::new();
+        for c in " add auth ".chars() {
+            l.apply(LauncherAction::Append(c));
+        }
+        assert_eq!(
+            l.apply(LauncherAction::Submit),
+            LauncherOutcome::Submitted("add auth".to_string())
+        );
+    }
+
+    #[test]
+    fn launcher_cancel_closes() {
+        let mut l = Launcher::new();
+        l.apply(LauncherAction::Append('x'));
+        assert_eq!(l.apply(LauncherAction::Cancel), LauncherOutcome::Cancelled);
+    }
+
+    #[test]
+    fn target_worker_name_slugs_goal() {
+        assert_eq!(
+            target_worker_name("Add user auth!", 1),
+            "target-add-user-auth-1"
+        );
+        // All-punctuation / blank goal falls back to a stable stem.
+        assert_eq!(target_worker_name("   ", 2), "target-goal-2");
+        // Long goals are capped and never leave a trailing dash.
+        let n = target_worker_name("a very long goal string that keeps going forever", 3);
+        assert!(n.starts_with("target-a-very-long-goal"), "got {n}");
+        assert!(n.ends_with("-3"));
+        assert!(!n.contains("--"));
+    }
+
+    #[test]
+    fn front_door_frame_renders_prompt_and_goal() {
+        let tty = TtySize::new(24, 80);
+        let frame = build_front_door_frame(tty, "add auth", None);
+        let all: String = (0..tty.rows)
+            .map(|r| row_text(&frame, r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("footnote grid"), "title present: {all:?}");
+        assert!(all.contains("press Enter"), "prompt present");
+        assert!(all.contains("goal> add auth"), "live goal buffer present");
+    }
+
+    #[test]
+    fn front_door_frame_renders_hint_status_line() {
+        // A failed submit on the empty front door must show feedback, not a
+        // blank prompt (sigma-review finding).
+        let tty = TtySize::new(24, 80);
+        let frame = build_front_door_frame(tty, "", Some("launch failed: daemon down"));
+        let all: String = (0..tty.rows)
+            .map(|r| row_text(&frame, r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all.contains("launch failed: daemon down"),
+            "hint shown: {all:?}"
+        );
+    }
+
+    #[test]
+    fn front_door_paint_clears_and_writes_goal() {
+        let tty = TtySize::new(24, 80);
+        let mut prev: Option<ScreenBuffer> = None;
+        let mut buf = Vec::new();
+        paint_front_door(&mut buf, &mut prev, tty, "do it", None);
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains(CLEAR_ALL), "first front-door frame clears");
+        assert!(s.contains("goal> do it"), "renders the goal buffer");
+        assert!(prev.is_some(), "records the screen buffer for diffing");
     }
 
     #[test]
