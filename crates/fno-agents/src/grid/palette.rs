@@ -26,17 +26,17 @@ pub fn parse_osc_color(bytes: &[u8]) -> Option<(u8, u8, u8)> {
     // Find the rgb: token anywhere (tolerates garbage / OSC header prefix).
     let pos = s.find("rgb:")?;
     let after = &s[pos + 4..];
-    // Strip trailing BEL / ST (ESC \) and ASCII whitespace.
-    let after = after.trim_end_matches(|c: char| {
-        c == '\x07' || c == '\x1b' || c == '\\' || c.is_ascii_whitespace()
-    });
+    // Stop at the FIRST terminator (BEL 0x07 or the ESC of ST). A combined
+    // OSC 10 + OSC 11 reply is one buffer, so the blue channel would otherwise
+    // run past this response's terminator and swallow the next response - which
+    // fails the hex parse and silently degrades the whole palette to fixed.
+    let end = after.find(['\x07', '\x1b']).unwrap_or(after.len());
+    let after = after[..end].trim_end_matches(|c: char| c == '\\' || c.is_ascii_whitespace());
     // Exactly 3 slash-separated channel fields.
     let mut iter = after.splitn(3, '/');
     let r_str = iter.next()?;
     let g_str = iter.next()?;
-    let b_str = iter.next()?.trim_end_matches(|c: char| {
-        c == '\x07' || c == '\x1b' || c == '\\' || c.is_ascii_whitespace()
-    });
+    let b_str = iter.next()?;
     let r = hex_to_u8(r_str)?;
     let g = hex_to_u8(g_str)?;
     let b = hex_to_u8(b_str)?;
@@ -139,6 +139,23 @@ pub fn query_terminal_palette() -> Palette {
 }
 
 fn query_with_bounded_timeout(timeout: Duration) -> Option<Palette> {
+    // If the user already typed something before we got here (early keystroke,
+    // paste), do NOT query: reading the reply would also drain and drop those
+    // bytes. Degrade to fixed and leave the pending input for the EventStream
+    // (codex peer P2). A non-blocking poll(2) on stdin detects it.
+    #[cfg(unix)]
+    {
+        let mut probe = [libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: `probe` is valid, length 1, timeout 0 (non-blocking).
+        if unsafe { libc::poll(probe.as_mut_ptr(), 1, 0) } > 0 {
+            return None;
+        }
+    }
+
     // Write both OSC 10 and OSC 11 queries to stderr (the grid's draw surface).
     let mut stderr = io::stderr();
     stderr.write_all(b"\x1b]10;?\x07\x1b]11;?\x07").ok()?;
@@ -286,6 +303,33 @@ mod tests {
     #[test]
     fn parse_osc_malformed_no_rgb_token() {
         assert_eq!(parse_osc_color(b"\x1b]10;norgb\x07"), None);
+    }
+
+    #[test]
+    fn parse_osc_color_stops_at_first_terminator() {
+        // A combined OSC 10+11 buffer: the FG slice runs to end-of-buffer, so
+        // the blue channel must stop at the first BEL or it swallows the next
+        // response and fails to parse (codex peer P2 regression).
+        let combined = b"\x1b]10;rgb:11/22/33\x07\x1b]11;rgb:44/55/66\x07";
+        assert_eq!(parse_osc_color(combined), Some((0x11, 0x22, 0x33)));
+    }
+
+    #[test]
+    fn parse_two_osc_combined_buffer_themes() {
+        // The real runtime input: a terminal answers OSC 10 AND OSC 11 in one
+        // read. This MUST yield a themed palette, not degrade to fixed.
+        let combined = b"\x1b]10;rgb:1111/2222/3333\x07\x1b]11;rgb:4444/5555/6666\x07";
+        let p = parse_two_osc_responses(combined).expect("combined OSC 10+11 must parse");
+        assert_eq!(
+            p.bg,
+            CellColor::Rgb(0x44, 0x55, 0x66),
+            "bg from the OSC 11 reply"
+        );
+        assert_ne!(
+            p,
+            Palette::fixed(),
+            "must NOT degrade to fixed when the terminal answers"
+        );
     }
 
     // ── Layer 2: Palette ──────────────────────────────────────────────────

@@ -150,11 +150,16 @@ impl GridArgs {
                 "--rail" => rail_override = Some(true),
                 "--no-rail" => rail_override = Some(false),
                 "--group-by" => {
-                    // Consume the next token as the key value.
-                    if let Some(key) = iter.next() {
-                        group_by = Some(key.clone());
+                    // Consume the next token as the key value, but only if it is
+                    // NOT another flag - `--group-by --no-rail` must not eat the
+                    // flag as the key (codex peer P3). A missing/flag value is
+                    // silently ignored (group_by defaults to cwd downstream).
+                    if let Some(key) = iter.peek() {
+                        if !key.starts_with("--") {
+                            group_by = Some((*key).clone());
+                            iter.next();
+                        }
                     }
-                    // Missing value after --group-by: silently ignore (defaults to cwd).
                 }
                 s if s.starts_with("--") => return Err(GridArgError::UnknownFlag(s.to_string())),
                 s => names.push(s.to_string()),
@@ -172,7 +177,7 @@ impl GridArgs {
         // Rail defaults ON for the fleet/spaces view (no explicit names) and
         // OFF when explicit names are given (the railless escape hatch).
         // `--rail` / `--no-rail` override the default either way.
-        let rail = rail_override.unwrap_or_else(|| names.is_empty());
+        let rail = rail_override.unwrap_or(names.is_empty());
         Ok(GridArgs {
             names,
             all,
@@ -301,6 +306,15 @@ mod tests {
         assert!(on_last.rail, "last rail flag wins (--rail last → on)");
         let off_last = GridArgs::parse(&argv(&["--rail", "--no-rail"])).unwrap();
         assert!(!off_last.rail, "last rail flag wins (--no-rail last → off)");
+    }
+
+    #[test]
+    fn group_by_does_not_consume_a_following_flag() {
+        // `--group-by --no-rail`: the flag must not be eaten as the key value
+        // (codex peer P3). group_by stays default; --no-rail still applies.
+        let a = GridArgs::parse(&argv(&["--all", "--group-by", "--no-rail"])).unwrap();
+        assert_eq!(a.group_by, None, "a flag is not a valid --group-by value");
+        assert!(!a.rail, "--no-rail still takes effect");
     }
 
     #[test]

@@ -3096,16 +3096,14 @@ fn help_key_action(key: KeyEvent, mode: Mode, help_open: bool) -> HelpAction {
         return HelpAction::Passthrough;
     }
     match (mode, help_open, key.code) {
-        // DRIVE: all keys pass through to the agent, never intercepted.
-        (Mode::Drive, _, _) => HelpAction::Passthrough,
-        // WATCH: `?` always toggles regardless of current state.
-        (Mode::Watch | Mode::Scrollback, _, KeyCode::Char('?')) => HelpAction::Toggle,
+        // The help overlay is WATCH-only. DRIVE forwards every key to the agent
+        // and SCROLLBACK keeps its own scroll keymap, so both fall through to
+        // key_to_input untouched (codex peer P2: `?` must not toggle outside WATCH).
+        (Mode::Watch, _, KeyCode::Char('?')) => HelpAction::Toggle,
         // WATCH + overlay open: Esc / q close; everything else is inert.
-        (Mode::Watch | Mode::Scrollback, true, KeyCode::Char('q') | KeyCode::Esc) => {
-            HelpAction::Close
-        }
-        (Mode::Watch | Mode::Scrollback, true, _) => HelpAction::Inert,
-        // Everything else (overlay closed, not `?`): pass through for key_to_input.
+        (Mode::Watch, true, KeyCode::Char('q') | KeyCode::Esc) => HelpAction::Close,
+        (Mode::Watch, true, _) => HelpAction::Inert,
+        // Everything else (DRIVE, SCROLLBACK, overlay closed + not `?`): pass through.
         _ => HelpAction::Passthrough,
     }
 }
