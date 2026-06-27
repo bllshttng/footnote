@@ -64,6 +64,37 @@ def test_rescope_project_null_conductor_worktree_repo_hint():
     assert fixes[0].new_cwd == "/home/u/code/etl"
 
 
+def test_rescope_project_null_harness_native_worktree_repo_hint():
+    """Harness-native worktree layout <repo>/.claude/worktrees/<name> (x-33e9):
+    the segment before .claude/worktrees/ is the repo hint."""
+    fixes = m.detect_rescope_fixes(
+        [_n("ab-4b", project=None, cwd="/home/u/code/etl/.claude/worktrees/bar")], WS
+    )
+    assert len(fixes) == 1
+    assert fixes[0].new_project == "etl"
+    assert fixes[0].new_cwd == "/home/u/code/etl"
+
+
+def test_worktree_repo_hint_custom_base(monkeypatch):
+    """A custom worktrees_base <base>/<repo>/<name> is recognized (codex P1, PR #67)."""
+    monkeypatch.setattr(m, "_configured_worktrees_base", lambda: "/custom/wt")
+    fixes = m.detect_rescope_fixes(
+        [_n("ab-4c", project=None, cwd="/custom/wt/etl/bar")], WS
+    )
+    assert len(fixes) == 1
+    assert fixes[0].new_project == "etl"
+    assert fixes[0].new_cwd == "/home/u/code/etl"
+
+
+def test_worktree_repo_hint_custom_base_unset_declines(monkeypatch):
+    """With no configured base, a node under an arbitrary root is left untouched."""
+    monkeypatch.setattr(m, "_configured_worktrees_base", lambda: None)
+    fixes = m.detect_rescope_fixes(
+        [_n("ab-4d", project=None, cwd="/custom/wt/etl/bar")], WS
+    )
+    assert fixes == []
+
+
 def test_rescope_correct_node_is_noop():
     fixes = m.detect_rescope_fixes(
         [_n("ab-5", project="fno", cwd="/home/u/code/abilities")], WS

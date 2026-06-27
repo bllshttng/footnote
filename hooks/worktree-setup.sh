@@ -20,12 +20,13 @@
 # skills/speculate/scripts/worktree-setup.sh to match - the two files are
 # intentional duplicates for portability.
 #
-# DIVERGENCE (Worktree Scope Hygiene, US3): the inside-checkout redirect
-# in block 0 below is intentionally HOOK-ONLY and must NOT be copied to the
-# /speculate duplicate. /speculate deliberately materializes its parallel
-# variations at .claude/worktrees/<name> (a sanctioned exception, like the
-# cross-project pipeline); forcing those to conductor would break it. The
-# rest of the two files stay in sync.
+# DIVERGENCE (worktrees_base migration, x-33e9): the relocation logic in
+# block 0 below (honor config.paths.worktrees_base, else leave harness-native)
+# is intentionally HOOK-ONLY and must NOT be copied to the /speculate
+# duplicate. /speculate deliberately materializes its parallel variations at
+# .claude/worktrees/<name> (a sanctioned exception, like the cross-project
+# pipeline); relocating those to a configured base would break it. The rest of
+# the two files stay in sync.
 set -euo pipefail
 
 # Read stdin JSON from CC (contains worktree name, branch, path context).
@@ -81,54 +82,39 @@ wt_config() {
     fi
 }
 
-# 0. Conductor redirect: opt-in for the default location, MANDATORY inside-checkout.
+# 0. Worktree relocation: honor config.paths.worktrees_base (OSS-neutral).
 #
-# When `worktree.use_conductor_canonical: true` is set in `.fno/
-# settings.yaml` (project or global), redirect the worktree from Claude
-# Code's default location (`.claude/worktrees/<name>`) to
-# `~/conductor/workspaces/<repo>/<name>`. Repo name comes from the
-# canonical checkout's directory basename.
+# Resolution order (x-33e9, worktrees_base migration):
+#   1. config.paths.worktrees_base set -> relocate to <base>/<repo>/<name>.
+#   2. else worktree.use_conductor_canonical: true (DEPRECATED back-compat)
+#      -> relocate to ~/conductor/workspaces/<repo>/<name>.
+#   3. else (unset) -> harness-native: leave the worktree where Claude Code
+#      placed it (`<repo>/.claude/worktrees/<name>`). No relocation. That dir
+#      is gitignored, so rg/Grep already skip it - the old "inside-checkout is
+#      always forbidden" redirect is retired; harness-native is now the default.
 #
-# Independent of that flag, a worktree path that resolves INSIDE the
-# canonical checkout (`<repo>/.claude/worktrees/`) is ALWAYS redirected: a
-# nested worktree is the structural search-pollution source and violates
-# .claude/rules/worktrees.md. The flag chooses whether the DEFAULT location
-# is redirected; inside-checkout is never allowed regardless of the flag
-# (design: Worktree Scope Hygiene, US3 / Locked Decision 4).
-#
-# `name` normally arrives in stdin; when absent (e.g. the /speculate skill
-# invokes this manually with only `.path`), the inside-checkout case derives
-# the name from the path basename so the mandatory redirect still has a target.
+# `worktrees_base` is read as the RAW config field (empty when unset) via
+# `fno config get`. The paths.sh `WORKTREES_BASE` var always carries the
+# ~/.fno/worktrees default, so it cannot distinguish "unset" from "set to the
+# default" - the distinction that decides relocate-vs-leave-in-place.
+WT_BASE_RAW=""
+if command -v fno >/dev/null 2>&1; then
+    WT_BASE_RAW="$(fno config get config.paths.worktrees_base 2>/dev/null || true)"
+fi
+[[ "$WT_BASE_RAW" == "null" ]] && WT_BASE_RAW=""
 USE_CANONICAL="$(wt_config "use_conductor_canonical" "false")"
 
-# Inside-checkout detection: is the resolved worktree path a strict descendant
-# of <canonical>/.claude/worktrees/ ? Both sides are resolved to PHYSICAL
-# paths (pwd -P) before comparing: WORKTREE_PATH comes from a logical `pwd`
-# while MAIN_REPO comes from git's physical --path-format=absolute, and on
-# macOS /var is a symlink to /private/var, so a logical-vs-physical compare
-# would miss a genuine inside-checkout path. The trailing slash keeps it a
-# strict-descendant test.
-INSIDE_CHECKOUT=0
-# WORKTREE_PATH exists here (cd'd into above), but resolve via its parent +
-# basename when it does not, so a not-yet-created path still classifies. Use
-# explicit if-blocks, not `A && B || C` on an assignment.
-_WT_PHYS=$(cd "$WORKTREE_PATH" 2>/dev/null && pwd -P)
-if [[ -z "$_WT_PHYS" ]]; then
-    _WT_PARENT_PHYS=$(cd "$(dirname "$WORKTREE_PATH")" 2>/dev/null && pwd -P)
-    if [[ -z "$_WT_PARENT_PHYS" ]]; then
-        _WT_PARENT_PHYS="$(dirname "$WORKTREE_PATH")"
-    fi
-    _WT_PHYS="$_WT_PARENT_PHYS/$(basename "$WORKTREE_PATH")"
+RELOCATE_BASE=""
+if [[ -n "$WT_BASE_RAW" ]]; then
+    # Config stores ~ literally; expand a leading ~ to $HOME.
+    RELOCATE_BASE="${WT_BASE_RAW/#\~/$HOME}"
+elif [[ "$USE_CANONICAL" == "true" ]]; then
+    echo "Note: worktree.use_conductor_canonical is DEPRECATED; set config.paths.worktrees_base: ~/conductor/workspaces instead." >&2
+    RELOCATE_BASE="$HOME/conductor/workspaces"
 fi
-_MAIN_PHYS=$(cd "$MAIN_REPO" 2>/dev/null && pwd -P)
-if [[ -z "$_MAIN_PHYS" ]]; then
-    _MAIN_PHYS="$MAIN_REPO"
-fi
-case "$_WT_PHYS/" in
-    "$_MAIN_PHYS/.claude/worktrees/"*) INSIDE_CHECKOUT=1 ;;
-esac
-unset _WT_PHYS _WT_PARENT_PHYS _MAIN_PHYS
 
+# Worktree name (from stdin; fall back to the path basename, e.g. when the
+# /speculate skill invokes this manually with only `.path`).
 NAME_FROM_INPUT=""
 if command -v python3 >/dev/null 2>&1; then
     NAME_FROM_INPUT=$(printf '%s' "$HOOK_INPUT" | python3 -c '
@@ -140,19 +126,15 @@ except (json.JSONDecodeError, ValueError):
 print(d.get("name", ""))
 ' 2>/dev/null || true)
 fi
-# Inside-checkout with no stdin name: derive it from the path basename so the
-# mandatory redirect still has a destination.
-if [[ "$INSIDE_CHECKOUT" == "1" && -z "$NAME_FROM_INPUT" ]]; then
-    NAME_FROM_INPUT="$(basename "$WORKTREE_PATH")"
-fi
+[[ -z "$NAME_FROM_INPUT" ]] && NAME_FROM_INPUT="$(basename "$WORKTREE_PATH")"
 
-if [[ "$USE_CANONICAL" == "true" || "$INSIDE_CHECKOUT" == "1" ]] && [[ -n "$NAME_FROM_INPUT" ]]; then
+if [[ -n "$RELOCATE_BASE" && -n "$NAME_FROM_INPUT" ]]; then
     REPO_NAME="$(basename "$MAIN_REPO")"
-    CANONICAL="$HOME/conductor/workspaces/$REPO_NAME/$NAME_FROM_INPUT"
+    CANONICAL="$RELOCATE_BASE/$REPO_NAME/$NAME_FROM_INPUT"
     BRANCH_NAME="worktree-$NAME_FROM_INPUT"
 
     if [[ "$WORKTREE_PATH" != "$CANONICAL" ]]; then
-        echo "Redirecting worktree: $WORKTREE_PATH -> $CANONICAL" >&2
+        echo "Relocating worktree: $WORKTREE_PATH -> $CANONICAL" >&2
 
         # Create the canonical worktree if it doesn't exist. Branch from
         # origin/HEAD with local-HEAD fallback. `worktree.baseRef` from
