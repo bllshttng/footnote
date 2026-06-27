@@ -358,10 +358,11 @@ def test_reconcile_triggers_advance_after_close(cli_env, monkeypatch):
 
 
 def test_reconcile_advances_cascade_closed_parent_epic(cli_env, monkeypatch):
-    """x-33b2 (codex P1): when closing a child cascade-closes its parent epic,
-    reconcile must run auto-continue for the PARENT too - else a node blocked_by
-    the epic stalls. advance is called for BOTH the child and the cascade-closed
-    epic (with the epic's own project)."""
+    """x-33b2 (codex P1): when closing a child cascade-closes its parent epic, a
+    node blocked_by the EPIC must be dispatched too - else it stalls. Reconcile
+    runs the full auto-continue path (advance + advance_dependents +
+    dispatch_reconcile_for_blocker) for the cascade-closed epic, so its
+    dependent's dispatch follows the epic's edges, not just the child's."""
     graph_path, _ = cli_env
     _make_graph(
         graph_path,
@@ -369,25 +370,36 @@ def test_reconcile_advances_cascade_closed_parent_epic(cli_env, monkeypatch):
             _node("ab-epicclose", project="web", cwd="/proj/web"),
             _node("ab-lastkid01", pr_number=810, project="fno", cwd="/proj/fno",
                   parent="ab-epicclose"),
+            # A dependent of the EPIC (not the child): only reachable if advance's
+            # dependent path runs for the cascade-closed parent.
+            _node("ab-epicdep01", project="api", blocked_by=["ab-epicclose"]),
         ],
     )
     monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
 
-    closed_ids = []
+    adv_ids, dep_ids, recon_ids = [], [], []
     import fno.backlog.advance as advmod
+    import fno.backlog.reconcile_dispatch as recdisp
 
-    def _capture(**kwargs):
-        closed_ids.append(kwargs.get("closed_node_id"))
+    def _cap_adv(**kw):
+        adv_ids.append(kw.get("closed_node_id"))
         return advmod.AdvanceResult("skipped", "advance_skipped", reason="disabled")
 
-    monkeypatch.setattr(advmod, "advance", _capture)
+    monkeypatch.setattr(advmod, "advance", _cap_adv)
+    monkeypatch.setattr(advmod, "advance_dependents",
+                        lambda **kw: dep_ids.append(kw.get("closed_node_id")) or [])
+    monkeypatch.setattr(recdisp, "dispatch_reconcile_for_blocker",
+                        lambda **kw: recon_ids.append(kw.get("closed_node_id")))
 
     result = runner.invoke(app, ["backlog", "reconcile"])
     assert result.exit_code == 0, result.output
-    # Both the directly-closed child AND the cascade-closed parent epic are advanced.
-    assert "ab-lastkid01" in closed_ids
-    assert "ab-epicclose" in closed_ids
-    # The epic actually closed (cascade fired).
+    # The cascade-closed epic is run through the FULL auto-continue path, so its
+    # own dependent (ab-epicdep01) is reachable via the parent's edges.
+    assert "ab-epicclose" in adv_ids        # same-project `next`
+    assert "ab-epicclose" in dep_ids        # cross-project dependents (the epicdep)
+    assert "ab-epicclose" in recon_ids      # contract de-stub
+    assert "ab-lastkid01" in adv_ids        # the child still advanced too
+    # The epic actually closed (cascade fired); the dependent is now unblocked.
     epic = next(e for e in _read_entries(graph_path) if e["id"] == "ab-epicclose")
     assert epic["completed_at"] is not None
 

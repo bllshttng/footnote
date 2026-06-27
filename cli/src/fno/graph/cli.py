@@ -3833,7 +3833,11 @@ def cmd_reconcile(
                     actually_closed.append(record)
             return entries
 
-        locked_mutate_graph(_graph_path(), mutator)
+        # Capture the POST-lock graph (codex P2): resolving a closed node's
+        # project/cwd from the pre-lock `entries` snapshot risks stale routing if
+        # a concurrent reparent/reproject landed between scan and lock, and a
+        # cascade parent only reachable in the locked graph would resolve to None.
+        post_entries = locked_mutate_graph(_graph_path(), mutator)
 
         def _auto_continue_after_close(node_id, project, root):
             """Merge-triggered auto-continue dispatch for one just-closed node:
@@ -3900,7 +3904,7 @@ def cmd_reconcile(
             # off) and is strictly non-fatal: a failed advance never fails the
             # reconcile sweep. Project-scoped per the closed node's project.
             try:
-                _adv_node = _find_node(entries, record.node_id)
+                _adv_node = _find_node(post_entries, record.node_id)
                 _adv_project = _adv_node.get("project") if _adv_node else None
                 # Resolve auto-continue state against the CLOSED NODE's project
                 # context, not the reconcile's cwd (codex P2): a full-graph
@@ -3929,7 +3933,7 @@ def cmd_reconcile(
                 continue
             _seen_parents.add(_pid)
             try:
-                _pn = _find_node(entries, _pid)
+                _pn = _find_node(post_entries, _pid)
                 _pproj = _pn.get("project") if _pn else None
                 _proot = Path(_pn["cwd"]) if _pn and _pn.get("cwd") else None
                 _auto_continue_after_close(_pid, _pproj, _proot)
