@@ -63,6 +63,7 @@ pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
 pub mod nudge;
+pub mod osc;
 pub mod paths;
 pub mod protocol;
 pub mod provider;

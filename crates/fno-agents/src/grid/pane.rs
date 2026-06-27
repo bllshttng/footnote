@@ -449,6 +449,10 @@ impl Pane {
             // prompt_ready inspects only visible_text; cursor is unused here.
             cursor_row: 0,
             cursor_col: 0,
+            // The grid-pane scanner reads rendered text, not OSC (E6.1 capture
+            // lives in the readiness read loop, crate::screen).
+            osc_title: None,
+            osc_progress: None,
         };
         crate::readiness::screen_is_waiting(&view)
     }

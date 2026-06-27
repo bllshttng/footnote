@@ -93,6 +93,10 @@ pub(crate) fn scrollback_config(lines: usize) -> Config {
 pub struct TerminalGrid {
     term: Term<VoidListener>,
     processor: Processor,
+    // OSC title/progress capture (E6.1). `processor` parses OSC sequences but
+    // dispatches them to the `VoidListener` (discarded), so a parallel scanner
+    // keeps the OSC strings the manifest engine wants as detection regions.
+    osc: crate::osc::OscCapture,
     rows: u16,
     cols: u16,
 }
@@ -110,6 +114,7 @@ impl TerminalGrid {
         TerminalGrid {
             term: Term::new(visible_only_config(), &size, VoidListener),
             processor: Processor::new(),
+            osc: crate::osc::OscCapture::new(),
             rows,
             cols,
         }
@@ -127,6 +132,9 @@ impl TerminalGrid {
         // `term` and `processor` are disjoint fields, so both mutable borrows
         // are allowed.
         self.processor.advance(&mut self.term, bytes);
+        // Same bytes, second pass: capture OSC title/progress the grid parser
+        // throws away. Two passes over the stream is O(2n); titles are short.
+        self.osc.feed(bytes);
     }
 
     /// Resize the grid, mirroring a PTY winsize change. Dimensions are clamped
@@ -183,6 +191,8 @@ impl TerminalGrid {
             text,
             cursor_row,
             cursor_col,
+            osc_title: self.osc.title().map(str::to_string),
+            osc_progress: self.osc.progress().map(str::to_string),
         }
     }
 }
@@ -194,6 +204,12 @@ pub struct OwnedScreen {
     pub text: String,
     pub cursor_row: usize,
     pub cursor_col: usize,
+    /// Latest OSC window title (OSC 0/2), captured from the byte stream (E6.1).
+    /// A detection region for the manifest engine; `None` until a title OSC is
+    /// seen.
+    pub osc_title: Option<String>,
+    /// Latest OSC 9;4 progress payload, if any (E6.1).
+    pub osc_progress: Option<String>,
 }
 
 impl OwnedScreen {
@@ -203,6 +219,8 @@ impl OwnedScreen {
             visible_text: &self.text,
             cursor_row: self.cursor_row,
             cursor_col: self.cursor_col,
+            osc_title: self.osc_title.as_deref(),
+            osc_progress: self.osc_progress.as_deref(),
         }
     }
 }
@@ -262,6 +280,28 @@ mod tests {
         let view = owned.view();
         assert_eq!(view.visible_text, owned.text);
         assert_eq!(view.cursor_row, owned.cursor_row);
+    }
+
+    #[test]
+    fn osc_title_exposed_on_snapshot_and_reassembled_across_feeds() {
+        // AC-E6-1 at the read-loop level: an OSC title split across two feeds
+        // reassembles, is exposed on the snapshot (owned + borrowed view), and
+        // is NOT echoed into the visible grid (the grid parser consumes it).
+        let mut grid = TerminalGrid::with_default_size();
+        // OSC 2 set-title "⠋ Compiling" (braille spinner = claude "working"
+        // signal), split mid-codepoint, then plain "hello" to the grid.
+        grid.feed(b"\x1b]2;\xe2\xa0\x8b Compil");
+        grid.feed(b"ing\x07hello");
+        let owned = grid.snapshot();
+        assert_eq!(owned.osc_title.as_deref(), Some("\u{280b} Compiling"));
+        assert!(
+            owned.text.starts_with("hello"),
+            "OSC bytes must not leak into the grid, got {:?}",
+            owned.text
+        );
+        // Exposed through the borrowed detector seam too.
+        let view = owned.view();
+        assert_eq!(view.osc_title, Some("\u{280b} Compiling"));
     }
 
     #[test]

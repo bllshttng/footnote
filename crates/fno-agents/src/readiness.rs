@@ -33,6 +33,14 @@ pub struct ScreenView<'a> {
     /// where the cursor rests.
     pub cursor_row: usize,
     pub cursor_col: usize,
+    /// Latest OSC window title (OSC 0/2), captured from the PTY byte stream
+    /// (E6.1). The manifest engine's `osc_title` region reads this; it survives
+    /// scrollback/wrap/resize where grid text does not. `None` if no title OSC
+    /// has been seen (e.g. the grid-pane scanner, which does not capture OSC).
+    pub osc_title: Option<&'a str>,
+    /// Latest OSC 9;4 progress payload (E6.1); the engine's `osc_progress`
+    /// region. `None` if none seen.
+    pub osc_progress: Option<&'a str>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -240,6 +248,8 @@ mod tests {
             visible_text: text,
             cursor_row: 0,
             cursor_col: 0,
+            osc_title: None,
+            osc_progress: None,
         }
     }
 
