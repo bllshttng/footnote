@@ -2575,7 +2575,16 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                         .and_then(|p| p.pane_at(m.column, m.row));
                                         match hit {
                                             Some(idx) => {
-                                                comp.set_focus(idx);
+                                                // A wheel that moves focus must
+                                                // repaint the focus border even if the
+                                                // scroll itself is a no-op (e.g.
+                                                // wheel-down in WATCH); otherwise the
+                                                // border desyncs from where keyboard
+                                                // input lands (codex P2).
+                                                if comp.focus() != idx {
+                                                    comp.set_focus(idx);
+                                                    dirty = true;
+                                                }
                                                 true
                                             }
                                             None => false,
