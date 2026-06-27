@@ -127,6 +127,7 @@ jobs:
           bash tests/hooks/test_loop_check_shim.sh
           bash tests/hooks/test_manifest_immutable.sh
           bash tests/hooks/test_init_target_session_id.sh
+          bash tests/hooks/test_agy_stop_hook.sh
 
       - name: docs-before-ship phase-ordering guard (ab-2e4a09f1)
         # Regression guard: the docs phase must run BEFORE ship so docs ride in
