@@ -107,44 +107,58 @@ pub fn contains_detach_sentinel(text: &str) -> bool {
     DETACH_SENTINELS.iter().any(|s| text.contains(s))
 }
 
-/// The sender of an a2a turn, rendered as a legible Claude-native tag. Mirrors
-/// Claude's own `<IMPORTANT MESSAGE>` convention so an adopted session treats a
-/// `<FNO ...>` line as structure natively (which closes most of the recipient-side
-/// gap with no custom primer).
+/// The legible a2a tag prefixed to an agent-to-agent turn. Lowercase
+/// `<fno ...>`, mirroring Claude's own `<IMPORTANT MESSAGE>` convention so an
+/// adopted session treats the line as structure natively (which closes most of
+/// the recipient-side gap with no custom primer).
 ///
-/// `fid` is the SHORT 8-hex sessionId of the driving session -- the identity, since
-/// sessionIds ARE names (never a display name; the registry row + claim still key
-/// on the FULL session_uuid underneath, the tag uses the short purely for
-/// legibility). `harness`/`model` are context for later reference. This is legible
-/// context, NOT unforgeable trust: the serde-escaped envelope is deliberately
-/// deferred until a parser actually makes a trust decision on `fid` (nothing does
-/// yet).
-pub struct A2aFrom<'a> {
-    /// Short 8-hex sessionId of the sender.
+/// Field rule: a field belongs in the TAG only if the recipient needs it AT
+/// MESSAGE TIME and cannot cheaply look it up by `fid`; everything else lives in
+/// the registry, keyed by `fid` (so cwd / log_path / pid / lineage are NOT tag
+/// fields). `fid` is the SHORT 8-hex sessionId of the sender -- the identity,
+/// since sessionIds ARE names (no display name; the registry row + claim key on
+/// the FULL session_uuid underneath, the tag uses the short purely for
+/// legibility). Legible context, NOT unforgeable trust: the escaped/unforgeable
+/// form is deferred until a parser actually makes a trust decision on `fid`.
+pub struct A2aTag<'a> {
+    /// REQUIRED. From-id: the sender's short 8-hex sessionId.
     pub fid: &'a str,
-    /// Sender harness: `claude-code` / `codex` / `gemini`.
+    /// OPTIONAL. The backlog node the sender is working on (e.g. `x-33b2`) --
+    /// the highest-value coordination context; omitted for node-less sessions.
+    pub node: Option<&'a str>,
+    /// Sender harness: `claude-code` / `codex` / `gemini` (how to reply).
     pub harness: &'a str,
-    /// Sender model id.
+    /// Sender model id (context).
     pub model: &'a str,
+    /// OPTIONAL. To-id: a peer's short sessionId, only when the turn is directed
+    /// at a specific peer (omitted on a bus where delivery implies the recipient).
+    pub tid: Option<&'a str>,
 }
 
-/// Render the a2a tag prefix: `<FNO harness={h} model={m} fid={fid}>`.
-pub fn a2a_tag(from: &A2aFrom) -> String {
-    format!(
-        "<FNO harness={} model={} fid={}>",
-        from.harness, from.model, from.fid
-    )
+/// Render the a2a tag: `<fno fid= [node=] harness= model= [tid=]>` (lowercase;
+/// optional fields omitted when absent).
+pub fn a2a_tag(t: &A2aTag) -> String {
+    let mut s = format!("<fno fid={}", t.fid);
+    if let Some(node) = t.node {
+        s.push_str(&format!(" node={node}"));
+    }
+    s.push_str(&format!(" harness={} model={}", t.harness, t.model));
+    if let Some(tid) = t.tid {
+        s.push_str(&format!(" tid={tid}"));
+    }
+    s.push('>');
+    s
 }
 
 /// Build the `op:'reply'` inject line. When `from` is set, the turn text is
-/// prefixed with the legible a2a tag (`<FNO ...> {text}`) so the recipient sees
+/// prefixed with the legible a2a tag (`<fno ...> {text}`) so the recipient sees
 /// it as agent-to-agent structure, not a human typing. Refuses text carrying a
 /// detach sentinel. `auth` is omitted on the same-uid no-auth path.
 pub fn build_reply_request(
     short: &str,
     text: &str,
     auth: Option<&str>,
-    from: Option<&A2aFrom>,
+    from: Option<&A2aTag>,
 ) -> Result<String, DriveError> {
     if contains_detach_sentinel(text) {
         return Err(DriveError::UnsafeText);
@@ -173,7 +187,7 @@ pub fn inject_reply<T: ControlTransport>(
     short: &str,
     text: &str,
     auth: Option<&str>,
-    from: Option<&A2aFrom>,
+    from: Option<&A2aTag>,
 ) -> Result<(), DriveError> {
     let line = build_reply_request(short, text, auth, from)?;
     t.send_line(&line)
@@ -222,11 +236,11 @@ fn line_is_assistant(line: &str) -> bool {
 }
 
 /// One a2a turn to drive: the `text` (which must embed `marker` for the transcript
-/// confirm), and the `from` identity that becomes the legible `<FNO ...>` tag.
+/// confirm), and the `from` identity that becomes the legible `<fno ...>` tag.
 pub struct DriveTurn<'a> {
     pub text: &'a str,
     pub marker: &'a str,
-    pub from: Option<&'a A2aFrom<'a>>,
+    pub from: Option<&'a A2aTag<'a>>,
 }
 
 /// Drive one turn end to end and confirm delivery: attach, baseline the
@@ -312,21 +326,35 @@ mod tests {
         assert!(!is_session_uuid("g1b2c3d4-1111-2222-3333-444455556666")); // non-hex
     }
 
-    fn from_orchestrator() -> A2aFrom<'static> {
-        A2aFrom {
+    fn from_orchestrator() -> A2aTag<'static> {
+        A2aTag {
             fid: "7d1f8bdc",
+            node: Some("x-26df"),
             harness: "claude-code",
             model: "opus-4.8",
+            tid: None,
         }
     }
 
     #[test]
-    fn a2a_tag_is_legible_native_shape() {
-        // <FNO harness= model= fid=short-sid>, fid is the SHORT 8-hex sessionId,
-        // no JSON, no name field.
+    fn a2a_tag_is_lowercase_with_optional_fields() {
+        // Lowercase <fno ...>, fid is the SHORT 8-hex sessionId, node included
+        // when present, no JSON, no name field.
         assert_eq!(
             a2a_tag(&from_orchestrator()),
-            "<FNO harness=claude-code model=opus-4.8 fid=7d1f8bdc>"
+            "<fno fid=7d1f8bdc node=x-26df harness=claude-code model=opus-4.8>"
+        );
+        // node omitted for a node-less ad-hoc session; tid included when directed.
+        let nodeless = A2aTag {
+            fid: "7d1f8bdc",
+            node: None,
+            harness: "claude-code",
+            model: "opus-4.8",
+            tid: Some("ee99ff00"),
+        };
+        assert_eq!(
+            a2a_tag(&nodeless),
+            "<fno fid=7d1f8bdc harness=claude-code model=opus-4.8 tid=ee99ff00>"
         );
     }
 
@@ -350,7 +378,7 @@ mod tests {
         // The turn is tagged legibly, and the marker survives for the confirm.
         assert_eq!(
             text,
-            "<FNO harness=claude-code model=opus-4.8 fid=7d1f8bdc> ship it MARKER42"
+            "<fno fid=7d1f8bdc node=x-26df harness=claude-code model=opus-4.8> ship it MARKER42"
         );
     }
 
