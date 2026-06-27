@@ -2207,7 +2207,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     };
     // Registry rows shadowing the current names list (rebuilt on `t` toggle
     // and after registry refreshes; stable within a session for Phase 1).
-    let rail_rows: Vec<Value> = initial_rail_rows;
+    // Mutable so an E5b live-added worker pushes a row in lockstep with its
+    // pane, keeping rail_rows 1:1 with panes (codex peer-review P2).
+    let mut rail_rows: Vec<Value> = initial_rail_rows;
     // If launched with --rail, size the focused pane to the rail main area so
     // the agent fills the full width from the first frame rather than the
     // smaller tiled-grid tile it was opened at (gemini HIGH).
@@ -2358,6 +2360,20 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                     comp.recompute_pagination(paged.capacity);
                                                     comp.set_focus(new_idx);
                                                     resize_all_panes(&paged, &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                                    // Keep rail_rows 1:1 with panes so a
+                                                    // worker launched while rail mode is
+                                                    // active appears in the grouping
+                                                    // (codex P2). Synthetic row mirrors the
+                                                    // explicit-name startup path; the worker
+                                                    // spawns in this grid's cwd, so cwd
+                                                    // grouping lands it with its siblings.
+                                                    rail_rows.push(json!({
+                                                        "name": name.as_str(),
+                                                        "provider": "claude",
+                                                        "cwd": std::env::current_dir()
+                                                            .ok()
+                                                            .and_then(|p| p.to_str().map(str::to_string)),
+                                                    }));
                                                     hint = Some(format!("launched {name}"));
                                                     // Push last (move, no clone): name's
                                                     // final use is the hint above.
