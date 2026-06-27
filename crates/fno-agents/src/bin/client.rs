@@ -1733,6 +1733,7 @@ mod tests {
             "loop-check",
             "loop",
             "finalize",
+            "report",
         ];
         let listed: std::collections::HashSet<&str> = CLIENT_VERB_USAGE
             .iter()
