@@ -307,18 +307,29 @@ impl ManifestRule {
                 })
         };
         let state = str_field("state")?.to_string();
-        let priority = v
+        let priority_i64 = v
             .get("priority")
             .and_then(|x| x.as_integer())
             .ok_or_else(|| ManifestError::Field {
                 rule: id.clone(),
                 field: "priority".to_string(),
-            })? as i32;
+            })?;
+        // TOML integers are i64; `as i32` would silently wrap a too-big priority
+        // and corrupt arbitration. Reject out-of-range rather than truncate.
+        let priority = i32::try_from(priority_i64).map_err(|_| ManifestError::Field {
+            rule: id.clone(),
+            field: "priority (out of i32 range)".to_string(),
+        })?;
         let region = Region::parse(str_field("region")?, &id)?;
-        let skip_state_update = v
-            .get("skip_state_update")
-            .and_then(|x| x.as_bool())
-            .unwrap_or(false);
+        // Present-but-wrong-type (e.g. `skip_state_update = "true"`) must error,
+        // not silently read as false and swallow an authoring typo.
+        let skip_state_update = match v.get("skip_state_update") {
+            None => false,
+            Some(x) => x.as_bool().ok_or_else(|| ManifestError::Field {
+                rule: id.clone(),
+                field: "skip_state_update (must be a boolean)".to_string(),
+            })?,
+        };
         let gate_val = v.get("gate").ok_or_else(|| ManifestError::Field {
             rule: id.clone(),
             field: "gate".to_string(),
@@ -367,11 +378,18 @@ impl Manifest {
     pub fn parse(s: &str) -> Result<Manifest, ManifestError> {
         let root: toml::Value =
             toml::from_str(s).map_err(|e| ManifestError::Toml(e.to_string()))?;
-        let min_engine_version = root
-            .get("min_engine_version")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(0)
-            .max(0) as u32;
+        // Absent -> 0. Present-but-wrong-type or negative is a malformed manifest,
+        // not a silent default-to-0 (fail closed, matching the per-rule fields).
+        let min_engine_version = match root.get("min_engine_version") {
+            None => 0,
+            Some(v) => v
+                .as_integer()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| ManifestError::Field {
+                    rule: "<root>".to_string(),
+                    field: "min_engine_version (must be a non-negative integer)".to_string(),
+                })?,
+        };
         let mut rules = match root.get("rule") {
             Some(v) => v
                 .as_array()
@@ -790,6 +808,51 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ManifestError::Field { rule, .. } if rule == "r"));
+    }
+
+    #[test]
+    fn malformed_scalar_fields_are_rejected_not_coerced() {
+        // priority out of i32 range -> error (not a silent wrap).
+        let big = i64::from(i32::MAX) + 1;
+        let err = Manifest::parse(&format!(
+            "[[rule]]\nid = \"r\"\nstate = \"x\"\npriority = {big}\nregion = \"whole_recent\"\ngate = {{ contains = \"x\" }}\n"
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ManifestError::Field { field, .. } if field.starts_with("priority")));
+
+        // skip_state_update present but not a bool -> error (not silent false).
+        let err = Manifest::parse(
+            r#"
+            [[rule]]
+            id = "r"
+            state = "x"
+            priority = 1
+            region = "whole_recent"
+            skip_state_update = "yes"
+            gate = { contains = "x" }
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Field { field, .. } if field.starts_with("skip_state_update"))
+        );
+
+        // min_engine_version present but wrong type -> error (not silent 0).
+        let err = Manifest::parse(
+            r#"
+            min_engine_version = "two"
+            [[rule]]
+            id = "r"
+            state = "x"
+            priority = 1
+            region = "whole_recent"
+            gate = { contains = "x" }
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Field { field, .. } if field.starts_with("min_engine_version"))
+        );
     }
 
     #[test]
