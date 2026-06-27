@@ -107,64 +107,78 @@ pub fn contains_detach_sentinel(text: &str) -> bool {
     DETACH_SENTINELS.iter().any(|s| text.contains(s))
 }
 
-/// The legible a2a tag prefixed to an agent-to-agent turn. Lowercase
-/// `<fno ...>`, mirroring Claude's own `<IMPORTANT MESSAGE>` convention so an
-/// adopted session treats the line as structure natively (which closes most of
-/// the recipient-side gap with no custom primer).
+/// The sender (and optional recipient) of an `<fno_mail>` agent-to-agent
+/// envelope. Rendered as a PAIRED, lowercase tag with `key="value"` attributes,
+/// matching the universal convention (snake_case tag name, double-quoted attrs,
+/// open/close pair, no data in the tag name) so an adopted session treats it as
+/// structure natively.
 ///
 /// Field rule: a field belongs in the TAG only if the recipient needs it AT
-/// MESSAGE TIME and cannot cheaply look it up by `fid`; everything else lives in
-/// the registry, keyed by `fid` (so cwd / log_path / pid / lineage are NOT tag
-/// fields). `fid` is the SHORT 8-hex sessionId of the sender -- the identity,
+/// MESSAGE TIME and cannot cheaply look it up by `from`; everything else lives in
+/// the registry, keyed by `from` (so cwd / log_path / pid / lineage are NOT tag
+/// fields). `from` is the SHORT 8-hex sessionId of the sender -- the identity,
 /// since sessionIds ARE names (no display name; the registry row + claim key on
 /// the FULL session_uuid underneath, the tag uses the short purely for
 /// legibility). Legible context, NOT unforgeable trust: the escaped/unforgeable
-/// form is deferred until a parser actually makes a trust decision on `fid`.
-pub struct A2aTag<'a> {
-    /// REQUIRED. From-id: the sender's short 8-hex sessionId.
-    pub fid: &'a str,
-    /// OPTIONAL. The backlog node the sender is working on (e.g. `x-33b2`) --
-    /// the highest-value coordination context; omitted for node-less sessions.
-    pub node: Option<&'a str>,
+/// form is deferred until a parser actually makes a trust decision on `from`.
+pub struct FnoMail<'a> {
+    /// REQUIRED. The sender's short 8-hex sessionId (identity).
+    pub from: &'a str,
     /// Sender harness: `claude-code` / `codex` / `gemini` (how to reply).
     pub harness: &'a str,
     /// Sender model id (context).
     pub model: &'a str,
-    /// OPTIONAL. To-id: a peer's short sessionId, only when the turn is directed
-    /// at a specific peer (omitted on a bus where delivery implies the recipient).
-    pub tid: Option<&'a str>,
+    /// OPTIONAL. The backlog node the sender is working on (e.g. `x-33b2`) --
+    /// the highest-value coordination context; omitted for node-less sessions.
+    pub node: Option<&'a str>,
+    /// OPTIONAL. A peer's short sessionId, only when the turn is directed at a
+    /// specific peer (omitted on broadcast/bus delivery).
+    pub to: Option<&'a str>,
 }
 
-/// Render the a2a tag: `<fno fid= [node=] harness= model= [tid=]>` (lowercase;
-/// optional fields omitted when absent).
-pub fn a2a_tag(t: &A2aTag) -> String {
-    let mut s = format!("<fno fid={}", t.fid);
-    if let Some(node) = t.node {
-        s.push_str(&format!(" node={node}"));
+/// Render the `<fno_mail ...>` open tag with double-quoted attributes:
+/// `<fno_mail from="..." harness="..." model="..."[ node="..."][ to="..."]>`.
+pub fn fno_mail_open(m: &FnoMail) -> String {
+    let mut s = format!(
+        "<fno_mail from=\"{}\" harness=\"{}\" model=\"{}\"",
+        m.from, m.harness, m.model
+    );
+    if let Some(node) = m.node {
+        s.push_str(&format!(" node=\"{node}\""));
     }
-    s.push_str(&format!(" harness={} model={}", t.harness, t.model));
-    if let Some(tid) = t.tid {
-        s.push_str(&format!(" tid={tid}"));
+    if let Some(to) = m.to {
+        s.push_str(&format!(" to=\"{to}\""));
     }
     s.push('>');
     s
 }
 
-/// Build the `op:'reply'` inject line. When `from` is set, the turn text is
-/// prefixed with the legible a2a tag (`<fno ...> {text}`) so the recipient sees
-/// it as agent-to-agent structure, not a human typing. Refuses text carrying a
-/// detach sentinel. `auth` is omitted on the same-uid no-auth path.
+/// Wrap `text` in the paired `<fno_mail>` envelope:
+/// `<fno_mail ...>\n{text}\n</fno_mail>`.
+pub fn wrap_fno_mail(m: &FnoMail, text: &str) -> String {
+    format!("{}\n{}\n</fno_mail>", fno_mail_open(m), text)
+}
+
+/// Build the `op:'reply'` inject line. When `mail` is set, the turn text is
+/// wrapped in the paired `<fno_mail>` envelope so the recipient sees it as
+/// agent-to-agent structure, not a human typing. Refuses text carrying a detach
+/// sentinel. `auth` is omitted on the same-uid no-auth path.
+///
+/// This is the reusable LIVE-DELIVERY primitive: `fno mail send` calls it to
+/// inject into a live recipient first, falling back to the durable bus queue only
+/// when the recipient is not live-reachable (that unification is a follow-up; here
+/// we just build the clean callable inject path).
 pub fn build_reply_request(
     short: &str,
     text: &str,
     auth: Option<&str>,
-    from: Option<&A2aTag>,
+    mail: Option<&FnoMail>,
 ) -> Result<String, DriveError> {
     if contains_detach_sentinel(text) {
         return Err(DriveError::UnsafeText);
     }
-    let body = match from {
-        Some(f) => format!("{} {}", a2a_tag(f), text),
+    let body = match mail {
+        Some(m) => wrap_fno_mail(m, text),
         None => text.to_string(),
     };
     let mut obj = serde_json::Map::new();
@@ -179,17 +193,17 @@ pub fn build_reply_request(
     Ok(line)
 }
 
-/// Inject a turn over `t` via `op:'reply'`, tagged as a2a from `from`. Writing
-/// succeeded does NOT mean the turn landed -- confirm with [`confirm_marker_after`]
-/// against the transcript.
+/// Inject a turn over `t` via `op:'reply'`, wrapped as `<fno_mail>` from `mail`.
+/// Writing succeeded does NOT mean the turn landed -- confirm with
+/// [`confirm_marker_after`] against the transcript.
 pub fn inject_reply<T: ControlTransport>(
     t: &mut T,
     short: &str,
     text: &str,
     auth: Option<&str>,
-    from: Option<&A2aTag>,
+    mail: Option<&FnoMail>,
 ) -> Result<(), DriveError> {
-    let line = build_reply_request(short, text, auth, from)?;
+    let line = build_reply_request(short, text, auth, mail)?;
     t.send_line(&line)
         .map_err(|e| DriveError::Io(e.to_string()))
 }
@@ -236,11 +250,11 @@ fn line_is_assistant(line: &str) -> bool {
 }
 
 /// One a2a turn to drive: the `text` (which must embed `marker` for the transcript
-/// confirm), and the `from` identity that becomes the legible `<fno ...>` tag.
+/// confirm), and the `mail` identity that becomes the paired `<fno_mail>` envelope.
 pub struct DriveTurn<'a> {
     pub text: &'a str,
     pub marker: &'a str,
-    pub from: Option<&'a A2aTag<'a>>,
+    pub mail: Option<&'a FnoMail<'a>>,
 }
 
 /// Drive one turn end to end and confirm delivery: attach, baseline the
@@ -270,7 +284,7 @@ pub fn drive_and_confirm<T: ControlTransport>(
         &attach.short,
         turn.text,
         attach.auth.as_deref(),
-        turn.from,
+        turn.mail,
     )?;
 
     for _ in 0..attempts.max(1) {
@@ -326,40 +340,49 @@ mod tests {
         assert!(!is_session_uuid("g1b2c3d4-1111-2222-3333-444455556666")); // non-hex
     }
 
-    fn from_orchestrator() -> A2aTag<'static> {
-        A2aTag {
-            fid: "7d1f8bdc",
-            node: Some("x-26df"),
+    fn from_orchestrator() -> FnoMail<'static> {
+        FnoMail {
+            from: "7d1f8bdc",
             harness: "claude-code",
             model: "opus-4.8",
-            tid: None,
+            node: Some("x-26df"),
+            to: None,
         }
     }
 
     #[test]
-    fn a2a_tag_is_lowercase_with_optional_fields() {
-        // Lowercase <fno ...>, fid is the SHORT 8-hex sessionId, node included
-        // when present, no JSON, no name field.
+    fn fno_mail_open_is_lowercase_quoted_attrs() {
+        // Lowercase <fno_mail ...> with key="value" double-quoted attrs; from is
+        // the SHORT 8-hex sessionId; node included when present.
         assert_eq!(
-            a2a_tag(&from_orchestrator()),
-            "<fno fid=7d1f8bdc node=x-26df harness=claude-code model=opus-4.8>"
+            fno_mail_open(&from_orchestrator()),
+            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" node=\"x-26df\">"
         );
-        // node omitted for a node-less ad-hoc session; tid included when directed.
-        let nodeless = A2aTag {
-            fid: "7d1f8bdc",
-            node: None,
+        // node omitted for a node-less sender; to included when directed.
+        let directed = FnoMail {
+            from: "7d1f8bdc",
             harness: "claude-code",
             model: "opus-4.8",
-            tid: Some("ee99ff00"),
+            node: None,
+            to: Some("ee99ff00"),
         };
         assert_eq!(
-            a2a_tag(&nodeless),
-            "<fno fid=7d1f8bdc harness=claude-code model=opus-4.8 tid=ee99ff00>"
+            fno_mail_open(&directed),
+            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" to=\"ee99ff00\">"
         );
     }
 
     #[test]
-    fn build_reply_request_untagged_when_no_from() {
+    fn wrap_fno_mail_is_a_paired_envelope() {
+        let wrapped = wrap_fno_mail(&from_orchestrator(), "ship it");
+        assert_eq!(
+            wrapped,
+            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" node=\"x-26df\">\nship it\n</fno_mail>"
+        );
+    }
+
+    #[test]
+    fn build_reply_request_untagged_when_no_mail() {
         let line = build_reply_request("a1b2c3d4", "hello world", Some("deadbeef"), None).unwrap();
         assert!(line.ends_with('\n'));
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
@@ -370,15 +393,15 @@ mod tests {
     }
 
     #[test]
-    fn build_reply_request_prefixes_a2a_tag() {
+    fn build_reply_request_wraps_fno_mail() {
         let from = from_orchestrator();
         let line = build_reply_request("a1b2c3d4", "ship it MARKER42", None, Some(&from)).unwrap();
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         let text = v["text"].as_str().unwrap();
-        // The turn is tagged legibly, and the marker survives for the confirm.
+        // The turn is the paired <fno_mail> envelope; the marker survives inside.
         assert_eq!(
             text,
-            "<fno fid=7d1f8bdc node=x-26df harness=claude-code model=opus-4.8> ship it MARKER42"
+            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" node=\"x-26df\">\nship it MARKER42\n</fno_mail>"
         );
     }
 
