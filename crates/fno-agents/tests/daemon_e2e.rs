@@ -1122,7 +1122,7 @@ async fn host_bad_provider_rejected_e2e() {
         resp.error()
             .unwrap()
             .message
-            .contains("only codex, gemini, or claude"),
+            .contains("only codex, gemini, agy, or claude"),
         "message should explain the provider constraint: {:?}",
         resp.error()
     );
