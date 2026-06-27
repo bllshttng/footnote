@@ -74,10 +74,11 @@ enum PaneMsg {
 /// Resolve the agent names to tile.
 ///
 /// For explicit names, returns them in order. For `--all`, reads the
-/// registry and returns every PTY-managed agent (codex / gemini - claude
-/// is self-supervised and not PTY-driveable, Locked Decision #6) that is
-/// in a live-ish status. Missing registry ⇒ empty (the caller errors on
-/// empty).
+/// registry and returns every PTY-managed agent (codex / gemini, plus
+/// interactive PTY-hosted claude since E2) that is in a live-ish status.
+/// Adopted stream-json claude rows are dropped via the worker-socket gate
+/// ([`is_socketless_claude`]) even though they carry `host_mode ==
+/// "interactive"`. Missing registry ⇒ empty (the caller errors on empty).
 pub(crate) fn resolve_agent_names(
     parsed: &GridArgs,
     home: &AgentsHome,
@@ -101,7 +102,16 @@ pub(crate) fn resolve_agent_names(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    Ok(filter_pty_agents(&rows))
+    let names = filter_pty_agents(&rows);
+    // Authoritative second gate: drop interactive-marked claude rows that have
+    // no live PTY worker socket (the adopted stream-json lane), so `--all` never
+    // tiles a non-drivable phantom pane. Only ever filters claude.
+    let drop: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|r| is_socketless_claude(r, |sid| home.worker_sock(sid).exists()))
+        .filter_map(|r| r.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    Ok(names.into_iter().filter(|n| !drop.contains(n)).collect())
 }
 
 /// PTY-driveable providers. claude joins codex/gemini in E2, but ONLY in its
@@ -115,11 +125,14 @@ const ALIVE_STATUSES: &[&str] = &["ready", "idle", "busy", "live", "spawning"];
 
 /// Filter registry rows to live PTY-managed agent names (pure; testable).
 ///
-/// claude is admitted only when `host_mode == "interactive"`: the interactive
-/// provider is the tileable, sub-billed PTY (E1/E2), whereas an exec/stream
-/// claude row (default or absent host_mode) is the headless `--bg`/`-p` lane
-/// with no drivable TUI. codex/gemini are unconditional (their grid behavior is
-/// unchanged).
+/// claude is admitted only when `host_mode == "interactive"`, which drops the
+/// `exec` `--bg` lane. NOTE this does NOT by itself separate the two
+/// interactive-marked claude lanes: the adopted stream-json lane ALSO sets
+/// `host_mode == "interactive"` (to keep reconcile from settling it `exited`,
+/// `build_claude_stream_entry`) yet has no PTY worker socket and cannot be
+/// tiled/driven. `resolve_agent_names` applies the authoritative worker-socket
+/// gate ([`is_socketless_claude`]) on top of this. codex/gemini are
+/// unconditional (their grid behavior is unchanged).
 fn filter_pty_agents(rows: &[Value]) -> Vec<String> {
     rows.iter()
         .filter_map(|row| {
@@ -128,9 +141,6 @@ fn filter_pty_agents(rows: &[Value]) -> Vec<String> {
                 return None;
             }
             if provider == "claude" {
-                // Only interactive claude tiles; absent/`exec` host_mode is the
-                // headless lane and reads as not-drivable (matches the
-                // absent==exec coercion used elsewhere in fno-agents).
                 let interactive =
                     row.get("host_mode").and_then(Value::as_str) == Some(HOST_MODE_INTERACTIVE);
                 if !interactive {
@@ -144,6 +154,23 @@ fn filter_pty_agents(rows: &[Value]) -> Vec<String> {
             row.get("name").and_then(Value::as_str).map(str::to_string)
         })
         .collect()
+}
+
+/// Does this row look like an interactive claude WITHOUT a live PTY worker
+/// socket - i.e. the adopted stream-json lane that dodges reconcile by carrying
+/// `host_mode == "interactive"` but cannot be tiled or driven? Pure given a
+/// socket-presence probe, so the partition is unit-testable without a real
+/// socket. Returns `false` for any non-claude row (codex/gemini always have a
+/// PTY worker socket; this never filters them).
+fn is_socketless_claude(row: &Value, sock_exists: impl Fn(&str) -> bool) -> bool {
+    if row.get("provider").and_then(Value::as_str) != Some("claude") {
+        return false;
+    }
+    match row.get("short_id").and_then(Value::as_str) {
+        Some(sid) => !sock_exists(sid),
+        // A claude row with no short_id has no worker socket path to drive.
+        None => true,
+    }
 }
 
 /// Per-name interactive-ness (host_mode == "interactive"), aligned 1:1 with
@@ -2739,6 +2766,22 @@ mod tests {
         // codex+idle, interactive claude, gemini+busy, gemini+(default live) kept;
         // exec claude + exited dropped.
         assert_eq!(got, vec!["wkA", "wkClaudeInt", "wkG", "wkNoStatus"]);
+    }
+
+    #[test]
+    fn is_socketless_claude_drops_stream_lane_keeps_pty_and_ignores_others() {
+        // PTY-hosted interactive claude: socket exists -> NOT socketless (kept).
+        let pty = json!({"name": "p", "provider": "claude", "short_id": "pty1", "host_mode": "interactive"});
+        assert!(!is_socketless_claude(&pty, |sid| sid == "pty1"));
+        // Adopted stream-json claude: same host_mode, but no worker socket -> dropped.
+        let stream = json!({"name": "s", "provider": "claude", "short_id": "str1", "host_mode": "interactive"});
+        assert!(is_socketless_claude(&stream, |sid| sid == "pty1"));
+        // claude row without a short_id has no socket path -> dropped.
+        let no_sid = json!({"name": "n", "provider": "claude", "host_mode": "interactive"});
+        assert!(is_socketless_claude(&no_sid, |_| true));
+        // Non-claude rows are never filtered, regardless of socket probe.
+        let codex = json!({"name": "c", "provider": "codex", "short_id": "cx1"});
+        assert!(!is_socketless_claude(&codex, |_| false));
     }
 
     #[test]
