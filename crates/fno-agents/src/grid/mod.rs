@@ -363,7 +363,10 @@ mod tests {
     #[test]
     fn rail_false_by_default() {
         let a = GridArgs::parse(&argv(&["wkA"])).unwrap();
-        assert!(!a.rail, "rail is opt-in; default false");
+        assert!(
+            !a.rail,
+            "explicit names default to railless (the escape hatch)"
+        );
     }
 
     #[test]

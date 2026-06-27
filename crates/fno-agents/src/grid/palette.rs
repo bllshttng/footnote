@@ -72,14 +72,10 @@ fn hex_to_u8(s: &str) -> Option<u8> {
 /// always returns `fixed()`, so the degrade path is a true no-op for the grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Palette {
-    /// Queried terminal foreground (or `Default`).
-    pub fg: CellColor,
-    /// Queried terminal background (or `Default`).
+    /// Terminal background for the chrome cells (queried bg, or `Default`).
     pub bg: CellColor,
-    /// Box-drawing / border chrome color (~40% fg blended toward bg).
+    /// Box-drawing / chrome foreground (~40% terminal-fg blended toward bg).
     pub border: CellColor,
-    /// Dimmed accent chrome (~25% fg blended toward bg).
-    pub dim: CellColor,
 }
 
 impl Palette {
@@ -90,25 +86,22 @@ impl Palette {
     /// the grid chrome is completely unchanged.
     pub fn fixed() -> Self {
         Palette {
-            fg: CellColor::Default,
             bg: CellColor::Default,
             border: CellColor::Default,
-            dim: CellColor::Default,
         }
     }
 
     /// Derive a palette from the terminal's queried fg and bg RGB triples.
     ///
-    /// `border` blends 40% fg toward bg (a mid-tone that reads as a border on
-    /// both light and dark backgrounds).  `dim` blends 25% fg toward bg.
+    /// `border` blends 40% fg toward bg (a mid-tone that reads as chrome on
+    /// both light and dark backgrounds); `bg` is the queried background. These
+    /// are the two colors the chrome actually applies - a fuller fg/dim split
+    /// is a follow-up if chrome text ever needs to read brighter than borders.
     pub fn from_terminal(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> Self {
         let border_rgb = blend(fg, bg, 40);
-        let dim_rgb = blend(fg, bg, 25);
         Palette {
-            fg: CellColor::Rgb(fg.0, fg.1, fg.2),
             bg: CellColor::Rgb(bg.0, bg.1, bg.2),
             border: CellColor::Rgb(border_rgb.0, border_rgb.1, border_rgb.2),
-            dim: CellColor::Rgb(dim_rgb.0, dim_rgb.1, dim_rgb.2),
         }
     }
 }
@@ -300,16 +293,13 @@ mod tests {
     #[test]
     fn palette_fixed_all_default() {
         let p = Palette::fixed();
-        assert_eq!(p.fg, CellColor::Default, "fixed fg must be Default");
         assert_eq!(p.bg, CellColor::Default, "fixed bg must be Default");
         assert_eq!(p.border, CellColor::Default, "fixed border must be Default");
-        assert_eq!(p.dim, CellColor::Default, "fixed dim must be Default");
     }
 
     #[test]
-    fn palette_from_terminal_uses_queried_fg_bg() {
+    fn palette_from_terminal_uses_queried_bg() {
         let p = Palette::from_terminal((200, 200, 200), (20, 20, 20));
-        assert_eq!(p.fg, CellColor::Rgb(200, 200, 200));
         assert_eq!(p.bg, CellColor::Rgb(20, 20, 20));
     }
 
@@ -329,18 +319,6 @@ mod tests {
             p.border,
             CellColor::Rgb(80, 80, 80),
             "border blend: 40% of 200 toward 0 = 80"
-        );
-    }
-
-    #[test]
-    fn palette_from_terminal_dim_blend_math() {
-        // dim = blend(fg, bg, 25%), fg=(200,200,200), bg=(0,0,0)
-        // ch = 200 * 25 / 100 + 0 * 75 / 100 = 50
-        let p = Palette::from_terminal((200, 200, 200), (0, 0, 0));
-        assert_eq!(
-            p.dim,
-            CellColor::Rgb(50, 50, 50),
-            "dim blend: 25% of 200 toward 0 = 50"
         );
     }
 }
