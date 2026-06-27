@@ -155,8 +155,24 @@ def _agents_home() -> Path:
     return Path(os.path.expanduser("~")) / ".fno" / "agents"
 
 
+# A daemon worker short_id is used as a path segment for its socket, so it must
+# be a safe token (no separators / `..`) -- a malformed registry row must not
+# path-traverse via _worker_sock. Mirrors the daemon's short_id shape.
+_SHORT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
 def _worker_sock(short_id: str) -> Path:
     return _agents_home() / short_id / "worker.sock"
+
+
+def interactive_claim_holder(short_id: str) -> str:
+    """The ``session:<uuid>`` claim holder the daemon writes for an interactive
+    PTY-hosted claude (E1): ``pty:<short_id>``. Mirrors the Rust
+    ``interactive_claim_holder`` (crates/fno-agents/src/daemon.rs) EXACTLY -- the
+    relay routes a hop only when the session claim is held under this string, i.e.
+    by the daemon's interactive lane for that worker (not the ``stream:`` lane, not
+    an external writer)."""
+    return f"pty:{short_id}"
 
 
 def resolve_worker_short_id(session_id: str) -> Optional[str]:
@@ -184,10 +200,16 @@ def resolve_worker_short_id(session_id: str) -> Optional[str]:
             continue
         if e.get("claude_session_uuid") != session_id:
             continue
+        if e.get("provider") not in (None, "claude"):
+            continue  # a claude_session_uuid on a non-claude row is malformed
         if e.get("status") not in (None, "live"):
             continue  # a dead worker holds no live PTY (LD#3: liveness authoritative)
+        # Only the interactive PTY lane is a worker.submit target ("where present":
+        # an exec/other row that happens to match is not routable).
+        if e.get("host_mode") not in (None, "interactive"):
+            continue
         short_id = e.get("short_id")
-        if short_id:
+        if isinstance(short_id, str) and _SHORT_ID_RE.match(short_id):
             return short_id
     return None
 
@@ -207,6 +229,8 @@ def _worker_rpc(
     ``result`` dict, or None on any transport/error response (socket absent ->
     worker dead/gone, which the caller treats as a deliver failure)."""
     payload = json.dumps({"id": 1, "method": method, "params": params}).encode("utf-8")
+    if len(payload) > 16 * 1024 * 1024:
+        return None  # mirror the inbound MAX_FRAME_BYTES cap (protocol.rs); never send an oversized frame
     frame = struct.pack("<I", len(payload)) + payload
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -268,6 +292,7 @@ def deliver_session(
     settle_ms: int = DEFAULT_SETTLE_MS,
     timeout: float = DEFAULT_HOP_TIMEOUT_SEC,
     config_dir: Optional[str] = None,
+    short_id: Optional[str] = None,
 ) -> str:
     """Inject ``framed`` into the daemon worker hosting ``session_id`` and capture
     the peer's next sentinel reply from the transcript.
@@ -290,10 +315,13 @@ def deliver_session(
     below; do not route the relay to a worker you did not spawn relay-targeted.
 
     Raises RuntimeError when no live daemon worker hosts the session (resolution
-    miss or the first submit fails -- the worker is dead), and TimeoutError when a
-    live worker took the turn but produced no reply within ``timeout`` (including a
-    worker that was not relay-spawned, per the contract above)."""
-    short_id = resolve_worker_short_id(session_id)
+    miss, the first submit fails, or the worker dies before the re-inject -- the
+    worker is dead), and TimeoutError when a live worker took the turn but produced
+    no reply within ``timeout`` (including a worker that was not relay-spawned, per
+    the contract above). ``short_id`` may be passed by the caller (e.g. the routing
+    vehicle that already resolved + lane-verified it) to skip re-resolution."""
+    if short_id is None:
+        short_id = resolve_worker_short_id(session_id)
     if short_id is None:
         raise RuntimeError(f"relay_deliver_failed: no live daemon worker for session {session_id}")
     sock = _worker_sock(short_id)
@@ -310,6 +338,12 @@ def deliver_session(
         if len(tx) > base_tx:
             return tx[-1]
         if not retried and time.monotonic() > deadline - timeout * 0.6:
-            submit_via_worker(sock, framed, settle_ms=settle_ms)  # best-effort re-inject
+            # The first submit landed (the worker was live), so a FAILED re-inject
+            # means the worker died mid-turn -- surface that as a hard failure now
+            # rather than waiting out the full timeout.
+            if not submit_via_worker(sock, framed, settle_ms=settle_ms):
+                raise RuntimeError(
+                    f"relay_deliver_failed: worker {short_id} died before reply for session {session_id}"
+                )
             retried = True
     raise TimeoutError(f"no reply from session {session_id} within {timeout:.0f}s")

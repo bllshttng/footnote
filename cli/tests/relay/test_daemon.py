@@ -255,32 +255,63 @@ def _resolution(sid):
     return Resolution(session_id=sid, provider="claude", inject_handle=f"pty:{sid}")
 
 
-def test_daemon_deliver_routes_when_session_daemon_held(tmp_path, monkeypatch):
-    """Finding session:X held by the daemon is the signal to route THROUGH the
-    held handle (worker.submit), never spawn a second --session-id writer."""
+def test_daemon_deliver_routes_when_session_held_by_interactive_lane(tmp_path, monkeypatch):
+    """Finding session:X held by the daemon's INTERACTIVE lane (holder
+    ``pty:<short_id>``) is the signal to route THROUGH the held handle
+    (worker.submit), never spawn a second --session-id writer."""
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     from fno.claims.core import acquire_claim
     from fno.relay import roundtrip as rt
-    acquire_claim("session:sidA", "relay-daemon:THE-DAEMON")  # the daemon holds it (E1)
+    monkeypatch.setattr(rt, "resolve_worker_short_id", lambda sid: "wkB")
+    acquire_claim("session:sidA", "pty:wkB")  # the daemon interactive lane holds it (E1)
 
     seen = {}
     monkeypatch.setattr(
         rt, "deliver_session",
-        lambda sid, framed, **kw: seen.update(sid=sid, framed=framed) or "the reply",
+        lambda sid, framed, **kw: seen.update(sid=sid, framed=framed, short_id=kw.get("short_id")) or "the reply",
     )
     deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
     out = deliver(_resolution("sidA"), "framed text")
     assert out == "the reply"
-    assert seen == {"sid": "sidA", "framed": "framed text"}
+    assert seen == {"sid": "sidA", "framed": "framed text", "short_id": "wkB"}
+
+
+def test_daemon_deliver_refuses_when_held_by_non_interactive_lane(tmp_path, monkeypatch):
+    """A session: claim held by the stream lane (or any non-``pty:<short_id>``
+    holder) is NOT a worker.submit target -- routing must refuse rather than inject
+    into a session the daemon does not PTY-host (AC-E4-3 single-writer guard)."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    from fno.claims.core import acquire_claim
+    from fno.relay import roundtrip as rt
+    monkeypatch.setattr(rt, "resolve_worker_short_id", lambda sid: "wkB")
+    monkeypatch.setattr(rt, "deliver_session",
+                        lambda *a, **k: pytest.fail("must not route to a non-interactive holder"))
+    acquire_claim("session:sidS", "stream:wkB")  # the stream lane, not the PTY interactive lane
+
+    deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
+    with pytest.raises(RuntimeError, match="not the daemon interactive lane"):
+        deliver(_resolution("sidS"), "framed")
+
+
+def test_daemon_deliver_refuses_when_no_worker(tmp_path, monkeypatch):
+    """No live daemon worker row for the session -> nothing to route to."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    from fno.relay import roundtrip as rt
+    monkeypatch.setattr(rt, "resolve_worker_short_id", lambda sid: None)
+    deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
+    with pytest.raises(RuntimeError, match="no live daemon worker"):
+        deliver(_resolution("sidNone"), "framed")
 
 
 def test_daemon_deliver_refuses_when_session_free_and_holds_no_claim(tmp_path, monkeypatch):
-    """A FREE claim means no daemon host -> no handle to route through. The relay
-    must refuse rather than spawn a second writer, and must NOT end up holding the
-    session: claim itself (it releases the probe)."""
+    """A FREE claim (worker row exists, but nothing holds session:X) means no
+    daemon host -> no handle. The relay must refuse rather than spawn a second
+    writer, and must NOT end up holding the session: claim itself (releases the
+    probe)."""
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     from fno.claims.core import claim_status
     from fno.relay import roundtrip as rt
+    monkeypatch.setattr(rt, "resolve_worker_short_id", lambda sid: "wkB")
     monkeypatch.setattr(rt, "deliver_session",
                         lambda *a, **k: pytest.fail("must not inject when session is free"))
 

@@ -171,6 +171,28 @@ def test_resolve_worker_accepts_missing_status(tmp_path, monkeypatch):
     assert rt_mod.resolve_worker_short_id("the-uuid") == "wkB"
 
 
+def test_resolve_worker_skips_non_claude_and_non_interactive(tmp_path, monkeypatch):
+    # A claude_session_uuid on a non-claude row, or an exec-mode row, is malformed
+    # / not a worker.submit target -- skip it (peer review P2).
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    _write_registry(tmp_path, [
+        {"name": "a", "short_id": "wkA", "claude_session_uuid": "u", "provider": "codex"},
+        {"name": "b", "short_id": "wkB", "claude_session_uuid": "u", "host_mode": "exec"},
+        {"name": "c", "short_id": "wkC", "claude_session_uuid": "u", "provider": "claude", "host_mode": "interactive"},
+    ])
+    assert rt_mod.resolve_worker_short_id("u") == "wkC"
+
+
+def test_resolve_worker_rejects_unsafe_short_id(tmp_path, monkeypatch):
+    # short_id is a path segment for the worker socket; a traversal value must not
+    # be returned (peer review P2 -- path safety).
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    _write_registry(tmp_path, [
+        {"name": "evil", "short_id": "../../etc", "claude_session_uuid": "u", "provider": "claude"},
+    ])
+    assert rt_mod.resolve_worker_short_id("u") is None
+
+
 # ---------------------------------------------------------------------------
 # The worker.submit RPC client.
 # ---------------------------------------------------------------------------
@@ -264,6 +286,43 @@ def test_deliver_session_bounded_reinject(monkeypatch):
     out = rt_mod.deliver_session("sid", "framed", timeout=10)
     assert out == "late reply"
     assert submits["n"] == 2, "expected exactly one bounded re-inject (initial + retry)"
+
+
+def test_deliver_session_reinject_failure_raises(monkeypatch):
+    # The first submit landed (worker was live); a FAILED re-inject means the worker
+    # died mid-turn -> surface RuntimeError now, not a full-timeout wait (peer P2).
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "resolve_worker_short_id", lambda sid: "wkB")
+    submits = {"n": 0}
+
+    def fake_submit(*a, **k):
+        submits["n"] += 1
+        return submits["n"] == 1  # first ok, re-inject fails (worker died)
+
+    monkeypatch.setattr(rt_mod, "submit_via_worker", fake_submit)
+    monkeypatch.setattr(rt_mod, "_transcript_replies", lambda sid, cd=None: [])  # never replies
+    with pytest.raises(RuntimeError, match="died before reply"):
+        rt_mod.deliver_session("sid", "framed", timeout=10)
+
+
+def test_deliver_session_accepts_caller_short_id(monkeypatch):
+    # The routing vehicle resolves + lane-verifies the worker, then passes short_id
+    # so deliver_session skips re-resolution (binds to the verified worker).
+    monkeypatch.setattr(rt_mod, "resolve_worker_short_id",
+                        lambda sid: pytest.fail("must not re-resolve when short_id is given"))
+    _fake_clock(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(rt_mod, "submit_via_worker",
+                        lambda sock, *a, **k: seen.update(sock=str(sock)) or True)
+    n = {"i": 0}
+
+    def fake_tx(sid, cd=None):
+        n["i"] += 1
+        return ["ok"] if n["i"] >= 2 else []  # call 1 = baseline (empty), reply next poll
+
+    monkeypatch.setattr(rt_mod, "_transcript_replies", fake_tx)
+    assert rt_mod.deliver_session("sid", "framed", short_id="wkB", timeout=5) == "ok"
+    assert seen["sock"].endswith("/wkB/worker.sock")
 
 
 def test_deliver_session_times_out_with_live_worker(monkeypatch):

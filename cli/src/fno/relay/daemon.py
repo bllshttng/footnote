@@ -313,7 +313,9 @@ def daemon_deliver(
     guard and the resolution/capture primitives are unit-tested.
     """
     from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim  # noqa: PLC0415
-    from fno.relay.roundtrip import deliver_session  # noqa: PLC0415
+    from fno.relay.roundtrip import (  # noqa: PLC0415
+        deliver_session, interactive_claim_holder, resolve_worker_short_id,
+    )
 
     holder = holder or f"relay-daemon:{_pid()}"
 
@@ -321,12 +323,29 @@ def daemon_deliver(
         sid = res.session_id
         if not sid:
             raise RuntimeError("relay_deliver_failed: resolution carries no session_id")
+        # Routing needs BOTH a live daemon worker row AND the session: claim held by
+        # THAT worker's interactive lane. Resolve the worker first so the lane check
+        # below can bind the claim holder to it.
+        short_id = resolve_worker_short_id(sid)
+        if short_id is None:
+            raise RuntimeError(f"relay_deliver_failed: no live daemon worker for session {sid}")
         key = f"session:{sid}"
         try:
             acquire_claim(key, holder, reason="relay routing probe")
-        except ClaimHeldByOther:
-            # Daemon-held: route through the held handle (no second writer).
-            return deliver_session(sid, framed, settle_ms=settle_ms, timeout=timeout)
+        except ClaimHeldByOther as exc:
+            # Held by another -> route ONLY if that holder is the daemon's
+            # interactive PTY lane for THIS worker (``pty:<short_id>``, the
+            # lane-tagged holder the daemon writes for E1). A ``stream:<id>`` lane or
+            # any other external writer holding session:<uuid> is NOT a worker.submit
+            # target; refuse rather than inject into a session the daemon does not
+            # PTY-host (single-writer guard, AC-E4-3).
+            expected = interactive_claim_holder(short_id)
+            if exc.holder != expected:
+                raise RuntimeError(
+                    f"relay_deliver_failed: session:{sid} held by {exc.holder!r}, not the daemon "
+                    f"interactive lane ({expected!r}); refusing to route"
+                )
+            return deliver_session(sid, framed, settle_ms=settle_ms, timeout=timeout, short_id=short_id)
         # Free (or stale-reclaimed): no daemon host -> no handle. Drop the probe
         # claim so the relay is never a second holder, then refuse.
         release_claim(key, holder)
