@@ -14,6 +14,7 @@ from fno.graph.render import (
     _rank_band,
     render_graph_md,
     _graph_sort_key,
+    in_progress_epic_ids,
 )
 
 
@@ -141,6 +142,46 @@ def test_column_idea_rides_priority():
 def test_ac1_hp_column_roadmap_excluded():
     e = _entry("ab-66666666", type="roadmap")
     assert _kanban_column(e) is None
+
+
+# -- in-progress epic -> Now (x-33b2) --
+
+
+def test_in_progress_epic_ids_detects_done_or_claimed_child():
+    entries = [
+        _entry("ab-epic0001"),                                   # in-progress (claimed child)
+        _entry("ab-kid00001", _status="claimed", parent="ab-epic0001"),
+        _entry("ab-epic0002"),                                   # in-progress (done child)
+        _entry("ab-kid00002", completed_at="2026-01-01T00:00:00Z", parent="ab-epic0002"),
+        _entry("ab-epic0003"),                                   # NOT in progress (ready child)
+        _entry("ab-kid00003", parent="ab-epic0003"),
+        _entry("ab-loose001"),                                   # not a parent at all
+    ]
+    ids = in_progress_epic_ids(entries)
+    assert ids == frozenset({"ab-epic0001", "ab-epic0002"})
+
+
+def test_column_in_progress_epic_goes_now():
+    """An in-progress epic (passed in the set) lands in Now even at p3, derived
+    from its children - its own _status is left untouched (still `ready`)."""
+    epic = _entry("ab-epic0001", priority="p3")  # would be Later by priority
+    assert _kanban_column(epic, frozenset({"ab-epic0001"})) == "Now"
+    # _status was never mutated to a session-less "claimed".
+    assert epic["_status"] == "ready"
+
+
+def test_column_epic_not_in_progress_rides_priority():
+    """A parent with no started children is NOT forced to Now - it rides its
+    priority column like any other node (the promotion is in-progress only)."""
+    epic = _entry("ab-epic0003", priority="p2")
+    assert _kanban_column(epic, frozenset()) == "Next"
+
+
+def test_column_done_epic_stays_done_even_if_in_progress_set():
+    """A completed epic is Done; the in-progress-epic override never resurrects a
+    done container into Now (done precedence wins)."""
+    epic = _entry("ab-epic0004", completed_at="2026-01-01T00:00:00Z")
+    assert _kanban_column(epic, frozenset({"ab-epic0004"})) == "Done"
 
 
 # -- _kanban_card --

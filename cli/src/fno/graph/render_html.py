@@ -28,6 +28,7 @@ from fno.graph.render import (
     _kanban_column,
     _lane_sort_key,
     _project_key,
+    in_progress_epic_ids,
 )
 
 # Shared single source of truth with the markdown renderer (render.KANBAN_COLUMNS)
@@ -206,16 +207,17 @@ def _project_color(name: str | None) -> str:
     return f"hsl({hue}, 65%, 55%)"
 
 
-def _column_for(entry: dict) -> str | None:
+def _column_for(entry: dict, epics: frozenset[str] = frozenset()) -> str | None:
     """Stable column name for an entry; None to exclude (roadmap type)."""
-    return _kanban_column(entry)
+    return _kanban_column(entry, epics)
 
 
 def _bucket(entries: list[dict]) -> dict[str, list[dict]]:
     """Partition entries into the kanban columns, sorted per column."""
+    epics = in_progress_epic_ids(entries)
     cols: dict[str, list[dict]] = {c: [] for c in COLUMNS}
     for e in entries:
-        col = _column_for(e)
+        col = _column_for(e, epics)
         if col is None:
             continue
         cols[col].append(e)

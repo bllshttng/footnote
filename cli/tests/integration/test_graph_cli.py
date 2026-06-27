@@ -1400,6 +1400,126 @@ def test_graph_ready_orders_epic_children_before_loose(tmp_graph):
     assert ids.index("ab-child") < ids.index("ab-loose")
 
 
+def test_graph_ready_excludes_epics(tmp_graph):
+    """x-33b2 (codex P2 on PR #69): `fno backlog ready` - which the
+    `dispatch-node.sh --all-ready` bulk path enumerates - must NOT list a
+    container, or that path would launch a /target worker against the box.
+    Shares the epic filter with `next` so the two surfaces agree."""
+    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries()}) + "\n")
+    r = _invoke("graph", "ready", "--all")
+    ids = [e["id"] for e in json.loads(r.stdout)]
+    assert "ab-epic" not in ids        # the container is excluded
+    assert "ab-child" in ids           # its buildable leaf is listed
+    assert "ab-loose" in ids
+
+
+def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
+    """x-33b2: an IN-PROGRESS epic (one child done, one still pending) is the
+    top-ranked ready node but must NOT be selected - `next` falls through to a
+    buildable leaf instead of repeatedly returning the container ('it keeps
+    assuming this one is next')."""
+    entries = [
+        # Epic: ready, p0 -> would rank ahead of everything if selectable.
+        {"id": "ab-epic", "title": "Epic", "_status": "ready", "priority": "p0",
+         "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": "x.md"},
+        # One child done, one still pending -> the epic is IN PROGRESS.
+        {"id": "ab-cdone", "title": "Done child", "_status": "done", "priority": "p2",
+         "created_at": "2026-01-02", "project": "p", "parent": "ab-epic",
+         "completed_at": "2026-01-03", "blocked_by": [], "plan_path": "x.md"},
+        {"id": "ab-cpend", "title": "Pending child", "_status": "ready", "priority": "p3",
+         "created_at": "2026-01-04", "project": "p", "parent": "ab-epic",
+         "blocked_by": [], "plan_path": "x.md"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    r = _invoke("graph", "next", "--all")
+    out = json.loads(r.stdout)
+    assert out is not None
+    assert out["id"] != "ab-epic"      # the in-progress container is skipped
+    assert out["id"] == "ab-cpend"     # its buildable pending leaf is picked
+
+
+def _by_id(tmp_graph):
+    return {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+
+
+def test_done_cascade_closes_all_done_parent_epic(tmp_graph):
+    """x-33b2: closing the LAST open child of an epic auto-closes the epic (it is
+    a container with no PR of its own; it is done when its children are). Replaces
+    the old 'walker closes the epic via next' path."""
+    entries = [
+        {"id": "ab-epic0000", "title": "Epic", "_status": "ready", "project": "p",
+         "blocked_by": [], "plan_path": "x.md"},
+        {"id": "ab-cdone001", "title": "Done child", "_status": "done", "project": "p",
+         "parent": "ab-epic0000", "completed_at": "2026-01-01T00:00:00Z", "blocked_by": []},
+        # Last open child, no PR refs -> `done` closes it with no gh cross-check.
+        {"id": "ab-clast002", "title": "Last child", "_status": "ready", "project": "p",
+         "parent": "ab-epic0000", "blocked_by": []},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    r = _invoke("graph", "done", "ab-clast002")
+    assert r.exit_code == 0, r.stdout + r.stderr
+    nodes = _by_id(tmp_graph)
+    assert nodes["ab-clast002"]["completed_at"]               # child closed
+    assert nodes["ab-epic0000"]["completed_at"]                # epic auto-closed
+    assert "auto-closed" in (nodes["ab-epic0000"].get("completion_note") or "")
+
+
+def test_done_does_not_close_epic_with_a_pending_child(tmp_graph):
+    """The cascade only fires when ALL children are done: an epic with another
+    still-open child stays open."""
+    entries = [
+        {"id": "ab-epic0000", "title": "Epic", "_status": "ready", "project": "p",
+         "blocked_by": [], "plan_path": "x.md"},
+        {"id": "ab-cdone001", "title": "Child A", "_status": "ready", "project": "p",
+         "parent": "ab-epic0000", "blocked_by": []},
+        {"id": "ab-cstill02", "title": "Child B (stays open)", "_status": "ready",
+         "project": "p", "parent": "ab-epic0000", "blocked_by": []},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    r = _invoke("graph", "done", "ab-cdone001")
+    assert r.exit_code == 0, r.stdout + r.stderr
+    nodes = _by_id(tmp_graph)
+    assert nodes["ab-cdone001"]["completed_at"]
+    assert not nodes["ab-epic0000"].get("completed_at")        # epic stays open
+
+
+def test_done_cascade_closes_grandparent_chain(tmp_graph):
+    """Cascade walks up multi-level chains: leaf -> sub-epic -> epic all close
+    when the leaf (the only open node in the chain) lands."""
+    entries = [
+        {"id": "ab-epic0000", "title": "Epic", "_status": "ready", "project": "p",
+         "blocked_by": [], "plan_path": "x.md"},
+        {"id": "ab-sub00001", "title": "Sub-epic", "_status": "ready", "project": "p",
+         "parent": "ab-epic0000", "blocked_by": []},
+        {"id": "ab-leaf0002", "title": "Leaf", "_status": "ready", "project": "p",
+         "parent": "ab-sub00001", "blocked_by": []},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    r = _invoke("graph", "done", "ab-leaf0002")
+    assert r.exit_code == 0, r.stdout + r.stderr
+    nodes = _by_id(tmp_graph)
+    assert nodes["ab-leaf0002"]["completed_at"]
+    assert nodes["ab-sub00001"]["completed_at"]               # sub-epic closed
+    assert nodes["ab-epic0000"]["completed_at"]                # grandparent closed
+
+
+def test_done_cascade_closes_cross_project_parent(tmp_graph):
+    """The cascade follows the parent EDGE, not a project filter: a parent in a
+    DIFFERENT project from its child closes on the same close - the cross-project
+    closure gap codex flagged (advance() is project-scoped and cannot)."""
+    entries = [
+        {"id": "ab-epic0000", "title": "Epic", "_status": "ready", "project": "web",
+         "blocked_by": [], "plan_path": "x.md"},
+        {"id": "ab-leaf0001", "title": "Leaf", "_status": "ready", "project": "etl",
+         "parent": "ab-epic0000", "blocked_by": []},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    r = _invoke("graph", "done", "ab-leaf0001")
+    assert r.exit_code == 0, r.stdout + r.stderr
+    nodes = _by_id(tmp_graph)
+    assert nodes["ab-epic0000"]["completed_at"]                # closed despite diff project
+
+
 # ---------------------------------------------------------------------------
 # _resolved_cwd derivation in cmd_get
 # ---------------------------------------------------------------------------

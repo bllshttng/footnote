@@ -493,7 +493,10 @@ def test_next_node_skips_get_when_already_resolved(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-_DEP = {"id": "ab-3333bbbb", "project": "web", "slug": "frontend-bit", "cwd": "/raw/web"}
+_DEP = {
+    "id": "ab-3333bbbb", "project": "web", "slug": "frontend-bit", "cwd": "/raw/web",
+    "cross_project": True,  # closed node is project "etl"; _direct_dependents tags this
+}
 
 
 def _map_project(monkeypatch, mapping):
@@ -550,11 +553,13 @@ def test_dependents_unmapped_project_refused(iso, monkeypatch):
 
 
 def test_dependents_no_project_skipped(iso, monkeypatch):
-    dep = {"id": "ab-3333bbbb", "project": None, "slug": "x"}
+    dep = {"id": "ab-3333bbbb", "project": None, "slug": "x", "cross_project": True}
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [dep])
     monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
 
-    results = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
+    )
     assert results[0].decision == "skipped" and results[0].reason == "no-project"
 
 
@@ -581,7 +586,9 @@ def test_dependents_already_claimed_skips(iso, monkeypatch):
     _map_project(monkeypatch, {"web": "/mapped/web"})
     monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
 
-    results = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
+    )
     assert results[0].decision == "skipped" and results[0].reason == "already-claimed"
 
 
@@ -593,8 +600,12 @@ def test_dependents_idempotent_double_call(iso, monkeypatch):
     calls = []
     monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None: calls.append(nid) or "sid")
 
-    first = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
-    second = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
+    first = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
+    )
+    second = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
+    )
 
     assert first[0].decision == "dispatched"
     assert second[0].decision == "skipped" and second[0].reason == "already-claimed"
@@ -610,11 +621,179 @@ def test_dependents_spawn_failure_releases_reservation(iso, monkeypatch):
 
     monkeypatch.setattr(adv, "_spawn_worker", boom)
 
-    results = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
+    )
     assert results[0].decision == "failed"
     key = f"dispatch:{_DEP['id']}"
     assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
     assert _events(iso)[0]["type"] == "advance_failed"
+
+
+# ---------------------------------------------------------------------------
+# RC1 (x-33b2): same-project dependent dispatch + closed_project provenance
+# ---------------------------------------------------------------------------
+
+_SAME_DEP = {
+    "id": "ab-4444cccc", "project": "fno", "slug": "e4-3-leaf", "cwd": "/repo/fno",
+    "cross_project": False,  # _direct_dependents tags a same-project dep this way
+}
+
+
+def test_dependents_same_project_dispatch(iso, monkeypatch):
+    """AC1-HP: a now-unblocked SAME-project dependent is spawned --cwd its OWN
+    project root, resolved work-map-first like the `next` path (codex P2), with
+    one advance_dispatched event whose cross_project is False."""
+    monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_SAME_DEP])
+    # Work-map root is the authority; it resolves to the node's OWN project root.
+    _map_project(monkeypatch, {"fno": "/mapped/fno"})
+    captured = {}
+
+    def fake_spawn(node_id, node_cwd, node_slug=None):
+        captured["args"] = (node_id, node_cwd, node_slug)
+        return "samesid1"
+
+    monkeypatch.setattr(adv, "_spawn_worker", fake_spawn)
+
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso
+    )
+
+    assert len(results) == 1 and results[0].decision == "dispatched"
+    # --cwd is the work-map-resolved OWN project root (not a foreign root).
+    assert captured["args"] == ("ab-4444cccc", "/mapped/fno", "e4-3-leaf")
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "advance_dispatched"
+    assert evs[0]["data"]["node_id"] == "ab-4444cccc"
+    assert evs[0]["data"]["cross_project"] is False
+
+
+def test_dependents_same_project_falls_back_to_recorded_cwd(iso, monkeypatch):
+    """codex P2: when the same-project node is unmapped in the work map, the route
+    falls back to the node's recorded cwd (never a foreign root)."""
+    monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_SAME_DEP])
+    _map_project(monkeypatch, {})  # "fno" unmapped -> fall back to recorded cwd
+    captured = {}
+    monkeypatch.setattr(
+        adv, "_spawn_worker",
+        lambda nid, cwd, slug=None: captured.update(cwd=cwd) or "sid",
+    )
+
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso
+    )
+    assert results[0].decision == "dispatched"
+    assert captured["cwd"] == "/repo/fno"  # _SAME_DEP's recorded cwd
+
+
+def test_dependents_same_project_no_cwd_skips(iso, monkeypatch):
+    """A same-project dependent with neither a mapped project nor a recorded cwd
+    is fail-closed (never guessed to canonical main), surfaced as skipped{no-cwd}."""
+    dep = {"id": "ab-4444cccc", "project": "fno", "slug": "x", "cross_project": False}
+    monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [dep])
+    _map_project(monkeypatch, {})  # unmapped AND dep has no cwd
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso
+    )
+    assert results[0].decision == "skipped" and results[0].reason == "no-cwd"
+
+
+def test_dependents_fail_closed_on_unknown_closed_project(iso, monkeypatch):
+    """AC1-ERR / Failure Modes: closed_project=None means we cannot classify a
+    dependent, so we dispatch NOTHING (prefer that over misrouting a same-project
+    node cross-project onto a protected branch). One skip event, no graph read."""
+    monkeypatch.setattr(
+        adv, "_direct_dependents",
+        lambda cid, cproj: pytest.fail("must not read graph when closed_project is None"),
+    )
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+
+    # None (the normal last-resort) AND an empty-string project both fail closed:
+    # an empty string would otherwise tag every dependent cross_project=True and
+    # misroute it (gemini: `not closed_project` over `is None`).
+    for bad in (None, ""):
+        kwargs = {"closed_node_id": "ab-1111aaaa", "events_path": iso}
+        if bad is not None:
+            kwargs["closed_project"] = bad
+        results = adv.advance_dependents(**kwargs)
+        assert len(results) == 1
+        assert results[0].decision == "skipped"
+        assert results[0].reason == "closed-project-unknown"
+
+
+def test_dependents_dispatch_independent_of_next_selection(iso, monkeypatch):
+    """AC1-EDGE: the dependent path never consults `fno backlog next`, so an
+    already-claimed/epic global head can never starve a genuinely-unblocked
+    same-project dependent."""
+    monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_SAME_DEP])
+    monkeypatch.setattr(
+        adv, "_next_node",
+        lambda project: pytest.fail("advance_dependents must not select via `next`"),
+    )
+    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None: "edgesid")
+
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso
+    )
+    assert results[0].decision == "dispatched" and results[0].node_id == "ab-4444cccc"
+
+
+def test_direct_dependents_tags_same_and_cross_project(monkeypatch):
+    """RC1 unit: _direct_dependents returns BOTH same- and cross-project ready
+    dependents, each tagged with cross_project (no longer excludes same-project)."""
+    import fno.graph.store as store
+    import fno.paths as paths
+
+    entries = [
+        {"id": "ab-same", "project": "fno", "blocked_by": ["ab-A"], "_status": "ready",
+         "slug": "same", "cwd": "/repo/fno"},
+        {"id": "ab-cross", "project": "web", "blocked_by": ["ab-A"], "_status": "ready",
+         "slug": "cross", "cwd": "/repo/web"},
+        {"id": "ab-blocked", "project": "fno", "blocked_by": ["ab-A"], "_status": "blocked"},
+        {"id": "ab-other", "project": "fno", "blocked_by": ["ab-Z"], "_status": "ready"},
+    ]
+    monkeypatch.setattr(store, "read_graph", lambda p: entries)
+    monkeypatch.setattr(paths, "graph_json", lambda: Path("/unused/graph.json"))
+
+    deps = adv._direct_dependents("ab-A", "fno")
+    by_id = {d["id"]: d for d in deps}
+    assert set(by_id) == {"ab-same", "ab-cross"}  # blocked + other-blocker excluded
+    assert by_id["ab-same"]["cross_project"] is False
+    assert by_id["ab-cross"]["cross_project"] is True
+
+
+def test_cmd_advance_resolves_closed_project_from_graph(monkeypatch):
+    """AC1-ERR (integration): `fno backlog advance --closed A` with NO --project
+    resolves closed_project from A's graph record, not from the omitted flag, so
+    advance_dependents gets the closed node's real project."""
+    import fno.backlog.advance as advmod
+    import fno.backlog.reconcile_dispatch as recmod
+    import fno.graph.cli as gcli
+    import fno.graph.store as store
+
+    monkeypatch.setattr(
+        advmod, "advance",
+        lambda **k: advmod.AdvanceResult("skipped", "advance_skipped", reason="disabled"),
+    )
+    captured = {}
+    monkeypatch.setattr(
+        advmod, "advance_dependents",
+        lambda **k: captured.update(k) or [],
+    )
+    monkeypatch.setattr(recmod, "dispatch_reconcile_for_blocker", lambda **k: None)
+    monkeypatch.setattr(
+        store, "read_graph",
+        lambda p: [{"id": "ab-A", "project": "fno"}],
+    )
+    monkeypatch.setattr(gcli, "_graph_path", lambda: Path("/unused/graph.json"))
+
+    result = runner.invoke(app, ["backlog", "advance", "--closed", "ab-A"])
+    assert result.exit_code == 0, result.output
+    # closed_project came from A's graph record ("fno"), NOT the omitted --project.
+    assert captured.get("closed_project") == "fno"
+    assert captured.get("closed_node_id") == "ab-A"
 
 
 def test_dependents_dependents_error_skips_never_guesses(iso, monkeypatch):
@@ -624,29 +803,33 @@ def test_dependents_dependents_error_skips_never_guesses(iso, monkeypatch):
     monkeypatch.setattr(adv, "_direct_dependents", boom)
     monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
 
-    results = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
+    )
     assert results[0].decision == "skipped" and results[0].reason == "dependents-error"
 
 
 def test_dependents_zero_dependents_is_clean_noop(iso, monkeypatch):
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [])
-    results = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
+    )
     assert results == []
     assert _events(iso) == []
 
 
 # ---------------------------------------------------------------------------
-# _direct_dependents: the edge-following filter (cross-project + ready only)
+# _direct_dependents: the edge-following filter (ready dependents, both projects)
 # ---------------------------------------------------------------------------
 
 
-def test_direct_dependents_filters_to_ready_cross_project(monkeypatch):
+def test_direct_dependents_filters_to_ready(monkeypatch):
     entries = [
         {"id": "A", "project": "etl", "_status": "done", "blocked_by": []},
-        # ready cross-project direct dependent -> INCLUDED
+        # ready cross-project direct dependent -> INCLUDED (cross_project True)
         {"id": "B", "project": "web", "_status": "ready", "blocked_by": ["A"],
          "slug": "bee", "cwd": "/w"},
-        # same-project dependent -> EXCLUDED (advance()'s `next` owns it)
+        # ready same-project dependent -> NOW INCLUDED (RC1; cross_project False)
         {"id": "C", "project": "etl", "_status": "ready", "blocked_by": ["A"]},
         # cross-project but still blocked by another open node -> EXCLUDED
         {"id": "D", "project": "web", "_status": "blocked", "blocked_by": ["A", "X"]},
@@ -657,8 +840,11 @@ def test_direct_dependents_filters_to_ready_cross_project(monkeypatch):
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
-    assert [d["id"] for d in deps] == ["B"]
-    assert deps[0]["project"] == "web" and deps[0]["slug"] == "bee"
+    by_id = {d["id"]: d for d in deps}
+    assert set(by_id) == {"B", "C"}  # ready dependents in BOTH projects
+    assert by_id["B"]["project"] == "web" and by_id["B"]["slug"] == "bee"
+    assert by_id["B"]["cross_project"] is True
+    assert by_id["C"]["cross_project"] is False
 
 
 def test_direct_dependents_treats_missing_closed_project_as_cross(monkeypatch):
@@ -698,6 +884,22 @@ def test_direct_dependents_skips_non_dict_and_idless(monkeypatch):
     assert [d["id"] for d in deps] == ["B"]
 
 
+def test_direct_dependents_skips_epic_dependent(monkeypatch):
+    """x-33b2: a now-unblocked dependent that is itself a container (some node's
+    `parent`) is NOT dispatched on merge - build its leaves, not the box. Mirrors
+    cmd_next's epic exclusion on the edge-following dependent path."""
+    entries = [
+        # E is a ready dependent of A, but it is also B's parent -> an epic.
+        {"id": "E", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+        {"id": "B", "project": "web", "_status": "ready", "parent": "E"},
+        # L is a ready leaf dependent of A (no children) -> dispatched.
+        {"id": "L", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    deps = adv._direct_dependents("A", "etl")
+    assert [d["id"] for d in deps] == ["L"]  # epic E skipped, leaf L kept
+
+
 def test_dependents_honors_dependent_repo_walker(iso, monkeypatch):
     """codex P2: a live walker in the DEPENDENT's repo suppresses the spawn (the
     walker will claim the node itself; spawning would double-launch there)."""
@@ -706,5 +908,7 @@ def test_dependents_honors_dependent_repo_walker(iso, monkeypatch):
     monkeypatch.setattr(adv, "_walker_live_at", lambda root: root == "/mapped/web")
     monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
 
-    results = adv.advance_dependents(closed_node_id="ab-1111aaaa", events_path=iso)
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
+    )
     assert results[0].decision == "skipped" and results[0].reason == "walker-live"

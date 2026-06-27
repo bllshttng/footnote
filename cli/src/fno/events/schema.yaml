@@ -1784,7 +1784,7 @@ event_types:
     consumers: [operator]
 
   - name: advance_dispatched
-    description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target no-merge worker for the next now-unblocked node after a PR merge. Also emitted by advance_dependents (G1) when it dispatches a now-unblocked CROSS-project blocked_by dependent into its own repo (cross_project=true). Surfaced in the next SessionStart reconcile reminder line."
+    description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target no-merge worker for the next now-unblocked node after a PR merge. Also emitted by advance_dependents when it dispatches a now-unblocked direct blocked_by dependent: cross-project into its own work-map repo (cross_project=true, G1) or same-project into its own project root (cross_project=false, RC1/x-33b2; work-map resolved, recorded cwd as fallback). Surfaced in the next SessionStart reconcile reminder line."
     sources: [backlog]
     data:
       required: [node_id]
@@ -1803,19 +1803,19 @@ event_types:
           description: "The just-merged node whose close triggered this advance (keying for AC1-RACE)."
         cross_project:
           type: boolean
-          description: "True when this dispatch followed a blocked_by edge into a DIFFERENT project (G1 advance_dependents), spawned with --cwd the dependent's own work-map root. Absent/false for the same-project next-node advance."
+          description: "True when this dispatch followed a blocked_by edge into a DIFFERENT project (G1 advance_dependents), spawned with --cwd the dependent's own work-map root. False for a same-project dispatch: either the next-node advance, or a same-project direct dependent spawned with --cwd its own project root (RC1/x-33b2; work-map resolved, recorded cwd as fallback)."
     consumers: [operator]
 
   - name: advance_skipped
-    description: "Emitted by `fno backlog advance` (and advance_dependents, G1) when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error plus the G1 cross-project reasons unmapped-project / no-project / dependents-error. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
+    description: "Emitted by `fno backlog advance` (and advance_dependents) when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error plus the dependent-path reasons unmapped-project / no-project / no-cwd / dependents-error / closed-project-unknown. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
     sources: [backlog]
     data:
       required: [reason]
       properties:
         reason:
           type: string
-          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, dependents-error]
-          description: "Why advance dispatched nothing this run. The last three are G1 (advance_dependents): unmapped-project = the dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; dependents-error = the graph read for direct dependents failed."
+          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown]
+          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/x-33b2); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/x-33b2)."
         node_id:
           type: string
           description: "The candidate next node, when a reason references one (already-claimed)."

@@ -89,6 +89,30 @@ def _has_unmerged_open_pr(e: dict) -> bool:
     return bool(e.get("pr_number"))
 
 
+def _container_ids(entries: list[dict]) -> set[str]:
+    """Ids of nodes that are some other node's ``parent`` - i.e. epics/containers.
+
+    A container is never directly buildable: its work lives in its decomposed
+    children, and it carries no PR of its own. So every work-SELECTION surface
+    drops it from the candidate pool - `next`/`ready`/`--all-ready` build the
+    leaves, never the box (x-33b2). Shared by `next` (_pick_ready) and `ready`
+    (cmd_ready) so the two surfaces cannot drift; advance_dependents applies the
+    same rule on the merge edge-following path.
+
+    No "keep the all-done epic selectable" exception is needed: an epic closes
+    automatically via ``_cascade_close_parents`` on the merge that finishes its
+    last child (uniform across projects), so it is already ``done`` - never a
+    lingering ``ready`` container that selection would have to surface for
+    closure. That replaces the old "walker closes the epic via next" path
+    (loop_megawalk.rs grilled-decision-9), which conflicted with never building a
+    container.
+    """
+    return {
+        e.get("parent") for e in entries
+        if isinstance(e, dict) and isinstance(e.get("parent"), str)
+    }
+
+
 @cli.callback()
 def _graph_callback(
     ctx: typer.Context,
@@ -1299,8 +1323,6 @@ def cmd_update(
                 current = [b for b in current if b not in remove_blockers]
                 node["blocked_by"] = current
 
-        if completed:
-            node["completed_at"] = datetime.now(timezone.utc).isoformat()
         if locked_by is not None:
             session = locked_by if locked_by != "null" else None
             node["session_id"] = session
@@ -1393,6 +1415,15 @@ def cmd_update(
                     )
                     raise typer.Exit(code=1)
                 node["parent"] = target["id"]
+
+        # Completion runs LAST so it sees the FINAL parent edge (codex P2): a
+        # combined `--completed --parent <epic>` must cascade against the new
+        # parent. Use the shared _apply_completion_fields so the close clears
+        # session/claim/defer/queue state in lockstep with done/reconcile, then
+        # cascade-close now-all-done ancestor epics (x-33b2).
+        if completed and not node.get("completed_at"):
+            _apply_completion_fields(node)
+            _cascade_close_parents(entries, node["id"])
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -1515,6 +1546,16 @@ def cmd_next(
             e for e in candidates
             if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
         ]
+        # Containers are never directly buildable (x-33b2): an epic's work lives
+        # in its decomposed children, so `next` must never return it - it
+        # otherwise ranks first among its siblings (make_selection_sort_key) and
+        # is repeatedly re-selected as the head, starving the genuinely-ready leaf
+        # below it. Build the leaves, not the box; the epic closes itself via
+        # _cascade_close_parents when its last child lands. Computed from the FULL
+        # graph so a parent already filtered out of `candidates` still suppresses
+        # correctly. Shared with cmd_ready.
+        container_ids = _container_ids(entries)
+        candidates = [e for e in candidates if e.get("id") not in container_ids]
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.
@@ -1633,6 +1674,15 @@ def cmd_ready(
         e for e in ready
         if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
     ]
+    # Containers are never actionable work (x-33b2 / codex P2 on PR #69): drop
+    # epics so `fno backlog ready` - and the `dispatch-node.sh --all-ready` bulk
+    # path that enumerates it - never presents/launches the box instead of its
+    # leaves. No all-done exception: the epic auto-closes via
+    # _cascade_close_parents when its last child lands, so it is already done
+    # rather than a lingering ready container. Shares _container_ids with `next`'s
+    # _pick_ready so the surfaces cannot drift.
+    container_ids = _container_ids(entries)
+    ready = [e for e in ready if e.get("id") not in container_ids]
     # Epics-first, then flat priority (C3, Locked Decision 7); key built
     # from the full graph so epic parents always resolve.
     ready.sort(key=make_selection_sort_key(entries))
@@ -3046,6 +3096,116 @@ def _apply_completion_fields(node: dict) -> None:
     node["completed_at"] = datetime.now(timezone.utc).isoformat()
 
 
+def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
+    """Close ancestor epics whose children are now all complete (x-33b2).
+
+    Called inside the close mutator right after a node's completion fields are
+    set. An epic is a container with no PR of its own - its work IS its
+    decomposed children - so it is "done" exactly when all of them are. Walking
+    UP the ``parent`` chain, each ancestor whose children all carry
+    ``completed_at`` is closed too (and tagged with a completion_note so the
+    PR-less close is self-explaining), continuing to the grandparent.
+
+    This is the closure path that lets epics be excluded from build-SELECTION
+    everywhere (`next`/`ready`/advance_dependents never dispatch the box): the
+    box closes itself off the merge event that finishes its last child. It fires
+    on every close path (done + reconcile + update --completed) since each calls
+    this after ``_apply_completion_fields``, and it is uniform across projects
+    because it follows the parent EDGE, not a project filter - so a cross-project
+    parent closes on the same merge that completes its last child.
+
+    Idempotent: an already-done or missing ancestor stops that branch. The walk
+    is depth-capped against a malformed parent cycle.
+    """
+    id_to_entry = {
+        e["id"]: e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    children_by_parent: dict[str, list[dict]] = {}
+    for e in entries:
+        if isinstance(e, dict) and isinstance(e.get("parent"), str):
+            children_by_parent.setdefault(e["parent"], []).append(e)
+
+    closed: list[str] = []
+    cur = id_to_entry.get(node_id)
+    for _ in range(64):  # depth cap: guards against a malformed parent cycle
+        pid = cur.get("parent") if isinstance(cur, dict) else None
+        if not isinstance(pid, str):
+            break
+        parent = id_to_entry.get(pid)
+        if parent is None or parent.get("completed_at"):
+            break  # missing or already-closed ancestor -> stop this branch
+        kids = children_by_parent.get(pid) or []
+        if not kids or any(not k.get("completed_at") for k in kids):
+            break  # at least one child still open -> the epic is not done yet
+        _apply_completion_fields(parent)
+        if not parent.get("completion_note"):
+            parent["completion_note"] = "auto-closed: all children complete"
+        closed.append(pid)
+        cur = parent  # cascade up to the grandparent
+    return closed
+
+
+def _strandable_epic_ids(entries: list[dict]) -> set[str]:
+    """Open epics (parents) whose children are ALL done - closeable right now.
+
+    Read-only. The cascade (_cascade_close_parents) only fires on a child-CLOSE
+    event, so an epic whose children were all completed BEFORE this code shipped
+    (or whose last child closed via a path that did not cascade) is stranded:
+    open, all children done, and - now that containers are hidden from
+    next/ready - unreachable for closure. This identifies them so reconcile can
+    self-heal (codex P2 on PR #69).
+    """
+    children_by_parent: dict[str, list[dict]] = {}
+    for e in entries:
+        if isinstance(e, dict) and isinstance(e.get("parent"), str):
+            children_by_parent.setdefault(e["parent"], []).append(e)
+    id_to_entry = {
+        e["id"]: e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    out: set[str] = set()
+    for pid, kids in children_by_parent.items():
+        parent = id_to_entry.get(pid)
+        if (
+            parent is not None
+            and not parent.get("completed_at")
+            and all(k.get("completed_at") for k in kids)
+        ):
+            out.add(pid)
+    return out
+
+
+def _sweep_close_done_epics(entries: list[dict]) -> list[str]:
+    """Close every open epic whose children are all done (self-heal/migration).
+
+    Idempotent, mutating, run inside a close mutator. Repeats to a fixpoint so a
+    freshly-closed epic heals ITS parent too (grandparent chains). Returns the
+    ids it closed so the caller can auto-continue their dependents. Reconcile
+    runs this so pre-existing stranded all-done epics (codex P2 on PR #69) heal
+    on the next reconcile pass - going forward the cascade prevents new ones, so
+    this is a no-op once migrated.
+    """
+    id_to_entry = {
+        e["id"]: e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    closed: list[str] = []
+    for _ in range(64):  # fixpoint, depth-capped against a malformed cycle
+        ready = _strandable_epic_ids(entries)
+        if not ready:
+            break
+        for pid in ready:
+            parent = id_to_entry.get(pid)
+            if parent is None or parent.get("completed_at"):
+                continue
+            _apply_completion_fields(parent)
+            if not parent.get("completion_note"):
+                parent["completion_note"] = "auto-closed: all children complete"
+            closed.append(pid)
+    return closed
+
+
 def _stamp_and_graduate_plan(
     plan_path: str,
     *,
@@ -3511,6 +3671,9 @@ def cmd_done(
             already_holder[0] = True
             return entries
         _apply_completion_fields(n)
+        # Close any now-all-done ancestor epic (x-33b2): the box is done when its
+        # children are, and it carries no PR of its own to close it explicitly.
+        _cascade_close_parents(entries, task_id)
         plan_path_out[0] = n.get("plan_path")
         return entries
 
@@ -3592,6 +3755,24 @@ def cmd_advance(
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
 
+    # RC2 (x-33b2): closed_project is the CLOSED NODE's own project, read from the
+    # graph - NEVER the --project next-selection flag. --project restricts which
+    # project advance() picks `next` from; it is normally OMITTED on a manual
+    # `advance --closed A`, which left closed_project=None and defeated
+    # advance_dependents' same-project guard, misrouting a same-project dependent
+    # through the cross-project --cwd path onto a protected branch where the bg
+    # worker dies. Mirror the reconcile path (cli.py reads the node's .project).
+    closed_project: Optional[str] = None
+    if closed:
+        try:
+            from fno.graph._intake import _find_node
+            from fno.graph.store import read_graph
+
+            _cn = _find_node(read_graph(_graph_path()), closed)
+            closed_project = _cn.get("project") if _cn else None
+        except Exception:  # noqa: BLE001 - non-fatal; advance_deps fails closed on None
+            closed_project = None
+
     try:
         result = _advance(closed_node_id=closed, project=project, verbose=verbose)
         # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
@@ -3600,7 +3781,7 @@ def cmd_advance(
         # dispatch:<id> dedup with reconcile's call so a node seen by both the
         # reconcile sweep and this explicit verb dispatches at most once.
         if closed:
-            _advance_deps(closed_node_id=closed, closed_project=project, verbose=verbose)
+            _advance_deps(closed_node_id=closed, closed_project=closed_project, verbose=verbose)
             # G4: route the closed node's contract dependents to a reconcile pass
             # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
             # advance paths so a node seen by all three dispatches at most once.
@@ -3681,9 +3862,18 @@ def cmd_reconcile(
     closeable = [r for r in records if r.closeable]
     failures = [r for r in records if r.error is not None]
 
-    closed: list[dict] = []
+    # Pre-existing stranded all-done epics to self-heal this sweep (codex P2 on
+    # PR #69). Read-only check so a reconcile with no drift AND nothing to heal
+    # still skips the lock entirely. ONLY on a full reconcile: a node-scoped
+    # `reconcile --node <id>` must not close/dispatch unrelated epics (codex P2),
+    # so the global sweep is suppressed there (the targeted node's own cascade
+    # still fires).
+    strandable = _strandable_epic_ids(entries) if node is None else set()
 
-    if not dry_run and closeable:
+    closed: list[dict] = []
+    healed_epics: list[str] = []
+
+    if not dry_run and (closeable or strandable):
         # Apply every close in ONE locked mutation rather than locking once
         # per node: locked_mutate_graph acquires a file lock and rewrites the
         # whole graph, so a per-node loop is O(N) lock+rewrite cycles. The
@@ -3691,17 +3881,52 @@ def cmd_reconcile(
         # closed or removed out-of-band between the read-only scan and the lock
         # is skipped) so the post-lock work only touches genuinely-closed nodes.
         actually_closed: list = []
+        # Ancestor epics the cascade closed this sweep (x-33b2). Their OWN
+        # dependents (a node blocked_by the epic) must be auto-continued too, so
+        # we accumulate the ids here and run the same dispatch path for them
+        # after the lock - else an epic-level dependent stalls.
+        cascade_closed_acc: list = []
 
         def mutator(entries):
             actually_closed.clear()
+            cascade_closed_acc.clear()
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
                     _apply_completion_fields(node_obj)
+                    # Cascade-close now-all-done ancestor epics (x-33b2), uniform
+                    # across projects (follows the parent edge, not a filter).
+                    cascade_closed_acc.extend(
+                        _cascade_close_parents(entries, record.node_id)
+                    )
                     actually_closed.append(record)
+            # Self-heal pre-existing stranded all-done epics (codex P2): close any
+            # open epic whose children are already all done, even with no drift
+            # this sweep. Full reconcile only - a node-scoped run must not touch
+            # unrelated epics. Going forward the cascade prevents new ones, so
+            # this is a no-op once migrated. Their dependents auto-continue via
+            # the same cascade_closed_acc dispatch loop.
+            if node is None:
+                cascade_closed_acc.extend(_sweep_close_done_epics(entries))
             return entries
 
-        locked_mutate_graph(_graph_path(), mutator)
+        # Capture the POST-lock graph (codex P2): resolving a closed node's
+        # project/cwd from the pre-lock `entries` snapshot risks stale routing if
+        # a concurrent reparent/reproject landed between scan and lock, and a
+        # cascade parent only reachable in the locked graph would resolve to None.
+        post_entries = locked_mutate_graph(_graph_path(), mutator)
+
+        def _auto_continue_after_close(node_id, project, root):
+            """Merge-triggered auto-continue dispatch for one just-closed node:
+            same-project `next`, cross-project dependents, and contract de-stub.
+            Shared by directly-closed records AND cascade-closed ancestor epics
+            (x-33b2) so an epic-level dependent is dispatched, not stranded."""
+            from fno.backlog.advance import advance as _advance
+            from fno.backlog.advance import advance_dependents as _advance_deps
+            from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+            _advance(closed_node_id=node_id, project=project, project_root=root)
+            _advance_deps(closed_node_id=node_id, closed_project=project, project_root=root)
+            dispatch_reconcile_for_blocker(closed_node_id=node_id, project_root=root)
 
         # Post-mutation work outside the lock (mirrors `done`): stamp the plan
         # and drop the retro sentinel for each node we actually closed.
@@ -3756,47 +3981,66 @@ def cmd_reconcile(
             # off) and is strictly non-fatal: a failed advance never fails the
             # reconcile sweep. Project-scoped per the closed node's project.
             try:
-                _adv_node = _find_node(entries, record.node_id)
+                _adv_node = _find_node(post_entries, record.node_id)
                 _adv_project = _adv_node.get("project") if _adv_node else None
                 # Resolve auto-continue state against the CLOSED NODE's project
                 # context, not the reconcile's cwd (codex P2): a full-graph
                 # reconcile run from project A can close a node belonging to
                 # project B, and B's campaign-arm marker lives under B's root.
                 _adv_cwd = _adv_node.get("cwd") if _adv_node else None
-                from fno.backlog.advance import advance as _advance
-                from fno.backlog.advance import advance_dependents as _advance_deps
-
                 _adv_root = Path(_adv_cwd) if _adv_cwd else None
-                _advance(
-                    closed_node_id=record.node_id,
-                    project=_adv_project,
-                    project_root=_adv_root,
-                )
-                # G1 (AC5-FR): also dispatch the closed node's now-unblocked
-                # CROSS-project dependents into their own repos. advance() above
-                # only reaches same-project successors (project-scoped `next`);
-                # this follows blocked_by edges across projects. Shares the
-                # dispatch:<id> dedup so a node observed by both dispatches once.
-                _advance_deps(
-                    closed_node_id=record.node_id,
-                    closed_project=_adv_project,
-                    project_root=_adv_root,
-                )
-                # G4 (AC4-HP/AC8): route the closed node's contract dependents to
-                # a `/target --reconcile` de-stub pass (or a pending sentinel when
-                # their manifest is not yet written) - NOT the cold dispatch above
-                # (advance_deps skips a node with an open draft PR). Same dedup.
-                from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
-                dispatch_reconcile_for_blocker(
-                    closed_node_id=record.node_id,
-                    project_root=_adv_root,
-                )
+                # next (same-project) + cross-project dependents (G1) + contract
+                # de-stub (G4), in one shared helper.
+                _auto_continue_after_close(record.node_id, _adv_project, _adv_root)
             except Exception as _adv_exc:  # noqa: BLE001 - never abort the sweep
                 typer.echo(
                     f"warning: auto-continue advance after closing "
                     f"{record.node_id} failed: {_adv_exc}",
                     err=True,
                 )
+
+        # x-33b2: a cascade-closed parent epic unblocks its OWN dependents (a node
+        # blocked_by the epic). The per-record loop above only dispatched the
+        # directly-closed children, so run the same auto-continue for each
+        # cascade-closed ancestor too - else an epic-level dependent stalls.
+        # Deduped; project/cwd read from the (close-stable) graph.
+        _seen_parents: set = set()
+        for _pid in cascade_closed_acc:
+            if _pid in _seen_parents:
+                continue
+            _seen_parents.add(_pid)
+            try:
+                _pn = _find_node(post_entries, _pid)
+                _pproj = _pn.get("project") if _pn else None
+                _proot = Path(_pn["cwd"]) if _pn and _pn.get("cwd") else None
+                _auto_continue_after_close(_pid, _pproj, _proot)
+            except Exception as _exc:  # noqa: BLE001 - never abort the sweep
+                typer.echo(
+                    f"warning: auto-continue after cascade-closing {_pid} failed: {_exc}",
+                    err=True,
+                )
+        # Epics the cascade/sweep auto-closed this run, for user-visible accounting
+        # (codex P3): the close summaries below otherwise only describe PR-drift
+        # records and would report "in sync" even after healing epics.
+        healed_epics = sorted(_seen_parents)
+    elif dry_run and (closeable or strandable):
+        # Accurate --dry-run preview (codex P2): the heal set is NOT just the
+        # pre-close `strandable` epics - closing a closeable last child cascade-
+        # closes its parent, and the sweep fixpoint reaches ancestors. Simulate
+        # the exact close + cascade + sweep on a THROWAWAY deep copy so the
+        # preview matches a real run, mutating nothing real.
+        import copy as _copy
+
+        _sim = _copy.deepcopy(entries)
+        _sim_acc: list = []
+        for record in closeable:
+            _sn = _find_node(_sim, record.node_id)
+            if _sn and not _sn.get("completed_at"):
+                _apply_completion_fields(_sn)
+                _sim_acc.extend(_cascade_close_parents(_sim, record.node_id))
+        if node is None:
+            _sim_acc.extend(_sweep_close_done_epics(_sim))
+        healed_epics = sorted(set(_sim_acc))
 
     if json_out:
         payload = {
@@ -3811,6 +4055,9 @@ def cmd_reconcile(
                 for r in closeable
             ],
             "closed": closed,
+            # Auto-closed container epics (cascade + self-heal sweep); on --dry-run
+            # this is the simulated preview of what a real run would heal (codex P3).
+            "healed_epics": healed_epics,
             "failures": [
                 {"node_id": r.node_id, "pr_number": r.pr_number, "error": r.error}
                 for r in failures
@@ -3823,7 +4070,7 @@ def cmd_reconcile(
             raise typer.Exit(code=4)
         return
 
-    if not closeable and not failures:
+    if not closeable and not failures and not strandable and not healed_epics:
         typer.echo("No merged-PR drift found. Backlog is in sync.")
         return
 
@@ -3831,6 +4078,11 @@ def cmd_reconcile(
         typer.echo(f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):")
         for r in closeable:
             typer.echo(f"  {r.node_id}  PR #{r.pr_number} MERGED  {r.pr_url or ''}".rstrip())
+        if healed_epics:
+            typer.echo(
+                f"Would self-heal {len(healed_epics)} container epic(s): "
+                + ", ".join(healed_epics)
+            )
     else:
         typer.echo(f"Closed {len(closed)} node(s):")
         for c in closed:
@@ -3838,6 +4090,11 @@ def cmd_reconcile(
             typer.echo(f"  {c['node_id']}  PR #{c['pr_number']}{stamp_note}")
         if closed:
             typer.echo(f"Retro sentinels written under {retro_pending_dir()}")
+        if healed_epics:
+            typer.echo(
+                f"Auto-closed {len(healed_epics)} container epic(s) "
+                f"(all children complete): " + ", ".join(healed_epics)
+            )
 
     if failures:
         typer.echo(f"{len(failures)} node(s) could not be resolved:", err=True)
