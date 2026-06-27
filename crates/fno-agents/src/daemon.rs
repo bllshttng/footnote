@@ -1432,7 +1432,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     }
 
     // Register.
-    let mut entry = RegistryEntry {
+    let entry = RegistryEntry {
         name: name.clone(),
         short_id: short_id.clone(),
         provider: provider.clone(),
@@ -1517,10 +1517,14 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             None
         }
     });
-    // E3.3 buffer-on-early-push: seed any report that arrived before this row
-    // existed. Peek+seed now (so it rides the insert); commit the buffer removal
-    // + event only after the insert wins, so a losing race leaves it buffered.
-    let flushed_inside_leg = peek_and_seed_inside_leg(ctx, &mut entry);
+    // E3.3 buffer-on-early-push: the session uuid this row will be matched by, so
+    // a report buffered before the row existed can be drained onto it AFTER a
+    // winning insert (race-free flush; see `flush_buffered_inside_leg`).
+    let flush_uuid = if interactive && provider == "claude" {
+        pinned_session_for_lock.clone()
+    } else {
+        None
+    };
     let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
         if r.entries.iter().any(|e| e.name == entry.name) {
             return false;
@@ -1546,7 +1550,11 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     })
     .await;
     match insert {
-        Ok(true) => commit_inside_leg_flush(ctx, &name, flushed_inside_leg),
+        Ok(true) => {
+            if let Some(uuid) = &flush_uuid {
+                flush_buffered_inside_leg(ctx, uuid, &name);
+            }
+        }
         Ok(false) => {
             // Lost a concurrent spawn race for this name: our just-started worker
             // is a duplicate. Shut it down so we don't leak it, then report the
@@ -2127,7 +2135,7 @@ async fn spawn_claude_stream_lane(
     //    one-host UUID guard) means exactly one inserts. The loser shuts its
     //    just-started worker down (which releases the claim via the worker's RAII
     //    guard) so it is never leaked untracked.
-    let mut entry = build_claude_stream_entry(
+    let entry = build_claude_stream_entry(
         name,
         &short_id,
         cwd,
@@ -2136,9 +2144,6 @@ async fn spawn_claude_stream_lane(
         worker_pid_start_time,
         ctx.home.timeline_jsonl(&short_id),
     );
-    // E3.3 buffer-on-early-push: seed any report buffered before this stream row
-    // existed; commit the buffer removal + event only after the insert wins.
-    let flushed_inside_leg = peek_and_seed_inside_leg(ctx, &mut entry);
     let uuid_for_lock = uuid.to_string();
     let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
         if r.entries.iter().any(|e| e.name == entry.name) {
@@ -2156,7 +2161,9 @@ async fn spawn_claude_stream_lane(
     })
     .await;
     match insert {
-        Ok(true) => commit_inside_leg_flush(ctx, name, flushed_inside_leg),
+        // E3.3 buffer-on-early-push: drain any report buffered before this stream
+        // row existed onto it now that it is registered (race-free post-insert).
+        Ok(true) => flush_buffered_inside_leg(ctx, uuid, name),
         Ok(false) => {
             best_effort_worker_shutdown(&sock).await;
             let _ = ctx.emitter.emit(
@@ -4422,10 +4429,21 @@ fn emit_inside_leg_completion(emitter: &EventEmitter, e: &RegistryEntry) {
             &json!({
                 "name": e.name,
                 "session_id": e.session_id,
-                "final_state": format!("{:?}", rep.state).to_lowercase(),
+                "final_state": inside_leg_state_str(rep.state),
                 "seq": rep.seq,
             }),
         );
+    }
+}
+
+/// The lowercase wire label for an inside-leg state (matches herdr's
+/// `report_agent` vocabulary). Allocation-free; the single source for the three
+/// daemon-emitted inside-leg events.
+fn inside_leg_state_str(state: state::InsideLegState) -> &'static str {
+    match state {
+        state::InsideLegState::Working => "working",
+        state::InsideLegState::Blocked => "blocked",
+        state::InsideLegState::Done => "done",
     }
 }
 
@@ -4704,46 +4722,45 @@ fn buffer_pending_report(
     BufferOutcome::Buffered
 }
 
-/// Peek a buffered early-push report for a freshly-built claude row and seed it
-/// onto `entry.inside_leg` BEFORE the row is inserted (E3.3 flush). Returns
-/// `(session_uuid, report)` so the caller commits the buffer removal + the
-/// `inside_leg_buffer_flushed` event only AFTER its insert wins
-/// ([`commit_inside_leg_flush`]): a losing concurrent insert then leaves the
-/// report buffered for the winning row rather than stranding it. A no-op
-/// (returns `None`) for a row with no pinned claude session uuid or no buffered
-/// report. Poisoned lock degrades to `None` (the report stays buffered).
-fn peek_and_seed_inside_leg(
-    ctx: &Ctx,
-    entry: &mut RegistryEntry,
-) -> Option<(String, state::InsideLegReport)> {
-    let uuid = entry.claude_session_uuid.clone()?;
-    let rep = ctx.pending_inside_leg.lock().ok()?.get(&uuid).cloned()?;
-    entry.inside_leg = Some(rep.clone());
-    Some((uuid, rep))
-}
-
-/// Commit a flushed early-push report after its row insert won: remove it from
-/// the pending buffer and publish `inside_leg_buffer_flushed`. A no-op when
-/// nothing was flushed.
-fn commit_inside_leg_flush(
-    ctx: &Ctx,
-    name: &str,
-    flushed: Option<(String, state::InsideLegReport)>,
-) {
-    if let Some((uuid, rep)) = flushed {
-        if let Ok(mut buf) = ctx.pending_inside_leg.lock() {
-            buf.remove(&uuid);
+/// Flush a buffered early-push report onto its session's row AFTER the row is
+/// registered (E3.3 flush).
+///
+/// Called only on a winning insert with the row's pinned claude session uuid.
+/// Takes the buffered report out of the pending map (highest-seq, since
+/// `buffer_pending_report` keeps only the newest) and applies it to the row
+/// under a seq gate, so a report that raced in on the row's *store* path between
+/// insert and this drain is never regressed (codex P2: highest-seq-wins must
+/// survive the flush). Draining strictly after the insert closes the
+/// peek-then-commit window where a newer buffered report could be deleted by an
+/// unconditional remove. A no-op for a row with no buffered report; a poisoned
+/// lock leaves the report buffered.
+fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
+    let rep = match ctx.pending_inside_leg.lock() {
+        Ok(mut buf) => buf.remove(session_uuid),
+        Err(_) => None,
+    };
+    let Some(rep) = rep else {
+        return;
+    };
+    let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
+    // Apply under the seq gate: a store-path report that landed on the row after
+    // it became visible (but before this drain) set a >= seq; never regress it.
+    let _ = state::update_registry(&ctx.home.registry_json(), |r| {
+        if let Some(e) = r
+            .entries
+            .iter_mut()
+            .find(|e| entry_holds_session(e, session_uuid))
+        {
+            let newer = e.inside_leg.as_ref().is_none_or(|cur| rep.seq > cur.seq);
+            if newer {
+                e.inside_leg = Some(rep);
+            }
         }
-        let _ = ctx.emitter.emit(
-            "inside_leg_buffer_flushed",
-            &json!({
-                "name": name,
-                "session_id": uuid,
-                "state": format!("{:?}", rep.state).to_lowercase(),
-                "seq": rep.seq,
-            }),
-        );
-    }
+    });
+    let _ = ctx.emitter.emit(
+        "inside_leg_buffer_flushed",
+        &json!({"name": name, "session_id": session_uuid, "state": state_str, "seq": seq}),
+    );
 }
 
 fn handle_report(ctx: &Ctx, req: &Request) -> Response {
@@ -4850,11 +4867,17 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         // E3.3 buffer-on-early-push: the row is not up yet (the hook fired before
         // the daemon registered the pane). Hold the report in the bounded buffer
         // instead of dropping it; the spawn path flushes it onto the row at
-        // creation. Still fire-and-forget: every branch returns `ok`.
-        Outcome::Unknown => match ctx.pending_inside_leg.lock() {
-            Ok(mut buf) => match buffer_pending_report(&mut buf, &session_id, report) {
-                BufferOutcome::Buffered => {
-                    drop(buf);
+        // creation. Still fire-and-forget: every branch returns `ok`. The lock is
+        // scoped to the buffer op (released before the emit) via `.map(..).ok()`;
+        // a poisoned lock -> `None` -> the old hard-drop degrade.
+        Outcome::Unknown => {
+            let buffered = ctx
+                .pending_inside_leg
+                .lock()
+                .map(|mut buf| buffer_pending_report(&mut buf, &session_id, report))
+                .ok();
+            match buffered {
+                Some(BufferOutcome::Buffered) => {
                     let _ = ctx.emitter.emit(
                         "inside_leg_report_buffered",
                         &json!({"session_id": session_id, "seq": seq, "state": state_label}),
@@ -4864,8 +4887,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                         json!({"stored": false, "buffered": true, "seq": seq}),
                     )
                 }
-                BufferOutcome::StaleSeq { last } => {
-                    drop(buf);
+                Some(BufferOutcome::StaleSeq { last }) => {
                     let _ = ctx.emitter.emit(
                         "inside_leg_report_dropped",
                         &json!({"session_id": session_id, "seq": seq, "last_seq": last, "reason": "stale_seq"}),
@@ -4875,28 +4897,27 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                         json!({"stored": false, "dropped": "stale_seq", "last_seq": last}),
                     )
                 }
-                BufferOutcome::Full => {
-                    drop(buf);
+                Some(BufferOutcome::Full) => {
                     let _ = ctx.emitter.emit(
                         "inside_leg_report_dropped",
                         &json!({"session_id": session_id, "seq": seq, "reason": "buffer_full"}),
                     );
                     Response::ok(req.id, json!({"stored": false, "dropped": "buffer_full"}))
                 }
-            },
-            // Poisoned buffer lock: degrade to the old hard-drop rather than
-            // panicking a fire-and-forget hook.
-            Err(_) => {
-                let _ = ctx.emitter.emit(
-                    "inside_leg_report_dropped",
-                    &json!({"session_id": session_id, "seq": seq, "reason": "unknown_session"}),
-                );
-                Response::ok(
-                    req.id,
-                    json!({"stored": false, "dropped": "unknown_session"}),
-                )
+                // Poisoned buffer lock: degrade to the old hard-drop rather than
+                // panicking a fire-and-forget hook.
+                None => {
+                    let _ = ctx.emitter.emit(
+                        "inside_leg_report_dropped",
+                        &json!({"session_id": session_id, "seq": seq, "reason": "unknown_session"}),
+                    );
+                    Response::ok(
+                        req.id,
+                        json!({"stored": false, "dropped": "unknown_session"}),
+                    )
+                }
             }
-        },
+        }
     }
 }
 
@@ -5989,44 +6010,41 @@ mod tests {
     }
 
     #[test]
-    fn peek_and_commit_flushes_buffered_report_onto_a_new_row() {
-        // E3.3 flush: a report buffered for an unregistered session is seeded onto
-        // the row at creation and removed from the buffer, with a logged event.
+    fn flush_buffered_inside_leg_drains_onto_row_under_seq_gate() {
+        // E3.3 flush (race-free): after a row registers, the buffered early-push
+        // report is drained onto it and removed from the buffer, with a logged
+        // event. A newer report that raced onto the row's store path first is NOT
+        // regressed (codex P2: highest-seq-wins survives the flush).
         let home = tmp_home("inside-leg-flush");
         let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
-        ctx.pending_inside_leg.lock().unwrap().insert(
-            "uuid-x".into(),
-            state::InsideLegReport {
-                state: state::InsideLegState::Working,
-                seq: 4,
-                reason: None,
-                received_at: "2026-06-27T00:00:00Z".into(),
-                ttl_ms: Some(5000),
-            },
-        );
+        let report = |seq| state::InsideLegReport {
+            state: state::InsideLegState::Working,
+            seq,
+            reason: None,
+            received_at: "2026-06-27T00:00:00Z".into(),
+            ttl_ms: Some(5000),
+        };
 
-        let mut entry = rentry("pane", AgentStatus::Live, None);
-        entry.provider = "claude".into();
-        entry.claude_session_uuid = Some("uuid-x".into());
-
-        // Peek+seed: the report lands on the entry; the buffer still holds it
-        // (removal is deferred until the insert wins).
-        let flushed = peek_and_seed_inside_leg(&ctx, &mut entry);
-        assert!(flushed.is_some());
-        assert_eq!(entry.inside_leg.as_ref().map(|r| r.seq), Some(4));
-        assert!(ctx
-            .pending_inside_leg
+        // A registered claude row (inside_leg None) + a buffered report for it.
+        let mut row = rentry("pane", AgentStatus::Live, None);
+        row.provider = "claude".into();
+        row.claude_session_uuid = Some("uuid-x".into());
+        state::update_registry(&home.registry_json(), |r| r.entries.push(row)).unwrap();
+        ctx.pending_inside_leg
             .lock()
             .unwrap()
-            .contains_key("uuid-x"));
+            .insert("uuid-x".into(), report(4));
 
-        // Commit (insert won): buffer entry removed, event emitted.
-        commit_inside_leg_flush(&ctx, "pane", flushed);
+        flush_buffered_inside_leg(&ctx, "uuid-x", "pane");
+
+        // Buffer drained; row carries the report; event logged.
         assert!(!ctx
             .pending_inside_leg
             .lock()
             .unwrap()
             .contains_key("uuid-x"));
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(reg.entries[0].inside_leg.as_ref().map(|r| r.seq), Some(4));
         let events = read_events(&home);
         assert!(events
             .iter()
@@ -6035,10 +6053,23 @@ mod tests {
                 && e["session_id"] == "uuid-x"
                 && e["seq"] == 4));
 
-        // A row with no pinned uuid is a no-op.
-        let mut plain = rentry("plain", AgentStatus::Live, None);
-        plain.claude_session_uuid = None;
-        assert!(peek_and_seed_inside_leg(&ctx, &mut plain).is_none());
+        // Seq gate: a NEWER report already on the row (seq 10) is not regressed by
+        // a stale buffered report (seq 7).
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries[0].inside_leg = Some(report(10));
+        })
+        .unwrap();
+        ctx.pending_inside_leg
+            .lock()
+            .unwrap()
+            .insert("uuid-x".into(), report(7));
+        flush_buffered_inside_leg(&ctx, "uuid-x", "pane");
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            reg.entries[0].inside_leg.as_ref().map(|r| r.seq),
+            Some(10),
+            "a stale buffered report must not regress a newer row state"
+        );
 
         std::fs::remove_dir_all(home.root()).ok();
     }

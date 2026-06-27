@@ -174,7 +174,19 @@ pub fn rfc3339_like_to_secs(s: &str) -> Option<u64> {
     {
         return None;
     }
-    let num = |lo: usize, hi: usize| -> Option<i64> { s.get(lo..hi)?.parse::<i64>().ok() };
+    // Parse the digits straight from the validated byte slice -- no UTF-8
+    // boundary check or temporary allocation, and an explicit non-digit reject
+    // (gemini review).
+    let num = |lo: usize, hi: usize| -> Option<i64> {
+        let mut val = 0i64;
+        for &ch in b.get(lo..hi)? {
+            if !ch.is_ascii_digit() {
+                return None;
+            }
+            val = val * 10 + i64::from(ch - b'0');
+        }
+        Some(val)
+    };
     let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
     let (h, mi, se) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
     if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {

@@ -278,6 +278,36 @@ pub fn compute_badges_from_live(
         .collect()
 }
 
+/// The per-member "needs the operator" signal AFTER the 3-tier authority lattice
+/// (inside-out E3.3): a live inside-leg `working` suppresses a false scraper
+/// `waiting`, a live `blocked` raises attention even when the scraper is quiet,
+/// and an exited pane never needs input. This is the resolved signal the `a`
+/// attention filter must use (via [`attention_view`]) so the filtered rail view
+/// honors the SAME authority the badges do - otherwise the filter would hide a
+/// `blocked` pane the scraper can't see, or keep a `working` pane the inside leg
+/// has already cleared (codex P2). Returns a `Vec<bool>` indexed like
+/// `waiting`/`exited`/`inside_leg`, sized to `waiting.len()`.
+pub fn needs_input_after_authority(
+    waiting: &[bool],
+    exited: &[bool],
+    inside_leg: &[Option<InsideLegReport>],
+    now_secs: u64,
+) -> Vec<bool> {
+    (0..waiting.len())
+        .map(|idx| {
+            matches!(
+                member_attention(
+                    exited.get(idx).copied().unwrap_or(false),
+                    inside_leg.get(idx).and_then(|o| o.as_ref()),
+                    now_secs,
+                    waiting[idx],
+                ),
+                MemberAttention::NeedsInput
+            )
+        })
+        .collect()
+}
+
 /// Return the **live** members of `group`: its member indices with any agent
 /// whose pane has exited filtered out. `exited[i]` is the live per-pane signal
 /// (`ConnState::Exited`), indexed the same way `Group::members` is, so an index
@@ -1046,6 +1076,25 @@ mod tests {
         // scraper quiet -> no attention.
         let badges = compute_badges_from_live(&groups, &[false], &[false], &done, now);
         assert!(badges[0].is_empty());
+    }
+
+    #[test]
+    fn needs_input_after_authority_honors_lattice() {
+        // The `a` attention filter must use the resolved signal, not raw waiting
+        // (codex P2): working suppresses a false scraper-waiting, blocked raises
+        // even when the scraper is quiet, exited never needs input.
+        let now = crate::state::rfc3339_like_to_secs("2026-06-27T00:00:00Z").unwrap();
+        let recv = "2026-06-27T00:00:00Z";
+        let inside_leg = vec![
+            Some(report_at(InsideLegState::Working, recv, Some(5000))), // scraper waiting, but working
+            Some(report_at(InsideLegState::Blocked, recv, Some(5000))), // scraper quiet, but blocked
+            None, // scraper waiting, no inside-leg
+            None, // exited
+        ];
+        let waiting = [true, false, true, false];
+        let exited = [false, false, false, true];
+        let got = needs_input_after_authority(&waiting, &exited, &inside_leg, now);
+        assert_eq!(got, vec![false, true, true, false]);
     }
 
     // ── AC5-FR: sum invariant under churn ─────────────────────────────────

@@ -1912,12 +1912,31 @@ fn rail_view_groups(
 ) -> Vec<group::Group> {
     let groups = group::group_by(rail_rows, rs.group_key);
     if rs.attention_filter {
+        // Resolve through the 3-tier inside-leg authority so the filtered view
+        // matches the badges (E3.3, codex P2): not the raw scraper `waiting`.
         let waiting: Vec<bool> = panes
             .iter()
             .zip(states.iter())
             .map(|(p, s)| p.is_waiting(s))
             .collect();
-        group::attention_view(&groups, &waiting)
+        let exited: Vec<bool> = states
+            .iter()
+            .map(|s| matches!(s, ConnState::Exited { .. }))
+            .collect();
+        let inside_leg: Vec<Option<crate::state::InsideLegReport>> = rail_rows
+            .iter()
+            .map(|row| {
+                row.get("inside_leg")
+                    .filter(|v| !v.is_null())
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+            })
+            .collect();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let attn = group::needs_input_after_authority(&waiting, &exited, &inside_leg, now_secs);
+        group::attention_view(&groups, &attn)
     } else {
         groups
     }
@@ -2263,12 +2282,16 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        // The attention filter (`a`) reduces the rendered groups to waiting-only;
-        // badges then derive from the visible set, so the global footer summary
-        // matches what the rail shows (`!N`, no `xM` once exited are filtered out).
+        // The attention filter (`a`) reduces the rendered groups to those needing
+        // the operator; badges then derive from the visible set, so the global
+        // footer summary matches what the rail shows (`!N`, no `xM` once exited
+        // are filtered out). The filter uses the SAME 3-tier-resolved signal as
+        // the badges (E3.3, codex P2) - not the raw scraper `waiting` - so a live
+        // `working` is not falsely surfaced and a `blocked` is not hidden.
         let mut groups = group::group_by(rail_rows, rs.group_key);
         if rs.attention_filter {
-            groups = group::attention_view(&groups, &waiting);
+            let attn = group::needs_input_after_authority(&waiting, &exited, &inside_leg, now_secs);
+            groups = group::attention_view(&groups, &attn);
         }
         let badges =
             group::compute_badges_from_live(&groups, &waiting, &exited, &inside_leg, now_secs);
