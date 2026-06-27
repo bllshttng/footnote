@@ -1583,7 +1583,7 @@ fn stream_claim_holder(short_id: &str) -> String {
 /// derived from its short_id (stable + unique per worker). Distinct prefix from
 /// [`stream_claim_holder`] so the relay (E4) can tell which lane holds the
 /// session when it reads the claim record.
-fn interactive_claim_holder(short_id: &str) -> String {
+pub(crate) fn interactive_claim_holder(short_id: &str) -> String {
     format!("pty:{short_id}")
 }
 

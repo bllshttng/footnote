@@ -74,9 +74,13 @@ enum PaneMsg {
 /// Resolve the agent names to tile.
 ///
 /// For explicit names, returns them in order. For `--all`, reads the
-/// registry and returns every PTY-managed agent (codex / gemini - claude
-/// is self-supervised and not PTY-driveable, Locked Decision #6) that is
-/// in a live-ish status. Missing registry ⇒ empty (the caller errors on
+/// registry and returns every PTY-managed agent (codex / gemini, plus
+/// interactive PTY-hosted claude since E2) that is in a live-ish status.
+/// This is the cheap host_mode pre-filter; the authoritative drop of the
+/// adopted stream-json claude lane (which also carries `host_mode ==
+/// "interactive"` and binds a worker socket, but serves only `stream.*`)
+/// happens in [`run`] via the `worker.ping` protocol probe ([`survives_pty_gate`]
+/// / [`worker_speaks_pty`]). Missing registry ⇒ empty (the caller errors on
 /// empty).
 pub(crate) fn resolve_agent_names(
     parsed: &GridArgs,
@@ -104,18 +108,112 @@ pub(crate) fn resolve_agent_names(
     Ok(filter_pty_agents(&rows))
 }
 
-/// PTY-driveable providers. claude is excluded (Locked Decision #6).
-const PTY_PROVIDERS: &[&str] = &["codex", "gemini"];
+/// Decide whether a tiled candidate survives the PTY-protocol gate. Non-claude
+/// rows always survive (codex/gemini are always generic PTY workers). A claude
+/// row survives only if its worker answered `worker.ping` - the PTY lane. The
+/// adopted stream-json lane (serves only `stream.*`) and any socketless row do
+/// not. Pure for testability; the I/O lives in [`worker_speaks_pty`].
+fn survives_pty_gate(provider: Option<&str>, claude_ping_ok: bool) -> bool {
+    provider != Some("claude") || claude_ping_ok
+}
+
+/// Probe a worker socket with `worker.ping`: true iff a generic PTY worker
+/// answers. The adopted claude stream lane binds the same `worker_sock` path
+/// (`stream_worker.rs`) but serves only `stream.*`, so `worker.ping` errors -
+/// the authoritative discriminator between the two interactive-marked claude
+/// lanes. Connect / timeout / parse failure all read as "not a PTY worker".
+async fn worker_speaks_pty(home: &AgentsHome, short_id: &str) -> bool {
+    use crate::protocol::{read_response, write_request, Request};
+    if short_id.is_empty() {
+        return false;
+    }
+    let sock = home.worker_sock(short_id);
+    let probe = Duration::from_millis(500);
+    let mut conn = match tokio::time::timeout(probe, UnixStream::connect(&sock)).await {
+        Ok(Ok(c)) => c,
+        _ => return false,
+    };
+    if write_request(&mut conn, &Request::new(1, "worker.ping", json!({})))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    matches!(
+        tokio::time::timeout(probe, read_response(&mut conn)).await,
+        Ok(Ok(resp)) if !resp.is_err()
+    )
+}
+
+/// Drop claude names whose worker does not speak the PTY protocol (the adopted
+/// stream-json lane), so `--all` never tiles a non-drivable phantom claude pane
+/// (codex review P2). codex/gemini pass through without a probe. The registry is
+/// read once to resolve each name's provider + short_id.
+async fn prune_non_pty_claude(names: Vec<String>, home: &AgentsHome) -> Vec<String> {
+    let rows: Vec<Value> = std::fs::read(home.registry_json())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|raw| {
+            raw.get("agents")
+                .or_else(|| raw.get("entries"))
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default();
+    let field = |name: &str, key: &str| -> Option<String> {
+        rows.iter()
+            .find(|r| r.get("name").and_then(Value::as_str) == Some(name))
+            .and_then(|r| r.get(key).and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    let mut kept = Vec::with_capacity(names.len());
+    for name in names {
+        let provider = field(&name, "provider");
+        let ping_ok = if provider.as_deref() == Some("claude") {
+            let short_id = field(&name, "short_id").unwrap_or_default();
+            worker_speaks_pty(home, &short_id).await
+        } else {
+            false // unused for non-claude (survives_pty_gate ignores it)
+        };
+        if survives_pty_gate(provider.as_deref(), ping_ok) {
+            kept.push(name);
+        }
+    }
+    kept
+}
+
+/// PTY-driveable providers. claude joins codex/gemini in E2, but ONLY in its
+/// interactive face (see `filter_pty_agents`): the daemon PTY-hosts interactive
+/// subscription-billed claude via the generic worker path (E1 keystone), while
+/// the `claude -p` stream-json lane is headless, Agent-SDK-billed, and not a
+/// drivable TUI - it stays out of the grid.
+const PTY_PROVIDERS: &[&str] = &["codex", "gemini", "claude"];
 /// Registry statuses we will try to tile under `--all` (alive-ish).
 const ALIVE_STATUSES: &[&str] = &["ready", "idle", "busy", "live", "spawning"];
 
 /// Filter registry rows to live PTY-managed agent names (pure; testable).
+///
+/// claude is admitted only when `host_mode == "interactive"`, the cheap
+/// pre-filter that drops the `exec` `--bg` lane. NOTE this does NOT by itself
+/// separate the two interactive-marked claude lanes: the adopted stream-json
+/// lane ALSO sets `host_mode == "interactive"` (to keep reconcile from settling
+/// it `exited`, `build_claude_stream_entry`) AND binds a worker socket, but
+/// serves only `stream.*`. The authoritative split is the `worker.ping`
+/// protocol probe ([`prune_non_pty_claude`]) applied in [`run`]. codex/gemini
+/// are unconditional (their grid behavior is unchanged).
 fn filter_pty_agents(rows: &[Value]) -> Vec<String> {
     rows.iter()
         .filter_map(|row| {
             let provider = row.get("provider").and_then(Value::as_str)?;
             if !PTY_PROVIDERS.contains(&provider) {
                 return None;
+            }
+            if provider == "claude" {
+                let interactive =
+                    row.get("host_mode").and_then(Value::as_str) == Some(HOST_MODE_INTERACTIVE);
+                if !interactive {
+                    return None;
+                }
             }
             let status = row.get("status").and_then(Value::as_str).unwrap_or("live");
             if !ALIVE_STATUSES.contains(&status) {
@@ -1704,6 +1802,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             return 1;
         }
     };
+    // Authoritative PTY-protocol gate: drop adopted stream-json claude rows
+    // (host_mode=interactive + a worker socket, but only `stream.*` RPCs) so
+    // `--all` never tiles a non-drivable phantom claude pane (codex review P2).
+    // codex/gemini pass through without a probe.
+    let names = prune_non_pty_claude(names, home).await;
     if names.is_empty() {
         eprintln!("fno-agents grid: no agents to tile (try: grid <name>... or grid --all with running agents)");
         return 2;
@@ -2704,17 +2807,34 @@ mod tests {
     }
 
     #[test]
-    fn filter_pty_agents_drops_claude_and_dead() {
+    fn filter_pty_agents_keeps_interactive_claude_drops_exec_and_dead() {
         let rows = vec![
             json!({"name": "wkA", "provider": "codex", "status": "idle"}),
-            json!({"name": "wkClaude", "provider": "claude", "status": "live"}),
+            // Interactive claude (E2): tileable, sub-billed PTY -> KEPT.
+            json!({"name": "wkClaudeInt", "provider": "claude", "status": "live", "host_mode": "interactive"}),
+            // Exec/stream claude (absent host_mode == exec): headless lane -> dropped.
+            json!({"name": "wkClaudeExec", "provider": "claude", "status": "live"}),
             json!({"name": "wkG", "provider": "gemini", "status": "busy"}),
             json!({"name": "wkDead", "provider": "codex", "status": "exited"}),
             json!({"name": "wkNoStatus", "provider": "gemini"}),
         ];
         let got = filter_pty_agents(&rows);
-        // codex+idle, gemini+busy, gemini+(default live) kept; claude + exited dropped.
-        assert_eq!(got, vec!["wkA", "wkG", "wkNoStatus"]);
+        // codex+idle, interactive claude, gemini+busy, gemini+(default live) kept;
+        // exec claude + exited dropped.
+        assert_eq!(got, vec!["wkA", "wkClaudeInt", "wkG", "wkNoStatus"]);
+    }
+
+    #[test]
+    fn survives_pty_gate_probes_only_claude() {
+        // codex/gemini always survive, regardless of the (unused) ping flag.
+        assert!(survives_pty_gate(Some("codex"), false));
+        assert!(survives_pty_gate(Some("gemini"), false));
+        // An unknown/absent provider is never claude -> survives.
+        assert!(survives_pty_gate(None, false));
+        // claude survives iff its worker answered worker.ping (PTY lane);
+        // the stream lane (ping fails) is dropped.
+        assert!(survives_pty_gate(Some("claude"), true));
+        assert!(!survives_pty_gate(Some("claude"), false));
     }
 
     #[test]

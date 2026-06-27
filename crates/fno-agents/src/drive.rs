@@ -295,6 +295,78 @@ enum Admit {
     Reject(Response),
 }
 
+/// Cross-process single-writer state for a claude `session:<uuid>` claim, read
+/// from `fno claim status session:<uuid> -J` (X1 / AC3-EDGE). Pure data so the
+/// drive verdict is unit-testable without shelling the CLI.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionClaimState {
+    /// No claim, a stale (dead-holder) claim, or an unreadable record: the drive
+    /// is allowed (fail-open, matching the daemon's best-effort acquire posture -
+    /// the in-daemon `table` lock stays the authoritative same-process gate).
+    FreeOrUnknown,
+    /// A claim held LIVE by `holder`.
+    Live { holder: String },
+}
+
+/// Parse `fno claim status ... -J` output into a [`SessionClaimState`]. Only a
+/// `state == "live"` record carrying a `holder` pins a writer; `free` / `stale`
+/// / missing fields all read as `FreeOrUnknown`.
+fn parse_session_claim_state(v: &serde_json::Value) -> SessionClaimState {
+    let live = v.get("state").and_then(|s| s.as_str()) == Some("live");
+    match (live, v.get("holder").and_then(|h| h.as_str())) {
+        (true, Some(h)) => SessionClaimState::Live {
+            holder: h.to_string(),
+        },
+        _ => SessionClaimState::FreeOrUnknown,
+    }
+}
+
+/// The X1 grid-drive interlock decision (AC3-EDGE), pure for testability: a
+/// claude pane may be driven UNLESS its `session:<uuid>` claim is held live by a
+/// holder OTHER than this daemon's own interactive-spawn holder (`pty:<short_id>`).
+/// Returns `Some(holder)` to refuse with `BusyElsewhere{holder}`, `None` to allow.
+///
+/// Forward-compatible with both unresolved X1 resolutions: if the relay routes
+/// through the daemon's held claim (AC3-FR) the holder stays `pty:<short_id>` and
+/// this always allows; if a future writer acquires its own holder (AC3-EDGE) this
+/// refuses. Either way grid-drive never interleaves with an external writer.
+fn external_session_writer(state: &SessionClaimState, self_holder: &str) -> Option<String> {
+    match state {
+        SessionClaimState::Live { holder } if holder != self_holder => Some(holder.clone()),
+        _ => None,
+    }
+}
+
+/// Read the cross-process `session:<uuid>` claim and return an EXTERNAL writer's
+/// holder if one is live (X1 / AC3-EDGE). Shells `fno claim status` on a blocking
+/// thread; any spawn / non-zero exit / parse failure reads as no external writer
+/// (fail-open).
+async fn external_claude_writer(uuid: &str, self_holder: &str) -> Option<String> {
+    if uuid.is_empty() {
+        return None;
+    }
+    let key = format!("session:{uuid}");
+    // Honor FNO_BIN (test/custom environments); fall back to PATH `fno`. var_os
+    // avoids silently dropping a non-UTF-8 path.
+    let fno_bin = std::env::var_os("FNO_BIN").unwrap_or_else(|| "fno".into());
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(fno_bin)
+            .args(["claim", "status", &key, "-J"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    external_session_writer(&parse_session_claim_state(&v), self_holder)
+}
+
 /// Validate the request and, if admitted, register the session in the table and
 /// (for controlling modes) write the `state.json` drive window. Emits
 /// `drive_attached` BEFORE the caller upgrades to a WebSocket.
@@ -363,6 +435,31 @@ async fn admit(
             format!("agent {name} worker is not reachable; cannot drive")
         };
         return Admit::Reject(Response::err(req.id, ErrorCode::InvalidStatus, why));
+    }
+
+    // X1 cross-process single-writer interlock (AC3-EDGE), claude-only: if another
+    // process holds this session's `fno claim session:<uuid>`, refuse the drive so
+    // grid-drive and an external writer (the relay, post-E4) never interleave
+    // keystrokes into one TUI. Same-daemon driver serialization stays the `table`
+    // lock below; codex/gemini are unchanged (their drive conversion is deferred,
+    // X1 decision #1). Only checked when actually opening an authority window.
+    if entry.provider == "claude" && mode.opens_authority_window() {
+        if let Some(uuid) = entry.claude_session_uuid.as_deref() {
+            let self_holder = crate::daemon::interactive_claim_holder(&entry.short_id);
+            if let Some(holder) = external_claude_writer(uuid, &self_holder).await {
+                let _ = emitter.emit(
+                    "drive_refused_busy_elsewhere",
+                    &json!({"agent": name, "holder": holder, "session_uuid": uuid}),
+                );
+                return Admit::Reject(Response::err(
+                    req.id,
+                    ErrorCode::Busy,
+                    format!(
+                        "agent {name} session is held by {holder} (BusyElsewhere); detach the other writer first"
+                    ),
+                ));
+            }
+        }
     }
 
     let short_id = entry.short_id.clone();
@@ -1068,6 +1165,62 @@ async fn resize_worker(sock: &std::path::Path, rows: u16, cols: u16) -> Option<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_session_claim_state_reads_live_holder_and_fails_open() {
+        // free / stale / missing-state / live-without-holder all read as FreeOrUnknown.
+        assert_eq!(
+            parse_session_claim_state(&json!({"key": "session:x", "state": "free"})),
+            SessionClaimState::FreeOrUnknown
+        );
+        assert_eq!(
+            parse_session_claim_state(
+                &json!({"key": "session:x", "state": "stale", "holder": "pty:dead"})
+            ),
+            SessionClaimState::FreeOrUnknown
+        );
+        assert_eq!(
+            parse_session_claim_state(&json!({"key": "session:x", "state": "live"})),
+            SessionClaimState::FreeOrUnknown
+        );
+        // A live claim with a holder pins a writer.
+        assert_eq!(
+            parse_session_claim_state(&json!({"state": "live", "holder": "relay:abc"})),
+            SessionClaimState::Live {
+                holder: "relay:abc".into()
+            }
+        );
+    }
+
+    #[test]
+    fn external_session_writer_allows_self_refuses_other() {
+        let self_holder = "pty:short1";
+        // Self-held (the daemon's own interactive spawn) -> allow.
+        assert_eq!(
+            external_session_writer(
+                &SessionClaimState::Live {
+                    holder: "pty:short1".into()
+                },
+                self_holder
+            ),
+            None
+        );
+        // Free/unknown -> allow (fail-open).
+        assert_eq!(
+            external_session_writer(&SessionClaimState::FreeOrUnknown, self_holder),
+            None
+        );
+        // An external writer (e.g. the relay) -> refuse BusyElsewhere{holder}.
+        assert_eq!(
+            external_session_writer(
+                &SessionClaimState::Live {
+                    holder: "relay:abc".into()
+                },
+                self_holder
+            ),
+            Some("relay:abc".to_string())
+        );
+    }
 
     #[test]
     fn drive_mode_parse_and_authority() {

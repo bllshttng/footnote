@@ -10,7 +10,7 @@ The grid composes entirely **client-side** (Locked Decision #2): the client open
 
 The compositor holds **at most one driver claim** at any time: the global mode is single-valued (WATCH or DRIVE), so take-over is serialized through the single focused pane. There is no N-way driver contention to coordinate.
 
-claude is out of scope (Locked Decision #6): it is self-supervised (`claude --bg` owns its own bg daemon + rendezvous socket), not fno-PTY-driveable. claude-in-a-panel rides the claude client-side ask port and the claude-native agent-view surface, not this compositor.
+**Interactive claude tiles since E2** (`x-34e2`, superseding the original Locked Decision #6 exclusion). The E1 keystone gave the daemon a `ClaudeInteractiveProvider` that PTY-hosts subscription-billed interactive claude via the generic worker path, so it tiles and drives exactly like a codex pane. Only that lane is admitted: `filter_pty_agents` requires `host_mode == "interactive"`, and `resolve_agent_names` additionally drops any claude row with no live PTY worker socket (the adopted `claude -p` stream-json lane, which also carries `host_mode == "interactive"` to dodge reconcile but cannot be tiled/driven). The headless `claude --bg`/stream lane stays out of the compositor.
 
 ## Render substrate
 
@@ -101,7 +101,7 @@ fno agents spawn pr-review --provider codex "explore the repo and write a detail
 fno agents grid pr-review
 ```
 
-The pane shows codex's raw `--json` stream live (not pretty, but live), then flips to `exited` when the run completes. `fno agents grid --all` tiles every live PTY-managed agent (codex / gemini; claude excluded).
+The pane shows codex's raw `--json` stream live (not pretty, but live), then flips to `exited` when the run completes. `fno agents grid --all` tiles every live PTY-managed agent (codex / gemini, plus interactive PTY-hosted claude since E2; the adopted stream-json claude lane is filtered out by the worker-socket gate).
 
 Note `fno agents grid` (the Python wrapper, space form) only forwards verbs in `rust_runtime.py`'s `AUTO_ROUTE_VERBS`; if your installed `fno` predates the `grid` entry, call the Rust binary directly as `fno-agents grid ...` (hyphen).
 
