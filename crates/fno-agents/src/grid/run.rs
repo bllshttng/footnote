@@ -368,6 +368,95 @@ fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
     }
 }
 
+// ── Launcher (E5b: zero-config front door + one-tap orchestration) ───────
+
+/// What the goal-launcher line should do with a key. Pure + testable,
+/// mirroring [`key_to_input`]. The launcher is a modal one-line text input the
+/// operator opens to type a goal; on submit the grid spawns a `/target` worker
+/// for it and tiles the worker live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LauncherAction {
+    /// Append a printable char to the goal buffer.
+    Append(char),
+    /// Delete the last char.
+    Backspace,
+    /// Submit the buffer (spawn a `/target` worker).
+    Submit,
+    /// Close the launcher without spawning (Esc / Ctrl-C).
+    Cancel,
+    /// Inert key.
+    Ignore,
+}
+
+/// Map a key to a [`LauncherAction`]. Esc / Ctrl-C cancel; Enter submits;
+/// Backspace edits; any non-control printable char accumulates. Everything
+/// else is inert (arrows etc. are intentionally not cursor-movement in this
+/// minimal single-line input).
+fn launcher_key(key: KeyEvent) -> LauncherAction {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl && matches!(key.code, KeyCode::Char('c')) {
+        return LauncherAction::Cancel;
+    }
+    match key.code {
+        KeyCode::Esc => LauncherAction::Cancel,
+        KeyCode::Enter => LauncherAction::Submit,
+        KeyCode::Backspace => LauncherAction::Backspace,
+        KeyCode::Char(c) if !ctrl && !c.is_control() => LauncherAction::Append(c),
+        _ => LauncherAction::Ignore,
+    }
+}
+
+/// What the run loop must do after feeding a key to the launcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LauncherOutcome {
+    /// Buffer changed or key ignored: keep the launcher open.
+    Stay,
+    /// Operator cancelled: close the launcher.
+    Cancelled,
+    /// Operator submitted a non-blank goal: close the launcher and spawn it.
+    Submitted(String),
+}
+
+/// Run-loop state for the goal launcher. Present (`Some`) only while the
+/// operator is typing a goal.
+struct Launcher {
+    buffer: String,
+}
+
+impl Launcher {
+    fn new() -> Self {
+        Launcher {
+            buffer: String::new(),
+        }
+    }
+
+    /// Apply a launcher action to the buffer and report what the run loop
+    /// should do. A blank (whitespace-only) Submit is a no-op (AC1-EDGE): the
+    /// launcher stays open rather than spawning an empty `/target`.
+    fn apply(&mut self, action: LauncherAction) -> LauncherOutcome {
+        match action {
+            LauncherAction::Append(c) => {
+                self.buffer.push(c);
+                LauncherOutcome::Stay
+            }
+            LauncherAction::Backspace => {
+                self.buffer.pop();
+                LauncherOutcome::Stay
+            }
+            LauncherAction::Cancel => LauncherOutcome::Cancelled,
+            LauncherAction::Submit => {
+                let goal = self.buffer.trim().to_string();
+                if goal.is_empty() {
+                    LauncherOutcome::Stay
+                } else {
+                    LauncherOutcome::Submitted(goal)
+                }
+            }
+            LauncherAction::Ignore => LauncherOutcome::Stay,
+        }
+    }
+}
+
 // ── Rendering ───────────────────────────────────────────────────────────
 
 /// A full-terminal cell grid. The compositor rasterizes one frame into this,
@@ -3038,6 +3127,68 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(key_to_input(key, Mode::Watch), Some(InputEvent::Quit));
         assert_eq!(key_to_input(key, Mode::Drive), Some(InputEvent::Quit));
+    }
+
+    // ── Launcher (E5b) ──────────────────────────────────────────────────
+
+    #[test]
+    fn launcher_key_maps_actions() {
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(launcher_key(k(KeyCode::Esc)), LauncherAction::Cancel);
+        assert_eq!(launcher_key(k(KeyCode::Enter)), LauncherAction::Submit);
+        assert_eq!(
+            launcher_key(k(KeyCode::Backspace)),
+            LauncherAction::Backspace
+        );
+        assert_eq!(
+            launcher_key(k(KeyCode::Char('a'))),
+            LauncherAction::Append('a')
+        );
+        // Ctrl-C cancels the launcher (escape hatch); arrows are inert.
+        assert_eq!(
+            launcher_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            LauncherAction::Cancel
+        );
+        assert_eq!(launcher_key(k(KeyCode::Up)), LauncherAction::Ignore);
+    }
+
+    #[test]
+    fn launcher_accumulates_and_edits() {
+        let mut l = Launcher::new();
+        assert_eq!(l.apply(LauncherAction::Append('h')), LauncherOutcome::Stay);
+        l.apply(LauncherAction::Append('i'));
+        assert_eq!(l.buffer, "hi");
+        assert_eq!(l.apply(LauncherAction::Backspace), LauncherOutcome::Stay);
+        assert_eq!(l.buffer, "h");
+        // Backspace on the way to empty never panics.
+        l.apply(LauncherAction::Backspace);
+        l.apply(LauncherAction::Backspace);
+        assert_eq!(l.buffer, "");
+    }
+
+    #[test]
+    fn launcher_submit_trims_and_blank_is_noop() {
+        // AC1-EDGE: a whitespace-only goal does not spawn.
+        let mut l = Launcher::new();
+        l.apply(LauncherAction::Append(' '));
+        l.apply(LauncherAction::Append(' '));
+        assert_eq!(l.apply(LauncherAction::Submit), LauncherOutcome::Stay);
+        // A real goal submits, trimmed.
+        let mut l = Launcher::new();
+        for c in " add auth ".chars() {
+            l.apply(LauncherAction::Append(c));
+        }
+        assert_eq!(
+            l.apply(LauncherAction::Submit),
+            LauncherOutcome::Submitted("add auth".to_string())
+        );
+    }
+
+    #[test]
+    fn launcher_cancel_closes() {
+        let mut l = Launcher::new();
+        l.apply(LauncherAction::Append('x'));
+        assert_eq!(l.apply(LauncherAction::Cancel), LauncherOutcome::Cancelled);
     }
 
     #[test]
