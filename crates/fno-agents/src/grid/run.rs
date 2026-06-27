@@ -2558,11 +2558,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     }
                                 }
                                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                                    // In WATCH the wheel re-focuses the pane under the
-                                    // cursor before scrolling; in SCROLLBACK the
-                                    // operator is pinned to the entry pane (Locked
-                                    // Decision 5), so the cursor position is ignored.
-                                    if comp.mode() == Mode::Watch {
+                                    // In WATCH the wheel targets the pane under the
+                                    // cursor: re-focus it, or ignore the wheel entirely
+                                    // when it falls on the footer / inter-tile gutter
+                                    // (no pane) — scrolling dead space scrolls nothing
+                                    // (gemini review). In SCROLLBACK the operator is
+                                    // pinned to the entry pane (Locked Decision 5), so
+                                    // the cursor position is not consulted.
+                                    let proceed = if comp.mode() == Mode::Watch {
                                         let hit = layout::compute_page(
                                             tty,
                                             panes.len(),
@@ -2570,15 +2573,22 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                         )
                                         .ok()
                                         .and_then(|p| p.pane_at(m.column, m.row));
-                                        if let Some(idx) = hit {
-                                            comp.set_focus(idx);
+                                        match hit {
+                                            Some(idx) => {
+                                                comp.set_focus(idx);
+                                                true
+                                            }
+                                            None => false,
                                         }
-                                    }
+                                    } else {
+                                        true
+                                    };
                                     let has_history = panes
                                         .get(comp.focus())
                                         .map(|p| p.history_size())
                                         .unwrap_or(0)
                                         > 0;
+                                    if proceed {
                                     match mouse_to_input(m.kind, comp.mode(), has_history) {
                                         Some(input) => {
                                             let action = comp.step(input, &states);
@@ -2599,6 +2609,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                 dirty = true;
                                             }
                                         }
+                                    }
                                     }
                                 }
                                 _ => {}
