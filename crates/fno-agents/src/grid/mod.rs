@@ -93,9 +93,6 @@ pub fn apply_soft_cap(mut names: Vec<String>, max: usize) -> (Vec<String>, Optio
 /// ("usage error") without chasing through a generic `Box<dyn Error>`.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum GridArgError {
-    #[error("fno-agents grid: no agent names given (try: grid <name1> <name2>... or grid --all)")]
-    NoAgents,
-
     #[error("fno-agents grid: --all takes no positional names (got: {0})")]
     AllWithNames(String),
 
@@ -126,6 +123,7 @@ impl GridArgs {
     /// The grammar is intentionally tiny for v1:
     ///
     /// ```text
+    /// grid                                 # bare: zero-config front door (E5b)
     /// grid <name>...                       # one or more agent names
     /// grid --all                           # every PTY-managed running agent
     /// grid --rail [--group-by <key>]       # opt-in rail (Phase 1)
@@ -157,9 +155,9 @@ impl GridArgs {
         if all && !names.is_empty() {
             return Err(GridArgError::AllWithNames(names.join(" ")));
         }
-        if !all && names.is_empty() {
-            return Err(GridArgError::NoAgents);
-        }
+        // E5b zero-config front door: a bare `grid` (no names, no --all) is
+        // legal. It opens an empty grid with the goal launcher active; the
+        // operator types a goal and the grid spawns + tiles a `/target` worker.
         Ok(GridArgs {
             names,
             all,
@@ -229,8 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_argv() {
-        assert_eq!(GridArgs::parse(&[]), Err(GridArgError::NoAgents));
+    fn bare_argv_is_the_front_door() {
+        // E5b: a bare `grid` parses to empty front-door args (no error).
+        let a = GridArgs::parse(&[]).unwrap();
+        assert!(a.names.is_empty());
+        assert!(!a.all);
     }
 
     #[test]
