@@ -1542,10 +1542,18 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             return Response::err(req.id, ErrorCode::Internal, format!("registry write: {e}"));
         }
     }
-    // The row is registered live: the worker now owns the session's liveness, so
-    // the daemon must NOT release the interactive-claude claim on drop (E1). Every
-    // early-return failure path above kept it armed and released exactly once.
+    // The row is registered live: re-anchor the interactive-claude single-writer
+    // claim's PID-liveness to the long-lived WORKER process, THEN disarm so the
+    // guard does not release it on drop (codex review P1). The pre-spawn acquire
+    // pinned liveness to the ephemeral `fno` subprocess (already dead), so without
+    // this re-anchor the `session:<uuid>` claim reads stale immediately and a
+    // second writer (the relay in E4, or a human TUI) could reclaim the still-live
+    // session - defeating the single-writer interlock. Unlike the stream worker
+    // (which re-anchors to its own pid), the generic PTY worker has no claim
+    // handoff, so the daemon does the re-anchor here. Every early-return failure
+    // path above kept the guard armed and released exactly once.
     if let Some(guard) = claude_claim_guard {
+        reanchor_session_claim_to_pid(&guard.session_uuid, &guard.holder, worker_pid);
         guard.disarm();
     }
     let _ = ctx.emitter.emit(
@@ -1620,6 +1628,43 @@ fn claim_acquire_argv(uuid: &str, holder: &str) -> Vec<String> {
         holder.into(),
         "-J".into(),
     ]
+}
+
+/// The `fno claim acquire session:<uuid> --holder <holder> --pid <pid>` argv that
+/// re-anchors PID-liveness to a specific (long-lived) process. Pure for
+/// unit-testability; mirrors `stream_worker::claim_reacquire_argv` so the daemon
+/// and worker re-anchor identically.
+fn claim_acquire_pid_argv(uuid: &str, holder: &str, pid: u32) -> Vec<String> {
+    vec![
+        "claim".into(),
+        "acquire".into(),
+        format!("session:{uuid}"),
+        "--holder".into(),
+        holder.into(),
+        "--pid".into(),
+        pid.to_string(),
+    ]
+}
+
+/// Re-anchor an interactive-claude `session:<uuid>` claim's PID-liveness to the
+/// long-lived worker process (codex review P1). The daemon's pre-spawn acquire
+/// pins liveness to the ephemeral `fno` subprocess it shelled (already dead by
+/// registration), so the claim reads stale at once; re-acquiring with the same
+/// holder + the worker pid (an idempotent re-acquire) makes the claim track the
+/// real writer for the PTY's whole life. Fire-and-forget (`spawn`, reaped by the
+/// daemon idle-tick) so it never blocks the async executor; best-effort like the
+/// guard's release - the registry one-host re-check stays the authoritative
+/// in-daemon gate.
+fn reanchor_session_claim_to_pid(uuid: &str, holder: &str, pid: u32) {
+    if uuid.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("fno")
+        .args(claim_acquire_pid_argv(uuid, holder, pid))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// The worker argv for the claude stream-json lane (everything after the worker
@@ -2096,6 +2141,10 @@ fn provider_readiness_detector(provider: &str) -> Box<dyn crate::readiness::Read
     match provider {
         "codex" => crate::provider::CodexProvider.readiness_detector(),
         "gemini" => crate::provider::GeminiProvider.readiness_detector(),
+        // E1 (codex review P2): interactive claude rows need a real detector, else
+        // `agent.ask` polls NoSignalDetector and times out with "no readiness
+        // signal" despite ClaudeReadinessDetector existing. Same source of truth.
+        "claude" => crate::provider::ClaudeInteractiveProvider.readiness_detector(),
         // Carry the real provider name so the UnknownReadinessSignal error and
         // provider_name() name the actual CLI (e.g. "opencode") rather than the
         // literal "unknown" (cv-789fdba0).
@@ -5846,6 +5895,40 @@ done
     #[test]
     fn stream_claim_holder_is_short_id_scoped() {
         assert_eq!(stream_claim_holder("sw7"), "stream:sw7");
+    }
+
+    /// E1 (codex P1): the re-anchor argv pins the claim to a specific pid via
+    /// `--pid`, so PID-liveness tracks the long-lived worker, not the dead `fno`
+    /// subprocess. Mirrors stream_worker::claim_reacquire_argv.
+    #[test]
+    fn claim_acquire_pid_argv_pins_worker_pid() {
+        assert_eq!(
+            claim_acquire_pid_argv("uuid-1", "pty:ab12cd34", 4242),
+            vec![
+                "claim",
+                "acquire",
+                "session:uuid-1",
+                "--holder",
+                "pty:ab12cd34",
+                "--pid",
+                "4242"
+            ]
+        );
+    }
+
+    /// E1 (codex P2): interactive claude resolves to a real readiness detector,
+    /// not the fail-loud NoSignalDetector, so `agent.ask` against it does not
+    /// time out with "no readiness signal".
+    #[test]
+    fn provider_readiness_detector_handles_claude() {
+        use crate::readiness::ReadinessDetector as _;
+        let d = provider_readiness_detector("claude");
+        assert_eq!(d.provider_name(), "claude");
+        // A truly unknown provider still gets the NoSignalDetector (name carried).
+        assert_eq!(
+            provider_readiness_detector("opencode").provider_name(),
+            "opencode"
+        );
     }
 
     #[test]
