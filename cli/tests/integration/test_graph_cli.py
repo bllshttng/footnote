@@ -1414,30 +1414,35 @@ def test_graph_ready_excludes_epics(tmp_graph):
 
 
 def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
-    """x-33b2: an in-progress epic (its child done, the epic itself the top-ranked
-    ready node) must NOT be selected - `next` falls through to a real leaf instead
-    of repeatedly returning the container ('it keeps assuming this one is next')."""
+    """x-33b2: an IN-PROGRESS epic (one child done, one still pending) is the
+    top-ranked ready node but must NOT be selected - `next` falls through to a
+    buildable leaf instead of repeatedly returning the container ('it keeps
+    assuming this one is next')."""
     entries = [
         # Epic: ready, p0 -> would rank ahead of everything if selectable.
         {"id": "ab-epic", "title": "Epic", "_status": "ready", "priority": "p0",
          "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": "x.md"},
-        # Its only child is DONE (the work the epic 'contained' is finished).
-        {"id": "ab-child", "title": "Child", "_status": "done", "priority": "p2",
+        # One child done, one still pending -> the epic is IN PROGRESS.
+        {"id": "ab-cdone", "title": "Done child", "_status": "done", "priority": "p2",
          "created_at": "2026-01-02", "project": "p", "parent": "ab-epic",
          "completed_at": "2026-01-03", "blocked_by": [], "plan_path": "x.md"},
-        # A genuinely buildable loose leaf elsewhere.
-        {"id": "ab-leaf", "title": "Leaf", "_status": "ready", "priority": "p2",
-         "created_at": "2026-01-04", "project": "p", "blocked_by": [], "plan_path": "x.md"},
+        {"id": "ab-cpend", "title": "Pending child", "_status": "ready", "priority": "p3",
+         "created_at": "2026-01-04", "project": "p", "parent": "ab-epic",
+         "blocked_by": [], "plan_path": "x.md"},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     r = _invoke("graph", "next", "--all")
     out = json.loads(r.stdout)
-    assert out is not None and out["id"] == "ab-leaf"  # the epic was skipped
+    assert out is not None
+    assert out["id"] != "ab-epic"      # the in-progress container is skipped
+    assert out["id"] == "ab-cpend"     # its buildable pending leaf is picked
 
 
-def test_graph_next_returns_null_when_only_epics_left(tmp_graph):
-    """x-33b2: with only a container (epic) and its done child left, `next` returns
-    nothing rather than the un-buildable epic."""
+def test_graph_next_returns_all_done_epic_for_closure(tmp_graph):
+    """codex P1 (PR #69): once ALL its children are done, the epic stays
+    selectable so the megawalk walker can reach it via `fno backlog next` and
+    close it (`fno backlog done`). Excluding it would strand the epic - and
+    anything blocked by it - with no automated closure path."""
     entries = [
         {"id": "ab-epic", "title": "Epic", "_status": "ready", "priority": "p0",
          "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": "x.md"},
@@ -1447,7 +1452,8 @@ def test_graph_next_returns_null_when_only_epics_left(tmp_graph):
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     r = _invoke("graph", "next", "--all")
-    assert json.loads(r.stdout) is None
+    out = json.loads(r.stdout)
+    assert out is not None and out["id"] == "ab-epic"  # reachable for closure
 
 
 # ---------------------------------------------------------------------------

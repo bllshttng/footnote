@@ -89,20 +89,31 @@ def _has_unmerged_open_pr(e: dict) -> bool:
     return bool(e.get("pr_number"))
 
 
-def _container_ids(entries: list[dict]) -> set[str]:
-    """Ids of nodes that are some other node's ``parent`` - i.e. epics/containers.
+def _pending_epic_ids(entries: list[dict]) -> set[str]:
+    """Ids of epics (parents) that still have at least one un-done child.
 
-    A container is never directly buildable (its work lives in its decomposed
-    children), so every work-SELECTION surface must drop it from the candidate
-    pool - else an in-progress epic ranks first and is repeatedly picked, or a
-    bulk `--all-ready` dispatch launches a `/target` worker against the box
-    (x-33b2). Shared by `next` (_pick_ready) and `ready` (cmd_ready) so the two
-    surfaces cannot drift; `advance_dependents` applies the same rule on the
-    merge edge-following path.
+    A container with PENDING children is never directly buildable (its work lives
+    in those children), so every work-SELECTION surface drops it from the
+    candidate pool - else it ranks first and is repeatedly picked, or a bulk
+    `--all-ready` dispatch launches a `/target` worker against the box (x-33b2).
+    Shared by `next` (_pick_ready) and `ready` (cmd_ready) so the two surfaces
+    cannot drift.
+
+    An ALL-children-done epic is deliberately NOT excluded (codex P1 on PR #69):
+    the megawalk walker closes it via `fno backlog done` after its group children
+    finish, and the epic stays visible in `fno backlog next` until its own
+    completed_at is set (loop_megawalk.rs grilled-decision-9). Excluding all-done
+    epics too would strand them - and anything blocked by them - with no
+    automated closure path. A child counts as done by `completed_at`
+    (== `_status` "done"; the field is the durable signal the walker keys on).
     """
+    children_by_parent: dict[str, list[dict]] = {}
+    for e in entries:
+        if isinstance(e, dict) and isinstance(e.get("parent"), str):
+            children_by_parent.setdefault(e["parent"], []).append(e)
     return {
-        e.get("parent") for e in entries
-        if isinstance(e, dict) and isinstance(e.get("parent"), str)
+        pid for pid, kids in children_by_parent.items()
+        if any(not k.get("completed_at") for k in kids)
     }
 
 
@@ -1532,16 +1543,16 @@ def cmd_next(
             e for e in candidates
             if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
         ]
-        # Containers are never directly buildable (x-33b2): a node that is some
-        # other node's `parent` is an epic whose work lives in its decomposed
-        # children. `next` must never return it - an in-progress epic otherwise
-        # ranks first among its siblings (make_selection_sort_key) and is
-        # repeatedly re-selected as the head, starving the genuinely-ready leaf
-        # below it. Build the leaves, not the box. Parent ids come from the FULL
-        # graph so a parent already filtered out of `candidates` still suppresses
-        # correctly, and the epic's leaves are unaffected. Shared with cmd_ready.
-        container_ids = _container_ids(entries)
-        candidates = [e for e in candidates if e.get("id") not in container_ids]
+        # Pending containers are never directly buildable (x-33b2): an epic with
+        # un-done children is a box whose work lives in those children. `next`
+        # must never return it - it otherwise ranks first among its siblings
+        # (make_selection_sort_key) and is repeatedly re-selected as the head,
+        # starving the genuinely-ready leaf below it. Build the leaves, not the
+        # box. An ALL-done epic stays selectable so the walker can close it
+        # (codex P1). Computed from the FULL graph so a parent already filtered
+        # out of `candidates` still suppresses correctly. Shared with cmd_ready.
+        pending_epics = _pending_epic_ids(entries)
+        candidates = [e for e in candidates if e.get("id") not in pending_epics]
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.
@@ -1660,13 +1671,14 @@ def cmd_ready(
         e for e in ready
         if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
     ]
-    # Containers are never actionable work (x-33b2 / codex P2 on PR #69): drop
-    # epics (a node that is some other node's `parent`) so `fno backlog ready` -
-    # and the `dispatch-node.sh --all-ready` bulk path that enumerates it - never
-    # presents/launches the box instead of its leaves. Shares _container_ids with
-    # `next`'s _pick_ready so the two selection surfaces cannot drift.
-    container_ids = _container_ids(entries)
-    ready = [e for e in ready if e.get("id") not in container_ids]
+    # Pending containers are never actionable work (x-33b2 / codex P2 on PR #69):
+    # drop epics with un-done children so `fno backlog ready` - and the
+    # `dispatch-node.sh --all-ready` bulk path that enumerates it - never
+    # presents/launches the box instead of its leaves. An all-done epic stays
+    # listed so the walker's closure path can reach it (codex P1). Shares
+    # _pending_epic_ids with `next`'s _pick_ready so the surfaces cannot drift.
+    pending_epics = _pending_epic_ids(entries)
+    ready = [e for e in ready if e.get("id") not in pending_epics]
     # Epics-first, then flat priority (C3, Locked Decision 7); key built
     # from the full graph so epic parents always resolve.
     ready.sort(key=make_selection_sort_key(entries))
