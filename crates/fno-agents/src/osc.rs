@@ -57,6 +57,10 @@ enum State {
 pub struct OscCapture {
     state: State,
     buffer: Vec<u8>,
+    /// Set when a body exceeds `MAX_OSC_BODY`. A truncated body's title is
+    /// unknowable, so an overflowed sequence is dropped at the terminator rather
+    /// than published as a bogus prefix. Reset at each new OSC start.
+    overflowed: bool,
     title: Option<String>,
     progress: Option<String>,
 }
@@ -80,6 +84,7 @@ impl OscCapture {
                 State::Escape => {
                     if b == b']' {
                         self.buffer.clear();
+                        self.overflowed = false;
                         self.state = State::Osc;
                     } else {
                         // Some other escape (CSI, plain ESC, ...): we only track
@@ -100,6 +105,10 @@ impl OscCapture {
                     _ => {
                         if self.buffer.len() < MAX_OSC_BODY {
                             self.buffer.push(b);
+                        } else {
+                            // Body too long: stop accumulating and mark it so the
+                            // terminator drops it instead of publishing a prefix.
+                            self.overflowed = true;
                         }
                     }
                 },
@@ -113,6 +122,7 @@ impl OscCapture {
                         // ran straight into the next one. Drop the partial body
                         // and start the new sequence rather than losing it.
                         self.buffer.clear();
+                        self.overflowed = false;
                         self.state = State::Osc;
                     } else {
                         // ESC inside the body not followed by `\` or `]`: the
@@ -144,6 +154,14 @@ impl OscCapture {
     /// Parse a completed OSC body (`Ps;Pt...`, terminator already stripped) and
     /// update the captured title/progress.
     fn finish(&mut self) {
+        // A body that overflowed MAX_OSC_BODY was truncated mid-stream, so its
+        // title/progress is unknowable: publish nothing rather than a bogus
+        // prefix. (The `ESC ]` restart path still lets a later valid OSC win.)
+        if self.overflowed {
+            self.buffer.clear();
+            self.overflowed = false;
+            return;
+        }
         // Decode lazily here, so a body split mid-multibyte across feeds is fine.
         if let Ok(body) = std::str::from_utf8(&self.buffer) {
             if let Some((code, rest)) = body.split_once(';') {
@@ -234,6 +252,25 @@ mod tests {
         let mut osc = OscCapture::new();
         osc.feed(b"\x1b]2;first\x1b]2;second\x07");
         assert_eq!(osc.title(), Some("second"));
+    }
+
+    #[test]
+    fn oversized_osc_body_is_dropped_not_published_truncated() {
+        // A body longer than MAX_OSC_BODY is truncated mid-stream; publishing the
+        // prefix would be a bogus title, so the terminator must drop it.
+        let mut osc = OscCapture::new();
+        let mut seq = b"\x1b]2;".to_vec();
+        seq.extend(std::iter::repeat(b'x').take(MAX_OSC_BODY + 100));
+        seq.push(BEL);
+        osc.feed(&seq);
+        assert_eq!(
+            osc.title(),
+            None,
+            "truncated oversized title must not publish"
+        );
+        // A later well-formed OSC still wins (overflow flag reset on new start).
+        osc.feed(b"\x1b]2;ok\x07");
+        assert_eq!(osc.title(), Some("ok"));
     }
 
     #[test]
