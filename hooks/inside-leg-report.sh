@@ -37,10 +37,14 @@ esac
 
 INPUT=$(cat)
 
-# One python process extracts the session id and a millisecond-resolution seq.
-# Millisecond (not second) resolution matters: the working/done pair of one fast
-# turn must get strictly increasing seqs, else the daemon's `seq <= last_seq`
-# drop would discard the `done`. A missing/garbled session id -> silent exit 0.
+# One python process extracts the session id and a monotonic seq. seq is
+# `time.monotonic_ns()`, NOT wall-clock: the daemon drops a report with
+# `seq <= last_seq`, so the working/done pair of one turn MUST be strictly
+# increasing. Wall-clock ns would regress if NTP steps the clock backward
+# between the two reports (dropping the `done`, pinning the badge at `working`);
+# the monotonic clock is host-global across processes and never steps back, so
+# done's seq (read later) always exceeds working's. A missing/garbled session id
+# -> silent exit 0.
 PARSED=$(python3 -c '
 import sys, json, time
 try:
@@ -50,7 +54,7 @@ except Exception:
     sys.exit(0)
 if not sid:
     sys.exit(0)
-print(f"{sid}\t{int(time.time() * 1000)}")
+print(f"{sid}\t{time.monotonic_ns()}")
 ' <<<"$INPUT" 2>/dev/null) || exit 0
 [[ -z "$PARSED" ]] && exit 0
 

@@ -1118,7 +1118,7 @@ event_types:
           type: string
 
   - name: inside_leg_report
-    description: "An inside-leg state push (E3.2) was stored on the matching claude row."
+    description: "Signal that an inside-leg state push (E3.2) was stored. Carries session_id/seq/state; the full stored report (reason/ttl_ms/received_at) lives on the matching claude registry row, which is the audit source -- this event is not a reconstruction record."
     sources: [daemon]
     data:
       required: [session_id, seq, state]
