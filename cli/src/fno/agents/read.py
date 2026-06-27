@@ -134,8 +134,15 @@ def list_agents(
             registered_short_ids = {
                 e.claude_short_id for e in entries if e.claude_short_id
             }
+            # Projects-store rows key on full session_id (their short_id is the
+            # uuid prefix, not the registry's hex handle), so exclude adopted
+            # sessions by cc_session_id too (x-a1d5: no double-listing).
+            registered_session_ids = {
+                e.cc_session_id for e in entries if e.cc_session_id
+            }
             sessions = discover_mod.discover_live_sessions(
-                exclude_short_ids=registered_short_ids
+                exclude_short_ids=registered_short_ids,
+                exclude_session_ids=registered_session_ids,
             )
             for sess in sessions:
                 if resolved_cwd is not None:

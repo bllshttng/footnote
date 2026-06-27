@@ -335,3 +335,250 @@ def test_ac1_edge2_worktree_resolves_to_parent_repo(tmp_path, monkeypatch):
         psutil_mod=_FakePsutil({111: ct}),
     )
     assert sessions[0].project == "fno"
+
+
+# ---------------------------------------------------------------------------
+# x-a1d5: canonical transcript-store fallback (~/.claude/projects)
+#
+# The sidecar is gone; liveness comes from a running ``claude`` process whose
+# cwd maps to a projects subdir. A fake psutil supplies both process_iter (for
+# the projects fallback) and create_time (for any sidecar row).
+# ---------------------------------------------------------------------------
+
+import os  # noqa: E402
+import re  # noqa: E402
+
+
+def _enc(cwd: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+
+
+class _FakeProcsProc:
+    def __init__(self, cwd=None, create_time=None):
+        self._cwd = cwd
+        self._ct = create_time
+
+    def cwd(self):
+        if self._cwd is None:
+            raise _FakeProcsPsutil.NoSuchProcess(0)
+        return self._cwd
+
+    def create_time(self):
+        if self._ct is None:
+            raise _FakeProcsPsutil.NoSuchProcess(0)
+        return self._ct
+
+
+class _IterItem:
+    def __init__(self, pid, cmdline):
+        self.info = {"pid": pid, "cmdline": cmdline}
+
+
+class _FakeProcsPsutil:
+    """psutil stand-in supporting process_iter + Process(pid).cwd()/create_time().
+
+    ``procs`` maps pid -> (cmdline, cwd); ``alive`` maps pid -> create_time for
+    any sidecar liveness check.
+    """
+
+    class NoSuchProcess(Exception):
+        pass
+
+    def __init__(self, procs=None, alive=None):
+        self._procs = procs or {}
+        self._alive = alive or {}
+
+    def process_iter(self, _fields=None):
+        return [_IterItem(pid, cmd) for pid, (cmd, _cwd) in self._procs.items()]
+
+    def Process(self, pid):  # noqa: N802 (mirror psutil API)
+        cwd = self._procs.get(pid, (None, None))[1]
+        ct = self._alive.get(pid)
+        if cwd is None and ct is None and pid not in self._procs:
+            raise self.NoSuchProcess(pid)
+        return _FakeProcsProc(cwd=cwd, create_time=ct)
+
+
+def _write_transcript(projects_dir, *, cwd, session_id, mtime_age=5.0, body_cwd=True):
+    pdir = projects_dir / _enc(cwd)
+    pdir.mkdir(parents=True, exist_ok=True)
+    f = pdir / f"{session_id}.jsonl"
+    line = {"type": "user", "sessionId": session_id}
+    if body_cwd:
+        line["cwd"] = cwd
+    f.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    mt = time.time() - mtime_age
+    os.utime(f, (mt, mt))
+    return f
+
+
+def _claude_proc(pid, cwd, *, session_id=None):
+    cmd = ["claude"]
+    if session_id:
+        cmd += ["--session-id", session_id]
+    return pid, (cmd, cwd)
+
+
+def _run_projects(tmp_path, projects_dir, procs, **kw):
+    """Discover with an absent sidecar so the projects fallback fires."""
+    pmap = dict(procs)
+    return discover.discover_live_sessions(
+        sessions_dir=tmp_path / "no-sessions-here",
+        projects_dir=projects_dir,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakeProcsPsutil(procs=pmap),
+        project_resolver=kw.pop("project_resolver", lambda c: None),
+        **kw,
+    )
+
+
+def test_x_a1d5_fallback_surfaces_live_session(tmp_path, monkeypatch):
+    """AC1: with no sidecar, a live claude proc's transcript still surfaces."""
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    sid = "02a5c8bc-c83c-4bb0-a473-19f85d0f3671"
+    _write_transcript(projects, cwd="/Users/x/code/proj", session_id=sid)
+    procs = [_claude_proc(4242, "/Users/x/code/proj", session_id=sid)]
+    sessions = _run_projects(tmp_path, projects, procs)
+    assert len(sessions) == 1
+    s = sessions[0]
+    assert s.session_id == sid
+    assert s.short_id == "02a5c8bc"  # session_id[:8], the addressable handle
+    assert s.cwd == "/Users/x/code/proj"  # from the live process
+    assert s.pid == 4242  # real pid from the running claude
+    assert s.agent == "claude"
+
+
+def test_x_a1d5_session_id_from_newest_transcript_not_argv(tmp_path, monkeypatch):
+    """Live id == newest transcript filename, even when argv --session-id differs.
+
+    Proven on the real host: a claude ran with --session-id X but its on-disk
+    transcript was a different id. The filename is canonical, argv is not.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    _write_transcript(projects, cwd="/Users/x/code/proj",
+                      session_id="real-transcript-id", mtime_age=2)
+    procs = [_claude_proc(4242, "/Users/x/code/proj", session_id="argv-only-id")]
+    sessions = _run_projects(tmp_path, projects, procs)
+    assert [s.session_id for s in sessions] == ["real-transcript-id"]
+
+
+def test_x_a1d5_sidecar_present_skips_fallback(tmp_path, monkeypatch):
+    """AC4: a working sidecar means the projects fallback is never consulted."""
+    use_tmpdir(monkeypatch, tmp_path)
+    sdir = tmp_path / "sessions"
+    ct = _write_session(sdir, 770, session_id="uuid-sidecar", job_id="side0001",
+                        cwd="/Users/x/code/proj")
+    projects = tmp_path / "projects"
+    _write_transcript(projects, cwd="/Users/x/code/other", session_id="ghost-sid")
+    sessions = discover.discover_live_sessions(
+        sessions_dir=sdir,
+        projects_dir=projects,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakeProcsPsutil(
+            procs={999: (["claude"], "/Users/x/code/other")},
+            alive={770: ct},
+        ),
+        project_resolver=lambda c: None,
+    )
+    assert [s.short_id for s in sessions] == ["side0001"]
+
+
+def test_x_a1d5_stale_transcript_not_surfaced(tmp_path, monkeypatch):
+    """A live proc whose transcript went quiet past the window is dropped."""
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    _write_transcript(projects, cwd="/Users/x/code/proj", session_id="stale-sid",
+                      mtime_age=discover._DEFAULT_RECENCY_SECONDS + 120)
+    procs = [_claude_proc(4242, "/Users/x/code/proj")]
+    assert _run_projects(tmp_path, projects, procs) == []
+
+
+def test_x_a1d5_noise_ignored(tmp_path, monkeypatch):
+    """sync-conflict copies, non-jsonl files, and subdirs never become sessions."""
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    real = _write_transcript(projects, cwd="/Users/x/code/proj",
+                             session_id="real-sid", mtime_age=20)
+    pdir = real.parent
+    # A FRESHER sync-conflict copy must still lose to name-based skipping.
+    conflict = pdir / "real-sid.sync-conflict-20260626.jsonl"
+    conflict.write_text(json.dumps({"sessionId": "conflict"}) + "\n", encoding="utf-8")
+    (pdir / "summary.md").write_text("# notes", encoding="utf-8")
+    (pdir / "tool-results").mkdir()  # UUID subdir analog, never a session
+    procs = [_claude_proc(4242, "/Users/x/code/proj")]
+    sessions = _run_projects(tmp_path, projects, procs)
+    assert [s.session_id for s in sessions] == ["real-sid"]
+
+
+def test_x_a1d5_no_dir_for_live_cwd_yields_nothing(tmp_path, monkeypatch):
+    """A live claude with no projects dir yet (brand-new) surfaces no row."""
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    procs = [_claude_proc(4242, "/Users/x/code/brand-new")]
+    assert _run_projects(tmp_path, projects, procs) == []
+
+
+def test_x_a1d5_bg_infra_proc_excluded(tmp_path, monkeypatch):
+    """A --bg-pty-host helper shares the claude binary but is not a session."""
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    _write_transcript(projects, cwd="/Users/x/code/proj", session_id="real-sid")
+    procs = {
+        16637: (
+            ["/Users/x/.local/share/claude/versions/2.1.193", "--bg-pty-host",
+             "/tmp/x.sock"],
+            "/Users/x/code/proj",
+        ),
+    }
+    assert _run_projects(tmp_path, projects, list(procs.items())) == []
+
+
+def test_x_a1d5_resolve_adopts_projects_session(tmp_path, monkeypatch):
+    """AC2: a projects-only session is addressable (resolve by its short-id)."""
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    sid = "8255f76d-75be-4a5f-bfc1-39a710fb8a01"
+    _write_transcript(projects, cwd="/Users/x/code/proj", session_id=sid)
+    match, _ = discover.resolve_or_suggest(
+        "8255f76d",
+        sessions_dir=tmp_path / "no-sessions-here",
+        projects_dir=projects,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakeProcsPsutil(procs={4242: (["claude"], "/Users/x/code/proj")}),
+        project_resolver=lambda c: None,
+    )
+    assert match is not None
+    assert match.session_id == sid
+
+
+def test_x_a1d5_underscore_cwd_dir_preserved(tmp_path, monkeypatch):
+    """Codex P2: a CC build that preserves '_' in the dir name still resolves.
+
+    The transcript lives under the underscore-PRESERVING dir; discovery must try
+    both encodings and find it (the underscore-collapsing form would miss).
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    cwd = "/Users/x/code/my_app"
+    # Seed under the underscore-preserving dir name only.
+    pdir = projects / re.sub(r"[^a-zA-Z0-9_]", "-", cwd)
+    pdir.mkdir(parents=True, exist_ok=True)
+    f = pdir / "us-sid.jsonl"
+    f.write_text(json.dumps({"sessionId": "us-sid"}) + "\n", encoding="utf-8")
+    procs = [_claude_proc(4242, cwd)]
+    sessions = _run_projects(tmp_path, projects, procs)
+    assert [s.session_id for s in sessions] == ["us-sid"]
+
+
+def test_x_a1d5_exclude_adopted_session_by_full_id(tmp_path, monkeypatch):
+    """Codex P2: an adopted (registered) session is not re-listed by projects/."""
+    use_tmpdir(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    sid = "adopted-session-uuid"
+    _write_transcript(projects, cwd="/Users/x/code/proj", session_id=sid)
+    procs = [_claude_proc(4242, "/Users/x/code/proj")]
+    sessions = _run_projects(tmp_path, projects, procs, exclude_session_ids={sid})
+    assert sessions == []
