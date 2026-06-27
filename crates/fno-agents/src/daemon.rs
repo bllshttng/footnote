@@ -836,6 +836,10 @@ fn entry_holds_session(e: &RegistryEntry, uuid: &str) -> bool {
     e.codex_session_id.as_deref() == Some(uuid)
         || e.gemini_session_id.as_deref() == Some(uuid)
         || e.session_id.as_deref() == Some(uuid)
+        // Interactive claude (E1) records its pinned session in claude_session_uuid;
+        // the locked one-host re-check matches it here so a second writer on one
+        // session id is refused even when the file claim is unavailable.
+        || e.claude_session_uuid.as_deref() == Some(uuid)
 }
 
 /// Non-terminal == has (or expects) a live backend. Exited/PermanentDead are
@@ -1444,17 +1448,32 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     // P1, PR #365). The closure returns whether THIS call won the insert.
     let resume_for_lock = resume_id.clone();
     let interactive_for_lock = interactive;
+    // The session uuid this spawn pins: a codex/gemini promote resumes via
+    // `resume_id`; interactive claude (E1) pins via `session_id`. Either way the
+    // locked re-check refuses a second non-terminal interactive writer on it -
+    // the in-daemon backstop when the file claim is unavailable (E1 fail-open).
+    let pinned_session_for_lock: Option<String> = resume_for_lock.clone().or_else(|| {
+        if interactive && provider == "claude" {
+            p.get("session_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        } else {
+            None
+        }
+    });
     let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
         if r.entries.iter().any(|e| e.name == entry.name) {
             return false;
         }
-        // Atomic one-host re-check: two concurrent `promote --from <uuid>` calls
-        // both pass the lock-free admit_promote above, then race to push here.
-        // Under the exclusive registry lock exactly one wins; the loser must NOT
-        // create a second interactive writer on the session (one-host invariant,
-        // AC2-EDGE concurrency; same pattern as the name reservation).
+        // Atomic one-host re-check: two concurrent interactive spawns on one
+        // session id (`promote --from <uuid>`, or two claude spawns pinning the
+        // same `session_id`) both pass the lock-free checks above, then race to
+        // push here. Under the exclusive registry lock exactly one wins; the loser
+        // must NOT create a second interactive writer on the session (one-host
+        // invariant, AC2-EDGE / AC3-EDGE concurrency; same pattern as the name
+        // reservation).
         if interactive_for_lock {
-            if let Some(uuid) = resume_for_lock.as_deref() {
+            if let Some(uuid) = pinned_session_for_lock.as_deref() {
                 if r.entries.iter().any(|e| {
                     e.is_interactive() && entry_holds_session(e, uuid) && is_non_terminal(e.status)
                 }) {
@@ -1472,6 +1491,18 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             // Lost a concurrent spawn race for this name: our just-started worker
             // is a duplicate. Shut it down so we don't leak it, then report the
             // conflict (same code the lock-free collision check returns).
+            //
+            // E1: a same-name race derives the SAME short_id -> the SAME
+            // `pty:<short_id>` claim holder, and the idempotent same-holder
+            // acquire returned `Acquired` to BOTH callers. The winner registered
+            // and owns that claim, so this loser must DISARM rather than release
+            // it on drop - else it would delete the live winner's single-writer
+            // claim (a different-name loser was already rejected at acquire time
+            // with HeldByOther, or holds a disarmed fail-open guard, so disarming
+            // here is correct in every sub-case).
+            if let Some(g) = claude_claim_guard {
+                g.disarm();
+            }
             best_effort_worker_shutdown(&sock).await;
             let _ = ctx.emitter.emit(
                 "agent_spawn_failed",
@@ -5632,6 +5663,27 @@ mod tests {
             interactive_claim_holder("ab12cd34"),
             stream_claim_holder("ab12cd34")
         );
+    }
+
+    /// E1 fix: the locked one-host re-check matches an interactive claude row by
+    /// its `claude_session_uuid`, so a second writer on the same pinned session id
+    /// is refused even when the file claim is unavailable (fail-open backstop).
+    #[test]
+    fn entry_holds_session_matches_claude_session_uuid() {
+        let row = build_claude_stream_entry(
+            "peer",
+            "ab12cd34",
+            std::path::Path::new("/work"),
+            "sess-uuid-9",
+            4242,
+            None,
+            PathBuf::from("/tmp/log.jsonl"),
+        );
+        assert!(
+            entry_holds_session(&row, "sess-uuid-9"),
+            "a claude row must be matched by its claude_session_uuid"
+        );
+        assert!(!entry_holds_session(&row, "other-uuid"));
     }
 
     fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
