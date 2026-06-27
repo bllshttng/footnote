@@ -95,6 +95,21 @@ def test_transcript_replies_robust_and_faithful(tmp_path, monkeypatch):
     assert rt_mod._transcript_replies("s") == ["hi   there\tfriend"]  # ws preserved, no crash
 
 
+def test_transcript_replies_skips_non_string_text(tmp_path, monkeypatch):
+    # A malformed block whose `text` is not a string (None / list) must be skipped,
+    # not crash _SENTINEL_RE.findall (gemini medium).
+    tx = tmp_path / "s.jsonl"
+    lines = [
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": None}]}}),
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": ["x"]}]}}),
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "<<<RELAY>>>ok now<<<ENDRELAY>>>"}]}}),
+    ]
+    tx.write_text("\n".join(lines))
+    monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: str(tx))
+    assert rt_mod._transcript_replies("s") == ["ok now"]
+
+
 def test_transcript_replies_honors_config_dir(tmp_path):
     # A peer under a relocated CLAUDE_CONFIG_DIR writes projects/ THERE, not under
     # ~/.claude. _transcript_replies must glob projects/ under the config dir.
@@ -136,6 +151,14 @@ def test_resolve_worker_skips_dead_session(tmp_path, monkeypatch):
     _write_registry(tmp_path, [
         {"name": "peer", "short_id": "wkB", "claude_session_uuid": "the-uuid", "status": "exited"},
     ])
+    assert rt_mod.resolve_worker_short_id("the-uuid") is None
+
+
+def test_resolve_worker_none_on_non_object_registry(tmp_path, monkeypatch):
+    # A registry that is valid JSON but not an object (corrupted/hand-edited) must
+    # not raise -- the relay treats it as unresolvable.
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    (tmp_path / "registry.json").write_text("[]")
     assert rt_mod.resolve_worker_short_id("the-uuid") is None
 
 

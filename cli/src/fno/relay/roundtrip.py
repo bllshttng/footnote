@@ -131,11 +131,13 @@ def _transcript_replies(session_id: str, config_dir: Optional[str] = None) -> li
             continue
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
+                text_val = block.get("text", "")
+                if not isinstance(text_val, str):
+                    continue  # a malformed block (text None / list) must not crash capture
                 # strip outer whitespace only -- preserve the reply's interior
                 # spacing faithfully; the injection path (_frame) re-normalizes to
                 # one line before sending the next hop.
-                out.extend(m.strip()
-                           for m in _SENTINEL_RE.findall(block.get("text", "")))
+                out.extend(m.strip() for m in _SENTINEL_RE.findall(text_val))
     return out
 
 
@@ -172,7 +174,11 @@ def resolve_worker_short_id(session_id: str) -> Optional[str]:
         data = json.loads(reg.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict):
+        return None  # a corrupted/hand-edited registry that is valid JSON but not an object
     rows = data.get("agents") or data.get("entries") or []
+    if not isinstance(rows, list):
+        return None
     for e in rows:
         if not isinstance(e, dict):
             continue
@@ -229,7 +235,8 @@ def _worker_rpc(
         resp = json.loads(data.decode("utf-8"))
         if not isinstance(resp, dict) or "error" in resp:
             return None
-        return resp.get("result")
+        result = resp.get("result")
+        return result if isinstance(result, dict) else None
     except (OSError, ValueError):
         return None
     finally:
