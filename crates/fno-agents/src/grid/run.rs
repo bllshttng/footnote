@@ -702,6 +702,58 @@ fn build_too_small_frame(tty: TtySize, err: &LayoutError) -> ScreenBuffer {
     frame
 }
 
+/// Build the E5b zero-config front-door frame, shown whenever the grid has no
+/// panes. Centers a title + prompt and renders the live goal buffer the
+/// operator is typing. The input line is anchored at a fixed column so the
+/// caret area does not jump as characters are typed. Pure over its inputs.
+fn build_front_door_frame(tty: TtySize, goal: &str) -> ScreenBuffer {
+    let mut frame = ScreenBuffer::blank(tty.rows, tty.cols);
+    let cols = tty.cols.max(1) as usize;
+    let title = truncate("footnote grid", cols);
+    let prompt = truncate(
+        "Type a goal and press Enter to launch a /target run. Esc to quit.",
+        cols,
+    );
+    // Center each line on its own width; the input line is anchored under the
+    // prompt's start column so it stays put while typing.
+    let col_of = |s: &str| -> u16 { ((cols - s.chars().count().min(cols)) / 2) as u16 };
+    let mid = tty.rows / 2;
+    let pcol = col_of(&prompt);
+    frame.put_str(mid.saturating_sub(2), col_of(&title), &title, false);
+    frame.put_str(mid, pcol, &prompt, false);
+    let line = truncate(
+        &format!("goal> {goal}\u{2588}"),
+        cols.saturating_sub(pcol as usize).max(1),
+    );
+    frame.put_str(mid.saturating_add(2), pcol, &line, true);
+    frame
+}
+
+/// Paint the front-door frame through the same diff/emit machinery as [`paint`]
+/// (so it shares the no-re-clear steady state). Called from the run loop's
+/// paint sites whenever `panes` is empty.
+fn paint_front_door<W: Write>(
+    out: &mut W,
+    prev_frame: &mut Option<ScreenBuffer>,
+    tty: TtySize,
+    goal: &str,
+) {
+    let cur = build_front_door_frame(tty, goal);
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    match prev_frame.as_ref() {
+        Some(prev) if prev.rows == cur.rows && prev.cols == cur.cols => {
+            let _ = emit_diff(prev, &cur, &mut buf);
+        }
+        _ => {
+            let _ = queue!(buf, terminal::Clear(terminal::ClearType::All));
+            let _ = emit_full(&cur, &mut buf);
+        }
+    }
+    let _ = out.write_all(&buf);
+    let _ = out.flush();
+    *prev_frame = Some(cur);
+}
+
 /// Render one frame to `out`, choosing the cheapest correct paint path:
 ///
 /// - **First frame / resize** (`prev_frame` is `None` or its dimensions no
@@ -1899,14 +1951,13 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // `--all` never tiles a non-drivable phantom claude pane (codex review P2).
     // codex/gemini pass through without a probe.
     let names = prune_non_pty_claude(names, home).await;
-    if names.is_empty() {
-        eprintln!("fno-agents grid: no agents to tile (try: grid <name>... or grid --all with running agents)");
-        return 2;
-    }
+    // E5b zero-config front door: an empty fleet no longer exits. The grid
+    // opens with no panes and the goal launcher active; the operator types a
+    // goal and the grid spawns + tiles a `/target` worker live. `names` and
+    // `host_interactive` are now mutable so a live-added pane can append.
     // Per-pane host_mode (interactive => Enter drives it; exec => watch only).
-    // Resolved once: an agent's host_mode is fixed at spawn, and pane indices
-    // are stable (panes transition state but are never removed mid-run). (ab-7fd7ae49)
-    let host_interactive = resolve_host_modes(&names, home);
+    // Resolved once per agent; live-added panes push their own entry.
+    let mut host_interactive = resolve_host_modes(&names, home);
     // Alignment is load-bearing: every reader indexes host_interactive by pane
     // index == names index. resolve_host_modes maps over names so this holds by
     // construction; assert it so a future change that breaks the 1:1 mapping
@@ -1924,7 +1975,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // still works). The note rides the footer so it stays visible on the
     // alternate screen; the eprintln lands in the operator's scrollback.
     let total_requested = names.len();
-    let (names, soft_warn) = apply_soft_cap(names, max_panes());
+    let (mut names, soft_warn) = apply_soft_cap(names, max_panes());
     if let Some(w) = &soft_warn {
         eprintln!("fno-agents grid: {w}");
     }
@@ -1942,7 +1993,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // `comp.current_page()`.
     let (tty_cols, tty_rows) = terminal::size().unwrap_or((80, 24));
     let mut tty = TtySize::new(tty_rows, tty_cols);
-    let paged0 = match layout::compute_page(tty, names.len(), 0) {
+    // `.max(1)`: with the zero-config front door `names` can be empty, but the
+    // ZeroPanes arm below would exit. A phantom 1-pane layout is harmless (the
+    // pane-construction loop iterates `names`, so it builds nothing) and only
+    // seeds an initial capacity; the front-door paint path ignores it.
+    let paged0 = match layout::compute_page(tty, names.len().max(1), 0) {
         Ok(p) => p,
         Err(LayoutError::TerminalTooSmall { rows, cols }) => {
             eprintln!("fno-agents grid: terminal too small ({rows}x{cols})");
@@ -2013,6 +2068,16 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // Transient one-line footer message (e.g. the exec watch-only hint).
     // Cleared on the next operator key so it never lingers. (ab-7fd7ae49)
     let mut hint: Option<String> = None;
+
+    // E5b launcher: Some while the operator is typing a goal. Starts open on
+    // the zero-config front door (no panes); otherwise opened with `n` in
+    // WATCH. `launch_seq` makes each spawned worker name unique.
+    let mut launcher: Option<Launcher> = if names.is_empty() {
+        Some(Launcher::new())
+    } else {
+        None
+    };
+    let mut launch_seq: usize = 0;
 
     // ── Rail state (ab-1fab1fdf, Phase 1) ────────────────────────────────
     // `rail_state`: Some when rail mode is active (`--rail` flag or `t` toggle).
@@ -2124,7 +2189,15 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // (Clear + emit_full). Every subsequent dirty tick diffs against the frame
     // recorded here, so the steady-state repaint never re-clears the screen.
     let mut prev_frame: Option<ScreenBuffer> = None;
-    {
+    if panes.is_empty() {
+        // E5b front door: no panes yet, render the goal launcher.
+        paint_front_door(
+            &mut stderr,
+            &mut prev_frame,
+            tty,
+            launcher.as_ref().map(|l| l.buffer.as_str()).unwrap_or(""),
+        );
+    } else {
         let rail_arg = rail_state.as_ref().map(|rs| {
             let (groups, badges) = rail_groups_and_badges(&rail_rows, rs, &panes, &states);
             (rs, groups, badges)
@@ -2168,6 +2241,51 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
+                        // ── E5b launcher (modal) ──────────────────────────
+                        // While the launcher is open every key edits the goal
+                        // buffer; nothing reaches the panes or compositor. With
+                        // panes present the buffer shows as a footer line; on
+                        // the empty front door the front-door paint renders it.
+                        if launcher.is_some() {
+                            match launcher.as_mut().unwrap().apply(launcher_key(key)) {
+                                LauncherOutcome::Stay => {
+                                    if !panes.is_empty() {
+                                        hint = Some(format!(
+                                            "goal> {}",
+                                            launcher.as_ref().unwrap().buffer
+                                        ));
+                                    }
+                                }
+                                LauncherOutcome::Cancelled => {
+                                    launcher = None;
+                                    if panes.is_empty() {
+                                        break; // front door: nothing else to show
+                                    }
+                                    hint = None;
+                                    prev_frame = None; // clear the footer overlay
+                                }
+                                LauncherOutcome::Submitted(goal) => {
+                                    launcher = None;
+                                    // T4 replaces this stub with spawn + live tile.
+                                    hint = Some(format!("would launch /target: {goal}"));
+                                    prev_frame = None;
+                                }
+                            }
+                            dirty = true;
+                            continue;
+                        }
+                        // E5b: `n` in WATCH opens the goal launcher (panes
+                        // present; the empty front door already starts open).
+                        if launcher.is_none()
+                            && comp.mode() == Mode::Watch
+                            && matches!(key.code, KeyCode::Char('n'))
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            launcher = Some(Launcher::new());
+                            hint = Some("goal> ".to_string());
+                            dirty = true;
+                            continue;
+                        }
                         // ── Rail-mode key handling (ab-1fab1fdf, Phase 1) ──
                         // Intercept rail keys BEFORE key_to_input so `g`/`t`/`d`/
                         // Up/Down/Enter/Esc are not forwarded to the existing
@@ -2868,7 +2986,16 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             _ = tick.tick() => {
                 // Paint at most once per frame, and only if something
                 // changed. No change -> no write -> no buffer pressure.
-                if dirty {
+                if dirty && panes.is_empty() {
+                    // E5b front door: no panes, render the goal launcher.
+                    paint_front_door(
+                        &mut stderr,
+                        &mut prev_frame,
+                        tty,
+                        launcher.as_ref().map(|l| l.buffer.as_str()).unwrap_or(""),
+                    );
+                    dirty = false;
+                } else if dirty {
                     let rail_arg = rail_state.as_ref().map(|rs| {
                         let (groups, badges) = rail_groups_and_badges(&rail_rows, rs, &panes, &states);
                         (rs, groups, badges)
@@ -2906,7 +3033,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             }
             _ = ping.tick() => {
                 ping_open_sinks(&mut watch_sinks, &mut driver_sinks, &mut states).await;
-                if matches!(comp.observe_pane_states(&states), CompositorAction::Quit) {
+                // E5b: with the front door up (no panes) observe_pane_states
+                // would report Quit on its 0-pane guard. Don't tear down the
+                // grid while the operator is at the launcher.
+                if !panes.is_empty()
+                    && matches!(comp.observe_pane_states(&states), CompositorAction::Quit)
+                {
                     break;
                 }
                 // codex P2: a driver ping failure drops the sink and
@@ -3189,6 +3321,31 @@ mod tests {
         let mut l = Launcher::new();
         l.apply(LauncherAction::Append('x'));
         assert_eq!(l.apply(LauncherAction::Cancel), LauncherOutcome::Cancelled);
+    }
+
+    #[test]
+    fn front_door_frame_renders_prompt_and_goal() {
+        let tty = TtySize::new(24, 80);
+        let frame = build_front_door_frame(tty, "add auth");
+        let all: String = (0..tty.rows)
+            .map(|r| row_text(&frame, r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("footnote grid"), "title present: {all:?}");
+        assert!(all.contains("press Enter"), "prompt present");
+        assert!(all.contains("goal> add auth"), "live goal buffer present");
+    }
+
+    #[test]
+    fn front_door_paint_clears_and_writes_goal() {
+        let tty = TtySize::new(24, 80);
+        let mut prev: Option<ScreenBuffer> = None;
+        let mut buf = Vec::new();
+        paint_front_door(&mut buf, &mut prev, tty, "do it");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains(CLEAR_ALL), "first front-door frame clears");
+        assert!(s.contains("goal> do it"), "renders the goal buffer");
+        assert!(prev.is_some(), "records the screen buffer for diffing");
     }
 
     #[test]
