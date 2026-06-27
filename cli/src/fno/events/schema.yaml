@@ -1132,7 +1132,7 @@ event_types:
           enum: [working, blocked, done]
 
   - name: inside_leg_report_dropped
-    description: "An inside-leg report was dropped without storing it (stale seq, or unknown session)."
+    description: "An inside-leg report was dropped without storing it (stale seq, unknown session, or the early-push buffer was full)."
     sources: [daemon]
     data:
       required: [session_id, seq, reason]
@@ -1143,8 +1143,54 @@ event_types:
           type: integer
         reason:
           type: string
-          enum: [stale_seq, unknown_session]
+          enum: [stale_seq, unknown_session, buffer_full]
         last_seq:
+          type: integer
+
+  - name: inside_leg_report_buffered
+    description: "Buffer-on-early-push (E3.3): a report arrived before its session's registry row existed and was held in the bounded pending buffer, to be flushed onto the row at creation."
+    sources: [daemon]
+    data:
+      required: [session_id, seq, state]
+      properties:
+        session_id:
+          type: string
+        seq:
+          type: integer
+        state:
+          type: string
+          enum: [working, blocked, done]
+
+  - name: inside_leg_buffer_flushed
+    description: "Buffer-on-early-push (E3.3): a buffered early-push report was flushed onto its session's registry row at row creation."
+    sources: [daemon]
+    data:
+      required: [name, session_id, state, seq]
+      properties:
+        name:
+          type: string
+        session_id:
+          type: string
+        state:
+          type: string
+          enum: [working, blocked, done]
+        seq:
+          type: integer
+
+  - name: inside_leg_completed
+    description: "Ordered exit teardown (E3.3, AC-X2-4): a claude row carrying an inside-leg report is transitioning to Exited. Emitted BEFORE the registry write clears the report, so list/waiters observe the final state before the badge goes blank."
+    sources: [daemon]
+    data:
+      required: [name, final_state, seq]
+      properties:
+        name:
+          type: string
+        session_id:
+          type: string
+        final_state:
+          type: string
+          enum: [working, blocked, done]
+        seq:
           type: integer
 
   - name: drive_attached

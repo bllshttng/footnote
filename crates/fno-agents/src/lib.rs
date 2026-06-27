@@ -689,6 +689,15 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // daemon dropped a report (stale seq / unknown session) without storing it.
     "inside_leg_report",
     "inside_leg_report_dropped",
+    // Ordered exit teardown (daemon-emitted, inside-out E3.3): a claude row with
+    // an inside-leg report is going Exited; the completion is published before
+    // the registry clears the report (AC-X2-4).
+    "inside_leg_completed",
+    // Buffer-on-early-push (daemon-emitted, inside-out E3.3): a report arrived
+    // before its session's row existed and was held in the pending buffer, then
+    // flushed onto the row at creation.
+    "inside_leg_report_buffered",
+    "inside_leg_buffer_flushed",
 ];
 
 /// Build the Branch B (Rust/fno-agents) envelope JSON Schema and the
