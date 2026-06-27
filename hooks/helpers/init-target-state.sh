@@ -452,19 +452,40 @@ if ! _init_acquire_lock; then
 fi
 trap _init_release_lock EXIT
 
-# ── Stale terminal-state archive ─────────────────────────────────────
-# Archive any prior terminal session (COMPLETE/BLOCKED/ABORTED) so the
-# fresh-init branch runs cleanly. IN_PROGRESS is preserved (resume case).
+# ── Stale-session archive ────────────────────────────────────────────
+# Archive a prior session's manifest so the fresh-init branch runs cleanly.
+# Two orphan signals, checked in order:
+#   1. An explicit terminal status (COMPLETE/BLOCKED/ABORTED) - legacy
+#      manifests that still carried a mutable status field.
+#   2. A dead owner_pid - the immutable manifest carries NO status field, so
+#      liveness of the owning process is the real orphan signal. Without this,
+#      a completed session's manifest survives in the shared .fno and every
+#      new session (even in a fresh worktree, via the .fno symlink) trips on
+#      it and has to hand-clear it.
+# A live owner_pid is preserved: it is either this process resuming or a
+# concurrent sibling that will refuse on the claim. This block only runs under
+# TARGET_START (new-session intent), so reaping a dead owner is always safe.
 if [[ -f "$STATE_FILE" ]]; then
   _STALE_STATUS=$(sed -n 's/^status:[[:space:]]*//p' "$STATE_FILE" | head -1 | xargs 2>/dev/null || true)
+  _OWNER_PID=$(sed -n 's/^owner_pid:[[:space:]]*//p' "$STATE_FILE" | head -1 | xargs 2>/dev/null || true)
+  _STALE_REASON=""
   case "${_STALE_STATUS:-}" in
-    COMPLETE|BLOCKED|ABORTED)
-      _ARCHIVE_PATH="$STATE_DIR/target-state.terminal.$(date -u +%Y%m%dT%H%M%SZ).md"
-      mv "$STATE_FILE" "$_ARCHIVE_PATH"
-      echo "target: prior session was $_STALE_STATUS; archived to $(basename "$_ARCHIVE_PATH"); writing fresh state" >&2
-      ;;
+    COMPLETE|BLOCKED|ABORTED) _STALE_REASON="status $_STALE_STATUS" ;;
   esac
-  unset _STALE_STATUS _ARCHIVE_PATH
+  # Reuse the lock section's _init_process_alive (ps -p, not kill -0, which
+  # can't disambiguate EPERM from ESRCH). ponytail: no owner_started_at
+  # provenance check here - unlike the lock path, a PID-reuse false "alive"
+  # only skips the reap (benign fallback to today's behavior), never clobbers
+  # a live session.
+  if [[ -z "$_STALE_REASON" && "$_OWNER_PID" =~ ^[0-9]+$ ]] && ! _init_process_alive "$_OWNER_PID"; then
+    _STALE_REASON="dead owner_pid $_OWNER_PID"
+  fi
+  if [[ -n "$_STALE_REASON" ]]; then
+    _ARCHIVE_PATH="$STATE_DIR/target-state.terminal.$(date -u +%Y%m%dT%H%M%SZ).md"
+    mv "$STATE_FILE" "$_ARCHIVE_PATH"
+    echo "target: prior session ($_STALE_REASON); archived to $(basename "$_ARCHIVE_PATH"); writing fresh state" >&2
+  fi
+  unset _STALE_STATUS _OWNER_PID _STALE_REASON _ARCHIVE_PATH
 fi
 
 # ── Scratchpad scaffolding ────────────────────────────────────────────

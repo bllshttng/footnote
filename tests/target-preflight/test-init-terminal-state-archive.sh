@@ -57,6 +57,26 @@ iteration: 1
 EOF
 }
 
+# Plant a real-shaped immutable manifest: owner_pid, NO status field. This is
+# what `fno target init` actually writes today; liveness of owner_pid is the
+# only orphan signal (the status-string reaper never fires for these).
+plant_pid_state() {
+    local dir="$1"
+    local pid="$2"
+    mkdir -p "$dir/.fno"
+    cat > "$dir/.fno/target-state.md" <<EOF
+---
+session_id: planted-pid-fixture-20260626
+created_at: 2026-06-26T00:00:00Z
+input: "x-prior"
+owner_pid: $pid
+owner_cwd: "/some/other/worktree"
+---
+
+# Planted immutable manifest (owner_pid, no status)
+EOF
+}
+
 run_init() {
     local cwd="$1"
     shift
@@ -83,18 +103,19 @@ if [[ $EC -eq 0 ]]; then
 else
     fail "AC1: expected exit 0, got $EC. Output: $OUT"
 fi
-if echo "$OUT" | grep -q "prior session was COMPLETE"; then
+if echo "$OUT" | grep -q "prior session (status COMPLETE)"; then
     pass "AC1: archive announcement names COMPLETE"
 else
     fail "AC1: archive announcement missing. Got: $OUT"
 fi
 # After init, the live state file should be FRESH (status IN_PROGRESS),
 # not the planted COMPLETE. Verify by reading the status line.
-LIVE_STATUS=$(grep "^status:" "$T/.fno/target-state.md" | head -1)
-if echo "$LIVE_STATUS" | grep -q "IN_PROGRESS"; then
-    pass "AC1: live state is IN_PROGRESS (fresh init ran)"
+# Fresh init must have run: the immutable manifest carries no status field, so
+# verify freshness by the planted orphan content being gone, not a status line.
+if ! grep -q "planted-fixture-20260522" "$T/.fno/target-state.md" 2>/dev/null; then
+    pass "AC1: live manifest is fresh (planted orphan replaced)"
 else
-    fail "AC1: live state should be IN_PROGRESS, got: $LIVE_STATUS"
+    fail "AC1: live manifest still the planted orphan (fresh init did not run)"
 fi
 # Archive file should exist with the timestamped name pattern.
 if ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
@@ -116,16 +137,15 @@ if [[ $EC -eq 0 ]]; then
 else
     fail "AC2: expected exit 0, got $EC. Output: $OUT"
 fi
-if echo "$OUT" | grep -q "prior session was BLOCKED"; then
+if echo "$OUT" | grep -q "prior session (status BLOCKED)"; then
     pass "AC2: archive announcement names BLOCKED"
 else
     fail "AC2: archive announcement missing. Got: $OUT"
 fi
-LIVE_STATUS=$(grep "^status:" "$T/.fno/target-state.md" | head -1)
-if echo "$LIVE_STATUS" | grep -q "IN_PROGRESS"; then
-    pass "AC2: live state is IN_PROGRESS after BLOCKED archive"
+if ! grep -q "planted-fixture-20260522" "$T/.fno/target-state.md" 2>/dev/null; then
+    pass "AC2: live manifest is fresh after BLOCKED archive"
 else
-    fail "AC2: live state should be IN_PROGRESS, got: $LIVE_STATUS"
+    fail "AC2: live manifest still the planted orphan after BLOCKED archive"
 fi
 
 # --- AC3: ABORTED state archived ------------------------------------------
@@ -141,7 +161,7 @@ if [[ $EC -eq 0 ]]; then
 else
     fail "AC3: expected exit 0, got $EC. Output: $OUT"
 fi
-if echo "$OUT" | grep -q "prior session was ABORTED"; then
+if echo "$OUT" | grep -q "prior session (status ABORTED)"; then
     pass "AC3: archive announcement names ABORTED"
 else
     fail "AC3: archive announcement missing. Got: $OUT"
@@ -199,6 +219,64 @@ if [[ -n "$ARCHIVE" ]]; then
     fi
 else
     fail "AC5: no archive file found"
+fi
+
+# --- AC6: dead owner_pid archived (real immutable manifest, no status) -----
+echo ""
+echo "--- AC6: dead owner_pid archived ---"
+T="$TMP_BASE/ac6-dead-pid"
+make_repo "$T" "feature/x"
+# PID 999999 is well above typical pid_max and reliably dead.
+plant_pid_state "$T" "999999"
+OUT=$(run_init "$T" 2>&1)
+EC=$?
+if [[ $EC -eq 0 ]]; then
+    pass "AC6: init succeeds when prior owner_pid is dead"
+else
+    fail "AC6: expected exit 0, got $EC. Output: $OUT"
+fi
+if echo "$OUT" | grep -q "dead owner_pid 999999"; then
+    pass "AC6: archive announcement names the dead owner_pid"
+else
+    fail "AC6: dead-pid archive announcement missing. Got: $OUT"
+fi
+if ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
+    pass "AC6: archive file present"
+else
+    fail "AC6: no archive found; orphan manifest survived (the original bug)"
+fi
+# Fresh init must have run: the planted session_id must be gone from the live file.
+if ! grep -q "planted-pid-fixture" "$T/.fno/target-state.md" 2>/dev/null; then
+    pass "AC6: live manifest is fresh (planted orphan replaced)"
+else
+    fail "AC6: live manifest still the planted orphan"
+fi
+
+# --- AC7: live owner_pid preserved (resume / concurrent sibling) -----------
+echo ""
+echo "--- AC7: live owner_pid preserved ---"
+T="$TMP_BASE/ac7-live-pid"
+make_repo "$T" "feature/x"
+# $$ is this test process: guaranteed alive for the duration of run_init.
+plant_pid_state "$T" "$$"
+PLANTED_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
+OUT=$(run_init "$T" 2>&1)
+EC=$?
+if [[ $EC -eq 0 ]]; then
+    pass "AC7: init succeeds with a live owner_pid"
+else
+    fail "AC7: expected exit 0, got $EC. Output: $OUT"
+fi
+LIVE_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
+if [[ "$LIVE_SID" == "$PLANTED_SID" ]]; then
+    pass "AC7: live-owner manifest preserved (no clobber)"
+else
+    fail "AC7: live-owner manifest changed. Planted: $PLANTED_SID, Live: $LIVE_SID"
+fi
+if ! ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
+    pass "AC7: no archive file (correctly preserved live owner)"
+else
+    fail "AC7: archived a live-owner manifest"
 fi
 
 echo ""
