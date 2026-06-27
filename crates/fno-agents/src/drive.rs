@@ -346,8 +346,11 @@ async fn external_claude_writer(uuid: &str, self_holder: &str) -> Option<String>
         return None;
     }
     let key = format!("session:{uuid}");
+    // Honor FNO_BIN (test/custom environments); fall back to PATH `fno`. var_os
+    // avoids silently dropping a non-UTF-8 path.
+    let fno_bin = std::env::var_os("FNO_BIN").unwrap_or_else(|| "fno".into());
     let out = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("fno")
+        std::process::Command::new(fno_bin)
             .args(["claim", "status", &key, "-J"])
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
