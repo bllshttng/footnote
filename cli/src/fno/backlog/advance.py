@@ -620,23 +620,25 @@ def _dispatch_one_dependent(
     project = dep.get("project")
     if not project:
         return skip("no-project")
+    from fno.graph._intake import project_root_from_settings
 
     if cross_project:
         # Cross-project: resolve the dependent's OWN project root from the work
         # map. Reject (never guess a cwd for) an unmapped project, surfacing it by
         # name so the operator sees which project is missing from
         # config.work.workspaces (Boundaries).
-        from fno.graph._intake import project_root_from_settings
-
         root = project_root_from_settings(project)
         if not root:
             return skip("unmapped-project", detail=project)
     else:
-        # Same-project (RC1 / LD#2): launch in the node's OWN recorded root, the
-        # same cwd advance()'s `next` path would have used. No work-map lookup,
-        # and never the cross-project root. A record with no cwd is unspawnable
-        # here (fail closed rather than guess canonical main).
-        root = dep.get("cwd")
+        # Same-project (RC1 / LD#2): launch in the node's OWN project root. Resolve
+        # it the way advance()'s `next` path does - the work-map root is the cwd
+        # authority and recorded `cwd` is fallback data (codex P2: a stale/absent
+        # recorded cwd would otherwise start the worker in the wrong checkout). For
+        # a same-project node this resolves to its OWN project root, never a
+        # foreign/cross-project root, so LD#2's anti-misroute intent holds. Fail
+        # closed if neither resolves (rather than guess canonical main).
+        root = project_root_from_settings(project) or dep.get("cwd")
         if not root:
             return skip("no-cwd")
 

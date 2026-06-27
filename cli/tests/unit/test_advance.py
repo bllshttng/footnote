@@ -641,17 +641,12 @@ _SAME_DEP = {
 
 
 def test_dependents_same_project_dispatch(iso, monkeypatch):
-    """AC1-HP: a now-unblocked SAME-project dependent is spawned --cwd the node's
-    OWN recorded root (NOT a work-map root), with one advance_dispatched event
-    whose cross_project is False."""
+    """AC1-HP: a now-unblocked SAME-project dependent is spawned --cwd its OWN
+    project root, resolved work-map-first like the `next` path (codex P2), with
+    one advance_dispatched event whose cross_project is False."""
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_SAME_DEP])
-    # The work map must NOT be consulted on the same-project route (LD#2).
-    _map_project(monkeypatch, {})
-    import fno.graph._intake as intake
-    monkeypatch.setattr(
-        intake, "project_root_from_settings",
-        lambda p: pytest.fail("same-project route must not hit the work map"),
-    )
+    # Work-map root is the authority; it resolves to the node's OWN project root.
+    _map_project(monkeypatch, {"fno": "/mapped/fno"})
     captured = {}
 
     def fake_spawn(node_id, node_cwd, node_slug=None):
@@ -665,19 +660,38 @@ def test_dependents_same_project_dispatch(iso, monkeypatch):
     )
 
     assert len(results) == 1 and results[0].decision == "dispatched"
-    # --cwd is the node's OWN recorded root, not a mapped/work-map root.
-    assert captured["args"] == ("ab-4444cccc", "/repo/fno", "e4-3-leaf")
+    # --cwd is the work-map-resolved OWN project root (not a foreign root).
+    assert captured["args"] == ("ab-4444cccc", "/mapped/fno", "e4-3-leaf")
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_dispatched"
     assert evs[0]["data"]["node_id"] == "ab-4444cccc"
     assert evs[0]["data"]["cross_project"] is False
 
 
+def test_dependents_same_project_falls_back_to_recorded_cwd(iso, monkeypatch):
+    """codex P2: when the same-project node is unmapped in the work map, the route
+    falls back to the node's recorded cwd (never a foreign root)."""
+    monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_SAME_DEP])
+    _map_project(monkeypatch, {})  # "fno" unmapped -> fall back to recorded cwd
+    captured = {}
+    monkeypatch.setattr(
+        adv, "_spawn_worker",
+        lambda nid, cwd, slug=None: captured.update(cwd=cwd) or "sid",
+    )
+
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso
+    )
+    assert results[0].decision == "dispatched"
+    assert captured["cwd"] == "/repo/fno"  # _SAME_DEP's recorded cwd
+
+
 def test_dependents_same_project_no_cwd_skips(iso, monkeypatch):
-    """A same-project dependent with no recorded cwd is fail-closed (never guessed
-    to canonical main), surfaced as skipped{no-cwd}; no spawn."""
+    """A same-project dependent with neither a mapped project nor a recorded cwd
+    is fail-closed (never guessed to canonical main), surfaced as skipped{no-cwd}."""
     dep = {"id": "ab-4444cccc", "project": "fno", "slug": "x", "cross_project": False}
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [dep])
+    _map_project(monkeypatch, {})  # unmapped AND dep has no cwd
     monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
 
     results = adv.advance_dependents(
