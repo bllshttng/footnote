@@ -195,6 +195,25 @@ impl ReadinessDetector for GeminiReadinessDetector {
     }
 }
 
+/// Claude interactive-composer readiness (inside-out-multiplexer E1). Claude's
+/// TUI composer draws the same prompt-glyph family as codex/gemini and its
+/// mid-turn "esc to interrupt" status line is already in [`BUSY_MARKERS`], so
+/// the shared [`prompt_ready`] logic applies unchanged. Threshold tuning against
+/// a live capture is Claude's Discretion (the design's readiness-detector
+/// bullet); the conservative bias (a wrong glyph is false-NOT-ready, never
+/// false-ready) holds here as for the other CLIs.
+pub struct ClaudeReadinessDetector;
+
+impl ReadinessDetector for ClaudeReadinessDetector {
+    fn provider_name(&self) -> &str {
+        "claude"
+    }
+
+    fn is_ready(&self, screen: &ScreenView) -> Result<bool, ReadinessError> {
+        Ok(prompt_ready(screen, PROMPT_GLYPHS))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

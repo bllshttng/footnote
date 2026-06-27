@@ -285,6 +285,119 @@ fn parse_claude_short_id(line: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Claude (interactive) — PTY-managed, subscription-billed (E1 keystone).
+// ---------------------------------------------------------------------------
+
+/// Interactive subscription-billed claude, PTY-hosted by the daemon exactly as
+/// codex/gemini are (inside-out-multiplexer E1, the keystone). This is the
+/// `ProviderWithPty` counterpart to the shellout [`ClaudeProvider`] and the
+/// stream-json lane ([`claude_stream_json_resume_argv`]): the grid tiles it, the
+/// relay injects through it, the inside leg reports against it - one PTY, three
+/// consumers.
+///
+/// Billing posture (Locked Decision 2 / D2): the argv is interactive `claude`
+/// with `--session-id <uuid>` pinned for transcript discovery + the claim
+/// interlock, NEVER `claude -p`/`--print` (that bills the Agent SDK pool). The
+/// daemon's billing guard rejects any `-p`/`--print` argv before spawning; this
+/// provider only ever emits the interactive form.
+pub struct ClaudeInteractiveProvider;
+
+impl ClaudeInteractiveProvider {
+    /// Interactive argv with the session id pinned. Shared by create and the
+    /// `create_interactive_argv` host path: a daemon-hosted claude is always
+    /// interactive, so there is no separate exec form. `claude --session-id
+    /// <uuid> [message]` - the relay-proven vehicle (roundtrip.py pins
+    /// `--session-id` at spawn so the transcript is discoverable and the
+    /// `session:<uuid>` claim keys on it).
+    fn interactive_argv(ctx: &CreateContext) -> Vec<String> {
+        let mut argv = vec!["claude".into()];
+        if let Some(sid) = ctx.session_id.as_deref().filter(|s| !s.is_empty()) {
+            argv.push("--session-id".into());
+            argv.push(sid.to_string());
+        }
+        if !ctx.message.is_empty() {
+            argv.push(ctx.message.clone());
+        }
+        argv
+    }
+}
+
+impl Provider for ClaudeInteractiveProvider {
+    fn name(&self) -> &'static str {
+        "claude"
+    }
+
+    // A daemon-hosted claude has no one-shot exec form; create == interactive.
+    // `provider_for_pty` only resolves this provider on the interactive route,
+    // so this is a defensive alias rather than a reachable exec path.
+    fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
+        Self::interactive_argv(ctx)
+    }
+
+    fn create_interactive_argv(&self, ctx: &CreateContext) -> Option<Vec<String>> {
+        Some(Self::interactive_argv(ctx))
+    }
+
+    fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
+        // Interactive resume: `claude --resume <uuid>` reattaches the session's
+        // TUI. The resume id IS the session, so no separate `--session-id` pin.
+        let mut argv = vec!["claude".into(), "--resume".into(), ctx.session_id.clone()];
+        if !ctx.message.is_empty() {
+            argv.push(ctx.message.clone());
+        }
+        argv
+    }
+
+    fn resume_interactive_argv(&self, ctx: &ResumeContext) -> Option<Vec<String>> {
+        Some(self.resume_argv(ctx))
+    }
+
+    fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
+        // The interactive TUI emits no JSONL stream (the daemon snapshots the
+        // screen via the readiness detector, as for codex/gemini interactive).
+        ParsedEvent::Unknown {
+            raw: chunk.to_string(),
+        }
+    }
+
+    fn reachability(
+        &self,
+        _entry: &AgentEntry,
+        _timeout: Duration,
+    ) -> Result<bool, ReachabilityProbeError> {
+        // Interactive PTY rows are governed by PTY liveness (the worker pid +
+        // ConnState), the authoritative signal per D4 - NOT a store scan. Report
+        // inconclusive so a caller never false-orphans a live pane on this probe;
+        // reconcile uses worker liveness for interactive rows.
+        Err(ReachabilityProbeError::new(
+            "claude",
+            "interactive claude liveness is PTY-governed (pid/ConnState), not store-probed",
+        ))
+    }
+
+    fn as_pty(&self) -> Option<&dyn ProviderWithPty> {
+        Some(self)
+    }
+}
+
+impl ProviderWithPty for ClaudeInteractiveProvider {
+    fn readiness_detector(&self) -> Box<dyn ReadinessDetector> {
+        Box::new(crate::readiness::ClaudeReadinessDetector)
+    }
+
+    fn envelope(&self) -> Box<dyn Envelope> {
+        // No structural anti-injection envelope on the interactive TUI path
+        // (input is human keystrokes / send-keys, not a JSON frame). The plain
+        // envelope passes text through unchanged, matching the send-keys vehicle.
+        Box::new(JsonEnvelope)
+    }
+
+    fn default_restart_policy(&self) -> RestartPolicy {
+        RestartPolicy::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Codex — full PTY-managed; JSONL stream.
 // ---------------------------------------------------------------------------
 
@@ -1210,9 +1323,80 @@ mod tests {
 
     #[test]
     fn claude_is_not_pty_managed_others_are() {
+        // The shellout `--bg` claude stays non-PTY; the interactive claude (E1)
+        // and codex/gemini are PTY-managed.
         assert!(ClaudeProvider.as_pty().is_none());
+        assert!(ClaudeInteractiveProvider.as_pty().is_some());
         assert!(CodexProvider.as_pty().is_some());
         assert!(GeminiProvider.as_pty().is_some());
+    }
+
+    // ---- ClaudeInteractiveProvider (E1 keystone) ----
+
+    fn claude_ctx(message: &str, session_id: Option<&str>) -> CreateContext {
+        CreateContext {
+            name: "peer".into(),
+            message: message.into(),
+            cwd: PathBuf::from("/work"),
+            from_name: None,
+            session_id: session_id.map(String::from),
+            yolo: false,
+        }
+    }
+
+    /// D2 assertion: the interactive claude argv pins `--session-id` and is
+    /// subscription-billed - it NEVER carries `-p`/`--print`/`--input-format`.
+    #[test]
+    fn claude_interactive_argv_is_subscription_billed_and_session_pinned() {
+        let argv = ClaudeInteractiveProvider
+            .create_interactive_argv(&claude_ctx("build it", Some("sess-uuid-1")))
+            .unwrap();
+        assert_eq!(
+            argv,
+            vec!["claude", "--session-id", "sess-uuid-1", "build it"]
+        );
+        // The billing-guard invariant (D2): no Agent-SDK flags on this path.
+        assert!(
+            !argv.iter().any(|a| a == "-p" || a == "--print"),
+            "interactive claude must never be -p/--print billed (D2)"
+        );
+        assert_eq!(ClaudeInteractiveProvider.name(), "claude");
+    }
+
+    /// Empty message -> a bare interactive session with the id still pinned; an
+    /// absent session id omits the flag (the daemon rejects that case upstream,
+    /// but the provider stays total).
+    #[test]
+    fn claude_interactive_argv_edge_cases() {
+        assert_eq!(
+            ClaudeInteractiveProvider
+                .create_interactive_argv(&claude_ctx("", Some("s1")))
+                .unwrap(),
+            vec!["claude", "--session-id", "s1"]
+        );
+        assert_eq!(
+            ClaudeInteractiveProvider
+                .create_interactive_argv(&claude_ctx("hi", None))
+                .unwrap(),
+            vec!["claude", "hi"]
+        );
+    }
+
+    /// Interactive resume reattaches the TUI by session id, still never `-p`.
+    #[test]
+    fn claude_interactive_resume_argv() {
+        let ctx = ResumeContext {
+            session_id: "resume-uuid".into(),
+            message: "continue".into(),
+            cwd: PathBuf::from("/work"),
+            from_name: None,
+            yolo: false,
+        };
+        let argv = ClaudeInteractiveProvider
+            .resume_interactive_argv(&ctx)
+            .unwrap();
+        assert_eq!(argv, vec!["claude", "--resume", "resume-uuid", "continue"]);
+        assert!(!argv.iter().any(|a| a == "-p" || a == "--print"));
     }
 
     #[test]
