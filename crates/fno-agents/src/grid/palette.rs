@@ -121,7 +121,7 @@ fn blend(fg: (u8, u8, u8), bg: (u8, u8, u8), pct: u8) -> (u8, u8, u8) {
 /// Query the terminal for its default fg/bg colors via OSC 10 and OSC 11.
 ///
 /// Safety contract:
-/// - Returns `Palette::fixed()` immediately when stdout is NOT a TTY.
+/// - Returns `Palette::fixed()` immediately when stdin or stderr is NOT a TTY.
 /// - Writes queries to stderr (where the grid renders) and reads from stdin.
 /// - Hard-bounded total wall time: ≤ ~120 ms (100 ms timeout + syscall slack).
 /// - On ANY failure (I/O error, timeout, malformed response): `Palette::fixed()`.
@@ -130,8 +130,11 @@ fn blend(fg: (u8, u8, u8), bg: (u8, u8, u8), pct: u8) -> (u8, u8, u8) {
 /// **Call after `enable_raw_mode()` and before the `EventStream` loop.**
 /// Raw mode makes stdin deliver the response bytes without line-buffering.
 pub fn query_terminal_palette() -> Palette {
-    // Guard: stdout not a TTY → skip entirely.
-    if !io::stdout().is_terminal() {
+    // We WRITE the query to stderr and READ the reply from stdin, so BOTH must
+    // be a TTY. If either is redirected (CI, piping, logging), skip the query
+    // entirely - writing to a file or draining a redirected stream is wrong, and
+    // the read could otherwise stall or consume unexpected input (gemini medium).
+    if !io::stderr().is_terminal() || !io::stdin().is_terminal() {
         return Palette::fixed();
     }
     // ponytail: Palette::fixed() on any inner failure; no partial-palette state.

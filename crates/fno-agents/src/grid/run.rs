@@ -2037,18 +2037,36 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // Registry rows shadowing the current names list (rebuilt on `t` toggle
     // and after registry refreshes; stable within a session for Phase 1).
     let rail_rows: Vec<Value> = initial_rail_rows;
-    // If launched with --rail, size the focused pane to the rail main area so
-    // the agent fills the full width from the first frame rather than the
-    // smaller tiled-grid tile it was opened at (gemini HIGH).
-    if rail_state.is_some() {
-        resize_rail_focus(
-            tty,
-            comp.focus(),
-            &mut panes,
-            &mut watch_sinks,
-            &mut driver_sinks,
-        )
-        .await;
+    // If launched with the rail, size the panes for the INITIAL main_mode so
+    // the first frame is correct without waiting for a resize event. GroupTile
+    // is the E5c default (AC-2), so a space with >1 live agent must tile its
+    // members from frame one; Single sizes the focused pane to the full main
+    // area (gemini HIGH). Mirrors the `Tab`-toggle resize paths (codex P2).
+    if let Some(rs) = rail_state.as_ref() {
+        match rs.main_mode {
+            group::MainMode::GroupTile => {
+                apply_group_tile_resize(
+                    rs,
+                    tty,
+                    &rail_rows,
+                    &states,
+                    &mut panes,
+                    &mut watch_sinks,
+                    &mut driver_sinks,
+                )
+                .await;
+            }
+            group::MainMode::Single => {
+                resize_rail_focus(
+                    tty,
+                    comp.focus(),
+                    &mut panes,
+                    &mut watch_sinks,
+                    &mut driver_sinks,
+                )
+                .await;
+            }
+        }
     }
 
     /// Helper: compute groups + LIVE attention badges. Groups partition the
