@@ -146,9 +146,13 @@ impl Region {
 /// vertical borders stripped. Returns "" when no complete box is present.
 ///
 /// ponytail: a single-heuristic box finder, tuned to claude's box-drawing glyphs;
-/// it does not handle nested boxes or ASCII `+--+` frames. Widen it in E6.3 if a
-/// real capture draws something this misses - the failure mode is an empty region
-/// (rule doesn't fire), never a wrong grid.
+/// it does not handle nested boxes or ASCII `+--+` frames, and it does NOT yet
+/// distinguish the live composer from a box-drawn TABLE up in scrollback - it just
+/// takes the bottommost `╰`/`╭` pair, so a scrollback table can be extracted as
+/// stale "prompt body" and let a rule false-match (codex peer P2). Disambiguating
+/// composer-vs-scrollback needs ground truth (the box near the status area / on the
+/// cursor row), which is E6.3's job against a live claude TUI; deliberately not
+/// guessed here. No rule consumes this region until E6.3.
 fn prompt_box_body(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let Some(bottom) = lines.iter().rposition(|l| l.contains('╰')) else {
@@ -214,6 +218,19 @@ impl Gate {
                 field: format!("gate.{key}"),
             })
         };
+        // An empty leaf pattern is fail-open the same way `all = []` is:
+        // `"".contains("")` and `Regex::new("")` both match every region, pinning
+        // the rule's state on every poll. Reject empty leaves at parse.
+        let leaf_str = || {
+            let s = as_str()?;
+            if s.is_empty() {
+                return Err(ManifestError::Field {
+                    rule: rule.to_string(),
+                    field: format!("gate.{key} (must be non-empty)"),
+                });
+            }
+            Ok(s)
+        };
         let as_array = || {
             val.as_array().ok_or_else(|| ManifestError::Field {
                 rule: rule.to_string(),
@@ -221,9 +238,9 @@ impl Gate {
             })
         };
         match key.as_str() {
-            "contains" => Ok(Gate::Contains(as_str()?.to_string())),
-            "regex" => Ok(Gate::Regex(compile(as_str()?)?)),
-            "line_regex" => Ok(Gate::LineRegex(compile(as_str()?)?)),
+            "contains" => Ok(Gate::Contains(leaf_str()?.to_string())),
+            "regex" => Ok(Gate::Regex(compile(leaf_str()?)?)),
+            "line_regex" => Ok(Gate::LineRegex(compile(leaf_str()?)?)),
             "all" => Ok(Gate::All(Self::parse_children(as_array()?, rule, depth)?)),
             "any" => Ok(Gate::Any(Self::parse_children(as_array()?, rule, depth)?)),
             "not" => Ok(Gate::Not(Box::new(Gate::parse(val, rule, depth + 1)?))),
@@ -335,6 +352,25 @@ impl ManifestRule {
             field: "gate".to_string(),
         })?;
         let gate = Gate::parse(gate_val, &id, 0)?;
+        // Reject unknown keys: a typo like `skip_state_updates = true` would
+        // otherwise parse fine and silently drop the real flag, changing
+        // arbitration. Fail closed instead (matches the gate's one-key rule).
+        if let Some(table) = v.as_table() {
+            const ALLOWED: &[&str] = &[
+                "id",
+                "state",
+                "priority",
+                "region",
+                "skip_state_update",
+                "gate",
+            ];
+            if let Some(unknown) = table.keys().find(|k| !ALLOWED.contains(&k.as_str())) {
+                return Err(ManifestError::Field {
+                    rule: id.clone(),
+                    field: format!("unknown key '{unknown}'"),
+                });
+            }
+        }
         Ok(ManifestRule {
             id,
             state,
@@ -378,6 +414,20 @@ impl Manifest {
     pub fn parse(s: &str) -> Result<Manifest, ManifestError> {
         let root: toml::Value =
             toml::from_str(s).map_err(|e| ManifestError::Toml(e.to_string()))?;
+        // Reject unknown root keys (typo like `min_engine_versions`). A later
+        // format bump is gated by `min_engine_version`, not by tolerating
+        // unknown keys, so fail closed in v1.
+        if let Some(table) = root.as_table() {
+            if let Some(unknown) = table
+                .keys()
+                .find(|k| !matches!(k.as_str(), "min_engine_version" | "rule"))
+            {
+                return Err(ManifestError::Field {
+                    rule: "<root>".to_string(),
+                    field: format!("unknown key '{unknown}'"),
+                });
+            }
+        }
         // Absent -> 0. Present-but-wrong-type or negative is a malformed manifest,
         // not a silent default-to-0 (fail closed, matching the per-rule fields).
         let min_engine_version = match root.get("min_engine_version") {
@@ -852,6 +902,60 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(err, ManifestError::Field { field, .. } if field.starts_with("min_engine_version"))
+        );
+    }
+
+    #[test]
+    fn empty_leaf_gate_pattern_is_rejected_not_fail_open() {
+        // `contains = ""` / `regex = ""` / `line_regex = ""` each match every
+        // region; reject them like an empty `all = []` (codex peer P2).
+        for leaf in [r#"contains = """#, r#"regex = """#, r#"line_regex = """#] {
+            let err = Manifest::parse(&format!(
+                "[[rule]]\nid = \"r\"\nstate = \"x\"\npriority = 1\nregion = \"whole_recent\"\ngate = {{ {leaf} }}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(err, ManifestError::Field { rule, .. } if rule == "r"),
+                "{leaf} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_rule_and_root_keys_are_rejected() {
+        // A typo'd rule key (`skip_state_updates`) would silently drop the real
+        // flag; reject it (codex peer P2).
+        let err = Manifest::parse(
+            r#"
+            [[rule]]
+            id = "r"
+            state = "x"
+            priority = 1
+            region = "whole_recent"
+            skip_state_updates = true
+            gate = { contains = "x" }
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Field { rule, field } if rule == "r" && field.contains("unknown key"))
+        );
+
+        // A typo'd root key is rejected too.
+        let err = Manifest::parse(
+            r#"
+            min_engine_versions = 1
+            [[rule]]
+            id = "r"
+            state = "x"
+            priority = 1
+            region = "whole_recent"
+            gate = { contains = "x" }
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Field { rule, field } if rule == "<root>" && field.contains("unknown key"))
         );
     }
 
