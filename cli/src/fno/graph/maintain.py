@@ -115,24 +115,49 @@ class RescopeFix:
 
 
 # Recover the repo-name segment from a worktree cwd of a project-null node (so
-# it does not map directly to a canonical workspace path). Two layouts are
+# it does not map directly to a canonical workspace path). Three layouts are
 # recognized; the caller guards the result with ``hint in workspaces``, so a
 # segment that is not a known project simply declines (never mis-scopes):
 #   - harness-native (the worktrees_base default, x-33e9):
-#       ``<repo>/.claude/worktrees/<name>``     -> ``<repo>``
-#   - conductor back-compat (use_conductor_canonical / worktrees_base set to it):
-#       ``.../conductor/workspaces/<repo>/<name>`` -> ``<repo>``
-# LIMITATION: a CUSTOM ``config.paths.worktrees_base`` (neither of the above,
-# e.g. ``~/myroot/<repo>/<name>``) is not recognized here - such a node simply
-# is not auto-rescoped rather than being mis-scoped.
+#       ``<repo>/.claude/worktrees/<name>``        -> ``<repo>``
+#   - conductor back-compat (use_conductor_canonical / worktrees_base = conductor):
+#       ``.../conductor/workspaces/<repo>/<name>``  -> ``<repo>``
+#   - a CUSTOM ``config.paths.worktrees_base`` (passed in by the caller):
+#       ``<base>/<repo>/<name>``                    -> ``<repo>``
 _CLAUDE_WORKTREE_RE = re.compile(r"/([^/]+)/\.claude/worktrees/")
 _CONDUCTOR_WORKTREE_RE = re.compile(r"/conductor/workspaces/([^/]+)/")
 
 
-def _worktree_repo_hint(norm_cwd: str) -> Optional[str]:
+def _configured_worktrees_base() -> Optional[str]:
+    """Return config.paths.worktrees_base (local then global), or None when unset.
+
+    Lets the rescope hint recognize a node rooted at a CUSTOM worktrees_base
+    (``<base>/<repo>/<name>``), closing the AC2 gap for non-default bases (codex
+    P1 on PR #67). Reuses the walker's per-file reader so the two stay in sync.
+    """
+    from fno.graph._intake import _settings_candidate_paths
+    from fno.worktree import _read_worktrees_base_from
+
+    for path in _settings_candidate_paths():
+        base = _read_worktrees_base_from(path)
+        if base is not None:
+            return os.path.normpath(os.path.expanduser(base))
+    return None
+
+
+def _worktree_repo_hint(norm_cwd: str, worktrees_base: Optional[str] = None) -> Optional[str]:
     probe = norm_cwd + "/"
     m = _CLAUDE_WORKTREE_RE.search(probe) or _CONDUCTOR_WORKTREE_RE.search(probe)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    # Custom configured base: <base>/<repo>/<name> -> <repo>.
+    if worktrees_base:
+        base = worktrees_base.rstrip("/")
+        if norm_cwd.startswith(base + "/"):
+            rest = norm_cwd[len(base) + 1:].split("/")
+            if len(rest) >= 2 and rest[0] and rest[0] != "..":
+                return rest[0]
+    return None
 
 
 def detect_rescope_fixes(
@@ -159,6 +184,9 @@ def detect_rescope_fixes(
         return []
     # path -> project, for reverse lookup of "which project owns this cwd".
     path_to_project = {path: proj for proj, path in workspaces.items()}
+    # Resolved once: a custom worktrees_base lets the hint recognize a node
+    # rooted at <base>/<repo>/<name> (in addition to harness-native/conductor).
+    wt_base = _configured_worktrees_base()
 
     fixes: list[RescopeFix] = []
     for e in entries:
@@ -183,7 +211,7 @@ def detect_rescope_fixes(
                 target_project = candidate
         elif not proj:
             # project null and cwd does not map directly: try a worktree hint.
-            hint = _worktree_repo_hint(norm_cwd)
+            hint = _worktree_repo_hint(norm_cwd, wt_base)
             if hint and hint in workspaces:
                 target_project = hint
 
