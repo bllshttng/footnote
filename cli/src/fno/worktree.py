@@ -109,17 +109,21 @@ def _read_worktrees_base_from(settings_path: Path) -> Optional[str]:
 def _worktrees_base_override(repo_root: Path) -> Optional[Path]:
     """Return config.paths.worktrees_base for ``repo_root``, or None when unset.
 
-    Reads ``{repo_root}/.fno/settings.yaml`` then the global
-    ``~/.fno/settings.yaml`` directly (project-local wins, global fallback) -
-    matching the precedence the hook gets from ``fno config get`` and how the
-    maintainer sets the base GLOBALLY. Read directly (not via the settings
-    loader) for the same reason as ``_use_conductor_canonical``: the walker runs
-    from arbitrary cwds and must not depend on the loader's cwd/caching. A
-    leading ``~`` is expanded; any load/parse failure falls through to None.
+    Reads ``{repo_root}/.fno/settings.yaml`` then the global settings file
+    (project-local wins, global fallback) - matching the precedence the hook
+    gets from ``fno config get`` and how the maintainer sets the base GLOBALLY.
+    The global path resolves via ``fno.config._global_settings_path`` (honors
+    ``$FNO_GLOBAL_SETTINGS_PATH``) rather than a hardcoded ``~/.fno``. Read
+    directly (not via the settings loader) for the same reason as
+    ``_use_conductor_canonical``: the walker runs from arbitrary cwds and must
+    not depend on the loader's cwd/caching. A leading ``~`` is expanded; any
+    load/parse failure falls through to None.
     """
+    from fno.config import _global_settings_path
+
     for settings_path in (
         repo_root / ".fno" / "settings.yaml",
-        Path.home() / ".fno" / "settings.yaml",
+        _global_settings_path(),
     ):
         base = _read_worktrees_base_from(settings_path)
         if base is not None:
