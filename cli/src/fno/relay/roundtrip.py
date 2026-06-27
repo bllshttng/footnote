@@ -279,9 +279,20 @@ def deliver_session(
     while a heavy SessionStart banner was still churning; the newest sentinel wins,
     so a duplicate turn is harmless.
 
+    CONTRACT (sentinel seam, resolved): the worker MUST have been spawned
+    relay-targeted -- i.e. with :data:`RELAY_SYSTEM_PROMPT` appended (the daemon
+    spawn's ``append_system_prompt``, E4.1), so every reply is wrapped in the
+    ``<<<RELAY>>>...<<<ENDRELAY>>>`` sentinels this reads. A grid- or generic-spawned
+    claude carries no such prompt and is therefore NOT relay-readable -- BY DESIGN.
+    There is no turn-boundary heuristic fallback (it is unneeded: relay peers are
+    always relay-spawned). The absence of a sentinel reply is indistinguishable
+    from a slow turn at read time, so it simply surfaces as the ``TimeoutError``
+    below; do not route the relay to a worker you did not spawn relay-targeted.
+
     Raises RuntimeError when no live daemon worker hosts the session (resolution
     miss or the first submit fails -- the worker is dead), and TimeoutError when a
-    live worker took the turn but produced no reply within ``timeout``."""
+    live worker took the turn but produced no reply within ``timeout`` (including a
+    worker that was not relay-spawned, per the contract above)."""
     short_id = resolve_worker_short_id(session_id)
     if short_id is None:
         raise RuntimeError(f"relay_deliver_failed: no live daemon worker for session {session_id}")
