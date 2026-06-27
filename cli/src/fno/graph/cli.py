@@ -4023,6 +4023,24 @@ def cmd_reconcile(
         # (codex P3): the close summaries below otherwise only describe PR-drift
         # records and would report "in sync" even after healing epics.
         healed_epics = sorted(_seen_parents)
+    elif dry_run and (closeable or strandable):
+        # Accurate --dry-run preview (codex P2): the heal set is NOT just the
+        # pre-close `strandable` epics - closing a closeable last child cascade-
+        # closes its parent, and the sweep fixpoint reaches ancestors. Simulate
+        # the exact close + cascade + sweep on a THROWAWAY deep copy so the
+        # preview matches a real run, mutating nothing real.
+        import copy as _copy
+
+        _sim = _copy.deepcopy(entries)
+        _sim_acc: list = []
+        for record in closeable:
+            _sn = _find_node(_sim, record.node_id)
+            if _sn and not _sn.get("completed_at"):
+                _apply_completion_fields(_sn)
+                _sim_acc.extend(_cascade_close_parents(_sim, record.node_id))
+        if node is None:
+            _sim_acc.extend(_sweep_close_done_epics(_sim))
+        healed_epics = sorted(set(_sim_acc))
 
     if json_out:
         payload = {
@@ -4037,9 +4055,9 @@ def cmd_reconcile(
                 for r in closeable
             ],
             "closed": closed,
-            # Auto-closed container epics (cascade + self-heal sweep). On --dry-run
-            # this previews the stranded epics that WOULD heal (codex P3).
-            "healed_epics": sorted(strandable) if dry_run else healed_epics,
+            # Auto-closed container epics (cascade + self-heal sweep); on --dry-run
+            # this is the simulated preview of what a real run would heal (codex P3).
+            "healed_epics": healed_epics,
             "failures": [
                 {"node_id": r.node_id, "pr_number": r.pr_number, "error": r.error}
                 for r in failures
@@ -4060,10 +4078,10 @@ def cmd_reconcile(
         typer.echo(f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):")
         for r in closeable:
             typer.echo(f"  {r.node_id}  PR #{r.pr_number} MERGED  {r.pr_url or ''}".rstrip())
-        if strandable:
+        if healed_epics:
             typer.echo(
-                f"Would self-heal {len(strandable)} stranded all-done epic(s): "
-                + ", ".join(sorted(strandable))
+                f"Would self-heal {len(healed_epics)} container epic(s): "
+                + ", ".join(healed_epics)
             )
     else:
         typer.echo(f"Closed {len(closed)} node(s):")

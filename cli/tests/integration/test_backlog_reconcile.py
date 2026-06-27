@@ -492,6 +492,32 @@ def test_reconcile_dry_run_previews_stranded_epics(cli_env, monkeypatch):
     assert epic.get("completed_at") is None
 
 
+def test_reconcile_dry_run_preview_includes_cascade_closed_parent(cli_env, monkeypatch):
+    """codex P2: the --dry-run heal preview must include a parent that a real run
+    would CASCADE-close from a closeable last child - not just the pre-close
+    strandable set (the parent is NOT strandable until its child closes)."""
+    graph_path, _ = cli_env
+    _make_graph(
+        graph_path,
+        [
+            _node("ab-cascadeep", project="web"),
+            # Last child: a merged PR makes it closeable; it is NOT done yet, so
+            # the parent is not strandable pre-close - only the simulation reveals it.
+            _node("ab-lastchild", pr_number=950, project="fno", parent="ab-cascadeep"),
+        ],
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({950: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["healed_epics"] == ["ab-cascadeep"]   # cascade-close previewed
+    # Nothing mutated.
+    nodes = {e["id"]: e for e in _read_entries(graph_path)}
+    assert nodes["ab-cascadeep"].get("completed_at") is None
+    assert nodes["ab-lastchild"].get("completed_at") is None
+
+
 def test_reconcile_advance_failure_does_not_abort_sweep(cli_env, monkeypatch):
     """Task 2.1: a raising advance is non-fatal - the node still closes and the
     reconcile run still exits 0 (the sweep is never wedged by auto-continue)."""
