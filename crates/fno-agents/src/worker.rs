@@ -358,16 +358,22 @@ fn build_child_command(cfg: &WorkerConfig) -> CommandBuilder {
     // targets this short_id, never on a window driving some unrelated agent.
     cmd.env("FNO_AGENTS_SELF_SHORT_ID", &cfg.short_id);
     cmd.env("FNO_AGENTS_HOME", cfg.home.as_os_str());
-    // Interactive-claude persistence recipe (inside-out-multiplexer E4.1): the
-    // daemon-side equivalent of the relay's roundtrip.py `_peer_env`. Force the
-    // PTY child to write its OWN faithful transcript at
-    // projects/<cwd-enc>/<session-id>.jsonl - which the relay then globs+reads
-    // with no PTY of its own (AC-E4-1) - by overriding the child's
-    // persistence-skip and dropping any inherited parent session id that would
-    // cross-write the child's turns into the parent's transcript. The child's own
-    // id is pinned via `--session-id` in the argv. Gated to interactive claude so
-    // codex/gemini panes (and the daemon's own env) are byte-unchanged.
-    if is_interactive_claude(&cfg.argv) {
+    // Persistence recipe (inside-out-multiplexer E4.1): the daemon-side
+    // equivalent of the relay's roundtrip.py `_peer_env`. Force the PTY child to
+    // write its OWN faithful transcript at projects/<cwd-enc>/<session-id>.jsonl -
+    // which the relay then globs+reads with no PTY of its own (AC-E4-1) - by
+    // overriding the child's persistence-skip and dropping any inherited parent
+    // session id that would cross-write the child's turns into the parent's
+    // transcript. The child's own id is pinned via `--session-id` in the argv.
+    //
+    // Scoped to RELAY-TARGETED interactive claude (carries the `--append-system-
+    // prompt` sentinel), not every interactive claude (codex P2 on PR #59): the
+    // same recipe wedges a second SIMULTANEOUSLY-booting peer and is only safe
+    // when spawns stagger (roundtrip.py:157-164), a contract the relay's spawn
+    // sites honor. Grid-tiled claude (E2) carries no sentinel, reads its PTY pane
+    // directly so it needs no transcript, and stays byte-unchanged + free of the
+    // wedge. A caller that must boot simultaneously omits the sentinel.
+    if is_relay_targeted_claude(&cfg.argv) {
         cmd.env("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "1");
         cmd.env_remove("CLAUDE_CODE_SESSION_ID");
     }
@@ -384,6 +390,15 @@ fn is_interactive_claude(argv: &[String]) -> bool {
         .map(|f| f == "claude")
         .unwrap_or(false)
         && !argv.iter().any(|a| a == "-p" || a == "--print")
+}
+
+/// True when this is interactive claude spawned for the relay - the one consumer
+/// that needs the transcript persisted. The `--append-system-prompt` sentinel is
+/// the relay-targeting signal (the relay always sets it; the grid never does), so
+/// it doubles as the opt-in for the persistence recipe. Keeping the recipe off
+/// the grid's concurrent spawns avoids the simultaneous-boot wedge (codex P2).
+fn is_relay_targeted_claude(argv: &[String]) -> bool {
+    is_interactive_claude(argv) && argv.iter().any(|a| a == "--append-system-prompt")
 }
 
 #[cfg(test)]
@@ -452,11 +467,11 @@ mod tests {
     }
 
     #[test]
-    fn build_child_command_applies_claude_persistence_recipe() {
-        // E4.1: interactive claude gets the persistence recipe so it writes its
-        // own transcript jsonl (the relay's AC-E4-1 capture key). Inherited
-        // CLAUDE_CODE_SESSION_ID must be dropped so the child does not cross-write
-        // the parent's transcript.
+    fn build_child_command_applies_recipe_for_relay_targeted_claude() {
+        // E4.1: a RELAY-TARGETED interactive claude (carries the sentinel
+        // --append-system-prompt) gets the persistence recipe so it writes its own
+        // transcript jsonl (AC-E4-1). Inherited CLAUDE_CODE_SESSION_ID must be
+        // dropped so the child does not cross-write the parent's transcript.
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "inherited-parent-id");
         let cfg = WorkerConfig::new(
@@ -467,6 +482,8 @@ mod tests {
                 "claude".to_string(),
                 "--session-id".to_string(),
                 "u1".to_string(),
+                "--append-system-prompt".to_string(),
+                "relay sentinel".to_string(),
             ],
         );
         let cmd = build_child_command(&cfg);
@@ -481,11 +498,35 @@ mod tests {
         assert_eq!(
             force.as_deref(),
             Some(OsStr::new("1")),
-            "interactive claude must force session persistence so the jsonl exists"
+            "relay-targeted claude must force session persistence so the jsonl exists"
         );
         assert_eq!(
             inherited_sid, None,
             "the inherited parent session id must be dropped for the claude child"
+        );
+    }
+
+    #[test]
+    fn build_child_command_skips_recipe_for_grid_claude_without_sentinel() {
+        // codex P2 on PR #59: interactive claude WITHOUT the relay sentinel (the
+        // grid-tiled case) must NOT get the recipe - it reads its PTY pane
+        // directly, needs no transcript, and the recipe would otherwise risk the
+        // simultaneous-boot wedge on concurrent grid starts.
+        let cfg = WorkerConfig::new(
+            "wk-grid-claude",
+            PathBuf::from("/tmp/abi-test-home-grid"),
+            PathBuf::from("/tmp"),
+            vec![
+                "claude".to_string(),
+                "--session-id".to_string(),
+                "g1".to_string(),
+            ],
+        );
+        let cmd = build_child_command(&cfg);
+        assert_eq!(
+            cmd.get_env("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"),
+            None,
+            "grid-tiled claude (no sentinel) must stay byte-unchanged - no recipe"
         );
     }
 
