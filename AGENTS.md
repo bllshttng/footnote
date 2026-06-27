@@ -30,7 +30,7 @@ footnote/
 
 ### Conventions
 
-- **Worktrees:** create at `~/conductor/workspaces/<repo>/<name>` and nowhere else, then run `bash scripts/setup/setup-worktree.sh`. `claude --worktree <name>` is redirected there by a `WorktreeCreate` hook. Full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
+- **Worktrees:** `claude --worktree <name>` is intercepted by footnote's `WorktreeCreate` hook (`hooks/worktree-setup.sh`); after creation, `bash scripts/setup/setup-worktree.sh` links shared state from canonical. Placement rule and full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
 - **Search hygiene:** prefer `rg` / the Grep tool over `grep -r` (which ignores `.gitignore` and descends into nested worktree checkouts, returning hundreds of false hits). If you must use `grep -r`, scope it to a path.
 - **Multi-CLI:** skills are portable; orchestration needs per-CLI hook config. Gemini defaults to sequential execution; Codex uses `.codex/agents/`. Substrate facts in [docs/HARNESSES.md](docs/HARNESSES.md), wiring in [docs/architecture/multi-cli-hooks.md](docs/architecture/multi-cli-hooks.md), per-skill compat in [docs/SKILL-COMPAT-MATRIX.md](docs/SKILL-COMPAT-MATRIX.md). [RTK](https://github.com/rtk-ai/rtk) is a recommended companion for long loops (`/fno:setup` wires it).
 
