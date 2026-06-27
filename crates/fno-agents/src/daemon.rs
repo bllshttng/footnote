@@ -269,12 +269,22 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
     if !to_reap.is_empty() {
         let reaped: std::collections::BTreeSet<String> =
             to_reap.iter().map(|(s, _)| s.clone()).collect();
+        // Ordered exit teardown (E3.3, AC-X2-4): publish any inside-leg
+        // completion before the reap write clears the report below.
+        for e in &registry.entries {
+            if reaped.contains(&e.short_id) {
+                emit_inside_leg_completion(emitter, e);
+            }
+        }
         // Surface a reap-write failure rather than silently diverging the
         // event log (which says reaped) from the on-disk registry (Gemini high).
         if let Err(e) = state::update_registry(&home.registry_json(), |r| {
             for e in r.entries.iter_mut() {
                 if reaped.contains(&e.short_id) {
                     e.status = AgentStatus::Exited;
+                    // Clear the inside-leg authority on exit (E3.3 / AC-X2-4):
+                    // a dead pane's last badge must not linger.
+                    e.inside_leg = None;
                 }
             }
         }) {
@@ -4369,7 +4379,31 @@ fn apply_reconcile_change(e: &mut RegistryEntry, new_status: Option<AgentStatus>
         if matches!(s, AgentStatus::Exited) {
             e.pid = None;
             e.pid_start_time = None;
+            // Ordered exit teardown (E3.3, AC-X2-4): clear the inside-leg
+            // authority on exit so a stale `working` never wins after the pane
+            // is gone. The completion event is published by the caller BEFORE
+            // this write (publish completion -> clear authority).
+            e.inside_leg = None;
         }
+    }
+}
+
+/// Publish one inside-leg completion event for a row that is about to be marked
+/// `Exited` (ordered exit teardown, E3.3 / AC-X2-4). Emitted BEFORE the registry
+/// write clears [`RegistryEntry::inside_leg`], so `fno agents list` / waiters
+/// observe the final state before the badge goes blank. A no-op for a row with
+/// no report (a normal exit, nothing to tear down).
+fn emit_inside_leg_completion(emitter: &EventEmitter, e: &RegistryEntry) {
+    if let Some(rep) = &e.inside_leg {
+        let _ = emitter.emit(
+            "inside_leg_completed",
+            &json!({
+                "name": e.name,
+                "session_id": e.session_id,
+                "final_state": format!("{:?}", rep.state).to_lowercase(),
+                "seq": rep.seq,
+            }),
+        );
     }
 }
 
@@ -4453,6 +4487,18 @@ fn run_reconcile_sweep(
         || start.elapsed() >= RECONCILE_SWEEP_BUDGET,
         pid_live,
     );
+
+    // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to
+    // Exited that still carries an inside-leg report, publish its completion
+    // BEFORE the write below clears the report. Publishing first is the
+    // contract: list/waiters see the final state before the badge goes blank.
+    for ch in &changes {
+        if matches!(ch.new_status, Some(AgentStatus::Exited)) {
+            if let Some(e) = registry.entries.iter().find(|e| e.name == ch.name) {
+                emit_inside_leg_completion(emitter, e);
+            }
+        }
+    }
 
     // Single batched write (US4-gemini pattern): apply all status changes and
     // bump last_reconciled_at for every probed entry in one lock window.
@@ -5657,20 +5703,42 @@ mod tests {
         let mut to_exited = rentry("x", AgentStatus::Live, None);
         to_exited.pid = Some(4242);
         to_exited.pid_start_time = Some(99);
+        to_exited.inside_leg = Some(state::InsideLegReport {
+            state: state::InsideLegState::Working,
+            seq: 3,
+            reason: None,
+            received_at: "2026-06-27T00:00:00Z".into(),
+            ttl_ms: None,
+        });
         apply_reconcile_change(&mut to_exited, Some(AgentStatus::Exited), "T1");
         assert_eq!(to_exited.status, AgentStatus::Exited);
         assert_eq!(to_exited.pid, None, "exited row must drop its pid");
         assert_eq!(to_exited.pid_start_time, None);
+        assert_eq!(
+            to_exited.inside_leg, None,
+            "exited row must clear the inside-leg authority (E3.3 / AC-X2-4)"
+        );
         assert_eq!(to_exited.last_reconciled_at.as_deref(), Some("T1"));
 
         let mut to_orphaned = rentry("y", AgentStatus::Live, None);
         to_orphaned.pid = Some(4242);
+        to_orphaned.inside_leg = Some(state::InsideLegReport {
+            state: state::InsideLegState::Working,
+            seq: 1,
+            reason: None,
+            received_at: "2026-06-27T00:00:00Z".into(),
+            ttl_ms: None,
+        });
         apply_reconcile_change(&mut to_orphaned, Some(AgentStatus::Orphaned), "T2");
         assert_eq!(to_orphaned.status, AgentStatus::Orphaned);
         assert_eq!(
             to_orphaned.pid,
             Some(4242),
             "non-exited transition keeps pid"
+        );
+        assert!(
+            to_orphaned.inside_leg.is_some(),
+            "a non-exit transition keeps the inside-leg report (only exit tears it down)"
         );
 
         // No status change: status held, but CHECKED still freshens (AC2-FR).
@@ -5680,6 +5748,42 @@ mod tests {
         assert_eq!(no_change.status, AgentStatus::Live);
         assert_eq!(no_change.pid, Some(4242));
         assert_eq!(no_change.last_reconciled_at.as_deref(), Some("T3"));
+    }
+
+    #[test]
+    fn emit_inside_leg_completion_publishes_only_for_report_bearing_rows() {
+        // AC-X2-4: the ordered teardown publishes one completion event carrying
+        // the final state for a row that has an inside-leg report, and is a no-op
+        // for a plain row (a normal exit with nothing to tear down).
+        let home = tmp_home("inside-leg-completion");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+        let mut with_report = rentry("pane", AgentStatus::Live, None);
+        with_report.session_id = Some("sess-uuid".into());
+        with_report.inside_leg = Some(state::InsideLegReport {
+            state: state::InsideLegState::Working,
+            seq: 9,
+            reason: Some("running tests".into()),
+            received_at: "2026-06-27T00:00:00Z".into(),
+            ttl_ms: Some(5000),
+        });
+        emit_inside_leg_completion(&emitter, &with_report);
+        emit_inside_leg_completion(&emitter, &rentry("plain", AgentStatus::Live, None));
+
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let events: Vec<serde_json::Value> = log
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .filter(|v: &serde_json::Value| v["kind"] == "inside_leg_completed")
+            .collect();
+        assert_eq!(events.len(), 1, "exactly one completion, only for the report-bearing row");
+        let ev = &events[0];
+        assert_eq!(ev["name"], "pane");
+        assert_eq!(ev["session_id"], "sess-uuid");
+        assert_eq!(ev["final_state"], "working");
+        assert_eq!(ev["seq"], 9);
+
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     #[test]

@@ -1147,6 +1147,22 @@ event_types:
         last_seq:
           type: integer
 
+  - name: inside_leg_completed
+    description: "Ordered exit teardown (E3.3, AC-X2-4): a claude row carrying an inside-leg report is transitioning to Exited. Emitted BEFORE the registry write clears the report, so list/waiters observe the final state before the badge goes blank."
+    sources: [daemon]
+    data:
+      required: [name, final_state, seq]
+      properties:
+        name:
+          type: string
+        session_id:
+          type: string
+        final_state:
+          type: string
+          enum: [working, blocked, done]
+        seq:
+          type: integer
+
   - name: drive_attached
     description: "An interactive drive window was opened for an agent."
     sources: [daemon]
