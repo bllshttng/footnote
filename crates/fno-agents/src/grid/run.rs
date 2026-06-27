@@ -2498,102 +2498,110 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         // keep their keyboard semantics here; mouse there (drive
                         // passthrough, drag-to-split, rail-mode mouse) is tracked as
                         // follow-up carveouts.
+                        // Compute the page layout lazily, only inside the arms
+                        // that hit-test (left-click, WATCH wheel). EnableMouseCapture
+                        // turns on all-motion tracking, so a Moved event fires on
+                        // every cursor move; those must NOT allocate a tile Vec
+                        // (codex efficiency note).
                         if rail_state.is_none() {
-                            if let Ok(paged) =
-                                layout::compute_page(tty, panes.len(), comp.current_page())
-                            {
-                                match m.kind {
-                                    MouseEventKind::Down(MouseButton::Left)
-                                        if comp.mode() == Mode::Watch =>
-                                    {
-                                        if let Some(idx) = paged.pane_at(m.column, m.row) {
-                                            hint = None;
-                                            if idx == comp.focus() {
-                                                // Re-click the focused pane → drive.
-                                                // Reuses the keyboard Promote path:
-                                                // claim attempt + the exec guard.
-                                                let input = InputEvent::Promote;
-                                                if promote_blocked_by_exec(
-                                                    &input,
-                                                    comp.mode(),
-                                                    idx,
-                                                    &host_interactive,
-                                                ) {
-                                                    let who = names
-                                                        .get(idx)
-                                                        .map(String::as_str)
-                                                        .unwrap_or("?");
-                                                    hint = Some(format!(
-                                                        "{who} is an exec agent - watch only (drive needs host_mode=interactive)"
-                                                    ));
-                                                } else {
-                                                    let action = comp.step(input, &states);
-                                                    if handle_action(
-                                                        action,
-                                                        &mut comp,
-                                                        &mut states,
-                                                        &names,
-                                                        &panes,
-                                                        &mut driver_sinks,
-                                                        home,
-                                                    )
-                                                    .await
-                                                    {
-                                                        break; // Quit
-                                                    }
+                            match m.kind {
+                                MouseEventKind::Down(MouseButton::Left)
+                                    if comp.mode() == Mode::Watch =>
+                                {
+                                    let hit = layout::compute_page(
+                                        tty,
+                                        panes.len(),
+                                        comp.current_page(),
+                                    )
+                                    .ok()
+                                    .and_then(|p| p.pane_at(m.column, m.row));
+                                    if let Some(idx) = hit {
+                                        hint = None;
+                                        if idx == comp.focus() {
+                                            // Re-click the focused pane → drive.
+                                            // Reuses the keyboard Promote path:
+                                            // claim attempt + the exec guard.
+                                            let input = InputEvent::Promote;
+                                            if promote_blocked_by_exec(
+                                                &input,
+                                                comp.mode(),
+                                                idx,
+                                                &host_interactive,
+                                            ) {
+                                                let who = names
+                                                    .get(idx)
+                                                    .map(String::as_str)
+                                                    .unwrap_or("?");
+                                                hint = Some(format!(
+                                                    "{who} is an exec agent - watch only (drive needs host_mode=interactive)"
+                                                ));
+                                            } else {
+                                                let action = comp.step(input, &states);
+                                                if handle_action(
+                                                    action,
+                                                    &mut comp,
+                                                    &mut states,
+                                                    &names,
+                                                    &panes,
+                                                    &mut driver_sinks,
+                                                    home,
+                                                )
+                                                .await
+                                                {
+                                                    break; // Quit
                                                 }
-                                            } else {
-                                                comp.set_focus(idx);
                                             }
-                                            dirty = true;
+                                        } else {
+                                            comp.set_focus(idx);
                                         }
-                                    }
-                                    MouseEventKind::ScrollUp => {
-                                        // Wheel up scrolls the pane's history back.
-                                        // In WATCH the wheel re-focuses under the
-                                        // cursor and the first notch enters scrollback
-                                        // (which itself scrolls up one line). In
-                                        // SCROLLBACK the operator is pinned to the
-                                        // entry pane (Locked Decision 5), so the cursor
-                                        // position is ignored.
-                                        if comp.mode() == Mode::Watch {
-                                            if let Some(idx) = paged.pane_at(m.column, m.row) {
-                                                comp.set_focus(idx);
-                                            }
-                                            let focus = comp.focus();
-                                            let no_history = panes
-                                                .get(focus)
-                                                .map(|p| p.history_size())
-                                                .unwrap_or(0)
-                                                == 0;
-                                            if no_history {
-                                                hint = Some("no scrollback history".to_string());
-                                            } else {
-                                                let action = comp
-                                                    .step(InputEvent::EnterScrollback, &states);
-                                                apply_scroll_action(action, &mut panes);
-                                                hint = None;
-                                            }
-                                            dirty = true;
-                                        } else if comp.mode() == Mode::Scrollback {
-                                            let action =
-                                                comp.step(InputEvent::ScrollLineUp, &states);
-                                            apply_scroll_action(action, &mut panes);
-                                            dirty = true;
-                                        }
-                                    }
-                                    MouseEventKind::ScrollDown
-                                        if comp.mode() == Mode::Scrollback =>
-                                    {
-                                        // Wheel down walks back toward the live tail.
-                                        // In WATCH the view is already live (nothing
-                                        // below), so that case falls through to no-op.
-                                        let action = comp.step(InputEvent::ScrollLineDown, &states);
-                                        apply_scroll_action(action, &mut panes);
                                         dirty = true;
                                     }
-                                    _ => {}
                                 }
+                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                    // In WATCH the wheel re-focuses the pane under the
+                                    // cursor before scrolling; in SCROLLBACK the
+                                    // operator is pinned to the entry pane (Locked
+                                    // Decision 5), so the cursor position is ignored.
+                                    if comp.mode() == Mode::Watch {
+                                        let hit = layout::compute_page(
+                                            tty,
+                                            panes.len(),
+                                            comp.current_page(),
+                                        )
+                                        .ok()
+                                        .and_then(|p| p.pane_at(m.column, m.row));
+                                        if let Some(idx) = hit {
+                                            comp.set_focus(idx);
+                                        }
+                                    }
+                                    let has_history = panes
+                                        .get(comp.focus())
+                                        .map(|p| p.history_size())
+                                        .unwrap_or(0)
+                                        > 0;
+                                    match mouse_to_input(m.kind, comp.mode(), has_history) {
+                                        Some(input) => {
+                                            let action = comp.step(input, &states);
+                                            apply_scroll_action(action, &mut panes);
+                                            hint = None;
+                                            dirty = true;
+                                        }
+                                        None => {
+                                            // Wheel-up on a pane with no history: same
+                                            // hint as the keyboard Space path. Wheel-down
+                                            // in WATCH is already at the live tail → a
+                                            // silent no-op.
+                                            if matches!(m.kind, MouseEventKind::ScrollUp)
+                                                && comp.mode() == Mode::Watch
+                                            {
+                                                hint =
+                                                    Some("no scrollback history".to_string());
+                                                dirty = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -2850,10 +2858,34 @@ impl Drop for TerminalGuard {
 /// because scrolling needs `&mut panes` while `handle_action` borrows them
 /// immutably.
 fn apply_scroll_action(action: CompositorAction, panes: &mut [Pane]) {
+    debug_assert!(
+        matches!(
+            action,
+            CompositorAction::Scroll { .. } | CompositorAction::NoOp
+        ),
+        "apply_scroll_action received a non-scroll variant: {action:?}"
+    );
     if let CompositorAction::Scroll { pane_idx, cmd } = action {
         if let Some(p) = panes.get_mut(pane_idx) {
             p.apply_scroll(cmd);
         }
+    }
+}
+
+/// Map a mouse-wheel event to the compositor `InputEvent` that scrolls the
+/// focused pane's history, or `None` when the wheel should do nothing: wheel-up
+/// on a pane with no history (the caller surfaces the "no scrollback" hint), or
+/// wheel-down in WATCH (already at the live tail). The focus side effects stay
+/// in the run loop; this mirrors `key_to_input` for the wheel so the
+/// mode-transition is unit-testable. (E5a mouse-native.)
+fn mouse_to_input(kind: MouseEventKind, mode: Mode, has_history: bool) -> Option<InputEvent> {
+    match (kind, mode) {
+        // First wheel-up notch enters scrollback, which itself scrolls up one
+        // line — only meaningful when the pane has history to freeze onto.
+        (MouseEventKind::ScrollUp, Mode::Watch) if has_history => Some(InputEvent::EnterScrollback),
+        (MouseEventKind::ScrollUp, Mode::Scrollback) => Some(InputEvent::ScrollLineUp),
+        (MouseEventKind::ScrollDown, Mode::Scrollback) => Some(InputEvent::ScrollLineDown),
+        _ => None,
     }
 }
 
@@ -3469,6 +3501,37 @@ mod tests {
             &mut panes,
         );
         assert_eq!(panes[0].scroll_offset(), 1);
+    }
+
+    /// E5a wheel router: `mouse_to_input` maps wheel + mode + history to the
+    /// scroll InputEvent, mirroring `key_to_input`. The focus side effects live
+    /// in the run loop and are not exercised here.
+    #[test]
+    fn mouse_to_input_wheel_routing() {
+        use MouseEventKind::{ScrollDown, ScrollUp};
+        // WATCH + history: the first wheel-up notch enters scrollback.
+        assert_eq!(
+            mouse_to_input(ScrollUp, Mode::Watch, true),
+            Some(InputEvent::EnterScrollback)
+        );
+        // WATCH + no history: nothing (the caller surfaces the hint instead).
+        assert_eq!(mouse_to_input(ScrollUp, Mode::Watch, false), None);
+        // SCROLLBACK: wheel up/down walk the history regardless of has_history.
+        assert_eq!(
+            mouse_to_input(ScrollUp, Mode::Scrollback, false),
+            Some(InputEvent::ScrollLineUp)
+        );
+        assert_eq!(
+            mouse_to_input(ScrollDown, Mode::Scrollback, true),
+            Some(InputEvent::ScrollLineDown)
+        );
+        // Wheel-down in WATCH: already at the live tail → no-op.
+        assert_eq!(mouse_to_input(ScrollDown, Mode::Watch, true), None);
+        // Non-wheel events never route through here.
+        assert_eq!(
+            mouse_to_input(MouseEventKind::Moved, Mode::Watch, true),
+            None
+        );
     }
 
     /// emit_diff over two identical frames produces zero bytes - an idle grid
