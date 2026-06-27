@@ -173,7 +173,14 @@ async fn serve_connection(pty: &PtySession, mut stream: UnixStream) -> bool {
             // Clean hangup or any read fault: end this connection, keep serving.
             Err(ProtocolError::UnexpectedEof) | Err(_) => return false,
         };
-        let (resp, shutdown) = handle(pty, &req);
+        // `worker.submit` owns a settle BETWEEN two writes, so it must run in
+        // the async serve loop (the sync `handle` cannot await); everything else
+        // is a single synchronous PTY op.
+        let (resp, shutdown) = if req.method == "worker.submit" {
+            (submit_keys(pty, &req).await, false)
+        } else {
+            handle(pty, &req)
+        };
         if write_response(&mut stream, &resp).await.is_err() {
             return shutdown;
         }
@@ -181,6 +188,57 @@ async fn serve_connection(pty: &PtySession, mut stream: UnixStream) -> bool {
             return true;
         }
     }
+}
+
+/// Default and ceiling for the `worker.submit` settle gap. The relay's per-turn
+/// settle is ~1s; the ceiling bounds a bad/hostile RPC value (e.g. minutes-as-ms
+/// or `u64::MAX`) that would otherwise park this single-client worker inside
+/// `serve_connection` for that whole duration - blocking shutdown/status and
+/// leaving the turn unsubmitted (codex P2 on PR #60).
+const DEFAULT_SETTLE_MS: u64 = 1000;
+const MAX_SETTLE_MS: u64 = 5000;
+
+/// Resolve the settle gap from the RPC param: default when absent, capped at the
+/// ceiling. Pure so the clamp contract is testable without an actual sleep.
+fn clamp_settle(raw: Option<u64>) -> u64 {
+    raw.unwrap_or(DEFAULT_SETTLE_MS).min(MAX_SETTLE_MS)
+}
+
+/// The text->settle->separate-CR submit state machine, ported off the relay's
+/// `roundtrip.py` `_inject` (inside-out-multiplexer E4.2) onto the daemon
+/// send-keys RPC. claude's TUI reads a single `text+"\r"` write as a PASTE and
+/// never submits the turn (see EPIC E1.4), so the submitting CR must arrive as
+/// its OWN keystroke after the input box already holds the text. `worker.write`
+/// stays the raw single-write passthrough (drive/ask paths); `worker.submit` is
+/// the interactive-claude turn-submit primitive a relay routes through.
+///
+/// Reply capture + the reply-driven bounded re-inject stay relay-side (they need
+/// the transcript sentinel signal, which never touched the PTY): the relay
+/// re-calls this RPC if no reply lands by its timeout. `settle_ms` is the gap
+/// between the text and the CR (default `DEFAULT_SETTLE_MS`, capped at
+/// `MAX_SETTLE_MS` via `clamp_settle`); generous because a polluted SessionStart
+/// banner can still be churning when the text lands.
+async fn submit_keys(pty: &PtySession, req: &Request) -> Response {
+    let text = match req.params.get("data").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `data` (string)"),
+    };
+    let settle_ms = clamp_settle(req.params.get("settle_ms").and_then(|v| v.as_u64()));
+    // 1. write the text (no trailing CR).
+    if let Err(e) = pty.write_input(text.as_bytes()) {
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("write text failed: {e}"),
+        );
+    }
+    // 2. settle, so the CR lands as a distinct keystroke (not a paste).
+    tokio::time::sleep(Duration::from_millis(settle_ms)).await;
+    // 3. write the submitting CR on its own.
+    if let Err(e) = pty.write_input(b"\r") {
+        return Response::err(req.id, ErrorCode::Internal, format!("write CR failed: {e}"));
+    }
+    Response::ok(req.id, json!({"submitted": true, "settle_ms": settle_ms}))
 }
 
 /// Handle one worker RPC. Returns the response and whether shutdown was asked.
@@ -666,6 +724,85 @@ mod tests {
         let r = read_response(&mut conn).await.unwrap();
         assert_eq!(r.result().unwrap()["shutdown"], true);
 
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn clamp_settle_defaults_and_caps() {
+        // codex P2 on PR #60: an unbounded settle parks the single-client worker.
+        assert_eq!(clamp_settle(None), DEFAULT_SETTLE_MS);
+        assert_eq!(clamp_settle(Some(250)), 250);
+        assert_eq!(clamp_settle(Some(MAX_SETTLE_MS + 1)), MAX_SETTLE_MS);
+        assert_eq!(clamp_settle(Some(u64::MAX)), MAX_SETTLE_MS);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_submit_settles_between_text_and_cr() {
+        // E4.2: `worker.submit` ports the relay's text->settle->separate-CR
+        // submit state machine. Its DEFINING property is two writes with a
+        // settle between them (a single text+CR is a paste, never a submit), so
+        // assert (a) the call blocked for >= settle_ms (the settle ran between
+        // the writes) and (b) the text reached the PTY child (cat echoes it).
+        let home = tmp_home("submit");
+        start_worker(&home, "wkS").await;
+        let sock = AgentsHome::at(&home).worker_sock("wkS");
+        let mut conn = connect_retry(&sock).await;
+
+        let settle_ms = 300u64;
+        let started = Instant::now();
+        write_request(
+            &mut conn,
+            &Request::new(
+                1,
+                "worker.submit",
+                json!({ "data": "submit-me", "settle_ms": settle_ms }),
+            ),
+        )
+        .await
+        .unwrap();
+        let resp = read_response(&mut conn).await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(!resp.is_err());
+        assert_eq!(resp.result().unwrap()["submitted"], true);
+        assert!(
+            elapsed >= Duration::from_millis(settle_ms),
+            "submit returned in {elapsed:?}, faster than the {settle_ms}ms settle - \
+             the text and CR were not written as separate keystrokes"
+        );
+
+        // The text payload reached the PTY (cat echoes stdin back).
+        let mut seen = false;
+        for i in 0..50 {
+            write_request(
+                &mut conn,
+                &Request::new(100 + i, "worker.snapshot", json!({})),
+            )
+            .await
+            .unwrap();
+            let r = read_response(&mut conn).await.unwrap();
+            if r.result().unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("submit-me")
+            {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(seen, "submitted text never appeared in snapshot");
+
+        // Missing `data` is a clean InvalidParams, not a panic.
+        write_request(&mut conn, &Request::new(2, "worker.submit", json!({})))
+            .await
+            .unwrap();
+        let r = read_response(&mut conn).await.unwrap();
+        assert!(r.is_err(), "worker.submit without `data` must error");
+
+        write_request(&mut conn, &Request::new(3, "worker.shutdown", json!({})))
+            .await
+            .unwrap();
+        let _ = read_response(&mut conn).await;
         std::fs::remove_dir_all(&home).ok();
     }
 
