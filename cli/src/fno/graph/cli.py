@@ -89,31 +89,27 @@ def _has_unmerged_open_pr(e: dict) -> bool:
     return bool(e.get("pr_number"))
 
 
-def _pending_epic_ids(entries: list[dict]) -> set[str]:
-    """Ids of epics (parents) that still have at least one un-done child.
+def _container_ids(entries: list[dict]) -> set[str]:
+    """Ids of nodes that are some other node's ``parent`` - i.e. epics/containers.
 
-    A container with PENDING children is never directly buildable (its work lives
-    in those children), so every work-SELECTION surface drops it from the
-    candidate pool - else it ranks first and is repeatedly picked, or a bulk
-    `--all-ready` dispatch launches a `/target` worker against the box (x-33b2).
-    Shared by `next` (_pick_ready) and `ready` (cmd_ready) so the two surfaces
-    cannot drift.
+    A container is never directly buildable: its work lives in its decomposed
+    children, and it carries no PR of its own. So every work-SELECTION surface
+    drops it from the candidate pool - `next`/`ready`/`--all-ready` build the
+    leaves, never the box (x-33b2). Shared by `next` (_pick_ready) and `ready`
+    (cmd_ready) so the two surfaces cannot drift; advance_dependents applies the
+    same rule on the merge edge-following path.
 
-    An ALL-children-done epic is deliberately NOT excluded (codex P1 on PR #69):
-    the megawalk walker closes it via `fno backlog done` after its group children
-    finish, and the epic stays visible in `fno backlog next` until its own
-    completed_at is set (loop_megawalk.rs grilled-decision-9). Excluding all-done
-    epics too would strand them - and anything blocked by them - with no
-    automated closure path. A child counts as done by `completed_at`
-    (== `_status` "done"; the field is the durable signal the walker keys on).
+    No "keep the all-done epic selectable" exception is needed: an epic closes
+    automatically via ``_cascade_close_parents`` on the merge that finishes its
+    last child (uniform across projects), so it is already ``done`` - never a
+    lingering ``ready`` container that selection would have to surface for
+    closure. That replaces the old "walker closes the epic via next" path
+    (loop_megawalk.rs grilled-decision-9), which conflicted with never building a
+    container.
     """
-    children_by_parent: dict[str, list[dict]] = {}
-    for e in entries:
-        if isinstance(e, dict) and isinstance(e.get("parent"), str):
-            children_by_parent.setdefault(e["parent"], []).append(e)
     return {
-        pid for pid, kids in children_by_parent.items()
-        if any(not k.get("completed_at") for k in kids)
+        e.get("parent") for e in entries
+        if isinstance(e, dict) and isinstance(e.get("parent"), str)
     }
 
 
@@ -1329,6 +1325,9 @@ def cmd_update(
 
         if completed:
             node["completed_at"] = datetime.now(timezone.utc).isoformat()
+            # Cascade-close now-all-done ancestor epics (x-33b2), same as the
+            # done/reconcile close paths.
+            _cascade_close_parents(entries, node["id"])
         if locked_by is not None:
             session = locked_by if locked_by != "null" else None
             node["session_id"] = session
@@ -1543,16 +1542,16 @@ def cmd_next(
             e for e in candidates
             if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
         ]
-        # Pending containers are never directly buildable (x-33b2): an epic with
-        # un-done children is a box whose work lives in those children. `next`
-        # must never return it - it otherwise ranks first among its siblings
-        # (make_selection_sort_key) and is repeatedly re-selected as the head,
-        # starving the genuinely-ready leaf below it. Build the leaves, not the
-        # box. An ALL-done epic stays selectable so the walker can close it
-        # (codex P1). Computed from the FULL graph so a parent already filtered
-        # out of `candidates` still suppresses correctly. Shared with cmd_ready.
-        pending_epics = _pending_epic_ids(entries)
-        candidates = [e for e in candidates if e.get("id") not in pending_epics]
+        # Containers are never directly buildable (x-33b2): an epic's work lives
+        # in its decomposed children, so `next` must never return it - it
+        # otherwise ranks first among its siblings (make_selection_sort_key) and
+        # is repeatedly re-selected as the head, starving the genuinely-ready leaf
+        # below it. Build the leaves, not the box; the epic closes itself via
+        # _cascade_close_parents when its last child lands. Computed from the FULL
+        # graph so a parent already filtered out of `candidates` still suppresses
+        # correctly. Shared with cmd_ready.
+        container_ids = _container_ids(entries)
+        candidates = [e for e in candidates if e.get("id") not in container_ids]
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.
@@ -1671,14 +1670,15 @@ def cmd_ready(
         e for e in ready
         if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
     ]
-    # Pending containers are never actionable work (x-33b2 / codex P2 on PR #69):
-    # drop epics with un-done children so `fno backlog ready` - and the
-    # `dispatch-node.sh --all-ready` bulk path that enumerates it - never
-    # presents/launches the box instead of its leaves. An all-done epic stays
-    # listed so the walker's closure path can reach it (codex P1). Shares
-    # _pending_epic_ids with `next`'s _pick_ready so the surfaces cannot drift.
-    pending_epics = _pending_epic_ids(entries)
-    ready = [e for e in ready if e.get("id") not in pending_epics]
+    # Containers are never actionable work (x-33b2 / codex P2 on PR #69): drop
+    # epics so `fno backlog ready` - and the `dispatch-node.sh --all-ready` bulk
+    # path that enumerates it - never presents/launches the box instead of its
+    # leaves. No all-done exception: the epic auto-closes via
+    # _cascade_close_parents when its last child lands, so it is already done
+    # rather than a lingering ready container. Shares _container_ids with `next`'s
+    # _pick_ready so the surfaces cannot drift.
+    container_ids = _container_ids(entries)
+    ready = [e for e in ready if e.get("id") not in container_ids]
     # Epics-first, then flat priority (C3, Locked Decision 7); key built
     # from the full graph so epic parents always resolve.
     ready.sort(key=make_selection_sort_key(entries))
@@ -3092,6 +3092,56 @@ def _apply_completion_fields(node: dict) -> None:
     node["completed_at"] = datetime.now(timezone.utc).isoformat()
 
 
+def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
+    """Close ancestor epics whose children are now all complete (x-33b2).
+
+    Called inside the close mutator right after a node's completion fields are
+    set. An epic is a container with no PR of its own - its work IS its
+    decomposed children - so it is "done" exactly when all of them are. Walking
+    UP the ``parent`` chain, each ancestor whose children all carry
+    ``completed_at`` is closed too (and tagged with a completion_note so the
+    PR-less close is self-explaining), continuing to the grandparent.
+
+    This is the closure path that lets epics be excluded from build-SELECTION
+    everywhere (`next`/`ready`/advance_dependents never dispatch the box): the
+    box closes itself off the merge event that finishes its last child. It fires
+    on every close path (done + reconcile + update --completed) since each calls
+    this after ``_apply_completion_fields``, and it is uniform across projects
+    because it follows the parent EDGE, not a project filter - so a cross-project
+    parent closes on the same merge that completes its last child.
+
+    Idempotent: an already-done or missing ancestor stops that branch. The walk
+    is depth-capped against a malformed parent cycle.
+    """
+    id_to_entry = {
+        e["id"]: e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    children_by_parent: dict[str, list[dict]] = {}
+    for e in entries:
+        if isinstance(e, dict) and isinstance(e.get("parent"), str):
+            children_by_parent.setdefault(e["parent"], []).append(e)
+
+    closed: list[str] = []
+    cur = id_to_entry.get(node_id)
+    for _ in range(64):  # depth cap: guards against a malformed parent cycle
+        pid = cur.get("parent") if isinstance(cur, dict) else None
+        if not isinstance(pid, str):
+            break
+        parent = id_to_entry.get(pid)
+        if parent is None or parent.get("completed_at"):
+            break  # missing or already-closed ancestor -> stop this branch
+        kids = children_by_parent.get(pid) or []
+        if not kids or any(not k.get("completed_at") for k in kids):
+            break  # at least one child still open -> the epic is not done yet
+        _apply_completion_fields(parent)
+        if not parent.get("completion_note"):
+            parent["completion_note"] = "auto-closed: all children complete"
+        closed.append(pid)
+        cur = parent  # cascade up to the grandparent
+    return closed
+
+
 def _stamp_and_graduate_plan(
     plan_path: str,
     *,
@@ -3557,6 +3607,9 @@ def cmd_done(
             already_holder[0] = True
             return entries
         _apply_completion_fields(n)
+        # Close any now-all-done ancestor epic (x-33b2): the box is done when its
+        # children are, and it carries no PR of its own to close it explicitly.
+        _cascade_close_parents(entries, task_id)
         plan_path_out[0] = n.get("plan_path")
         return entries
 
@@ -3762,6 +3815,9 @@ def cmd_reconcile(
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
                     _apply_completion_fields(node_obj)
+                    # Cascade-close now-all-done ancestor epics (x-33b2), uniform
+                    # across projects (follows the parent edge, not a filter).
+                    _cascade_close_parents(entries, record.node_id)
                     actually_closed.append(record)
             return entries
 

@@ -54,28 +54,27 @@ use std::process::Command;
 // epic, and does the epic surface again via `fno backlog next` after all
 // children are ready?
 //
-// Verified (2026-06-06): NO premature epic completion.
+// UPDATED (x-33b2, PR #69): epics now close AUTOMATICALLY.
 //
-// Evidence:
-//   cli/src/fno/graph/statuses.py:recompute_statuses derives _status:done
-//   from completed_at on the INDIVIDUAL node only (line 81). There is no
-//   parent-cascade: walking a group-child through cmd_done sets
-//   `completed_at` on that child; the epic's completed_at remains None until
-//   cmd_done is called explicitly on the epic itself. The children summary
-//   index (store.py:_compute_children) is read-only metadata for the Kanban
-//   board; it does not influence _status.
+// Original grilled-decision-9 (2026-06-06) kept the epic visible in
+// `fno backlog next` so the walker would close it explicitly via
+// `fno backlog done`. That conflicted with a later requirement: an epic is a
+// container and must NEVER be selected/dispatched as a build target (building
+// the box instead of its leaves starves the real work). Once epics are excluded
+// from build-selection everywhere (cli.py `_container_ids`, used by `next` /
+// `ready` / advance_dependents), the "walker closes it via next" path can no
+// longer fire - the epic is filtered out.
 //
-//   fno.plan._stamp: group-aware graduation writes expected_url_count
-//   on the shared epic doc (first-writer-wins, fno plan set-expected, ab-9e864e42).
-//   The epic backlog node is NOT automatically marked done by the stamp module; the
-//   walker must call fno backlog done on the epic node separately after all
-//   group children are confirmed done. This is correct: the epic node is still
-//   visible in `fno backlog next` until its own completed_at is set.
-//
-// Consequence: no speculative walker-side umbrella machinery is needed here.
-// The current walker closes group-child nodes one at a time; the epic parent
-// continues to surface in `fno backlog next` as a separate ready node. This is
-// deliberate simplicity (grilled decision 9). No gap was found; no test added.
+// Resolution: `cli/src/fno/graph/cli.py:_cascade_close_parents` closes an
+// ancestor epic the moment its last child's `completed_at` is set. It runs
+// inside every close mutator (done + reconcile + update --completed), follows
+// the `parent` EDGE (so it is uniform across projects - a cross-project parent
+// closes on the same merge that finishes its last child), cascades to the
+// grandparent, and tags the PR-less close with a completion_note. So the walker
+// no longer needs to discover or close epics: it dispatches leaves only, and the
+// box closes itself. recompute_statuses still derives _status:done from the
+// individual node's completed_at; the cascade is what SETS the parent's
+// completed_at (deliberately, in the close path - not a recompute derivation).
 
 // ── Event-kind prune ledger (Claude's Discretion 2) ──────────────────────────
 //
