@@ -80,9 +80,20 @@ def _use_conductor_canonical(repo_root: Path) -> bool:
         data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
     except Exception:
         return False
-    config = data.get("config") if isinstance(data, dict) else None
-    wt_cfg = config.get("worktree") if isinstance(config, dict) else None
-    return bool(wt_cfg.get("use_conductor_canonical", False)) if isinstance(wt_cfg, dict) else False
+    if not isinstance(data, dict):
+        return False
+    # Read the flag from BOTH config.worktree (nested) and top-level worktree:
+    # the bash hook's wt_config reads the top-level block, while real settings.yaml
+    # stores it top-level - so a config.worktree-only read made the walker disagree
+    # with the hook for the same file (codex P1 on PR #67). Either location wins.
+    config = data.get("config")
+    for container in (
+        config.get("worktree") if isinstance(config, dict) else None,
+        data.get("worktree"),
+    ):
+        if isinstance(container, dict) and bool(container.get("use_conductor_canonical", False)):
+            return True
+    return False
 
 
 def _read_worktrees_base_from(settings_path: Path) -> Optional[str]:

@@ -342,6 +342,19 @@ class TestCanonicalWorktreeWiring:
         wm = WorktreeManager(repo_root=repo_root)
         assert wm.base_dir == tmp_path / "wtroot" / "both-repo"
 
+    def test_conductor_flag_read_from_top_level_worktree_block(self, tmp_path, monkeypatch):
+        """Real settings.yaml stores the flag top-level (worktree:), which the bash
+        hook reads; the walker must agree (codex P1 on PR #67)."""
+        monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
+        from fno.worktree import WorktreeManager
+        repo_root = tmp_path / "toplevel-repo"
+        (repo_root / ".fno").mkdir(parents=True)
+        (repo_root / ".fno" / "settings.yaml").write_text(
+            "worktree:\n  use_conductor_canonical: true\n"  # top-level, not config.worktree
+        )
+        wm = WorktreeManager(repo_root=repo_root)
+        assert wm.base_dir == Path.home() / "conductor" / "workspaces" / "toplevel-repo"
+
     def test_worktrees_base_read_from_global_settings(self, tmp_path, monkeypatch):
         """A GLOBALLY-set worktrees_base (the maintainer's setup) is honored even
         when the repo has no local setting (gemini HIGH on PR #67)."""
