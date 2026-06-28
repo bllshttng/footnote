@@ -163,7 +163,7 @@ fn rotated_path(path: &Path) -> PathBuf {
 /// Event `ts` is wall-clock for human audit (drive-window math uses the
 /// monotonic clock instead; LD17). Implemented without `chrono` to keep the
 /// dependency surface minimal.
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)

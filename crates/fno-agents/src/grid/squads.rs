@@ -148,8 +148,18 @@ pub fn squad_groups(rows: &[Value], store: &SquadStore) -> Vec<Group> {
                 })
                 .collect();
             hits.sort_by(|a, b| a.0.cmp(b.0));
+            // Surface offline (ghost) members in the header so a reopened squad
+            // whose member is not live reads as `*stack +1 off`, never as a
+            // silently smaller squad (AC1-EDGE / AC1-FR). The rail appends the
+            // live `(count)` after this, giving `*stack +1 off (2)`.
+            let off = offline_members(rows, squad).len();
+            let header = if off > 0 {
+                format!("*{} +{off} off", squad.name)
+            } else {
+                format!("*{}", squad.name)
+            };
             Group {
-                header: format!("*{}", squad.name),
+                header,
                 key_value: format!("squad:{}", squad.name),
                 members: hits.into_iter().map(|(_, idx)| idx).collect(),
             }
@@ -394,6 +404,10 @@ mod tests {
         store.recruit("stack", "wkGONE");
         let groups = squad_groups(&r, &store);
         assert_eq!(groups[0].members, vec![0], "only the live member tiles");
+        assert_eq!(
+            groups[0].header, "*stack +1 off",
+            "the offline ghost is surfaced in the header, never silently dropped"
+        );
     }
 
     // ── AC1-EDGE: offline members are reported, never dropped from the store ─

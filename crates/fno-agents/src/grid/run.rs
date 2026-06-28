@@ -461,6 +461,16 @@ impl Launcher {
     }
 }
 
+/// Modal prompt for recruiting the focused agent into a squad (x-5b3e). Reuses
+/// the single-line [`Launcher`] buffer for the squad name; `agent` is the
+/// registry name being recruited, captured when `m` opens the prompt so a later
+/// pane churn can never retarget the recruit (Concurrency: the recruit binds to
+/// the name decided at keypress, not whatever is focused at submit).
+struct RecruitPrompt {
+    agent: String,
+    input: Launcher,
+}
+
 /// Derive a legible, unique-ish worker name from a goal + a monotonic counter:
 /// `target-<slug>-<n>`. The slug is the goal's leading alphanumeric words,
 /// lowercased and dash-joined (capped), so the name reads cleanly in
@@ -2276,6 +2286,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
         None
     };
     let mut launch_seq: usize = 0;
+    // Open recruit prompt (x-5b3e): `Some` while the operator is typing the
+    // squad name to recruit the focused agent into. Modal like `launcher`.
+    let mut recruit: Option<RecruitPrompt> = None;
 
     // ── Rail state (ab-1fab1fdf, Phase 1) ────────────────────────────────
     // `rail_state`: Some when rail mode is active (`--rail` flag or `t` toggle).
@@ -2618,6 +2631,62 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             dirty = true;
                             continue;
                         }
+                        // ── Recruit prompt (x-5b3e, modal) ─────────────────
+                        // While open every key edits the squad-name buffer;
+                        // nothing reaches the rail or panes. Submit creates the
+                        // squad if new and recruits the captured agent (AC1-HP /
+                        // AC1-UI); the outcome toast makes a re-recruit a visible
+                        // no-op. After the launcher so only one modal owns input.
+                        if recruit.is_some() {
+                            match recruit.as_mut().unwrap().input.apply(launcher_key(key)) {
+                                LauncherOutcome::Stay => {
+                                    let rp = recruit.as_ref().unwrap();
+                                    hint = Some(format!(
+                                        "recruit {} into squad> {}",
+                                        rp.agent, rp.input.buffer
+                                    ));
+                                }
+                                LauncherOutcome::Cancelled => {
+                                    recruit = None;
+                                    hint = None;
+                                    prev_frame = None; // clear the footer overlay
+                                }
+                                LauncherOutcome::Submitted(squad_name) => {
+                                    let agent = recruit.take().unwrap().agent;
+                                    let now = crate::events::now_rfc3339();
+                                    match squads::update(&squads_path, |s| {
+                                        // create-if-absent then recruit: a new name
+                                        // is created, an existing one is reused, and
+                                        // the agent is added (deduped) either way.
+                                        s.create(&squad_name, &now);
+                                        s.recruit(&squad_name, &agent)
+                                    }) {
+                                        Ok(outcome) => {
+                                            // Reload so the Squad view reflects the
+                                            // new membership on the next frame.
+                                            squad_store = squads::load(&squads_path);
+                                            hint = Some(match outcome {
+                                                squads::RecruitOutcome::Recruited => {
+                                                    format!("recruited {agent} into *{squad_name}")
+                                                }
+                                                squads::RecruitOutcome::AlreadyMember => {
+                                                    format!("{agent} already in *{squad_name}")
+                                                }
+                                                squads::RecruitOutcome::NoSuchSquad => {
+                                                    format!("could not recruit {agent}")
+                                                }
+                                            });
+                                        }
+                                        Err(e) => {
+                                            hint = Some(format!("recruit failed: {e}"));
+                                        }
+                                    }
+                                    prev_frame = None;
+                                }
+                            }
+                            dirty = true;
+                            continue;
+                        }
                         // ── ? help overlay key gate (E5c AC-3) ──────────────
                         // Checked when the launcher is closed. BEFORE the rail
                         // handler and key_to_input so the overlay intercepts keys
@@ -2891,6 +2960,28 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                         }
                                     }
                                     prev_frame = None; // axis change -> full-paint
+                                    dirty = true;
+                                    rail_consumed = true;
+                                }
+                                // RailNav: `m` recruits the selected agent into a
+                                // squad (x-5b3e). Opens the modal squad-name prompt
+                                // seeded with the agent's name; the recruit itself
+                                // runs on submit. The agent is captured now so a
+                                // later selection move cannot retarget it. (When the
+                                // x-d97d rail leader lands, this rebinds to
+                                // `leader m` - the recruit verb is unchanged.)
+                                (group::FocusAxis::RailNav, KeyCode::Char('m')) => {
+                                    if let Some(agent) =
+                                        rs.selected_agent_idx.and_then(|i| names.get(i)).cloned()
+                                    {
+                                        hint = Some(format!("recruit {agent} into squad> "));
+                                        recruit = Some(RecruitPrompt {
+                                            agent,
+                                            input: Launcher::new(),
+                                        });
+                                    } else {
+                                        hint = Some("no agent selected to recruit".to_string());
+                                    }
                                     dirty = true;
                                     rail_consumed = true;
                                 }
@@ -3805,7 +3896,8 @@ fn help_overlay_lines(rail_on: bool) -> Vec<String> {
     if rail_on {
         lines.push(String::new());
         lines.push("  Rail (when active):".to_string());
-        lines.push("  g              cycle group-by".to_string());
+        lines.push("  g              cycle group-by (cwd .. squad)".to_string());
+        lines.push("  m              recruit selected agent into a squad".to_string());
         lines.push("  a              toggle attention filter".to_string());
         lines.push("  Tab            tile / zoom selected group".to_string());
     }
