@@ -2021,8 +2021,8 @@ fn base_groups(
             for g in &mut sidelines {
                 g.key_value = format!("cwd:{}", g.key_value);
             }
-            let squad_half = squads::squad_groups(rail_rows, squads);
-            sidelines.into_iter().chain(squad_half).collect()
+            sidelines.extend(squads::squad_groups(rail_rows, squads));
+            sidelines
         }
         _ => group::group_by(rail_rows, group_key),
     }
