@@ -3246,7 +3246,32 @@ def _load_a2a_settings() -> tuple[bool, int]:
         return (False, 6)
 
 
-def _run_relay_loop(to_name: str, from_name: str, seed: str, ceiling: int) -> int:
+def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
+    """Wrap a relay hop body in the peer's ``<fno_mail>`` envelope, or return it
+    raw when no context is supplied (the chat path) (node x-1f23). The stream-json
+    switchboard injects a whole turn, so this uses the paired multiline form, not
+    the relay single-line PTY variant."""
+    if ctx is None:
+        return cur
+    from fno.mail.envelope import wrap_fno_mail
+
+    return wrap_fno_mail(
+        cur,
+        from_=ctx.from_,
+        harness=ctx.harness,
+        model=ctx.model,
+        node=ctx.node,
+        to=ctx.to,
+    )
+
+
+def _run_relay_loop(
+    to_name: str,
+    from_name: str,
+    seed: str,
+    ceiling: int,
+    mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+) -> int:
     """Drive the bounded A2A relay AFTER the first hop (B already replied
     ``seed``). Alternate driving A then B with each other's reply — the drive IS
     the literal injection into the target — up to ``ceiling`` total turns
@@ -3268,7 +3293,14 @@ def _run_relay_loop(to_name: str, from_name: str, seed: str, ceiling: int) -> in
     while turns < ceiling and cur.strip():
         hop = _daemon_rpc(
             "agent.switchboard",
-            {"to": target, "from": peer, "body": cur, "mirror": False},
+            {
+                "to": target,
+                "from": peer,
+                # Wrap each continuation in the sending peer's <fno_mail> so the
+                # relay turn carries provenance, not just the seed (node x-1f23).
+                "body": _wrap_relay_body(cur, (mail_ctxs or {}).get(peer)),
+                "mirror": False,
+            },
             connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
             read_timeout=_SWITCHBOARD_READ_TIMEOUT,
         )
@@ -3312,7 +3344,11 @@ def _detach_stdio() -> None:
 
 
 def _kickoff_background_relay(
-    to_name: str, from_name: str, seed: str, ceiling: int
+    to_name: str,
+    from_name: str,
+    seed: str,
+    ceiling: int,
+    mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
 ) -> None:
     """Run the A2A relay in a DETACHED background process so the caller returns
     immediately (ab-3bd520ab).
@@ -3331,7 +3367,7 @@ def _kickoff_background_relay(
     try:
         pid = os.fork()
     except OSError:
-        _run_relay_loop(to_name, from_name, seed, ceiling)
+        _run_relay_loop(to_name, from_name, seed, ceiling, mail_ctxs)
         return
     if pid > 0:
         # Parent: reap the intermediate child (it exits at once) and return.
@@ -3352,7 +3388,7 @@ def _kickoff_background_relay(
             os._exit(0)
         _detach_stdio()
         try:
-            _run_relay_loop(to_name, from_name, seed, ceiling)
+            _run_relay_loop(to_name, from_name, seed, ceiling, mail_ctxs)
         except Exception:
             pass
     finally:
@@ -3431,8 +3467,18 @@ def _a2a_first_use_gate(auto: bool, ceiling: int) -> bool:
     return keep_on
 
 
-def _switchboard_exchange(to_name: str, from_name: str, body: str) -> Optional[bool]:
+def _switchboard_exchange(
+    to_name: str,
+    from_name: str,
+    body: str,
+    mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+) -> Optional[bool]:
     """Drive a stream-json switchboard exchange (Group 2, Tasks 3.1 + 4.1).
+
+    ``mail_ctxs`` (node x-1f23) maps each endpoint name to its ``<fno_mail>``
+    sender context. When set (the mail-send path), every autonomous relay
+    continuation is wrapped so later peer turns keep provenance, not just the
+    seed. ``fno agents chat`` passes None, so the chat path stays raw + unchanged.
 
     Returns ``True`` when the turn(s) were delivered via the switchboard, or
     ``None`` when B is not a live stream thread / the daemon is unreachable (the
@@ -3472,7 +3518,7 @@ def _switchboard_exchange(to_name: str, from_name: str, body: str) -> Optional[b
     # empty first reply has no relay to run.
     cur = sb.get("reply") or ""
     if ceiling > 1 and from_name != to_name and cur.strip():
-        _kickoff_background_relay(to_name, from_name, cur, ceiling)
+        _kickoff_background_relay(to_name, from_name, cur, ceiling, mail_ctxs)
     return True
 
 
@@ -3793,32 +3839,128 @@ def _chat_unwind(result: "DispatchChatResult", hosts: list) -> None:
             )
 
 
+# Subprocess budget for the mail-inject verb. It polls the recipient transcript
+# for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
+_MAIL_INJECT_TIMEOUT_S = 20.0
+
+
+@dataclass(frozen=True)
+class _MailCtx:
+    """Sender identity stamped into the ``<fno_mail>`` envelope (node x-1f23)."""
+
+    from_: str
+    harness: str
+    model: str
+    node: Optional[str] = None
+    to: Optional[str] = None
+
+
+def _build_mail_ctx(
+    from_name: str,
+    from_session: Optional[str],
+    provider_from: Optional[str],
+    to: Optional[str] = None,
+) -> _MailCtx:
+    """Build the ``<fno_mail>`` sender context from the dispatch provenance.
+
+    ``from`` is the sender's short 8-hex sessionId (or the bare ``from_name`` when
+    the caller is unregistered). ``model`` is unknown today (AgentEntry carries no
+    model field) so it is reported ``"unknown"`` -- never fabricated, matching the
+    durable envelope's existing "do not invent a model" stance.
+
+    ``to`` and ``node`` are OPTIONAL envelope attributes (omitted when None).
+    ``to`` is the recipient's short id -- set for a directed ``fno mail send`` so
+    the recipient can tell a directed turn from a broadcast. ``node`` (the sender's
+    backlog node) stays None: dispatch has no truthful source for it today."""
+    from fno.mail.envelope import harness_for_provider
+
+    from_ = from_session.split("-")[0] if from_session else from_name
+    return _MailCtx(
+        from_=from_,
+        harness=harness_for_provider(provider_from),
+        model="unknown",
+        to=to or None,
+    )
+
+
+def _mail_inject_claude(recipient: str, text: str) -> bool:
+    """Inject ``text`` into a live claude session over the daemon ``control.sock``
+    via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
+
+    Returns True only when the verb confirms the turn landed in the recipient
+    transcript; any miss (binary absent, recipient not on the roster, not
+    confirmed within the poll budget) returns False so the caller writes the
+    durable fallback."""
+    import json
+
+    from fno.agents import rust_runtime
+
+    binary = rust_runtime.resolve_installed_binary()
+    if binary is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [str(binary), "mail-inject", "--session", recipient],
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=_MAIL_INJECT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    try:
+        return bool(json.loads(proc.stdout.strip()).get("delivered"))
+    except (ValueError, AttributeError):
+        return False
+
+
 def _deliver_live(
     entry: "AgentEntry",
     body: str,
     from_name: str,
+    mail: "Optional[_MailCtx]" = None,
 ) -> bool:
-    """Attempt a single fire-and-forget live delivery.
+    """Attempt a single fire-and-forget live delivery (live-inject-first; the
+    caller writes the durable fallback when this returns False -- node x-1f23).
 
-    Returns True on success, False when live delivery is not possible or
-    fails (socket error, gate demotion, daemon unreachable, etc.).
+    Returns True on success, False when live delivery is not possible or fails
+    (not live-reachable, socket error, daemon unreachable, etc.).
 
-    For claude peers the transport-selection mirrors _followup_path:
-    MCP-channel probe first (0.25 s timeout), demote to socket on probe
-    failure, fire-and-forget (no reply wait).
+    When ``mail`` is set the body is wrapped in the paired ``<fno_mail>`` envelope
+    so the recipient sees agent-to-agent structure and the delivered turn is
+    self-recording (``grep <fno_mail>`` reconstructs a2a history). Every live
+    transport below carries the same wrapped turn.
 
-    For codex/gemini peers (Task 2.3): calls the daemon ``agent.deliver``
-    RPC (4-byte-LE-u32 framing). Daemon-down or any failure demotes to
-    durable with a stderr notice; the durable envelope the caller already
-    wrote is the recovery record.
+    For claude peers: the proven ``control.sock`` ``op:'reply'`` inject via the
+    ``fno-agents mail-inject`` verb (G1, x-26df) is the live primitive for adopted
+    ``claude --bg`` sessions, replacing the dead per-worker messaging socket; the
+    switchboard / MCP fast lanes still apply first for stream-json / MCP-routed
+    peers.
+
+    For codex/gemini peers: the daemon ``agent.deliver`` RPC, now carrying the
+    ``<fno_mail>`` envelope. Daemon-down or any failure demotes to durable with a
+    stderr notice; the durable envelope the caller writes is the recovery record.
     """
+    wrapped = body
+    if mail is not None:
+        from fno.mail.envelope import wrap_fno_mail
+
+        wrapped = wrap_fno_mail(
+            body,
+            from_=mail.from_,
+            harness=mail.harness,
+            model=mail.model,
+            node=mail.node,
+            to=mail.to,
+        )
+
     if entry.provider != "claude":
-        # Task 2.3: route codex/gemini through the daemon deliver RPC.
+        # Route codex/gemini through the daemon deliver RPC (now <fno_mail>-wrapped).
         result = _daemon_rpc(
             "agent.deliver",
             {
                 "name": entry.name,
-                "body": body,
+                "body": wrapped,
                 "from_name": from_name,
             },
         )
@@ -3851,7 +3993,26 @@ def _deliver_live(
     # config.agents.a2a.auto is on) is in _switchboard_exchange. It returns True
     # when delivered via the switchboard, or None to demote to the MCP/socket
     # path below (B not a live stream thread, or daemon unreachable).
-    if _switchboard_exchange(entry.name, from_name, body):
+    # node x-1f23: provenance for the autonomous relay continuations. The sender's
+    # ctx wraps A's turns; the recipient's ctx (from/to swapped) wraps B's. None
+    # when there is no mail envelope, leaving the relay raw (and the chat path,
+    # which never reaches _deliver_live, unaffected).
+    relay_ctxs = None
+    if mail is not None:
+        from fno.mail.envelope import harness_for_provider
+
+        relay_ctxs = {from_name: mail}
+        # Only wrap the recipient's relay turns when it has a resolvable short id;
+        # otherwise leave that side raw rather than emit <fno_mail from=""> (codex
+        # peer P2). mail.to is the recipient short resolved in dispatch_send.
+        if mail.to:
+            relay_ctxs[entry.name] = _MailCtx(
+                from_=mail.to,
+                harness=harness_for_provider(entry.provider),
+                model="unknown",
+                to=mail.from_,
+            )
+    if _switchboard_exchange(entry.name, from_name, wrapped, relay_ctxs):
         return True
 
     # MCP-channel probe (mirrors _followup_path :334-366).
@@ -3873,7 +4034,7 @@ def _deliver_live(
                 from fno.mcp import client as _mcp_client
 
                 envelope = build_channel_notification(
-                    content=body,
+                    content=wrapped,
                     meta={
                         "source": "fno",
                         "from_name": from_name,
@@ -3885,26 +4046,14 @@ def _deliver_live(
             except Exception:
                 pass  # fall through to socket path
 
-    # Socket path (fire-and-forget).
-    # Use claude_mod.locate_session so tests can monkeypatch it at the
-    # module attribute level (the same pattern _followup_path uses).
-    short_id = entry.claude_short_id
-    if not short_id:
+    # control.sock op:'reply' inject via the fno-agents mail-inject verb (G1; node
+    # x-1f23). The proven live path for adopted `claude --bg` sessions, replacing
+    # the dead per-worker messaging socket. The roster accepts either the full
+    # session uuid or the 8-hex short id.
+    recipient = entry.claude_session_uuid or entry.claude_short_id
+    if not recipient:
         return False
-
-    locator = claude_mod.locate_session(short_id)
-    if locator is None:
-        return False
-
-    try:
-        claude_mod.send_to_session(
-            locator.messaging_socket_path,
-            body,
-            from_name,
-        )
-        return True
-    except Exception:
-        return False
+    return _mail_inject_claude(recipient, wrapped)
 
 
 def dispatch_send(
@@ -3917,9 +4066,12 @@ def dispatch_send(
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
-    Durable-first: the envelope is written to the inbox store BEFORE live
-    delivery is attempted.  The envelope survives every failure path after
-    the write (design doc "send state machine" / AC3-FR).
+    Live-inject-first (node x-1f23): live delivery is attempted FIRST and the
+    durable inbox envelope is written ONLY when the recipient is not
+    live-reachable or the live inject does not confirm. A confirmed live
+    (``hosted``) send is self-recording in the transcript and is NOT also queued;
+    the durable bus is the offline fallback tier. Both the live turn and the
+    durable body carry the same ``<fno_mail>`` envelope.
 
     Orchestration:
 
@@ -3929,10 +4081,12 @@ def dispatch_send(
     4. INSIDE the flock:
        a. Load registry; unknown name -> exit 16 (same message as ask).
        b. Provider mismatch -> exit 2.
-       c. Write envelope through the store API (kind=send, recipient=name).
+       c. Capture sender provenance + build the <fno_mail> ctx; generate msg_id.
        d. Attempt live delivery via _deliver_live (fire-and-forget).
-       e. Emit agent_send_started / agent_send_done (delivery field).
-       f. Bump last_message_at + status stamps via update_registry.
+       e. On non-hosted, write the durable fallback envelope (the <fno_mail>
+          body), kind=send, recipient=name.
+       f. Emit agent_send_started / agent_send_done (delivery field).
+       g. Bump last_message_at + status stamps via update_registry.
     5. Return DispatchSendResult(msg_id, delivery).
 
     Raises:
@@ -4015,19 +4169,14 @@ def dispatch_send(
                     exit_code=12,
                 ) from exc
 
-            # 4c. Durable-first: write envelope to inbox store NOW.
+            # 4c. Capture sender provenance for the <fno_mail> envelope and the
+            # durable fallback record (node x-1f23). Sender identity is
+            # best-effort: an unregistered caller leaves from_session None and
+            # exclusion falls back to the always-present from_ name. from_model is
+            # NOT set on the durable envelope (AgentEntry has no model field; we do
+            # not fabricate one -- LD11 forward-compat).
             from fno.inbox.store import generate_msg_id, write_new_thread
 
-            # Addressed-delivery enrichment (Group 1, ab-ba91b807): record the
-            # recipient's provider and the sender's provider/session/model so the
-            # read side can render attribution and exclude the sender on a
-            # project broadcast. Sender identity is best-effort: an unregistered
-            # caller leaves from_session None and exclusion falls back to the
-            # always-present from_ name.
-            # from_model is intentionally NOT set here: AgentEntry carries no
-            # model field today, so there is no truthful source. The Envelope
-            # field stays reserved (LD11 forward-compat) for a future producer
-            # that does know the model; we do not fabricate it.
             sender_entry = next((e for e in entries if e.name == from_name), None)
             from_session = provider_from = None
             if sender_entry is not None:
@@ -4040,34 +4189,66 @@ def dispatch_send(
                     or getattr(sender_entry, "short_id", None)
                     or getattr(sender_entry, "claude_short_id", None)
                 )
-
+            # A `fno mail send <name>` is always directed -> stamp the recipient's
+            # short id as the envelope `to` (node x-1f23: optional, set when known).
+            mail_ctx = _build_mail_ctx(
+                from_name,
+                from_session,
+                provider_from,
+                to=(existing.claude_short_id or existing.short_id or None),
+            )
             msg_id = generate_msg_id()
-            try:
-                write_new_thread(
-                    recipient=name,
-                    sender=from_name,
-                    kind="send",
-                    body=message,
-                    msg_id=msg_id,
-                    to_kind="name",
-                    provider_to=existing.provider,
-                    provider_from=provider_from,
-                    from_session=from_session,
-                )
-            except (OSError, ValueError, RuntimeError) as exc:
-                events.emit(
-                    "agent_send_failed",
-                    stage="envelope-write",
-                    name=name,
-                )
-                raise DispatchAskError(
-                    f"durable envelope write failed: {exc}",
-                    exit_code=12,
-                ) from exc
 
-            # 4d/4e. Build dispatch context then emit started, attempt live
-            # delivery, emit done.  The context stash ensures started/done
-            # share the same request_id + caller attribution (mirrors the
+            def _write_durable() -> None:
+                """Write the durable FALLBACK envelope: the pending-queue for an
+                offline recipient, or the recovery record when a live inject did
+                not land. The jsonl bus is the fallback tier now, not a peer to the
+                live path (node x-1f23). Drain-on-wake semantics are unchanged.
+
+                The body is stored <fno_mail>-wrapped, the SAME envelope the live
+                path injects, so a delivered message carries one consistent wire
+                form everywhere and `grep <fno_mail>` reconstructs durable history
+                too (codex peer P1). The wrapped body round-trips through the
+                thread render unchanged (no unwrap, so mark_thread_read does not
+                strip it); summaries surface the open tag, which identifies the
+                message as a2a from its `from` sender."""
+                durable_body = message
+                if mail_ctx is not None:
+                    from fno.mail.envelope import wrap_fno_mail
+
+                    durable_body = wrap_fno_mail(
+                        message,
+                        from_=mail_ctx.from_,
+                        harness=mail_ctx.harness,
+                        model=mail_ctx.model,
+                        node=mail_ctx.node,
+                        to=mail_ctx.to,
+                    )
+                try:
+                    write_new_thread(
+                        recipient=name,
+                        sender=from_name,
+                        kind="send",
+                        body=durable_body,
+                        msg_id=msg_id,
+                        to_kind="name",
+                        provider_to=existing.provider,
+                        provider_from=provider_from,
+                        from_session=from_session,
+                    )
+                except (OSError, ValueError, RuntimeError) as exc:
+                    events.emit(
+                        "agent_send_failed",
+                        stage="envelope-write",
+                        name=name,
+                    )
+                    raise DispatchAskError(
+                        f"durable envelope write failed: {exc}",
+                        exit_code=12,
+                    ) from exc
+
+            # 4d/4e. Live-inject-first, durable fallback. The context stash ensures
+            # started/done share one request_id + caller attribution (mirrors the
             # dispatch_ask pattern introduced in PR #457).
             ctx_for_dispatch = build_context(
                 to_name=name,
@@ -4088,12 +4269,22 @@ def dispatch_send(
                 delivery = "durable"
                 demotion_notice: Optional[str] = None
 
-                if existing.status == "live":
-                    live_ok = _deliver_live(existing, message, from_name)
-                    if live_ok:
-                        delivery = "hosted"
-                    else:
-                        # Demotion: live peer was not reachable or inject failed.
+                if existing.status == "live" and _deliver_live(
+                    existing, message, from_name, mail_ctx
+                ):
+                    delivery = "hosted"
+                else:
+                    # Durable fallback: an offline recipient, or a live inject that
+                    # did not confirm. Persist ONLY here so a CONFIRMED live turn is
+                    # not also queued. At-most-once on the common path; a busy
+                    # recipient whose injected turn is queued past the verb's confirm
+                    # budget can still receive the durable copy too (bounded
+                    # double-delivery -- see mail_inject.rs). Live-first also widens
+                    # the crash-loss window vs the old durable-first; both are
+                    # accepted tradeoffs of the live-inject-first design (node
+                    # x-1f23). A live peer that fell through gets a demotion notice.
+                    _write_durable()
+                    if existing.status == "live":
                         demotion_notice = (
                             f"live delivery failed for {name!r}; "
                             f"message queued durable ({msg_id})"

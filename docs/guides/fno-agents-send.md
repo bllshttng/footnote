@@ -27,7 +27,7 @@ or
 msg-3a7f1c2e queued (durable)
 ```
 
-`delivered (hosted)` means live PTY injection (codex/gemini) or socket delivery (claude) succeeded. `queued (durable)` means the message is in the recipient's inbox store, waiting for their next drain. Both are exit 0. The `msg-<8hex>` id is stable and can be used to correlate a later reply in the bus log.
+`delivered (hosted)` means live PTY injection (codex/gemini) or the `control.sock` `op:'reply'` inject (claude, via the `fno-agents mail-inject` verb) succeeded. `queued (durable)` means the message is in the recipient's inbox store, waiting for their next drain. Both are exit 0. The `msg-<8hex>` id is stable, but it only exists in the bus log for a `queued (durable)` send: a `delivered (hosted)` send writes no bus entry and the live `<fno_mail>` envelope does not carry that id, so bus-log reply correlation by `msg-<id>` applies to the durable path only. For a delivered live turn, the history is the recipient transcript (`grep <fno_mail>`).
 
 ## Flags
 
@@ -43,11 +43,11 @@ msg-3a7f1c2e queued (durable)
 fno mail send backend-worker "review my PR diff" --from-name "orchestrator-alpha"
 ```
 
-The recipient sees the body inside a `<cross-session-message from-name="orchestrator-alpha">` container. The framing marks the sender as a peer, not the operator, so the receiving model responds in a directed style rather than treating the injection as a user interrupt.
+The recipient sees the body inside the `<fno_mail from="..." harness="..." model="...">` envelope. The framing marks the sender as a peer, not the operator, so the receiving model responds in a directed style rather than treating the injection as a user interrupt. See [docs/architecture/mail-live-inject.md](../architecture/mail-live-inject.md) for the envelope and delivery model.
 
-## Durable-first semantics
+## Live-inject-first semantics
 
-The envelope is written to the recipient's inbox store BEFORE any live delivery attempt. If live delivery fails for any reason (daemon unreachable, injection gate not passed, socket error), the durable copy is already on disk. Nothing is lost. The stdout line reflects the actual delivery outcome - `queued (durable)` is a success state, not an error.
+As of node x-1f23 the order is reversed from the old durable-first design: `send` attempts LIVE delivery first and writes the durable bus ONLY when the recipient is not live-reachable or the live inject does not confirm. A confirmed live (`hosted`) delivery is self-recording in the transcripts and is NOT also queued, so the durable bus is the fallback tier (the offline pending-queue), not a peer to the live path. If live delivery fails for any reason (daemon unreachable, injection gate not passed, not confirmed), the durable copy is written then. The stdout line reflects the actual outcome; `queued (durable)` is a success state, not an error. A busy recipient whose injected turn is queued past the confirm budget can receive both the live inject and the durable copy (a bounded duplicate; see the architecture doc).
 
 When live delivery demotes to durable, a notice goes to stderr:
 

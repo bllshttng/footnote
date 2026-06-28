@@ -23,6 +23,19 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_mail_inject(monkeypatch):
+    """Default the claude live-inject seam (node x-1f23) to 'not delivered' so no
+    test shells out to a real fno-agents binary / daemon. The claude live path now
+    runs `fno-agents mail-inject` over the daemon control.sock; tests that assert a
+    HOSTED delivery override this with their own deterministic stub."""
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(
+        dispatch_mod, "_mail_inject_claude", lambda recipient, text: False
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helper: write a registry entry for "red" (live claude peer)
 # ---------------------------------------------------------------------------
@@ -100,37 +113,27 @@ def test_cmd_send_registered() -> None:
 def test_dispatch_send_happy_path_live_claude(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC3-HP: live claude peer + mock socket send -> 'delivered (hosted)', exit 0,
-    envelope written to inbox store with kind=send."""
+    """AC3-HP: live claude peer + live-inject success -> 'delivered (hosted)',
+    exit 0. The turn is <fno_mail>-wrapped and injected over the control.sock; a
+    hosted delivery is self-recording (transcript), so it is NOT also queued
+    durable -- the bus is the fallback tier now (node x-1f23)."""
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    # Locate the claude session socket so send_to_session doesn't need a real socket
+    from fno.agents import dispatch as dispatch_mod
     from fno.agents.providers import claude as claude_mod
 
-    # Mock the socket send to succeed (no-op)
-    send_calls: list[dict] = []
-
-    def _mock_send_to_session(sock_path: str, content: str, from_name: str) -> None:
-        send_calls.append({"sock_path": sock_path, "content": content, "from_name": from_name})
-
-    monkeypatch.setattr(claude_mod, "send_to_session", _mock_send_to_session)
-
-    # Mock locate_session to return a SessionLocator
-    from fno.agents.providers._claude_session_registry import SessionLocator
-
-    def _mock_locate(short_id: str, home: str | None = None):
-        return SessionLocator(
-            pid=12345,
-            short_id=short_id,
-            messaging_socket_path=_sock_path(tmp_path),
-            jobs_dir=tmp_path / "jobs",
-        )
-
-    monkeypatch.setattr(claude_mod, "locate_session", _mock_locate)
-
-    # MCP probe: return False so we go socket path
+    # MCP probe: return False so we reach the control.sock inject path.
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
+
+    # The live-inject seam succeeds; capture what it was asked to inject.
+    inject_calls: list[dict] = []
+
+    def _ok_inject(recipient: str, text: str) -> bool:
+        inject_calls.append({"recipient": recipient, "text": text})
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _ok_inject)
 
     from fno.agents.dispatch import dispatch_send
 
@@ -148,17 +151,18 @@ def test_dispatch_send_happy_path_live_claude(
     assert result.msg_id.startswith("msg-"), f"Bad msg_id: {result.msg_id!r}"
     assert result.delivery == "hosted", f"Expected hosted, got {result.delivery!r}"
 
-    # Exactly one live delivery attempt
-    assert len(send_calls) == 1
+    # Exactly one live delivery attempt, carrying the paired <fno_mail> envelope.
+    assert len(inject_calls) == 1
+    injected = inject_calls[0]["text"]
+    assert injected.startswith("<fno_mail "), f"not wrapped: {injected[:40]!r}"
+    assert injected.rstrip().endswith("</fno_mail>")
+    assert "FYI built the thing" in injected
+    # Directed send -> the recipient's short id is stamped as the envelope `to`.
+    assert 'to="abcd1234"' in injected, f"missing directed `to`: {injected[:80]!r}"
 
-    # Envelope must be in the store (inbox for "red")
+    # Bus demotion: a hosted delivery is NOT also written to the durable store.
     from fno.inbox.store import read_all_threads
-    threads = read_all_threads("red")
-    assert len(threads) == 1, f"Expected 1 thread, got {len(threads)}"
-    t = threads[0]
-    assert t.kind == "send"
-    assert t.messages[0].msg_id == result.msg_id
-    assert "FYI built the thing" in t.messages[0].body
+    assert read_all_threads("red") == [], "hosted delivery must not queue durable"
 
 
 def test_cmd_send_happy_path_stdout_format(
@@ -168,19 +172,12 @@ def test_cmd_send_happy_path_stdout_format(
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
+    from fno.agents import dispatch as dispatch_mod
     from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
 
-    monkeypatch.setattr(claude_mod, "send_to_session", lambda *a, **kw: None)
-    monkeypatch.setattr(
-        claude_mod, "locate_session",
-        lambda short_id, home=None: SessionLocator(
-            pid=12345, short_id=short_id,
-            messaging_socket_path=_sock_path(tmp_path),
-            jobs_dir=tmp_path / "jobs",
-        ),
-    )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
+    # Live-inject succeeds -> hosted.
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda recipient, text: True)
 
     from fno.mail.cli import mail_app
 
@@ -417,7 +414,12 @@ def test_dispatch_send_200kb_body_round_trip(tmp_path: Path, monkeypatch) -> Non
     threads = read_all_threads("red")
     assert len(threads) == 1
     stored_body = threads[0].messages[0].body
-    assert stored_body == body, f"Round-trip mismatch: got {len(stored_body)} chars"
+    # The durable body is <fno_mail>-wrapped now (node x-1f23); the 200KB message
+    # round-trips intact inside the paired envelope.
+    assert stored_body.startswith("<fno_mail "), stored_body[:40]
+    assert stored_body.rstrip().endswith("</fno_mail>")
+    inner = stored_body.split("\n", 1)[1].rsplit("\n", 1)[0]
+    assert inner == body, f"Round-trip mismatch: got {len(inner)} chars"
 
 
 def test_dispatch_send_rejects_over_1mib_body(tmp_path: Path, monkeypatch) -> None:
@@ -451,31 +453,24 @@ def test_dispatch_send_rejects_over_1mib_body(tmp_path: Path, monkeypatch) -> No
 # ---------------------------------------------------------------------------
 
 def test_dispatch_send_demotion_preserves_envelope(tmp_path: Path, monkeypatch) -> None:
-    """AC3-FR: peer resolves live but socket send raises -> envelope durable, no retry."""
+    """AC3-FR: peer resolves live but the inject does not land -> envelope durable,
+    no retry. The live inject failing partway must never lose the message; the
+    durable fallback is the recovery record (node x-1f23)."""
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
+    from fno.agents import dispatch as dispatch_mod
     from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import ProviderSocketError
-    from fno.agents.providers._claude_session_registry import SessionLocator
 
-    monkeypatch.setattr(
-        claude_mod, "locate_session",
-        lambda short_id, home=None: SessionLocator(
-            pid=12345, short_id=short_id,
-            messaging_socket_path=_sock_path(tmp_path),
-            jobs_dir=tmp_path / "jobs",
-        ),
-    )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
 
-    send_attempt_count = [0]
+    inject_attempt_count = [0]
 
-    def _fail_send(sock_path: str, content: str, from_name: str) -> None:
-        send_attempt_count[0] += 1
-        raise ProviderSocketError("peer died")
+    def _fail_inject(recipient: str, text: str) -> bool:
+        inject_attempt_count[0] += 1
+        return False
 
-    monkeypatch.setattr(claude_mod, "send_to_session", _fail_send)
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _fail_inject)
 
     from fno.agents.dispatch import dispatch_send
     from fno.inbox.store import read_all_threads
@@ -494,11 +489,11 @@ def test_dispatch_send_demotion_preserves_envelope(tmp_path: Path, monkeypatch) 
     assert result.msg_id.startswith("msg-")
 
     # Exactly ONE attempt, no retry storm
-    assert send_attempt_count[0] == 1, f"Expected 1 send attempt, got {send_attempt_count[0]}"
+    assert inject_attempt_count[0] == 1, f"Expected 1 inject attempt, got {inject_attempt_count[0]}"
 
-    # Envelope is in the store (survived injection failure)
+    # Envelope is in the store (survived the failed inject)
     threads = read_all_threads("red")
-    assert len(threads) == 1, f"Envelope must survive socket failure; got {len(threads)} threads"
+    assert len(threads) == 1, f"Envelope must survive inject failure; got {len(threads)} threads"
     assert "important message" in threads[0].messages[0].body
 
 

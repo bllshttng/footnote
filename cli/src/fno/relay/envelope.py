@@ -11,17 +11,20 @@ bus fields:
 - ``from``/``to`` -> bus ``from_``/``to`` (addresses; ``from_session`` is the id).
 - ``hop_count`` + ``ttl`` -> bus ``meta`` (cycle termination; relay-private).
 - ``provenance``  -> derived from ``from_session`` / ``provider_from`` /
-  ``from_model`` and serialized to the ``<fno ...>`` wire tag below.
+  ``from_model`` and serialized to the ``<fno_mail ...>`` wire tag below.
 
-Provenance wire format (design "Provenance wire format", decided 2026-06-26)::
+Provenance wire format (node x-1f23: the relay is the SINGLE-LINE transport
+variant of the unified ``<fno_mail>`` a2a envelope, :mod:`fno.mail.envelope`)::
 
-    <fno from="<session-id>" provider="<provider>" model="<model>"> <message>
+    <fno_mail from="<short-sid>" harness="<harness>" model="<model>"> <message>
 
 A single-line attribute tag prefixing the (single-lined) body, NO closing tag:
-the PTY Enter submits on newline so the turn boundary is the delimiter. Attributes
-(not dash-delimited) because session-ids are dash-filled UUIDs. The sender
+the PTY Enter submits on newline so the turn boundary is the delimiter, so this
+hop cannot carry the paired multiline ``<fno_mail>...</fno_mail>`` form the
+control.sock inject uses. It shares the tag NAME and attribute vocabulary
+(``harness`` maps the provider via :func:`fno.mail.envelope.harness_for_provider`)
+so ``grep <fno_mail>`` across transcripts reconstructs relay hops too. The sender
 self-stamps -- the framed line is self-describing with no registry dependency.
-This is the parse-safe successor to G1's prose ``_frame``.
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ import re
 from typing import Optional
 
 from fno.bus.log import Envelope
+from fno.mail.envelope import harness_for_provider
 
 # Relay-private meta keys on the bus envelope.
 META_HOP = "hop_count"
@@ -43,24 +47,25 @@ RELAY_KIND = "relay"
 # Parse the wire tag. ``model`` is optional (a peer may not always know it).
 # DOTALL is deliberately NOT set: the tag and body are one physical line.
 _TAG_RE = re.compile(
-    r'^<fno\s+from="(?P<from_session>[^"]*)"\s+provider="(?P<provider>[^"]*)"'
+    r'^<fno_mail\s+from="(?P<from_session>[^"]*)"\s+harness="(?P<harness>[^"]*)"'
     r'(?:\s+model="(?P<model>[^"]*)")?\s*>\s?(?P<body>.*)$'
 )
 
 
-def frame(from_session: str, provider: str, model: Optional[str], body: str) -> str:
-    """Serialize one peer message to the ``<fno ...>`` wire line.
+def frame(from_session: str, harness: str, model: Optional[str], body: str) -> str:
+    """Serialize one peer message to the single-line ``<fno_mail ...>`` wire line.
 
     The body is collapsed to a single line (Enter submits the TUI turn, so an
-    embedded newline would submit early -- same constraint as G1's ``_frame``).
+    embedded newline would submit early -- the constraint that keeps this hop on
+    the single-line, no-close variant of the ``<fno_mail>`` envelope).
     """
     one_line = " ".join(body.split())
     model_attr = f' model="{model}"' if model else ""
-    return f'<fno from="{from_session}" provider="{provider}"{model_attr}> {one_line}'
+    return f'<fno_mail from="{from_session}" harness="{harness}"{model_attr}> {one_line}'
 
 
 def parse(line: str) -> Optional[dict]:
-    """Parse a wire line into ``{from_session, provider, model, body}``.
+    """Parse a wire line into ``{from_session, harness, model, body}``.
 
     Returns ``None`` if the line is not framed -- the caller uses that to refuse
     an unframed cross-provider injection (AC5-FR)."""
@@ -69,14 +74,14 @@ def parse(line: str) -> Optional[dict]:
         return None
     return {
         "from_session": m.group("from_session"),
-        "provider": m.group("provider"),
+        "harness": m.group("harness"),
         "model": m.group("model"),
         "body": m.group("body"),
     }
 
 
 def is_framed(line: str) -> bool:
-    """True if ``line`` carries a valid ``<fno ...>`` provenance tag."""
+    """True if ``line`` carries a valid ``<fno_mail ...>`` provenance tag."""
     return parse(line) is not None
 
 
@@ -88,7 +93,12 @@ def frame_envelope(env: Envelope) -> Optional[str]:
     the daemon refuses to inject it to a cross-provider recipient (AC5-FR)."""
     if not env.from_session or not env.provider_from:
         return None
-    return frame(env.from_session, env.provider_from, env.from_model, env.body)
+    return frame(
+        env.from_session,
+        harness_for_provider(env.provider_from),
+        env.from_model,
+        env.body,
+    )
 
 
 def hop_count(env: Envelope) -> int:

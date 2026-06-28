@@ -138,7 +138,11 @@ def test_dispatch_send_writes_addressed_name_envelope(env, tmp_path):
     assert env_.from_ == "alice"
     # sender session recorded (best-effort) so a project-broadcast read can exclude it
     assert env_.from_session == "id-alice"
-    assert env_.body == "rebase first"
+    # The durable bus body is <fno_mail>-wrapped now (node x-1f23): the same
+    # envelope the live path injects, so grep <fno_mail> finds durable mail too.
+    assert env_.body.startswith("<fno_mail "), env_.body[:40]
+    assert env_.body.rstrip().endswith("</fno_mail>")
+    assert "rebase first" in env_.body
 
 
 def test_dispatch_send_to_project_sets_to_kind_project(env, tmp_path):

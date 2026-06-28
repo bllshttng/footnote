@@ -67,6 +67,7 @@ pub mod loop_megawalk;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
+pub mod mail_inject;
 pub mod manifest;
 pub mod nudge;
 pub mod osc;

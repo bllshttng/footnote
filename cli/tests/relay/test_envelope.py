@@ -7,14 +7,15 @@ from fno.relay import envelope as env
 # ---- wire format: frame / parse round-trip ---------------------------------
 
 def test_frame_produces_single_line_attribute_tag():
-    line = env.frame("sid-abc", "claude", "opus", "hello there")
-    assert line == '<fno from="sid-abc" provider="claude" model="opus"> hello there'
+    # node x-1f23: the single-line <fno_mail> transport variant (harness attr).
+    line = env.frame("sid-abc", "claude-code", "opus", "hello there")
+    assert line == '<fno_mail from="sid-abc" harness="claude-code" model="opus"> hello there'
     assert "\n" not in line  # one physical line (Enter submits the TUI turn)
 
 
 def test_frame_collapses_multiline_body():
-    line = env.frame("A", "claude", None, "line one\nline two\t  three")
-    assert line == '<fno from="A" provider="claude"> line one line two three'
+    line = env.frame("A", "claude-code", None, "line one\nline two\t  three")
+    assert line == '<fno_mail from="A" harness="claude-code"> line one line two three'
 
 
 def test_parse_round_trips_frame():
@@ -22,14 +23,14 @@ def test_parse_round_trips_frame():
     got = env.parse(line)
     assert got == {
         "from_session": "uuid-with-dashes-1234",
-        "provider": "codex",
+        "harness": "codex",
         "model": "gpt",
         "body": "the body",
     }
 
 
 def test_parse_model_optional():
-    got = env.parse('<fno from="A" provider="claude"> hi')
+    got = env.parse('<fno_mail from="A" harness="claude-code"> hi')
     assert got is not None and got["model"] is None and got["body"] == "hi"
 
 
@@ -37,6 +38,7 @@ def test_parse_unframed_is_none():
     assert env.parse("just a raw human message") is None
     assert env.parse("") is None
     assert not env.is_framed("RELAY from peer alice: hi")  # G1's prose form is NOT the tag
+    assert not env.is_framed('<fno from="A" provider="claude"> hi')  # old tag is NOT the new one
 
 
 # ---- hop_count / ttl over the bus meta -------------------------------------
@@ -62,7 +64,8 @@ def test_meta_junk_degrades_to_default():
 def test_frame_envelope_uses_provenance_fields():
     e = env.make_relay_envelope(from_session="A", to="B", body="ping",
                                 provider_from="claude", from_model="opus")
-    assert env.frame_envelope(e) == '<fno from="A" provider="claude" model="opus"> ping'
+    # provider_from "claude" maps to the harness vocabulary "claude-code".
+    assert env.frame_envelope(e) == '<fno_mail from="A" harness="claude-code" model="opus"> ping'
 
 
 def test_frame_envelope_none_when_provenance_missing():
