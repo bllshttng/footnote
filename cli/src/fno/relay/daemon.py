@@ -294,28 +294,37 @@ def daemon_deliver(
     settle_ms: int = 1000,
     timeout: float = 180.0,
 ) -> Deliver:
-    """Build a ``deliver`` that routes a hop through the DAEMON's interactive-claude
-    worker (E4.3), replacing the retired footnote-owned PTY peer.
+    """Build a ``deliver`` that routes a hop through a live claude session footnote
+    holds the ``session:<uuid>`` claim on, replacing the retired footnote-owned PTY
+    peer. Two lanes share one claim guard:
 
-    Single-writer claim guard (Locked Decision #1 / AC-E4-3): before injecting,
-    the relay ACQUIRES ``session:<uuid>``. Finding it held by another (the daemon,
-    which acquired + re-anchored it at spawn -- E1) is the signal that a live
-    handle exists to route THROUGH: the relay calls
-    :func:`fno.relay.roundtrip.deliver_session` (the daemon ``worker.submit`` RPC +
-    transcript capture). A SUCCESSFUL acquire means the claim is FREE -- no daemon
-    host owns this session -- so there is no handle; the relay RELEASES the probe
-    claim and refuses, rather than spawning a second ``--session-id X`` writer
-    (two processes pinned to one session id corrupt the transcript). The relay
-    therefore never ends up holding a ``session:`` claim itself.
+    - **interactive** (E4.3): a footnote-spawned PTY worker -> the daemon
+      ``worker.submit`` RPC (:func:`fno.relay.roundtrip.deliver_session`).
+    - **attached** (G3, node x-e027): an adopted ``claude --bg`` session with no
+      worker socket -> the ``control.sock`` op:'reply' inject
+      (:func:`fno.relay.roundtrip.deliver_attached`, the ``mail-inject`` verb).
+
+    Single-writer claim guard (Locked Decision #1 / AC-E4-3): before injecting, the
+    relay ACQUIRES ``session:<uuid>``. Finding it held by the lane's holder
+    (``pty:<short>`` -- the same tag for both lanes: the daemon writes it at E1
+    spawn, the adopt path at G1) is the signal that a live handle exists to route
+    THROUGH. A SUCCESSFUL acquire means the claim is FREE -- no host owns the
+    session -- so there is no handle; the relay RELEASES the probe claim and refuses
+    rather than spawning a second ``--session-id X`` writer (two processes pinned to
+    one session id corrupt the transcript). The relay never ends up holding a
+    ``session:`` claim itself. Both lanes flowing through this one claim is the
+    single-writer serialize: grid-drive and relay-inject contend on it, footnote
+    serializes (Claude's own remote bridge is an out-of-band writer, advisory).
 
     A vehicle exception is surfaced by :func:`route_message` as
     ``relay_deliver_failed`` (it never crashes the daemon). Not unit-tested end to
-    end (the live RPC substrate is the ``FNO_LIVE_RELAY`` gate, AC-E4-5); the claim
+    end (the live substrate is the ``FNO_LIVE_RELAY`` gate, AC-E4-5); the claim
     guard and the resolution/capture primitives are unit-tested.
     """
     from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim  # noqa: PLC0415
     from fno.relay.roundtrip import (  # noqa: PLC0415
-        deliver_session, interactive_claim_holder, resolve_worker_short_id,
+        deliver_attached, deliver_session, interactive_claim_holder,
+        resolve_attached_short_id, resolve_worker_short_id,
     )
 
     holder = holder or f"relay-daemon:{_pid()}"
@@ -324,31 +333,48 @@ def daemon_deliver(
         sid = res.session_id
         if not sid:
             raise RuntimeError("relay_deliver_failed: resolution carries no session_id")
-        # Routing needs BOTH a live daemon worker row AND the session: claim held by
-        # THAT worker's interactive lane. Resolve the worker first so the lane check
-        # below can bind the claim holder to it.
+        # Gather BOTH candidate lanes for this session, each with the claim holder
+        # it would be held under (``pty:<short>``) and its delivery vehicle. A
+        # session normally resolves to exactly one lane, but a stale live-looking
+        # interactive row can coexist with the valid adopted row -- so we dispatch by
+        # which candidate actually HOLDS the claim, not by resolution precedence
+        # (codex peer P2: precedence would refuse when the wrong lane wins the order).
+        candidates: list[tuple[str, Callable[[], Optional[str]]]] = []
         short_id = resolve_worker_short_id(sid)
-        if short_id is None:
-            raise RuntimeError(f"relay_deliver_failed: no live daemon worker for session {sid}")
+        if short_id is not None:
+            candidates.append((
+                interactive_claim_holder(short_id),
+                lambda: deliver_session(sid, framed, settle_ms=settle_ms, timeout=timeout, short_id=short_id),
+            ))
+        attached_short = resolve_attached_short_id(sid)
+        if attached_short is not None:
+            candidates.append((
+                interactive_claim_holder(attached_short),
+                lambda: deliver_attached(sid, framed, timeout=timeout),
+            ))
+        if not candidates:
+            raise RuntimeError(
+                f"relay_deliver_failed: no live daemon worker or adopted session for session {sid}"
+            )
+
+        # Probe the single-writer claim ONCE (AC-E4-3). Held by a candidate's lane
+        # holder -> route through THAT lane. A free claim (no host) or a foreign
+        # holder (a ``stream:`` lane / external writer matching no candidate) refuses
+        # rather than injecting into a session footnote does not PTY-host.
         key = f"session:{sid}"
         try:
             acquire_claim(key, holder, reason="relay routing probe")
         except ClaimHeldByOther as exc:
-            # Held by another -> route ONLY if that holder is the daemon's
-            # interactive PTY lane for THIS worker (``pty:<short_id>``, the
-            # lane-tagged holder the daemon writes for E1). A ``stream:<id>`` lane or
-            # any other external writer holding session:<uuid> is NOT a worker.submit
-            # target; refuse rather than inject into a session the daemon does not
-            # PTY-host (single-writer guard, AC-E4-3).
-            expected = interactive_claim_holder(short_id)
-            if exc.holder != expected:
-                raise RuntimeError(
-                    f"relay_deliver_failed: session:{sid} held by {exc.holder!r}, not the daemon "
-                    f"interactive lane ({expected!r}); refusing to route"
-                )
-            return deliver_session(sid, framed, settle_ms=settle_ms, timeout=timeout, short_id=short_id)
-        # Free (or stale-reclaimed): no daemon host -> no handle. Drop the probe
-        # claim so the relay is never a second holder, then refuse.
+            for expected, deliver_fn in candidates:
+                if exc.holder == expected:
+                    return deliver_fn()
+            holders = " or ".join(e for e, _ in candidates)
+            raise RuntimeError(
+                f"relay_deliver_failed: session:{sid} held by {exc.holder!r}, not the daemon "
+                f"interactive lane ({holders}); refusing to route"
+            )
+        # Free (or stale-reclaimed): no host -> no handle. Drop the probe claim so
+        # the relay is never a second holder, then refuse.
         release_claim(key, holder)
         raise RuntimeError(
             f"relay_deliver_failed: session:{sid} not daemon-held (no live handle to route through)"

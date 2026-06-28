@@ -296,13 +296,78 @@ def test_daemon_deliver_refuses_when_held_by_non_interactive_lane(tmp_path, monk
 
 
 def test_daemon_deliver_refuses_when_no_worker(tmp_path, monkeypatch):
-    """No live daemon worker row for the session -> nothing to route to."""
+    """No live worker row AND no adopted session for the session -> nothing to
+    route to (G3: the lane resolution tries both interactive and attached)."""
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     from fno.relay import roundtrip as rt
     monkeypatch.setattr(rt, "resolve_worker_short_id", lambda sid: None)
+    monkeypatch.setattr(rt, "resolve_attached_short_id", lambda sid: None)
     deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
     with pytest.raises(RuntimeError, match="no live daemon worker"):
         deliver(_resolution("sidNone"), "framed")
+
+
+def test_daemon_deliver_routes_attached_session_via_control_reply(tmp_path, monkeypatch):
+    """G3 (node x-e027): no interactive worker, but an ADOPTED claude --bg session
+    whose session:<uuid> claim is held by its adopt lane (``pty:<claude_short_id>``)
+    routes through the control.sock op:reply vehicle (deliver_attached), never a
+    second writer -- the same single-writer claim guard as the interactive lane."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    from fno.claims.core import acquire_claim
+    from fno.relay import roundtrip as rt
+    monkeypatch.setattr(rt, "resolve_worker_short_id", lambda sid: None)        # no interactive lane
+    monkeypatch.setattr(rt, "resolve_attached_short_id", lambda sid: "cc77dd88")  # adopted lane
+    acquire_claim("session:sidAtt", "pty:cc77dd88")  # the adopt path holds it (G1)
+
+    seen = {}
+    monkeypatch.setattr(rt, "deliver_session",
+                        lambda *a, **k: pytest.fail("attached session must not use worker.submit"))
+    monkeypatch.setattr(
+        rt, "deliver_attached",
+        lambda sid, framed, **kw: seen.update(sid=sid, framed=framed) or "adopted reply",
+    )
+    deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
+    assert deliver(_resolution("sidAtt"), "framed text") == "adopted reply"
+    assert seen == {"sid": "sidAtt", "framed": "framed text"}
+
+
+def test_daemon_deliver_refuses_attached_held_by_foreign_lane(tmp_path, monkeypatch):
+    """An adopted session whose claim is held by a non-``pty:`` writer is refused by
+    the same single-writer guard (G3 rides the shared claim check)."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    from fno.claims.core import acquire_claim
+    from fno.relay import roundtrip as rt
+    monkeypatch.setattr(rt, "resolve_worker_short_id", lambda sid: None)
+    monkeypatch.setattr(rt, "resolve_attached_short_id", lambda sid: "cc77dd88")
+    monkeypatch.setattr(rt, "deliver_attached",
+                        lambda *a, **k: pytest.fail("must not route to a foreign holder"))
+    acquire_claim("session:sidX", "stream:cc77dd88")  # not the pty adopt lane
+
+    deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
+    with pytest.raises(RuntimeError, match="not the daemon interactive lane"):
+        deliver(_resolution("sidX"), "framed")
+
+
+def test_daemon_deliver_routes_attached_when_stale_interactive_row_present(tmp_path, monkeypatch):
+    """codex peer P2: a stale live-looking interactive row coexists with the valid
+    adopted row, and the claim is held by the ATTACHED lane (pty:<attached_short>).
+    Resolution precedence would run the interactive branch first and refuse;
+    holder-matched dispatch routes through the lane that actually holds the claim."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    from fno.claims.core import acquire_claim
+    from fno.relay import roundtrip as rt
+    monkeypatch.setattr(rt, "resolve_worker_short_id", lambda sid: "staleI")     # stale interactive row
+    monkeypatch.setattr(rt, "resolve_attached_short_id", lambda sid: "cc77dd88")  # the valid adopted row
+    acquire_claim("session:sidDual", "pty:cc77dd88")  # held by the ATTACHED lane, not the stale one
+
+    seen = {}
+    monkeypatch.setattr(rt, "deliver_session",
+                        lambda *a, **k: pytest.fail("must not route to the stale interactive lane"))
+    monkeypatch.setattr(rt, "deliver_attached",
+                        lambda sid, framed, **kw: seen.update(sid=sid) or "adopted reply")
+    deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
+    assert deliver(_resolution("sidDual"), "framed") == "adopted reply"
+    assert seen == {"sid": "sidDual"}
 
 
 def test_daemon_deliver_refuses_when_session_free_and_holds_no_claim(tmp_path, monkeypatch):

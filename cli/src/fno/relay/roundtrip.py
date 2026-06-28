@@ -34,6 +34,7 @@ import os
 import re
 import socket
 import struct
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional
@@ -160,6 +161,12 @@ def _agents_home() -> Path:
 # path-traverse via _worker_sock. Mirrors the daemon's short_id shape.
 _SHORT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
+# An adopted session's claude_short_id is the control.sock wire `short`: always
+# exactly the 8-hex prefix of the session uuid. Validate it precisely (stricter
+# than the worker _SHORT_ID_RE, which also covers non-hex fno worker ids) so a
+# malformed/non-hex registry value is never handed to the wire boundary.
+_ATTACHED_SHORT_RE = re.compile(r"^[0-9a-fA-F]{8}$")
+
 
 def _worker_sock(short_id: str) -> Path:
     return _agents_home() / short_id / "worker.sock"
@@ -175,26 +182,24 @@ def interactive_claim_holder(short_id: str) -> str:
     return f"pty:{short_id}"
 
 
-def resolve_worker_short_id(session_id: str) -> Optional[str]:
-    """Resolve a claude session uuid to its live daemon worker's ``short_id`` via
-    the canonical agents registry (the D3 registry bridge: the relay reads
-    addressing from ``agents/registry.json``, not its own store).
-
-    Matches a LIVE interactive-claude row whose ``claude_session_uuid`` equals
-    ``session_id``. Reads the raw json (the parsed Python ``AgentEntry`` is fine
-    too, but the raw read mirrors agents.cli._resolve_stream_short_id and needs no
-    registry-version coercion). Returns None when absent/unreadable/not-live --
-    the caller surfaces that as a deliver failure rather than spawning."""
+def _live_claude_rows(session_id: str):
+    """Yield LIVE claude registry rows whose ``claude_session_uuid`` equals
+    ``session_id`` -- the shared filter both lane resolvers narrow further. Reads
+    the raw json from the canonical agents registry (the D3 registry bridge: the
+    relay reads addressing from ``agents/registry.json``, not its own store), so it
+    needs no registry-version coercion. A missing / unreadable / non-object /
+    non-list registry yields nothing (the caller surfaces a deliver failure rather
+    than spawning)."""
     reg = _agents_home() / "registry.json"
     try:
         data = json.loads(reg.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return
     if not isinstance(data, dict):
-        return None  # a corrupted/hand-edited registry that is valid JSON but not an object
+        return  # a corrupted/hand-edited registry that is valid JSON but not an object
     rows = data.get("agents") or data.get("entries") or []
     if not isinstance(rows, list):
-        return None
+        return
     for e in rows:
         if not isinstance(e, dict):
             continue
@@ -204,13 +209,42 @@ def resolve_worker_short_id(session_id: str) -> Optional[str]:
             continue  # a claude_session_uuid on a non-claude row is malformed
         if e.get("status") not in (None, "live"):
             continue  # a dead worker holds no live PTY (LD#3: liveness authoritative)
+        yield e
+
+
+def resolve_worker_short_id(session_id: str) -> Optional[str]:
+    """Resolve a claude session uuid to its live daemon worker's ``short_id`` (the
+    INTERACTIVE-claude lane: a footnote-spawned PTY worker that serves the
+    ``worker.submit`` RPC). Returns None when absent/unreadable/not-live -- the
+    caller surfaces that as a deliver failure rather than spawning."""
+    for e in _live_claude_rows(session_id):
         # Only the interactive PTY lane is a worker.submit target ("where present":
-        # an exec/other row that happens to match is not routable).
+        # an exec/attached/other row that happens to match is not routable here --
+        # an adopted attached session routes via resolve_attached_short_id instead).
         if e.get("host_mode") not in (None, "interactive"):
             continue
         short_id = e.get("short_id")
         if isinstance(short_id, str) and _SHORT_ID_RE.match(short_id):
             return short_id
+    return None
+
+
+def resolve_attached_short_id(session_id: str) -> Optional[str]:
+    """Resolve a claude session uuid to its ADOPTED (``host_mode == "attached"``)
+    row's 8-hex ``claude_short_id`` -- the G3 adopt lane (epic x-07c1, node x-e027).
+
+    An adopted ``claude --bg`` session is not a footnote PTY worker: its
+    ``short_id`` is empty and there is NO ``worker.sock``. Its only drive handle is
+    the daemon ``control.sock`` (driven via the ``mail-inject`` op:'reply' verb),
+    and the single-writer claim the adopt path writes is keyed
+    ``pty:<claude_short_id>`` (mirrors ``crate::claude_adopt::pty_claim_holder``).
+    Returns the path-safe ``claude_short_id``, or None when absent/not-live."""
+    for e in _live_claude_rows(session_id):
+        if e.get("host_mode") != "attached":
+            continue
+        short = e.get("claude_short_id")
+        if isinstance(short, str) and _ATTACHED_SHORT_RE.match(short):
+            return short
     return None
 
 
@@ -347,3 +381,126 @@ def deliver_session(
                 )
             retried = True
     raise TimeoutError(f"no reply from session {session_id} within {timeout:.0f}s")
+
+
+# ---------------------------------------------------------------------------
+# Adopted-session vehicle (G3): control.sock op:'reply' via the mail-inject verb.
+# ---------------------------------------------------------------------------
+
+# Subprocess budget for the mail-inject verb: it polls the recipient transcript
+# for ~10s (40 * 250ms) before reporting not-confirmed, so give it headroom.
+# Mirrors fno.agents.dispatch._MAIL_INJECT_TIMEOUT_S.
+_MAIL_INJECT_TIMEOUT_S = 20.0
+
+# Outcome of an attempted control.sock inject (codex peer P1). The distinction
+# that matters: an inject can be SENT but not confirmed (a busy recipient hasn't
+# recorded the turn within mail-inject's short growth-confirm budget -- yet the
+# turn still lands later, see mail_inject.rs). Treating that "uncertain" case as a
+# hard failure would drop a hop whose reply is still coming, so the caller polls
+# for the reply on both CONFIRMED and UNCONFIRMED and only hard-fails NOT_SENT.
+INJECT_CONFIRMED = "confirmed"      # mail-inject saw transcript growth: the turn landed.
+INJECT_UNCONFIRMED = "unconfirmed"  # op:'reply' sent, growth not confirmed in budget (or the
+                                    # subprocess timed out mid-confirm): the turn may still land.
+INJECT_NOT_SENT = "not_sent"        # the inject never reached the session (not-live, verb
+                                    # absent, attach/write failed): nothing was delivered.
+
+
+def submit_via_control_reply(session_id: str, framed: str) -> str:
+    """Inject one framed turn into an ADOPTED ``claude --bg`` session over the daemon
+    ``control.sock`` via the ``fno-agents mail-inject`` verb (the G1 op:'reply'
+    primitive, node x-26df; the one live-delivery vehicle, node x-1f23). NEVER raises.
+
+    Returns one of :data:`INJECT_CONFIRMED` / :data:`INJECT_UNCONFIRMED` /
+    :data:`INJECT_NOT_SENT`. mail-inject emits ``{"delivered": bool, "reason": str}``:
+    ``delivered`` -> CONFIRMED; ``reason == "not-confirmed"`` -> UNCONFIRMED (the
+    op:'reply' WAS written but growth wasn't seen in budget -- a busy recipient still
+    lands it); every other not-delivered reason (``not-live`` / ``no-transcript`` /
+    ``attach-failed`` / ``io-error`` / ``unsafe-text``) means the turn never reached
+    the session -> NOT_SENT. A subprocess timeout is UNCONFIRMED: the verb may have
+    written the op:'reply' before its growth-confirm poll was cut off.
+
+    This is the adopted-lane sibling of :func:`submit_via_worker`: an adopted session
+    has no ``worker.sock``, so the relay rides the SAME vehicle as ``fno mail send``
+    (mirrors :func:`fno.agents.dispatch._mail_inject_claude`) rather than a second
+    op:'reply' client."""
+    from fno.agents import rust_runtime
+
+    binary = rust_runtime.resolve_installed_binary()
+    if binary is None:
+        return INJECT_NOT_SENT
+    try:
+        proc = subprocess.run(
+            [str(binary), "mail-inject", "--session", session_id],
+            input=framed,
+            capture_output=True,
+            text=True,
+            timeout=_MAIL_INJECT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        # Cut off mid-run: the op:'reply' may already have been written before the
+        # growth-confirm poll. Uncertain, not a clean miss -- let the caller poll.
+        # (TimeoutExpired subclasses SubprocessError, so this clause must precede it.)
+        return INJECT_UNCONFIRMED
+    except (OSError, subprocess.SubprocessError):
+        return INJECT_NOT_SENT
+    try:
+        res = json.loads(proc.stdout.strip())
+    except ValueError:
+        return INJECT_NOT_SENT
+    if not isinstance(res, dict):  # malformed output (list / string / null) -> nothing sent
+        return INJECT_NOT_SENT
+    if res.get("delivered"):
+        return INJECT_CONFIRMED
+    # delivered == false: only "not-confirmed" means the op:'reply' was actually
+    # written (the recipient was just too busy to record it in budget); any other
+    # reason means the inject never reached the session.
+    if res.get("reason") == "not-confirmed":
+        return INJECT_UNCONFIRMED
+    return INJECT_NOT_SENT
+
+
+def deliver_attached(
+    session_id: str,
+    framed: str,
+    *,
+    timeout: float = DEFAULT_HOP_TIMEOUT_SEC,
+    config_dir: Optional[str] = None,
+) -> str:
+    """Deliver a hop to an ADOPTED ``claude --bg`` session (``host_mode=attached``)
+    via the ``control.sock`` op:'reply' inject and capture the peer's next sentinel
+    reply from the transcript -- the G3 relay re-point (epic x-07c1, node x-e027).
+
+    The adopted session has no fno worker socket; :func:`submit_via_control_reply`
+    (the ``mail-inject`` verb) is the only live handle. The hard failure is ONLY a
+    NOT_SENT inject (the turn never reached the session). On CONFIRMED *or*
+    UNCONFIRMED the turn may have landed -- mail-inject's growth-confirm budget is
+    short (~10s) and a busy recipient records the inject later -- so we poll for the
+    peer's reply over the FULL hop ``timeout``, the same as the interactive lane,
+    rather than discarding a hop whose reply is still in flight (codex peer P1). No
+    re-inject: a confirmed turn is already recorded, and re-firing on an unconfirmed
+    one risks a duplicate turn for little gain.
+
+    CONTRACT (sentinel seam): as with :func:`deliver_session`, the adopted peer must
+    have been spawned relay-targeted (``RELAY_SYSTEM_PROMPT`` appended) so its reply
+    is wrapped in the ``<<<RELAY>>>...<<<ENDRELAY>>>`` sentinels :func:`_transcript_replies`
+    reads. A generic ``claude --bg`` session carries no such prompt and is NOT
+    relay-readable -- that surfaces as the ``TimeoutError`` below (a missing sentinel
+    is indistinguishable from a slow turn at read time). Wiring that spawn-lane is the
+    LD#2 amendment, deferred to its own review (carveout for node x-e027).
+
+    Raises RuntimeError when the inject never reached the session (NOT_SENT) and
+    TimeoutError when the turn may have landed but no reply appeared within
+    ``timeout``."""
+    base_tx = len(_transcript_replies(session_id, config_dir))
+    if submit_via_control_reply(session_id, framed) == INJECT_NOT_SENT:
+        raise RuntimeError(
+            f"relay_deliver_failed: control.sock inject failed for adopted session {session_id}"
+        )
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(_POLL_INTERVAL_SEC)
+        tx = _transcript_replies(session_id, config_dir)
+        if len(tx) > base_tx:
+            return tx[-1]
+    raise TimeoutError(f"no reply from adopted session {session_id} within {timeout:.0f}s")

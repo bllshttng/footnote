@@ -194,6 +194,74 @@ def test_resolve_worker_rejects_unsafe_short_id(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Adopted (host_mode="attached") lane resolution (G3, node x-e027).
+# ---------------------------------------------------------------------------
+
+def test_resolve_attached_matches_live_adopted_session(tmp_path, monkeypatch):
+    # An adopted claude --bg row has an EMPTY short_id (no worker socket) and the
+    # 8-hex in claude_short_id; resolve to that, not the interactive short_id.
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    _write_registry(tmp_path, [
+        {"name": "cc-aa11bb22", "short_id": "", "provider": "claude",
+         "claude_session_uuid": "the-uuid", "claude_short_id": "aa11bb22",
+         "host_mode": "attached", "status": "live"},
+    ])
+    assert rt_mod.resolve_attached_short_id("the-uuid") == "aa11bb22"
+    # The same row is NOT an interactive worker.submit target (empty short_id, not
+    # host_mode=interactive) -> the worker resolver skips it.
+    assert rt_mod.resolve_worker_short_id("the-uuid") is None
+
+
+def test_resolve_attached_skips_interactive_and_exec(tmp_path, monkeypatch):
+    # Only host_mode=attached resolves on the adopt lane; interactive/exec do not.
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    _write_registry(tmp_path, [
+        {"name": "i", "short_id": "wkI", "provider": "claude", "claude_session_uuid": "u",
+         "claude_short_id": "wkI", "host_mode": "interactive"},
+        {"name": "e", "short_id": "wkE", "provider": "claude", "claude_session_uuid": "u",
+         "claude_short_id": "wkE", "host_mode": "exec"},
+        {"name": "a", "short_id": "", "provider": "claude", "claude_session_uuid": "u",
+         "claude_short_id": "cc77dd88", "host_mode": "attached"},
+    ])
+    assert rt_mod.resolve_attached_short_id("u") == "cc77dd88"
+
+
+def test_resolve_attached_skips_dead_and_rejects_unsafe(tmp_path, monkeypatch):
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    _write_registry(tmp_path, [
+        {"name": "dead", "claude_session_uuid": "d", "claude_short_id": "aa11bb22",
+         "host_mode": "attached", "status": "exited"},
+        {"name": "evil", "claude_session_uuid": "x", "claude_short_id": "../../etc",
+         "provider": "claude", "host_mode": "attached", "status": "live"},
+    ])
+    assert rt_mod.resolve_attached_short_id("d") is None  # dead
+    assert rt_mod.resolve_attached_short_id("x") is None  # path-unsafe short
+
+
+def test_resolve_attached_none_without_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))  # no registry.json
+    assert rt_mod.resolve_attached_short_id("u") is None
+
+
+def test_resolve_attached_rejects_non_hex_short(tmp_path, monkeypatch):
+    # codex peer P3: the wire `short` is always the 8-hex uuid prefix. A path-safe
+    # but non-hex / wrong-length claude_short_id is malformed and must not reach the
+    # control.sock boundary (stricter than the worker _SHORT_ID_RE).
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    _write_registry(tmp_path, [
+        {"name": "n8", "claude_session_uuid": "nonhex", "claude_short_id": "zzzzzzzz",
+         "provider": "claude", "host_mode": "attached", "status": "live"},
+        {"name": "short", "claude_session_uuid": "tooshort", "claude_short_id": "aa11bb",
+         "provider": "claude", "host_mode": "attached", "status": "live"},
+        {"name": "ok", "claude_session_uuid": "good", "claude_short_id": "aa11bb22",
+         "provider": "claude", "host_mode": "attached", "status": "live"},
+    ])
+    assert rt_mod.resolve_attached_short_id("nonhex") is None    # alnum but not hex
+    assert rt_mod.resolve_attached_short_id("tooshort") is None  # 6 hex, not 8
+    assert rt_mod.resolve_attached_short_id("good") == "aa11bb22"
+
+
+# ---------------------------------------------------------------------------
 # The worker.submit RPC client.
 # ---------------------------------------------------------------------------
 
@@ -332,6 +400,134 @@ def test_deliver_session_times_out_with_live_worker(monkeypatch):
     monkeypatch.setattr(rt_mod, "_transcript_replies", lambda sid, cd=None: [])  # never replies
     with pytest.raises(TimeoutError, match="no reply"):
         rt_mod.deliver_session("sid", "framed", timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Adopted-session vehicle: control.sock op:reply via the mail-inject verb (G3).
+# ---------------------------------------------------------------------------
+
+class _FakeProc:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def _fake_subprocess(run_fn):
+    """A stand-in `subprocess` module for rt_mod: a custom `run`, but the REAL
+    exception classes so rt_mod's `except subprocess.TimeoutExpired` /
+    `SubprocessError` clauses still match."""
+    import subprocess as real
+    return type("S", (), {
+        "run": staticmethod(run_fn),
+        "TimeoutExpired": real.TimeoutExpired,
+        "SubprocessError": real.SubprocessError,
+    })
+
+
+def _patch_binary(monkeypatch, path="/bin/fno-agents"):
+    from fno.agents import rust_runtime
+    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: path)
+
+
+def test_submit_via_control_reply_confirmed_on_delivered(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(argv=argv, input=kw.get("input"))
+        return _FakeProc('{"delivered": true, "reason": "delivered"}')
+
+    monkeypatch.setattr(rt_mod, "subprocess", _fake_subprocess(fake_run))
+    _patch_binary(monkeypatch)
+    assert rt_mod.submit_via_control_reply("the-uuid", "framed text") == rt_mod.INJECT_CONFIRMED
+    assert seen["argv"] == ["/bin/fno-agents", "mail-inject", "--session", "the-uuid"]
+    assert seen["input"] == "framed text"  # the framed turn goes on STDIN
+
+
+def test_submit_via_control_reply_unconfirmed_on_not_confirmed(monkeypatch):
+    # delivered=false BUT reason=not-confirmed: the op:reply WAS written (busy
+    # recipient) -> uncertain, NOT a clean miss (codex peer P1).
+    monkeypatch.setattr(rt_mod, "subprocess", _fake_subprocess(
+        lambda *a, **k: _FakeProc('{"delivered": false, "reason": "not-confirmed"}')))
+    _patch_binary(monkeypatch)
+    assert rt_mod.submit_via_control_reply("u", "f") == rt_mod.INJECT_UNCONFIRMED
+
+
+def test_submit_via_control_reply_not_sent_on_other_failure(monkeypatch):
+    # Any other not-delivered reason means the inject never reached the session.
+    for reason in ("not-live", "no-transcript", "attach-failed", "io-error", "unsafe-text"):
+        monkeypatch.setattr(rt_mod, "subprocess", _fake_subprocess(
+            lambda *a, _r=reason, **k: _FakeProc(f'{{"delivered": false, "reason": "{_r}"}}')))
+        _patch_binary(monkeypatch)
+        assert rt_mod.submit_via_control_reply("u", "f") == rt_mod.INJECT_NOT_SENT, reason
+
+
+def test_submit_via_control_reply_unconfirmed_on_subprocess_timeout(monkeypatch):
+    # A timeout may have cut the verb off AFTER it wrote the op:reply -> uncertain.
+    import subprocess as real
+
+    def fake_run(*a, **k):
+        raise real.TimeoutExpired(cmd="mail-inject", timeout=20)
+
+    monkeypatch.setattr(rt_mod, "subprocess", _fake_subprocess(fake_run))
+    _patch_binary(monkeypatch)
+    assert rt_mod.submit_via_control_reply("u", "f") == rt_mod.INJECT_UNCONFIRMED
+
+
+def test_submit_via_control_reply_not_sent_when_binary_absent(monkeypatch):
+    from fno.agents import rust_runtime
+    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: None)
+    assert rt_mod.submit_via_control_reply("u", "f") == rt_mod.INJECT_NOT_SENT
+
+
+def test_submit_via_control_reply_not_sent_on_bad_or_nondict_json(monkeypatch):
+    for out in ("not json", "[]", "null"):
+        monkeypatch.setattr(rt_mod, "subprocess", _fake_subprocess(
+            lambda *a, _o=out, **k: _FakeProc(_o)))
+        _patch_binary(monkeypatch)
+        assert rt_mod.submit_via_control_reply("u", "f") == rt_mod.INJECT_NOT_SENT, out
+
+
+def test_deliver_attached_returns_new_transcript_reply(monkeypatch):
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_control_reply", lambda sid, framed: rt_mod.INJECT_CONFIRMED)
+    n = {"i": 0}
+
+    def fake_tx(sid, cd=None):
+        n["i"] += 1
+        return ["adopted peer reply"] if n["i"] >= 3 else []  # call 1 = baseline
+
+    monkeypatch.setattr(rt_mod, "_transcript_replies", fake_tx)
+    assert rt_mod.deliver_attached("the-uuid", "framed", timeout=30) == "adopted peer reply"
+
+
+def test_deliver_attached_polls_on_unconfirmed(monkeypatch):
+    # codex peer P1 regression: an UNCONFIRMED inject must NOT hard-fail -- the turn
+    # may have landed, so we poll for the reply over the full hop timeout. A late
+    # reply is still captured.
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_control_reply", lambda sid, framed: rt_mod.INJECT_UNCONFIRMED)
+    n = {"i": 0}
+
+    def fake_tx(sid, cd=None):
+        n["i"] += 1
+        return ["late adopted reply"] if n["i"] >= 5 else []
+
+    monkeypatch.setattr(rt_mod, "_transcript_replies", fake_tx)
+    assert rt_mod.deliver_attached("the-uuid", "framed", timeout=60) == "late adopted reply"
+
+
+def test_deliver_attached_raises_only_when_not_sent(monkeypatch):
+    monkeypatch.setattr(rt_mod, "submit_via_control_reply", lambda sid, framed: rt_mod.INJECT_NOT_SENT)
+    monkeypatch.setattr(rt_mod, "_transcript_replies", lambda sid, cd=None: [])
+    with pytest.raises(RuntimeError, match="control.sock inject failed"):
+        rt_mod.deliver_attached("the-uuid", "framed")
+
+
+def test_deliver_attached_times_out_without_reply(monkeypatch):
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_control_reply", lambda sid, framed: rt_mod.INJECT_CONFIRMED)
+    monkeypatch.setattr(rt_mod, "_transcript_replies", lambda sid, cd=None: [])  # never replies
+    with pytest.raises(TimeoutError, match="no reply from adopted session"):
+        rt_mod.deliver_attached("the-uuid", "framed", timeout=5)
 
 
 # ---------------------------------------------------------------------------
