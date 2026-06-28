@@ -153,8 +153,18 @@ pub fn squad_groups(rows: &[Value], store: &SquadStore) -> Vec<Group> {
             // Surface offline (ghost) members in the header so a reopened squad
             // whose member is not live reads as `*stack +1 off`, never as a
             // silently smaller squad (AC1-EDGE / AC1-FR). The rail appends the
-            // live `(count)` after this, giving `*stack +1 off (2)`.
-            let off = offline_members(rows, squad).len();
+            // live `(count)` after this, giving `*stack +1 off (2)`. Counted
+            // without allocating (this runs every paint frame): a recruited name
+            // is offline iff no live row carries it.
+            let off = squad
+                .members
+                .iter()
+                .filter(|m| {
+                    !rows
+                        .iter()
+                        .any(|r| r.get("name").and_then(Value::as_str) == Some(m.as_str()))
+                })
+                .count();
             let header = if off > 0 {
                 format!("*{} +{off} off", squad.name)
             } else {
@@ -202,10 +212,20 @@ pub fn squads_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("squads.json"))
 }
 
-/// Load the store, never failing: an absent file is an empty store, and a
-/// corrupt/unparseable file is an empty store + a one-line warning (AC1-ERR:
-/// the grid must start with no squads and never crash on a malformed store).
+/// Load the store, never failing: an absent file is an empty store and a
+/// corrupt/unparseable file is an empty store (AC1-ERR: the grid must start
+/// with no squads and never crash on a malformed store). Use [`load_reporting`]
+/// at startup to also surface the corruption warning.
 pub fn load(path: &Path) -> SquadStore {
+    load_reporting(path).0
+}
+
+/// Like [`load`] but also returns a one-line warning when the store was present
+/// but unparseable (AC1-ERR's warning). The caller surfaces it as a grid hint
+/// rather than `eprintln!`, which would corrupt the active TUI (raw mode /
+/// alternate screen) - never write to stderr while the compositor owns the
+/// terminal.
+pub fn load_reporting(path: &Path) -> (SquadStore, Option<String>) {
     let lock = acquire_shared(&lock_path(path));
     let out = read_tolerant(path);
     if let Some(l) = lock {
@@ -229,7 +249,7 @@ where
     // Lock a stable `.lock` sidecar, not the data file: renaming the data file
     // out from under a held flock would invalidate the lock fd (state.rs).
     let lock = acquire_exclusive(&lock_path(path))?;
-    let mut store = read_tolerant(path);
+    let (mut store, _warn) = read_tolerant(path);
     let out = f(&mut store);
     let res = write_atomic(path, &store);
     if let Some(l) = lock {
@@ -239,23 +259,30 @@ where
     Ok(out)
 }
 
-fn read_tolerant(path: &Path) -> SquadStore {
+/// Read + parse the store with no lock. Returns the parsed store (or an empty
+/// one on absence / read error / parse failure) plus a warning string when the
+/// file was present but unparseable. NEVER writes to stderr (the caller owns the
+/// TUI); corruption is reported through the returned warning instead.
+fn read_tolerant(path: &Path) -> (SquadStore, Option<String>) {
     let mut buf = String::new();
     match OpenOptions::new().read(true).open(path) {
         Ok(mut file) => {
             if file.read_to_string(&mut buf).is_err() {
-                return SquadStore::default();
+                return (SquadStore::default(), None);
             }
         }
-        Err(_) => return SquadStore::default(),
+        Err(_) => return (SquadStore::default(), None),
     }
     if buf.trim().is_empty() {
-        return SquadStore::default();
+        return (SquadStore::default(), None);
     }
-    serde_json::from_str(&buf).unwrap_or_else(|e| {
-        eprintln!("fno grid: ignoring malformed {}: {e}", path.display());
-        SquadStore::default()
-    })
+    match serde_json::from_str(&buf) {
+        Ok(store) => (store, None),
+        Err(e) => (
+            SquadStore::default(),
+            Some(format!("ignoring malformed {}: {e}", path.display())),
+        ),
+    }
 }
 
 fn write_atomic(path: &Path, store: &SquadStore) -> std::io::Result<()> {
@@ -432,6 +459,14 @@ mod tests {
         std::fs::write(&p, b"{ this is not json").unwrap();
         let store = load(&p);
         assert!(store.squads.is_empty(), "malformed store degrades to empty");
+        // The warning is RETURNED (for the caller to show as a TUI hint), not
+        // printed to stderr (which would corrupt the active compositor).
+        let (store2, warn) = load_reporting(&p);
+        assert!(store2.squads.is_empty());
+        assert!(
+            warn.is_some(),
+            "corruption is reported through the return value"
+        );
         std::fs::remove_file(&p).ok();
         std::fs::remove_file(lock_path(&p)).ok();
     }

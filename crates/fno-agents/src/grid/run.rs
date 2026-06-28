@@ -2347,7 +2347,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // per-frame paint never read the file in the render loop. A corrupt store
     // degrades to empty (squads::load never panics).
     let squads_path = squads::squads_path();
-    let mut squad_store = squads::load(&squads_path);
+    let (mut squad_store, squad_warn) = squads::load_reporting(&squads_path);
+    // Surface a corrupt-store warning as a startup hint, never via eprintln
+    // (the compositor owns the terminal; a stderr write would garble the TUI).
+    if let Some(w) = squad_warn {
+        hint = Some(format!("squads: {w}"));
+    }
 
     // Active rail state; initialized from `--rail` flag.
     let mut rail_state: Option<RailState> = if parsed.rail {
