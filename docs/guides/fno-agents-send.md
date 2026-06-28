@@ -27,7 +27,7 @@ or
 msg-3a7f1c2e queued (durable)
 ```
 
-`delivered (hosted)` means live PTY injection (codex/gemini) or the `control.sock` `op:'reply'` inject (claude, via the `fno-agents mail-inject` verb) succeeded. `queued (durable)` means the message is in the recipient's inbox store, waiting for their next drain. Both are exit 0. The `msg-<8hex>` id is stable and can be used to correlate a later reply in the bus log.
+`delivered (hosted)` means live PTY injection (codex/gemini) or the `control.sock` `op:'reply'` inject (claude, via the `fno-agents mail-inject` verb) succeeded. `queued (durable)` means the message is in the recipient's inbox store, waiting for their next drain. Both are exit 0. The `msg-<8hex>` id is stable, but it only exists in the bus log for a `queued (durable)` send: a `delivered (hosted)` send writes no bus entry and the live `<fno_mail>` envelope does not carry that id, so bus-log reply correlation by `msg-<id>` applies to the durable path only. For a delivered live turn, the history is the recipient transcript (`grep <fno_mail>`).
 
 ## Flags
 
