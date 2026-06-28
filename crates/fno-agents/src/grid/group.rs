@@ -422,14 +422,30 @@ pub enum MainMode {
 
 /// Rail navigation state: which row is selected and which groups are expanded.
 ///
-/// Selection is tracked as an **agent index** (into `rows`) so it survives
-/// `group_by` re-partitions (focus follows the agent, not the slot - AC4-FR).
-/// When the agent is gone from the new partition, clamp to the nearest valid row.
+/// Selection identifies a **group occurrence**, not just an agent: the pair
+/// (`selected_group_key`, `selected_agent_idx`). The agent index survives
+/// `group_by` re-partitions (focus follows the agent, not the slot - AC4-FR),
+/// and the group key disambiguates which copy is selected when the same agent
+/// appears in two visible groups - an agent recruited into 2+ squads in the
+/// Squad view, or the simultaneous sideline+squad union (x-8a6a). When the agent
+/// is gone from the new partition, clamp to the nearest valid row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RailState {
     /// Index into `rows` of the currently selected agent; `None` when the
     /// fleet is empty.
     pub selected_agent_idx: Option<usize>,
+    /// `key_value` of the group occurrence the selection sits in. Disambiguates
+    /// the selected copy when `selected_agent_idx` appears in 2+ groups (the
+    /// duplicate-index case this state exists to fix). `None` before the first
+    /// nav/anchor, or for a selection set directly without an occurrence; the
+    /// resolvers then fall back to the first group containing the agent
+    /// (back-compat, the pre-x-8a6a first-match behavior).
+    ///
+    /// `pub(crate)`, not `pub`: nothing outside this crate reads or writes it,
+    /// and keeping the pair's second half off the public API stops a future call
+    /// site from desyncing it with a bare `selected_agent_idx` write. Mutate it
+    /// only through the nav methods (or alongside `selected_agent_idx`).
+    pub(crate) selected_group_key: Option<String>,
     /// The active focus axis.
     pub axis: FocusAxis,
     /// The active group-by key.
@@ -447,6 +463,7 @@ impl RailState {
     pub fn new(group_key: GroupKey) -> Self {
         RailState {
             selected_agent_idx: None,
+            selected_group_key: None,
             axis: FocusAxis::RailNav,
             group_key,
             // E5c AC-2: a space auto-tiles its members. GroupTile is the
@@ -472,82 +489,111 @@ impl RailState {
         self.group_key = self.group_key.next();
     }
 
+    /// Total members across all groups - the length of the flat rail list. A
+    /// duplicated agent counts once per occurrence (so a member in two squads
+    /// adds two rail rows), which is exactly the cursor space nav steps over.
+    fn flat_len(groups: &[Group]) -> usize {
+        groups.iter().map(|g| g.members.len()).sum()
+    }
+
+    /// The flat rail position (index into the group-order-then-member-order
+    /// flattening) of the currently selected **occurrence**. Resolves by the
+    /// (group key, agent) pair so a duplicated agent lands on the exact copy the
+    /// cursor sits in. Falls back to the first occurrence of the agent when the
+    /// group key does not match any current group (a re-partition moved it, or
+    /// the selection was set directly without a key). `None` when nothing is
+    /// selected or the agent is absent from `groups`.
+    fn current_pos(&self, groups: &[Group]) -> Option<usize> {
+        let agent = self.selected_agent_idx?;
+        let mut pos = 0usize;
+        let mut first_match: Option<usize> = None;
+        for g in groups {
+            for &m in &g.members {
+                if m == agent {
+                    if first_match.is_none() {
+                        first_match = Some(pos);
+                    }
+                    if self.selected_group_key.as_deref() == Some(g.key_value.as_str()) {
+                        return Some(pos);
+                    }
+                }
+                pos += 1;
+            }
+        }
+        first_match
+    }
+
+    /// Set the selection to the occurrence at flat position `pos`, updating both
+    /// `selected_agent_idx` (the agent there) and `selected_group_key` (the
+    /// group it occupies) so the pair always identifies one occurrence. Returns
+    /// the agent index, or `None` when `pos` is out of range.
+    fn set_pos(&mut self, groups: &[Group], pos: usize) -> Option<usize> {
+        let mut i = 0usize;
+        for g in groups {
+            for &m in &g.members {
+                if i == pos {
+                    self.selected_agent_idx = Some(m);
+                    self.selected_group_key = Some(g.key_value.clone());
+                    return Some(m);
+                }
+                i += 1;
+            }
+        }
+        None
+    }
+
     /// After a re-partition (re-group), re-anchor the selection to the same
-    /// agent index. If the agent no longer appears in `groups` (it was removed),
-    /// clamp to the first available member across all groups.
+    /// occurrence. The agent index leads (focus-follows-agent, AC4-FR); the
+    /// group key follows it into whatever group now holds it. If the agent no
+    /// longer appears in `groups` (it was removed), clamp to the first available
+    /// member across all groups.
     ///
     /// Returns the new `selected_agent_idx`.
     pub fn re_anchor(&mut self, groups: &[Group]) -> Option<usize> {
-        // Collect all member indices in rail order (group order, then member order).
-        let all_members: Vec<usize> = groups
-            .iter()
-            .flat_map(|g| g.members.iter().copied())
-            .collect();
-
-        if all_members.is_empty() {
+        if Self::flat_len(groups) == 0 {
             self.selected_agent_idx = None;
+            self.selected_group_key = None;
             return None;
         }
-
-        let selected = self.selected_agent_idx;
-        if let Some(idx) = selected {
-            if all_members.contains(&idx) {
-                // Agent still present; keep it.
-                return Some(idx);
-            }
-        }
-
-        // Agent gone or not set; clamp to the first available.
-        let first = all_members[0];
-        self.selected_agent_idx = Some(first);
-        Some(first)
+        // Keep the exact occurrence when the agent is still present (current_pos
+        // re-resolves the group key into the new partition); else clamp to first.
+        let pos = self.current_pos(groups).unwrap_or(0);
+        self.set_pos(groups, pos)
     }
 
     /// Move selection up in the rail (toward the first row). Clamps at the
     /// beginning (no wrap-panic). With nothing selected, lands on the first
     /// member (consistent with `move_down`). Returns the new selected index.
     pub fn move_up(&mut self, groups: &[Group]) -> Option<usize> {
-        let all_members: Vec<usize> = groups
-            .iter()
-            .flat_map(|g| g.members.iter().copied())
-            .collect();
-        if all_members.is_empty() {
+        if Self::flat_len(groups) == 0 {
             self.selected_agent_idx = None;
+            self.selected_group_key = None;
             return None;
         }
-        let new_sel = match self.selected_agent_idx {
-            Some(sel) => {
-                let pos = all_members.iter().position(|&m| m == sel).unwrap_or(0);
-                all_members[pos.saturating_sub(1)]
-            }
-            None => all_members[0],
+        let new_pos = match self.current_pos(groups) {
+            Some(pos) => pos.saturating_sub(1),
+            None => 0,
         };
-        self.selected_agent_idx = Some(new_sel);
-        Some(new_sel)
+        self.set_pos(groups, new_pos)
     }
 
     /// Move selection down in the rail (toward the last row). Clamps at the
     /// end (no wrap-panic). With nothing selected, lands on the first member
     /// (NOT the second - the `None` case must not skip member 0, gemini HIGH).
+    /// Steps the flat occurrence position, so a duplicated agent's second copy
+    /// is reachable past its first (AC4-EDGE, the duplicate-index fix).
     pub fn move_down(&mut self, groups: &[Group]) -> Option<usize> {
-        let all_members: Vec<usize> = groups
-            .iter()
-            .flat_map(|g| g.members.iter().copied())
-            .collect();
-        if all_members.is_empty() {
+        let total = Self::flat_len(groups);
+        if total == 0 {
             self.selected_agent_idx = None;
+            self.selected_group_key = None;
             return None;
         }
-        let new_sel = match self.selected_agent_idx {
-            Some(sel) => {
-                let pos = all_members.iter().position(|&m| m == sel).unwrap_or(0);
-                let new_pos = (pos + 1).min(all_members.len().saturating_sub(1));
-                all_members[new_pos]
-            }
-            None => all_members[0],
+        let new_pos = match self.current_pos(groups) {
+            Some(pos) => (pos + 1).min(total - 1),
+            None => 0,
         };
-        self.selected_agent_idx = Some(new_sel);
-        Some(new_sel)
+        self.set_pos(groups, new_pos)
     }
 
     /// Enter drive mode on the currently selected agent.
@@ -603,7 +649,36 @@ impl RailState {
     /// (AC1-EDGE / AC3-EDGE).
     pub fn selected_group<'a>(&self, groups: &'a [Group]) -> Option<&'a Group> {
         let sel = self.selected_agent_idx?;
+        // Prefer the exact occupied group (matching key); the first-match scan is
+        // the back-compat fallback when no occurrence is pinned (key None) or the
+        // pinned group is gone. This is the fix for "GroupTile tiles the wrong
+        // group for a shared agent" - the second copy now resolves to its own
+        // group, not the first one that happens to contain the agent.
+        if let Some(key) = &self.selected_group_key {
+            if let Some(g) = groups
+                .iter()
+                .find(|g| &g.key_value == key && g.members.contains(&sel))
+            {
+                return Some(g);
+            }
+        }
         groups.iter().find(|g| g.members.contains(&sel))
+    }
+
+    /// True iff `member_idx` in `group` is the selected occurrence - the agent
+    /// matches AND `group` is the occupied group. The renderer uses this so a
+    /// shared agent is accented only in the group the cursor sits in, not in
+    /// every group it appears in (the "highlights every occurrence" fix). When
+    /// no occurrence is pinned (key None, pre-nav), falls back to highlighting
+    /// the agent wherever it appears (the pre-x-8a6a behavior).
+    pub fn is_selected_occurrence(&self, group: &Group, member_idx: usize) -> bool {
+        if self.selected_agent_idx != Some(member_idx) {
+            return false;
+        }
+        match &self.selected_group_key {
+            Some(key) => &group.key_value == key,
+            None => true,
+        }
     }
 
     /// The 0-based position of the selected agent within `group.members`, or
@@ -643,6 +718,9 @@ impl RailState {
             pos.saturating_sub(cap)
         };
         self.selected_agent_idx = Some(group.members[new_pos]);
+        // Paging stays within `group`, so keep the occurrence key aligned to it
+        // (the caller passes the resolved selected group / its live view).
+        self.selected_group_key = Some(group.key_value.clone());
     }
 }
 
@@ -1313,6 +1391,143 @@ mod tests {
             Some(0),
             "move_up from None -> first member"
         );
+    }
+
+    // ── x-8a6a: duplicate-index (an agent in 2+ groups) selection ─────────────
+    //
+    // The squad view (x-5b3e) and the deferred sideline+squad union put the SAME
+    // agent index in two visible groups. The old index cursor (`position(==sel)`,
+    // first-match) snapped any later occurrence back to the first, leaving the
+    // second copy unreachable and tiling/highlighting the wrong group. These
+    // assert the occurrence-aware (group key, agent) cursor.
+
+    /// Agent 0 ("x") recruited into squads A and B; 1 ("y") in A only, 2 ("z") in
+    /// B only. Mirrors the multi-squad GroupKey::Squad view (name-keyed groups).
+    fn dup_groups() -> Vec<Group> {
+        vec![
+            Group {
+                header: "A".into(),
+                key_value: "A".into(),
+                members: vec![0, 1],
+            },
+            Group {
+                header: "B".into(),
+                key_value: "B".into(),
+                members: vec![0, 2],
+            },
+        ]
+    }
+
+    #[test]
+    fn ac4_edge_move_down_reaches_second_occurrence() {
+        // The bug this plan exists to fix: walking down must reach B's copy of x
+        // (the duplicate), not stick at A's copy. Flat order: A.x, A.y, B.x, B.z.
+        let groups = dup_groups();
+        let mut rs = RailState::new(GroupKey::Squad);
+        rs.re_anchor(&groups); // A.x (pos 0)
+        assert_eq!(
+            (rs.selected_agent_idx, rs.selected_group_key.as_deref()),
+            (Some(0), Some("A"))
+        );
+        rs.move_down(&groups); // A.y
+        assert_eq!(
+            (rs.selected_agent_idx, rs.selected_group_key.as_deref()),
+            (Some(1), Some("A"))
+        );
+        rs.move_down(&groups); // B.x - the SECOND occurrence of x
+        assert_eq!(
+            (rs.selected_agent_idx, rs.selected_group_key.as_deref()),
+            (Some(0), Some("B")),
+            "reached x's second copy in group B, not snapped back to A"
+        );
+        rs.move_down(&groups); // B.z
+        assert_eq!(
+            (rs.selected_agent_idx, rs.selected_group_key.as_deref()),
+            (Some(2), Some("B"))
+        );
+        rs.move_down(&groups); // clamp at last
+        assert_eq!(
+            rs.selected_agent_idx,
+            Some(2),
+            "clamps at the last occurrence"
+        );
+    }
+
+    #[test]
+    fn ac4_edge_move_up_returns_to_first_occurrence() {
+        let groups = dup_groups();
+        let mut rs = RailState::new(GroupKey::Squad);
+        rs.re_anchor(&groups);
+        rs.move_down(&groups); // A.y
+        rs.move_down(&groups); // B.x
+        assert_eq!(rs.selected_group_key.as_deref(), Some("B"));
+        rs.move_up(&groups); // back to A.y, NOT stuck on the duplicate
+        assert_eq!(
+            (rs.selected_agent_idx, rs.selected_group_key.as_deref()),
+            (Some(1), Some("A"))
+        );
+    }
+
+    #[test]
+    fn ac3_hp_selected_group_resolves_the_occupied_copy() {
+        // selected_group must return the group the cursor sits in, not the first
+        // group that happens to contain the agent (the GroupTile-wrong-group bug).
+        let groups = dup_groups();
+        let mut rs = RailState::new(GroupKey::Squad);
+        rs.re_anchor(&groups);
+        rs.move_down(&groups); // A.y
+        rs.move_down(&groups); // B.x
+        let g = rs
+            .selected_group(&groups)
+            .expect("a group holds the selection");
+        assert_eq!(
+            g.key_value, "B",
+            "the SECOND copy resolves to its own group"
+        );
+    }
+
+    #[test]
+    fn highlight_only_selected_occurrence() {
+        // The renderer accents only the occupied copy; the agent's other copy is
+        // not highlighted (the "highlights every occurrence" fix).
+        let groups = dup_groups();
+        let (a, b) = (&groups[0], &groups[1]);
+        let mut rs = RailState::new(GroupKey::Squad);
+        rs.re_anchor(&groups);
+        rs.move_down(&groups); // A.y
+        rs.move_down(&groups); // B.x
+        assert!(
+            rs.is_selected_occurrence(b, 0),
+            "B's x is the selected copy"
+        );
+        assert!(
+            !rs.is_selected_occurrence(a, 0),
+            "A's x (the other copy) is NOT accented"
+        );
+        assert!(
+            !rs.is_selected_occurrence(a, 1),
+            "an unselected member is not accented"
+        );
+    }
+
+    #[test]
+    fn re_anchor_clamps_when_occupied_group_removed() {
+        // Cursor on B.x, then B is un-recruited away. x still exists in A, so
+        // focus-follows-agent lands on A.x and never indexes out of range (ERR).
+        let groups = dup_groups();
+        let mut rs = RailState::new(GroupKey::Squad);
+        rs.re_anchor(&groups);
+        rs.move_down(&groups);
+        rs.move_down(&groups); // B.x
+        assert_eq!(rs.selected_group_key.as_deref(), Some("B"));
+        let only_a = vec![Group {
+            header: "A".into(),
+            key_value: "A".into(),
+            members: vec![0, 1],
+        }];
+        let sel = rs.re_anchor(&only_a);
+        assert_eq!(sel, Some(0), "x follows into the surviving group A");
+        assert_eq!(rs.selected_group_key.as_deref(), Some("A"));
     }
 
     // ── Focus axis transitions ────────────────────────────────────────────

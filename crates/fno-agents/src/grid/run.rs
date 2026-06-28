@@ -1407,7 +1407,9 @@ fn raster_rail(
                 Some(w) => w.to_string(),
                 None => agent_name().to_string(),
             };
-            let selected = rail_state.selected_agent_idx == Some(member_idx);
+            // Occurrence-aware: accent only the copy in the selected group, not
+            // every group a shared (multi-squad) agent appears in (x-8a6a).
+            let selected = rail_state.is_selected_occurrence(grp, member_idx);
             if selected {
                 selected_flat = Some(lines.len());
             }
@@ -2892,7 +2894,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             .is_some_and(|s| live.members.contains(&s));
                                         if !on_live {
                                             if let Some(&first) = live.members.first() {
+                                                // Keep the (agent, group key) pair
+                                                // coherent: `first` lives in this
+                                                // same group, so pin the key too
+                                                // rather than leaving it stale.
                                                 rs.selected_agent_idx = Some(first);
+                                                // `live` is unused after this; move
+                                                // its key out rather than cloning.
+                                                rs.selected_group_key = Some(live.key_value);
                                             }
                                         }
                                     }
