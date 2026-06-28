@@ -414,7 +414,12 @@ def test_dispatch_send_200kb_body_round_trip(tmp_path: Path, monkeypatch) -> Non
     threads = read_all_threads("red")
     assert len(threads) == 1
     stored_body = threads[0].messages[0].body
-    assert stored_body == body, f"Round-trip mismatch: got {len(stored_body)} chars"
+    # The durable body is <fno_mail>-wrapped now (node x-1f23); the 200KB message
+    # round-trips intact inside the paired envelope.
+    assert stored_body.startswith("<fno_mail "), stored_body[:40]
+    assert stored_body.rstrip().endswith("</fno_mail>")
+    inner = stored_body.split("\n", 1)[1].rsplit("\n", 1)[0]
+    assert inner == body, f"Round-trip mismatch: got {len(inner)} chars"
 
 
 def test_dispatch_send_rejects_over_1mib_body(tmp_path: Path, monkeypatch) -> None:

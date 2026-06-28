@@ -4001,15 +4001,17 @@ def _deliver_live(
     if mail is not None:
         from fno.mail.envelope import harness_for_provider
 
-        relay_ctxs = {
-            from_name: mail,
-            entry.name: _MailCtx(
-                from_=mail.to or "",
+        relay_ctxs = {from_name: mail}
+        # Only wrap the recipient's relay turns when it has a resolvable short id;
+        # otherwise leave that side raw rather than emit <fno_mail from=""> (codex
+        # peer P2). mail.to is the recipient short resolved in dispatch_send.
+        if mail.to:
+            relay_ctxs[entry.name] = _MailCtx(
+                from_=mail.to,
                 harness=harness_for_provider(entry.provider),
                 model="unknown",
                 to=mail.from_,
-            ),
-        }
+            )
     if _switchboard_exchange(entry.name, from_name, wrapped, relay_ctxs):
         return True
 
@@ -4064,9 +4066,12 @@ def dispatch_send(
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
-    Durable-first: the envelope is written to the inbox store BEFORE live
-    delivery is attempted.  The envelope survives every failure path after
-    the write (design doc "send state machine" / AC3-FR).
+    Live-inject-first (node x-1f23): live delivery is attempted FIRST and the
+    durable inbox envelope is written ONLY when the recipient is not
+    live-reachable or the live inject does not confirm. A confirmed live
+    (``hosted``) send is self-recording in the transcript and is NOT also queued;
+    the durable bus is the offline fallback tier. Both the live turn and the
+    durable body carry the same ``<fno_mail>`` envelope.
 
     Orchestration:
 
@@ -4076,10 +4081,12 @@ def dispatch_send(
     4. INSIDE the flock:
        a. Load registry; unknown name -> exit 16 (same message as ask).
        b. Provider mismatch -> exit 2.
-       c. Write envelope through the store API (kind=send, recipient=name).
+       c. Capture sender provenance + build the <fno_mail> ctx; generate msg_id.
        d. Attempt live delivery via _deliver_live (fire-and-forget).
-       e. Emit agent_send_started / agent_send_done (delivery field).
-       f. Bump last_message_at + status stamps via update_registry.
+       e. On non-hosted, write the durable fallback envelope (the <fno_mail>
+          body), kind=send, recipient=name.
+       f. Emit agent_send_started / agent_send_done (delivery field).
+       g. Bump last_message_at + status stamps via update_registry.
     5. Return DispatchSendResult(msg_id, delivery).
 
     Raises:
@@ -4196,13 +4203,33 @@ def dispatch_send(
                 """Write the durable FALLBACK envelope: the pending-queue for an
                 offline recipient, or the recovery record when a live inject did
                 not land. The jsonl bus is the fallback tier now, not a peer to the
-                live path (node x-1f23). Drain-on-wake semantics are unchanged."""
+                live path (node x-1f23). Drain-on-wake semantics are unchanged.
+
+                The body is stored <fno_mail>-wrapped, the SAME envelope the live
+                path injects, so a delivered message carries one consistent wire
+                form everywhere and `grep <fno_mail>` reconstructs durable history
+                too (codex peer P1). The wrapped body round-trips through the
+                thread render unchanged (no unwrap, so mark_thread_read does not
+                strip it); summaries surface the open tag, which identifies the
+                message as a2a from its `from` sender."""
+                durable_body = message
+                if mail_ctx is not None:
+                    from fno.mail.envelope import wrap_fno_mail
+
+                    durable_body = wrap_fno_mail(
+                        message,
+                        from_=mail_ctx.from_,
+                        harness=mail_ctx.harness,
+                        model=mail_ctx.model,
+                        node=mail_ctx.node,
+                        to=mail_ctx.to,
+                    )
                 try:
                     write_new_thread(
                         recipient=name,
                         sender=from_name,
                         kind="send",
-                        body=message,
+                        body=durable_body,
                         msg_id=msg_id,
                         to_kind="name",
                         provider_to=existing.provider,

@@ -33,6 +33,18 @@ message text
 
 `from` is the sender's short 8-hex sessionId (the identity). `harness` maps the provider to a reply vocabulary (`claude` -> `claude-code`; `codex`/`gemini` unchanged) via `harness_for_provider`. `node`/`to` are optional. A delivered turn is self-recording: it lands in both transcripts, so `grep <fno_mail>` across transcripts reconstructs the a2a history. That is what lets the durable bus stop being the history store and become only the offline pending-queue.
 
+## Where the envelope lands: per-harness transcript map
+
+A live `hosted` delivery puts the `<fno_mail>` turn into the recipient's session transcript by construction: the claude path injects it over `control.sock` and the `mail-inject` verb only reports `delivered` once that transcript grew; the codex/gemini path types it into the PTY worker, which the session records. So `grep <fno_mail>` reconstructs delivered a2a history, but you have to know where each harness keeps its transcript:
+
+| Harness | Provider-native transcript | Notes |
+|---------|----------------------------|-------|
+| claude | `~/.claude/projects/<cwd-encoded>/<session_uuid>.jsonl` | The filename IS the full session uuid, so `find_transcript` globs `<uuid>.jsonl` across project dirs (sidestepping the lossy cwd-encoding). Override the base with `FNO_CLAUDE_PROJECTS_DIR`. |
+| codex | `~/.codex/sessions/` rollout JSONL, indexed by `~/.codex/session_index.jsonl` | The index maps session uuids to rollout files. |
+| gemini | `~/.gemini/tmp/<cwd-basename>/chats/` | Per-cwd chats dir; gemini pins a session to its cwd. |
+
+Provider-agnostic fallback: footnote tees each spawned agent's I/O to a per-agent `output.jsonl` (the registry entry's `log_path`, surfaced by `fno agents logs <name>`). Because footnote owns that file's format and it captures both injected input and the model's output, it is the most uniform `grep <fno_mail>` target across all three harnesses. A durable (offline) message has no transcript yet; its `<fno_mail>` body lives in the bus log until drained.
+
 ## The `mail-inject` verb
 
 `fno-agents mail-inject --session <uuid|short>` (`crates/fno-agents/src/mail_inject.rs`) is the one-shot claude live primitive `_deliver_live` shells out to. It reads the turn text from STDIN (sidestepping the argv size limit), resolves the recipient on the daemon roster, attaches to its `control.sock`, `op:'reply'`-injects the text verbatim, and confirms delivery by transcript GROWTH. It prints `{"delivered": bool, "reason": str}` and exits 0 when delivered. Every not-delivered reason (`not-live`, `no-transcript`, `attach-failed`, `not-confirmed`, ...) is a clean signal for Python to write the durable fallback.
@@ -51,6 +63,10 @@ Both are accepted tradeoffs of live-inject-first. Hard exactly-once would carry 
 ## The relay variant
 
 The cross-session relay PTY hop (`cli/src/fno/relay/envelope.py`) frames provenance on the same `<fno_mail>` tag, but as the SINGLE-LINE, no-close transport variant: `<fno_mail from="..." harness="..."[ model="..."]> <one-line body>`. It cannot carry the paired multiline form because the PTY Enter submits on newline. It shares the tag name and `harness` vocabulary so `grep <fno_mail>` reconstructs relay hops too.
+
+## Durable body carries the same envelope
+
+The durable fallback stores the `<fno_mail>`-wrapped body, the SAME envelope the live path injects, so a delivered message carries one consistent wire form across the live and durable paths and `grep <fno_mail>` reconstructs durable history too (not just live transcripts). The wrapped body round-trips through the per-recipient markdown render unchanged, so `mark_thread_read` does not strip it. A consequence: `fno mail unread` summaries (`body.split("\n")[0]`) surface the open tag rather than a content preview; that tag is a recognizable a2a marker (it names the `from` sender), which is the point of keeping it legible.
 
 ## What did NOT change
 
