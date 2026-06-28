@@ -3246,7 +3246,32 @@ def _load_a2a_settings() -> tuple[bool, int]:
         return (False, 6)
 
 
-def _run_relay_loop(to_name: str, from_name: str, seed: str, ceiling: int) -> int:
+def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
+    """Wrap a relay hop body in the peer's ``<fno_mail>`` envelope, or return it
+    raw when no context is supplied (the chat path) (node x-1f23). The stream-json
+    switchboard injects a whole turn, so this uses the paired multiline form, not
+    the relay single-line PTY variant."""
+    if ctx is None:
+        return cur
+    from fno.mail.envelope import wrap_fno_mail
+
+    return wrap_fno_mail(
+        cur,
+        from_=ctx.from_,
+        harness=ctx.harness,
+        model=ctx.model,
+        node=ctx.node,
+        to=ctx.to,
+    )
+
+
+def _run_relay_loop(
+    to_name: str,
+    from_name: str,
+    seed: str,
+    ceiling: int,
+    mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+) -> int:
     """Drive the bounded A2A relay AFTER the first hop (B already replied
     ``seed``). Alternate driving A then B with each other's reply — the drive IS
     the literal injection into the target — up to ``ceiling`` total turns
@@ -3268,7 +3293,14 @@ def _run_relay_loop(to_name: str, from_name: str, seed: str, ceiling: int) -> in
     while turns < ceiling and cur.strip():
         hop = _daemon_rpc(
             "agent.switchboard",
-            {"to": target, "from": peer, "body": cur, "mirror": False},
+            {
+                "to": target,
+                "from": peer,
+                # Wrap each continuation in the sending peer's <fno_mail> so the
+                # relay turn carries provenance, not just the seed (node x-1f23).
+                "body": _wrap_relay_body(cur, (mail_ctxs or {}).get(peer)),
+                "mirror": False,
+            },
             connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
             read_timeout=_SWITCHBOARD_READ_TIMEOUT,
         )
@@ -3312,7 +3344,11 @@ def _detach_stdio() -> None:
 
 
 def _kickoff_background_relay(
-    to_name: str, from_name: str, seed: str, ceiling: int
+    to_name: str,
+    from_name: str,
+    seed: str,
+    ceiling: int,
+    mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
 ) -> None:
     """Run the A2A relay in a DETACHED background process so the caller returns
     immediately (ab-3bd520ab).
@@ -3331,7 +3367,7 @@ def _kickoff_background_relay(
     try:
         pid = os.fork()
     except OSError:
-        _run_relay_loop(to_name, from_name, seed, ceiling)
+        _run_relay_loop(to_name, from_name, seed, ceiling, mail_ctxs)
         return
     if pid > 0:
         # Parent: reap the intermediate child (it exits at once) and return.
@@ -3352,7 +3388,7 @@ def _kickoff_background_relay(
             os._exit(0)
         _detach_stdio()
         try:
-            _run_relay_loop(to_name, from_name, seed, ceiling)
+            _run_relay_loop(to_name, from_name, seed, ceiling, mail_ctxs)
         except Exception:
             pass
     finally:
@@ -3431,8 +3467,18 @@ def _a2a_first_use_gate(auto: bool, ceiling: int) -> bool:
     return keep_on
 
 
-def _switchboard_exchange(to_name: str, from_name: str, body: str) -> Optional[bool]:
+def _switchboard_exchange(
+    to_name: str,
+    from_name: str,
+    body: str,
+    mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+) -> Optional[bool]:
     """Drive a stream-json switchboard exchange (Group 2, Tasks 3.1 + 4.1).
+
+    ``mail_ctxs`` (node x-1f23) maps each endpoint name to its ``<fno_mail>``
+    sender context. When set (the mail-send path), every autonomous relay
+    continuation is wrapped so later peer turns keep provenance, not just the
+    seed. ``fno agents chat`` passes None, so the chat path stays raw + unchanged.
 
     Returns ``True`` when the turn(s) were delivered via the switchboard, or
     ``None`` when B is not a live stream thread / the daemon is unreachable (the
@@ -3472,7 +3518,7 @@ def _switchboard_exchange(to_name: str, from_name: str, body: str) -> Optional[b
     # empty first reply has no relay to run.
     cur = sb.get("reply") or ""
     if ceiling > 1 and from_name != to_name and cur.strip():
-        _kickoff_background_relay(to_name, from_name, cur, ceiling)
+        _kickoff_background_relay(to_name, from_name, cur, ceiling, mail_ctxs)
     return True
 
 
@@ -3947,7 +3993,24 @@ def _deliver_live(
     # config.agents.a2a.auto is on) is in _switchboard_exchange. It returns True
     # when delivered via the switchboard, or None to demote to the MCP/socket
     # path below (B not a live stream thread, or daemon unreachable).
-    if _switchboard_exchange(entry.name, from_name, wrapped):
+    # node x-1f23: provenance for the autonomous relay continuations. The sender's
+    # ctx wraps A's turns; the recipient's ctx (from/to swapped) wraps B's. None
+    # when there is no mail envelope, leaving the relay raw (and the chat path,
+    # which never reaches _deliver_live, unaffected).
+    relay_ctxs = None
+    if mail is not None:
+        from fno.mail.envelope import harness_for_provider
+
+        relay_ctxs = {
+            from_name: mail,
+            entry.name: _MailCtx(
+                from_=mail.to or "",
+                harness=harness_for_provider(entry.provider),
+                model="unknown",
+                to=mail.from_,
+            ),
+        }
+    if _switchboard_exchange(entry.name, from_name, wrapped, relay_ctxs):
         return True
 
     # MCP-channel probe (mirrors _followup_path :334-366).

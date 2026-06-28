@@ -503,14 +503,15 @@ def test_switchboard_auto_is_nonblocking_kicks_off_detached_relay(monkeypatch) -
     monkeypatch.setattr(
         dispatch_mod,
         "_kickoff_background_relay",
-        lambda to_name, from_name, seed, ceiling: kicked.append(
-            (to_name, from_name, seed, ceiling)
+        lambda to_name, from_name, seed, ceiling, mail_ctxs=None: kicked.append(
+            (to_name, from_name, seed, ceiling, mail_ctxs)
         ),
     )
     assert dispatch_mod._switchboard_exchange("B", "A", "msg") is True
     assert len(calls) == 1, "only the first hop (drive B) runs inline; the relay is detached"
     assert calls[0]["to"] == "B" and calls[0]["mirror"] is False
-    assert kicked == [("B", "A", "r1", 6)], "the relay is handed off with B's reply as the seed"
+    # No mail ctxs on this bare _switchboard_exchange call -> chat-style raw relay.
+    assert kicked == [("B", "A", "r1", 6, None)], "the relay is handed off with B's reply as the seed"
 
 
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:
@@ -1083,3 +1084,48 @@ def test_deliver_live_claude_mcp_error_falls_back_to_socket(
 
     assert result.delivery == "hosted"
     assert len(inject_calls) == 1, "control.sock inject must fire on sidecar failure"
+
+
+# ---------------------------------------------------------------------------
+# node x-1f23: the autonomous relay continuations carry <fno_mail>, not just
+# the seed (codex P2). Chat (no mail ctxs) stays raw.
+# ---------------------------------------------------------------------------
+
+def test_relay_loop_wraps_continuations_with_mail_ctxs(monkeypatch) -> None:
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _MailCtx, _run_relay_loop
+
+    calls: list = []
+
+    def _rpc(method, params, **kw):
+        calls.append(params)
+        return {"delivered": True, "reply": ""}  # empty reply ends the loop
+
+    monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
+
+    ctxs = {
+        "alice": _MailCtx(from_="aaaa1111", harness="claude-code", model="unknown", to="bbbb2222"),
+        "bob": _MailCtx(from_="bbbb2222", harness="claude-code", model="unknown", to="aaaa1111"),
+    }
+    # seed = bob's reply; first continuation drives alice with bob's turn, so the
+    # hop body is wrapped as BOB (the peer who just spoke).
+    _run_relay_loop("bob", "alice", "bob says hi", ceiling=3, mail_ctxs=ctxs)
+    assert len(calls) == 1
+    body = calls[0]["body"]
+    assert body.startswith('<fno_mail from="bbbb2222"'), body
+    assert body.rstrip().endswith("</fno_mail>")
+    assert "bob says hi" in body
+
+
+def test_relay_loop_raw_without_mail_ctxs_chat_path(monkeypatch) -> None:
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _run_relay_loop
+
+    calls: list = []
+    monkeypatch.setattr(
+        dispatch_mod, "_daemon_rpc",
+        lambda method, params, **kw: calls.append(params) or {"delivered": True, "reply": ""},
+    )
+    # No mail ctxs (the chat path) -> body stays raw, no envelope.
+    _run_relay_loop("bob", "alice", "bob says hi", ceiling=3)
+    assert calls[0]["body"] == "bob says hi"
