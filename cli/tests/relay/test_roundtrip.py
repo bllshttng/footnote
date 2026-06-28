@@ -194,6 +194,56 @@ def test_resolve_worker_rejects_unsafe_short_id(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Adopted (host_mode="attached") lane resolution (G3, node x-e027).
+# ---------------------------------------------------------------------------
+
+def test_resolve_attached_matches_live_adopted_session(tmp_path, monkeypatch):
+    # An adopted claude --bg row has an EMPTY short_id (no worker socket) and the
+    # 8-hex in claude_short_id; resolve to that, not the interactive short_id.
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    _write_registry(tmp_path, [
+        {"name": "cc-aa11bb22", "short_id": "", "provider": "claude",
+         "claude_session_uuid": "the-uuid", "claude_short_id": "aa11bb22",
+         "host_mode": "attached", "status": "live"},
+    ])
+    assert rt_mod.resolve_attached_short_id("the-uuid") == "aa11bb22"
+    # The same row is NOT an interactive worker.submit target (empty short_id, not
+    # host_mode=interactive) -> the worker resolver skips it.
+    assert rt_mod.resolve_worker_short_id("the-uuid") is None
+
+
+def test_resolve_attached_skips_interactive_and_exec(tmp_path, monkeypatch):
+    # Only host_mode=attached resolves on the adopt lane; interactive/exec do not.
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    _write_registry(tmp_path, [
+        {"name": "i", "short_id": "wkI", "provider": "claude", "claude_session_uuid": "u",
+         "claude_short_id": "wkI", "host_mode": "interactive"},
+        {"name": "e", "short_id": "wkE", "provider": "claude", "claude_session_uuid": "u",
+         "claude_short_id": "wkE", "host_mode": "exec"},
+        {"name": "a", "short_id": "", "provider": "claude", "claude_session_uuid": "u",
+         "claude_short_id": "cc77dd88", "host_mode": "attached"},
+    ])
+    assert rt_mod.resolve_attached_short_id("u") == "cc77dd88"
+
+
+def test_resolve_attached_skips_dead_and_rejects_unsafe(tmp_path, monkeypatch):
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    _write_registry(tmp_path, [
+        {"name": "dead", "claude_session_uuid": "d", "claude_short_id": "aa11bb22",
+         "host_mode": "attached", "status": "exited"},
+        {"name": "evil", "claude_session_uuid": "x", "claude_short_id": "../../etc",
+         "provider": "claude", "host_mode": "attached", "status": "live"},
+    ])
+    assert rt_mod.resolve_attached_short_id("d") is None  # dead
+    assert rt_mod.resolve_attached_short_id("x") is None  # path-unsafe short
+
+
+def test_resolve_attached_none_without_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))  # no registry.json
+    assert rt_mod.resolve_attached_short_id("u") is None
+
+
+# ---------------------------------------------------------------------------
 # The worker.submit RPC client.
 # ---------------------------------------------------------------------------
 
@@ -332,6 +382,84 @@ def test_deliver_session_times_out_with_live_worker(monkeypatch):
     monkeypatch.setattr(rt_mod, "_transcript_replies", lambda sid, cd=None: [])  # never replies
     with pytest.raises(TimeoutError, match="no reply"):
         rt_mod.deliver_session("sid", "framed", timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Adopted-session vehicle: control.sock op:reply via the mail-inject verb (G3).
+# ---------------------------------------------------------------------------
+
+class _FakeProc:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def test_submit_via_control_reply_true_on_delivered(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(argv=argv, input=kw.get("input"))
+        return _FakeProc('{"delivered": true, "short": "aa11bb22"}')
+
+    monkeypatch.setattr(rt_mod, "subprocess", type("S", (), {
+        "run": staticmethod(fake_run), "SubprocessError": Exception}))
+    from fno.agents import rust_runtime
+    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: "/bin/fno-agents")
+
+    assert rt_mod.submit_via_control_reply("the-uuid", "framed text") is True
+    assert seen["argv"] == ["/bin/fno-agents", "mail-inject", "--session", "the-uuid"]
+    assert seen["input"] == "framed text"  # the framed turn goes on STDIN
+
+
+def test_submit_via_control_reply_false_when_not_delivered(monkeypatch):
+    monkeypatch.setattr(rt_mod, "subprocess", type("S", (), {
+        "run": staticmethod(lambda *a, **k: _FakeProc('{"delivered": false}')),
+        "SubprocessError": Exception}))
+    from fno.agents import rust_runtime
+    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: "/bin/fno-agents")
+    assert rt_mod.submit_via_control_reply("u", "f") is False
+
+
+def test_submit_via_control_reply_false_when_binary_absent(monkeypatch):
+    from fno.agents import rust_runtime
+    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: None)
+    assert rt_mod.submit_via_control_reply("u", "f") is False
+
+
+def test_submit_via_control_reply_false_on_bad_json(monkeypatch):
+    monkeypatch.setattr(rt_mod, "subprocess", type("S", (), {
+        "run": staticmethod(lambda *a, **k: _FakeProc("not json")),
+        "SubprocessError": Exception}))
+    from fno.agents import rust_runtime
+    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: "/bin/fno-agents")
+    assert rt_mod.submit_via_control_reply("u", "f") is False
+
+
+def test_deliver_attached_returns_new_transcript_reply(monkeypatch):
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_control_reply", lambda sid, framed: True)
+    n = {"i": 0}
+
+    def fake_tx(sid, cd=None):
+        n["i"] += 1
+        return ["adopted peer reply"] if n["i"] >= 3 else []  # call 1 = baseline
+
+    monkeypatch.setattr(rt_mod, "_transcript_replies", fake_tx)
+    assert rt_mod.deliver_attached("the-uuid", "framed", timeout=30) == "adopted peer reply"
+
+
+def test_deliver_attached_raises_when_inject_fails(monkeypatch):
+    monkeypatch.setattr(rt_mod, "submit_via_control_reply", lambda sid, framed: False)
+    monkeypatch.setattr(rt_mod, "_transcript_replies", lambda sid, cd=None: [])
+    with pytest.raises(RuntimeError, match="control.sock inject failed"):
+        rt_mod.deliver_attached("the-uuid", "framed")
+
+
+def test_deliver_attached_times_out_without_reply(monkeypatch):
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_control_reply", lambda sid, framed: True)
+    monkeypatch.setattr(rt_mod, "_transcript_replies", lambda sid, cd=None: [])  # never replies
+    with pytest.raises(TimeoutError, match="no reply from adopted session"):
+        rt_mod.deliver_attached("the-uuid", "framed", timeout=5)
 
 
 # ---------------------------------------------------------------------------
