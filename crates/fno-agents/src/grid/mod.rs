@@ -51,6 +51,7 @@ pub mod palette;
 pub mod pane;
 pub mod repo;
 pub mod run;
+pub mod squads;
 pub mod state;
 
 /// Default soft cap on the number of panes a grid will tile (Locked Decision
