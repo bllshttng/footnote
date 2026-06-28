@@ -41,7 +41,7 @@ Atomic, lock-protected, schema-validated. Callable from anywhere (bash, Python, 
 | `fno state` | Read/write/validate state files. The ONLY legal post-init mutation on a target manifest is first-fill of an empty `plan_path` via `fno state set --field plan_path` (else exit 5). |
 | `fno-agents loop run --driver target\|megawalk` | The unified Rust loop (step 5). Front door: `scripts/run-target-loop.sh`. The old `fno loop` verb is removed. |
 | `fno whoami\|status` | Self-introspection. Run when confused after compaction. |
-| `fno mail send --to-project` / `fno mail reply\|unread\|ack` | Cross-project messaging: one namespace over the jsonl-canon bus log. `send` publishes (durable-first); `unread`/`ack` are the per-recipient cursor consume; `reply` correlates. (The legacy inbox + agents-send messaging surfaces are retired.) |
+| `fno mail send --to-project` / `fno mail reply\|unread\|ack` | Cross-project messaging: one namespace over the jsonl-canon bus log. `send` delivers live-inject-first (the durable bus is the offline fallback, node x-1f23); `unread`/`ack` are the per-recipient cursor consume; `reply` correlates. (The legacy inbox + agents-send messaging surfaces are retired.) |
 | `fno agents spawn\|promote\|host\|ask\|watch ...` | Cross-CLI agent lifecycle (claude / codex / gemini). Per-provider support differs (e.g. `promote` adopts claude into a stream-json lane; `drive`/`grid` are codex/gemini-only; `watch` is claude-only) - see `docs/provider-command-matrix.md`. To message a peer, use `fno mail send`. |
 | `fno carveout add` | Capture left-out work (deferred decisions, out-of-scope bugs) to a session ledger for retro-triage at merge. |
 
