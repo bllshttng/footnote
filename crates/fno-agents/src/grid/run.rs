@@ -38,6 +38,7 @@ use tokio_tungstenite::WebSocketStream;
 use crate::client::{ensure_daemon, resolve_daemon_bin};
 use crate::grid::group::{self as group, GroupKey, RailState};
 use crate::grid::layout::{self as layout, LayoutError, PageLayout, TtySize};
+use crate::grid::leader::{self, LeaderDecision, LeaderState};
 use crate::grid::palette::Palette;
 use crate::grid::pane::{CellColor, Pane, PaneSnapshot, RenderCell};
 use crate::grid::repo;
@@ -1280,7 +1281,7 @@ fn raster_footer(
             }
             (Mode::Watch, false, true) => "[ ] page · ↹ focus · Enter drive · q quit",
             (Mode::Watch, false, false) => "[ ] page · ↹ focus · Enter: exec - watch only · q quit",
-            (Mode::Drive, _, _) => "DRIVE - Esc release · Ctrl-C quit",
+            (Mode::Drive, _, _) => "DRIVE - ^Space leader (mux) · Esc release · Ctrl-C quit",
             // Scrollback is handled by the dedicated branch above; this arm
             // exists only for exhaustiveness and is never reached at runtime.
             (Mode::Scrollback, _, _) => "SCROLLBACK - Esc live",
@@ -2322,6 +2323,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     } else {
         None
     };
+    // Leader-key input model for the railless tiled grid (x-b563, Phase 1).
+    // Resolved once from `config.grid.leader_key` (default Ctrl-Space). The
+    // leader only routes input on the tiled compositor path; the rail keeps its
+    // own RailNav/PaneDrive model (Phase 2, x-d97d). `leader` carries the
+    // Normal/Pending sub-state across key events.
+    let leader_cfg = leader::resolve_leader_key(&std::env::current_dir().unwrap_or_default());
+    let mut leader = LeaderState::Normal;
+
     // Registry rows shadowing the current names list (rebuilt on `t` toggle
     // and after registry refreshes; stable within a session for Phase 1).
     // Mutable so an E5b live-added worker pushes a row in lockstep with its
@@ -2981,6 +2990,167 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         } // end if rail_fits
 
                         if !rail_consumed {
+                        // ── Leader-key model (tiled path only; x-b563 Phase 1) ──
+                        // The rail owns its own input (RailNav/PaneDrive); the
+                        // leader routes input ONLY when the tiled grid is the
+                        // surface (no rail, or a rail too narrow to render). The
+                        // leader is additive here: a bare key still flows through
+                        // the existing key_to_input dispatch below.
+                        let tiled_input = rail_state.is_none() || !rail_fits;
+                        if tiled_input {
+                            let (next, decision) = leader::step(leader, &key, &leader_cfg);
+                            leader = next;
+                            match decision {
+                                LeaderDecision::EnterPending => {
+                                    hint = Some(
+                                        "LEADER - next: \u{21b9} focus \u{b7} ] [ page \u{b7} Enter drive \u{b7} Space scrollback \u{b7} ? help \u{b7} q quit \u{b7} (Ctrl-Space again sends it)"
+                                            .to_string(),
+                                    );
+                                    dirty = true;
+                                    continue;
+                                }
+                                LeaderDecision::SendPrefix => {
+                                    // Double-tap: send the literal leader byte to the
+                                    // focused agent (no key is permanently stolen).
+                                    // Eaten by the per-pane gate if not driving.
+                                    hint = None;
+                                    let act = comp.step(
+                                        InputEvent::Keystroke(leader::leader_bytes(&leader_cfg)),
+                                        &states,
+                                    );
+                                    if handle_action(act, &mut comp, &mut states, &names,
+                                                     &panes, &mut driver_sinks, home).await {
+                                        break;
+                                    }
+                                    dirty = true;
+                                    continue;
+                                }
+                                LeaderDecision::Command(cmdkey) => {
+                                    hint = None;
+                                    let ctrl_cmd = cmdkey.modifiers.contains(KeyModifiers::CONTROL);
+                                    if !ctrl_cmd && matches!(cmdkey.code, KeyCode::Char('?')) {
+                                        // leader + ? opens the help overlay. Release any
+                                        // drive first so the existing WATCH help gate
+                                        // (q/Esc/?) can close it.
+                                        if comp.mode() == Mode::Drive {
+                                            let rel = comp.step(InputEvent::Release, &states);
+                                            if handle_action(rel, &mut comp, &mut states, &names,
+                                                             &panes, &mut driver_sinks, home).await {
+                                                break;
+                                            }
+                                        }
+                                        help_open = !help_open;
+                                        prev_frame = None; // overlay toggled -> full-paint
+                                        dirty = true;
+                                        continue;
+                                    }
+                                    // The mux command set is the former WATCH keymap;
+                                    // an unbound key is reported and NOT forwarded.
+                                    match key_to_input(cmdkey, Mode::Watch) {
+                                        Some(InputEvent::Quit) => {
+                                            if handle_action(CompositorAction::Quit, &mut comp,
+                                                             &mut states, &names, &panes,
+                                                             &mut driver_sinks, home).await {
+                                                break;
+                                            }
+                                        }
+                                        Some(InputEvent::EnterScrollback) => {
+                                            if comp.mode() == Mode::Drive {
+                                                let rel = comp.step(InputEvent::Release, &states);
+                                                if handle_action(rel, &mut comp, &mut states, &names,
+                                                                 &panes, &mut driver_sinks, home).await {
+                                                    break;
+                                                }
+                                            }
+                                            let no_history = panes
+                                                .get(comp.focus())
+                                                .map(|p| p.history_size())
+                                                .unwrap_or(0)
+                                                == 0;
+                                            if no_history {
+                                                hint = Some("no scrollback history".to_string());
+                                            } else if let CompositorAction::Scroll { pane_idx, cmd } =
+                                                comp.step(InputEvent::EnterScrollback, &states)
+                                            {
+                                                if let Some(p) = panes.get_mut(pane_idx) {
+                                                    p.apply_scroll(cmd);
+                                                }
+                                            }
+                                            dirty = true;
+                                        }
+                                        Some(
+                                            input @ (InputEvent::FocusNext
+                                            | InputEvent::FocusPrev
+                                            | InputEvent::PageNext
+                                            | InputEvent::PagePrev),
+                                        ) => {
+                                            // Seamless switch-and-drive: release the
+                                            // current claim, move focus/page, then
+                                            // promote the newly focused pane so the
+                                            // operator keeps driving without an explicit
+                                            // Enter. Release(old)+Promote(new) act on
+                                            // different agents, so the per-agent claims
+                                            // do not race.
+                                            if comp.mode() == Mode::Drive {
+                                                let rel = comp.step(InputEvent::Release, &states);
+                                                if handle_action(rel, &mut comp, &mut states, &names,
+                                                                 &panes, &mut driver_sinks, home).await {
+                                                    break;
+                                                }
+                                            }
+                                            let act = comp.step(input, &states);
+                                            if handle_action(act, &mut comp, &mut states, &names,
+                                                             &panes, &mut driver_sinks, home).await {
+                                                break;
+                                            }
+                                            if !promote_blocked_by_exec(&InputEvent::Promote, comp.mode(),
+                                                                        comp.focus(), &host_interactive)
+                                                && states.get(comp.focus())
+                                                    .map(ConnState::is_drivable)
+                                                    .unwrap_or(false)
+                                            {
+                                                let prom = comp.step(InputEvent::Promote, &states);
+                                                if handle_action(prom, &mut comp, &mut states, &names,
+                                                                 &panes, &mut driver_sinks, home).await {
+                                                    break;
+                                                }
+                                            }
+                                            dirty = true;
+                                        }
+                                        Some(InputEvent::Promote) => {
+                                            // leader + Enter drives the focused pane
+                                            // (no-op if already driving it).
+                                            if promote_blocked_by_exec(&InputEvent::Promote, comp.mode(),
+                                                                       comp.focus(), &host_interactive) {
+                                                let who = names.get(comp.focus())
+                                                    .map(String::as_str).unwrap_or("?");
+                                                hint = Some(format!(
+                                                    "{who} is an exec agent - watch only (drive needs host_mode=interactive)"
+                                                ));
+                                            } else {
+                                                let prom = comp.step(InputEvent::Promote, &states);
+                                                if handle_action(prom, &mut comp, &mut states, &names,
+                                                                 &panes, &mut driver_sinks, home).await {
+                                                    break;
+                                                }
+                                            }
+                                            dirty = true;
+                                        }
+                                        _ => {
+                                            hint = Some(
+                                                "unknown leader command (Ctrl-Space then: \u{21b9} focus \u{b7} ] [ page \u{b7} Enter drive \u{b7} Space scrollback \u{b7} ? help \u{b7} q quit)"
+                                                    .to_string(),
+                                            );
+                                            dirty = true;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                LeaderDecision::Forward => {
+                                    // Bare key: fall through to the existing dispatch.
+                                }
+                            }
+                        }
                         if let Some(input) = key_to_input(key, comp.mode()) {
                             // Any operator key clears a prior transient hint.
                             hint = None;
@@ -3583,6 +3753,9 @@ fn help_key_action(key: KeyEvent, mode: Mode, help_open: bool) -> HelpAction {
 fn help_overlay_lines(rail_on: bool) -> Vec<String> {
     let mut lines = vec![
         " Keybindings ".to_string(),
+        String::new(),
+        "  ^Space + key   leader: mux command while driving (tiled grid)".to_string(),
+        "  ^Space ^Space  send the literal Ctrl-Space to the agent".to_string(),
         String::new(),
         "  Tab / arrows   focus next/prev pane".to_string(),
         "  Enter          drive focused pane".to_string(),
