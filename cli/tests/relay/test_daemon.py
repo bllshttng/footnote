@@ -348,6 +348,28 @@ def test_daemon_deliver_refuses_attached_held_by_foreign_lane(tmp_path, monkeypa
         deliver(_resolution("sidX"), "framed")
 
 
+def test_daemon_deliver_routes_attached_when_stale_interactive_row_present(tmp_path, monkeypatch):
+    """codex peer P2: a stale live-looking interactive row coexists with the valid
+    adopted row, and the claim is held by the ATTACHED lane (pty:<attached_short>).
+    Resolution precedence would run the interactive branch first and refuse;
+    holder-matched dispatch routes through the lane that actually holds the claim."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    from fno.claims.core import acquire_claim
+    from fno.relay import roundtrip as rt
+    monkeypatch.setattr(rt, "resolve_worker_short_id", lambda sid: "staleI")     # stale interactive row
+    monkeypatch.setattr(rt, "resolve_attached_short_id", lambda sid: "cc77dd88")  # the valid adopted row
+    acquire_claim("session:sidDual", "pty:cc77dd88")  # held by the ATTACHED lane, not the stale one
+
+    seen = {}
+    monkeypatch.setattr(rt, "deliver_session",
+                        lambda *a, **k: pytest.fail("must not route to the stale interactive lane"))
+    monkeypatch.setattr(rt, "deliver_attached",
+                        lambda sid, framed, **kw: seen.update(sid=sid) or "adopted reply")
+    deliver = daemon.daemon_deliver(holder="relay-daemon:OTHER")
+    assert deliver(_resolution("sidDual"), "framed") == "adopted reply"
+    assert seen == {"sid": "sidDual"}
+
+
 def test_daemon_deliver_refuses_when_session_free_and_holds_no_claim(tmp_path, monkeypatch):
     """A FREE claim (worker row exists, but nothing holds session:X) means no
     daemon host -> no handle. The relay must refuse rather than spawn a second

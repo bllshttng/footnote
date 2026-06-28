@@ -329,54 +329,55 @@ def daemon_deliver(
 
     holder = holder or f"relay-daemon:{_pid()}"
 
-    def _route_through_claim(sid: str, claim_short: str, deliver_fn) -> Optional[str]:
-        """Route ``deliver_fn()`` ONLY if ``session:<sid>`` is held by the lane's
-        holder (``pty:<claim_short>``); a FREE claim or a foreign holder refuses
-        (single-writer guard, AC-E4-3). The probe claim is released on the free
-        path so the relay is never a second holder."""
+    def _deliver(res: Resolution, framed: str) -> Optional[str]:
+        sid = res.session_id
+        if not sid:
+            raise RuntimeError("relay_deliver_failed: resolution carries no session_id")
+        # Gather BOTH candidate lanes for this session, each with the claim holder
+        # it would be held under (``pty:<short>``) and its delivery vehicle. A
+        # session normally resolves to exactly one lane, but a stale live-looking
+        # interactive row can coexist with the valid adopted row -- so we dispatch by
+        # which candidate actually HOLDS the claim, not by resolution precedence
+        # (codex peer P2: precedence would refuse when the wrong lane wins the order).
+        candidates: list[tuple[str, Callable[[], Optional[str]]]] = []
+        short_id = resolve_worker_short_id(sid)
+        if short_id is not None:
+            candidates.append((
+                interactive_claim_holder(short_id),
+                lambda: deliver_session(sid, framed, settle_ms=settle_ms, timeout=timeout, short_id=short_id),
+            ))
+        attached_short = resolve_attached_short_id(sid)
+        if attached_short is not None:
+            candidates.append((
+                interactive_claim_holder(attached_short),
+                lambda: deliver_attached(sid, framed, timeout=timeout),
+            ))
+        if not candidates:
+            raise RuntimeError(
+                f"relay_deliver_failed: no live daemon worker or adopted session for session {sid}"
+            )
+
+        # Probe the single-writer claim ONCE (AC-E4-3). Held by a candidate's lane
+        # holder -> route through THAT lane. A free claim (no host) or a foreign
+        # holder (a ``stream:`` lane / external writer matching no candidate) refuses
+        # rather than injecting into a session footnote does not PTY-host.
         key = f"session:{sid}"
         try:
             acquire_claim(key, holder, reason="relay routing probe")
         except ClaimHeldByOther as exc:
-            # Held by another -> route ONLY if that holder is the daemon's PTY lane
-            # for THIS session (``pty:<short>``). A ``stream:<id>`` lane or any other
-            # external writer is NOT a routable handle; refuse rather than inject
-            # into a session footnote does not PTY-host (single-writer guard).
-            expected = interactive_claim_holder(claim_short)
-            if exc.holder != expected:
-                raise RuntimeError(
-                    f"relay_deliver_failed: session:{sid} held by {exc.holder!r}, not the daemon "
-                    f"interactive lane ({expected!r}); refusing to route"
-                )
-            return deliver_fn()
+            for expected, deliver_fn in candidates:
+                if exc.holder == expected:
+                    return deliver_fn()
+            holders = " or ".join(e for e, _ in candidates)
+            raise RuntimeError(
+                f"relay_deliver_failed: session:{sid} held by {exc.holder!r}, not the daemon "
+                f"interactive lane ({holders}); refusing to route"
+            )
         # Free (or stale-reclaimed): no host -> no handle. Drop the probe claim so
         # the relay is never a second holder, then refuse.
         release_claim(key, holder)
         raise RuntimeError(
             f"relay_deliver_failed: session:{sid} not daemon-held (no live handle to route through)"
-        )
-
-    def _deliver(res: Resolution, framed: str) -> Optional[str]:
-        sid = res.session_id
-        if not sid:
-            raise RuntimeError("relay_deliver_failed: resolution carries no session_id")
-        # Resolve the lane first so the claim holder binds to it. Interactive
-        # (worker.submit) takes precedence; an adopted attached session is the G3
-        # fallback when no interactive worker hosts the session.
-        short_id = resolve_worker_short_id(sid)
-        if short_id is not None:
-            return _route_through_claim(
-                sid, short_id,
-                lambda: deliver_session(sid, framed, settle_ms=settle_ms, timeout=timeout, short_id=short_id),
-            )
-        attached_short = resolve_attached_short_id(sid)
-        if attached_short is not None:
-            return _route_through_claim(
-                sid, attached_short,
-                lambda: deliver_attached(sid, framed, timeout=timeout),
-            )
-        raise RuntimeError(
-            f"relay_deliver_failed: no live daemon worker or adopted session for session {sid}"
         )
 
     return _deliver
