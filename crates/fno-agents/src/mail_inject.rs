@@ -149,13 +149,12 @@ pub fn run_mail_inject(rest: &[String]) -> i32 {
     let short = worker.short_id().to_string();
     let auth = read_control_key();
 
-    // Baseline the recipient transcript BEFORE injecting so growth proves OUR turn
-    // landed. No transcript yet == we cannot confirm landing -> durable.
+    // Locate the recipient transcript. No transcript yet == we cannot confirm
+    // landing -> durable.
     let transcript = match find_transcript(&worker.session_id) {
         Some(p) => p,
         None => return emit(false, "no-transcript"),
     };
-    let baseline = transcript_len(&transcript);
 
     let mut transport = match UnixControlTransport::connect(&sock) {
         Ok(t) => t,
@@ -169,6 +168,10 @@ pub fn run_mail_inject(rest: &[String]) -> i32 {
     {
         return emit(false, "attach-failed");
     }
+    // Baseline the transcript AFTER attach, immediately before inject, so attach
+    // side-effects cannot be mistaken for our turn landing (codex peer P2); only
+    // post-inject growth counts.
+    let baseline = transcript_len(&transcript);
     if let Err(e) = inject_reply(&mut transport, &short, &text, auth.as_deref(), None) {
         return match e {
             DriveError::UnsafeText => emit(false, "unsafe-text"),
