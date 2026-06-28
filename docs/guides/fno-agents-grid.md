@@ -40,7 +40,7 @@ The rail is opt-in. Without `--rail` the grid is exactly the tiled grid above; n
 | `d` | drive the selected agent (if drivable), from either Single or GroupTile | forwarded to the agent |
 | `a` | toggle the **attention filter**: show only agents waiting for input (idle + exited hidden) | forwarded to the agent |
 | Esc | (inert) | release the driver claim, back to RailNav |
-| `g` | cycle the group-by key: cwd → session → provider → status | forwarded to the agent |
+| `g` | cycle the group-by key: cwd → session → provider → status → squad → union (sidelines + squads at once) | forwarded to the agent |
 | `Tab` | toggle the main area between **Single** (one focused pane) and **GroupTile** (the selected agent's whole group tiled side by side) | forwarded to the agent |
 | `]` / `[` | in GroupTile, page through a group too large to tile at once (`PageDn` / `PageUp` also work) | forwarded to the agent |
 | `t` | toggle the rail off (back to the tiled grid) | forwarded to the agent |
