@@ -48,6 +48,7 @@ pub mod group;
 pub mod layout;
 pub mod palette;
 pub mod pane;
+pub mod repo;
 pub mod run;
 pub mod state;
 

@@ -40,6 +40,7 @@ use crate::grid::group::{self as group, GroupKey, RailState};
 use crate::grid::layout::{self as layout, LayoutError, PageLayout, TtySize};
 use crate::grid::palette::Palette;
 use crate::grid::pane::{CellColor, Pane, PaneSnapshot, RenderCell};
+use crate::grid::repo;
 use crate::grid::state::{
     off_screen_waiting_by_page, Compositor, CompositorAction, ConnAction, ConnEvent, ConnState,
     InputEvent, Mode,
@@ -1353,10 +1354,22 @@ fn raster_rail(
 
         // Member lines: indented, selected member is inverse.
         for &member_idx in &grp.members {
-            let name = rows
-                .get(member_idx)
-                .and_then(|r| r.get("name"))
-                .and_then(serde_json::Value::as_str)
+            let row = rows.get(member_idx);
+            // Under repo-rollup (Cwd grouping), label the member by its worktree
+            // (`main`, `e5c-layout`) so a repo's checkouts are distinguishable
+            // (US2); fall back to the agent name (other group keys, or a non-git
+            // agent that carries no `_worktree`).
+            let worktree = if rail_state.group_key == group::GroupKey::Cwd {
+                row.and_then(|r| r.get(repo::WORKTREE_FIELD))
+                    .and_then(serde_json::Value::as_str)
+            } else {
+                None
+            };
+            let name = worktree
+                .or_else(|| {
+                    row.and_then(|r| r.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                })
                 .unwrap_or("?");
             let selected = rail_state.selected_agent_idx == Some(member_idx);
             if selected {
@@ -2233,7 +2246,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // This is a conservative Phase 1 choice (Discretion #2: keep all panes
     // subscribed; no lazy subscription). The rail groups the same names the
     // existing grid already shows - zero new I/O.
-    let initial_rail_rows: Vec<Value> = {
+    // Repo-rollup resolution cache (x-cb89): cwd -> canonical repo root,
+    // resolved once per distinct cwd. Lives for the whole run so the rail
+    // snapshot AND every live-added worker share it - git never re-spawns for a
+    // cwd already seen (the Concurrency failure mode: no per-frame git).
+    let mut repo_cache = repo::RepoCache::new();
+    let mut initial_rail_rows: Vec<Value> = {
         // Read registry rows once for richer grouping (cwd, provider, status).
         // Fall back to name-only synthetic rows if the registry is absent.
         let reg_path = home.registry_json();
@@ -2261,6 +2279,10 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
             })
             .collect()
     };
+    // Stamp each snapshot row with its repo-rollup identity (`_repo_root` +
+    // `_worktree`) so the very first `group_by` below already rolls a repo's
+    // worktrees up under one sideline (x-cb89).
+    repo::stamp_rows(&mut initial_rail_rows, &mut repo_cache);
 
     // Active rail state; initialized from `--rail` flag.
     let mut rail_state: Option<RailState> = if parsed.rail {
@@ -2487,13 +2509,18 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                     // explicit-name startup path; the worker
                                                     // spawns in this grid's cwd, so cwd
                                                     // grouping lands it with its siblings.
-                                                    rail_rows.push(json!({
+                                                    let mut new_row = json!({
                                                         "name": name.as_str(),
                                                         "provider": "claude",
                                                         "cwd": std::env::current_dir()
                                                             .ok()
                                                             .and_then(|p| p.to_str().map(str::to_string)),
-                                                    }));
+                                                    });
+                                                    // Resolve its repo so the new
+                                                    // worker rolls up under the right
+                                                    // sideline on the next frame (x-cb89).
+                                                    repo::stamp_row(&mut new_row, &mut repo_cache);
+                                                    rail_rows.push(new_row);
                                                     hint = Some(format!("launched {name}"));
                                                     // Push last (move, no clone): name's
                                                     // final use is the hint above.
@@ -4737,6 +4764,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn raster_rail_repo_rollup_header_basename_and_worktree_labels() {
+        // US1/US2/AC1-UI: a repo's main checkout + a worktree (stamped with the
+        // same `_repo_root`) render under ONE header (the repo basename), with
+        // members labeled by their worktree (`main`, `e5c-layout`), never the
+        // full path or the agent name.
+        let rows = vec![
+            json!({
+                "name": "wkMain", "provider": "claude", "status": "live",
+                "cwd": "/code/footnote/footnote",
+                repo::REPO_ROOT_FIELD: "/code/footnote/footnote",
+                repo::WORKTREE_FIELD: "main",
+            }),
+            json!({
+                "name": "wkLeaf", "provider": "claude", "status": "live",
+                "cwd": "/conductor/workspaces/footnote/e5c-layout",
+                repo::REPO_ROOT_FIELD: "/code/footnote/footnote",
+                repo::WORKTREE_FIELD: "e5c-layout",
+            }),
+        ];
+        let groups = group::group_by(&rows, group::GroupKey::Cwd);
+        let badges =
+            group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
+        let rs = group::RailState::new(group::GroupKey::Cwd);
+
+        let rail_rect = layout::TileRect {
+            row: 0,
+            col: 0,
+            rows: 6,
+            cols: 24,
+        };
+        let mut frame = ScreenBuffer::blank(6, 24);
+        raster_rail(&mut frame, &rail_rect, &groups, &badges, &rs, &rows);
+        let all: String = (0..6)
+            .map(|r| row_text(&frame, r))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(all.contains("footnote (2)"), "repo basename header:\n{all}");
+        assert!(!all.contains("/code/footnote"), "full path leaked:\n{all}");
+        assert!(all.contains("main"), "worktree label `main`:\n{all}");
+        assert!(all.contains("e5c-layout"), "worktree label:\n{all}");
+        assert!(
+            !all.contains("wkMain") && !all.contains("wkLeaf"),
+            "agent names must not show under repo rollup:\n{all}"
+        );
+    }
+
     // codex P2: a fleet taller than the rail must scroll so the selected row
     // stays visible (it was previously clipped once row >= last_row).
     #[test]
@@ -4937,8 +5012,10 @@ mod tests {
         assert!(all.contains("wkB"), "wkB tile missing:\n{all}");
 
         let footer_line = row_text(&frame, rail_page.footer.row);
+        // Footer shows the selected group's header, which under repo-rollup is the
+        // repo basename (`x` for cwd `/repo/x`), not the full path (US1).
         assert!(
-            footer_line.contains("group /repo/x"),
+            footer_line.contains("group x"),
             "footer group missing: {footer_line}"
         );
 
@@ -5069,7 +5146,9 @@ mod tests {
             ConnState::Watching,
         ];
         let live = live_group_of(&groups[0], &states);
-        assert_eq!(live.header, "/repo/x", "header preserved for rail + footer");
+        // Header is the repo basename (US1); key_value keeps the full path.
+        assert_eq!(live.header, "x", "header preserved for rail + footer");
+        assert_eq!(live.key_value, "/repo/x");
         assert_eq!(
             live.members,
             vec![0, 2],
