@@ -174,16 +174,19 @@ def test_deliver_live_codex_daemon_delivered_true(
     )
     assert result.msg_id.startswith("msg-")
 
-    # Durable-first invariant: envelope must always be in the store.
-    threads = read_all_threads("codex-agent")
-    assert len(threads) == 1, "envelope must be in store (durable-first)"
+    # Bus demotion (node x-1f23): a hosted delivery is self-recording (transcript),
+    # NOT also queued durable.
+    assert read_all_threads("codex-agent") == [], "hosted delivery must not queue durable"
 
-    # Verify the RPC was called with correct params.
+    # The deliver RPC carried the <fno_mail>-wrapped turn (codex/gemini share the
+    # envelope now), not the raw body.
     assert len(rpc_calls) == 1
     rpc = rpc_calls[0]
     assert rpc["method"] == "agent.deliver"
     assert rpc["params"]["name"] == "codex-agent"
-    assert rpc["params"]["body"] == "hey codex via PTY"
+    body = rpc["params"]["body"]
+    assert body.startswith("<fno_mail ") and body.rstrip().endswith("</fno_mail>")
+    assert "hey codex via PTY" in body
 
 
 # ---------------------------------------------------------------------------
@@ -362,23 +365,22 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
         )
     ])
 
+    from fno.agents import dispatch as dispatch_mod
     from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
 
-    send_calls: list = []
-    monkeypatch.setattr(claude_mod, "send_to_session", lambda *a, **kw: send_calls.append(1))
-    monkeypatch.setattr(
-        claude_mod, "locate_session",
-        lambda short_id, home=None: SessionLocator(
-            pid=12345, short_id=short_id,
-            messaging_socket_path=str(tmp_path / "agent.sock"),
-            jobs_dir=tmp_path / "jobs",
-        ),
-    )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
 
+    # The control.sock inject (mail-inject verb) is the socket-path successor; it
+    # succeeds here so the demote falls through to it.
+    inject_calls: list = []
+
+    def _ok_inject(recipient: str, text: str) -> bool:
+        inject_calls.append({"recipient": recipient, "text": text})
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _ok_inject)
+
     rpc_calls: list = []
-    from fno.agents import dispatch as dispatch_mod
 
     def _mock_rpc(method: str, params: dict, **kwargs):
         rpc_calls.append({"method": method, "params": params})
@@ -399,7 +401,7 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
     )
 
     assert result.delivery == "hosted"
-    assert len(send_calls) == 1, "demote must fall through to the socket path"
+    assert len(inject_calls) == 1, "demote must fall through to the control.sock inject"
     assert len(rpc_calls) == 1, "claude must probe the switchboard RPC"
     assert rpc_calls[0]["method"] == "agent.switchboard"
     assert rpc_calls[0]["params"]["to"] == "claude-peer"
@@ -635,8 +637,8 @@ def test_deliver_live_gemini_daemon_delivered_true(
     )
 
     assert result.delivery == "hosted"
-    threads = read_all_threads("gemini-agent")
-    assert len(threads) == 1
+    # Bus demotion (node x-1f23): a hosted delivery is not also queued durable.
+    assert read_all_threads("gemini-agent") == []
 
 
 # ---------------------------------------------------------------------------
@@ -1050,7 +1052,6 @@ def test_deliver_live_claude_mcp_error_falls_back_to_socket(
     ])
 
     from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
 
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: True)
 
@@ -1061,18 +1062,16 @@ def test_deliver_live_claude_mcp_error_falls_back_to_socket(
 
     monkeypatch.setattr(mcp_client, "send_to_channel", _boom)
 
-    socket_calls: list = []
-    monkeypatch.setattr(
-        claude_mod, "send_to_session", lambda *a, **kw: socket_calls.append(1)
-    )
-    monkeypatch.setattr(
-        claude_mod, "locate_session",
-        lambda short_id, home=None: SessionLocator(
-            pid=12345, short_id=short_id,
-            messaging_socket_path=str(tmp_path / "agent.sock"),
-            jobs_dir=tmp_path / "jobs",
-        ),
-    )
+    # The control.sock inject (mail-inject verb) is the socket-path successor.
+    from fno.agents import dispatch as dispatch_mod
+
+    inject_calls: list = []
+
+    def _ok_inject(recipient: str, text: str) -> bool:
+        inject_calls.append({"recipient": recipient, "text": text})
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _ok_inject)
 
     from fno.agents.dispatch import dispatch_send
 
@@ -1083,4 +1082,4 @@ def test_deliver_live_claude_mcp_error_falls_back_to_socket(
     )
 
     assert result.delivery == "hosted"
-    assert len(socket_calls) == 1, "socket fallback must fire on sidecar failure"
+    assert len(inject_calls) == 1, "control.sock inject must fire on sidecar failure"
