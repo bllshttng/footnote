@@ -116,19 +116,16 @@ pub type RepoCache = HashMap<String, Option<RepoInfo>>;
 /// renderer falls back to the agent name) - it shares the single ungrouped
 /// sideline and is never dropped.
 pub fn stamp_row(row: &mut Value, cache: &mut RepoCache) {
-    let cwd = row
+    let info = row
         .get("cwd")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let info = if cwd.is_empty() {
-        None
-    } else {
-        cache
-            .entry(cwd.clone())
-            .or_insert_with(|| resolve_repo(&cwd))
-            .clone()
-    };
+        .filter(|s| !s.is_empty())
+        .and_then(|cwd| {
+            cache
+                .entry(cwd.to_string())
+                .or_insert_with_key(|key| resolve_repo(key))
+                .clone()
+        });
     let Some(obj) = row.as_object_mut() else {
         return;
     };

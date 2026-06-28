@@ -1353,24 +1353,48 @@ fn raster_rail(
         lines.push((truncate_rail(&header_line, max_cols), false));
 
         // Member lines: indented, selected member is inverse.
+        let cwd_grouped = rail_state.group_key == group::GroupKey::Cwd;
         for &member_idx in &grp.members {
             let row = rows.get(member_idx);
+            let agent_name = || {
+                row.and_then(|r| r.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?")
+            };
             // Under repo-rollup (Cwd grouping), label the member by its worktree
             // (`main`, `e5c-layout`) so a repo's checkouts are distinguishable
             // (US2); fall back to the agent name (other group keys, or a non-git
             // agent that carries no `_worktree`).
-            let worktree = if rail_state.group_key == group::GroupKey::Cwd {
+            let worktree = if cwd_grouped {
                 row.and_then(|r| r.get(repo::WORKTREE_FIELD))
                     .and_then(serde_json::Value::as_str)
             } else {
                 None
             };
-            let name = worktree
-                .or_else(|| {
-                    row.and_then(|r| r.get("name"))
-                        .and_then(serde_json::Value::as_str)
-                })
-                .unwrap_or("?");
+            let label: String = match worktree {
+                // Two agents can share a checkout (e.g. several goals launched in
+                // the same cwd), so the same `_worktree` repeats within a group.
+                // A non-unique label would render duplicate bullets and an
+                // ambiguous selection marker, so disambiguate with the agent name
+                // (codex P2). Names are registry-unique.
+                Some(w)
+                    if grp
+                        .members
+                        .iter()
+                        .filter(|&&mi| {
+                            rows.get(mi)
+                                .and_then(|r| r.get(repo::WORKTREE_FIELD))
+                                .and_then(serde_json::Value::as_str)
+                                == Some(w)
+                        })
+                        .count()
+                        > 1 =>
+                {
+                    format!("{w} ({})", agent_name())
+                }
+                Some(w) => w.to_string(),
+                None => agent_name().to_string(),
+            };
             let selected = rail_state.selected_agent_idx == Some(member_idx);
             if selected {
                 selected_flat = Some(lines.len());
@@ -1378,7 +1402,7 @@ fn raster_rail(
             // Indent by 2 spaces; leave room for the selection marker.
             let prefix = if selected { "> " } else { "  " };
             let available = max_cols.saturating_sub(prefix.len());
-            let name_part = truncate_rail(name, available);
+            let name_part = truncate_rail(&label, available);
             let padded = pad_rail(&format!("{prefix}{name_part}"), max_cols);
             lines.push((padded, selected));
         }
@@ -4810,6 +4834,43 @@ mod tests {
             !all.contains("wkMain") && !all.contains("wkLeaf"),
             "agent names must not show under repo rollup:\n{all}"
         );
+    }
+
+    #[test]
+    fn raster_rail_disambiguates_shared_worktree_with_agent_name() {
+        // codex P2: two agents in the SAME checkout share `_worktree = main`.
+        // The rail must disambiguate (append the agent name) rather than render
+        // two identical `main` bullets with an ambiguous selection marker.
+        let rows = vec![
+            json!({
+                "name": "goalA", "provider": "claude", "status": "live",
+                "cwd": "/r/footnote",
+                repo::REPO_ROOT_FIELD: "/r/footnote", repo::WORKTREE_FIELD: "main",
+            }),
+            json!({
+                "name": "goalB", "provider": "claude", "status": "live",
+                "cwd": "/r/footnote",
+                repo::REPO_ROOT_FIELD: "/r/footnote", repo::WORKTREE_FIELD: "main",
+            }),
+        ];
+        let groups = group::group_by(&rows, group::GroupKey::Cwd);
+        let badges =
+            group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
+        let rs = group::RailState::new(group::GroupKey::Cwd);
+        let rail_rect = layout::TileRect {
+            row: 0,
+            col: 0,
+            rows: 6,
+            cols: 28,
+        };
+        let mut frame = ScreenBuffer::blank(6, 28);
+        raster_rail(&mut frame, &rail_rect, &groups, &badges, &rs, &rows);
+        let all: String = (0..6)
+            .map(|r| row_text(&frame, r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("main (goalA)"), "A disambiguated:\n{all}");
+        assert!(all.contains("main (goalB)"), "B disambiguated:\n{all}");
     }
 
     // codex P2: a fleet taller than the rail must scroll so the selected row
