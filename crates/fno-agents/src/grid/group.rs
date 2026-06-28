@@ -53,7 +53,15 @@ impl GroupKey {
     /// the field is absent or not a string (caller buckets to `"unknown"`).
     fn extract<'a>(&self, row: &'a Value) -> Option<&'a str> {
         match self {
-            GroupKey::Cwd => row.get("cwd").and_then(Value::as_str),
+            // Repo-rollup (x-cb89): bucket by the canonical repo root stamped
+            // onto the frozen rail snapshot by `repo::stamp_row` (a worktree and
+            // its repo's main checkout carry the same `_repo_root`, so they roll
+            // up under one sideline). Fall back to the literal `cwd` when the row
+            // was never stamped (e.g. the railless path or a pure unit test).
+            GroupKey::Cwd => row
+                .get(crate::grid::repo::REPO_ROOT_FIELD)
+                .and_then(Value::as_str)
+                .or_else(|| row.get("cwd").and_then(Value::as_str)),
             GroupKey::Provider => row.get("provider").and_then(Value::as_str),
             GroupKey::Status => row.get("status").and_then(Value::as_str),
             // Session is provider-specific on disk. Python (which authors most
@@ -139,8 +147,16 @@ pub fn group_by(rows: &[Value], key: GroupKey) -> Vec<Group> {
                 continue;
             }
         }
+        // Repo-rollup display (x-cb89): the Cwd key buckets on the full repo-root
+        // PATH (so two repos sharing a basename stay distinct - AC1-EDGE) but the
+        // header shows just the basename (`footnote`, not the full path - US1).
+        // Every other key displays its raw value verbatim.
+        let header = match key {
+            GroupKey::Cwd => crate::grid::repo::basename(&kv).to_string(),
+            _ => kv.clone(),
+        };
         groups.push(Group {
-            header: kv.clone(),
+            header,
             key_value: kv,
             members: vec![idx],
         });
@@ -639,11 +655,13 @@ mod tests {
         ]);
         let groups = group_by(&rows, GroupKey::Cwd);
 
-        // Three distinct cwds; sorted by header.
+        // Three distinct cwds; sorted by key_value (the full path). The header
+        // is the repo basename (US1), while key_value keeps the full path.
         assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].header, "/repo/alpha");
-        assert_eq!(groups[1].header, "/repo/beta");
-        assert_eq!(groups[2].header, "/repo/gamma");
+        assert_eq!(groups[0].header, "alpha");
+        assert_eq!(groups[0].key_value, "/repo/alpha");
+        assert_eq!(groups[1].header, "beta");
+        assert_eq!(groups[2].header, "gamma");
 
         // Alpha group has two members (wkA at idx 0, wkC at idx 2).
         assert_eq!(groups[0].members.len(), 2);
@@ -683,6 +701,79 @@ mod tests {
         assert_eq!(names, vec!["wkA", "wkM", "wkZ"]);
     }
 
+    // ── Repo-rollup (x-cb89): grouping reads the stamped `_repo_root` ─────────
+
+    /// A row stamped with `_repo_root` + `cwd` by `repo::stamp_row`.
+    fn stamped(name: &str, cwd: &str, repo_root: &str) -> Value {
+        json!({
+            "name": name,
+            "cwd": cwd,
+            "provider": "claude",
+            "status": "live",
+            crate::grid::repo::REPO_ROOT_FIELD: repo_root,
+        })
+    }
+
+    #[test]
+    fn ac1_hp_repo_rollup_merges_worktrees_under_one_entry() {
+        // AC1-HP: the main checkout and a worktree (different cwds) carry the
+        // SAME `_repo_root`, so they roll up into ONE `footnote` sideline.
+        let rows = vec![
+            stamped(
+                "wkMain",
+                "/code/footnote/footnote",
+                "/code/footnote/footnote",
+            ),
+            stamped(
+                "wkLeaf",
+                "/conductor/workspaces/footnote/e5c-layout",
+                "/code/footnote/footnote",
+            ),
+        ];
+        let groups = group_by(&rows, GroupKey::Cwd);
+        assert_eq!(groups.len(), 1, "one repo entry, not one-per-checkout");
+        assert_eq!(groups[0].header, "footnote", "header is the repo basename");
+        assert_eq!(groups[0].key_value, "/code/footnote/footnote");
+        assert_eq!(groups[0].members.len(), 2);
+    }
+
+    #[test]
+    fn ac1_edge_shared_basename_stays_two_entries() {
+        // AC1-EDGE: two repos rooted at different paths but sharing the basename
+        // `footnote` must NOT collapse - grouping keys on the full root path.
+        let rows = vec![
+            stamped("wkA", "/a/footnote", "/a/footnote"),
+            stamped("wkB", "/b/footnote", "/b/footnote"),
+        ];
+        let groups = group_by(&rows, GroupKey::Cwd);
+        assert_eq!(groups.len(), 2, "distinct roots are distinct sidelines");
+        assert!(groups.iter().all(|g| g.header == "footnote"));
+        let keys: Vec<&str> = groups.iter().map(|g| g.key_value.as_str()).collect();
+        assert!(keys.contains(&"/a/footnote") && keys.contains(&"/b/footnote"));
+    }
+
+    #[test]
+    fn ac1_err_ungrouped_sentinel_buckets_together() {
+        // A non-git agent is stamped `_repo_root = "ungrouped"`; all such agents
+        // share the single ungrouped sideline and are never dropped.
+        let rows = vec![
+            stamped("wkA", "/tmp/scratch", crate::grid::repo::UNGROUPED),
+            stamped("wkB", "/tmp/other", crate::grid::repo::UNGROUPED),
+            stamped("wkC", "/code/footnote/footnote", "/code/footnote/footnote"),
+        ];
+        let groups = group_by(&rows, GroupKey::Cwd);
+        assert_eq!(groups.len(), 2);
+        let ungrouped = groups
+            .iter()
+            .find(|g| g.header == "ungrouped")
+            .expect("ungrouped sideline");
+        assert_eq!(
+            ungrouped.members.len(),
+            2,
+            "both non-git agents bucket here"
+        );
+    }
+
     // ── AC1-ERR: missing / null cwd -> "unknown" bucket ──────────────────
 
     #[test]
@@ -694,7 +785,7 @@ mod tests {
         ];
         let groups = group_by(&rows, GroupKey::Cwd);
 
-        // "unknown" and "/repo/alpha" groups.
+        // "unknown" (missing/null cwd, unstamped) and the "alpha" repo group.
         assert_eq!(groups.len(), 2);
         let unknown = groups
             .iter()
@@ -704,8 +795,9 @@ mod tests {
 
         let alpha = groups
             .iter()
-            .find(|g| g.header == "/repo/alpha")
+            .find(|g| g.key_value == "/repo/alpha")
             .expect("alpha group");
+        assert_eq!(alpha.header, "alpha", "header is the repo basename");
         assert_eq!(alpha.members.len(), 1);
     }
 
@@ -952,13 +1044,13 @@ mod tests {
         let exited = vec![false, false, false];
         let badges = compute_badges_from_live(&groups, &waiting, &exited, &[], 0);
 
-        // /alpha group: wkA is needs-input.
-        let alpha_idx = groups.iter().position(|g| g.header == "/alpha").unwrap();
+        // alpha group: wkA is needs-input.
+        let alpha_idx = groups.iter().position(|g| g.header == "alpha").unwrap();
         assert_eq!(badges[alpha_idx].needs_input, 1);
         assert_eq!(badges[alpha_idx].exited, 0);
 
-        // /beta group: no attention needed.
-        let beta_idx = groups.iter().position(|g| g.header == "/beta").unwrap();
+        // beta group: no attention needed.
+        let beta_idx = groups.iter().position(|g| g.header == "beta").unwrap();
         assert!(badges[beta_idx].is_empty());
     }
 
@@ -1325,10 +1417,11 @@ mod tests {
         let groups = group_by(&rows, GroupKey::Cwd);
         let mut rs = RailState::new(GroupKey::Cwd);
 
-        // Select wkC (row index 2) -> its group is /repo/alpha with 2 members.
+        // Select wkC (row index 2) -> its group is the alpha repo with 2 members.
         rs.selected_agent_idx = Some(2);
         let grp = rs.selected_group(&groups).expect("a group holds wkC");
-        assert_eq!(grp.header, "/repo/alpha");
+        assert_eq!(grp.header, "alpha");
+        assert_eq!(grp.key_value, "/repo/alpha");
         assert_eq!(grp.members.len(), 2, "alpha holds wkA + wkC");
         assert!(grp.members.contains(&2));
     }
@@ -1505,11 +1598,11 @@ mod tests {
             ("wkC", "/beta", "codex", "live"),
         ]);
         let groups = group_by(&rows, GroupKey::Cwd);
-        // wkB (idx 1) waiting in /alpha; nothing waiting in /beta.
+        // wkB (idx 1) waiting in the alpha repo; nothing waiting in beta.
         let waiting = vec![false, true, false];
         let view = attention_view(&groups, &waiting);
-        assert_eq!(view.len(), 1, "/beta has no waiting member -> dropped");
-        assert_eq!(view[0].header, "/alpha");
+        assert_eq!(view.len(), 1, "beta has no waiting member -> dropped");
+        assert_eq!(view[0].header, "alpha");
         assert_eq!(view[0].members, vec![1], "only the waiting member survives");
     }
 
