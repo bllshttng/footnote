@@ -191,7 +191,7 @@ pub fn offline_members(rows: &[Value], squad: &Squad) -> Vec<String> {
     let mut out: Vec<String> = squad
         .members
         .iter()
-        .filter(|m| !live.iter().any(|l| *l == m.as_str()))
+        .filter(|m| !live.contains(&m.as_str()))
         .cloned()
         .collect();
     out.sort();

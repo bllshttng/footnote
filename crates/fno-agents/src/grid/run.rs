@@ -2062,6 +2062,7 @@ fn rail_view_groups(
 /// every GroupTile state change (Tab into tile, selection move, `g` regroup, page
 /// jump) so the visible panes always render at tile dimensions rather than the
 /// full-width Single size. A no-op when no group resolves.
+#[allow(clippy::too_many_arguments)]
 async fn apply_group_tile_resize(
     rs: &group::RailState,
     tty: TtySize,
