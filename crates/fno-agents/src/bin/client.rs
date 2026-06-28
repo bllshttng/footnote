@@ -53,6 +53,17 @@ async fn run(args: Vec<String>) -> i32 {
         return 0;
     }
 
+    // `mail-inject` is the one-shot LIVE-DELIVERY verb `fno mail send` calls to
+    // inject a turn into a live `claude --bg` session over the daemon control.sock
+    // (node x-1f23). Binary-direct (Python `_deliver_live` subprocess), NOT a
+    // routable `fno agents` verb -- matched with `matches!` (like `version`) so the
+    // parity guard (test_rust_client_verbs_match_client_rs) does not see it and it
+    // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS. Connects to an existing
+    // daemon; never lazy-starts one.
+    if matches!(verb, "mail-inject") {
+        return fno_agents::mail_inject::run_mail_inject(&args[1..]);
+    }
+
     // Per-verb help: `fno agents <verb> --help` prints that verb's usage line
     // and exits 0, instead of the verb's arg parser erroring "unknown flag:
     // --help" / "takes no arguments" (ab-351427cb). Only fires for a recognized
