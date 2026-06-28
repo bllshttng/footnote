@@ -200,6 +200,7 @@ impl GridArgs {
             Some("session") => group::GroupKey::Session,
             Some("provider") => group::GroupKey::Provider,
             Some("status") => group::GroupKey::Status,
+            Some("squad") => group::GroupKey::Squad,
             _ => group::GroupKey::Cwd,
         }
     }

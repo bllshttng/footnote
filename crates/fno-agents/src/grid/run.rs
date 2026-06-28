@@ -42,6 +42,7 @@ use crate::grid::leader::{self, LeaderDecision, LeaderState};
 use crate::grid::palette::Palette;
 use crate::grid::pane::{CellColor, Pane, PaneSnapshot, RenderCell};
 use crate::grid::repo;
+use crate::grid::squads;
 use crate::grid::state::{
     off_screen_waiting_by_page, Compositor, CompositorAction, ConnAction, ConnEvent, ConnState,
     InputEvent, Mode,
@@ -1983,19 +1984,37 @@ fn live_group_of(sel_group: &group::Group, states: &[ConnState]) -> group::Group
     }
 }
 
-/// The rail's current view groups: `group_by` on the active key, then the
+/// The unfiltered base groups for the active view: the manual squads from the
+/// store when `group_key == Squad` (x-5b3e), otherwise the derived
+/// `group::group_by` partition. The single chokepoint both the nav path
+/// ([`rail_view_groups`]) and the paint path (`rail_groups_and_badges`) route
+/// through, so the Squad view behaves identically everywhere.
+fn base_groups(
+    rail_rows: &[Value],
+    group_key: group::GroupKey,
+    squads: &squads::SquadStore,
+) -> Vec<group::Group> {
+    if matches!(group_key, group::GroupKey::Squad) {
+        squads::squad_groups(rail_rows, squads)
+    } else {
+        group::group_by(rail_rows, group_key)
+    }
+}
+
+/// The rail's current view groups: [`base_groups`] on the active key, then the
 /// attention filter (`a`) applied when active so only agents waiting for input
 /// remain (empty groups dropped). Navigation, selection, and the GroupTile
 /// tiling all resolve groups through this, so the `a` filter hides non-waiting
 /// agents everywhere consistently. With the filter off it is exactly
-/// `group::group_by`.
+/// `base_groups`.
 fn rail_view_groups(
     rail_rows: &[Value],
     rs: &group::RailState,
     panes: &[Pane],
     states: &[ConnState],
+    squads: &squads::SquadStore,
 ) -> Vec<group::Group> {
-    let groups = group::group_by(rail_rows, rs.group_key);
+    let groups = base_groups(rail_rows, rs.group_key, squads);
     if rs.attention_filter {
         // Resolve through the 3-tier inside-leg authority so the filtered view
         // matches the badges (E3.3, codex P2): not the raw scraper `waiting`.
@@ -2038,11 +2057,12 @@ async fn apply_group_tile_resize(
     tty: TtySize,
     rail_rows: &[Value],
     states: &[ConnState],
+    squads: &squads::SquadStore,
     panes: &mut [Pane],
     watch_sinks: &mut [Option<WsSink>],
     driver_sinks: &mut BTreeMap<usize, WsSink>,
 ) {
-    let groups = rail_view_groups(rail_rows, rs, panes, states);
+    let groups = rail_view_groups(rail_rows, rs, panes, states, squads);
     let Some(sel_group) = rs.selected_group(&groups) else {
         return;
     };
@@ -2309,10 +2329,17 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // worktrees up under one sideline (x-cb89).
     repo::stamp_rows(&mut initial_rail_rows, &mut repo_cache);
 
+    // Manual squads (x-5b3e), read once from the GLOBAL ~/.fno/squads.json and
+    // reloaded after a recruit. Held in memory so the Squad rail view and the
+    // per-frame paint never read the file in the render loop. A corrupt store
+    // degrades to empty (squads::load never panics).
+    let squads_path = squads::squads_path();
+    let mut squad_store = squads::load(&squads_path);
+
     // Active rail state; initialized from `--rail` flag.
     let mut rail_state: Option<RailState> = if parsed.rail {
         let mut rs = RailState::new(parsed.initial_group_key());
-        let groups = group::group_by(&initial_rail_rows, rs.group_key);
+        let groups = base_groups(&initial_rail_rows, rs.group_key, &squad_store);
         // Seed compositor focus from the first selected agent so the main pane
         // and drive target are aligned from the first frame (AC1-HP: main shows
         // the first group's first agent), matching the `t`-toggle-on path.
@@ -2349,6 +2376,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                     tty,
                     &rail_rows,
                     &states,
+                    &squad_store,
                     &mut panes,
                     &mut watch_sinks,
                     &mut driver_sinks,
@@ -2379,6 +2407,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
         rs: &RailState,
         panes: &[Pane],
         states: &[ConnState],
+        squads: &squads::SquadStore,
     ) -> (Vec<group::Group>, Vec<group::GroupBadge>) {
         let waiting: Vec<bool> = panes
             .iter()
@@ -2413,7 +2442,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
         // are filtered out). The filter uses the SAME 3-tier-resolved signal as
         // the badges (E3.3, codex P2) - not the raw scraper `waiting` - so a live
         // `working` is not falsely surfaced and a `blocked` is not hidden.
-        let mut groups = group::group_by(rail_rows, rs.group_key);
+        let mut groups = base_groups(rail_rows, rs.group_key, squads);
         if rs.attention_filter {
             let attn = group::needs_input_after_authority(&waiting, &exited, &inside_leg, now_secs);
             groups = group::attention_view(&groups, &attn);
@@ -2438,7 +2467,8 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
         );
     } else {
         let rail_arg = rail_state.as_ref().map(|rs| {
-            let (groups, badges) = rail_groups_and_badges(&rail_rows, rs, &panes, &states);
+            let (groups, badges) =
+                rail_groups_and_badges(&rail_rows, rs, &panes, &states, &squad_store);
             (rs, groups, badges)
         });
         // Borrow-split: paint needs &[Value] for rows, but groups/badges own their data.
@@ -2693,14 +2723,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // that agent across the re-partition (AC4-FR).
                                 (group::FocusAxis::RailNav, KeyCode::Char('g')) => {
                                     rs.cycle_group_key();
-                                    let groups = rail_view_groups(&rail_rows, rs, &panes, &states);
+                                    let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel) = rs.re_anchor(&groups) {
                                         comp.set_focus(sel);
                                         match rs.main_mode {
                                             group::MainMode::GroupTile => {
                                                 // Focus follows the agent into its new
                                                 // group; size that group's tiles (AC4-FR).
-                                                apply_group_tile_resize(rs, tty, &rail_rows, &states,
+                                                apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
                                                     &mut panes, &mut watch_sinks, &mut driver_sinks).await;
                                             }
                                             group::MainMode::Single => {
@@ -2718,14 +2748,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // focus follows so the selected agent fills the main
                                 // area (AC1-UI / AC2-HP).
                                 (group::FocusAxis::RailNav, KeyCode::Up) => {
-                                    let groups = rail_view_groups(&rail_rows, rs, &panes, &states);
+                                    let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel) = rs.move_up(&groups) {
                                         comp.set_focus(sel);
                                         match rs.main_mode {
                                             group::MainMode::GroupTile => {
                                                 // Selection move can cross a page; size the
                                                 // group's tiles + force a full repaint.
-                                                apply_group_tile_resize(rs, tty, &rail_rows, &states,
+                                                apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
                                                     &mut panes, &mut watch_sinks, &mut driver_sinks).await;
                                                 prev_frame = None;
                                             }
@@ -2740,12 +2770,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     rail_consumed = true;
                                 }
                                 (group::FocusAxis::RailNav, KeyCode::Down) => {
-                                    let groups = rail_view_groups(&rail_rows, rs, &panes, &states);
+                                    let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel) = rs.move_down(&groups) {
                                         comp.set_focus(sel);
                                         match rs.main_mode {
                                             group::MainMode::GroupTile => {
-                                                apply_group_tile_resize(rs, tty, &rail_rows, &states,
+                                                apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
                                                     &mut panes, &mut watch_sinks, &mut driver_sinks).await;
                                                 prev_frame = None;
                                             }
@@ -2779,7 +2809,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     // group's first live member; if the whole group is
                                     // dead, leave the selection (Single then shows the
                                     // exited pane - nothing live to focus).
-                                    let view = rail_view_groups(&rail_rows, rs, &panes, &states);
+                                    let view = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel_group) = rs.selected_group(&view) {
                                         let live = live_group_of(sel_group, &states);
                                         let on_live = rs
@@ -2876,7 +2906,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     rs.toggle_main_mode();
                                     match rs.main_mode {
                                         group::MainMode::GroupTile => {
-                                            apply_group_tile_resize(rs, tty, &rail_rows, &states,
+                                            apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
                                                 &mut panes, &mut watch_sinks, &mut driver_sinks).await;
                                         }
                                         group::MainMode::Single => {
@@ -2907,7 +2937,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             key.code,
                                             KeyCode::Char(']') | KeyCode::PageDown
                                         );
-                                        let groups = rail_view_groups(&rail_rows, rs, &panes, &states);
+                                        let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                         if let Some(sel_group) = rs.selected_group(&groups) {
                                             // AC3-FR: page over the LIVE members so
                                             // `]`/`[` step by the same survivor pages
@@ -2919,7 +2949,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                         if let Some(sel) = rs.selected_agent_idx {
                                             comp.set_focus(sel);
                                         }
-                                        apply_group_tile_resize(rs, tty, &rail_rows, &states,
+                                        apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
                                             &mut panes, &mut watch_sinks, &mut driver_sinks).await;
                                         prev_frame = None; // page slice changed -> full-paint
                                         hint = None;
@@ -2935,13 +2965,13 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // full-repaint, mirroring the `g` regroup discipline.
                                 (group::FocusAxis::RailNav, KeyCode::Char('a')) => {
                                     rs.toggle_attention_filter();
-                                    let groups = rail_view_groups(&rail_rows, rs, &panes, &states);
+                                    let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     match rs.re_anchor(&groups) {
                                         Some(sel) => {
                                             comp.set_focus(sel);
                                             match rs.main_mode {
                                                 group::MainMode::GroupTile => {
-                                                    apply_group_tile_resize(rs, tty, &rail_rows, &states,
+                                                    apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
                                                         &mut panes, &mut watch_sinks, &mut driver_sinks).await;
                                                 }
                                                 group::MainMode::Single => {
@@ -2975,7 +3005,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
                             if !ctrl && key.code == KeyCode::Char('t') && comp.mode() == Mode::Watch {
                                 let mut rs = RailState::new(GroupKey::Cwd);
-                                let groups = group::group_by(&rail_rows, rs.group_key);
+                                let groups = base_groups(&rail_rows, rs.group_key, &squad_store);
                                 if let Some(sel) = rs.re_anchor(&groups) {
                                     comp.set_focus(sel);
                                     resize_rail_focus(tty, sel, &mut panes, &mut watch_sinks, &mut driver_sinks).await;
@@ -3384,6 +3414,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             tty,
                                             &rail_rows,
                                             &states,
+                                            &squad_store,
                                             &mut panes,
                                             &mut watch_sinks,
                                             &mut driver_sinks,
@@ -3458,7 +3489,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         // when no group resolves.
                         if let Some(rs) = rail_state.as_ref() {
                             if matches!(rs.main_mode, group::MainMode::GroupTile) {
-                                apply_group_tile_resize(rs, tty, &rail_rows, &states,
+                                apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
                                     &mut panes, &mut watch_sinks, &mut driver_sinks).await;
                                 prev_frame = None; // tile sizes changed -> full-paint
                             }
@@ -3505,7 +3536,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                     dirty = false;
                 } else if dirty {
                     let rail_arg = rail_state.as_ref().map(|rs| {
-                        let (groups, badges) = rail_groups_and_badges(&rail_rows, rs, &panes, &states);
+                        let (groups, badges) = rail_groups_and_badges(&rail_rows, rs, &panes, &states, &squad_store);
                         (rs, groups, badges)
                     });
                     match rail_arg {

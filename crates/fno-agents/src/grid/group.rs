@@ -26,16 +26,24 @@ pub enum GroupKey {
     Session,
     Provider,
     Status,
+    /// Manual squads (x-5b3e). Unlike the others this is NOT a row-field
+    /// partition: squad groups are resolved from `~/.fno/squads.json` by
+    /// [`super::squads::squad_groups`], not [`group_by`] (which has no squad
+    /// store and returns empty for this key). A `g`-cycle into this view swaps
+    /// the rail's derived sidelines for the user's squads; the same agent still
+    /// appears under its repo sideline in the Cwd view (reference membership).
+    Squad,
 }
 
 impl GroupKey {
-    /// The next key in the cycle (cwd -> session -> provider -> status -> cwd).
+    /// The next key in the cycle (cwd -> session -> provider -> status -> squad -> cwd).
     pub fn next(self) -> GroupKey {
         match self {
             GroupKey::Cwd => GroupKey::Session,
             GroupKey::Session => GroupKey::Provider,
             GroupKey::Provider => GroupKey::Status,
-            GroupKey::Status => GroupKey::Cwd,
+            GroupKey::Status => GroupKey::Squad,
+            GroupKey::Squad => GroupKey::Cwd,
         }
     }
 
@@ -46,6 +54,7 @@ impl GroupKey {
             GroupKey::Session => "session",
             GroupKey::Provider => "provider",
             GroupKey::Status => "status",
+            GroupKey::Squad => "squad",
         }
     }
 
@@ -76,6 +85,10 @@ impl GroupKey {
             GroupKey::Session => SESSION_ID_FIELDS
                 .iter()
                 .find_map(|field| row.get(field).and_then(Value::as_str)),
+            // Squad grouping is resolved from the squad store, not a row field.
+            // `group_by` short-circuits this key before `extract` runs; this arm
+            // exists only for exhaustiveness.
+            GroupKey::Squad => None,
         }
     }
 }
@@ -120,6 +133,13 @@ pub struct Group {
 /// - A row with a missing `name` field uses `""` as its sort key (sorted to
 ///   front of its group), but IS included so the sum invariant holds.
 pub fn group_by(rows: &[Value], key: GroupKey) -> Vec<Group> {
+    // Squad is not a row-field partition: its groups come from the squad store
+    // via `squads::squad_groups`. Returning empty here keeps a stray `group_by`
+    // call from collapsing every row into one "unknown" bucket (the rail routes
+    // the Squad key through `squad_groups` instead - see `rail_view_groups`).
+    if matches!(key, GroupKey::Squad) {
+        return Vec::new();
+    }
     // Collect (key_value, name, original_index) triples.
     let mut entries: Vec<(String, String, usize)> = rows
         .iter()
@@ -913,7 +933,9 @@ mod tests {
         assert_eq!(GroupKey::Cwd.next(), GroupKey::Session);
         assert_eq!(GroupKey::Session.next(), GroupKey::Provider);
         assert_eq!(GroupKey::Provider.next(), GroupKey::Status);
-        assert_eq!(GroupKey::Status.next(), GroupKey::Cwd);
+        // Status now cycles into the manual-squads view, then back to cwd (x-5b3e).
+        assert_eq!(GroupKey::Status.next(), GroupKey::Squad);
+        assert_eq!(GroupKey::Squad.next(), GroupKey::Cwd);
     }
 
     // ── AC4-ERR: all agents share the same provider -> single group ───────
