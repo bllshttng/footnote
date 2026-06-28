@@ -416,9 +416,12 @@ def submit_via_control_reply(session_id: str, framed: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     try:
-        return bool(json.loads(proc.stdout.strip()).get("delivered"))
-    except (ValueError, AttributeError):
+        res = json.loads(proc.stdout.strip())
+    except ValueError:
         return False
+    # Verify the parsed value is a dict before .get() -- malformed output (a list /
+    # string / null) is skipped gracefully, matching this module's JSON guideline.
+    return isinstance(res, dict) and bool(res.get("delivered"))
 
 
 def deliver_attached(
