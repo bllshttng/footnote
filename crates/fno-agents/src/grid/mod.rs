@@ -46,6 +46,7 @@ use crate::paths::AgentsHome;
 
 pub mod group;
 pub mod layout;
+pub mod leader;
 pub mod palette;
 pub mod pane;
 pub mod repo;
