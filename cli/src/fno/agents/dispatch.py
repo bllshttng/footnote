@@ -3813,18 +3813,27 @@ def _build_mail_ctx(
     from_name: str,
     from_session: Optional[str],
     provider_from: Optional[str],
+    to: Optional[str] = None,
 ) -> _MailCtx:
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
 
     ``from`` is the sender's short 8-hex sessionId (or the bare ``from_name`` when
     the caller is unregistered). ``model`` is unknown today (AgentEntry carries no
     model field) so it is reported ``"unknown"`` -- never fabricated, matching the
-    durable envelope's existing "do not invent a model" stance."""
+    durable envelope's existing "do not invent a model" stance.
+
+    ``to`` and ``node`` are OPTIONAL envelope attributes (omitted when None).
+    ``to`` is the recipient's short id -- set for a directed ``fno mail send`` so
+    the recipient can tell a directed turn from a broadcast. ``node`` (the sender's
+    backlog node) stays None: dispatch has no truthful source for it today."""
     from fno.mail.envelope import harness_for_provider
 
     from_ = from_session.split("-")[0] if from_session else from_name
     return _MailCtx(
-        from_=from_, harness=harness_for_provider(provider_from), model="unknown"
+        from_=from_,
+        harness=harness_for_provider(provider_from),
+        model="unknown",
+        to=to or None,
     )
 
 
@@ -4110,7 +4119,14 @@ def dispatch_send(
                     or getattr(sender_entry, "short_id", None)
                     or getattr(sender_entry, "claude_short_id", None)
                 )
-            mail_ctx = _build_mail_ctx(from_name, from_session, provider_from)
+            # A `fno mail send <name>` is always directed -> stamp the recipient's
+            # short id as the envelope `to` (node x-1f23: optional, set when known).
+            mail_ctx = _build_mail_ctx(
+                from_name,
+                from_session,
+                provider_from,
+                to=(existing.claude_short_id or existing.short_id or None),
+            )
             msg_id = generate_msg_id()
 
             def _write_durable() -> None:

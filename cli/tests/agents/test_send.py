@@ -157,6 +157,8 @@ def test_dispatch_send_happy_path_live_claude(
     assert injected.startswith("<fno_mail "), f"not wrapped: {injected[:40]!r}"
     assert injected.rstrip().endswith("</fno_mail>")
     assert "FYI built the thing" in injected
+    # Directed send -> the recipient's short id is stamped as the envelope `to`.
+    assert 'to="abcd1234"' in injected, f"missing directed `to`: {injected[:80]!r}"
 
     # Bus demotion: a hosted delivery is NOT also written to the durable store.
     from fno.inbox.store import read_all_threads
