@@ -161,6 +161,12 @@ def _agents_home() -> Path:
 # path-traverse via _worker_sock. Mirrors the daemon's short_id shape.
 _SHORT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
+# An adopted session's claude_short_id is the control.sock wire `short`: always
+# exactly the 8-hex prefix of the session uuid. Validate it precisely (stricter
+# than the worker _SHORT_ID_RE, which also covers non-hex fno worker ids) so a
+# malformed/non-hex registry value is never handed to the wire boundary.
+_ATTACHED_SHORT_RE = re.compile(r"^[0-9a-fA-F]{8}$")
+
 
 def _worker_sock(short_id: str) -> Path:
     return _agents_home() / short_id / "worker.sock"
@@ -237,7 +243,7 @@ def resolve_attached_short_id(session_id: str) -> Optional[str]:
         if e.get("host_mode") != "attached":
             continue
         short = e.get("claude_short_id")
-        if isinstance(short, str) and _SHORT_ID_RE.match(short):
+        if isinstance(short, str) and _ATTACHED_SHORT_RE.match(short):
             return short
     return None
 
@@ -386,25 +392,42 @@ def deliver_session(
 # Mirrors fno.agents.dispatch._MAIL_INJECT_TIMEOUT_S.
 _MAIL_INJECT_TIMEOUT_S = 20.0
 
+# Outcome of an attempted control.sock inject (codex peer P1). The distinction
+# that matters: an inject can be SENT but not confirmed (a busy recipient hasn't
+# recorded the turn within mail-inject's short growth-confirm budget -- yet the
+# turn still lands later, see mail_inject.rs). Treating that "uncertain" case as a
+# hard failure would drop a hop whose reply is still coming, so the caller polls
+# for the reply on both CONFIRMED and UNCONFIRMED and only hard-fails NOT_SENT.
+INJECT_CONFIRMED = "confirmed"      # mail-inject saw transcript growth: the turn landed.
+INJECT_UNCONFIRMED = "unconfirmed"  # op:'reply' sent, growth not confirmed in budget (or the
+                                    # subprocess timed out mid-confirm): the turn may still land.
+INJECT_NOT_SENT = "not_sent"        # the inject never reached the session (not-live, verb
+                                    # absent, attach/write failed): nothing was delivered.
 
-def submit_via_control_reply(session_id: str, framed: str) -> bool:
-    """Inject one framed turn into an ADOPTED ``claude --bg`` session over the
-    daemon ``control.sock`` via the ``fno-agents mail-inject`` verb (the G1 op:'reply'
-    primitive, node x-26df; the one live-delivery vehicle, node x-1f23). Returns
-    True iff the verb confirms the turn landed in the recipient transcript; any miss
-    (binary absent, session not on the roster, not confirmed within the poll budget)
-    returns False. NEVER raises.
+
+def submit_via_control_reply(session_id: str, framed: str) -> str:
+    """Inject one framed turn into an ADOPTED ``claude --bg`` session over the daemon
+    ``control.sock`` via the ``fno-agents mail-inject`` verb (the G1 op:'reply'
+    primitive, node x-26df; the one live-delivery vehicle, node x-1f23). NEVER raises.
+
+    Returns one of :data:`INJECT_CONFIRMED` / :data:`INJECT_UNCONFIRMED` /
+    :data:`INJECT_NOT_SENT`. mail-inject emits ``{"delivered": bool, "reason": str}``:
+    ``delivered`` -> CONFIRMED; ``reason == "not-confirmed"`` -> UNCONFIRMED (the
+    op:'reply' WAS written but growth wasn't seen in budget -- a busy recipient still
+    lands it); every other not-delivered reason (``not-live`` / ``no-transcript`` /
+    ``attach-failed`` / ``io-error`` / ``unsafe-text``) means the turn never reached
+    the session -> NOT_SENT. A subprocess timeout is UNCONFIRMED: the verb may have
+    written the op:'reply' before its growth-confirm poll was cut off.
 
     This is the adopted-lane sibling of :func:`submit_via_worker`: an adopted session
-    has no ``worker.sock``, so the relay rides the SAME drive vehicle as ``fno mail
-    send`` (mirrors :func:`fno.agents.dispatch._mail_inject_claude`) rather than a
-    second op:'reply' client. ``mail-inject`` does its own transcript-growth confirm,
-    so a True return already proves the injected turn was recorded."""
+    has no ``worker.sock``, so the relay rides the SAME vehicle as ``fno mail send``
+    (mirrors :func:`fno.agents.dispatch._mail_inject_claude`) rather than a second
+    op:'reply' client."""
     from fno.agents import rust_runtime
 
     binary = rust_runtime.resolve_installed_binary()
     if binary is None:
-        return False
+        return INJECT_NOT_SENT
     try:
         proc = subprocess.run(
             [str(binary), "mail-inject", "--session", session_id],
@@ -413,15 +436,27 @@ def submit_via_control_reply(session_id: str, framed: str) -> bool:
             text=True,
             timeout=_MAIL_INJECT_TIMEOUT_S,
         )
+    except subprocess.TimeoutExpired:
+        # Cut off mid-run: the op:'reply' may already have been written before the
+        # growth-confirm poll. Uncertain, not a clean miss -- let the caller poll.
+        # (TimeoutExpired subclasses SubprocessError, so this clause must precede it.)
+        return INJECT_UNCONFIRMED
     except (OSError, subprocess.SubprocessError):
-        return False
+        return INJECT_NOT_SENT
     try:
         res = json.loads(proc.stdout.strip())
     except ValueError:
-        return False
-    # Verify the parsed value is a dict before .get() -- malformed output (a list /
-    # string / null) is skipped gracefully, matching this module's JSON guideline.
-    return isinstance(res, dict) and bool(res.get("delivered"))
+        return INJECT_NOT_SENT
+    if not isinstance(res, dict):  # malformed output (list / string / null) -> nothing sent
+        return INJECT_NOT_SENT
+    if res.get("delivered"):
+        return INJECT_CONFIRMED
+    # delivered == false: only "not-confirmed" means the op:'reply' was actually
+    # written (the recipient was just too busy to record it in budget); any other
+    # reason means the inject never reached the session.
+    if res.get("reason") == "not-confirmed":
+        return INJECT_UNCONFIRMED
+    return INJECT_NOT_SENT
 
 
 def deliver_attached(
@@ -436,13 +471,14 @@ def deliver_attached(
     reply from the transcript -- the G3 relay re-point (epic x-07c1, node x-e027).
 
     The adopted session has no fno worker socket; :func:`submit_via_control_reply`
-    (the ``mail-inject`` verb) is the only live handle. Unlike :func:`deliver_session`
-    (whose keystroke ``worker.submit`` returns before the turn is recorded), the
-    ``mail-inject`` verb internally confirms the injected turn LANDED via transcript
-    growth before returning, so a successful inject already proves the turn was
-    recorded -- we then poll for the peer's reply, the same capture as the
-    interactive lane (no bounded re-inject: the landing was already confirmed, and
-    re-firing a blocking 20s inject would risk a duplicate turn for little gain).
+    (the ``mail-inject`` verb) is the only live handle. The hard failure is ONLY a
+    NOT_SENT inject (the turn never reached the session). On CONFIRMED *or*
+    UNCONFIRMED the turn may have landed -- mail-inject's growth-confirm budget is
+    short (~10s) and a busy recipient records the inject later -- so we poll for the
+    peer's reply over the FULL hop ``timeout``, the same as the interactive lane,
+    rather than discarding a hop whose reply is still in flight (codex peer P1). No
+    re-inject: a confirmed turn is already recorded, and re-firing on an unconfirmed
+    one risks a duplicate turn for little gain.
 
     CONTRACT (sentinel seam): as with :func:`deliver_session`, the adopted peer must
     have been spawned relay-targeted (``RELAY_SYSTEM_PROMPT`` appended) so its reply
@@ -452,11 +488,11 @@ def deliver_attached(
     is indistinguishable from a slow turn at read time). Wiring that spawn-lane is the
     LD#2 amendment, deferred to its own review (carveout for node x-e027).
 
-    Raises RuntimeError when the inject fails (session not on the roster, verb
-    absent, or not confirmed) and TimeoutError when the turn landed but no reply
-    appeared within ``timeout``."""
+    Raises RuntimeError when the inject never reached the session (NOT_SENT) and
+    TimeoutError when the turn may have landed but no reply appeared within
+    ``timeout``."""
     base_tx = len(_transcript_replies(session_id, config_dir))
-    if not submit_via_control_reply(session_id, framed):
+    if submit_via_control_reply(session_id, framed) == INJECT_NOT_SENT:
         raise RuntimeError(
             f"relay_deliver_failed: control.sock inject failed for adopted session {session_id}"
         )
