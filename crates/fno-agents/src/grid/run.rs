@@ -2899,8 +2899,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                 // same group, so pin the key too
                                                 // rather than leaving it stale.
                                                 rs.selected_agent_idx = Some(first);
-                                                rs.selected_group_key =
-                                                    Some(live.key_value.clone());
+                                                // `live` is unused after this; move
+                                                // its key out rather than cloning.
+                                                rs.selected_group_key = Some(live.key_value);
                                             }
                                         }
                                     }
