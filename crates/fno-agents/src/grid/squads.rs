@@ -131,6 +131,16 @@ impl SquadStore {
 /// it - the GroupTile path already guards a 0-member selection (`selected_group`
 /// returns `None`), so an empty squad renders an empty view, never a degenerate
 /// grid.
+///
+/// KNOWN v1 LIMITATION (codex peer P1): membership is by reference, so the same
+/// agent name can be in two squads, which puts the SAME row index in two of the
+/// `Group`s returned here. The rail selects by agent index (`selected_agent_idx`),
+/// so in the Squad view `selected_group` resolves such a shared agent to the
+/// FIRST squad and the render highlights every occurrence - a second squad whose
+/// members are all shared can be hard to select/tile. The fix is a group-aware
+/// selection cursor (flat row position, not a bare index) - the same nav-identity
+/// rework the simultaneous sideline+squad union needs. Tracked as a carveout;
+/// distinct-membership squads (the common case) are unaffected.
 pub fn squad_groups(rows: &[Value], store: &SquadStore) -> Vec<Group> {
     store
         .squads
@@ -252,9 +262,7 @@ where
     let (mut store, _warn) = read_tolerant(path);
     let out = f(&mut store);
     let res = write_atomic(path, &store);
-    if let Some(l) = lock {
-        let _ = l.unlock();
-    }
+    let _ = lock.unlock();
     res?;
     Ok(out)
 }
@@ -303,10 +311,11 @@ fn lock_path(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Best-effort exclusive lock on the sidecar; `None` if the lock file cannot be
-/// opened (degrade rather than crash the grid - a recruit still writes, it just
-/// loses the cross-instance guarantee in that rare case).
-fn acquire_exclusive(lock_file: &Path) -> std::io::Result<Option<File>> {
+/// Exclusive lock on the sidecar for a MUTATING read-modify-write. Fails CLOSED
+/// (propagates the lock error) like `state.rs::acquire_exclusive`: a recruit must
+/// hold the lock or not write at all - a fail-open write could lose a concurrent
+/// grid instance's recruit, defeating the whole point of the lock (codex peer P2).
+fn acquire_exclusive(lock_file: &Path) -> std::io::Result<File> {
     if let Some(parent) = lock_file.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -316,10 +325,8 @@ fn acquire_exclusive(lock_file: &Path) -> std::io::Result<Option<File>> {
         .write(true)
         .truncate(false)
         .open(lock_file)?;
-    match file.lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(_) => Ok(None),
-    }
+    file.lock()?;
+    Ok(file)
 }
 
 fn acquire_shared(lock_file: &Path) -> Option<File> {
