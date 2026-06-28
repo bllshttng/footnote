@@ -10,8 +10,9 @@ Three safety properties are structural, not best-effort:
 - **Cycle termination (US4 / AC4).** Each hop increments ``hop_count``; a message
   whose count reaches ``ttl`` is dropped with ``relay_ttl_exhausted`` -- a cyclic
   route ``a -> b -> a -> b`` terminates by the hop guard, never by chance timing.
-- **Provenance (US5 / AC5).** Every injected hop is framed with the ``<fno ...>``
-  tag (the recipient must know it is a peer, not its user). A cross-provider
+- **Provenance (US5 / AC5).** Every injected hop is framed with the
+  ``<fno_mail ...>`` tag (the recipient must know it is a peer, not its user). A
+  cross-provider
   recipient whose message cannot be framed is REFUSED
   (``relay_dropped{unframed-cross-provider}``) -- the spike's Alice-rejection
   failure made impossible by construction.

@@ -17,6 +17,21 @@ from __future__ import annotations
 
 from typing import Optional
 
+# Provider id -> the <fno_mail> ``harness`` vocabulary. The single mapping shared
+# by the dispatch (live-inject) and relay (PTY hop) producers so the harness
+# attribute reads the same everywhere.
+_HARNESS_BY_PROVIDER = {"claude": "claude-code", "codex": "codex", "gemini": "gemini"}
+
+
+def harness_for_provider(provider: Optional[str]) -> str:
+    """Map a provider id to the ``<fno_mail>`` ``harness`` vocabulary (``claude``
+    -> ``claude-code``; ``codex`` / ``gemini`` unchanged). An unknown or missing
+    provider defaults to ``claude-code`` (the dominant harness). The harness is
+    legible context for how to reply, not unforgeable trust."""
+    if not provider:
+        return "claude-code"
+    return _HARNESS_BY_PROVIDER.get(provider, provider)
+
 
 def fno_mail_open(
     *,

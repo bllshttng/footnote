@@ -3793,10 +3793,6 @@ def _chat_unwind(result: "DispatchChatResult", hosts: list) -> None:
             )
 
 
-# node x-1f23: the <fno_mail> a2a envelope (G1 spec, x-26df). harness maps the
-# provider to the envelope vocabulary; the renderer lives in fno.mail.envelope.
-_HARNESS_BY_PROVIDER = {"claude": "claude-code", "codex": "codex", "gemini": "gemini"}
-
 # Subprocess budget for the mail-inject verb. It polls the recipient transcript
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
 _MAIL_INJECT_TIMEOUT_S = 20.0
@@ -3824,9 +3820,12 @@ def _build_mail_ctx(
     the caller is unregistered). ``model`` is unknown today (AgentEntry carries no
     model field) so it is reported ``"unknown"`` -- never fabricated, matching the
     durable envelope's existing "do not invent a model" stance."""
+    from fno.mail.envelope import harness_for_provider
+
     from_ = from_session.split("-")[0] if from_session else from_name
-    harness = _HARNESS_BY_PROVIDER.get(provider_from or "", provider_from or "claude-code")
-    return _MailCtx(from_=from_, harness=harness, model="unknown")
+    return _MailCtx(
+        from_=from_, harness=harness_for_provider(provider_from), model="unknown"
+    )
 
 
 def _mail_inject_claude(recipient: str, text: str) -> bool:
