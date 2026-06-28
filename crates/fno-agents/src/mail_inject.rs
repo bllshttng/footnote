@@ -15,11 +15,20 @@
 //! single renderer, shared by the codex/gemini + relay paths) and injected
 //! verbatim here, so this verb is a dumb transport.
 //!
-//! Delivery confirm = the recipient transcript GREW after the inject (a new turn
-//! landed). This is strictly stronger than the pre-unification claude path, which
-//! reported "delivered" on socket-write success with no landing check at all.
-//! ponytail: growth-confirm can false-positive on a concurrent unrelated turn in
-//! the same session; a session blocked at a prompt awaiting our inject has none.
+//! Delivery confirm = the recipient transcript GREW after the inject, i.e. the
+//! injected USER turn was recorded. This is strictly stronger than the
+//! pre-unification claude path, which reported "delivered" on socket-write success
+//! with no landing check at all. For the TARGET case -- a session idle/blocked at
+//! a prompt -- the injected turn is recorded promptly, so growth fires within a
+//! poll interval.
+//!
+//! ponytail: growth-confirm is a best-effort proxy with two bounded edges. (1) A
+//! BUSY recipient (mid tool call) queues the injected turn; if it is not recorded
+//! within the poll budget we report not-confirmed and Python writes the durable
+//! fallback, yet the queued inject still lands later -- a bounded DOUBLE delivery.
+//! (2) A concurrent unrelated turn could false-positive a confirm. Hard
+//! exactly-once would need recipient-side msg_id dedup on the <fno_mail> envelope
+//! (follow-up); the bounded duplicate is the accepted tradeoff for live-first.
 
 use std::io::Read;
 use std::time::Duration;

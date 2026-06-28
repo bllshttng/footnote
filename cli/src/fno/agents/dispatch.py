@@ -4169,9 +4169,14 @@ def dispatch_send(
                     delivery = "hosted"
                 else:
                     # Durable fallback: an offline recipient, or a live inject that
-                    # did not land. Persist ONLY here so a live-delivered turn is
-                    # never also queued (at-most-once across the live + queued
-                    # paths). A live peer that fell through gets a demotion notice.
+                    # did not confirm. Persist ONLY here so a CONFIRMED live turn is
+                    # not also queued. At-most-once on the common path; a busy
+                    # recipient whose injected turn is queued past the verb's confirm
+                    # budget can still receive the durable copy too (bounded
+                    # double-delivery -- see mail_inject.rs). Live-first also widens
+                    # the crash-loss window vs the old durable-first; both are
+                    # accepted tradeoffs of the live-inject-first design (node
+                    # x-1f23). A live peer that fell through gets a demotion notice.
                     _write_durable()
                     if existing.status == "live":
                         demotion_notice = (
