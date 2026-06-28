@@ -44,7 +44,7 @@ pub enum GroupKey {
 }
 
 impl GroupKey {
-    /// The next key in the cycle (cwd -> session -> provider -> status -> squad -> cwd).
+    /// The next key in the cycle (cwd -> session -> provider -> status -> squad -> union -> cwd).
     pub fn next(self) -> GroupKey {
         match self {
             GroupKey::Cwd => GroupKey::Session,
