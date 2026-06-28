@@ -291,6 +291,14 @@ pub fn attach_for_frames<R: io::Read, W: Write>(
             code: Some("EOF".into()),
             detail: "daemon closed before attach reply".into(),
         }),
+        // A reply without the protocol newline is a truncated handshake (the
+        // daemon closed mid-write): `read_line` returns `Ok(n>0)` and the JSON
+        // may even parse, but the stream that follows is empty. Treat it as a
+        // refusal rather than handing back a FrameStream that instantly EOFs.
+        Ok(_) if !line.ends_with('\n') => Err(AttachError::Refused {
+            code: Some("EOF".into()),
+            detail: "daemon closed before complete attach reply".into(),
+        }),
         Ok(_) => {
             let ok = parse_attach_reply(&line)?;
             Ok((ok, FrameStream { reader }))
@@ -489,6 +497,17 @@ mod tests {
     #[test]
     fn attach_for_frames_eof_before_reply_is_refused() {
         let reader = Cursor::new(Vec::new());
+        let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
+        let err = attach_for_frames(Vec::new(), reader, &req).unwrap_err();
+        assert!(matches!(err, AttachError::Refused { .. }));
+    }
+
+    #[test]
+    fn attach_for_frames_truncated_reply_without_newline_is_refused() {
+        // Valid JSON but the daemon closed before the protocol newline: the
+        // handshake is incomplete and the frame stream would be empty, so this
+        // must refuse rather than report a successful attach.
+        let reader = Cursor::new(br#"{"ok":true,"op":"attach","state":"running"}"#.to_vec());
         let req = AttachRequest::for_frame_stream("a1b2c3d4", None);
         let err = attach_for_frames(Vec::new(), reader, &req).unwrap_err();
         assert!(matches!(err, AttachError::Refused { .. }));
