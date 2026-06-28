@@ -39,6 +39,28 @@ impl Default for LeaderKey {
     }
 }
 
+impl LeaderKey {
+    /// Compact label for footers / hints, e.g. `^Space` or `^A`. Derived from
+    /// the configured key so the UI never names a leader the operator did not
+    /// bind (gemini review on PR #79).
+    pub fn format_compact(&self) -> String {
+        match self.code {
+            KeyCode::Char(' ') => "^Space".to_string(),
+            KeyCode::Char(c) => format!("^{}", c.to_ascii_uppercase()),
+            _ => "^Space".to_string(),
+        }
+    }
+
+    /// Verbose label for prose, e.g. `Ctrl-Space` or `Ctrl-A`.
+    pub fn format_verbose(&self) -> String {
+        match self.code {
+            KeyCode::Char(' ') => "Ctrl-Space".to_string(),
+            KeyCode::Char(c) => format!("Ctrl-{}", c.to_ascii_uppercase()),
+            _ => "Ctrl-Space".to_string(),
+        }
+    }
+}
+
 /// Parse `config.grid.leader_key` into a [`LeaderKey`].
 ///
 /// Accepts `ctrl-space` (the default) and `ctrl-<letter>` (e.g. `ctrl-a`,
@@ -336,6 +358,15 @@ mod tests {
         let a = k(KeyCode::Char('a'), KeyModifiers::NONE);
         let (s, d) = step(LeaderState::Normal, &a, &l);
         assert_eq!((s, d), (LeaderState::Normal, LeaderDecision::Forward));
+    }
+
+    #[test]
+    fn format_helpers_reflect_the_configured_key() {
+        assert_eq!(LeaderKey::default().format_compact(), "^Space");
+        assert_eq!(LeaderKey::default().format_verbose(), "Ctrl-Space");
+        assert_eq!(parse_leader_key("ctrl-a").format_compact(), "^A");
+        assert_eq!(parse_leader_key("ctrl-a").format_verbose(), "Ctrl-A");
+        assert_eq!(parse_leader_key("ctrl-g").format_compact(), "^G");
     }
 
     #[test]

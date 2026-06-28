@@ -1281,7 +1281,7 @@ fn raster_footer(
             }
             (Mode::Watch, false, true) => "[ ] page · ↹ focus · Enter drive · q quit",
             (Mode::Watch, false, false) => "[ ] page · ↹ focus · Enter: exec - watch only · q quit",
-            (Mode::Drive, _, _) => "DRIVE - ^Space leader (mux) · Esc release · Ctrl-C quit",
+            (Mode::Drive, _, _) => "DRIVE - leader for mux · Esc release · Ctrl-C quit",
             // Scrollback is handled by the dedicated branch above; this arm
             // exists only for exhaustiveness and is never reached at runtime.
             (Mode::Scrollback, _, _) => "SCROLLBACK - Esc live",
@@ -3002,10 +3002,10 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             leader = next;
                             match decision {
                                 LeaderDecision::EnterPending => {
-                                    hint = Some(
-                                        "LEADER - next: \u{21b9} focus \u{b7} ] [ page \u{b7} Enter drive \u{b7} Space scrollback \u{b7} ? help \u{b7} q quit \u{b7} (Ctrl-Space again sends it)"
-                                            .to_string(),
-                                    );
+                                    let lk = leader_cfg.format_compact();
+                                    hint = Some(format!(
+                                        "LEADER ({lk}) - next: \u{21b9} focus \u{b7} ] [ page \u{b7} Enter drive \u{b7} Space scrollback \u{b7} ? help \u{b7} q quit \u{b7} ({lk} again sends it)"
+                                    ));
                                     dirty = true;
                                     continue;
                                 }
@@ -3137,10 +3137,10 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             dirty = true;
                                         }
                                         _ => {
-                                            hint = Some(
-                                                "unknown leader command (Ctrl-Space then: \u{21b9} focus \u{b7} ] [ page \u{b7} Enter drive \u{b7} Space scrollback \u{b7} ? help \u{b7} q quit)"
-                                                    .to_string(),
-                                            );
+                                            hint = Some(format!(
+                                                "unknown leader command ({} then: \u{21b9} focus \u{b7} ] [ page \u{b7} Enter drive \u{b7} Space scrollback \u{b7} ? help \u{b7} q quit)",
+                                                leader_cfg.format_compact()
+                                            ));
                                             dirty = true;
                                         }
                                     }
@@ -3754,8 +3754,8 @@ fn help_overlay_lines(rail_on: bool) -> Vec<String> {
     let mut lines = vec![
         " Keybindings ".to_string(),
         String::new(),
-        "  ^Space + key   leader: mux command while driving (tiled grid)".to_string(),
-        "  ^Space ^Space  send the literal Ctrl-Space to the agent".to_string(),
+        "  leader + key   mux command while driving (tiled grid)".to_string(),
+        "  leader twice   send the literal leader key to the agent".to_string(),
         String::new(),
         "  Tab / arrows   focus next/prev pane".to_string(),
         "  Enter          drive focused pane".to_string(),
