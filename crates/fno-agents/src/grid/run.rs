@@ -3084,14 +3084,19 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             | InputEvent::PageNext
                                             | InputEvent::PagePrev),
                                         ) => {
-                                            // Seamless switch-and-drive: release the
-                                            // current claim, move focus/page, then
-                                            // promote the newly focused pane so the
-                                            // operator keeps driving without an explicit
-                                            // Enter. Release(old)+Promote(new) act on
-                                            // different agents, so the per-agent claims
-                                            // do not race.
-                                            if comp.mode() == Mode::Drive {
+                                            // Seamless switch-and-drive ONLY when already
+                                            // driving: release the current claim, move
+                                            // focus/page, then re-promote the new pane so
+                                            // the operator keeps driving without an
+                                            // explicit Enter. Release(old)+Promote(new) act
+                                            // on different agents, so the per-agent claims
+                                            // do not race. When NOT driving (WATCH), this is
+                                            // plain navigation: move focus/page and DO NOT
+                                            // claim drive, or leader+focus/page in WATCH
+                                            // would silently start driving and steal the
+                                            // next keystrokes (codex P2 on PR #79).
+                                            let was_driving = comp.mode() == Mode::Drive;
+                                            if was_driving {
                                                 let rel = comp.step(InputEvent::Release, &states);
                                                 if handle_action(rel, &mut comp, &mut states, &names,
                                                                  &panes, &mut driver_sinks, home).await {
@@ -3103,8 +3108,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                              &panes, &mut driver_sinks, home).await {
                                                 break;
                                             }
-                                            if !promote_blocked_by_exec(&InputEvent::Promote, comp.mode(),
-                                                                        comp.focus(), &host_interactive)
+                                            if was_driving
+                                                && !promote_blocked_by_exec(&InputEvent::Promote, comp.mode(),
+                                                                            comp.focus(), &host_interactive)
                                                 && states.get(comp.focus())
                                                     .map(ConnState::is_drivable)
                                                     .unwrap_or(false)
