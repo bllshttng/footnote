@@ -201,6 +201,7 @@ impl GridArgs {
             Some("provider") => group::GroupKey::Provider,
             Some("status") => group::GroupKey::Status,
             Some("squad") => group::GroupKey::Squad,
+            Some("union") => group::GroupKey::Union,
             _ => group::GroupKey::Cwd,
         }
     }

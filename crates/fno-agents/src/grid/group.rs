@@ -33,6 +33,14 @@ pub enum GroupKey {
     /// the rail's derived sidelines for the user's squads; the same agent still
     /// appears under its repo sideline in the Cwd view (reference membership).
     Squad,
+    /// Both derived sidelines AND manual squads at once (x-fef5). Like
+    /// [`Squad`](GroupKey::Squad) this is NOT a row-field partition: the rail
+    /// assembles it in [`super::run`]'s `base_groups` as the `Cwd` sidelines
+    /// concatenated with the squad groups, each half in a disjoint key namespace
+    /// (`cwd:` / `squad:`) so an agent appearing in both is two independently
+    /// selectable occurrences (the occurrence cursor, x-8a6a). [`group_by`]
+    /// returns empty for this key, mirroring `Squad`.
+    Union,
 }
 
 impl GroupKey {
@@ -43,7 +51,8 @@ impl GroupKey {
             GroupKey::Session => GroupKey::Provider,
             GroupKey::Provider => GroupKey::Status,
             GroupKey::Status => GroupKey::Squad,
-            GroupKey::Squad => GroupKey::Cwd,
+            GroupKey::Squad => GroupKey::Union,
+            GroupKey::Union => GroupKey::Cwd,
         }
     }
 
@@ -55,6 +64,7 @@ impl GroupKey {
             GroupKey::Provider => "provider",
             GroupKey::Status => "status",
             GroupKey::Squad => "squad",
+            GroupKey::Union => "union",
         }
     }
 
@@ -89,6 +99,9 @@ impl GroupKey {
             // `group_by` short-circuits this key before `extract` runs; this arm
             // exists only for exhaustiveness.
             GroupKey::Squad => None,
+            // Union is assembled in `base_groups` (sidelines ++ squads), never a
+            // row-field partition; `group_by` short-circuits it before `extract`.
+            GroupKey::Union => None,
         }
     }
 }
@@ -114,7 +127,10 @@ const SESSION_ID_FIELDS: &[&str] = &[
 pub struct Group {
     /// Display header (the raw key value, or `"unknown"`).
     pub header: String,
-    /// The raw key value (same as `header`, or `"unknown"` for missing fields).
+    /// Cursor-identity key. Usually the raw key value (same as `header`, or
+    /// `"unknown"` for missing fields), but composite views namespace it with a
+    /// prefix (`squad:` for squads, `cwd:` for the union's sidelines) so an
+    /// agent in two visible groups stays two distinct occurrences.
     pub key_value: String,
     /// Indices into the agent list, stable by name (ascending). May be empty.
     pub members: Vec<usize>,
@@ -133,11 +149,12 @@ pub struct Group {
 /// - A row with a missing `name` field uses `""` as its sort key (sorted to
 ///   front of its group), but IS included so the sum invariant holds.
 pub fn group_by(rows: &[Value], key: GroupKey) -> Vec<Group> {
-    // Squad is not a row-field partition: its groups come from the squad store
-    // via `squads::squad_groups`. Returning empty here keeps a stray `group_by`
-    // call from collapsing every row into one "unknown" bucket (the rail routes
-    // the Squad key through `squad_groups` instead - see `rail_view_groups`).
-    if matches!(key, GroupKey::Squad) {
+    // Squad and Union are not row-field partitions: their groups come from the
+    // squad store (`squads::squad_groups`) and the `base_groups` union assembly
+    // respectively. Returning empty here keeps a stray `group_by` call from
+    // collapsing every row into one "unknown" bucket (the rail routes these keys
+    // through `base_groups` instead - see `rail_view_groups`).
+    if matches!(key, GroupKey::Squad | GroupKey::Union) {
         return Vec::new();
     }
     // Collect (key_value, name, original_index) triples.
@@ -1011,9 +1028,69 @@ mod tests {
         assert_eq!(GroupKey::Cwd.next(), GroupKey::Session);
         assert_eq!(GroupKey::Session.next(), GroupKey::Provider);
         assert_eq!(GroupKey::Provider.next(), GroupKey::Status);
-        // Status now cycles into the manual-squads view, then back to cwd (x-5b3e).
+        // Status cycles into the manual-squads view (x-5b3e), then the union
+        // (x-fef5), then back to cwd - the cycle closes.
         assert_eq!(GroupKey::Status.next(), GroupKey::Squad);
-        assert_eq!(GroupKey::Squad.next(), GroupKey::Cwd);
+        assert_eq!(GroupKey::Squad.next(), GroupKey::Union);
+        assert_eq!(GroupKey::Union.next(), GroupKey::Cwd);
+    }
+
+    // ── x-fef5: Union view (sidelines + squads at once) ───────────────────
+
+    #[test]
+    fn union_label_and_group_by_short_circuit() {
+        // Union is a non-row-field view, so `group_by` returns empty (it never
+        // collapses every row into one "unknown" bucket - the Squad short-circuit
+        // invariant extended to Union). The rail routes it via `base_groups`.
+        assert_eq!(GroupKey::Union.label(), "union");
+        let rows = make_rows(&[
+            ("wkA", "/a", "codex", "live"),
+            ("wkB", "/b", "gemini", "live"),
+        ]);
+        assert!(
+            group_by(&rows, GroupKey::Union).is_empty(),
+            "Union short-circuits group_by to empty (assembled in base_groups)"
+        );
+    }
+
+    #[test]
+    fn union_occurrence_cursor_selects_each_half_independently() {
+        // A hand-built union: a `cwd:` sideline and a `squad:` squad that SHARE
+        // member idx 0 (agent `x`). The x-8a6a occurrence cursor must reach the
+        // second occurrence and resolve `selected_group` to the occupied half
+        // without disturbing the other (the whole reason x-8a6a came first).
+        let sideline = Group {
+            header: "root".to_string(),
+            key_value: "cwd:/repo/root".to_string(),
+            members: vec![0, 1], // x, y
+        };
+        let squad = Group {
+            header: "stack".to_string(),
+            key_value: "squad:stack".to_string(),
+            members: vec![0, 2], // x, z
+        };
+        let groups = vec![sideline, squad];
+
+        let mut rs = RailState::new(GroupKey::Union);
+        // First occurrence: agent x under its sideline (flat pos 0).
+        assert_eq!(rs.move_down(&groups), Some(0));
+        assert_eq!(
+            rs.selected_group(&groups).map(|g| g.key_value.as_str()),
+            Some("cwd:/repo/root")
+        );
+
+        // Step to the squad's x (sideline has [0,1] then squad [0,2]; flat
+        // positions 0=x@cwd, 1=y@cwd, 2=x@squad). Two move_downs land on x@squad.
+        rs.move_down(&groups); // -> y@cwd (pos 1)
+        assert_eq!(rs.move_down(&groups), Some(0), "back on agent x"); // -> x@squad (pos 2)
+        assert_eq!(
+            rs.selected_group(&groups).map(|g| g.key_value.as_str()),
+            Some("squad:stack"),
+            "second occurrence resolves to the squad half, not the sideline"
+        );
+        // Selecting the squad occurrence does not mark the sideline's x selected.
+        assert!(!rs.is_selected_occurrence(&groups[0], 0));
+        assert!(rs.is_selected_occurrence(&groups[1], 0));
     }
 
     // ── AC4-ERR: all agents share the same provider -> single group ───────
