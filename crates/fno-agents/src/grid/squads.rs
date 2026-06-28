@@ -14,10 +14,12 @@
 //!   respawn-stable than a uuid: a respawn reusing the same name auto-rejoins
 //!   its squads, where a uuid is re-minted on every respawn (the design's own
 //!   Open Questions flag uuid as un-rematchable). Confirmed with the maintainer.
-//! - **Recruit binds to plain `m`, not `leader m`.** The leader-key model
-//!   (x-b563) is being built in parallel and is not landed; `recruit_outcome`
-//!   here is the reusable verb both the current `m` binding and a future
-//!   `leader m` call into, so the rebind is a one-line change.
+//! - **Recruit binds to plain `m` on the rail, not `leader m`.** The leader-key
+//!   model (x-b563) landed but is TILED-ONLY; the rail keeps its own
+//!   RailNav/PaneDrive keymap until the rail leader (x-d97d) lands. So recruit
+//!   is a plain `m` arm in the rail keymap today; [`SquadStore::recruit`] is the
+//!   reusable verb both that binding and a future `leader m` call into, so the
+//!   rebind is a one-line change. Keyed on `name` per above.
 //!
 //! Persisted GLOBALLY at `~/.fno/squads.json` (a squad spans repos, so it cannot
 //! live in any one project's `.fno`). Writes go through [`update`], which mirrors
