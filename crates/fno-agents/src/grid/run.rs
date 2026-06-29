@@ -557,7 +557,11 @@ async fn spawn_interactive_claude_pane(name: &str, message: &str) -> Result<(), 
         "interactive".into(),
         name.to_string(),
     ];
+    // Pass the first message via --message (not as a trailing positional) so a
+    // goal that happens to start with `--` is taken as text, not parsed as a
+    // flag by the host verb.
     if !message.is_empty() {
+        args.push("--message".into());
         args.push(message.to_string());
     }
     let out = tokio::process::Command::new(&fno)
