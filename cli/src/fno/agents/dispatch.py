@@ -4046,10 +4046,27 @@ def _deliver_live(
             except Exception:
                 pass  # fall through to socket path
 
-    # control.sock op:'reply' inject via the fno-agents mail-inject verb (G1; node
-    # x-1f23). The proven live path for adopted `claude --bg` sessions, replacing
-    # the dead per-worker messaging socket. The roster accepts either the full
-    # session uuid or the 8-hex short id.
+    # Dual-lane inject (node x-849b). An owned-PTY worker (host_mode=interactive)
+    # has NO control.sock handle -- it is driven via worker.submit; an adopted
+    # `claude --bg` session (host_mode=attached) is driven over control.sock
+    # op:reply (the fno-agents mail-inject verb, G1; node x-1f23). resolve_live_lane
+    # picks the live lane (worker first, lossless); both carry the SAME `wrapped`
+    # <fno_mail> turn, so the envelope rides every lane. Neither live -> the caller
+    # writes the durable fallback (unchanged).
+    from fno.relay.roundtrip import (
+        _worker_sock,
+        resolve_live_lane,
+        submit_via_worker,
+    )
+
+    if entry.claude_session_uuid:
+        lane, short_id = resolve_live_lane(entry.claude_session_uuid)
+        if lane == "worker" and short_id:
+            return submit_via_worker(_worker_sock(short_id), wrapped)
+
+    # control.sock lane (adopted --bg) or unresolved: the mail-inject verb resolves
+    # the control.sock handle itself and returns False (-> durable) when not
+    # reachable. The roster accepts either the full session uuid or 8-hex short id.
     recipient = entry.claude_session_uuid or entry.claude_short_id
     if not recipient:
         return False

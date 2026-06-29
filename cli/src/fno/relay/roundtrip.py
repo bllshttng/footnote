@@ -250,6 +250,28 @@ def resolve_attached_short_id(session_id: str) -> Optional[str]:
     return None
 
 
+def resolve_live_lane(session_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Pick the live inject lane that reaches a claude ``session_id`` (node x-849b).
+
+    The single place encoding lane precedence so ``fno mail`` and the relay never
+    drift: an owned-PTY worker (``host_mode == "interactive"``, driven by
+    ``worker.submit``) beats an adopted ``claude --bg`` session (``host_mode ==
+    "attached"``, driven over the daemon ``control.sock`` op:reply). The two
+    host_modes are mutually exclusive for one session uuid, so precedence only
+    orders the lossless worker lane first; neither live -> the caller queues durable.
+
+    Returns ``("worker", short_id)``, ``("control", claude_short_id)``, or
+    ``(None, None)``.
+    """
+    short_id = resolve_worker_short_id(session_id)
+    if short_id is not None:
+        return "worker", short_id
+    attached = resolve_attached_short_id(session_id)
+    if attached is not None:
+        return "control", attached
+    return None, None
+
+
 def _worker_rpc(
     sock_path: Path,
     method: str,
