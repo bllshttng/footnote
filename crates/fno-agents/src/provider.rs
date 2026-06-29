@@ -498,6 +498,22 @@ impl Provider for CodexProvider {
             ctx.cwd.to_string_lossy().into_owned(),
         ];
         argv.extend(Self::sandbox_create(ctx.yolo));
+        // Relay reply-steering (G5 Track A): a relay-targeted spawn carries the
+        // `<<<RELAY>>>` sentinel prompt in `append_system_prompt`; codex honors it
+        // via `-c developer_instructions=<steer>` (an ADDITIVE developer-role
+        // message, NOT `base_instructions` which REPLACES codex's own system
+        // prompt). Passed as a single `-c key=value` argv element, never
+        // shell-interpolated, after the sandbox flags and before the positional
+        // prompt. Empty/absent -> no flag, so a non-relay/grid spawn argv stays
+        // byte-unchanged (AC2-EDGE / AC5-FR).
+        if let Some(steer) = ctx
+            .append_system_prompt
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            argv.push("-c".into());
+            argv.push(format!("developer_instructions={steer}"));
+        }
         // Empty task -> bare interactive session (codex accepts no prompt).
         if !ctx.message.is_empty() {
             argv.push(ctx.message.clone());
@@ -730,6 +746,21 @@ impl Provider for GeminiProvider {
     }
 
     fn create_interactive_argv(&self, ctx: &CreateContext) -> Option<Vec<String>> {
+        // Relay reply-steering (G5 Track A): gemini is explicitly OUT of scope -
+        // its CLI exposes no spawn-time system-prompt flag, so a relay-targeted
+        // gemini spawn cannot be steered at spawn. The daemon now threads
+        // append_system_prompt to every interactive provider, so make gemini's
+        // drop OBSERVABLE (mirrors agy's degrade) rather than a silent no-op.
+        if ctx
+            .append_system_prompt
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            eprintln!(
+                "relay_steer_unsupported{{gemini}}: append_system_prompt dropped (gemini out of scope, no steer channel); spawning unsteered"
+            );
+        }
         // Fresh interactive gemini: `-i/--prompt-interactive` executes the
         // prompt then stays interactive (gemini 0.42.0). NO `--output-format
         // json` (that is the exec/parse path; interactive renders a raw TUI).
@@ -945,6 +976,23 @@ impl Provider for AgyProvider {
     }
 
     fn create_interactive_argv(&self, ctx: &CreateContext) -> Option<Vec<String>> {
+        // Relay reply-steering (G5 Track A): agy (Antigravity CLI) has no
+        // system-prompt FLAG - the codex/claude `--append-system-prompt`
+        // flag-steer model does not transfer (agy's base prompt is server-side).
+        // A file-based channel exists (an `--add-dir` rules dir carrying an
+        // `AGENTS.md` sentinel rule) but it is deferred to a follow-up node, so
+        // v1 does NOT steer agy at spawn. Degrade: log `relay_steer_unsupported`
+        // and spawn UNSTEERED - never a project-file write, never a spawn error.
+        if ctx
+            .append_system_prompt
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            eprintln!(
+                "relay_steer_unsupported{{agy}}: append_system_prompt dropped (no agy steer channel); spawning unsteered"
+            );
+        }
         // Fresh interactive agy. `-i/--prompt-interactive` seeds a prompt then
         // stays interactive; an empty task opens a bare interactive session.
         let mut argv = vec!["agy".into()];
@@ -1347,6 +1395,113 @@ mod tests {
         let argv = CodexProvider.create_interactive_argv(&ctx).unwrap();
         assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(!argv.iter().any(|a| a == "--sandbox"));
+    }
+
+    /// Relay reply-steering (G5 Track A / AC1-HP): a relay-targeted codex spawn
+    /// carries the sentinel prompt as `-c developer_instructions=<steer>`,
+    /// inserted after the sandbox flags and before the positional prompt.
+    #[test]
+    fn codex_interactive_argv_steers_with_developer_instructions() {
+        let mut ctx = create_ctx();
+        ctx.append_system_prompt = Some("WRAP IN SENTINELS".into());
+        let argv = CodexProvider.create_interactive_argv(&ctx).unwrap();
+        assert_eq!(
+            argv,
+            vec![
+                "codex",
+                "-C",
+                "/tmp/example-repo",
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                "developer_instructions=WRAP IN SENTINELS",
+                "build feature X"
+            ]
+        );
+    }
+
+    /// AC1-ERR: an empty steer adds no flag (mirrors claude's empty-prompt no-op).
+    #[test]
+    fn codex_interactive_argv_empty_steer_adds_no_flag() {
+        let mut ctx = create_ctx();
+        ctx.append_system_prompt = Some(String::new());
+        let argv = CodexProvider.create_interactive_argv(&ctx).unwrap();
+        assert!(!argv
+            .iter()
+            .any(|a| a.starts_with("developer_instructions=")));
+        assert!(!argv.iter().any(|a| a == "-c"));
+    }
+
+    /// AC2-EDGE: a steer with quotes/`=`/spaces stays ONE argv element (codex
+    /// `-c key=value`), never split or shell-interpolated.
+    #[test]
+    fn codex_interactive_argv_steer_is_single_argv_element() {
+        let mut ctx = create_ctx();
+        ctx.append_system_prompt = Some("say \"hi\"; x=1 && echo $PATH".into());
+        let argv = CodexProvider.create_interactive_argv(&ctx).unwrap();
+        let steer: Vec<&String> = argv
+            .iter()
+            .filter(|a| a.starts_with("developer_instructions="))
+            .collect();
+        assert_eq!(steer.len(), 1, "steer must be exactly one argv element");
+        assert_eq!(
+            steer[0],
+            "developer_instructions=say \"hi\"; x=1 && echo $PATH"
+        );
+    }
+
+    /// AC2-EDGE / AC5-FR: `append_system_prompt: None` yields the byte-identical
+    /// pre-G5 codex interactive argv (non-relay spawns unchanged).
+    #[test]
+    fn codex_interactive_argv_unsteered_when_none() {
+        let argv = CodexProvider
+            .create_interactive_argv(&create_ctx())
+            .unwrap();
+        assert_eq!(
+            argv,
+            vec![
+                "codex",
+                "-C",
+                "/tmp/example-repo",
+                "--sandbox",
+                "workspace-write",
+                "build feature X"
+            ]
+        );
+    }
+
+    /// AC1-ERR: agy has no steer channel, so a relay-targeted agy spawn degrades -
+    /// the argv is byte-identical to an unsteered spawn (the steer is dropped, the
+    /// daemon logs `relay_steer_unsupported{agy}`); the spawn never errors.
+    #[test]
+    fn agy_interactive_argv_degrades_when_steered() {
+        let mut ctx = create_ctx();
+        ctx.append_system_prompt = Some("WRAP IN SENTINELS".into());
+        let steered = AgyProvider.create_interactive_argv(&ctx).unwrap();
+        let unsteered = AgyProvider.create_interactive_argv(&create_ctx()).unwrap();
+        assert_eq!(
+            steered, unsteered,
+            "agy drops the steer and spawns byte-unchanged"
+        );
+        assert!(!steered.iter().any(|a| a.contains("developer_instructions")));
+    }
+
+    /// gemini is out of scope (no steer channel); the daemon gate-drop threads
+    /// append_system_prompt to it, so a steered gemini spawn degrades byte-
+    /// identical (the daemon logs `relay_steer_unsupported{gemini}`), never errors.
+    #[test]
+    fn gemini_interactive_argv_degrades_when_steered() {
+        let mut ctx = create_ctx();
+        ctx.append_system_prompt = Some("WRAP IN SENTINELS".into());
+        let steered = GeminiProvider.create_interactive_argv(&ctx).unwrap();
+        let unsteered = GeminiProvider
+            .create_interactive_argv(&create_ctx())
+            .unwrap();
+        assert_eq!(
+            steered, unsteered,
+            "gemini drops the steer and spawns byte-unchanged"
+        );
+        assert!(!steered.iter().any(|a| a.contains("developer_instructions")));
     }
 
     #[test]
