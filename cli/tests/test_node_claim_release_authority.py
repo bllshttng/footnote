@@ -48,6 +48,12 @@ SCAN_DIRS = ["cli/src/fno", "scripts", "skills", "hooks", "crates"]
 ALLOWLIST = {
     "skills/target/scripts/handoff.sh",
     "crates/fno-agents/src/loop_megawalk.rs",
+    # `fno backlog unclaim`/`release`: the sanctioned one-shot un-claim verb. Its
+    # lockfile release is holder-verified - it drops the lock ONLY when the
+    # holder is stale (PID dead / TTL expired) or matches the invoking session,
+    # and REFUSES a live foreign holder (warn + point at force-release). Single
+    # authority at an explicit operator lifecycle boundary (x-a747).
+    "cli/src/fno/graph/cli.py",
 }
 
 _EXTS = {".py", ".sh", ".bash", ".rs"}
