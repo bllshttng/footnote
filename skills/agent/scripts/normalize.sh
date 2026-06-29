@@ -40,6 +40,8 @@ PROVIDER=""
 ALLOW_MERGE=0
 YES=0              # 1 = -y/--yes: skip the confirm (consumed by the SKILL policy)
 MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
+SUBSTRATE=""       # x-2c27: ""|bg|headless trailing-posture word (the spawn
+                   # substrate axis). Empty = the default `pane` (owned-PTY).
 YOLO=0             # 1 = full-auto (codex/gemini bypass); sandboxed default
 ASK_MODE=0         # 1 = `ask`/`bare` verb: send the prompt VERBATIM (no /target)
 HANDOFF_MODE=0     # 1 = `handoff` verb: payload is a doc path -> continuation seed
@@ -151,6 +153,7 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
       yolo|auto)           YOLO=1; _end=$_i ;;
       merge)               ALLOW_MERGE=1; _end=$_i ;;
       interactive|drive)   [[ "$MODE" == "exec" ]] && MODE="interactive"; _end=$_i ;;
+      bg|headless)         [[ -z "$SUBSTRATE" ]] && SUBSTRATE="$_lt"; _end=$_i ;;
       as)                  emit_error "'as' is a name keyword with no name after it; write 'as <name>' or drop it" ;;
       *)                   break ;;  # task-text boundary (the run ends here)
     esac
@@ -654,6 +657,10 @@ printf 'shape_hint=%s\n' "$shape_hint"
 printf 'name=%s\n' "$agent_name"
 printf 'provider=%s\n' "$provider"
 printf 'mode=%s\n' "$MODE"
+# x-2c27: the spawn substrate (empty=pane default). The SKILL forwards a
+# non-empty value to `spawn.sh --substrate`; bg -> claude --bg thread,
+# headless -> one-shot (claude -p / codex --exec / agy -p).
+printf 'substrate=%s\n' "$SUBSTRATE"
 printf 'yolo=%s\n' "$YOLO"
 printf 'yes=%s\n' "$YES"
 # allow_merge is emitted deterministically (not re-derived from message prose) so
