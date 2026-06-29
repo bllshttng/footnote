@@ -50,6 +50,12 @@ pub enum ConnState {
     /// Agent process exited. Terminal for this run; the renderer paints
     /// the last received frame plus `exited (code N)`.
     Exited { code: i32 },
+    /// A claude `--bg` roster session surfaced as a static status card
+    /// (x-57eb, Option A). It owns NO fno worker socket and receives no PTY
+    /// stream - the pane is fed a one-shot card (cwd + age + `↵ attach`) at
+    /// build time and never steps the stream FSM. Not drivable as an fno PTY:
+    /// the focused-card Enter shells out to native `claude attach` instead.
+    BgRoster,
 }
 
 impl ConnState {
@@ -87,6 +93,7 @@ impl ConnState {
             ConnState::Live => "live".to_string(),
             ConnState::Disconnected { reason } => format!("disconnected - {reason} (r to retry)"),
             ConnState::Exited { code } => format!("exited (code {code})"),
+            ConnState::BgRoster => "bg \u{b7} \u{21b5} attach".to_string(),
         }
     }
 }
@@ -148,7 +155,9 @@ impl ConnState {
                 }
                 Live => ConnAction::FeedRenderer(bytes),
                 // Bytes after exit / disconnect are dropped (buffered-frame race).
-                Exited { .. } | Disconnected { .. } => ConnAction::NoOp,
+                // A bg-roster card has no stream, so bytes never reach it; the arm
+                // exists only for exhaustiveness.
+                Exited { .. } | Disconnected { .. } | BgRoster => ConnAction::NoOp,
             };
         }
 
