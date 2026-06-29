@@ -688,15 +688,22 @@ fn client_ask_unknown_name_exits_16() {
     );
 }
 
-/// AC6-CLIENT: `spawn --once` for claude must exit 2 with a clear message
-/// (claude peers are persistent; --once is not supported).
+/// x-3ab8: `spawn --once` for claude is no longer an error - it is claude's
+/// headless opt-out (the client-side `claude --bg` lane). It must NOT exit 2 and
+/// must NOT print the old "--once not supported" message; with a fake claude on
+/// PATH it produces the client-side receipt (exit 0). The plain (no --once) lane
+/// is the daemon-routed owned-interactive pane.
 #[test]
-fn client_spawn_once_claude_exits_2() {
+fn client_spawn_once_claude_is_headless_bg_lane_not_an_error() {
+    let _guard = PATH_MUTEX.lock().unwrap();
     let home_dir = tmpdir("cli-spawn-once-claude-home");
+    let bin_dir = tmpdir("cli-spawn-once-claude-bin");
+    let cwd = tmpdir("cli-spawn-once-claude-cwd");
+    install_fake_claude(&bin_dir);
     let bin = find_client_bin();
     if !bin.exists() {
         eprintln!(
-            "skipping client_spawn_once_claude_exits_2: binary not found at {:?}",
+            "skipping client_spawn_once_claude_is_headless_bg_lane_not_an_error: binary not found at {:?}",
             bin
         );
         return;
@@ -712,22 +719,26 @@ fn client_spawn_once_claude_exits_2() {
             "--once",
         ])
         .env("FNO_AGENTS_HOME", &home_dir)
+        .env("PATH", path_with(&bin_dir))
+        .current_dir(&cwd)
         .output()
         .expect("failed to run fno-agents");
 
-    assert_eq!(
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(
         out.status.code(),
         Some(2),
-        "spawn --once claude must exit 2, got {:?}; stderr: {}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr)
+        "claude --once must no longer exit 2 (x-3ab8); stderr: {stderr}"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--once")
-            && (stderr.contains("not supported") || stderr.contains("persistent")),
-        "stderr must explain --once is not supported for claude: {}",
-        stderr
+        !stderr.contains("not supported"),
+        "claude --once must not print the old 'not supported' message: {stderr}"
+    );
+    // With a fake claude on PATH the client-side --bg lane lands the receipt.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"short_id\""),
+        "claude --once should print the client-side --bg receipt; stdout: {stdout} stderr: {stderr}"
     );
 }
 
@@ -765,13 +776,15 @@ fn client_spawn_no_provider_exits_2() {
     );
 }
 
-/// Q1 (sigma-review): the HAPPY PATH of `spawn -p claude` through the real
-/// client binary. Every internal caller (dispatch-node.sh, handoff.sh,
-/// spawn.sh) parses `.short_id` off this binary's stdout, so the
-/// argv -> interception -> receipt plumbing must be pinned end-to-end, not
-/// only at the `dispatch_claude_spawn` lib level.
+/// Q1 (sigma-review): the HAPPY PATH of the CLIENT-SIDE claude spawn lane through
+/// the real client binary. Post-x-3ab8 that lane is reached via `--once` (the
+/// headless `claude --bg` opt-out); a plain `spawn -p claude` now routes through
+/// the daemon's owned-interactive lane instead (covered by build_request's
+/// `spawn_claude_default_is_pty_lane_with_minted_session` + the daemon e2e suite,
+/// which spawn_routing.rs deliberately does NOT start a daemon for). The `--once`
+/// receipt byte shape stays pinned end-to-end: callers parse `.short_id` off it.
 #[test]
-fn client_spawn_claude_happy_path_prints_receipt() {
+fn client_spawn_once_claude_happy_path_prints_receipt() {
     let home_dir = tmpdir("cli-spawn-claude-hp-home");
     let bin_dir = tmpdir("cli-spawn-claude-hp-bin");
     let cwd = tmpdir("cli-spawn-claude-hp-cwd");
@@ -779,14 +792,21 @@ fn client_spawn_claude_happy_path_prints_receipt() {
     let bin = find_client_bin();
     if !bin.exists() {
         eprintln!(
-            "skipping client_spawn_claude_happy_path_prints_receipt: binary not found at {:?}",
+            "skipping client_spawn_once_claude_happy_path_prints_receipt: binary not found at {:?}",
             bin
         );
         return;
     }
 
     let out = std::process::Command::new(&bin)
-        .args(["spawn", "hp-agent", "hello there", "--provider", "claude"])
+        .args([
+            "spawn",
+            "hp-agent",
+            "hello there",
+            "--provider",
+            "claude",
+            "--once",
+        ])
         .env("FNO_AGENTS_HOME", &home_dir)
         .env("PATH", path_with(&bin_dir))
         .current_dir(&cwd)

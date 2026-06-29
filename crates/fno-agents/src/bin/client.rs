@@ -541,10 +541,12 @@ fn maybe_run_agy_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
 
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
 ///
-/// - claude + no --once: dispatch_claude_spawn (persistent bg thread, JSON receipt).
-/// - claude + --once: stderr error + exit 2 (claude peers are persistent; no --once).
-/// - codex/gemini + --once: dispatch_codex_once / dispatch_gemini_once.
-/// - codex/gemini + no --once: return None (fall through to daemon PTY worker).
+/// x-3ab8 flipped the claude default: a plain `spawn` is now an owned interactive
+/// daemon pane (fall through), and `--once` is claude's headless opt-out.
+/// - claude + --once: dispatch_claude_spawn (the headless `claude --bg` thread, JSON receipt).
+/// - claude + no --once: return None (fall through to the daemon owned-interactive lane).
+/// - codex/gemini/agy + --once: dispatch_*_once (one-shot, client-side).
+/// - codex/gemini/agy + no --once: return None (fall through to daemon PTY worker).
 /// - no resolvable provider: stderr usage error + exit 2.
 ///
 /// Returns `Some(exit_code)` when handled client-side, `None` to fall through.
