@@ -207,11 +207,13 @@ bash "${SKILL_DIR}/scripts/dispatch-node.sh" <node...|--all-ready> [--flags "<si
 
 Each line is one of `launched` / `already-running` / `parked` / `skipped-done` / `failed` / `deferred-cap`, followed by a `summary:` line; never silent. Locked semantics:
 - Only `ready`, non-deferred nodes dispatch; `blocked`/`deferred` are **parked** (pre-planned future work), never launched. A node a live worker already holds (`node:<id>` claim) is **already-running**, never double-dispatched.
-- Each worker launches via `fno agents spawn --provider claude` (which builds `claude --bg --name`; Group 1 ab-8b3e4fe0 moved creation off `ask`), NEVER `--bare`/`-p` (subscription lane only).
+- Each worker launches via `fno agents spawn --provider claude --substrate bg` (the detached `claude --bg` thread; Group 1 ab-8b3e4fe0 moved creation off `ask`), NEVER `--bare`/`-p` (subscription lane only). The `--substrate bg` key is load-bearing: the post-x-3ab8 default substrate is `pane` (owned-PTY), which would stall a fire-and-forget dispatch at a placement prompt (x-2c27).
 - `no-merge` is injected by default (an autonomous worker lands a PR for review, not an auto-merge); pass `--allow-merge` to opt out.
 - A dispatch failure is surfaced and leaves the node `ready`/re-dispatchable; it never reports a launch that did not happen, and never falls back to `-p`/API-credit billing.
 
 Multi-CLI: `bg` requires `claude --bg` + `fno agents`; on a CLI without them the dispatch reports the failure and the node stays `ready` (degrade, never fake a launch).
+
+**Spawn substrate axis (x-2c27).** `fno agents spawn --substrate <pane|bg|headless>` names one axis - where an off-thread `/target` runs: `pane` (owned-PTY drivable pane; the default), `bg` (detached `claude --bg` thread; what `/target bg` dispatches), `headless` (a one-shot `claude -p` / `codex --exec` / `agy -p`). `/target bg` is the autonomous-dispatch verb because only `bg` is both detached AND able to run the full multi-phase pipeline. For an attended drivable pane use `/agent spawn /target <node>` (substrate `pane`); `headless` (one-shot) does not fit a multi-phase `/target` run and is a `/agent spawn headless` surface for cross-provider one-shots, not a `/target` dispatch verb. `bg` is claude-only; a non-claude `bg` is a hard error pointing to `headless`.
 
 ### 0b. Reconcile mode (`--reconcile <manifest>`)
 

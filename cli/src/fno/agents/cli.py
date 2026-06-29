@@ -294,6 +294,15 @@ def cmd_spawn(
             "claude peers are persistent bg threads; use plain spawn."
         ),
     ),
+    substrate: str = typer.Option(
+        "pane", "--substrate",
+        help=(
+            "Session substrate (x-2c27): pane (owned-PTY) | bg (claude --bg "
+            "thread) | headless (-p/--exec one-shot). The Rust runtime owns the "
+            "full routing; this Python fallback maps headless->one-shot and "
+            "bg/pane->plain spawn so the flag is never a hard 'unknown option'."
+        ),
+    ),
     cwd: str | None = typer.Option(
         None, "--cwd", "-c", help="Working directory for the agent subprocess."
     ),
@@ -356,6 +365,21 @@ def cmd_spawn(
     from fno.agents.dispatch import DispatchAskError, SpawnResult, dispatch_spawn
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
+
+    # x-2c27: the Rust client owns substrate routing; this Python fallback only
+    # runs when the binary is absent / FNO_AGENTS_RUNTIME=python / a --role spawn.
+    # Validate to parity with the Rust client (exit 2 on a bad value) rather than
+    # silently falling back to plain spawn, then map the substrate onto the
+    # existing `once` lever: headless -> one-shot; bg/pane -> plain spawn (for
+    # claude that already IS the bg thread).
+    if substrate not in ("pane", "bg", "headless"):
+        print(
+            f"--substrate must be one of: pane, bg, headless (got {substrate})",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if substrate == "headless":
+        once = True
 
     try:
         result: SpawnResult = dispatch_spawn(

@@ -46,7 +46,7 @@ focused core:
 
 | Verb | Envelope | Routes to | Cost |
 |------|----------|-----------|------|
-| `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` (claude `--bg` /target; codex/gemini exec or `host -i`) | free (claude subscription) |
+| `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-2c27): default `pane` (owned-PTY drivable); trailing `bg` -> detached `claude --bg` thread; trailing `headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
 | `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (claude `--bg`, continuation seed, NO `/target`) | free (claude subscription) |
 | `discuss [seed]` | normalize `--discuss` + honest-receipt (free lane) | `fno agents spawn` (claude `--bg`, verbatim chat seed, NO `/target`) | free (claude subscription) |
 | `send <name> "..."` | normalize recipient + addressed write | `fno mail send` (the addressed jsonl bus, sender-excluded) | free |
@@ -81,14 +81,15 @@ otherwise the whole argument is the spawn task.
 
 | Provider | Build dispatch | Worker | Receipt |
 |---|---|---|---|
-| `claude` | `fno agents spawn` (client-side `claude --bg`, subscription lane) | backgrounded `/target` loop, full harness | compact JSON `.short_id` |
-| `codex` | `fno agents spawn` (exec) / `fno agents host` (`-i`) | daemon-managed PTY worker | pretty JSON `.short_id` |
-| `gemini` | `fno agents spawn` (exec) / `fno agents host` (`-i`) | daemon-managed PTY worker | pretty JSON `.short_id` |
+| `claude` | `fno agents spawn` (default `pane` owned-PTY; `bg` -> `claude --bg`; `headless` -> `claude -p`) | owned pane, or backgrounded `/target` thread (`bg`) | compact JSON `.short_id` (reply on `headless`) |
+| `codex` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `codex --exec` | daemon-managed PTY worker | pretty JSON `.short_id` |
+| `gemini` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `agy -p` | daemon-managed PTY worker | pretty JSON `.short_id` |
 
 All three create via `spawn` (Group 1 ab-8b3e4fe0: `ask` never creates - it
-messages EXISTING peers only); claude's spawn is a client-side `claude --bg`
-shellout, while codex/gemini route to the shipped PTY primitives `spawn`
-(autonomous, walk-away) and `host` (interactive, human-driven). Ask-mode
+messages EXISTING peers only). The substrate axis (x-2c27) selects the host:
+`pane` (default, owned-PTY drivable), `bg` (claude-only detached `claude --bg`
+thread), `headless` (one-shot `claude -p` / `codex --exec` / `agy -p`). `bg` on a
+non-claude provider is a hard error pointing to `headless`. Ask-mode
 (one-shot Q&A) runs `spawn --once` for codex/gemini. A codex/gemini exec worker
 is a **single autonomous pass**, not the claude "refuse to stop until shipped"
 loop - do not imply loop-grade completion guarantees for them.
@@ -339,11 +340,14 @@ and parses the receipt deterministically:
 ```bash
 bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
   --message "$message" --mode "$mode" --payload-mode "$payload_mode" \
-  [--yolo] [--node "$node"] [--cwd "<cwd source, see below>"]
+  [--substrate "$substrate"] [--yolo] [--node "$node"] [--cwd "<cwd source, see below>"]
 ```
 
-Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--node` whenever `node`
-is non-empty. Choose the `--cwd` source in this priority order, so launch cwd
+Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
+only when normalize emitted a non-empty `substrate` (`bg` -> a detached `claude
+--bg` thread; `headless` -> a one-shot `claude -p` / `codex --exec` / `agy -p`);
+an empty `substrate` is the default `pane` (owned-PTY) and the flag is omitted.
+Pass `--node` whenever `node` is non-empty. Choose the `--cwd` source in this priority order, so launch cwd
 follows the work-map root:
 
 1. normalize's `resolved_cwd` when non-empty (a `-P`/`--project` target, including

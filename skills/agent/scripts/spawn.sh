@@ -36,6 +36,8 @@ CWD=""
 # of these still launches a persistent claude bg peer.
 MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
 PAYLOAD_MODE="build"   # build | ask | passthrough (ask -> spawn --once)
+SUBSTRATE=""           # x-2c27: ""|pane|bg|headless. bg -> claude --bg thread
+                       # (JSON receipt); headless -> one-shot (reply receipt).
 YOLO=0                 # 1 appends --yolo to the spawn/host argv
 FRESH=0                # 1 appends --fresh (canonical-root cwd) to the spawn argv
 HERE=0                 # 1 appends --here (opt out of --fresh) to the spawn argv
@@ -65,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     --cwd)          CWD="${2:-}"; shift 2 ;;
     --mode)         MODE="${2:-}"; shift 2 ;;
     --payload-mode) PAYLOAD_MODE="${2:-}"; shift 2 ;;
+    --substrate)    SUBSTRATE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --yolo)         YOLO=1; shift ;;
     # Pass-through cwd flags (ab-77b691dc): forwarded to `fno agents spawn` so a
     # target-class dispatcher can request canonical-root cwd. NOT defaulted here:
@@ -98,6 +101,16 @@ elif [[ "$MODE" == "interactive" ]]; then
   VERB="host"
 else
   VERB="spawn"
+fi
+
+# x-2c27: an explicit --substrate (bg|headless) always selects the spawn verb
+# (never host) and supersedes the --once ask alias. `headless` yields a one-shot
+# reply receipt (like --once); `bg` (and pane/default) yield the JSON short-id
+# receipt. REPLY drives the receipt-family branch below.
+REPLY=$ONCE
+if [[ -n "$SUBSTRATE" ]]; then
+  VERB="spawn"
+  [[ "$SUBSTRATE" == "headless" ]] && REPLY=1
 fi
 
 # A non-host launch needs a task; only a bare interactive host may be idle
@@ -252,8 +265,11 @@ maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout
 # client-side (Group 1 ab-8b3e4fe0 moved the create off `ask`); codex/gemini
 # `spawn`/`host` are daemon-managed PTY workers (Locked Decision 1) and
 # `spawn --once` is the ephemeral one-shot. Name is POSITIONAL (Locked
-# Decision 8). NEVER -p/--bare. --yolo is appended only when the user
-# explicitly passed it (normalize.sh strips it for claude). A bare interactive
+# Decision 8). Never default to claude `-p`/`--bare` (x-2c27, amended from
+# "never -p"): `pane`/`bg` use owned-PTY / `claude --bg`, never `-p`; `-p` is
+# reachable only via the explicit `--substrate headless` verb (which the Rust
+# client, not this script, translates to `claude -p`). --yolo is appended only
+# when the user explicitly passed it (normalize.sh strips it for claude). A bare interactive
 # host omits the message positional (a valid idle session). The cmd array
 # always carries at least `agents <verb> --provider <p> <name>`, so
 # "${cmd[@]}" is never an empty expansion (bash 3.2 set -u safe).
@@ -267,7 +283,13 @@ cmd=(agents "$VERB" --provider "$PROVIDER")
 [[ "$FRESH" -eq 1 ]] && cmd+=(--fresh)
 [[ "$HERE" -eq 1 ]] && cmd+=(--here)
 [[ "$YOLO" -eq 1 ]] && cmd+=(--yolo)
-[[ "$ONCE" -eq 1 ]] && cmd+=(--once)
+# x-2c27: an explicit substrate emits --substrate (the canonical selector) and
+# supersedes the --once alias; otherwise the ask lane keeps --once.
+if [[ -n "$SUBSTRATE" ]]; then
+  cmd+=(--substrate "$SUBSTRATE")
+elif [[ "$ONCE" -eq 1 ]]; then
+  cmd+=(--once)
+fi
 cmd+=("$NAME")
 [[ -n "$MESSAGE" ]] && cmd+=("$MESSAGE")
 
@@ -296,12 +318,12 @@ fi
 #                          the client-side claude spawn). Parse `.short_id`
 #                          with jq, validate whole-string 8-hex.
 #                          Empty/missing/non-8-hex (even on exit 0) is FAILED.
-if [[ "$ONCE" -eq 1 ]]; then
-  # spawn --once reply receipt. Trim whitespace for the empty check only;
-  # the full reply is relayed verbatim.
+if [[ "$REPLY" -eq 1 ]]; then
+  # one-shot reply receipt (spawn --once / --substrate headless). Trim
+  # whitespace for the empty check only; the full reply is relayed verbatim.
   reply_trimmed="${spawn_out//[$' \t\r\n']/}"
   if [[ -z "$reply_trimmed" ]]; then
-    fail "empty reply (spawn --once returned no content on exit 0): $(sanitize "${spawn_err:-(no stderr)}")"
+    fail "empty reply (one-shot returned no content on exit 0): $(sanitize "${spawn_err:-(no stderr)}")"
   fi
   # The reply IS the deliverable (no lasting peer for a one-shot). Outcome line
   # first, then the full reply verbatim for the skill to preview.

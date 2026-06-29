@@ -75,6 +75,20 @@ out="$(run 'spawn the node that will merge two branches')"
 check_eq   'AC1-EDGE merge not consumed' "$(field "$out" allow_merge)" '0'
 check_contains 'AC1-EDGE merge stays in message' "$(field "$out" message)" 'merge two branches'
 
+# --- x-2c27: bg / headless substrate posture words ----------------------------
+out="$(run 'build the thing bg')"
+check_eq   'x-2c27 bg substrate'       "$(field "$out" substrate)" 'bg'
+check_contains 'x-2c27 bg task trimmed' "$(field "$out" message)"  'build the thing'
+out="$(run 'fix it headless codex')"
+check_eq   'x-2c27 headless substrate' "$(field "$out" substrate)" 'headless'
+check_eq   'x-2c27 headless+codex provider' "$(field "$out" provider)" 'codex'
+out="$(run 'just build the feature')"
+check_eq   'x-2c27 no posture -> empty substrate (pane default)' "$(field "$out" substrate)" ''
+# A mid-task 'bg' stays task text (right-anchored run; a non-posture token follows)
+out="$(run 'make the bg job run faster')"
+check_eq   'x-2c27 mid-task bg not consumed' "$(field "$out" substrate)" ''
+check_contains 'x-2c27 mid-task bg stays in message' "$(field "$out" message)" 'bg job run faster'
+
 # trailing `merge` after a non-posture token still binds (right-anchored run)
 out="$(run 'ab-22222222 merge')"
 check_eq   'trailing merge binds' "$(field "$out" allow_merge)" '1'

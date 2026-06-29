@@ -759,6 +759,28 @@ def test_worker_agent_name_reason_scoped():
     assert len(names) == 3  # no collision across a node's lifecycle
 
 
+def test_worker_agent_name_capped_at_64_keeps_node_id():
+    """x-2c27 (AC2-ERR): the assembled name never exceeds the 64-char spawn limit.
+
+    Per-component slugging caps each part at 30, but a long slug + a long
+    invocation suffix on a lifecycle reason can overflow the assembled name and
+    crash `fno agents spawn` with "name must be 1-64 chars". The cap trims the
+    tail while keeping the `think-<node-id>` lead.
+    """
+    long_slug = "a-very-long-descriptive-node-slug-that-keeps-going-and-going"
+    suffix = "sessaaaa"
+    name = st._worker_agent_name("x-2c27", long_slug, st.REASON_WORK_START, suffix)
+    assert len(name) <= 64, f"name overflowed: {len(name)} chars: {name!r}"
+    assert name.startswith("think-x-2c27-work-start"), f"node id/reason dropped: {name!r}"
+    assert not name.endswith("-"), f"trailing hyphen not trimmed: {name!r}"
+    # codex P2: the per-session suffix is the uniqueness discriminator - capping
+    # must trim the slug, never the suffix, or two repeat dispatches collide.
+    assert name.endswith("sessaaaa"), f"session suffix shaved by the cap: {name!r}"
+    # Two distinct suffixes on the same long-slug node must yield distinct names.
+    other = st._worker_agent_name("x-2c27", long_slug, st.REASON_WORK_START, "sessbbbb")
+    assert name != other, f"name collision across suffixes: {name!r} == {other!r}"
+
+
 def test_lifecycle_wrapper_strictly_non_fatal(iso, monkeypatch):
     """A wrapper swallows any internal failure and returns None (never raises)."""
     monkeypatch.setattr(st, "_subflag_on", lambda name, root: True)

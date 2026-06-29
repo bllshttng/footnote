@@ -688,13 +688,13 @@ fn client_ask_unknown_name_exits_16() {
     );
 }
 
-/// x-3ab8: `spawn --once` for claude is no longer an error - it is claude's
-/// headless opt-out (the client-side `claude --bg` lane). It must NOT exit 2 and
-/// must NOT print the old "--once not supported" message; with a fake claude on
-/// PATH it produces the client-side receipt (exit 0). The plain (no --once) lane
-/// is the daemon-routed owned-interactive pane.
+/// x-2c27: `spawn --once` is the back-compat alias for `--substrate headless`.
+/// For claude that is the `claude -p` one-shot lane - NOT the `--bg` thread.
+/// It must NOT exit 2, must NOT print the old "--once not supported" message,
+/// and must NOT emit the bg JSON `"short_id"` receipt (which would prove it
+/// hit the bg lane instead of the headless passthrough).
 #[test]
-fn client_spawn_once_claude_is_headless_bg_lane_not_an_error() {
+fn client_spawn_once_claude_is_headless_p_lane_not_bg() {
     let _guard = PATH_MUTEX.lock().unwrap();
     let home_dir = tmpdir("cli-spawn-once-claude-home");
     let bin_dir = tmpdir("cli-spawn-once-claude-bin");
@@ -703,7 +703,7 @@ fn client_spawn_once_claude_is_headless_bg_lane_not_an_error() {
     let bin = find_client_bin();
     if !bin.exists() {
         eprintln!(
-            "skipping client_spawn_once_claude_is_headless_bg_lane_not_an_error: binary not found at {:?}",
+            "skipping client_spawn_once_claude_is_headless_p_lane_not_bg: binary not found at {:?}",
             bin
         );
         return;
@@ -728,17 +728,113 @@ fn client_spawn_once_claude_is_headless_bg_lane_not_an_error() {
     assert_ne!(
         out.status.code(),
         Some(2),
-        "claude --once must no longer exit 2 (x-3ab8); stderr: {stderr}"
+        "claude --once (headless) must not exit 2; stderr: {stderr}"
     );
     assert!(
         !stderr.contains("not supported"),
         "claude --once must not print the old 'not supported' message: {stderr}"
     );
-    // With a fake claude on PATH the client-side --bg lane lands the receipt.
+    // The headless `claude -p` lane returns the subprocess output verbatim; it
+    // does NOT wrap it in the bg JSON receipt. Absence of `"short_id"` proves we
+    // took the -p lane, not the --bg lane.
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("\"short_id\""),
-        "claude --once should print the client-side --bg receipt; stdout: {stdout} stderr: {stderr}"
+        !stdout.contains("\"short_id\""),
+        "claude --once (headless) must NOT emit the bg JSON receipt; stdout: {stdout} stderr: {stderr}"
+    );
+}
+
+/// x-2c27 (codex P2): the claude headless lane honors `--timeout` - a hung
+/// `claude -p` is SIGKILLed past the deadline and reported as exit 124, not an
+/// indefinite wedge.
+#[test]
+fn client_spawn_headless_claude_honors_timeout() {
+    let _guard = PATH_MUTEX.lock().unwrap();
+    let home_dir = tmpdir("cli-spawn-hl-to-home");
+    let bin_dir = tmpdir("cli-spawn-hl-to-bin");
+    let cwd = tmpdir("cli-spawn-hl-to-cwd");
+    // A fake claude that hangs well past the 1s timeout.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("claude");
+        fs::write(&path, "#!/bin/sh\nsleep 30\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!("skipping client_spawn_headless_claude_honors_timeout: binary not found");
+        return;
+    }
+
+    let start = std::time::Instant::now();
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "wk",
+            "hello",
+            "--provider",
+            "claude",
+            "--substrate",
+            "headless",
+            "--timeout",
+            "1",
+        ])
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .env("PATH", path_with(&bin_dir))
+        .current_dir(&cwd)
+        .output()
+        .expect("failed to run fno-agents");
+    let elapsed = start.elapsed();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(124),
+        "headless timeout must exit 124; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("timed out"),
+        "stderr must name the timeout: {stderr}"
+    );
+    assert!(
+        elapsed.as_secs() < 10,
+        "must not wait the full 30s sleep; took {elapsed:?}"
+    );
+}
+
+/// x-2c27: `bg` is claude-only. `--substrate bg --provider codex` must hard-error
+/// (exit 2) pointing to headless, never silently fall to another substrate.
+#[test]
+fn client_spawn_substrate_bg_codex_hard_errors() {
+    let home_dir = tmpdir("cli-spawn-bg-codex-home");
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!("skipping client_spawn_substrate_bg_codex_hard_errors: binary not found");
+        return;
+    }
+
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "myagent",
+            "hello",
+            "--provider",
+            "codex",
+            "--substrate",
+            "bg",
+        ])
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .output()
+        .expect("failed to run fno-agents");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "codex --substrate bg must exit 2; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("claude-only") && stderr.contains("headless"),
+        "codex --substrate bg error must name the claude-only constraint and headless: {stderr}"
     );
 }
 
@@ -776,15 +872,16 @@ fn client_spawn_no_provider_exits_2() {
     );
 }
 
-/// Q1 (sigma-review): the HAPPY PATH of the CLIENT-SIDE claude spawn lane through
-/// the real client binary. Post-x-3ab8 that lane is reached via `--once` (the
-/// headless `claude --bg` opt-out); a plain `spawn -p claude` now routes through
-/// the daemon's owned-interactive lane instead (covered by build_request's
-/// `spawn_claude_default_is_pty_lane_with_minted_session` + the daemon e2e suite,
-/// which spawn_routing.rs deliberately does NOT start a daemon for). The `--once`
-/// receipt byte shape stays pinned end-to-end: callers parse `.short_id` off it.
+/// Q1 (sigma-review): the HAPPY PATH of the CLIENT-SIDE claude `--bg` spawn lane
+/// through the real client binary. Post-x-2c27 that lane is reached via
+/// `--substrate bg` (the detached `claude --bg` thread); a plain `spawn -p
+/// claude` (pane) routes through the daemon's owned-interactive lane instead
+/// (covered by build_request's `spawn_claude_default_is_pty_lane_with_minted_session`
+/// + the daemon e2e suite, which spawn_routing.rs deliberately does NOT start a
+/// daemon for). The bg receipt byte shape stays pinned end-to-end: callers parse
+/// `.short_id` off it.
 #[test]
-fn client_spawn_once_claude_happy_path_prints_receipt() {
+fn client_spawn_bg_claude_happy_path_prints_receipt() {
     let home_dir = tmpdir("cli-spawn-claude-hp-home");
     let bin_dir = tmpdir("cli-spawn-claude-hp-bin");
     let cwd = tmpdir("cli-spawn-claude-hp-cwd");
@@ -805,7 +902,8 @@ fn client_spawn_once_claude_happy_path_prints_receipt() {
             "hello there",
             "--provider",
             "claude",
-            "--once",
+            "--substrate",
+            "bg",
         ])
         .env("FNO_AGENTS_HOME", &home_dir)
         .env("PATH", path_with(&bin_dir))

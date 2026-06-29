@@ -1676,6 +1676,173 @@ pub fn dispatch_claude_spawn(
     }
 }
 
+/// Dispatch a `claude -p` truly-headless one-shot (x-2c27 `headless` substrate).
+///
+/// Unlike [`dispatch_claude_spawn`] (the detached `--bg` thread, which returns a
+/// short-id receipt), this runs `claude -p` SYNCHRONOUSLY to completion, prints
+/// the model's reply to stdout, and exits - no registry row, no short-id, no
+/// driveable pane. `claude` never *defaults* to `-p`; this is the one lane that
+/// shells it (Locked Decision 4). `ask` and the relay claude hop keep `--bg`.
+///
+/// A headless run cannot answer permission prompts, so it always passes
+/// `--dangerously-skip-permissions` (mirrors the agy/codex once lanes); `yolo`
+/// is therefore a no-op, accepted only for signature parity. `claude_home` is
+/// unused (no session registry for an ephemeral one-shot) and kept for parity
+/// with the bg path's signature.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_claude_headless(
+    _claude_home: &ClaudeHome,
+    name: &str,
+    message: &str,
+    from_name: &str,
+    cwd: &Path,
+    _yolo: bool,
+    timeout: Option<Duration>,
+) -> AskOutcome {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    if let Err(msg) = validate_spawn_inputs(name, from_name) {
+        return AskOutcome::err(msg, 2);
+    }
+
+    // Python-truthiness parity with the once lanes: only an EMPTY message
+    // becomes "hello"; a whitespace-only prompt passes through unchanged.
+    let effective = if message.is_empty() { "hello" } else { message };
+    let use_stdin = use_stdin_for(effective);
+
+    let mut argv: Vec<String> = vec![
+        "claude".into(),
+        "-p".into(),
+        "--dangerously-skip-permissions".into(),
+    ];
+    if !use_stdin {
+        argv.push(effective.to_string());
+    }
+
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    cmd.current_dir(cwd);
+    cmd.env("FNO_AGENT_SELF", name);
+    cmd.env("FNO_AGENT_PROVIDER", "claude");
+    cmd.env("FNO_AGENT_FROM", from_name);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.stdin(if use_stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return AskOutcome::err(format!("claude CLI not found: {}", e), 127);
+        }
+        Err(e) => return AskOutcome::err(e.to_string(), 127),
+    };
+
+    // Drain stdout/stderr on their own threads so a filling pipe can never
+    // deadlock the bounded wait below (we can't use wait_with_output: it blocks
+    // with no timeout knob). The common argv path still uses these.
+    let stdout_join = child.stdout.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut s = Vec::new();
+            let _ = p.read_to_end(&mut s);
+            s
+        })
+    });
+    let stderr_join = child.stderr.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut s = Vec::new();
+            let _ = p.read_to_end(&mut s);
+            s
+        })
+    });
+
+    // Large (>200KB) prompts go via stdin on a detached writer thread so a
+    // filling stdout pipe can't deadlock a synchronous write. The common path
+    // (argv) skips this entirely.
+    let stdin_writer = if use_stdin {
+        child.stdin.take().map(|mut s| {
+            let data = effective.to_string();
+            std::thread::spawn(move || {
+                let _ = s.write_all(data.as_bytes());
+            })
+        })
+    } else {
+        None
+    };
+
+    // Bounded wait: a `-p` one-shot has no detached fork to orphan, but a hung
+    // `claude -p` (startup/network stall) would otherwise wedge the caller
+    // forever even when --timeout was supplied (codex P2). When `timeout` is
+    // set, SIGKILL the child past the deadline and report exit 124 (parity with
+    // the --bg launch timeout); with no --timeout the wait is unbounded, as the
+    // user asked for no bound. The reader threads above keep the pipes drained.
+    // `wait_result` is Some(exit_code) on a real exit, None on a timeout kill.
+    let wait_result: Result<Option<i32>, String> = if let Some(limit) = timeout {
+        let deadline = Instant::now() + limit;
+        loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break Ok(Some(st.code().unwrap_or(1))),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Ok(None);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => break Err(format!("claude -p wait failed: {}", e)),
+            }
+        }
+    } else {
+        child
+            .wait()
+            .map(|st| Some(st.code().unwrap_or(1)))
+            .map_err(|e| format!("claude -p wait failed: {}", e))
+    };
+
+    // Collect output by JOINING the reader/writer threads ONLY on a clean exit.
+    // On a timeout-kill we must NOT join: SIGKILL'ing `claude` does not reap a
+    // grandchild it spawned (e.g. a shell's `sleep`), which keeps the inherited
+    // stdout/stderr write end open, so `read_to_end` would block until THAT
+    // grandchild exits - defeating the very timeout we just enforced. Abandon
+    // the threads (they die when the OS finally closes the fds); the timed-out
+    // one-shot has no useful deliverable anyway. (Same orphan-pipe hazard the
+    // --bg launch path documents.)
+    match wait_result {
+        Err(msg) => AskOutcome::err(msg, 1),
+        Ok(None) => AskOutcome::err(
+            format!(
+                "claude -p timed out after {:.1}s",
+                timeout
+                    .expect("timeout Some on the bounded path")
+                    .as_secs_f64()
+            ),
+            124,
+        ),
+        Ok(Some(exit_code)) => {
+            let stdout = stdout_join
+                .map(|h| h.join().unwrap_or_default())
+                .unwrap_or_default();
+            let stderr = stderr_join
+                .map(|h| h.join().unwrap_or_default())
+                .unwrap_or_default();
+            if let Some(h) = stdin_writer {
+                let _ = h.join();
+            }
+            AskOutcome {
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                exit_code,
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn followup(
     _home: &AgentsHome,
