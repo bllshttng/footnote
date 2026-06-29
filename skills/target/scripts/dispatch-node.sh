@@ -283,12 +283,15 @@ for id in "${NODES[@]}"; do
     cwd_hint="--cwd $node_cwd "
     dry_cwd="$node_cwd"
   elif [[ "$HERE" -eq 0 ]]; then
+    # cwd= must stay a real, space-free path so the receipt is machine-parseable
+    # (the conductor worktree path is not known until ensure runs, so preview the
+    # canonical root the --fresh fallback would use); the hint carries the intent.
     cwd_hint="--cwd <fno worktree ensure> "
-    dry_cwd="<conductor worktree (ensure), else --fresh>"
+    dry_cwd="${CANONICAL_ROOT:-$(pwd)}"
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=\"${dry_cwd}\" hint=\"would run: fno agents spawn --provider claude ${cwd_hint}$agent_name '$tgt_cmd'\""
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude ${cwd_hint}$agent_name '$tgt_cmd'\""
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -349,7 +352,9 @@ for id in "${NODES[@]}"; do
       launch_cwd="$wt"
     else
       spawn_out="$(fno agents spawn --provider claude --fresh "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
-      launch_cwd="<canonical main (--fresh)>"
+      # --fresh lands the worker in canonical main; report that real path (not a
+      # space-containing label) so the cwd= field stays machine-parseable.
+      launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
     spawn_out="$(fno agents spawn --provider claude "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
@@ -385,7 +390,7 @@ for id in "${NODES[@]}"; do
   fi
   # Launched. Leave the reservation to expire by TTL (the worker now owns
   # node:<id>, which guards later dispatches).
-  echo "launched $id name=$agent_name session=$sid cwd=\"${launch_cwd}\" hint=\"fno agents logs $agent_name\""
+  echo "launched $id name=$agent_name session=$sid cwd=${launch_cwd} hint=\"fno agents logs $agent_name\""
   n_launched=$((n_launched + 1))
 done
 
