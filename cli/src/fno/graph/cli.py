@@ -1461,7 +1461,6 @@ def _release_node_lockfile(node_id: str) -> str:
     try:
         from fno.claims.core import (
             claim_status,
-            force_release_claim,
             release_claim,
         )
         from fno.claims.io import claims_root_for
@@ -1477,7 +1476,12 @@ def _release_node_lockfile(node_id: str) -> str:
         if state == "free":
             return "no lockfile"
         if state == "stale":
-            force_release_claim(key, reason="unclaim: stale holder", root=root)
+            # Holder-verified release, NOT unconditional force-release (codex P1):
+            # between this stale snapshot and the unlink, another dispatcher can
+            # reclaim the dead lock with a NEW holder. release_claim() only
+            # removes the file if its holder still matches the stale holder we
+            # saw, so a fresh live holder is left intact rather than yanked.
+            release_claim(key, holder=status.get("holder") or "", root=root)
             return "released stale lockfile"
         if state == "corrupted":
             typer.echo(

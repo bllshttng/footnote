@@ -124,6 +124,29 @@ def test_unclaim_releases_stale_lockfile(tmp_graph, claims_root):
     assert _read(tmp_graph)[0]["session_id"] is None
 
 
+def test_unclaim_stale_release_is_holder_verified_toctou(tmp_graph, claims_root, monkeypatch):
+    # codex P1: between the stale snapshot and the unlink, another dispatcher
+    # reclaims the dead lock with a NEW holder. The release must be holder-
+    # verified so it leaves that fresh live lock intact (no two-writer yank).
+    _seed(tmp_graph, [_claimed_node()])
+    # On-disk reality: a DIFFERENT live holder now owns the lock.
+    _acquire("node:ab-1234abcd", "target-session:fresh-live", pid=os.getpid(), root=claims_root)
+    # Stale snapshot the verb sees first reports the OLD dead holder.
+    import fno.claims.core as cc
+    real_status = cc.claim_status
+    def stale_snapshot(key, **kw):
+        s = dict(real_status(key, **kw))
+        if key == "node:ab-1234abcd":
+            s.update(state="stale", holder="target-session:dead-old")
+        return s
+    monkeypatch.setattr("fno.claims.core.claim_status", stale_snapshot)
+    result = runner.invoke(app, ["backlog", "unclaim", "ab-1234abcd"])
+    assert result.exit_code == 0, result.output
+    # The fresh live holder's lock survives (holder mismatch -> release no-ops).
+    assert _lock_exists("node:ab-1234abcd", claims_root)
+    assert _read(tmp_graph)[0]["session_id"] is None  # graph still cleared
+
+
 def test_unclaim_refuses_live_foreign_lockfile(tmp_graph, claims_root, monkeypatch):
     _seed(tmp_graph, [_claimed_node()])
     # A live holder (this pid) that is NOT us => graph cleared, lockfile kept.
