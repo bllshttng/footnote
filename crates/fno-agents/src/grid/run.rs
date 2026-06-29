@@ -4639,7 +4639,8 @@ fn help_overlay_lines(rail_on: bool) -> Vec<String> {
         lines.push("  Rail (when active):".to_string());
         lines.push("  g              cycle group-by (cwd .. union)".to_string());
         lines.push("  m              recruit selected agent (Up/Down picks a squad)".to_string());
-        lines.push("  r              remove selected agent from its squad (squad view)".to_string());
+        lines
+            .push("  r              remove selected agent from its squad (squad view)".to_string());
         lines.push("  a              toggle attention filter".to_string());
         lines.push("  Tab            tile / zoom selected group".to_string());
     }
@@ -4837,8 +4838,14 @@ mod tests {
     #[test]
     fn candidate_legend_marks_cursor() {
         let cands = vec!["stack".to_string(), "crew".to_string(), "ops".to_string()];
-        assert_eq!(candidate_legend(&cands, 1), "stack \u{2039}crew\u{203a} ops");
-        assert_eq!(candidate_legend(&cands, 0), "\u{2039}stack\u{203a} crew ops");
+        assert_eq!(
+            candidate_legend(&cands, 1),
+            "stack \u{2039}crew\u{203a} ops"
+        );
+        assert_eq!(
+            candidate_legend(&cands, 0),
+            "\u{2039}stack\u{203a} crew ops"
+        );
     }
 
     // AC1-EDGE: no squads -> empty legend, so the footer is the bare prompt.
