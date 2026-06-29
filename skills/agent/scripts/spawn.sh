@@ -265,8 +265,11 @@ maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout
 # client-side (Group 1 ab-8b3e4fe0 moved the create off `ask`); codex/gemini
 # `spawn`/`host` are daemon-managed PTY workers (Locked Decision 1) and
 # `spawn --once` is the ephemeral one-shot. Name is POSITIONAL (Locked
-# Decision 8). NEVER -p/--bare. --yolo is appended only when the user
-# explicitly passed it (normalize.sh strips it for claude). A bare interactive
+# Decision 8). Never default to claude `-p`/`--bare` (x-2c27, amended from
+# "never -p"): `pane`/`bg` use owned-PTY / `claude --bg`, never `-p`; `-p` is
+# reachable only via the explicit `--substrate headless` verb (which the Rust
+# client, not this script, translates to `claude -p`). --yolo is appended only
+# when the user explicitly passed it (normalize.sh strips it for claude). A bare interactive
 # host omits the message positional (a valid idle session). The cmd array
 # always carries at least `agents <verb> --provider <p> <name>`, so
 # "${cmd[@]}" is never an empty expansion (bash 3.2 set -u safe).
