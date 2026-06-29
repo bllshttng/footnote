@@ -2370,6 +2370,293 @@ async fn ping_open_sinks(watch_sinks: &mut [Option<WsSink>], states: &mut [ConnS
     }
 }
 
+// ── Live-add + poll-discovery (x-45e6) ────────────────────────────────────
+
+/// Registry names present in `fresh` but not already tiled in `known` (the poll
+/// diff, by name - AC2-EDGE: a name already tiled is never double-added). Pure.
+fn new_registry_names(fresh: Vec<String>, known: &[String]) -> Vec<String> {
+    let known: std::collections::HashSet<&str> = known.iter().map(String::as_str).collect();
+    fresh
+        .into_iter()
+        .filter(|n| !known.contains(n.as_str()))
+        .collect()
+}
+
+/// Roster cards whose session is not already carried by a tiled card (the poll
+/// diff, by session_id - AC3-EDGE). `known` is the grid's `roster_cards` vector
+/// (`None` for real fno panes, skipped). Pure.
+fn new_roster_cards(fresh: Vec<RosterBgCard>, known: &[Option<RosterBgCard>]) -> Vec<RosterBgCard> {
+    let known: std::collections::HashSet<&str> = known
+        .iter()
+        .flatten()
+        .map(|c| c.session_id.as_str())
+        .collect();
+    fresh
+        .into_iter()
+        .filter(|c| !known.contains(c.session_id.as_str()))
+        .collect()
+}
+
+/// Read the fno registry rows (absent / unparseable => empty). Mirrors the
+/// other enumeration sites; used by the poll to recover a discovered child's
+/// real provider/cwd for rail grouping.
+fn read_registry_rows(home: &AgentsHome) -> Vec<Value> {
+    std::fs::read(home.registry_json())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| {
+            v.get("agents")
+                .or_else(|| v.get("entries"))
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default()
+}
+
+/// Assert every parallel vector is 1:1 with `names` (the load-bearing
+/// invariant: every reader indexes these by pane index == names index). Cheap
+/// `debug_assert` so a desync trips in debug/tests, never silently mislabels a
+/// pane in release.
+fn debug_assert_vectors_aligned(
+    names: &[String],
+    panes: &[Pane],
+    states: &[ConnState],
+    watch_sinks: &[Option<WsSink>],
+    host_interactive: &[bool],
+    roster_cards: &[Option<RosterBgCard>],
+    rail_rows: &[Value],
+) {
+    debug_assert_eq!(panes.len(), names.len(), "panes 1:1 names");
+    debug_assert_eq!(states.len(), names.len(), "states 1:1 names");
+    debug_assert_eq!(watch_sinks.len(), names.len(), "watch_sinks 1:1 names");
+    debug_assert_eq!(
+        host_interactive.len(),
+        names.len(),
+        "host_interactive 1:1 names"
+    );
+    debug_assert_eq!(roster_cards.len(), names.len(), "roster_cards 1:1 names");
+    debug_assert_eq!(rail_rows.len(), names.len(), "rail_rows 1:1 names");
+}
+
+/// Live-add ONE registry PTY pane at the next global index, growing every
+/// parallel vector in lockstep. The launcher and the x-45e6 poll share this so
+/// the parallel-vector 1:1 invariant lives in exactly one place (Change 1).
+/// Opens a watcher WS, re-tiles, stamps the caller-supplied rail row. `focus`
+/// steals focus to the new pane (the launcher path, where the human just
+/// launched it); the poll passes `false` so a discovered pane never yanks the
+/// operator's focus. Returns `true` if the pane tiled; `false` if the terminal
+/// is too small to add another tile (the worker is running, just not shown yet).
+#[allow(clippy::too_many_arguments)]
+async fn live_add_pane(
+    home: &AgentsHome,
+    name: &str,
+    host_mode: bool,
+    tx: &mpsc::Sender<PaneMsg>,
+    tty: TtySize,
+    comp: &mut Compositor,
+    names: &mut Vec<String>,
+    panes: &mut Vec<Pane>,
+    states: &mut Vec<ConnState>,
+    watch_sinks: &mut Vec<Option<WsSink>>,
+    host_interactive: &mut Vec<bool>,
+    roster_cards: &mut Vec<Option<RosterBgCard>>,
+    rail_rows: &mut Vec<Value>,
+    repo_cache: &mut repo::RepoCache,
+    mut rail_row: Value,
+    focus: bool,
+) -> bool {
+    let new_idx = panes.len();
+    let Ok(paged) = layout::compute_page(tty, new_idx + 1, comp.current_page()) else {
+        // Worker is running; the terminal just can't tile another pane yet.
+        return false;
+    };
+    let (rows, cols) = target_pane_inner(&paged, new_idx);
+    let (pane, state, sink) = open_watch_pane(home, name, new_idx, rows, cols, tx).await;
+    // Grow every parallel vector in lockstep (Invariants: parallel-vector 1:1).
+    host_interactive.push(host_mode);
+    roster_cards.push(None); // a real fno pane, never a bg card (x-57eb)
+    panes.push(pane);
+    states.push(state);
+    watch_sinks.push(sink);
+    names.push(name.to_string());
+    // Resolve the new worker's repo so it rolls up under the right sideline on
+    // the next frame (x-cb89). Caller owns the row's provenance (launcher
+    // synthesizes claude+cwd; the poll passes the child's real registry row).
+    repo::stamp_row(&mut rail_row, repo_cache);
+    rail_rows.push(rail_row);
+    comp.set_pane_count(panes.len());
+    comp.recompute_pagination(paged.capacity);
+    if focus {
+        comp.set_focus(new_idx);
+    }
+    resize_all_panes(&paged, panes, watch_sinks).await;
+    debug_assert_vectors_aligned(
+        names,
+        panes,
+        states,
+        watch_sinks,
+        host_interactive,
+        roster_cards,
+        rail_rows,
+    );
+    true
+}
+
+/// Live-add ONE claude `--bg` roster card at the next global index (x-45e6
+/// poll, Change 3). A roster card has NO fno worker socket, so it NEVER opens a
+/// watcher WS (that is the rejected Option B) - the static card text is fed
+/// once and the state is `BgRoster`. Mirrors the startup roster merge and keeps
+/// every parallel vector 1:1 with `names`. Never steals focus. Returns `true`
+/// if the card tiled; `false` if the terminal is too small.
+#[allow(clippy::too_many_arguments)]
+async fn live_add_roster_card(
+    card: RosterBgCard,
+    tty: TtySize,
+    comp: &mut Compositor,
+    names: &mut Vec<String>,
+    panes: &mut Vec<Pane>,
+    states: &mut Vec<ConnState>,
+    watch_sinks: &mut Vec<Option<WsSink>>,
+    host_interactive: &mut Vec<bool>,
+    roster_cards: &mut Vec<Option<RosterBgCard>>,
+    rail_rows: &mut Vec<Value>,
+    repo_cache: &mut repo::RepoCache,
+) -> bool {
+    let new_idx = panes.len();
+    let Ok(paged) = layout::compute_page(tty, new_idx + 1, comp.current_page()) else {
+        return false; // claude's daemon still runs it; just can't tile a card yet
+    };
+    let (rows, cols) = target_pane_inner(&paged, new_idx);
+    // NEVER open_watch_pane (Boundaries: no owned PTY for a roster card).
+    panes.push(bg_card_pane(&card, rows, cols, unix_now_secs()));
+    states.push(ConnState::BgRoster);
+    watch_sinks.push(None);
+    host_interactive.push(false); // Enter attaches; no keystrokes to an fno PTY
+    names.push(card.name.clone());
+    let mut rail_row = json!({
+        "name": card.name.as_str(),
+        "provider": "claude",
+        "cwd": card.cwd.as_str(),
+    });
+    repo::stamp_row(&mut rail_row, repo_cache);
+    rail_rows.push(rail_row);
+    roster_cards.push(Some(card)); // move last; the bg card IS a card row
+    comp.set_pane_count(panes.len());
+    comp.recompute_pagination(paged.capacity);
+    resize_all_panes(&paged, panes, watch_sinks).await;
+    debug_assert_vectors_aligned(
+        names,
+        panes,
+        states,
+        watch_sinks,
+        host_interactive,
+        roster_cards,
+        rail_rows,
+    );
+    true
+}
+
+/// Poll-discover externally-spawned children on the shared 3s tick (x-45e6,
+/// Change 2 + 3). Re-reads the fno registry + the claude `--bg` roster and
+/// live-adds any row not already tiled - no restart, no focus-steal. Gated to
+/// `--all` (the fleet view): an explicit-name invocation has a fixed roster and
+/// nothing to discover. Vanished rows are LEFT on screen (registry: the Exited
+/// badge via the state machine; roster: a stale card) - removal is out of scope
+/// (the plan's "MAY drop"; we don't, to avoid the multi-vector removal hazard).
+#[allow(clippy::too_many_arguments)]
+async fn poll_live_discover(
+    parsed: &GridArgs,
+    home: &AgentsHome,
+    tx: &mpsc::Sender<PaneMsg>,
+    tty: TtySize,
+    comp: &mut Compositor,
+    names: &mut Vec<String>,
+    panes: &mut Vec<Pane>,
+    states: &mut Vec<ConnState>,
+    watch_sinks: &mut Vec<Option<WsSink>>,
+    host_interactive: &mut Vec<bool>,
+    roster_cards: &mut Vec<Option<RosterBgCard>>,
+    rail_rows: &mut Vec<Value>,
+    repo_cache: &mut repo::RepoCache,
+) {
+    if !parsed.all {
+        return; // explicit-name fleet is fixed; nothing to discover
+    }
+    // ponytail: the same soft cap as startup bounds a runaway orchestrator that
+    // auto-spawns children faster than the operator can close them. Raise via
+    // FNO_GRID_MAX_PANES.
+    let cap = max_panes();
+
+    // ── Registry diff: new PTY panes (Change 2) ─────────────────────────────
+    let new_names =
+        new_registry_names(resolve_agent_names(parsed, home).unwrap_or_default(), names);
+    if !new_names.is_empty() {
+        // Same authoritative PTY-protocol gate as startup, but the worker.ping
+        // probe runs ONLY for the new candidates (steady state: no probe).
+        let new_names = prune_non_pty_claude(new_names, home).await;
+        if !new_names.is_empty() {
+            let rows = read_registry_rows(home);
+            let host_modes = host_modes_from_rows(&rows, &new_names);
+            for (name, host_mode) in new_names.iter().zip(host_modes) {
+                if names.len() >= cap {
+                    break;
+                }
+                // The child's REAL registry row so rail grouping uses its true
+                // provider/cwd (a `spawn --cwd` child may live in another repo).
+                let rail_row = rows
+                    .iter()
+                    .find(|r| r.get("name").and_then(Value::as_str) == Some(name.as_str()))
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "name": name }));
+                // focus=false: a poll-discovered pane never steals focus (AC2-UI).
+                live_add_pane(
+                    home,
+                    name,
+                    host_mode,
+                    tx,
+                    tty,
+                    comp,
+                    names,
+                    panes,
+                    states,
+                    watch_sinks,
+                    host_interactive,
+                    roster_cards,
+                    rail_rows,
+                    repo_cache,
+                    rail_row,
+                    false,
+                )
+                .await;
+            }
+        }
+    }
+
+    // ── Roster diff: new --bg status cards (Change 3) ───────────────────────
+    // resolve_bg_roster_cards already dedups against the registry, so a session
+    // that became an fno pane above is NOT returned here (AC3-EDGE: added once).
+    let new_cards = new_roster_cards(resolve_bg_roster_cards(home), roster_cards);
+    for card in new_cards {
+        if names.len() >= cap {
+            break;
+        }
+        live_add_roster_card(
+            card,
+            tty,
+            comp,
+            names,
+            panes,
+            states,
+            watch_sinks,
+            host_interactive,
+            roster_cards,
+            rail_rows,
+            repo_cache,
+        )
+        .await;
+    }
+}
+
 // ── Run loop ──────────────────────────────────────────────────────────────
 
 /// Entry point for `fno agents grid` (wired from `run_grid` in
@@ -2854,60 +3141,34 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     };
                                     match spawn_res {
                                         Ok(()) => {
-                                            // Live-add the worker's pane: open a
-                                            // watcher at the next global index, grow
-                                            // the parallel vectors, re-tile, focus it.
-                                            let new_idx = panes.len();
-                                            match layout::compute_page(tty, new_idx + 1, comp.current_page()) {
-                                                Ok(paged) => {
-                                                    let (rows, cols) = target_pane_inner(&paged, new_idx);
-                                                    let (pane, state, sink) =
-                                                        open_watch_pane(home, &name, new_idx, rows, cols, &tx).await;
-                                                    // A /target worker is interactive claude.
-                                                    host_interactive.push(true);
-                                                    // Keep roster_cards 1:1 with panes: a
-                                                    // live-added worker is a real fno pane,
-                                                    // never a bg card (x-57eb).
-                                                    roster_cards.push(None);
-                                                    panes.push(pane);
-                                                    states.push(state);
-                                                    watch_sinks.push(sink);
-                                                    comp.set_pane_count(panes.len());
-                                                    comp.recompute_pagination(paged.capacity);
-                                                    comp.set_focus(new_idx);
-                                                    resize_all_panes(&paged, &mut panes, &mut watch_sinks).await;
-                                                    // Keep rail_rows 1:1 with panes so a
-                                                    // worker launched while rail mode is
-                                                    // active appears in the grouping
-                                                    // (codex P2). Synthetic row mirrors the
-                                                    // explicit-name startup path; the worker
-                                                    // spawns in this grid's cwd, so cwd
-                                                    // grouping lands it with its siblings.
-                                                    let mut new_row = json!({
-                                                        "name": name.as_str(),
-                                                        "provider": "claude",
-                                                        "cwd": std::env::current_dir()
-                                                            .ok()
-                                                            .and_then(|p| p.to_str().map(str::to_string)),
-                                                    });
-                                                    // Resolve its repo so the new
-                                                    // worker rolls up under the right
-                                                    // sideline on the next frame (x-cb89).
-                                                    repo::stamp_row(&mut new_row, &mut repo_cache);
-                                                    rail_rows.push(new_row);
-                                                    hint = Some(format!("launched {name}"));
-                                                    // Push last (move, no clone): name's
-                                                    // final use is the hint above.
-                                                    names.push(name);
-                                                }
-                                                Err(_) => {
-                                                    // Worker is running; the terminal
-                                                    // just can't tile another pane yet.
-                                                    hint = Some(format!(
-                                                        "{name} launched (terminal too small to tile it)"
-                                                    ));
-                                                }
-                                            }
+                                            // Live-add the worker's pane via the shared
+                                            // helper (x-45e6 Change 1). The launcher
+                                            // FOCUSES it (the human just launched it);
+                                            // the worker spawns in this grid's cwd, so a
+                                            // synthetic claude+cwd rail row groups it with
+                                            // its siblings (x-cb89).
+                                            let rail_row = json!({
+                                                "name": name.as_str(),
+                                                "provider": "claude",
+                                                "cwd": std::env::current_dir()
+                                                    .ok()
+                                                    .and_then(|p| p.to_str().map(str::to_string)),
+                                            });
+                                            let tiled = live_add_pane(
+                                                home, &name, true, &tx, tty, &mut comp,
+                                                &mut names, &mut panes, &mut states,
+                                                &mut watch_sinks, &mut host_interactive,
+                                                &mut roster_cards, &mut rail_rows,
+                                                &mut repo_cache, rail_row, true,
+                                            )
+                                            .await;
+                                            hint = Some(if tiled {
+                                                format!("launched {name}")
+                                            } else {
+                                                // Worker is running; the terminal just
+                                                // can't tile another pane yet.
+                                                format!("{name} launched (terminal too small to tile it)")
+                                            });
                                             prev_frame = None; // region map changed -> full repaint
                                         }
                                         Err(e) => {
@@ -3899,6 +4160,15 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 }
             }
             _ = ping.tick() => {
+                // x-45e6: live-discover externally-spawned children (orchestrator
+                // panes via `fno agents spawn --cwd`, fresh `claude --bg` sessions)
+                // on the existing tick - tiles within one cadence, no restart.
+                poll_live_discover(
+                    &parsed, home, &tx, tty, &mut comp, &mut names, &mut panes,
+                    &mut states, &mut watch_sinks, &mut host_interactive,
+                    &mut roster_cards, &mut rail_rows, &mut repo_cache,
+                )
+                .await;
                 ping_open_sinks(&mut watch_sinks, &mut states).await;
                 // E5b: with the front door up (no panes) observe_pane_states
                 // would report Quit on its 0-pane guard. Don't tear down the
@@ -4229,6 +4499,42 @@ mod tests {
         assert_eq!(cards[0].name, "bbbb2222");
         assert_eq!(cards[0].session_id, "bbbb2222-3333-4444-5555-666677778888");
         assert_eq!(cards[0].cwd, "/Users/x/code/proj");
+    }
+
+    // x-45e6 AC2-EDGE: the registry poll diff never re-adds an already-tiled
+    // name; only genuinely new children survive.
+    #[test]
+    fn new_registry_names_skips_already_tiled() {
+        let known = vec!["wkA".to_string(), "wkB".to_string()];
+        let fresh = vec![
+            "wkA".to_string(), // already tiled -> dropped
+            "wkB".to_string(), // already tiled -> dropped
+            "wkC".to_string(), // new -> kept
+        ];
+        assert_eq!(new_registry_names(fresh, &known), vec!["wkC".to_string()]);
+        // No new rows when the registry is unchanged.
+        assert!(new_registry_names(known.clone(), &known).is_empty());
+    }
+
+    // x-45e6 AC3-EDGE: the roster poll diff is by session_id, and skips slots
+    // that are real fno panes (None) as well as already-carried cards.
+    #[test]
+    fn new_roster_cards_diffs_by_session_id() {
+        let card = |sid: &str| RosterBgCard {
+            name: sid[..4].to_string(),
+            session_id: sid.to_string(),
+            cwd: "/c".to_string(),
+            proc_start: None,
+        };
+        // Grid currently carries one real pane (None) and one bg card.
+        let known = vec![None, Some(card("aaaa1111-0000-0000-0000-000000000000"))];
+        let fresh = vec![
+            card("aaaa1111-0000-0000-0000-000000000000"), // already carried -> dropped
+            card("bbbb2222-0000-0000-0000-000000000000"), // new -> kept
+        ];
+        let got = new_roster_cards(fresh, &known);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].session_id, "bbbb2222-0000-0000-0000-000000000000");
     }
 
     // AC-EDGE (dedup): a session in BOTH registry and roster appears once
