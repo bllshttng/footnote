@@ -79,9 +79,18 @@ pub struct RosterWorker {
     /// claim is reanchored to (that is footnote's long-lived HOLDER pid).
     #[serde(default)]
     pub pid: Option<u32>,
-    /// Worker process start time (epoch-ish, per-host/per-boot); mirrors
-    /// `RegistryEntry::pid_start_time`. Only ever compared for equality.
-    #[serde(default)]
+    /// Worker process start time; mirrors `RegistryEntry::pid_start_time`. Only
+    /// ever compared for equality.
+    ///
+    /// Parsed leniently: `procStart` drifted from an epoch `u64` (claude-code
+    /// <=2.1.194) to a human date string (e.g. `"Mon Jun 29 00:11:16 2026"`) on
+    /// later CLIs. `#[serde(default)]` tolerates a MISSING field but NOT a type
+    /// mismatch, so a strict `Option<u64>` makes serde reject the ENTIRE roster on
+    /// the first string value, silently zeroing every worker (the 0->visible flip
+    /// this restores). [`de_lenient_opt_u64`] accepts null/absent -> None, a number
+    /// -> `Some`, a numeric string -> `Some`, and any other string (a date) ->
+    /// None - degrading only the equality signal rather than killing the parse.
+    #[serde(default, deserialize_with = "de_lenient_opt_u64")]
     pub proc_start: Option<u64>,
     /// The internal supervisor<->worker ptySock. We never speak it directly (the
     /// substrate is the daemon `control.sock`), but we WALK UP from it to resolve
@@ -102,6 +111,22 @@ pub struct RosterWorker {
     /// Linked-worktree path, when the worker runs in one (0/14 live, but modeled).
     #[serde(default)]
     pub worktree_path: Option<String>,
+}
+
+/// Lenient `Option<u64>` deserializer for the drifting `procStart` field (see
+/// [`RosterWorker::proc_start`]). Accepts a JSON number, a numeric string, or
+/// null/anything-else (-> None). Never errors, so one worker's date-string
+/// `procStart` cannot fail the whole-roster parse. The field is only compared for
+/// equality, so a None from an unparseable value is a safe degradation.
+fn de_lenient_opt_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Number(n) => Ok(n.as_u64()),
+        serde_json::Value::String(s) => Ok(s.trim().parse::<u64>().ok()),
+        _ => Ok(None),
+    }
 }
 
 impl RosterWorker {
@@ -262,6 +287,75 @@ mod tests {
         assert_eq!(w.cli_version.as_deref(), Some("2.1.195"));
         assert_eq!(w.cwd, "/Users/x/code/proj");
         assert_eq!(w.pty_auth.as_deref(), Some("cccc3333dddd4444"));
+    }
+
+    // The live claude-code (>=2.1.195) roster shape: `procStart` is a human DATE
+    // STRING, not the epoch `u64` the <=2.1.194 schema emitted. A strict
+    // `Option<u64>` rejected the WHOLE roster here (every worker lost); the lenient
+    // deserializer must parse all workers and degrade `proc_start` to None.
+    const SAMPLE_STRING_PROCSTART: &str = r#"{
+      "proto": 1,
+      "supervisorPid": 77901,
+      "workers": {
+        "6269e385": {
+          "pid": 6001,
+          "procStart": "Mon Jun 29 00:11:16 2026",
+          "sessionId": "6269e385-1111-2222-3333-444455556666",
+          "ptySock": "/tmp/cc-daemon-501/608d3bdb/spare/6269e385.pty.sock",
+          "cliVersion": "2.1.199",
+          "cwd": "/Users/bb16/code/footnote/footnote"
+        },
+        "d712218d": {
+          "pid": 6002,
+          "procStart": "Mon Jun 29 00:11:22 2026",
+          "sessionId": "d712218d-7777-8888-9999-aaaabbbbcccc",
+          "ptySock": "/tmp/cc-daemon-501/608d3bdb/spare/d712218d.pty.sock",
+          "cwd": "/Users/bb16/code/footnote/footnote"
+        }
+      }
+    }"#;
+
+    #[test]
+    fn parses_roster_with_string_procstart_drift() {
+        // Regression: before the lenient deserializer this errored, zeroing the
+        // roster (mail-inject + every roster consumer saw zero claude workers).
+        let r = ClaudeRoster::parse(SAMPLE_STRING_PROCSTART.as_bytes())
+            .expect("string procStart must not fail the whole-roster parse");
+        assert_eq!(r.workers.len(), 2, "both workers survive the drift");
+        let w = &r.workers["6269e385"];
+        assert_eq!(w.session_id, "6269e385-1111-2222-3333-444455556666");
+        assert_eq!(w.pid, Some(6001));
+        // An unparseable date string degrades to None, not a parse failure.
+        assert_eq!(w.proc_start, None);
+        assert_eq!(w.cwd, "/Users/bb16/code/footnote/footnote");
+    }
+
+    #[test]
+    fn lenient_procstart_accepts_number_numeric_string_and_null() {
+        // number -> Some
+        let num = r#"{"workers":{"a":{"sessionId":"a-1","procStart":12345}}}"#;
+        assert_eq!(
+            ClaudeRoster::parse(num.as_bytes()).unwrap().workers["a"].proc_start,
+            Some(12345)
+        );
+        // numeric string -> Some (a future CLI could quote the epoch)
+        let numstr = r#"{"workers":{"a":{"sessionId":"a-1","procStart":"12345"}}}"#;
+        assert_eq!(
+            ClaudeRoster::parse(numstr.as_bytes()).unwrap().workers["a"].proc_start,
+            Some(12345)
+        );
+        // explicit null -> None
+        let null = r#"{"workers":{"a":{"sessionId":"a-1","procStart":null}}}"#;
+        assert_eq!(
+            ClaudeRoster::parse(null.as_bytes()).unwrap().workers["a"].proc_start,
+            None
+        );
+        // absent -> None (the #[serde(default)] path)
+        let absent = r#"{"workers":{"a":{"sessionId":"a-1"}}}"#;
+        assert_eq!(
+            ClaudeRoster::parse(absent.as_bytes()).unwrap().workers["a"].proc_start,
+            None
+        );
     }
 
     #[test]
