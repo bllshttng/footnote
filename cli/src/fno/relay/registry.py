@@ -201,8 +201,10 @@ def _live_agents_workers() -> dict[str, RegistryEntry]:
         provider = e.get("provider")
         if provider in (None, "claude"):
             continue  # claude rides the discover + session-uuid lane, not this bridge
-        if e.get("host_mode") not in (None, "interactive"):
-            continue  # only an interactive PTY worker serves worker.submit
+        if e.get("host_mode") != "interactive":
+            continue  # ONLY an explicit interactive PTY worker serves worker.submit;
+            # a missing host_mode is the exec/one-shot default in the agents registry,
+            # not an interactive relay target (codex P2 on PR #89)
         if e.get("status") not in (None, "live"):
             continue  # a dead worker holds no live PTY
         short_id = e.get("short_id")

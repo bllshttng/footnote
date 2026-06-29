@@ -521,6 +521,15 @@ def deliver_worker(
     by the routing vehicle -- IS the routability signal, and the worker actor's own
     single-socket serialization prevents interleaving.
 
+    CONTRACT (relay-targeted peer): like :func:`deliver_session`, capture reads the
+    ``<<<RELAY>>>...<<<ENDRELAY>>>`` sentinels a peer is steered to wrap replies in. A
+    peer that is not relay-targeted answers without the sentinels, so this surfaces as
+    a ``TimeoutError`` (a missing sentinel is indistinguishable from a slow turn).
+    claude is steered via the daemon spawn's ``append_system_prompt`` (RELAY_SYSTEM_PROMPT);
+    the equivalent non-claude spawn-lane steering is the tracked follow-up (codex P1 on
+    PR #89), the same way the claude-adopt steering was deferred (x-e027 LD#2). Until then
+    a non-claude peer must be primed to use the sentinel protocol to round-trip.
+
     Raises RuntimeError when ``short_id`` is path-unsafe or the worker is unreachable,
     TimeoutError when a live worker produced no reply within ``timeout``."""
     if not _SHORT_ID_RE.match(short_id or ""):

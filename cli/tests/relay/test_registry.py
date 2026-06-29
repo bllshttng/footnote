@@ -171,6 +171,8 @@ def test_index_bridge_skips_claude_dead_exec_and_unsafe(tmp_path, monkeypatch):
         {"short_id": "deadw", "provider": "codex", "host_mode": "interactive", "status": "exited"},
         # exec (-p / dispatch) is not a worker.submit target
         {"short_id": "execw", "provider": "codex", "host_mode": "exec", "status": "live"},
+        # a MISSING host_mode is the exec/one-shot default, NOT interactive (codex P2)
+        {"short_id": "nullhm", "provider": "codex", "status": "live"},
         # unsafe short_id (socket path segment) must never surface
         {"short_id": "../../etc", "provider": "codex", "host_mode": "interactive", "status": "live"},
         # the one good row
