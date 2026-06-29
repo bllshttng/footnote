@@ -81,6 +81,9 @@
 | `config.pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |
 | `config.pr_watch.max_age_days` | int | `14` | never | PR-watcher: park PRs older than N days. |
 | `config.pr_watch.model` | str | `claude-haiku-4-5` | never | Claude model used for headless PR-watcher skill fires. |
+| `config.recovery.enabled` | bool | `true` | advanced | Enable the session auto-recovery watchdog (resumes idle-but-incomplete bg sessions; rides the pr_watch tick). |
+| `config.recovery.idle_threshold_seconds` | int | `300` | never | How stale a bg session must be before a resume nudge fires (seconds). |
+| `config.recovery.max_nudges` | int | `3` | never | Per-session cap on resume nudges before the watchdog gives up. |
 | `config.health_monitor.enabled` | bool | `true` | advanced | Enable backlog health monitoring. |
 | `config.health_monitor.thresholds.idea_pile_depth` | int | `25` | never | Breach threshold: idea pile depth. |
 | `config.health_monitor.thresholds.stale_ready_days` | int | `30` | never | Breach threshold: stale-ready age (days). |
