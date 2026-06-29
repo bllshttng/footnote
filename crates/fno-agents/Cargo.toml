@@ -43,6 +43,11 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 libc = "0.2"
+# Cross-platform OS CSPRNG for minting interactive-claude session UUIDs
+# (client_verbs/bin). Already present transitively, so declaring it adds no new
+# compile cost; replaces a hardcoded `/dev/urandom` read that was unix-only
+# (gemini review, PR #88).
+getrandom = "0.3"
 # Headless VT grid emulator for the readiness seam (screen.rs) and the grid
 # compositor (grid/pane.rs). alacritty_terminal 0.26 is used purely as a
 # parser + grid model via `Term<VoidListener>` + `vte::ansi::Processor` — its

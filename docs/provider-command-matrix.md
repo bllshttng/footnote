@@ -12,13 +12,13 @@ Legend: **yes** / **no** / **n/a** / **partial** (works under a stated condition
 |------|:------:|:-----:|:------:|-------|
 | `spawn` | yes | yes | yes | Create + register. claude uses `--bg`; codex/gemini exec. |
 | `promote --from <uuid>` | yes | yes | yes | Adopt a settled session into a live host. claude → stream-json lane; codex/gemini → PTY host. |
-| `host [--provider P] [task]` | no | yes | yes | Fresh interactive host. claude has no fresh host — adopt an existing session with `promote --from` instead. |
+| `host [--provider P] [task]` | partial | yes | yes | Fresh interactive host. claude: `--mode interactive` hosts a fresh owned-PTY pane (subscription-billed; the CLI mints the pinned session id); without it, adopt an existing session via `promote --from`. codex/gemini host directly. |
 | `ask <name>` (sync) | partial | yes | yes | claude live-ask is reachable only for MCP-channel sessions, or adopt with `promote` then `send`. codex/gemini intercept the reply client-side. |
 | `send <name>` / `--to-project` | yes | yes | yes | Async, durable-first bus delivery; never waits for a reply. |
 | `chat A B "<seed>"` | yes | no | no | Costed, always-confirm. Drives a bounded A↔B relay; v1 claude↔claude only. Observe with `watch`. |
 | `inbox` / `ack` | yes | yes | yes | Bus-cursor read + advance; registry-agnostic. |
 | `watch <name>` | yes | no | no | Observe a held thread's turns. The headless analog of `drive`/`grid`. |
-| `drive` / `grid` | no | yes | yes | PTY-TUI driving. claude has no PTY; use `watch` + `send`. |
+| `drive` / `grid` | partial | yes | yes | PTY-TUI driving. claude tiles in the grid as an owned interactive PTY pane (`host --provider claude --mode interactive`, or `>`-prefix in the grid launcher); codex/gemini via their PTY host. An adopted stream-json claude is `watch` + `send` only. |
 | `attach <name>` | yes | no | no | Re-exec into the running session's own TUI. |
 | `resume <name>` | yes | yes | yes | Re-exec the provider's resume CLI in the agent's recorded cwd. |
 | `register-channel` / `push-channel` / `unregister-channel` | yes | no | no | MCP channel sidecar; claude-only this release. |
@@ -26,7 +26,7 @@ Legend: **yes** / **no** / **n/a** / **partial** (works under a stated condition
 
 ## Why the asymmetries exist
 
-claude is driven as a shellout; codex and gemini are driven through a pseudo-terminal the daemon owns. So the PTY-TUI verbs (`host`, `drive`, `grid`) work for codex/gemini, while claude is reached two other ways: a **stream-json host lane** (`promote --from <uuid> --provider claude`, the live lane you adopt an idle session into) or an **MCP channel** sidecar (reaches only sessions launched with the channel). Live `ask` against claude is `partial` for the same reason.
+codex and gemini are driven through a pseudo-terminal the daemon owns. claude now has its own daemon-owned interactive PTY lane too (`host --provider claude --mode interactive`): the daemon spawns subscription-billed `claude --session-id <uuid>` (never `-p`), so the grid tiles it as an owned pane you type straight into. claude is also reachable two other ways without a fresh PTY: a **stream-json host lane** (`promote --from <uuid> --provider claude`, the live lane you adopt an idle session into) or an **MCP channel** sidecar (reaches only sessions launched with the channel). Live `ask` against claude is `partial` for the same reason.
 
 ## See also
 
