@@ -4062,13 +4062,22 @@ def _deliver_live(
     if entry.claude_session_uuid:
         live = resolve_live_lane(entry.claude_session_uuid)
         if live is not None and live[0] == "worker":
-            return submit_via_worker(_worker_sock(live[1]), wrapped)
+            if submit_via_worker(_worker_sock(live[1]), wrapped):
+                return True
+            # The worker.sock was gone: a STALE live-looking interactive row can
+            # coexist with a valid adopted row for one uuid, so do NOT demote
+            # straight to durable -- fall through to the control.sock lane, which
+            # may still reach the adopted session (codex P2 on #95). This mirrors
+            # the relay's claim-based dispatch (daemon.py:351-365): try the other
+            # lane rather than refuse on precedence. Worst case is a bounded double
+            # delivery if a slow worker later drains, an accepted semantic here.
 
-    # control.sock lane (adopted --bg) or unresolved: the mail-inject verb resolves
-    # the control.sock handle itself and returns False (-> durable) when not
-    # reachable. A ("control", short_id) verdict from resolve_live_lane is handled
-    # here by re-deriving the recipient from the roster (the verb re-resolves the
-    # handle), so its short_id is intentionally not threaded through. The roster
+    # control.sock lane (adopted --bg), unresolved, or worker-lane fall-through: the
+    # mail-inject verb resolves the control.sock handle itself (via ClaudeRoster,
+    # more liberal than resolve_attached_short_id) and returns False (-> durable)
+    # when not reachable. A ("control", short_id) verdict from resolve_live_lane is
+    # handled here by re-deriving the recipient from the roster (the verb re-resolves
+    # the handle), so its short_id is intentionally not threaded through. The roster
     # accepts either the full session uuid or 8-hex short id.
     recipient = entry.claude_session_uuid or entry.claude_short_id
     if not recipient:

@@ -1217,6 +1217,64 @@ def test_deliver_live_claude_no_live_lane_queues_durable(
     assert result.delivery != "hosted", "no live lane -> durable fallback"
 
 
+def test_deliver_live_claude_worker_unreachable_falls_through_to_control(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """codex P2 (#95): a STALE live-looking interactive row can coexist with a
+    valid adopted row for one uuid. When the worker lane is chosen but its sock is
+    gone (submit_via_worker -> False), delivery must fall through to the
+    control.sock lane instead of demoting straight to durable."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import AgentEntry, write_registry
+    write_registry([
+        AgentEntry(
+            name="dual-row",
+            provider="claude",
+            cwd="/tmp",
+            log_path="/tmp/dual-row.log",
+            claude_session_uuid="cccc0003-1111-2222-3333-444444444444",
+            status="live",
+        )
+    ])
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.providers import claude as claude_mod
+    from fno.relay import roundtrip
+
+    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        dispatch_mod, "_daemon_rpc",
+        lambda method, params, **kw: {"delivered": False, "reason": "not-a-live-stream-thread"},
+    )
+    # The worker lane resolves (a stale-looking interactive row) but its sock is gone.
+    monkeypatch.setattr(roundtrip, "resolve_live_lane", lambda sid: ("worker", "wkStale"))
+    monkeypatch.setattr(roundtrip, "_worker_sock", lambda short_id: Path(f"/tmp/{short_id}/worker.sock"))
+    monkeypatch.setattr(roundtrip, "submit_via_worker", lambda *a, **kw: False)
+
+    # The control.sock lane (the coexisting adopted row) delivers on the fall-through.
+    inject_calls: list = []
+
+    def _ok_inject(recipient: str, text: str) -> bool:
+        inject_calls.append({"recipient": recipient, "text": text})
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _ok_inject)
+
+    from fno.agents.dispatch import dispatch_send
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(
+        name="dual-row", message="reach me on control", provider=None, cwd=cwd
+    )
+
+    assert result.delivery == "hosted", "worker-fail must fall through to control, not durable"
+    assert len(inject_calls) == 1, "the control.sock lane must be tried on worker failure"
+    # The fall-through still carries the <fno_mail> envelope (same wrapped turn).
+    assert inject_calls[0]["text"].startswith('<fno_mail from="')
+
+
 # ---------------------------------------------------------------------------
 # node x-1f23: the autonomous relay continuations carry <fno_mail>, not just
 # the seed (codex P2). Chat (no mail ctxs) stays raw.
