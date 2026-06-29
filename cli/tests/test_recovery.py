@@ -261,6 +261,21 @@ class TestSweep:
 # run_recovery_sweep — the high-level entry (registry join -> sweep -> persist)
 # ---------------------------------------------------------------------------
 
+class TestSafeReadState:
+    def test_non_object_state_json_degrades_not_raises(self, tmp_path):
+        # A2: a valid-JSON-but-non-object state.json (bare string) must not raise
+        # AttributeError out of the sweep; it degrades to an empty (not-stale) view.
+        (tmp_path / "state.json").write_text('"running"', encoding="utf-8")
+        view = recovery._safe_read_state(tmp_path)
+        assert view.state == ""
+        assert view.updated_at is None
+
+    def test_missing_state_json_degrades(self, tmp_path):
+        view = recovery._safe_read_state(tmp_path)
+        assert view.state == ""
+        assert view.updated_at is None
+
+
 class TestRunRecoverySweep:
     def test_end_to_end_nudge_and_counts_persisted(self, tmp_path):
         h = _Harness()  # stale running session, live socket, no promise

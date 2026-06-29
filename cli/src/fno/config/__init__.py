@@ -1123,8 +1123,14 @@ class RecoveryBlock(BaseModel):
         false to keep pr_watch's PR polling without the resume nudges.
     idle_threshold_seconds:
         How stale a session's state.json must be before it is treated as
-        idle-but-incomplete (default 300 = 5 min; the motivating repro stalled
-        ~3.5 min before a human intervened). Tunable per workload.
+        idle-but-incomplete (default 900 = 15 min). This MUST exceed the
+        longest expected single-tool runtime: a session mid-way through a long
+        ``cargo build`` / test suite is busy but emits no turn events, so its
+        state.json freezes while it is legitimately working — too low a value
+        nudges a working session. 15 min clears that while still recovering a
+        genuinely wedged session long before Claude Code's ~1h reaper abandons
+        it. Tunable per workload (the motivating repro stalled ~3.5 min, but a
+        human was watching; an autonomous watchdog is deliberately patient).
     max_nudges:
         Per-session cap on resume nudges before the watchdog gives up and emits
         ``recovery_capped`` (default 3) so a genuinely wedged session surfaces
@@ -1134,7 +1140,7 @@ class RecoveryBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
-    idle_threshold_seconds: int = Field(default=300, gt=0)
+    idle_threshold_seconds: int = Field(default=900, gt=0)
     max_nudges: int = Field(default=3, ge=1)
 
 

@@ -28,7 +28,11 @@ Design notes (the load-bearing parts):
   ``running``), indistinguishable from a busy session except that a busy
   session keeps *updating* ``state.json``. So ``classify`` nudges only when the
   state is non-terminal, not ``needs-input``, no ``<promise>`` is present, and
-  ``updatedAt`` is staler than the idle threshold.
+  ``updatedAt`` is staler than the idle threshold. Caveat: a session mid-way
+  through a single long tool call (a multi-minute build/test) is busy but emits
+  no turn events, so its ``state.json`` also freezes; the idle threshold
+  default (15 min) is set above the longest expected single-tool runtime so
+  such a session is not mistaken for wedged.
 
 - **Reuse over re-implement.** The socket write is the shipped
   ``providers.claude.send_to_session`` (the same BG8 inject used by ``fno
@@ -279,7 +283,13 @@ def load_counts() -> dict:
 
 
 def save_counts(counts: dict) -> None:
-    """Persist the nudge counter; non-fatal on failure (best-effort state)."""
+    """Persist the nudge counter; non-fatal on failure (best-effort state).
+
+    ponytail: best-effort means the cap is *soft* under a persistent write
+    failure — a failed save lets the next tick reload the pre-increment count
+    and nudge again. Acceptable: the alternative (crashing the tick on a disk
+    error) is worse, and a chronically unwritable ~/.fno is a louder problem.
+    """
     try:
         path = _counts_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -300,7 +310,11 @@ def _safe_read_state(jobs_dir):
     try:
         snap = read_state_json(Path(jobs_dir))
         return _SnapshotView(snap.state, snap.updated_at)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+        # AttributeError/TypeError: a valid-JSON-but-non-object state.json (a
+        # bare string/list) makes the parser's ``.get(...)`` raise. Degrade to
+        # an empty view so ONE malformed session never aborts the sweep for the
+        # rest of this tick; the next tick retries.
         return _SnapshotView("", None)
 
 
