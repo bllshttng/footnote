@@ -221,7 +221,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "restart": "Restart a stale daemon (pick up a new build; PTY workers survive).",
     "drive": "Drive a spawned agent's TUI (--watch / --step / --paranoid).",
     "grid": "Compose several agents into one multi-panel terminal view.",
-    "host": "Host a fresh interactive codex/gemini TUI in a drivable worker.",
+    "host": "Host a fresh interactive codex/gemini TUI in a drivable worker, or an interactive claude pane (--provider claude --mode interactive).",
     "promote": "Promote an existing session (--from <uuid>) into a drivable codex/gemini TUI, or adopt a claude session as a stream-json thread (add --provider claude).",
     "register-channel": "Register a Claude Code session as an agent channel.",
     "unregister-channel": "Unregister an agent channel by id.",
