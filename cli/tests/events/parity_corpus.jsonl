@@ -80,3 +80,9 @@
 {"expect":"invalid","reason":"pr_watch_parked missing reason","event":{"ts":"2026-06-14T12:00:08Z","type":"pr_watch_parked","source":"daemon","data":{"pr":3}}}
 {"expect":"valid","reason":"pr_watch_tick quiet","event":{"ts":"2026-06-14T12:00:09Z","type":"pr_watch_tick","source":"daemon","data":{"open_prs":0,"acted":0}}}
 {"expect":"invalid","reason":"pr_watch_tick missing acted","event":{"ts":"2026-06-14T12:00:10Z","type":"pr_watch_tick","source":"daemon","data":{"open_prs":3}}}
+{"expect":"valid","reason":"recovery_nudge basic","event":{"ts":"2026-06-29T20:11:32Z","type":"recovery_nudge","source":"daemon","data":{"short_id":"b78039cc","nudge_count":1}}}
+{"expect":"invalid","reason":"recovery_nudge missing nudge_count","event":{"ts":"2026-06-29T20:11:32Z","type":"recovery_nudge","source":"daemon","data":{"short_id":"b78039cc"}}}
+{"expect":"valid","reason":"recovery_skipped needs-input","event":{"ts":"2026-06-29T20:11:32Z","type":"recovery_skipped","source":"daemon","data":{"short_id":"b78039cc","reason":"needs-input"}}}
+{"expect":"invalid","reason":"recovery_skipped missing reason","event":{"ts":"2026-06-29T20:11:32Z","type":"recovery_skipped","source":"daemon","data":{"short_id":"b78039cc"}}}
+{"expect":"valid","reason":"recovery_capped basic","event":{"ts":"2026-06-29T20:11:32Z","type":"recovery_capped","source":"daemon","data":{"short_id":"b78039cc","nudges":3}}}
+{"expect":"invalid","reason":"recovery_capped missing nudges","event":{"ts":"2026-06-29T20:11:32Z","type":"recovery_capped","source":"daemon","data":{"short_id":"b78039cc"}}}
