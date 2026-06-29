@@ -1483,7 +1483,6 @@ mod tests {
             steered, unsteered,
             "agy drops the steer and spawns byte-unchanged"
         );
-        assert!(!steered.iter().any(|a| a.contains("developer_instructions")));
     }
 
     /// gemini is out of scope (no steer channel); the daemon gate-drop threads
@@ -1501,7 +1500,6 @@ mod tests {
             steered, unsteered,
             "gemini drops the steer and spawns byte-unchanged"
         );
-        assert!(!steered.iter().any(|a| a.contains("developer_instructions")));
     }
 
     #[test]
