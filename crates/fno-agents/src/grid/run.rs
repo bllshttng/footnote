@@ -375,7 +375,8 @@ enum LauncherAction {
     Append(char),
     /// Delete the last char.
     Backspace,
-    /// Submit the buffer (spawn a `/target` worker).
+    /// Submit the buffer (a plain goal spawns a `/target` worker; a `>`-prefixed
+    /// buffer opens an interactive claude pane -- see [`classify_launch`]).
     Submit,
     /// Close the launcher without spawning (Esc / Ctrl-C).
     Cancel,
@@ -509,6 +510,67 @@ async fn spawn_target_worker(name: &str, goal: &str) -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let last = stderr.lines().last().unwrap_or("unknown").trim();
         Err(format!("spawn failed: {last}"))
+    }
+}
+
+/// How an E5b launcher submission should be dispatched (x-1b1c Change 2). A
+/// leading `>` opens an interactive claude pane the operator types straight
+/// into (the herdr UX this grid is for); anything else dispatches an autonomous
+/// `/target` worker (the original E5b behavior, kept as the distinct option).
+/// Pure + testable, mirroring [`launcher_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LaunchKind {
+    /// Interactive claude pane; the string is the optional first message.
+    InteractivePane(String),
+    /// Autonomous `/target` worker for this goal.
+    TargetWorker(String),
+}
+
+fn classify_launch(input: &str) -> LaunchKind {
+    match input.strip_prefix('>') {
+        Some(rest) => LaunchKind::InteractivePane(rest.trim().to_string()),
+        None => LaunchKind::TargetWorker(input.trim().to_string()),
+    }
+}
+
+/// Name for a launcher-spawned interactive claude pane: `claude-<n>`. Distinct
+/// from `target-<slug>-<n>` so the two launch kinds read apart in the rail.
+fn interactive_pane_name(n: usize) -> String {
+    format!("claude-{n}")
+}
+
+/// Spawn an interactive, owned claude pane via the host lane (x-1b1c Change 1):
+/// `fno agents host <name> --provider claude --mode interactive [message]`.
+/// Unlike [`spawn_target_worker`] (an autonomous `--bg /target` worker), this
+/// tiles as a live panel the operator types straight into. `$FNO_BIN` overrides
+/// the binary (tests / non-PATH installs). Returns Ok once the pane is hosted.
+async fn spawn_interactive_claude_pane(name: &str, message: &str) -> Result<(), String> {
+    let fno = std::env::var_os("FNO_BIN")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "fno".into());
+    let mut args: Vec<String> = vec![
+        "agents".into(),
+        "host".into(),
+        "--provider".into(),
+        "claude".into(),
+        "--mode".into(),
+        "interactive".into(),
+        name.to_string(),
+    ];
+    if !message.is_empty() {
+        args.push(message.to_string());
+    }
+    let out = tokio::process::Command::new(&fno)
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| format!("host exec failed: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let last = stderr.lines().last().unwrap_or("unknown").trim();
+        Err(format!("host failed: {last}"))
     }
 }
 
@@ -792,7 +854,7 @@ fn build_front_door_frame(tty: TtySize, goal: &str, hint: Option<&str>) -> Scree
     let cols = tty.cols.max(1) as usize;
     let title = truncate("footnote grid", cols);
     let prompt = truncate(
-        "Type a goal and press Enter to launch a /target run. Esc to quit.",
+        "Enter a goal -> /target run; prefix > -> open a claude pane to type into. Esc quits.",
         cols,
     );
     // Center each line on its own width; the input line is anchored under the
@@ -2533,11 +2595,28 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     hint = None;
                                     prev_frame = None; // clear the footer overlay
                                 }
-                                LauncherOutcome::Submitted(goal) => {
+                                LauncherOutcome::Submitted(input) => {
                                     launcher = None;
                                     launch_seq += 1;
-                                    let name = target_worker_name(&goal, launch_seq);
-                                    match spawn_target_worker(&name, &goal).await {
+                                    // `>`-prefixed input opens an interactive
+                                    // claude pane (type straight in); a plain goal
+                                    // dispatches an autonomous `/target` worker.
+                                    // Both land an interactive claude row, so the
+                                    // live-add tail below is shared.
+                                    let (name, spawn_res) = match classify_launch(&input) {
+                                        LaunchKind::InteractivePane(msg) => {
+                                            let name = interactive_pane_name(launch_seq);
+                                            let r =
+                                                spawn_interactive_claude_pane(&name, &msg).await;
+                                            (name, r)
+                                        }
+                                        LaunchKind::TargetWorker(goal) => {
+                                            let name = target_worker_name(&goal, launch_seq);
+                                            let r = spawn_target_worker(&name, &goal).await;
+                                            (name, r)
+                                        }
+                                    };
+                                    match spawn_res {
                                         Ok(()) => {
                                             // Live-add the worker's pane: open a
                                             // watcher at the next global index, grow
@@ -3950,6 +4029,36 @@ mod tests {
         let mut l = Launcher::new();
         l.apply(LauncherAction::Append('x'));
         assert_eq!(l.apply(LauncherAction::Cancel), LauncherOutcome::Cancelled);
+    }
+
+    #[test]
+    fn classify_launch_routes_sigil_to_interactive_pane() {
+        // Plain goal -> autonomous /target worker (the E5b default).
+        assert_eq!(
+            classify_launch("add auth"),
+            LaunchKind::TargetWorker("add auth".to_string())
+        );
+        // `>` opens an interactive pane; trailing text is the first message.
+        assert_eq!(
+            classify_launch("> fix the bug"),
+            LaunchKind::InteractivePane("fix the bug".to_string())
+        );
+        // Bare `>` opens an empty pane (no first message).
+        assert_eq!(
+            classify_launch(">"),
+            LaunchKind::InteractivePane(String::new())
+        );
+        // `>` with no space still strips the sigil.
+        assert_eq!(
+            classify_launch(">hello"),
+            LaunchKind::InteractivePane("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn interactive_pane_name_is_distinct_from_target() {
+        assert_eq!(interactive_pane_name(3), "claude-3");
+        assert!(!interactive_pane_name(3).starts_with("target-"));
     }
 
     #[test]
