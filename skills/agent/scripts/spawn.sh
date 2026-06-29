@@ -237,6 +237,11 @@ maybe_auto_worktree() {
   wt="$(fno worktree ensure --repo "$top" --name "$NAME" 2>/dev/null)"
   if [[ -n "$wt" ]]; then
     CWD="$wt"; AUTO_WT="$wt"
+    # Link gitignored shared state (footnote-ecosystem only; absent -> skip).
+    # This stays caller-side: the verb is package code and may not shell out to
+    # a repo-root script (shellout-drift gate); a skill script may.
+    local setup="$top/scripts/setup/setup-worktree.sh"
+    [[ -f "$setup" ]] && CANONICAL="$top" WORKTREE="$wt" bash "$setup" >/dev/null 2>&1
     printf 'auto-worktree: %s\n' "$wt" >&2
   fi
 }

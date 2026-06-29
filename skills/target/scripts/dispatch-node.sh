@@ -340,6 +340,11 @@ for id in "${NODES[@]}"; do
     wt=""
     [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
     if [[ -n "$wt" ]]; then
+      # Link gitignored shared state into the new worktree (footnote-ecosystem
+      # only; absent -> skip). Caller-side because the verb is package code and
+      # may not shell out to a repo-root script (shellout-drift gate).
+      _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
+      [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
       spawn_out="$(fno agents spawn --provider claude --cwd "$wt" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else

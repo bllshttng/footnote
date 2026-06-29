@@ -12,7 +12,6 @@ a CLI verb so the two Rust-intercepted code-dispatch callers (`dispatch-node.sh`
 and `/do`'s foreign-wave prose) can shell it. It lives here, NOT under
 `fno agents` (Rust-intercepted runtime), so the default install can reach it.
 """
-import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -179,16 +178,13 @@ def _worktree_ensure(repo: str, name: str, branch: Optional[str]) -> int:
         )
         return 1
 
-    # Link gitignored shared state (footnote-ecosystem only; absent -> skip).
-    setup = top / "scripts" / "setup" / "setup-worktree.sh"
-    if setup.is_file():
-        subprocess.run(
-            ["bash", str(setup)],
-            cwd=str(wt),  # WORKTREE env drives it, but run from the worktree too
-            env={**os.environ, "CANONICAL": str(top), "WORKTREE": str(wt)},
-            capture_output=True,
-        )
-
+    # Portable git mechanism only. Linking footnote-ecosystem shared state
+    # (.fno / internal / .claude) via scripts/setup/setup-worktree.sh is the
+    # CALLER's job, not this package verb's: a `pip install fno` ships no
+    # repo-root scripts, so a shell-out here trips the shellout-drift gate
+    # (and forcing it to fail-on-bare-install would break the "best-effort,
+    # never fail the ensure" contract). The in-repo skill callers
+    # (dispatch-node.sh, spawn.sh, /do) run setup-worktree.sh after ensure.
     typer.echo(str(wt))  # the ONLY stdout line -> the caller's $wt
     return 0
 
