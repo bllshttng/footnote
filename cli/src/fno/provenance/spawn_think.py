@@ -87,6 +87,10 @@ _VALID_DECISION_EVENTS = {
 # The discriminator `fno agents spawn` prints on a name collision (exit 2).
 _SPAWN_ALREADY_EXISTS = "already exists"
 
+# x-2c27: `fno agents spawn` enforces a 1-64 char agent name. The assembled
+# provenance name can overflow even with per-component slugging, so it is capped.
+_AGENT_NAME_MAX = 64
+
 # A2 (x-122a): non-birth dispatch reasons. The default birth reason keeps A1
 # byte-for-byte; the lifecycle reasons additionally require a RESOLVED transcript
 # pointer (relevance filter, Locked Decision 3) so a context-free /think never
@@ -526,7 +530,14 @@ def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REA
     # it `fno agents spawn` rejects the constant name and a later conversation can
     # never re-dispatch the node even after the dedup TTL expires (codex P2).
     suf = _name_slug(invocation_suffix)
-    return f"{name}-{suf}" if suf else name
+    name = f"{name}-{suf}" if suf else name
+    # x-2c27 (AC2-ERR): each component is slugged to 30, but the ASSEMBLED name
+    # (think- + node-id + reason + slug + suffix) can exceed `fno agents spawn`'s
+    # 1-64 char limit and fail with "name must be 1-64 chars". Cap the tail; the
+    # `think-<node-id>` lead is short and always survives, so the node id is kept.
+    if len(name) > _AGENT_NAME_MAX:
+        name = name[:_AGENT_NAME_MAX].rstrip("-")
+    return name
 
 
 def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None) -> str:
@@ -539,7 +550,10 @@ def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node
     SpawnAlreadyRunning on a name-collision and SpawnError otherwise.
     """
     agent_name = _worker_agent_name(node_id, node_slug, reason, invocation_suffix)
-    cmd = ["fno", "agents", "spawn", "--provider", "claude"]
+    # x-2c27: a conversational /think handoff is a DETACHED thread, so route it
+    # to the `claude --bg` substrate explicitly (the x-3ab8 default `pane` would
+    # land an owned-PTY pane that stalls a fire-and-forget dispatch).
+    cmd = ["fno", "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
