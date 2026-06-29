@@ -386,6 +386,7 @@ def capture_replies(
     provider: Optional[str],
     *,
     sock: Optional[Path] = None,
+    short_id: Optional[str] = None,
     session_id: Optional[str] = None,
     config_dir: Optional[str] = None,
     events_path: Optional[Path] = None,
@@ -394,11 +395,17 @@ def capture_replies(
     defensive degrade: if the strategy throws (e.g. transcript/structured schema
     drift on a harness version bump), fall back to the pty-tail default and emit
     ``relay_capture_degraded`` -- one harness's drift never zeroes the reply
-    (AC5-ERR / the defensive-foreign-parse rule)."""
+    (AC5-ERR / the defensive-foreign-parse rule).
+
+    Every locator a strategy might need is threaded through (``sock`` for pty-tail,
+    ``short_id`` for a worker-keyed structured log, ``session_id``/``config_dir`` for
+    the claude transcript); each strategy takes ``**_`` and uses only its own. A
+    registered structured strategy that keys on the worker id therefore has it
+    (gemini HIGH on PR #89)."""
     harness = harness_for_provider(provider)
     strategy = _CAPTURE_STRATEGIES.get(harness, _pty_tail_strategy)
     try:
-        return strategy(sock=sock, session_id=session_id, config_dir=config_dir)
+        return strategy(sock=sock, short_id=short_id, session_id=session_id, config_dir=config_dir)
     except Exception as exc:  # noqa: BLE001 - a capture strategy must never sink the relay
         emit("relay_capture_degraded", path=events_path, harness=harness, error=str(exc))
         if strategy is _pty_tail_strategy:
@@ -521,7 +528,7 @@ def deliver_worker(
     sock = _worker_sock(short_id)
     return _submit_and_capture(
         sock, framed,
-        lambda: capture_replies(provider, sock=sock, events_path=events_path),
+        lambda: capture_replies(provider, sock=sock, short_id=short_id, events_path=events_path),
         settle_ms=settle_ms, timeout=timeout,
         subject=f"worker {short_id}",
     )

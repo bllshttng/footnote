@@ -668,6 +668,40 @@ def test_capture_replies_pty_tail_failure_returns_empty_not_crash(monkeypatch):
     assert rt_mod.capture_replies("codex", sock=rt_mod.Path("/x/w.sock")) == []
 
 
+def test_capture_replies_threads_worker_id_to_strategy(monkeypatch):
+    # gemini HIGH (PR #89): a registered structured strategy that keys on the worker
+    # id must RECEIVE it. capture_replies threads sock/short_id/session_id/config_dir.
+    got = {}
+
+    def id_keyed_strategy(**kw):
+        got.update(kw)
+        return ["structured reply"]
+
+    monkeypatch.setattr(rt_mod, "harness_for_provider", lambda p: "idkeyed")
+    monkeypatch.setitem(rt_mod._CAPTURE_STRATEGIES, "idkeyed", id_keyed_strategy)
+    out = rt_mod.capture_replies("idprovider", sock=rt_mod.Path("/x/w.sock"), short_id="phasesta")
+    assert out == ["structured reply"]
+    assert got.get("short_id") == "phasesta"  # the worker id is available to the strategy
+
+
+def test_deliver_worker_passes_short_id_to_capture(monkeypatch):
+    # The non-claude lane must hand its short_id to the capture seam so a structured
+    # strategy can locate the right worker's output (gemini HIGH, PR #89).
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: True)
+    seen = {}
+    n = {"i": 0}
+
+    def fake_capture(provider, *, sock, short_id=None, **kw):
+        seen.update(provider=provider, short_id=short_id)
+        n["i"] += 1
+        return ["reply"] if n["i"] >= 2 else []
+
+    monkeypatch.setattr(rt_mod, "capture_replies", fake_capture)
+    rt_mod.deliver_worker("phasesta", "framed", provider="codex", timeout=5)
+    assert seen == {"provider": "codex", "short_id": "phasesta"}
+
+
 def test_register_capture_strategy_adds_a_harness(monkeypatch):
     # AC4-FR: adding a harness is registering a strategy, not a new injection path.
     calls = {"n": 0}

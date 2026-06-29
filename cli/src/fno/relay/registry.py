@@ -163,9 +163,12 @@ def unregister(session_id: str, path: Optional[Path] = None) -> None:
 def _agents_home() -> Path:
     """The fno-agents home (mirrors :func:`fno.relay.roundtrip._agents_home`):
     ``$FNO_AGENTS_HOME`` else ``$HOME/.fno/agents``. Kept local so this module does
-    not import roundtrip (which imports this one -- a cycle)."""
+    not import roundtrip (which imports this one -- a cycle). Uses
+    ``os.path.expanduser`` (not ``Path.home()``) so an unset HOME in a headless /
+    sandboxed env degrades to an unresolved path -> empty bridge, never a
+    ``RuntimeError`` (gemini MEDIUM on PR #89; matches roundtrip's resolver)."""
     env = os.environ.get("FNO_AGENTS_HOME")
-    return Path(env) if env else Path.home() / ".fno" / "agents"
+    return Path(env) if env else Path(os.path.expanduser("~")) / ".fno" / "agents"
 
 
 # short_id is a worker-socket path segment, so a surfaced peer's id must be a safe
