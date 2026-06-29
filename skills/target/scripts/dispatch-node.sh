@@ -28,12 +28,14 @@
 #   summary: launched=<n> parked=<n> already=<n> done=<n> failed=<n> capped=<n>[ nothing-up-next]
 #
 # Invariants (Failure Modes section of the plan):
-#   - The bg worker is ALWAYS dispatched via `fno agents spawn --provider claude`.
-#     Post-x-3ab8 that lands an owned interactive pane hosted by the fno daemon
-#     (daemon owns the PTY since PR#86, so it still runs fire-and-forget and a
-#     grid can attach/take over later); we do NOT pass `--once` (the worker is a
-#     long-running pane, not a headless one-shot). NEVER `--bare`/`-p` (those
-#     force the API-credit pool and strip skills/hooks). Subscription lane only.
+#   - The bg worker is ALWAYS dispatched via
+#     `fno agents spawn --provider claude --substrate bg`, which lands a DETACHED
+#     `claude --bg` thread (x-2c27): it auto-worktrees and runs to completion
+#     unattended, and shows in `claude agents` (attach/peek/reply later). The
+#     `--substrate bg` key is required - the x-3ab8 default `pane` (owned-PTY)
+#     would stall a fire-and-forget dispatch at a placement prompt. NEVER
+#     `--bare`/`-p` (those force the API-credit pool and strip skills/hooks);
+#     `bg` is the subscription `claude --bg` lane, not `-p`. Subscription only.
 #   - A failed dispatch is surfaced and leaves the node `ready`/re-dispatchable;
 #     never reports a launch that did not happen; never silently swallows.
 #   - Fire-and-forget: this script NEVER writes/clears the caller's
@@ -293,7 +295,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude ${cwd_hint}$agent_name '$tgt_cmd'\""
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}$agent_name '$tgt_cmd'\""
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -326,15 +328,17 @@ for id in "${NODES[@]}"; do
   fi
 
   # ---- Dispatch, fire-and-forget ----
-  # `fno agents spawn --provider claude` now lands an owned interactive pane
-  # hosted by the fno daemon (x-3ab8: spawn defaults to interactive). Still the
-  # subscription lane (NEVER --bare/-p) and still fire-and-forget; no --once (the
-  # worker is a long-running pane, not a headless one-shot). The receipt parsed
-  # below is byte-identical to the old --bg lane's. name is a positional. Two
-  # branches keep the optional --cwd off an
-  # empty-array path (bash 3.2 set -u safe). stderr goes to a temp file, NOT
-  # 2>&1: a stderr warning must never pollute the JSON receipt parse below
-  # (house rule; gemini review PR #457).
+  # `fno agents spawn --provider claude --substrate bg` lands a DETACHED
+  # `claude --bg` thread (x-2c27): it auto-worktrees, runs the node to
+  # completion unattended, and shows in `claude agents` (attach/peek/reply) -
+  # NOT an owned-PTY pane that would stall at a placement prompt. `--substrate
+  # bg` is the explicit routing key (the x-3ab8 default `pane` is the
+  # regression this fixes). Still the subscription lane (NEVER --bare/-p) and
+  # still fire-and-forget. The receipt parsed below is the claude-spawn JSON
+  # (byte-identical to the pre-x-3ab8 --bg lane's). name is a positional. Three
+  # branches keep the optional --cwd off an empty-array path (bash 3.2 set -u
+  # safe). stderr goes to a temp file, NOT 2>&1: a stderr warning must never
+  # pollute the JSON receipt parse below (house rule; gemini review PR #457).
   spawn_err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/dispatch-node-$$.err")"
   # Three explicit branches (NOT an optional-flag array): bash 3.2 (macOS)
   # errors on `"${arr[@]}"` for an empty array under `set -u`. node cwd ->
@@ -343,7 +347,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --provider claude --cwd "$node_cwd" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$node_cwd" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
@@ -353,16 +357,16 @@ for id in "${NODES[@]}"; do
       # may not shell out to a repo-root script (shellout-drift gate).
       _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
       [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
-      spawn_out="$(fno agents spawn --provider claude --cwd "$wt" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$wt" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --provider claude --fresh "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider claude --substrate bg --fresh "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --provider claude "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider claude --substrate bg "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then
