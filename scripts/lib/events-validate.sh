@@ -57,7 +57,7 @@ _ev_resolve_schema_path() {
     # Tier 3: lib-relative self-location. This file lives at
     # <plugin-root>/scripts/lib/events-validate.sh, so ../../docs/... is the
     # schema that ships with the plugin. BASH_SOURCE[0] is this file regardless
-    # of cwd or who sourced it (mirrors phase-verifier.sh / inbox-check.sh), so
+    # of cwd or who sourced it (mirrors phase-verifier.sh), so
     # the bundled schema resolves with no env var set on the bash code path
     # (`fno gate set` -> set-gate.sh -> here). The `:-` guard keeps `set -u`
     # from tripping when sourced from zsh, which does not populate BASH_SOURCE;

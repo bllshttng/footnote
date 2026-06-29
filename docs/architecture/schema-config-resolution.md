@@ -48,8 +48,7 @@ The lib-relative tier sits *above* the env-var tiers so an operator never needs
 guard so a zsh caller (which does not populate `BASH_SOURCE`) falls through to
 the env tiers under `set -u` rather than crashing. The real `fno gate set` path
 runs under bash, where the lib-relative tier always resolves. This mirrors the
-self-location pattern in `scripts/lib/phase-verifier.sh` and
-`scripts/lib/inbox-check.sh`.
+self-location pattern in `scripts/lib/phase-verifier.sh`.
 
 When every tier misses, the original `schema unavailable: <path>` diagnostic
 (rc 2) is preserved.

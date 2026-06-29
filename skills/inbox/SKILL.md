@@ -25,8 +25,8 @@ conversation is one markdown file in that directory:
 `{YYYY-MM-DD}-{slug}.md`. Replies append to the same file rather than
 creating new ones, so the recipient sees a self-contained thread per
 file. Senders write via `fno mail send --to-project`. Recipients drain
-unread threads via `fno mail drain`, either manually or via the launchd
-daemon installed by `fno watch install`.
+unread threads via `fno mail drain`, run manually or by an autonomous
+worker.
 
 A thread is "unread" when its frontmatter has no `read_at:` field; the
 drain sets `read_at:` after dispatch (except for `question`, which
@@ -193,9 +193,8 @@ fno mail send --to-project acme-web --kind heads-up \
 
 A one-paragraph mental model so you can send freely:
 
-- A daemon (`fno watch install`) watches the recipient's inbox
-  directory. When you write a thread, the daemon spawns
-  `claude -p --bare` to drain new mail.
+- The recipient drains its inbox with `fno mail drain` (run manually
+  or by an autonomous worker), reading each unread thread.
 - For each unread thread, the drain dispatches by kind. `heads-up`
   triggers triage and may file a graph node. `question` drops a
   wake-signal and stays unread. `fyi` logs to convo-signals OR writes

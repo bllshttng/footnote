@@ -2,6 +2,8 @@
 
 The inbox lets four agent roles (footnote, acme-web, example-pipeline, marketing) communicate across projects with traceable, idempotent message delivery. Megawalk drains each project's inbox at the top of every iteration so cross-project knowledge survives session compaction, project boundaries, and offline windows.
 
+> **Note (2026-06):** the headless `fno watch` launchd drain daemon (`scripts/abi-watch.sh`, the `com.fno.watch` plist, `install-drain-prompt.sh`), the in-session unread-mail wake hooks, and archive rotation (`inbox/archive.py`) were removed. The cross-session relay supersedes the autonomous-push use case; recipients drain with `fno mail drain` (manual or via an autonomous worker). The headless-drain subsection below is retained for historical context only. Megawalk itself was also cut earlier, so its Step 0 drain is historical too. Operators who previously ran `fno watch install` should remove the now-orphaned launchd job once; see the migration note in `docs/guides/cross-project-inbox.md`.
+
 ## Surfaces ownership: turning peer detection into a mechanical check
 
 The "surfaces ownership" map below is the substrate that makes
@@ -148,21 +150,6 @@ truncated. Filename allocation in `write_new_thread` uses
 `O_CREAT|O_EXCL` so two senders racing on the same `{date}-{slug}.md`
 both get distinct files.
 
-## Archive rotation
-
-`fno.inbox.archive.archive_old_threads(recipient, settings)` moves
-stale read threads from `{recipient}/inbox/` into
-`{recipient}/inbox/archive/{YYYY-MM}/`. The month derives from the
-thread's `read_at` (or `created` when read_at is somehow missing).
-Sorting is by `read_at` descending, so the most recent
-`settings.keep_recent_read` (default 50) read threads stay in the live
-folder and the rest are archived. Unread threads (frontmatter has no
-`read_at:`) are NEVER archived, regardless of count or size.
-
-The auto-rotate-on-write path from the old flat-file layout is
-removed; rotation is now an explicit operator action (manual
-invocation or a periodic launchd task).
-
 ## LLM triage seam
 
 `fno mail triage <msg-id>` shells out to `claude -p` with a structured prompt and JSON schema, returning a typed `TriagePlan`:
@@ -241,8 +228,8 @@ By design, only `kind: question` ever reaches a human. The daemon and the drain 
 
 ### Cross-references
 
-- `docs/guides/cross-project-inbox.md` - operator-facing install and uninstall instructions for the daemon
-- `cli/src/fno/inbox/drain.py` - drain command dispatch logic and `--headless` flag
+- `docs/guides/cross-project-inbox.md` - operator-facing `fno mail` usage
+- `cli/src/fno/inbox/drain.py` - drain command dispatch logic
 - `cli/src/fno/wake/signal.py` - wake-signal write, read, and delete substrate
 
 ## Out of scope (follow-ups)
@@ -251,14 +238,12 @@ The substrate ships as a single feature. Four follow-up backlog entries land in 
 
 - Supervisor sweep (`fno supervise`) - cron-driven anomaly detection that uses the inbox to question and lesson back to projects
 - Daily brief generator - 9am/5pm rollups of overnight work + unread inbox + personal TODOs
-- Headless `fno watch` daemon - launchd-managed per-project poller
 - Marketing role automation - Gmail outreach + content schedule via inbox heads-ups
 
 ## Files
 
 - `cli/src/fno/inbox/store.py` - Markdown parser, `Message`/`Kind`/`Status`, filelock, monotonic transitions, `resolve_project()`
-- `cli/src/fno/inbox/cli.py` - Six Typer verbs (send/unread/ack/reply/list/lint) + triage subcommand registration
-- `cli/src/fno/inbox/archive.py` - `needs_rotation`, `rotate`, `read_inbox_settings`
+- `cli/src/fno/mail/cli.py` - `fno mail` Typer verbs (send/unread/ack/reply/list/lint/drain/status) over the store data model
 - `cli/src/fno/inbox/triage.py` - `claude -p` subprocess wrapper with retry-once and env-stub override
 - `cli/src/fno/graph/store.py` - Provenance setdefaults in `_apply_graph_defaults`
 - `cli/src/fno/graph/load.py` - `query_by_source_inbox_msg` helper

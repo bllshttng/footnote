@@ -55,7 +55,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "reality-check": ("fno.reality_check.cli:cli",         "check external reality"),
     "providers":     ("fno.adapters.providers.cli:cli",    "Manage provider records and active selection."),
     "mail":          ("fno.mail.cli:mail_app",             "Durable polled mailbox: send/unread/ack/reply/drain/status."),
-    "watch":         ("fno.inbox.watch_cli:watch_app",     "Manage the per-project headless mail-drain daemon."),
     "agents":        ("fno.agents.cli:agents_app",          "Cross-CLI agent dispatch (claude / codex / gemini)."),
     "wake":          ("fno.wake.cli:wake_app",             "Wake-signal admin commands"),
     "plan":          ("fno.plan:plan_app",                 "Plan frontmatter stamping (in-package)"),

@@ -18,10 +18,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inbox-wake-prompt-submit.sh"
-          },
-          {
-            "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
           }
         ]
@@ -190,10 +186,6 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/cache-keepalive-inject.sh"
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inbox-wake-session-start.sh"
           },
           {
             "type": "command",

@@ -1117,6 +1117,82 @@ event_types:
         backend:
           type: string
 
+  - name: inside_leg_report
+    description: "Signal that an inside-leg state push (E3.2) was stored. Carries session_id/seq/state; the full stored report (reason/ttl_ms/received_at) lives on the matching claude registry row, which is the audit source -- this event is not a reconstruction record."
+    sources: [daemon]
+    data:
+      required: [session_id, seq, state]
+      properties:
+        session_id:
+          type: string
+        seq:
+          type: integer
+        state:
+          type: string
+          enum: [working, blocked, done]
+
+  - name: inside_leg_report_dropped
+    description: "An inside-leg report was dropped without storing it (stale seq, unknown session, or the early-push buffer was full)."
+    sources: [daemon]
+    data:
+      required: [session_id, seq, reason]
+      properties:
+        session_id:
+          type: string
+        seq:
+          type: integer
+        reason:
+          type: string
+          enum: [stale_seq, unknown_session, buffer_full]
+        last_seq:
+          type: integer
+
+  - name: inside_leg_report_buffered
+    description: "Buffer-on-early-push (E3.3): a report arrived before its session's registry row existed and was held in the bounded pending buffer, to be flushed onto the row at creation."
+    sources: [daemon]
+    data:
+      required: [session_id, seq, state]
+      properties:
+        session_id:
+          type: string
+        seq:
+          type: integer
+        state:
+          type: string
+          enum: [working, blocked, done]
+
+  - name: inside_leg_buffer_flushed
+    description: "Buffer-on-early-push (E3.3): a buffered early-push report was flushed onto its session's registry row at row creation."
+    sources: [daemon]
+    data:
+      required: [name, session_id, state, seq]
+      properties:
+        name:
+          type: string
+        session_id:
+          type: string
+        state:
+          type: string
+          enum: [working, blocked, done]
+        seq:
+          type: integer
+
+  - name: inside_leg_completed
+    description: "Ordered exit teardown (E3.3, AC-X2-4): a claude row carrying an inside-leg report is transitioning to Exited. Emitted BEFORE the registry write clears the report, so list/waiters observe the final state before the badge goes blank."
+    sources: [daemon]
+    data:
+      required: [name, final_state, seq]
+      properties:
+        name:
+          type: string
+        session_id:
+          type: string
+        final_state:
+          type: string
+          enum: [working, blocked, done]
+        seq:
+          type: integer
+
   - name: drive_attached
     description: "An interactive drive window was opened for an agent."
     sources: [daemon]
@@ -1332,6 +1408,19 @@ event_types:
         agent:
           type: string
         session_id:
+          type: string
+
+  - name: drive_refused_busy_elsewhere
+    description: "A claude grid-drive was refused because the session's cross-process claim is held by another writer (X1 single-writer interlock)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        agent:
+          type: string
+        holder:
+          type: string
+        session_uuid:
           type: string
 
   - name: drive_takeover_after_stale
@@ -1695,7 +1784,7 @@ event_types:
     consumers: [operator]
 
   - name: advance_dispatched
-    description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target no-merge worker for the next now-unblocked node after a PR merge. Also emitted by advance_dependents (G1) when it dispatches a now-unblocked CROSS-project blocked_by dependent into its own repo (cross_project=true). Surfaced in the next SessionStart reconcile reminder line."
+    description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target no-merge worker for the next now-unblocked node after a PR merge. Also emitted by advance_dependents when it dispatches a now-unblocked direct blocked_by dependent: cross-project into its own work-map repo (cross_project=true, G1) or same-project into its own project root (cross_project=false, RC1/x-33b2; work-map resolved, recorded cwd as fallback). Surfaced in the next SessionStart reconcile reminder line."
     sources: [backlog]
     data:
       required: [node_id]
@@ -1714,19 +1803,19 @@ event_types:
           description: "The just-merged node whose close triggered this advance (keying for AC1-RACE)."
         cross_project:
           type: boolean
-          description: "True when this dispatch followed a blocked_by edge into a DIFFERENT project (G1 advance_dependents), spawned with --cwd the dependent's own work-map root. Absent/false for the same-project next-node advance."
+          description: "True when this dispatch followed a blocked_by edge into a DIFFERENT project (G1 advance_dependents), spawned with --cwd the dependent's own work-map root. False for a same-project dispatch: either the next-node advance, or a same-project direct dependent spawned with --cwd its own project root (RC1/x-33b2; work-map resolved, recorded cwd as fallback)."
     consumers: [operator]
 
   - name: advance_skipped
-    description: "Emitted by `fno backlog advance` (and advance_dependents, G1) when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error plus the G1 cross-project reasons unmapped-project / no-project / dependents-error. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
+    description: "Emitted by `fno backlog advance` (and advance_dependents) when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error plus the dependent-path reasons unmapped-project / no-project / no-cwd / dependents-error / closed-project-unknown. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
     sources: [backlog]
     data:
       required: [reason]
       properties:
         reason:
           type: string
-          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, dependents-error]
-          description: "Why advance dispatched nothing this run. The last three are G1 (advance_dependents): unmapped-project = the dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; dependents-error = the graph read for direct dependents failed."
+          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown]
+          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/x-33b2); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/x-33b2)."
         node_id:
           type: string
           description: "The candidate next node, when a reason references one (already-claimed)."
@@ -1766,8 +1855,8 @@ event_types:
           description: "The freshly-filed node a /think was spawned for."
         trigger:
           type: string
-          enum: [birth, work-start, retro]
-          description: "Which dispatch moment fired (x-122a): birth (A1), work-start or retro (A2 lifecycle)."
+          enum: [birth, work-start, retro, conversational]
+          description: "Which dispatch moment fired: birth (A1), work-start or retro (A2 lifecycle, x-122a), or conversational (C explicit verb, x-0a9c)."
         think_session:
           type: string
           description: "Short id of the spawned claude /think bg worker (from the spawn receipt)."
@@ -1797,8 +1886,8 @@ event_types:
           description: "The freshly-filed node a /think handoff was offered for."
         trigger:
           type: string
-          enum: [birth, work-start, retro]
-          description: "Which dispatch moment fired (x-122a): birth (A1), work-start or retro (A2 lifecycle)."
+          enum: [birth, work-start, retro, conversational]
+          description: "Which dispatch moment fired: birth (A1), work-start or retro (A2 lifecycle, x-122a), or conversational (C explicit verb, x-0a9c)."
         presence:
           type: string
           enum: [attended]
@@ -1823,8 +1912,8 @@ event_types:
           description: "Why the dispatch spawned/offered nothing this evaluation."
         trigger:
           type: string
-          enum: [birth, work-start, retro]
-          description: "Which dispatch moment fired (x-122a): birth (A1), work-start or retro (A2 lifecycle)."
+          enum: [birth, work-start, retro, conversational]
+          description: "Which dispatch moment fired: birth (A1), work-start or retro (A2 lifecycle, x-122a), or conversational (C explicit verb, x-0a9c)."
         node_id:
           type: string
           description: "The candidate node, when the reason references one."
