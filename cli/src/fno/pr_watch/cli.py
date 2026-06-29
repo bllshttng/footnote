@@ -200,6 +200,19 @@ def tick() -> None:
         f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
     )
 
+    # Session auto-recovery (x-f47c) rides this same launchd cadence: a sweep
+    # that resumes footnote-launched bg sessions which went idle-but-incomplete
+    # after an abnormal turn termination. Gated by config.recovery.enabled and
+    # wrapped non-fatally so a recovery failure never breaks the PR-watch tick.
+    if settings.config.recovery.enabled:
+        try:
+            from fno.recovery import run_recovery_sweep
+
+            n = run_recovery_sweep(settings.config.recovery, emit=_emit_event)
+            typer.echo(f"recovery sweep: candidates={n}")
+        except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
+            log.warning("pr-watch: recovery sweep failed: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # install
