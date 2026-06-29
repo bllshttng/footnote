@@ -3779,6 +3779,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                         prev_frame = None;
                                                     }
                                                     Ok(false) => {
+                                                        // No local change, but `update`
+                                                        // re-read the file under lock: a
+                                                        // concurrent instance may have moved
+                                                        // the store on, so reload to converge
+                                                        // (codex P2). No full paint - the rail
+                                                        // membership the operator sees is
+                                                        // unchanged by THIS no-op.
+                                                        squad_store = squads::load(&squads_path);
                                                         hint = Some(format!(
                                                             "{agent} not in *{squad}"
                                                         ));
