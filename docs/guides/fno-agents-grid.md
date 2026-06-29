@@ -41,6 +41,8 @@ The rail is opt-in. Without `--rail` the grid is exactly the tiled grid above; n
 | `a` | toggle the **attention filter**: show only agents waiting for input (idle + exited hidden) | forwarded to the agent |
 | Esc | (inert) | release the driver claim, back to RailNav |
 | `g` | cycle the group-by key: cwd → session → provider → status → squad → union (sidelines + squads at once) | forwarded to the agent |
+| `m` | **recruit** the selected agent into a squad: opens a prompt that lists your existing squads; Up/Down cycle them into the buffer (or type a new name), Enter joins. The prompt pre-seeds your last-used squad, so building one squad from several agents is `m`-Enter, `m`-Enter | forwarded to the agent |
+| `r` | in **squad** view, **remove** the selected agent from the selected squad (it stays live in its repo sideline - squads are a playlist, not a move); a no-op toast in any other view | forwarded to the agent |
 | `Tab` | toggle the main area between **Single** (one focused pane) and **GroupTile** (the selected agent's whole group tiled side by side) | forwarded to the agent |
 | `]` / `[` | in GroupTile, page through a group too large to tile at once (`PageDn` / `PageUp` also work) | forwarded to the agent |
 | `t` | toggle the rail off (back to the tiled grid) | forwarded to the agent |

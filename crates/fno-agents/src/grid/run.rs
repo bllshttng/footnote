@@ -652,6 +652,12 @@ impl Launcher {
 struct RecruitPrompt {
     agent: String,
     input: Launcher,
+    /// Existing squad names the operator can cycle into the buffer with Up/Down
+    /// (x-0175 US1). Empty when no squads exist yet (cycling is then inert).
+    candidates: Vec<String>,
+    /// Index into `candidates` of the currently-cycled name; seeded onto the
+    /// last-recruited squad when present (AC2-HP).
+    cursor: usize,
 }
 
 /// Derive a legible, unique-ish worker name from a goal + a monotonic counter:
@@ -676,6 +682,75 @@ fn target_worker_name(goal: &str, n: usize) -> String {
     let slug = slug.trim_matches('-');
     let slug = if slug.is_empty() { "goal" } else { slug };
     format!("target-{slug}-{n}")
+}
+
+/// Build the recruit modal's `(candidates, cursor)` (x-0175 US1): existing squad
+/// names in store order, with the cursor pre-positioned on `last`'s index when
+/// it is still a known squad (Discretion #2 / AC2-HP fast repeat-recruit), else
+/// 0. A `last` that no longer exists (squad removed mid-session) falls back to 0
+/// without crashing (AC2-FR). Pure + unit-tested.
+fn recruit_candidates(store: &squads::SquadStore, last: Option<&str>) -> (Vec<String>, usize) {
+    let candidates: Vec<String> = store.squads.iter().map(|s| s.name.clone()).collect();
+    let cursor = last
+        .and_then(|l| candidates.iter().position(|c| c == l))
+        .unwrap_or(0);
+    (candidates, cursor)
+}
+
+/// Next cursor for an Up/Down cycle over `len` recruit candidates. `on_candidate`
+/// is true when the buffer currently shows `candidates[cursor]` (the press
+/// advances to the neighbour); false when the buffer diverged - empty or freely
+/// typed - so the press snaps back onto the cursor candidate without advancing,
+/// guaranteeing the first press always changes the buffer (AC1-UI). Wraps at both
+/// ends (Discretion #4); inert with no candidates (AC1-EDGE). Pure + unit-tested.
+fn cycle_cursor(len: usize, cursor: usize, on_candidate: bool, down: bool) -> usize {
+    if len == 0 {
+        return cursor;
+    }
+    if !on_candidate {
+        return cursor.min(len - 1);
+    }
+    if down {
+        (cursor + 1) % len
+    } else {
+        (cursor + len - 1) % len
+    }
+}
+
+/// Render the recruit modal's candidate legend: existing squad names with the
+/// cursor one wrapped in single guillemets, e.g. `stack ‹crew› ops`, so the
+/// operator sees the squads they can pick and which one is current (US1 /
+/// AC1-UI). Empty string when no squads exist, so the footer collapses to the
+/// bare prompt (AC1-EDGE). Narrow terminals truncate it via the footer's
+/// existing hint clip (Discretion #3). Pure + unit-tested.
+fn candidate_legend(candidates: &[String], cursor: usize) -> String {
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if i == cursor {
+                format!("\u{2039}{c}\u{203a}")
+            } else {
+                c.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The recruit modal's full footer hint: the editable squad-name buffer plus the
+/// candidate legend when squads exist. One place so the m-open, typing, and
+/// cycle paths render an identical footer.
+fn recruit_hint(rp: &RecruitPrompt) -> String {
+    let legend = candidate_legend(&rp.candidates, rp.cursor);
+    if legend.is_empty() {
+        format!("recruit {} into squad> {}", rp.agent, rp.input.buffer)
+    } else {
+        format!(
+            "recruit {} into squad> {}   [{}]",
+            rp.agent, rp.input.buffer, legend
+        )
+    }
 }
 
 /// Spawn a `/target` worker for `goal` via the same primitive dispatch uses:
@@ -2918,6 +2993,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // Open recruit prompt (x-5b3e): `Some` while the operator is typing the
     // squad name to recruit the focused agent into. Modal like `launcher`.
     let mut recruit: Option<RecruitPrompt> = None;
+    // Last squad recruited into this session (x-0175 US2): pre-seeds the next
+    // recruit prompt so building one squad from several agents is `m`-Enter,
+    // `m`-Enter. In-memory / session-scoped (Locked Decision 3).
+    // ponytail: session-scoped; persist to squads.json only if operators ask
+    // for cross-restart memory.
+    let mut last_squad: Option<String> = None;
 
     // ── Rail state (ab-1fab1fdf, Phase 1) ────────────────────────────────
     // `rail_state`: Some when rail mode is active (`--rail` flag or `t` toggle).
@@ -3276,13 +3357,30 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         // AC1-UI); the outcome toast makes a re-recruit a visible
                         // no-op. After the launcher so only one modal owns input.
                         if recruit.is_some() {
+                            // Up/Down cycle existing squad names into the buffer
+                            // (US1/AC1-UI). Inert with zero candidates but still
+                            // consumed so the key never leaks to the rail
+                            // (AC1-EDGE). Handled before `apply` because arrows map
+                            // to Ignore in the launcher keymap.
+                            if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                                let rp = recruit.as_mut().unwrap();
+                                if !rp.candidates.is_empty() {
+                                    let on = rp.input.buffer == rp.candidates[rp.cursor];
+                                    rp.cursor = cycle_cursor(
+                                        rp.candidates.len(),
+                                        rp.cursor,
+                                        on,
+                                        matches!(key.code, KeyCode::Down),
+                                    );
+                                    rp.input.buffer = rp.candidates[rp.cursor].clone();
+                                }
+                                hint = Some(recruit_hint(recruit.as_ref().unwrap()));
+                                dirty = true;
+                                continue;
+                            }
                             match recruit.as_mut().unwrap().input.apply(launcher_key(key)) {
                                 LauncherOutcome::Stay => {
-                                    let rp = recruit.as_ref().unwrap();
-                                    hint = Some(format!(
-                                        "recruit {} into squad> {}",
-                                        rp.agent, rp.input.buffer
-                                    ));
+                                    hint = Some(recruit_hint(recruit.as_ref().unwrap()));
                                 }
                                 LauncherOutcome::Cancelled => {
                                     recruit = None;
@@ -3303,6 +3401,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             // Reload so the Squad view reflects the
                                             // new membership on the next frame.
                                             squad_store = squads::load(&squads_path);
+                                            // Remember this squad so the next `m`
+                                            // pre-seeds it (AC2-HP). Set on any Ok
+                                            // (create-if-absent means the squad now
+                                            // exists, even on AlreadyMember).
+                                            last_squad = Some(squad_name.clone());
                                             hint = Some(match outcome {
                                                 squads::RecruitOutcome::Recruited => {
                                                     format!("recruited {agent} into *{squad_name}")
@@ -3383,7 +3486,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     LeaderDecision::EnterPending => {
                                         let lk = leader_cfg.format_compact();
                                         hint = Some(format!(
-                                            "LEADER ({lk}) - rail: \u{2191}\u{2193} select \u{b7} g group \u{b7} Tab zoom \u{b7} a attn \u{b7} ] [ page \u{b7} m recruit \u{b7} t hide \u{b7} Esc drive"
+                                            "LEADER ({lk}) - rail: \u{2191}\u{2193} select \u{b7} g group \u{b7} Tab zoom \u{b7} a attn \u{b7} ] [ page \u{b7} m recruit \u{b7} r remove \u{b7} t hide \u{b7} Esc drive"
                                         ));
                                         dirty = true;
                                         rail_consumed = true;
@@ -3613,13 +3716,91 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     if let Some(agent) =
                                         rs.selected_agent_idx.and_then(|i| names.get(i)).cloned()
                                     {
-                                        hint = Some(format!("recruit {agent} into squad> "));
-                                        recruit = Some(RecruitPrompt {
+                                        let (candidates, cursor) =
+                                            recruit_candidates(&squad_store, last_squad.as_deref());
+                                        let mut input = Launcher::new();
+                                        // Pre-seed with the last-recruited squad (AC2-HP) so
+                                        // Enter immediately re-recruits into it.
+                                        if let Some(seed) = last_squad.as_deref() {
+                                            input.buffer = seed.to_string();
+                                        }
+                                        let rp = RecruitPrompt {
                                             agent,
-                                            input: Launcher::new(),
-                                        });
+                                            input,
+                                            candidates,
+                                            cursor,
+                                        };
+                                        hint = Some(recruit_hint(&rp));
+                                        recruit = Some(rp);
                                     } else {
                                         hint = Some("no agent selected to recruit".to_string());
+                                    }
+                                    dirty = true;
+                                    rail_consumed = true;
+                                }
+                                // nav: `r` removes the selected agent from the
+                                // selected squad (x-0175 US3). Squad view only
+                                // (Locked Decision 4): elsewhere a toast says to
+                                // switch (AC1-ERR). Squad + agent are captured at
+                                // keypress so a later selection move cannot retarget
+                                // the mutation (Concurrency), mirroring `m`. Always
+                                // emits a toast - never a silent no-op.
+                                (KeyCode::Char('r')) => {
+                                    if rs.group_key != group::GroupKey::Squad {
+                                        hint = Some(
+                                            "switch to squad view (g) to remove".to_string(),
+                                        );
+                                    } else {
+                                        let groups = rail_view_groups(
+                                            &rail_rows, rs, &panes, &states, &squad_store,
+                                        );
+                                        let squad = rs
+                                            .selected_group(&groups)
+                                            .and_then(|g| g.key_value.strip_prefix("squad:"))
+                                            .map(str::to_string);
+                                        let agent = rs
+                                            .selected_agent_idx
+                                            .and_then(|i| names.get(i))
+                                            .cloned();
+                                        match (squad, agent) {
+                                            (Some(squad), Some(agent)) => {
+                                                match squads::update(&squads_path, |s| {
+                                                    s.remove_member(&squad, &agent)
+                                                }) {
+                                                    Ok(true) => {
+                                                        squad_store = squads::load(&squads_path);
+                                                        hint = Some(format!(
+                                                            "removed {agent} from *{squad}"
+                                                        ));
+                                                        // Membership changed -> the rail
+                                                        // layout shifts; force a full paint.
+                                                        // The no-op paths only change the
+                                                        // footer hint, which `dirty` repaints.
+                                                        prev_frame = None;
+                                                    }
+                                                    Ok(false) => {
+                                                        // No local change, but `update`
+                                                        // re-read the file under lock: a
+                                                        // concurrent instance may have moved
+                                                        // the store on, so reload to converge
+                                                        // (codex P2). No full paint - the rail
+                                                        // membership the operator sees is
+                                                        // unchanged by THIS no-op.
+                                                        squad_store = squads::load(&squads_path);
+                                                        hint = Some(format!(
+                                                            "{agent} not in *{squad}"
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        hint =
+                                                            Some(format!("remove failed: {e}"));
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                hint = Some("no agent selected".to_string());
+                                            }
+                                        }
                                     }
                                     dirty = true;
                                     rail_consumed = true;
@@ -4469,7 +4650,9 @@ fn help_overlay_lines(rail_on: bool) -> Vec<String> {
         lines.push(String::new());
         lines.push("  Rail (when active):".to_string());
         lines.push("  g              cycle group-by (cwd .. union)".to_string());
-        lines.push("  m              recruit selected agent into a squad".to_string());
+        lines.push("  m              recruit selected agent (Up/Down picks a squad)".to_string());
+        lines
+            .push("  r              remove selected agent from its squad (squad view)".to_string());
         lines.push("  a              toggle attention filter".to_string());
         lines.push("  Tab            tile / zoom selected group".to_string());
     }
@@ -4594,6 +4777,93 @@ mod tests {
         assert_eq!(new_registry_names(fresh, &known), vec!["wkC".to_string()]);
         // No new rows when the registry is unchanged.
         assert!(new_registry_names(known.clone(), &known).is_empty());
+    }
+
+    // ── recruit picker + cycle (x-0175) ──────────────────────────────────────
+
+    fn squad_store_named(names: &[&str]) -> squads::SquadStore {
+        squads::SquadStore {
+            squads: names
+                .iter()
+                .map(|n| squads::Squad {
+                    name: n.to_string(),
+                    members: vec![],
+                    created_at: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    // AC2-HP / Discretion #2: the cursor seeds onto last_squad's index.
+    #[test]
+    fn recruit_candidates_seeds_cursor_on_last() {
+        let store = squad_store_named(&["stack", "crew", "ops"]);
+        let (cands, cursor) = recruit_candidates(&store, Some("crew"));
+        assert_eq!(cands, vec!["stack", "crew", "ops"]);
+        assert_eq!(cursor, 1);
+    }
+
+    // AC2-FR: a last_squad that no longer exists (or None) -> cursor 0, no crash.
+    #[test]
+    fn recruit_candidates_unknown_last_is_zero() {
+        let store = squad_store_named(&["stack", "crew"]);
+        assert_eq!(recruit_candidates(&store, Some("ghost")).1, 0);
+        assert_eq!(recruit_candidates(&store, None).1, 0);
+    }
+
+    // AC1-EDGE: no squads -> empty candidates, cursor 0.
+    #[test]
+    fn recruit_candidates_empty_store() {
+        let store = squad_store_named(&[]);
+        let (cands, cursor) = recruit_candidates(&store, Some("stack"));
+        assert!(cands.is_empty());
+        assert_eq!(cursor, 0);
+    }
+
+    // AC1-UI: from a shown candidate, Down/Up step and wrap (Discretion #4).
+    #[test]
+    fn cycle_advances_and_wraps_from_candidate() {
+        assert_eq!(cycle_cursor(3, 2, true, true), 0); // Down wraps high->0
+        assert_eq!(cycle_cursor(3, 0, true, false), 2); // Up wraps 0->high
+        assert_eq!(cycle_cursor(3, 0, true, true), 1);
+        assert_eq!(cycle_cursor(3, 2, true, false), 1);
+    }
+
+    // AC1-UI: a diverged buffer (empty or typed) snaps onto the cursor candidate
+    // without advancing, so the first press always shows feedback.
+    #[test]
+    fn cycle_snaps_when_buffer_diverged() {
+        assert_eq!(cycle_cursor(2, 0, false, true), 0); // fresh: first Down -> [0]
+        assert_eq!(cycle_cursor(2, 0, false, false), 0); // first Up -> [0]
+        assert_eq!(cycle_cursor(2, 5, false, true), 1); // stale cursor clamps in-range
+    }
+
+    // AC1-EDGE: zero candidates -> cursor unchanged (inert cycle).
+    #[test]
+    fn cycle_inert_when_empty() {
+        assert_eq!(cycle_cursor(0, 0, false, true), 0);
+        assert_eq!(cycle_cursor(0, 0, true, false), 0);
+    }
+
+    // AC1-UI: the legend lists every squad and marks the cursor one with
+    // guillemets, so the operator sees the choices and which is current.
+    #[test]
+    fn candidate_legend_marks_cursor() {
+        let cands = vec!["stack".to_string(), "crew".to_string(), "ops".to_string()];
+        assert_eq!(
+            candidate_legend(&cands, 1),
+            "stack \u{2039}crew\u{203a} ops"
+        );
+        assert_eq!(
+            candidate_legend(&cands, 0),
+            "\u{2039}stack\u{203a} crew ops"
+        );
+    }
+
+    // AC1-EDGE: no squads -> empty legend, so the footer is the bare prompt.
+    #[test]
+    fn candidate_legend_empty_when_no_squads() {
+        assert_eq!(candidate_legend(&[], 0), "");
     }
 
     // x-45e6 AC3-EDGE: the roster poll diff is by session_id, and skips slots
@@ -6647,6 +6917,11 @@ mod tests {
         assert!(text_rail.contains('g'), "rail lines must mention g");
         assert!(text_rail.contains('a'), "rail lines must mention a");
         assert!(text_rail.contains("Tab"), "rail lines must mention Tab");
+        // x-0175 Discretion #1: the new remove key is documented in the overlay.
+        assert!(
+            text_rail.contains("r              remove"),
+            "rail lines must document the r remove key"
+        );
     }
 
     /// Owned-PTY: bare `?` always passes through (it types to the agent; the
