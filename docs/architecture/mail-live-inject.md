@@ -64,6 +64,13 @@ Both are accepted tradeoffs of live-inject-first. Hard exactly-once would carry 
 
 The cross-session relay PTY hop (`cli/src/fno/relay/envelope.py`) frames provenance on the same `<fno_mail>` tag, but as the SINGLE-LINE, no-close transport variant: `<fno_mail from="..." harness="..."[ model="..."]> <one-line body>`. It cannot carry the paired multiline form because the PTY Enter submits on newline. It shares the tag name and `harness` vocabulary so `grep <fno_mail>` reconstructs relay hops too.
 
+### Cross-harness hop (G4, x-3f34)
+
+The relay graph spans harnesses (claude -> codex, codex -> gemini, ...), not just claude<->claude. The hop splits into two halves with opposite generality:
+
+- **Injection is harness-agnostic.** Every cross-harness turn lands via the daemon `worker.submit` RPC (raw text -> settle -> CR into the recipient's owned PTY), the same vehicle claude uses. A live non-claude interactive worker is surfaced as a routable peer by `fno.relay.registry.index()` (keyed by `short_id`, with a `worker:<short_id>` inject handle); `fno.relay.daemon.daemon_deliver` routes that handle through `fno.relay.roundtrip.deliver_worker` with NO `session:` claim probe (that single-writer interlock is claude-transcript-specific; the live `worker.sock` is the routability signal, and the worker actor's single-socket write serializes injects).
+- **Reply capture is NOT harness-agnostic.** It is a strategy resolved per harness behind one seam (`roundtrip.capture_replies`): claude reads its transcript jsonl (faithful), every other harness tails its PTY pane via the `worker.snapshot` RPC (the safe default), and a strategy that throws on schema drift degrades to pty-tail and emits `relay_capture_degraded` rather than zeroing the reply. Adding a harness is a `register_capture_strategy` entry (or nothing -> pty-tail default), never a new injection path. Provenance framing (`<fno_mail>`) and the G3 envelope (dedup, ttl, cycle-cut) are inherited unchanged; an unframed cross-harness inject is refused (`relay_dropped{unframed-cross-provider}`).
+
 ## Durable body carries the same envelope
 
 The durable fallback stores the `<fno_mail>`-wrapped body, the SAME envelope the live path injects, so a delivered message carries one consistent wire form across the live and durable paths and `grep <fno_mail>` reconstructs durable history too (not just live transcripts). The wrapped body round-trips through the per-recipient markdown render unchanged, so `mark_thread_read` does not strip it. A consequence: `fno mail unread` summaries (`body.split("\n")[0]`) surface the open tag rather than a content preview; that tag is a recognizable a2a marker (it names the `from` sender), which is the point of keeping it legible.
