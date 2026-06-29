@@ -38,6 +38,14 @@ pub struct WorkerConfig {
     pub rows: u16,
     pub cols: u16,
     pub ring_bytes: usize,
+    /// Agent name + provider, stamped into the PTY child env as
+    /// `FNO_AGENT_SELF` / `FNO_AGENT_PROVIDER` so a daemon-spawned worker carries
+    /// the same mesh identity the client-side dispatch paths set (x-3ab8 / codex
+    /// P2 on PR#90: presence classification in context.py / spawn_think.py keys on
+    /// `FNO_AGENT_SELF`, so without it a default `/target` worker misclassifies as
+    /// human/attended). Empty (the `new()` default) stamps nothing.
+    pub name: String,
+    pub provider: String,
 }
 
 impl WorkerConfig {
@@ -56,6 +64,8 @@ impl WorkerConfig {
             rows: 24,
             cols: 80,
             ring_bytes: DEFAULT_OUTPUT_RING_BYTES,
+            name: String::new(),
+            provider: String::new(),
         }
     }
 }
@@ -416,6 +426,20 @@ fn build_child_command(cfg: &WorkerConfig) -> CommandBuilder {
     // targets this short_id, never on a window driving some unrelated agent.
     cmd.env("FNO_AGENTS_SELF_SHORT_ID", &cfg.short_id);
     cmd.env("FNO_AGENTS_HOME", cfg.home.as_os_str());
+    // Mesh identity (x-3ab8 / codex P2 on PR#90): the client-side dispatch paths
+    // (claude_ask/codex_ask/gemini_ask/agy_ask) export FNO_AGENT_SELF/PROVIDER, but
+    // a daemon-spawned PTY worker did not - so a default `/target` worker routed
+    // through the daemon lost the spawned-worker signal and presence classification
+    // (context.py / spawn_think.py) misread it as human/attended. Stamp them here
+    // so every daemon-PTY worker (claude/codex/gemini/agy) carries the same
+    // identity. Empty name/provider (the new() default, e.g. a raw worker test)
+    // stamps nothing, keeping that path byte-unchanged.
+    if !cfg.name.is_empty() {
+        cmd.env("FNO_AGENT_SELF", &cfg.name);
+    }
+    if !cfg.provider.is_empty() {
+        cmd.env("FNO_AGENT_PROVIDER", &cfg.provider);
+    }
     // Persistence recipe (inside-out-multiplexer E4.1): the daemon-side
     // equivalent of the relay's roundtrip.py `_peer_env`. Force the PTY child to
     // write its OWN faithful transcript at projects/<cwd-enc>/<session-id>.jsonl -
@@ -521,6 +545,56 @@ mod tests {
             cmd.get_env("FNO_AGENTS_HOME"),
             Some(home.as_os_str()),
             "FNO_AGENTS_HOME must be stamped with the worker's home path"
+        );
+    }
+
+    #[test]
+    fn build_child_command_stamps_mesh_identity_when_present() {
+        // x-3ab8 / codex P2 on PR#90: a daemon-spawned worker must carry the same
+        // FNO_AGENT_SELF / FNO_AGENT_PROVIDER the client-side dispatch paths set,
+        // so presence classification (context.py / spawn_think.py) recognizes a
+        // default `/target` worker as a spawned agent (away), not human/attended.
+        let mut cfg = WorkerConfig::new(
+            "wk-c0ffee",
+            PathBuf::from("/tmp/abi-test-home-3"),
+            PathBuf::from("/tmp"),
+            vec!["claude".to_string()],
+        );
+        cfg.name = "target-x-3ab8".to_string();
+        cfg.provider = "claude".to_string();
+        let cmd = build_child_command(&cfg);
+        assert_eq!(
+            cmd.get_env("FNO_AGENT_SELF"),
+            Some(OsStr::new("target-x-3ab8")),
+            "FNO_AGENT_SELF must carry the agent name (spawned-worker signal)"
+        );
+        assert_eq!(
+            cmd.get_env("FNO_AGENT_PROVIDER"),
+            Some(OsStr::new("claude")),
+            "FNO_AGENT_PROVIDER must carry the provider"
+        );
+    }
+
+    #[test]
+    fn build_child_command_omits_mesh_identity_when_absent() {
+        // Empty name/provider (the new() default, e.g. a raw fno-agents-worker
+        // launch) stamps nothing - that path stays byte-unchanged.
+        let cfg = WorkerConfig::new(
+            "wk-bare",
+            PathBuf::from("/tmp/abi-test-home-4"),
+            PathBuf::from("/tmp"),
+            vec!["codex".to_string()],
+        );
+        let cmd = build_child_command(&cfg);
+        assert_eq!(
+            cmd.get_env("FNO_AGENT_SELF"),
+            None,
+            "no stamp without a name"
+        );
+        assert_eq!(
+            cmd.get_env("FNO_AGENT_PROVIDER"),
+            None,
+            "no stamp without a provider"
         );
     }
 

@@ -492,6 +492,12 @@ fn target_worker_name(goal: &str, n: usize) -> String {
 /// `no-merge` keeps an autonomous worker landing a PR for review, never an
 /// auto-merge (dispatch Locked Decision 4). `$FNO_BIN` overrides the binary
 /// (tests / non-PATH installs). Returns Ok once the worker is launched.
+///
+/// x-3ab8: `spawn` now defaults to an owned interactive pane, so this launches
+/// the `/target` worker INTO the grid as a drivable, take-over-able pane (no
+/// `--once`) rather than claude's detached `--bg` thread - the unification that
+/// makes a launched worker tile live (Change 4 AC-HP). The spawn command is
+/// unchanged; the default flip does the work.
 async fn spawn_target_worker(name: &str, goal: &str) -> Result<(), String> {
     // var_os (not var): FNO_BIN is a path and may carry non-UTF-8 bytes;
     // Command::new takes an OsStr, so no lossy conversion is needed.
@@ -514,10 +520,12 @@ async fn spawn_target_worker(name: &str, goal: &str) -> Result<(), String> {
 }
 
 /// How an E5b launcher submission should be dispatched (x-1b1c Change 2). A
-/// leading `>` opens an interactive claude pane the operator types straight
-/// into (the herdr UX this grid is for); anything else dispatches an autonomous
-/// `/target` worker (the original E5b behavior, kept as the distinct option).
-/// Pure + testable, mirroring [`launcher_key`].
+/// leading `>` opens a BARE interactive claude pane the operator types straight
+/// into (the herdr UX this grid is for); anything else dispatches a `/target`
+/// worker for the goal. Post-x-3ab8 BOTH tile as owned interactive panes - the
+/// distinction is the payload (bare pane vs a pane running `/target`), not a
+/// watch-vs-drive tier (there is none). Pure + testable, mirroring
+/// [`launcher_key`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LaunchKind {
     /// Interactive claude pane; the string is the optional first message.

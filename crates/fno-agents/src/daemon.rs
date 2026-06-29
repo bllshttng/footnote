@@ -1332,6 +1332,14 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         .arg(ctx.home.root())
         .arg("--cwd")
         .arg(&cwd)
+        // Mesh identity (x-3ab8 / codex P2 on PR#90): carry the agent name +
+        // provider so the PTY child gets FNO_AGENT_SELF / FNO_AGENT_PROVIDER, the
+        // spawned-worker signal presence classification reads (else a default
+        // daemon-routed `/target` worker misreads as human/attended).
+        .arg("--name")
+        .arg(&name)
+        .arg("--provider")
+        .arg(&provider)
         .arg("--")
         .args(&argv);
     cmd.process_group(0);

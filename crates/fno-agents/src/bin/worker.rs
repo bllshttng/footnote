@@ -150,6 +150,8 @@ fn parse_args(args: Vec<String>) -> Result<WorkerConfig, String> {
     let mut rows = 24u16;
     let mut cols = 80u16;
     let mut ring_bytes = DEFAULT_OUTPUT_RING_BYTES;
+    let mut name: Option<String> = None;
+    let mut provider: Option<String> = None;
     let mut argv: Vec<String> = Vec::new();
 
     let mut it = args.into_iter();
@@ -158,6 +160,11 @@ fn parse_args(args: Vec<String>) -> Result<WorkerConfig, String> {
             "--short-id" => short_id = it.next(),
             "--home" => home = it.next().map(PathBuf::from),
             "--cwd" => cwd = it.next().map(PathBuf::from),
+            // Mesh identity (x-3ab8): stamped into the PTY child as
+            // FNO_AGENT_SELF / FNO_AGENT_PROVIDER. Optional; byte-unchanged when
+            // absent (a raw `fno-agents-worker` launch without them).
+            "--name" => name = it.next(),
+            "--provider" => provider = it.next(),
             "--rows" => {
                 rows = it
                     .next()
@@ -195,5 +202,7 @@ fn parse_args(args: Vec<String>) -> Result<WorkerConfig, String> {
     cfg.rows = rows;
     cfg.cols = cols;
     cfg.ring_bytes = ring_bytes;
+    cfg.name = name.unwrap_or_default();
+    cfg.provider = provider.unwrap_or_default();
     Ok(cfg)
 }
