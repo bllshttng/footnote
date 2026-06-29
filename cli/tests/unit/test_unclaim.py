@@ -139,10 +139,30 @@ def test_unclaim_refuses_live_foreign_lockfile(tmp_graph, claims_root, monkeypat
     assert "force-release" in out
 
 
-def test_unclaim_releases_own_live_lockfile(tmp_graph, claims_root, monkeypatch):
+def _point_session_at(tmp_path: Path, monkeypatch, session_id: str) -> None:
+    """Make _invoking_session_id() resolve to `session_id` via a real
+    target-state.md, exercising the live repo_root()->Path->resolve_session_id
+    path (NOT monkeypatching the helper, so a regression there is caught)."""
+    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".fno" / "target-state.md").write_text(
+        f"---\nsession_id: {session_id}\n---\n", encoding="utf-8"
+    )
+    # repo_root() returns a str; the helper must wrap it in Path() itself.
+    monkeypatch.setattr("fno.graph._intake.repo_root", lambda: str(tmp_path))
+
+
+def test_invoking_session_id_reads_target_state(tmp_path, monkeypatch):
+    # Regression: repo_root() is a str; _invoking_session_id must Path()-wrap it
+    # before handing it to resolve_session_id, or it silently returns None.
+    import fno.graph.cli as gcli
+    _point_session_at(tmp_path, monkeypatch, "sid-123")
+    assert gcli._invoking_session_id() == "sid-123"
+
+
+def test_unclaim_releases_own_live_lockfile(tmp_path, tmp_graph, claims_root, monkeypatch):
     _seed(tmp_graph, [_claimed_node()])
     _acquire("node:ab-1234abcd", "target-session:mine", pid=os.getpid(), root=claims_root)
-    monkeypatch.setattr("fno.graph.cli._invoking_session_id", lambda: "mine")
+    _point_session_at(tmp_path, monkeypatch, "mine")  # real helper path, holder = target-session:mine
     result = runner.invoke(app, ["backlog", "unclaim", "ab-1234abcd"])
     assert result.exit_code == 0, result.output
     assert not _lock_exists("node:ab-1234abcd", claims_root)

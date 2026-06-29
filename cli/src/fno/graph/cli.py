@@ -1441,7 +1441,10 @@ def _invoking_session_id() -> Optional[str]:
         from fno.carveout.core import resolve_session_id
         from fno.graph._intake import repo_root
 
-        return resolve_session_id(repo_root())
+        # repo_root() returns a str; resolve_session_id() needs a Path (it does
+        # `root / ".fno" / ...`). Without the wrap the TypeError is swallowed
+        # below and this always returns None, disabling the own-claim release.
+        return resolve_session_id(Path(repo_root()))
     except Exception:
         return None
 
