@@ -16,7 +16,10 @@ The per-agent flock that `dispatch_send` already holds serializes concurrent sen
 
 Every live transport carries the same `<fno_mail>`-wrapped turn:
 
-- **claude** (adopted `claude --bg`): the proven `control.sock` `op:'reply'` inject, reached through the `fno-agents mail-inject` verb (see below). The stream-json switchboard and MCP-channel fast lanes still apply first for peers that are live stream threads or MCP-routed; the `control.sock` inject is the successor to the dead per-worker messaging socket.
+- **claude**: dual-lane by recipient spawn-style (node x-849b), resolved in one place by `roundtrip.resolve_live_lane` (worker beats control; the two `host_mode`s are mutually exclusive for one uuid):
+  - an **owned-PTY worker** (`host_mode == "interactive"`, a footnote-spawned daemon worker) has no `control.sock` handle, so it is driven over its `worker.sock` via `roundtrip.submit_via_worker` (`worker.submit` RPC). Without this lane, mail to an owned-PTY worker silently fell to the durable queue a finished `/think` never drains. The worker inject is framed in bracketed paste (`ESC[200~ ... ESC[201~`, `worker.rs::submit_keys`) so claude's TUI buffers it atomically instead of dropping chars under render load.
+  - an **adopted `claude --bg`** session (`host_mode == "attached"`) takes the proven `control.sock` `op:'reply'` inject through the `fno-agents mail-inject` verb (see below). The stream-json switchboard and MCP-channel fast lanes still apply first for peers that are live stream threads or MCP-routed; the `control.sock` inject is the successor to the dead per-worker messaging socket.
+  - Both lanes carry the SAME `<fno_mail>` envelope (`_deliver_live` wraps the turn before lane selection), so an owned-PTY worker's turn is the same agent-vs-human-discriminated turn an adopted session gets.
 - **codex / gemini**: the daemon `agent.deliver` RPC, now carrying the `<fno_mail>` envelope (see [fno-agents-deliver-gate.md](fno-agents-deliver-gate.md)).
 
 `_deliver_live` returns `True` on the first lane that succeeds, else `False`; `dispatch_send` writes durable exactly when it returns `False`. So a message takes exactly one of {one live transport, durable}.
