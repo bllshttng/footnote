@@ -12,8 +12,7 @@ underlying tool's own failure is swallowed (the bash used ``|| true``). The one
 intentional divergence is the no-tool path: the bash silently returned 0 when
 neither tool was present, but AC2-FR requires a loud, non-zero, one-line
 degrade (never a silent no-op). ``scripts/lib/notify.sh`` is kept on disk for
-in-clone bash sourcers (e.g. ``scripts/lib/inbox-check.sh``); only the Python
-verb is re-pointed here.
+in-clone bash sourcers; only the Python verb is re-pointed here.
 """
 from __future__ import annotations
 

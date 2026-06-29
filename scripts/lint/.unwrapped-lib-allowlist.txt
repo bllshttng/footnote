@@ -54,7 +54,6 @@ claim-release.sh
 wake-signals.sh
 state-update.sh
 planning-session.sh
-inbox-check.sh
 
 # Phase 2 of stop-hook refactor: auto-complete helper (session_satisfied
 # event scanner + portable compute_md5) lifted from hooks/target-stop-hook.sh.
