@@ -1204,7 +1204,7 @@ def test_deliver_live_claude_no_live_lane_queues_durable(
         lambda method, params, **kw: {"delivered": False, "reason": "not-a-live-stream-thread"},
     )
     # Neither lane resolves live; the control.sock inject also misses.
-    monkeypatch.setattr(roundtrip, "resolve_live_lane", lambda sid: (None, None))
+    monkeypatch.setattr(roundtrip, "resolve_live_lane", lambda sid: None)
     monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda *a, **kw: False)
 
     from fno.agents.dispatch import dispatch_send

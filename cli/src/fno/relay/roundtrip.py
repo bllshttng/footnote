@@ -37,7 +37,7 @@ import struct
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 from fno.agents.events import emit
 from fno.mail.envelope import harness_for_provider
@@ -250,7 +250,9 @@ def resolve_attached_short_id(session_id: str) -> Optional[str]:
     return None
 
 
-def resolve_live_lane(session_id: str) -> tuple[Optional[str], Optional[str]]:
+def resolve_live_lane(
+    session_id: str,
+) -> Optional[tuple[Literal["worker", "control"], str]]:
     """Pick the live inject lane that reaches a claude ``session_id`` (node x-849b).
 
     The single place encoding lane precedence so ``fno mail`` and the relay never
@@ -258,10 +260,12 @@ def resolve_live_lane(session_id: str) -> tuple[Optional[str], Optional[str]]:
     ``worker.submit``) beats an adopted ``claude --bg`` session (``host_mode ==
     "attached"``, driven over the daemon ``control.sock`` op:reply). The two
     host_modes are mutually exclusive for one session uuid, so precedence only
-    orders the lossless worker lane first; neither live -> the caller queues durable.
+    orders the lossless worker lane first.
 
-    Returns ``("worker", short_id)``, ``("control", claude_short_id)``, or
-    ``(None, None)``.
+    Returns ``("worker", short_id)`` or ``("control", claude_short_id)`` when a
+    live lane resolves, else ``None`` (the caller queues durable). The lane and
+    its short id are present-or-absent together -- the ``Optional[tuple]`` shape
+    makes the half-resolved states unrepresentable.
     """
     short_id = resolve_worker_short_id(session_id)
     if short_id is not None:
@@ -269,7 +273,7 @@ def resolve_live_lane(session_id: str) -> tuple[Optional[str], Optional[str]]:
     attached = resolve_attached_short_id(session_id)
     if attached is not None:
         return "control", attached
-    return None, None
+    return None
 
 
 def _worker_rpc(

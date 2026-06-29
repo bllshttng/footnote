@@ -880,8 +880,12 @@ mod tests {
              the text and CR were not written as separate keystrokes"
         );
 
-        // The text payload reached the PTY (cat echoes stdin back).
-        let mut seen = false;
+        // The framed text reached the PTY (cat echoes stdin back). Capture the
+        // snapshot once the payload appears, then assert the bracketed-paste
+        // markers wrap it -- proves submit_keys ran the text through
+        // bracketed_paste (node x-849b), which a raw-write regression would drop
+        // while the bare "submit-me" substring still matched (integration-test Gap 1).
+        let mut snap = String::new();
         for i in 0..50 {
             write_request(
                 &mut conn,
@@ -890,17 +894,21 @@ mod tests {
             .await
             .unwrap();
             let r = read_response(&mut conn).await.unwrap();
-            if r.result().unwrap()["text"]
-                .as_str()
-                .unwrap()
-                .contains("submit-me")
-            {
-                seen = true;
+            snap = r.result().unwrap()["text"].as_str().unwrap().to_string();
+            if snap.contains("submit-me") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(seen, "submitted text never appeared in snapshot");
+        assert!(
+            snap.contains("submit-me"),
+            "submitted text never appeared in snapshot"
+        );
+        assert!(
+            snap.contains("\u{1b}[200~"),
+            "submit_keys must frame the text in bracketed paste (ESC[200~); the \
+             snapshot lacked the paste-start marker - a raw-write regression"
+        );
 
         // Missing `data` is a clean InvalidParams, not a panic.
         write_request(&mut conn, &Request::new(2, "worker.submit", json!({})))
@@ -908,6 +916,11 @@ mod tests {
             .unwrap();
         let r = read_response(&mut conn).await.unwrap();
         assert!(r.is_err(), "worker.submit without `data` must error");
+        assert_eq!(
+            r.error().unwrap().code,
+            ErrorCode::InvalidParams,
+            "missing `data` must be InvalidParams, not a generic error"
+        );
 
         write_request(&mut conn, &Request::new(3, "worker.shutdown", json!({})))
             .await

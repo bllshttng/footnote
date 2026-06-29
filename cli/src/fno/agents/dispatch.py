@@ -4060,13 +4060,16 @@ def _deliver_live(
     )
 
     if entry.claude_session_uuid:
-        lane, short_id = resolve_live_lane(entry.claude_session_uuid)
-        if lane == "worker" and short_id:
-            return submit_via_worker(_worker_sock(short_id), wrapped)
+        live = resolve_live_lane(entry.claude_session_uuid)
+        if live is not None and live[0] == "worker":
+            return submit_via_worker(_worker_sock(live[1]), wrapped)
 
     # control.sock lane (adopted --bg) or unresolved: the mail-inject verb resolves
     # the control.sock handle itself and returns False (-> durable) when not
-    # reachable. The roster accepts either the full session uuid or 8-hex short id.
+    # reachable. A ("control", short_id) verdict from resolve_live_lane is handled
+    # here by re-deriving the recipient from the roster (the verb re-resolves the
+    # handle), so its short_id is intentionally not threaded through. The roster
+    # accepts either the full session uuid or 8-hex short id.
     recipient = entry.claude_session_uuid or entry.claude_short_id
     if not recipient:
         return False
