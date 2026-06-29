@@ -604,11 +604,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         .unwrap_or("abilities");
     // --cwd > --fresh > caller cwd (AC6); resolve_dispatch_cwd canonicalizes an
     // explicit --cwd and shells to git only when --fresh && !--here. Resolve only
-    // for CLIENT-SIDE spawns (claude any, codex/gemini --once). codex/gemini
-    // WITHOUT --once fall through to the daemon RPC below, which resolves canonical
-    // itself -- resolving here too would double the git call and the redirect note
-    // (review MEDIUM 3). The unused value on the daemon path is never read.
-    let cwd = if provider == "claude" || once {
+    // for CLIENT-SIDE spawns, which are now exactly the `--once` dispatches (claude
+    // --once / codex --once / gemini --once / agy --once). Everything WITHOUT
+    // --once -- including plain claude (x-3ab8) -- falls through to the daemon RPC
+    // below, which resolves canonical itself; resolving here too would double the
+    // git call and the redirect note (review MEDIUM 3).
+    let cwd = if once {
         resolve_dispatch_cwd(params)
     } else {
         std::path::PathBuf::new()
@@ -625,13 +626,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     let model = params.get("model").and_then(|v| v.as_str());
 
     match provider {
-        "claude" => {
-            if once {
-                eprintln!(
-                    "--once is not supported for provider 'claude' (claude peers are persistent bg threads; use plain spawn)"
-                );
-                return Some(2);
-            }
+        // x-3ab8: plain `spawn --provider claude` now defaults to an owned
+        // interactive daemon pane (host_mode=interactive set in build_request) ->
+        // fall through (None) to the daemon RPC, exactly like host. `--once` is
+        // claude's headless opt-out: the persistent `claude --bg` fire-and-forget
+        // thread (NOT a grid pane; claude owns that PTY, adoption is x-cb89).
+        "claude" if once => {
             let claude_home = ClaudeHome::from_env();
             let outcome = dispatch_claude_spawn(
                 home,
@@ -652,6 +652,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             }
             Some(outcome.exit_code)
         }
+        "claude" => None,
         "codex" if once => {
             let outcome = dispatch_codex_once(home, name, message, from_name, &cwd, yolo, timeout);
             if !outcome.stderr.is_empty() {
@@ -877,6 +878,41 @@ fn mint_session_uuid() -> String {
 }
 
 /// Build (method, params) from a verb and its flags.
+/// Apply the owned-interactive (drivable grid pane) defaults to a spawn/host
+/// request. Sets `host_mode=interactive`; for claude additionally defaults the
+/// PTY lane (`mode=interactive`) and mints a `session_id` when none is pinned or
+/// resumed (the daemon's single-writer claim + transcript discovery key on it).
+///
+/// Shared by `host` (always interactive) and `spawn` (default for PTY providers
+/// unless `--once`) so the claude mint lives in exactly ONE place (x-3ab8). An
+/// explicit `--mode` wins, so `--mode stream_json` opts a claude spawn back out
+/// of the PTY lane. Non-claude providers get only `host_mode`; their create argv
+/// stays byte-unchanged (the mint is claude-only, mirroring the host contract).
+fn apply_interactive_defaults(params: &mut Map<String, Value>) {
+    params.insert(
+        "host_mode".into(),
+        Value::String(fno_agents::state::HOST_MODE_INTERACTIVE.into()),
+    );
+    if params.get("provider").and_then(Value::as_str) == Some("claude") {
+        // claude has two interactive lanes; default the owned-PTY pane unless the
+        // caller explicitly picked one via --mode.
+        if !params.contains_key("mode") {
+            params.insert(
+                "mode".into(),
+                Value::String(fno_agents::state::CLAUDE_MODE_INTERACTIVE.into()),
+            );
+        }
+        let is_pty_lane = params.get("mode").and_then(Value::as_str)
+            == Some(fno_agents::state::CLAUDE_MODE_INTERACTIVE);
+        if is_pty_lane
+            && !params.contains_key("session_id")
+            && !params.contains_key("resume_id")
+        {
+            params.insert("session_id".into(), Value::String(mint_session_uuid()));
+        }
+    }
+}
+
 fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String> {
     let mut params = Map::new();
     let mut positional: Vec<String> = Vec::new();
@@ -1067,6 +1103,18 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             if !params.contains_key("message") && positional.len() > 1 {
                 params.insert("message".into(), Value::String(positional[1..].join(" ")));
             }
+            // x-3ab8: spawn defaults to an owned interactive pane (drivable grid
+            // pane) for PTY-capable providers. `--once` is the headless opt-out
+            // (byte-unchanged: no host_mode, no mint). An unknown provider keeps
+            // today's behavior (the daemon's provider_for_pty errors as before).
+            let once = params.get("once").and_then(Value::as_bool).unwrap_or(false);
+            let pty_capable = matches!(
+                params.get("provider").and_then(Value::as_str),
+                Some("claude") | Some("codex") | Some("gemini") | Some("agy")
+            );
+            if !once && pty_capable {
+                apply_interactive_defaults(&mut params);
+            }
             "agent.spawn"
         }
         "ask" => {
@@ -1078,33 +1126,18 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "agent.ask"
         }
         "host" => {
-            // Fresh interactive host: `host <name> --provider codex|gemini|claude
-            // [--mode interactive] ["<task>"]`. Same spawn IPC as `spawn`, but
-            // host_mode=interactive routes to the provider's interactive argv.
+            // `host` is now a thin alias for `spawn --mode interactive` (x-3ab8):
+            // `host <name> --provider codex|gemini|claude|agy ["<task>"]`. It always
+            // forces the owned interactive lane via the SAME helper `spawn` uses, so
+            // the two verbs produce identical params (no second mint path). Kept as a
+            // distinct routable verb for callers/docs/muscle-memory; not deprecated.
             // Empty task -> bare interactive session.
             let name = positional.first().ok_or("host needs a <name>")?;
             params.insert("name".into(), Value::String(name.clone()));
             if !params.contains_key("message") && positional.len() > 1 {
                 params.insert("message".into(), Value::String(positional[1..].join(" ")));
             }
-            params.insert(
-                "host_mode".into(),
-                Value::String(fno_agents::state::HOST_MODE_INTERACTIVE.into()),
-            );
-            // Interactive claude (PTY pane) requires a pinned session id: the
-            // daemon refuses without one (single-writer claim + transcript
-            // discovery key on it). Mint one unless the caller already pinned a
-            // session_id or is resuming one (--from). codex/gemini are unaffected.
-            let claude_interactive = params.get("provider").and_then(Value::as_str)
-                == Some("claude")
-                && params.get("mode").and_then(Value::as_str)
-                    == Some(fno_agents::state::CLAUDE_MODE_INTERACTIVE);
-            if claude_interactive
-                && !params.contains_key("session_id")
-                && !params.contains_key("resume_id")
-            {
-                params.insert("session_id".into(), Value::String(mint_session_uuid()));
-            }
+            apply_interactive_defaults(&mut params);
             "agent.spawn"
         }
         "promote" => {
@@ -1355,6 +1388,28 @@ fn format_success(
             } else {
                 Some(render_reconcile_human(result))
             }
+        }
+        "spawn" => {
+            // x-3ab8: PTY-provider spawns now route through the daemon (owned
+            // interactive pane) instead of the client-side claude `--bg` lane.
+            // Emit the SAME compact single-line JSON receipt that lane produced
+            // ({"name","short_id","provider","status"}) so receipt parsers
+            // (dispatch-node.sh, backlog/advance.py) keep working across the move.
+            // serde_json::to_string (NOT _pretty) keeps it one line for the
+            // line-by-line `json.loads` consumers. `--once` spawns are handled
+            // client-side and never reach here.
+            let short_id = result.get("short_id").and_then(|v| v.as_str()).unwrap_or("");
+            let provider = result.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("live");
+            Some(
+                serde_json::to_string(&json!({
+                    "name": name,
+                    "short_id": short_id,
+                    "provider": provider,
+                    "status": status,
+                }))
+                .unwrap_or_default(),
+            )
         }
         "host" | "promote" => {
             // AC1-UI: a live spawn outcome is visible -- name, short_id, provider,
@@ -2087,12 +2142,14 @@ mod tests {
         assert_eq!(out, Some("removed: bar-agent".to_string()));
     }
 
-    /// AC2-HP: unknown verb returns None (falls back to pretty-print)
+    /// AC2-HP: unknown verb returns None (falls back to pretty-print).
+    /// `spawn` is NOT unknown post-x-3ab8 (it renders a receipt, covered by
+    /// `format_success_spawn_emits_compact_receipt`); use a truly unhandled verb.
     #[test]
     fn format_success_unknown_verb_returns_none() {
         let result = json!({"spawned": true});
         assert_eq!(
-            format_success("spawn", "worker", &result, false, true, false),
+            format_success("bogus-verb", "worker", &result, false, true, false),
             None
         );
         // list and reconcile now have their own rendering (not None)
@@ -2564,6 +2621,118 @@ mod tests {
             params.get("session_id").is_none(),
             "no mint for codex interactive host"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // spawn defaults to an owned interactive pane (x-3ab8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spawn_defaults_interactive_for_pty_providers() {
+        // AC1-HP: spawn --provider <pty> (no --once) -> host_mode=interactive.
+        // codex/gemini/agy never mint a session id (claude-only).
+        for provider in ["codex", "gemini", "agy"] {
+            let args = vec!["wk".to_string(), "--provider".to_string(), provider.to_string()];
+            let (method, params) = build_request("spawn", &args).unwrap();
+            assert_eq!(method, "agent.spawn");
+            assert_eq!(params["host_mode"], "interactive", "{provider} default-interactive");
+            assert!(params.get("session_id").is_none(), "{provider} never mints");
+        }
+    }
+
+    #[test]
+    fn spawn_claude_default_is_pty_lane_with_minted_session() {
+        // claude default -> PTY lane (mode=interactive) + a minted session id.
+        let args = vec!["wk".to_string(), "--provider".to_string(), "claude".to_string()];
+        let (_m, params) = build_request("spawn", &args).unwrap();
+        assert_eq!(params["host_mode"], "interactive");
+        assert_eq!(params["mode"], "interactive");
+        let sid = params["session_id"].as_str().expect("minted session_id");
+        assert_eq!(sid.split('-').count(), 5, "minted a uuid: {sid}");
+    }
+
+    #[test]
+    fn spawn_once_is_headless_byte_unchanged() {
+        // AC1-ERR: --once is the headless opt-out -> no host_mode, no mint,
+        // for EVERY provider.
+        for provider in ["claude", "codex", "gemini", "agy"] {
+            let args = vec![
+                "wk".to_string(),
+                "--provider".to_string(),
+                provider.to_string(),
+                "--once".to_string(),
+            ];
+            let (_m, params) = build_request("spawn", &args).unwrap();
+            assert!(
+                params.get("host_mode").is_none(),
+                "{provider} --once: no host_mode"
+            );
+            assert!(
+                params.get("session_id").is_none(),
+                "{provider} --once: no mint"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_unknown_provider_does_not_force_interactive() {
+        // AC1-EDGE (Boundaries): an unknown provider keeps today's behavior; the
+        // daemon's provider_for_pty errors on it as before, so we must NOT force
+        // host_mode (which would change the error surface).
+        let args = vec!["wk".to_string(), "--provider".to_string(), "opencode".to_string()];
+        let (_m, params) = build_request("spawn", &args).unwrap();
+        assert!(
+            params.get("host_mode").is_none(),
+            "unknown provider: interactive not forced"
+        );
+    }
+
+    #[test]
+    fn host_equals_spawn_params_without_once() {
+        // Change 2 AC-HP: identical args via host vs spawn (no --once) produce
+        // equal params. The claude mint is a fresh uuid per call, so for claude we
+        // assert both mint then drop the id before the structural equality check.
+        for provider in ["codex", "gemini", "agy", "claude"] {
+            let args = vec![
+                "wk".to_string(),
+                "--provider".to_string(),
+                provider.to_string(),
+                "do".to_string(),
+                "it".to_string(),
+            ];
+            let (m_spawn, mut p_spawn) = build_request("spawn", &args).unwrap();
+            let (m_host, mut p_host) = build_request("host", &args).unwrap();
+            assert_eq!(m_spawn, m_host, "{provider}: same method");
+            if provider == "claude" {
+                assert!(
+                    p_spawn["session_id"].as_str().is_some() && p_host["session_id"].as_str().is_some(),
+                    "both mint a claude session id"
+                );
+                p_spawn.as_object_mut().unwrap().remove("session_id");
+                p_host.as_object_mut().unwrap().remove("session_id");
+            }
+            assert_eq!(p_spawn, p_host, "{provider}: host == spawn params");
+        }
+    }
+
+    #[test]
+    fn format_success_spawn_emits_compact_receipt() {
+        // x-3ab8: a daemon-routed spawn must emit the one-line JSON receipt that
+        // advance.py / dispatch-node.sh parse for short_id (line-by-line
+        // json.loads needs it compact, not pretty-printed).
+        let result = json!({
+            "short_id": "ab12cd34",
+            "provider": "claude",
+            "status": "live",
+            "extra": "ignored"
+        });
+        let line = format_success("spawn", "wk", &result, false, false, false).unwrap();
+        assert!(!line.contains('\n'), "receipt must be one line: {line}");
+        let parsed: Value = serde_json::from_str(&line).expect("valid JSON receipt");
+        assert_eq!(parsed["name"], "wk");
+        assert_eq!(parsed["short_id"], "ab12cd34");
+        assert_eq!(parsed["provider"], "claude");
+        assert_eq!(parsed["status"], "live");
     }
 
     #[test]
