@@ -368,8 +368,16 @@ def cmd_spawn(
 
     # x-2c27: the Rust client owns substrate routing; this Python fallback only
     # runs when the binary is absent / FNO_AGENTS_RUNTIME=python / a --role spawn.
-    # Map the substrate onto the existing `once` lever: headless -> one-shot;
-    # bg/pane -> plain spawn (for claude that already IS the bg thread).
+    # Validate to parity with the Rust client (exit 2 on a bad value) rather than
+    # silently falling back to plain spawn, then map the substrate onto the
+    # existing `once` lever: headless -> one-shot; bg/pane -> plain spawn (for
+    # claude that already IS the bg thread).
+    if substrate not in ("pane", "bg", "headless"):
+        print(
+            f"--substrate must be one of: pane, bg, headless (got {substrate})",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
     if substrate == "headless":
         once = True
 

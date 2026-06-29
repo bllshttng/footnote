@@ -524,17 +524,25 @@ def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REA
     """
     base = f"think-{node_id}" if reason == REASON_BIRTH else f"think-{node_id}-{reason}"
     slug = _name_slug(node_slug)
-    name = f"{base}-{slug}" if slug else base
     # An optional per-invocation discriminator (C/x-0a9c: the live session id) so a
     # REPEATABLE trigger (conversational) gets a DISTINCT name each call. Without
     # it `fno agents spawn` rejects the constant name and a later conversation can
     # never re-dispatch the node even after the dedup TTL expires (codex P2).
     suf = _name_slug(invocation_suffix)
-    name = f"{name}-{suf}" if suf else name
     # x-2c27 (AC2-ERR): each component is slugged to 30, but the ASSEMBLED name
     # (think- + node-id + reason + slug + suffix) can exceed `fno agents spawn`'s
-    # 1-64 char limit and fail with "name must be 1-64 chars". Cap the tail; the
-    # `think-<node-id>` lead is short and always survives, so the node id is kept.
+    # 1-64 char limit and fail with "name must be 1-64 chars". `base` (id + reason
+    # scoping) and `suf` (the per-session uniqueness discriminator) are BOTH
+    # load-bearing, so cap only the human-readable `slug` to make room - trimming
+    # the assembled tail would shave the suffix and let two repeat dispatches
+    # collide on name (codex P2).
+    fixed = len(base) + (1 + len(suf) if suf else 0)  # +1 for the '-' before suf
+    if slug:
+        avail = _AGENT_NAME_MAX - fixed - 1  # -1 for the '-' before slug
+        slug = slug[:avail].rstrip("-") if avail > 0 else ""
+    name = "-".join(p for p in (base, slug, suf) if p)
+    # Pathological backstop: base + suf alone overflow (a very long id/suffix) ->
+    # cap the tail; the `think-<node-id>` lead still survives.
     if len(name) > _AGENT_NAME_MAX:
         name = name[:_AGENT_NAME_MAX].rstrip("-")
     return name

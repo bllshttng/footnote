@@ -768,11 +768,17 @@ def test_worker_agent_name_capped_at_64_keeps_node_id():
     tail while keeping the `think-<node-id>` lead.
     """
     long_slug = "a-very-long-descriptive-node-slug-that-keeps-going-and-going"
-    long_suffix = "session-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    name = st._worker_agent_name("x-2c27", long_slug, st.REASON_WORK_START, long_suffix)
+    suffix = "sessaaaa"
+    name = st._worker_agent_name("x-2c27", long_slug, st.REASON_WORK_START, suffix)
     assert len(name) <= 64, f"name overflowed: {len(name)} chars: {name!r}"
-    assert name.startswith("think-x-2c27"), f"node id dropped: {name!r}"
+    assert name.startswith("think-x-2c27-work-start"), f"node id/reason dropped: {name!r}"
     assert not name.endswith("-"), f"trailing hyphen not trimmed: {name!r}"
+    # codex P2: the per-session suffix is the uniqueness discriminator - capping
+    # must trim the slug, never the suffix, or two repeat dispatches collide.
+    assert name.endswith("sessaaaa"), f"session suffix shaved by the cap: {name!r}"
+    # Two distinct suffixes on the same long-slug node must yield distinct names.
+    other = st._worker_agent_name("x-2c27", long_slug, st.REASON_WORK_START, "sessbbbb")
+    assert name != other, f"name collision across suffixes: {name!r} == {other!r}"
 
 
 def test_lifecycle_wrapper_strictly_non_fatal(iso, monkeypatch):

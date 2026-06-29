@@ -744,6 +744,63 @@ fn client_spawn_once_claude_is_headless_p_lane_not_bg() {
     );
 }
 
+/// x-2c27 (codex P2): the claude headless lane honors `--timeout` - a hung
+/// `claude -p` is SIGKILLed past the deadline and reported as exit 124, not an
+/// indefinite wedge.
+#[test]
+fn client_spawn_headless_claude_honors_timeout() {
+    let _guard = PATH_MUTEX.lock().unwrap();
+    let home_dir = tmpdir("cli-spawn-hl-to-home");
+    let bin_dir = tmpdir("cli-spawn-hl-to-bin");
+    let cwd = tmpdir("cli-spawn-hl-to-cwd");
+    // A fake claude that hangs well past the 1s timeout.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("claude");
+        fs::write(&path, "#!/bin/sh\nsleep 30\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!("skipping client_spawn_headless_claude_honors_timeout: binary not found");
+        return;
+    }
+
+    let start = std::time::Instant::now();
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "wk",
+            "hello",
+            "--provider",
+            "claude",
+            "--substrate",
+            "headless",
+            "--timeout",
+            "1",
+        ])
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .env("PATH", path_with(&bin_dir))
+        .current_dir(&cwd)
+        .output()
+        .expect("failed to run fno-agents");
+    let elapsed = start.elapsed();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(124),
+        "headless timeout must exit 124; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("timed out"),
+        "stderr must name the timeout: {stderr}"
+    );
+    assert!(
+        elapsed.as_secs() < 10,
+        "must not wait the full 30s sleep; took {elapsed:?}"
+    );
+}
+
 /// x-2c27: `bg` is claude-only. `--substrate bg --provider codex` must hard-error
 /// (exit 2) pointing to headless, never silently fall to another substrate.
 #[test]

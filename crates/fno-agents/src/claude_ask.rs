@@ -1697,10 +1697,11 @@ pub fn dispatch_claude_headless(
     from_name: &str,
     cwd: &Path,
     _yolo: bool,
-    _timeout: Option<Duration>,
+    timeout: Option<Duration>,
 ) -> AskOutcome {
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::time::Instant;
 
     if let Err(msg) = validate_spawn_inputs(name, from_name) {
         return AskOutcome::err(msg, 2);
@@ -1742,6 +1743,24 @@ pub fn dispatch_claude_headless(
         Err(e) => return AskOutcome::err(e.to_string(), 127),
     };
 
+    // Drain stdout/stderr on their own threads so a filling pipe can never
+    // deadlock the bounded wait below (we can't use wait_with_output: it blocks
+    // with no timeout knob). The common argv path still uses these.
+    let stdout_join = child.stdout.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut s = Vec::new();
+            let _ = p.read_to_end(&mut s);
+            s
+        })
+    });
+    let stderr_join = child.stderr.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut s = Vec::new();
+            let _ = p.read_to_end(&mut s);
+            s
+        })
+    });
+
     // Large (>200KB) prompts go via stdin on a detached writer thread so a
     // filling stdout pipe can't deadlock a synchronous write. The common path
     // (argv) skips this entirely.
@@ -1756,23 +1775,71 @@ pub fn dispatch_claude_headless(
         None
     };
 
-    // ponytail: block until claude -p exits; `_timeout` is NOT enforced here.
-    // Unlike the `--bg` lane (which bounds the launch because the detached fork
-    // inherits stdout and could orphan), a `-p` one-shot has no detached child
-    // to orphan and terminates on its own. wait_with_output drains both pipes,
-    // so no pipe-fill deadlock. Add a bounded wait only if a real hang appears.
-    let output = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(e) => return AskOutcome::err(format!("claude -p wait failed: {}", e), 1),
+    // Bounded wait: a `-p` one-shot has no detached fork to orphan, but a hung
+    // `claude -p` (startup/network stall) would otherwise wedge the caller
+    // forever even when --timeout was supplied (codex P2). When `timeout` is
+    // set, SIGKILL the child past the deadline and report exit 124 (parity with
+    // the --bg launch timeout); with no --timeout the wait is unbounded, as the
+    // user asked for no bound. The reader threads above keep the pipes drained.
+    // `wait_result` is Some(exit_code) on a real exit, None on a timeout kill.
+    let wait_result: Result<Option<i32>, String> = if let Some(limit) = timeout {
+        let deadline = Instant::now() + limit;
+        loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break Ok(Some(st.code().unwrap_or(1))),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Ok(None);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => break Err(format!("claude -p wait failed: {}", e)),
+            }
+        }
+    } else {
+        child
+            .wait()
+            .map(|st| Some(st.code().unwrap_or(1)))
+            .map_err(|e| format!("claude -p wait failed: {}", e))
     };
-    if let Some(h) = stdin_writer {
-        let _ = h.join();
-    }
 
-    AskOutcome {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code().unwrap_or(1),
+    // Collect output by JOINING the reader/writer threads ONLY on a clean exit.
+    // On a timeout-kill we must NOT join: SIGKILL'ing `claude` does not reap a
+    // grandchild it spawned (e.g. a shell's `sleep`), which keeps the inherited
+    // stdout/stderr write end open, so `read_to_end` would block until THAT
+    // grandchild exits - defeating the very timeout we just enforced. Abandon
+    // the threads (they die when the OS finally closes the fds); the timed-out
+    // one-shot has no useful deliverable anyway. (Same orphan-pipe hazard the
+    // --bg launch path documents.)
+    match wait_result {
+        Err(msg) => AskOutcome::err(msg, 1),
+        Ok(None) => AskOutcome::err(
+            format!(
+                "claude -p timed out after {:.1}s",
+                timeout
+                    .expect("timeout Some on the bounded path")
+                    .as_secs_f64()
+            ),
+            124,
+        ),
+        Ok(Some(exit_code)) => {
+            let stdout = stdout_join
+                .map(|h| h.join().unwrap_or_default())
+                .unwrap_or_default();
+            let stderr = stderr_join
+                .map(|h| h.join().unwrap_or_default())
+                .unwrap_or_default();
+            if let Some(h) = stdin_writer {
+                let _ = h.join();
+            }
+            AskOutcome {
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                exit_code,
+            }
+        }
     }
 }
 

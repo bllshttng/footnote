@@ -67,7 +67,7 @@ while [[ $# -gt 0 ]]; do
     --cwd)          CWD="${2:-}"; shift 2 ;;
     --mode)         MODE="${2:-}"; shift 2 ;;
     --payload-mode) PAYLOAD_MODE="${2:-}"; shift 2 ;;
-    --substrate)    SUBSTRATE="${2:-}"; shift 2 ;;
+    --substrate)    SUBSTRATE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --yolo)         YOLO=1; shift ;;
     # Pass-through cwd flags (ab-77b691dc): forwarded to `fno agents spawn` so a
     # target-class dispatcher can request canonical-root cwd. NOT defaulted here:
