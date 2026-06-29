@@ -405,12 +405,15 @@ else
   fail "AC6: node-cwd path added --fresh or dropped --cwd: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
 fi
 
-# ---- --dry-run reflects the --fresh default in its preview line ----
+# ---- --dry-run reflects the worktree-ensure default in its preview line ----
+# A cwd-less dispatch now ensures a conductor worktree and passes --cwd it
+# (falling back to --fresh only when ensure fails), so the preview shows the
+# ensure intent rather than a bare --fresh (x-73ca).
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
-echo "$out" | grep -q -- "--fresh" \
-  && pass "AC1-UI: --dry-run preview shows the --fresh default for a cwd-less node" \
-  || fail "AC1-UI: dry-run missing --fresh: $out"
+echo "$out" | grep -q -- "worktree ensure" \
+  && pass "AC1-UI: --dry-run preview shows the worktree-ensure default for a cwd-less node" \
+  || fail "AC1-UI: dry-run missing worktree-ensure intent: $out"
 
 # ---- a peer dispatcher holding dispatch:<id> -> already-running, NO ask
 #      (boot-window race closed BEFORE the stray-message injection) ----

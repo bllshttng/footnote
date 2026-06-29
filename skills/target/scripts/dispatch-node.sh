@@ -44,6 +44,18 @@ set -uo pipefail
 command -v fno >/dev/null 2>&1 || { echo "failed: - reason=\"fno not on PATH\"" >&2; echo "summary: launched=0 parked=0 already=0 done=0 failed=1 capped=0"; exit 1; }
 command -v jq  >/dev/null 2>&1 || { echo "failed: - reason=\"jq not on PATH\""  >&2; echo "summary: launched=0 parked=0 already=0 done=0 failed=1 capped=0"; exit 1; }
 
+# Canonical MAIN checkout for deterministic --fresh isolation (x-73ca). The
+# git-common-dir's parent is the main checkout even when the dispatcher runs
+# from a linked worktree; `fno worktree ensure --repo <this>` then creates the
+# worker's conductor worktree off origin/main. Empty when not in a git repo
+# (the --fresh arm falls back to the Rust runtime's own --fresh resolution).
+CANONICAL_ROOT=""
+_gcd_raw="$(git rev-parse --git-common-dir 2>/dev/null)"
+if [[ -n "$_gcd_raw" ]]; then            # guard so we never `cd ""` (a no-op that
+  _gcd="$(cd "$_gcd_raw" 2>/dev/null && pwd -P)"   # would falsely set a non-git cwd)
+  [[ -n "$_gcd" ]] && CANONICAL_ROOT="$(dirname "$_gcd")"
+fi
+
 # ---- arg parse --------------------------------------------------------------
 NODES=()
 ALL_READY=0
@@ -271,8 +283,11 @@ for id in "${NODES[@]}"; do
     cwd_hint="--cwd $node_cwd "
     dry_cwd="$node_cwd"
   elif [[ "$HERE" -eq 0 ]]; then
-    cwd_hint="--fresh "
-    dry_cwd="<canonical main (--fresh)>"
+    # cwd= must stay a real, space-free path so the receipt is machine-parseable
+    # (the conductor worktree path is not known until ensure runs, so preview the
+    # canonical root the --fresh fallback would use); the hint carries the intent.
+    cwd_hint="--cwd <fno worktree ensure> "
+    dry_cwd="${CANONICAL_ROOT:-$(pwd)}"
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -318,11 +333,29 @@ for id in "${NODES[@]}"; do
   spawn_err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/dispatch-node-$$.err")"
   # Three explicit branches (NOT an optional-flag array): bash 3.2 (macOS)
   # errors on `"${arr[@]}"` for an empty array under `set -u`. node cwd ->
-  # --cwd; no node cwd + default -> --fresh (canonical); --here -> inherit.
+  # --cwd; no node cwd + default -> ensure a conductor worktree and pass --cwd
+  # it (deterministic isolation, x-73ca), falling back to --fresh on any ensure
+  # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
+  launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
     spawn_out="$(fno agents spawn --provider claude --cwd "$node_cwd" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
-    spawn_out="$(fno agents spawn --provider claude --fresh "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    wt=""
+    [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
+    if [[ -n "$wt" ]]; then
+      # Link gitignored shared state into the new worktree (footnote-ecosystem
+      # only; absent -> skip). Caller-side because the verb is package code and
+      # may not shell out to a repo-root script (shellout-drift gate).
+      _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
+      [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
+      spawn_out="$(fno agents spawn --provider claude --cwd "$wt" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      launch_cwd="$wt"
+    else
+      spawn_out="$(fno agents spawn --provider claude --fresh "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      # --fresh lands the worker in canonical main; report that real path (not a
+      # space-containing label) so the cwd= field stays machine-parseable.
+      launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
+    fi
   else
     spawn_out="$(fno agents spawn --provider claude "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
@@ -357,7 +390,7 @@ for id in "${NODES[@]}"; do
   fi
   # Launched. Leave the reservation to expire by TTL (the worker now owns
   # node:<id>, which guards later dispatches).
-  echo "launched $id name=$agent_name session=$sid cwd=${node_cwd:-$(pwd)} hint=\"fno agents logs $agent_name\""
+  echo "launched $id name=$agent_name session=$sid cwd=${launch_cwd} hint=\"fno agents logs $agent_name\""
   n_launched=$((n_launched + 1))
 done
 
