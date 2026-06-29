@@ -72,6 +72,34 @@ impl SquadStore {
         self.squads.iter().find(|s| s.name == name)
     }
 
+    /// Coalesce the store into the shape `create`/`recruit` already guarantee:
+    /// squad names trimmed and unique (duplicates merged, members concatenated),
+    /// blank names dropped, members deduped within each squad (first wins, order
+    /// preserved). Applied on every parse so a hand-edited or legacy
+    /// `squads.json` with duplicate squad names cannot produce two
+    /// `squad:<name>` groups - which the rail's occurrence cursor (keyed on
+    /// `(key_value, agent)`) cannot disambiguate, landing nav/drive on the wrong
+    /// pane. `create()` already rejects blank/duplicate names on the live path;
+    /// this enforces the same invariant for externally-authored stores.
+    fn normalize(&mut self) {
+        let mut merged: Vec<Squad> = Vec::new();
+        for squad in std::mem::take(&mut self.squads) {
+            let name = squad.name.trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            match merged.iter_mut().find(|s| s.name == name) {
+                Some(existing) => existing.members.extend(squad.members),
+                None => merged.push(Squad { name, ..squad }),
+            }
+        }
+        for s in &mut merged {
+            let mut seen = std::collections::HashSet::new();
+            s.members.retain(|m| seen.insert(m.clone()));
+        }
+        self.squads = merged;
+    }
+
     /// Create a new squad. Returns `false` (and does nothing) when the name is
     /// blank (Boundaries: reject a nameless squad) or already taken (name
     /// uniqueness). `created_at` is passed in so creation stays pure/testable.
@@ -284,8 +312,11 @@ fn read_tolerant(path: &Path) -> (SquadStore, Option<String>) {
     if buf.trim().is_empty() {
         return (SquadStore::default(), None);
     }
-    match serde_json::from_str(&buf) {
-        Ok(store) => (store, None),
+    match serde_json::from_str::<SquadStore>(&buf) {
+        Ok(mut store) => {
+            store.normalize();
+            (store, None)
+        }
         Err(e) => (
             SquadStore::default(),
             Some(format!("ignoring malformed {}: {e}", path.display())),
@@ -374,6 +405,44 @@ mod tests {
         assert!(!s.create("stack", "t"), "duplicate name rejected");
         assert!(!s.create("  stack  ", "t"), "duplicate after trim rejected");
         assert_eq!(s.squads.len(), 1);
+    }
+
+    // ── normalize: a legacy store with duplicate squad names merges to one ───
+    // (so the Union/Squad rail can't get two `squad:<name>` groups the
+    // occurrence cursor can't disambiguate). Mirrors create()'s invariant.
+    #[test]
+    fn normalize_merges_duplicate_names_and_drops_blank() {
+        let mut s = SquadStore {
+            squads: vec![
+                Squad {
+                    name: "stack".into(),
+                    members: vec!["wkA".into(), "wkB".into()],
+                    created_at: "t".into(),
+                },
+                Squad {
+                    name: " stack ".into(),
+                    members: vec!["wkB".into(), "wkC".into()],
+                    created_at: "u".into(),
+                },
+                Squad {
+                    name: "   ".into(),
+                    members: vec!["wkZ".into()],
+                    created_at: "v".into(),
+                },
+            ],
+        };
+        s.normalize();
+        assert_eq!(
+            s.squads.len(),
+            1,
+            "duplicate (trim-equal) names merge; blank dropped"
+        );
+        assert_eq!(s.squads[0].name, "stack");
+        assert_eq!(
+            s.squads[0].members,
+            vec!["wkA".to_string(), "wkB".into(), "wkC".into()],
+            "members concatenated, deduped, order preserved"
+        );
     }
 
     // ── recruit: dedup + no-such (AC1-UI idempotency, member uniqueness) ─────

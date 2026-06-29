@@ -119,7 +119,8 @@ pub struct GridArgs {
     /// drops into the rail (grouped by cwd), and explicit names or `--no-rail`
     /// fall back to the railless tiled grid.
     pub rail: bool,
-    /// Initial group-by key for the rail (`--group-by cwd|session|provider|status`).
+    /// Initial group-by key for the rail
+    /// (`--group-by cwd|session|provider|status|squad|union`).
     /// Only meaningful when `rail` is true. Defaults to `cwd` when absent.
     pub group_by: Option<String>,
 }
@@ -201,6 +202,7 @@ impl GridArgs {
             Some("provider") => group::GroupKey::Provider,
             Some("status") => group::GroupKey::Status,
             Some("squad") => group::GroupKey::Squad,
+            Some("union") => group::GroupKey::Union,
             _ => group::GroupKey::Cwd,
         }
     }

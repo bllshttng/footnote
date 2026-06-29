@@ -2006,10 +2006,32 @@ fn base_groups(
     group_key: group::GroupKey,
     squads: &squads::SquadStore,
 ) -> Vec<group::Group> {
-    if matches!(group_key, group::GroupKey::Squad) {
-        squads::squad_groups(rail_rows, squads)
-    } else {
-        group::group_by(rail_rows, group_key)
+    match group_key {
+        group::GroupKey::Squad => squads::squad_groups(rail_rows, squads),
+        // Union (x-fef5): the derived `Cwd` sidelines AND the manual squads in
+        // one rail, an agent in both reachable as two occurrences. Prefix the
+        // sideline keys with `cwd:` so the two halves occupy disjoint key
+        // namespaces; `squad_groups` already prefixes its keys with `squad:`.
+        // That keeps the occurrence cursor's (key_value, agent) identity unique
+        // even for the adversarial case of a squad named after a repo path
+        // (x-8a6a invariant). Only `key_value` (cursor identity) is namespaced;
+        // `header` (display) is left untouched.
+        group::GroupKey::Union => {
+            let mut sidelines = group::group_by(rail_rows, group::GroupKey::Cwd);
+            for g in &mut sidelines {
+                g.key_value = format!("cwd:{}", g.key_value);
+            }
+            sidelines.extend(squads::squad_groups(rail_rows, squads));
+            sidelines
+        }
+        // Row-field partitions go through `group_by`. Enumerated (not `_`) so a
+        // future non-row-field variant fails to compile here until it gets an
+        // arm, rather than silently routing to `group_by` (which short-circuits
+        // it to an empty, blank rail).
+        group::GroupKey::Cwd
+        | group::GroupKey::Session
+        | group::GroupKey::Provider
+        | group::GroupKey::Status => group::group_by(rail_rows, group_key),
     }
 }
 
@@ -3911,7 +3933,7 @@ fn help_overlay_lines(rail_on: bool) -> Vec<String> {
     if rail_on {
         lines.push(String::new());
         lines.push("  Rail (when active):".to_string());
-        lines.push("  g              cycle group-by (cwd .. squad)".to_string());
+        lines.push("  g              cycle group-by (cwd .. union)".to_string());
         lines.push("  m              recruit selected agent into a squad".to_string());
         lines.push("  a              toggle attention filter".to_string());
         lines.push("  Tab            tile / zoom selected group".to_string());
@@ -5063,6 +5085,90 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    // ── x-fef5: base_groups Union assembly (sidelines ++ squads) ──────────
+
+    #[test]
+    fn base_groups_union_assembles_sidelines_and_squads() {
+        // HP: agent x is in repo sideline `footnote` AND squad `stack`. The
+        // union contains both a `cwd:`-keyed sideline group and a `squad:`-keyed
+        // squad group, each containing x - so the occurrence cursor can select
+        // each independently.
+        let rows = vec![
+            json!({"name": "x", "cwd": "/code/footnote"}), // idx 0
+            json!({"name": "y", "cwd": "/code/footnote"}), // idx 1
+            json!({"name": "z", "cwd": "/code/other"}),    // idx 2
+        ];
+        let mut store = squads::SquadStore::default();
+        store.create("stack", "t");
+        store.recruit("stack", "x");
+        store.recruit("stack", "z");
+
+        let groups = base_groups(&rows, group::GroupKey::Union, &store);
+
+        let sideline = groups
+            .iter()
+            .find(|g| g.key_value == "cwd:/code/footnote")
+            .expect("namespaced footnote sideline present");
+        assert_eq!(
+            sideline.header, "footnote",
+            "header is the basename, unprefixed"
+        );
+        assert!(sideline.members.contains(&0), "x under its repo sideline");
+
+        let squad = groups
+            .iter()
+            .find(|g| g.key_value == "squad:stack")
+            .expect("namespaced squad present");
+        assert!(squad.members.contains(&0), "x under its squad too");
+    }
+
+    #[test]
+    fn base_groups_union_namespaces_keys_against_collision() {
+        // AC4-EDGE / Boundaries: a squad named the SAME string as a sideline's
+        // key_value (the repo path) still yields a distinct key_value, so the
+        // occurrence cursor can sit on exactly one. `cwd:` / `squad:` prefixes
+        // keep the namespaces disjoint.
+        let rows = vec![json!({"name": "x", "cwd": "/code/footnote"})];
+        let mut store = squads::SquadStore::default();
+        store.create("/code/footnote", "t"); // squad literally named the repo path
+        store.recruit("/code/footnote", "x");
+
+        let groups = base_groups(&rows, group::GroupKey::Union, &store);
+        let keys: Vec<&str> = groups.iter().map(|g| g.key_value.as_str()).collect();
+        let mut uniq = keys.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(
+            keys.len(),
+            uniq.len(),
+            "union key_values must be unique: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"cwd:/code/footnote"),
+            "sideline key namespaced"
+        );
+        assert!(
+            keys.contains(&"squad:/code/footnote"),
+            "squad key namespaced"
+        );
+    }
+
+    #[test]
+    fn base_groups_union_no_squads_degrades_to_sidelines() {
+        // ERR: no squads configured -> the union is just the sidelines, no panic.
+        let rows = vec![
+            json!({"name": "x", "cwd": "/a"}),
+            json!({"name": "y", "cwd": "/b"}),
+        ];
+        let store = squads::SquadStore::default();
+        let groups = base_groups(&rows, group::GroupKey::Union, &store);
+        assert_eq!(groups.len(), 2, "two sidelines, no squad half");
+        assert!(
+            groups.iter().all(|g| g.key_value.starts_with("cwd:")),
+            "all groups are namespaced sidelines: {groups:?}"
+        );
     }
 
     #[test]
