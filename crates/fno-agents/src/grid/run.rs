@@ -2380,13 +2380,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 .await;
             }
             group::MainMode::Single => {
-                resize_rail_focus(
-                    tty,
-                    comp.focus(),
-                    &mut panes,
-                    &mut watch_sinks,
-                )
-                .await;
+                resize_rail_focus(tty, comp.focus(), &mut panes, &mut watch_sinks).await;
             }
         }
     }
@@ -3962,9 +3956,18 @@ mod tests {
             leader_command(k(KeyCode::BackTab)),
             Some(InputEvent::FocusPrev)
         );
-        assert_eq!(leader_command(k(KeyCode::Right)), Some(InputEvent::FocusNext));
-        assert_eq!(leader_command(k(KeyCode::Left)), Some(InputEvent::FocusPrev));
-        assert_eq!(leader_command(k(KeyCode::Char('q'))), Some(InputEvent::Quit));
+        assert_eq!(
+            leader_command(k(KeyCode::Right)),
+            Some(InputEvent::FocusNext)
+        );
+        assert_eq!(
+            leader_command(k(KeyCode::Left)),
+            Some(InputEvent::FocusPrev)
+        );
+        assert_eq!(
+            leader_command(k(KeyCode::Char('q'))),
+            Some(InputEvent::Quit)
+        );
         // Scrollback entry moved to leader+Space (bare Space types now).
         assert_eq!(
             leader_command(k(KeyCode::Char(' '))),
@@ -3989,7 +3992,10 @@ mod tests {
             leader_command(k(KeyCode::PageDown)),
             Some(InputEvent::PageNext)
         );
-        assert_eq!(leader_command(k(KeyCode::PageUp)), Some(InputEvent::PagePrev));
+        assert_eq!(
+            leader_command(k(KeyCode::PageUp)),
+            Some(InputEvent::PagePrev)
+        );
     }
 
     /// Owned-PTY: every bare key forwards to the focused agent as bytes -
@@ -4027,10 +4033,7 @@ mod tests {
     fn ctrl_letter_maps_to_control_byte() {
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
         // Ctrl-A = 0x01 forwarded to the agent.
-        assert_eq!(
-            key_to_input(key),
-            Some(InputEvent::Keystroke(vec![0x01]))
-        );
+        assert_eq!(key_to_input(key), Some(InputEvent::Keystroke(vec![0x01])));
     }
 
     /// Scrollback keymap: the frozen-pane nav keys.
@@ -4122,7 +4125,10 @@ mod tests {
         // Focused (only) pane uses heavy border corners.
         assert!(s.contains('┏'), "heavy top-left border for focused pane");
         assert!(s.contains("wkA"), "title shows agent name");
-        assert!(s.contains("leader"), "footer shows the owned-PTY leader hint");
+        assert!(
+            s.contains("leader"),
+            "footer shows the owned-PTY leader hint"
+        );
         assert!(s.contains("hello from agent"), "pane content painted");
         // AC1-UI: single-page renders no pagination chrome.
         assert!(
@@ -4206,7 +4212,16 @@ mod tests {
 
         let mut buf = Vec::new();
         render_to(
-            &mut buf, &paged, &names, &snaps, &states, &comp, &[true], None, &[], None,
+            &mut buf,
+            &paged,
+            &names,
+            &snaps,
+            &states,
+            &comp,
+            &[true],
+            None,
+            &[],
+            None,
         )
         .unwrap();
         let s = String::from_utf8_lossy(&buf);
@@ -4272,8 +4287,14 @@ mod tests {
         )
         .unwrap();
         let s = String::from_utf8_lossy(&buf);
-        assert!(s.contains("Page "), "multi-page footer shows the page indicator");
-        assert!(s.contains("▸p"), "off-screen waiting agent badges in the footer");
+        assert!(
+            s.contains("Page "),
+            "multi-page footer shows the page indicator"
+        );
+        assert!(
+            s.contains("▸p"),
+            "off-screen waiting agent badges in the footer"
+        );
     }
 
     /// The soft-cap note rides the footer so the operator sees the fleet was
