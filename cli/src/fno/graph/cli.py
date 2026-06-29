@@ -1430,6 +1430,135 @@ def cmd_update(
     typer.echo(f"Updated {task_id}")
 
 
+# -- unclaim / release --
+
+
+def _invoking_session_id() -> Optional[str]:
+    """Best-effort id of the session running this command, for the unclaim
+    "is this lockfile mine?" check. None => treat any live holder as foreign
+    (the safe default: never yank a live peer's claim)."""
+    try:
+        from fno.carveout.core import resolve_session_id
+        from fno.graph._intake import repo_root
+
+        return resolve_session_id(repo_root())
+    except Exception:
+        return None
+
+
+def _release_node_lockfile(node_id: str) -> str:
+    """Best-effort release of the ``node:<id>`` fno-claim lockfile.
+
+    Releases when the holder is stale (PID dead / TTL expired) or matches the
+    invoking session; refuses a LIVE foreign holder (warn + point at
+    ``force-release``) so we never silently yank a live peer's claim. Returns a
+    short human note for the command summary. Never raises - the graph clear is
+    the load-bearing part and must not be undone by a lockfile hiccup.
+    """
+    try:
+        from fno.claims.core import (
+            claim_status,
+            force_release_claim,
+            release_claim,
+        )
+        from fno.claims.io import claims_root_for
+    except Exception:
+        return "lockfile untouched (claims module unavailable)"
+
+    key = f"node:{node_id}"
+    try:
+        root = claims_root_for(key)
+        status = claim_status(key, root=root)
+        state = status.get("state")
+
+        if state == "free":
+            return "no lockfile"
+        if state == "stale":
+            force_release_claim(key, reason="unclaim: stale holder", root=root)
+            return "released stale lockfile"
+        if state == "corrupted":
+            typer.echo(
+                f"warning: lockfile {key} is corrupted; graph claim cleared but "
+                f"lockfile left intact. Use `fno claim force-release {key} -R <why>` "
+                f"to repair.",
+                err=True,
+            )
+            return "lockfile left (corrupted)"
+
+        # state == "live": only release if it is ours.
+        holder = status.get("holder") or ""
+        sid = _invoking_session_id()
+        mine = bool(sid) and (holder == f"target-session:{sid}" or sid in holder)
+        if mine:
+            release_claim(key, holder=holder, root=root)
+            return "released own lockfile"
+
+        typer.echo(
+            f"warning: lockfile {key} held by LIVE holder {holder!r}; graph claim "
+            f"cleared but lockfile left intact. Use "
+            f"`fno claim force-release {key} -R <why>` to override.",
+            err=True,
+        )
+        return "lockfile left (live foreign holder)"
+    except Exception as exc:  # never let a lockfile error mask the graph clear
+        return f"lockfile untouched ({exc})"
+
+
+def _unclaim_node(task_id: str) -> None:
+    """Free a claimed node in one call: clear the graph claim (always) and
+    best-effort-release the lockfile (stale or owned). Mirrors the graph-side of
+    ``update --locked-by null``, then adds the lockfile release the two-step
+    dance forced you to do by hand."""
+    from fno.graph._constants import has_node_id_prefix
+    from fno.graph.store import locked_mutate_graph
+    from fno.graph._intake import _find_node
+
+    if not has_node_id_prefix(task_id):
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    resolved_id: Optional[str] = None
+
+    def mutator(entries):
+        nonlocal resolved_id
+        node = _find_node(entries, task_id)
+        if node is None:
+            typer.echo(f"Error: graph node {task_id} not found", err=True)
+            raise typer.Exit(code=1)
+        resolved_id = node["id"]
+        # Same field clear as `update --locked-by null`; recompute_statuses
+        # derives _status back to ready from the now-empty session_id.
+        node["session_id"] = None
+        node["claimed_at"] = None
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+
+    lock_note = _release_node_lockfile(resolved_id or task_id)
+    typer.echo(f"Unclaimed {resolved_id or task_id} ({lock_note})")
+
+
+@cli.command("unclaim")
+def cmd_unclaim(
+    task_id: str = typer.Argument(
+        ..., help="Node id to free (reverts claimed -> ready, releases the lockfile)"
+    ),
+) -> None:
+    """Free a claimed node in one call (graph claim + safe lockfile release)."""
+    _unclaim_node(task_id)
+
+
+@cli.command("release")
+def cmd_release(
+    task_id: str = typer.Argument(..., help="Alias for `unclaim`"),
+) -> None:
+    """Alias for `unclaim`: free a claimed node in one call."""
+    _unclaim_node(task_id)
+
+
 # -- next --
 
 @cli.command("next")
