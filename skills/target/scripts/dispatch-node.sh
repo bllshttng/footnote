@@ -28,10 +28,12 @@
 #   summary: launched=<n> parked=<n> already=<n> done=<n> failed=<n> capped=<n>[ nothing-up-next]
 #
 # Invariants (Failure Modes section of the plan):
-#   - The bg worker is ALWAYS dispatched via `fno agents spawn --provider claude`
-#     (which builds `claude --bg --name`; Group 1 ab-8b3e4fe0 moved the create
-#     off `ask`); NEVER `--bare`/`-p` (those force the API-credit pool and strip
-#     skills/hooks). Subscription lane only.
+#   - The bg worker is ALWAYS dispatched via `fno agents spawn --provider claude`.
+#     Post-x-3ab8 that lands an owned interactive pane hosted by the fno daemon
+#     (daemon owns the PTY since PR#86, so it still runs fire-and-forget and a
+#     grid can attach/take over later); we do NOT pass `--once` (the worker is a
+#     long-running pane, not a headless one-shot). NEVER `--bare`/`-p` (those
+#     force the API-credit pool and strip skills/hooks). Subscription lane only.
 #   - A failed dispatch is surfaced and leaves the node `ready`/re-dispatchable;
 #     never reports a launch that did not happen; never silently swallows.
 #   - Fire-and-forget: this script NEVER writes/clears the caller's
@@ -324,9 +326,12 @@ for id in "${NODES[@]}"; do
   fi
 
   # ---- Dispatch, fire-and-forget ----
-  # `fno agents spawn --provider claude` builds `claude --bg --name <name> <msg>`
-  # (subscription lane; Group 1 ab-8b3e4fe0: ask never creates). NEVER --bare/-p;
-  # name is a positional. Two branches keep the optional --cwd off an
+  # `fno agents spawn --provider claude` now lands an owned interactive pane
+  # hosted by the fno daemon (x-3ab8: spawn defaults to interactive). Still the
+  # subscription lane (NEVER --bare/-p) and still fire-and-forget; no --once (the
+  # worker is a long-running pane, not a headless one-shot). The receipt parsed
+  # below is byte-identical to the old --bg lane's. name is a positional. Two
+  # branches keep the optional --cwd off an
   # empty-array path (bash 3.2 set -u safe). stderr goes to a temp file, NOT
   # 2>&1: a stderr warning must never pollute the JSON receipt parse below
   # (house rule; gemini review PR #457).

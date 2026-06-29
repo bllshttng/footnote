@@ -894,6 +894,13 @@ impl ProviderWithPty for GeminiProvider {
 /// session id (reachability is always inconclusive; the headless one-shot path
 /// lives in `agy_ask.rs`). `-p`/`--print` takes the prompt as its VALUE, so it
 /// is appended LAST in every argv.
+///
+/// x-3ab8 caveat — STATELESS interactive: a plain `spawn --provider agy` now
+/// defaults to an owned interactive pane (like the other PTY providers), and the
+/// pane is drivable WHILE attached. But because agy mints no session id, there is
+/// NO re-attach after it settles — nothing to key a resume on (`resume_argv`
+/// below keys on a conversation id agy v1.0.x does not surface). Treat the agy
+/// pane as live-only; once it settles, dispatch a fresh `--once` instead.
 pub struct AgyProvider;
 
 impl AgyProvider {

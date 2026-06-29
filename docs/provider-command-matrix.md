@@ -2,7 +2,9 @@
 
 `fno agents` is one surface over four CLIs (`claude`, `codex`, `gemini`, `agy`), but the CLIs are not symmetric: some verbs are claude-only, some are codex/gemini-only, and the live-conversation transport differs per provider. This page is the source of truth for which `fno agents <verb>` works against which provider. (The deep transport internals are maintained internally.)
 
-> **agy (Antigravity CLI), Phase C.** agy is a dispatchable worker via `spawn --provider agy --once` (a one-shot `agy -p`, plain-text reply) and resolves a PTY pane for interactive `spawn`. It is held to the columns below only where verified: `spawn` **yes**. Because agy v1.0.x emits plain text with **no parseable session id**, it is **stateless** — `ask`-by-name resume is refused (use a fresh `--once`), `resume`/`attach` are **no**, and reachability is always inconclusive (never orphaned). `host`/`promote`/`drive`/`grid` are untested for agy this release.
+> **agy (Antigravity CLI), Phase C.** agy is a dispatchable worker via `spawn --provider agy --once` (a one-shot `agy -p`, plain-text reply) and, post-x-3ab8, a plain `spawn --provider agy` resolves a live owned-PTY pane (interactive by default). It is held to the columns below only where verified: `spawn` **yes**. Because agy v1.0.x emits plain text with **no parseable session id**, it is **stateless** — the live pane works while attached, but there is **no re-attach after it settles** (no resume id to key on); `ask`-by-name resume is refused (use a fresh `--once`), `resume`/`attach` are **no**, and reachability is always inconclusive (never orphaned). `host`/`promote`/`drive`/`grid` are untested for agy this release.
+
+> **opencode.** opencode has **no PTY provider** in `fno-agents` (readiness + stop-hook only), so it is **headless-only**: `spawn --provider opencode` cannot resolve an interactive pane and stays a non-tiled run. The x-3ab8 interactive default applies only to the four PTY providers; opencode is unaffected. File a follow-up node if an opencode PTY provider is wanted.
 
 ## The matrix
 
@@ -10,9 +12,9 @@ Legend: **yes** / **no** / **n/a** / **partial** (works under a stated condition
 
 | Verb | claude | codex | gemini | Notes |
 |------|:------:|:-----:|:------:|-------|
-| `spawn` | yes | yes | yes | Create + register. claude uses `--bg`; codex/gemini exec. |
+| `spawn` | yes | yes | yes | Create + register. **Interactive by default** (x-3ab8): a plain `spawn --provider <claude\|codex\|gemini\|agy>` lands an owned, grid-drivable interactive pane (the daemon owns the PTY, so it still runs fire-and-forget; a grid attaches/takes over later). `--once` is the headless opt-out — claude `--bg`, codex `exec`, gemini one-shot, agy `-p` — not shown in the grid. |
 | `promote --from <uuid>` | yes | yes | yes | Adopt a settled session into a live host. claude → stream-json lane; codex/gemini → PTY host. |
-| `host [--provider P] [task]` | partial | yes | yes | Fresh interactive host. claude: `--mode interactive` hosts a fresh owned-PTY pane (subscription-billed; the CLI mints the pinned session id); without it, adopt an existing session via `promote --from`. codex/gemini host directly. |
+| `host [--provider P] [task]` | yes | yes | yes | Now a thin alias for `spawn --mode interactive` (x-3ab8) — kept for callers/docs/muscle-memory, not deprecated. Forces the owned interactive lane for any PTY provider; for claude it mints the pinned session id and hosts a fresh subscription-billed owned-PTY pane. To adopt an *existing* idle claude session instead, use `promote --from <uuid>`. |
 | `ask <name>` (sync) | partial | yes | yes | claude live-ask is reachable only for MCP-channel sessions, or adopt with `promote` then `send`. codex/gemini intercept the reply client-side. |
 | `send <name>` / `--to-project` | yes | yes | yes | Async, durable-first bus delivery; never waits for a reply. |
 | `chat A B "<seed>"` | yes | no | no | Costed, always-confirm. Drives a bounded A↔B relay; v1 claude↔claude only. Observe with `watch`. |
