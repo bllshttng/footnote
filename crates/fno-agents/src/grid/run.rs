@@ -2558,6 +2558,33 @@ async fn live_add_roster_card(
     true
 }
 
+/// Reapply the active rail-mode sizing after a live-add changed the pane set, so
+/// the visible pane(s) render at the rail-region size, not the tiled-grid size
+/// `live_add_pane` / `live_add_roster_card` just pushed (codex PR #98 P2). No-op
+/// in the railless grid. Mirrors the startup rail-sizing block and the
+/// `Tab`-toggle resize paths.
+async fn reapply_rail_sizing(
+    rail_state: Option<&group::RailState>,
+    tty: TtySize,
+    rail_rows: &[Value],
+    states: &[ConnState],
+    squad_store: &squads::SquadStore,
+    focus: usize,
+    panes: &mut [Pane],
+    watch_sinks: &mut [Option<WsSink>],
+) {
+    let Some(rs) = rail_state else {
+        return;
+    };
+    match rs.main_mode {
+        group::MainMode::GroupTile => {
+            apply_group_tile_resize(rs, tty, rail_rows, states, squad_store, panes, watch_sinks)
+                .await
+        }
+        group::MainMode::Single => resize_rail_focus(tty, focus, panes, watch_sinks).await,
+    }
+}
+
 /// Poll-discover externally-spawned children on the shared 3s tick (x-45e6,
 /// Change 2 + 3). Re-reads the fno registry + the claude `--bg` roster and
 /// live-adds any row not already tiled - no restart, no focus-steal. Gated to
@@ -2580,14 +2607,21 @@ async fn poll_live_discover(
     roster_cards: &mut Vec<Option<RosterBgCard>>,
     rail_rows: &mut Vec<Value>,
     repo_cache: &mut repo::RepoCache,
+    rail_state: Option<&group::RailState>,
+    squad_store: &squads::SquadStore,
 ) {
     if !parsed.all {
         return; // explicit-name fleet is fixed; nothing to discover
     }
-    // ponytail: the same soft cap as startup bounds a runaway orchestrator that
-    // auto-spawns children faster than the operator can close them. Raise via
+    // The soft cap bounds EAGER WATCHER CONNECTIONS, so it counts only real fno
+    // panes (roster cards open no socket and are exempt at startup; codex PR #98
+    // P2). Count the `None` slots in roster_cards = the real PTY panes. Raise via
     // FNO_GRID_MAX_PANES.
     let cap = max_panes();
+    let pane_count = |roster_cards: &[Option<RosterBgCard>]| -> usize {
+        roster_cards.iter().filter(|c| c.is_none()).count()
+    };
+    let mut added = false;
 
     // Read + parse the registry ONCE per tick and reuse the rows for both the
     // pane diff and the roster diff (gemini PR #98: avoid up to 4 redundant
@@ -2605,7 +2639,7 @@ async fn poll_live_discover(
         if !new_names.is_empty() {
             let host_modes = host_modes_from_rows(&rows, &new_names);
             for (name, host_mode) in new_names.iter().zip(host_modes) {
-                if names.len() >= cap {
+                if pane_count(roster_cards) >= cap {
                     break;
                 }
                 // The child's REAL registry row so rail grouping uses its true
@@ -2616,7 +2650,7 @@ async fn poll_live_discover(
                     .cloned()
                     .unwrap_or_else(|| json!({ "name": name }));
                 // focus=false: a poll-discovered pane never steals focus (AC2-UI).
-                live_add_pane(
+                added |= live_add_pane(
                     home,
                     name,
                     host_mode,
@@ -2643,17 +2677,15 @@ async fn poll_live_discover(
     // roster_bg_cards_from dedups against the registry rows, so a session that
     // became an fno pane above is NOT returned here (AC3-EDGE: added once). A
     // missing / unparseable roster yields zero cards (AC3-ERR). Reuses the rows
-    // read once above (gemini PR #98).
+    // read once above (gemini PR #98). Cards open no socket, so they are NOT
+    // capped (matching the startup roster merge).
     let fresh_cards = match crate::claude_roster::ClaudeRoster::load_default() {
         Ok(r) => roster_bg_cards_from(&rows, &r.workers_deduped()),
         Err(_) => Vec::new(),
     };
     let new_cards = new_roster_cards(fresh_cards, roster_cards);
     for card in new_cards {
-        if names.len() >= cap {
-            break;
-        }
-        live_add_roster_card(
+        added |= live_add_roster_card(
             card,
             tty,
             comp,
@@ -2665,6 +2697,23 @@ async fn poll_live_discover(
             roster_cards,
             rail_rows,
             repo_cache,
+        )
+        .await;
+    }
+
+    // A live-add sized the new pane(s) for the tiled grid; in rail mode reapply
+    // the rail-region sizing so the visible pane(s) don't render shrunk until
+    // the next manual rail resize (codex PR #98 P2).
+    if added {
+        reapply_rail_sizing(
+            rail_state,
+            tty,
+            rail_rows,
+            states,
+            squad_store,
+            comp.focus(),
+            panes,
+            watch_sinks,
         )
         .await;
     }
@@ -3182,6 +3231,23 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                 // can't tile another pane yet.
                                                 format!("{name} launched (terminal too small to tile it)")
                                             });
+                                            if tiled {
+                                                // Rail mode: size the new pane for the
+                                                // rail region, not the tiled grid
+                                                // live_add_pane just applied (codex
+                                                // PR #98 P2).
+                                                reapply_rail_sizing(
+                                                    rail_state.as_ref(),
+                                                    tty,
+                                                    &rail_rows,
+                                                    &states,
+                                                    &squad_store,
+                                                    comp.focus(),
+                                                    &mut panes,
+                                                    &mut watch_sinks,
+                                                )
+                                                .await;
+                                            }
                                             prev_frame = None; // region map changed -> full repaint
                                         }
                                         Err(e) => {
@@ -4180,6 +4246,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                     &parsed, home, &tx, tty, &mut comp, &mut names, &mut panes,
                     &mut states, &mut watch_sinks, &mut host_interactive,
                     &mut roster_cards, &mut rail_rows, &mut repo_cache,
+                    rail_state.as_ref(), &squad_store,
                 )
                 .await;
                 ping_open_sinks(&mut watch_sinks, &mut states).await;
