@@ -156,16 +156,18 @@ async fn worker_speaks_pty(home: &AgentsHome, short_id: &str) -> bool {
 /// (codex review P2). codex/gemini pass through without a probe. The registry is
 /// read once to resolve each name's provider + short_id.
 async fn prune_non_pty_claude(names: Vec<String>, home: &AgentsHome) -> Vec<String> {
-    let rows: Vec<Value> = std::fs::read(home.registry_json())
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|raw| {
-            raw.get("agents")
-                .or_else(|| raw.get("entries"))
-                .and_then(Value::as_array)
-                .cloned()
-        })
-        .unwrap_or_default();
+    let rows = read_registry_rows(home);
+    prune_non_pty_claude_with_rows(names, &rows, home).await
+}
+
+/// As [`prune_non_pty_claude`] but over already-parsed registry `rows`, so a
+/// caller that already holds them (the x-45e6 poll, which reads the registry
+/// once per tick) does not re-read and re-parse the file.
+async fn prune_non_pty_claude_with_rows(
+    names: Vec<String>,
+    rows: &[Value],
+    home: &AgentsHome,
+) -> Vec<String> {
     let field = |name: &str, key: &str| -> Option<String> {
         rows.iter()
             .find(|r| r.get("name").and_then(Value::as_str) == Some(name))
@@ -2587,15 +2589,20 @@ async fn poll_live_discover(
     // FNO_GRID_MAX_PANES.
     let cap = max_panes();
 
+    // Read + parse the registry ONCE per tick and reuse the rows for both the
+    // pane diff and the roster diff (gemini PR #98: avoid up to 4 redundant
+    // reads/parses of registry.json on the hot 3s executor tick). parsed.all is
+    // guaranteed true here, so resolve_agent_names reduces to filter_pty_agents.
+    let rows = read_registry_rows(home);
+
     // ── Registry diff: new PTY panes (Change 2) ─────────────────────────────
-    let new_names =
-        new_registry_names(resolve_agent_names(parsed, home).unwrap_or_default(), names);
+    let new_names = new_registry_names(filter_pty_agents(&rows), names);
     if !new_names.is_empty() {
         // Same authoritative PTY-protocol gate as startup, but the worker.ping
-        // probe runs ONLY for the new candidates (steady state: no probe).
-        let new_names = prune_non_pty_claude(new_names, home).await;
+        // probe runs ONLY for the new candidates (steady state: no probe), over
+        // the rows we already hold.
+        let new_names = prune_non_pty_claude_with_rows(new_names, &rows, home).await;
         if !new_names.is_empty() {
-            let rows = read_registry_rows(home);
             let host_modes = host_modes_from_rows(&rows, &new_names);
             for (name, host_mode) in new_names.iter().zip(host_modes) {
                 if names.len() >= cap {
@@ -2633,9 +2640,15 @@ async fn poll_live_discover(
     }
 
     // ── Roster diff: new --bg status cards (Change 3) ───────────────────────
-    // resolve_bg_roster_cards already dedups against the registry, so a session
-    // that became an fno pane above is NOT returned here (AC3-EDGE: added once).
-    let new_cards = new_roster_cards(resolve_bg_roster_cards(home), roster_cards);
+    // roster_bg_cards_from dedups against the registry rows, so a session that
+    // became an fno pane above is NOT returned here (AC3-EDGE: added once). A
+    // missing / unparseable roster yields zero cards (AC3-ERR). Reuses the rows
+    // read once above (gemini PR #98).
+    let fresh_cards = match crate::claude_roster::ClaudeRoster::load_default() {
+        Ok(r) => roster_bg_cards_from(&rows, &r.workers_deduped()),
+        Err(_) => Vec::new(),
+    };
+    let new_cards = new_roster_cards(fresh_cards, roster_cards);
     for card in new_cards {
         if names.len() >= cap {
             break;
