@@ -4090,7 +4090,10 @@ mod tests {
             .join("\n");
         assert!(all.contains("footnote grid"), "title present: {all:?}");
         assert!(all.contains("Enter a goal"), "prompt present");
-        assert!(all.contains("claude pane"), "interactive-pane gesture advertised");
+        assert!(
+            all.contains("claude pane"),
+            "interactive-pane gesture advertised"
+        );
         assert!(all.contains("goal> add auth"), "live goal buffer present");
     }
 
