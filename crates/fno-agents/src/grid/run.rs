@@ -3167,8 +3167,13 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                 == 0;
                                             if no_history {
                                                 hint = Some("no scrollback history".to_string());
-                                            } else {
-                                                comp.step(InputEvent::EnterScrollback, &states);
+                                            } else if let CompositorAction::Scroll { pane_idx, cmd } =
+                                                comp.step(InputEvent::EnterScrollback, &states)
+                                            {
+                                                // Entry scrolls up one line to freeze the viewport.
+                                                if let Some(p) = panes.get_mut(pane_idx) {
+                                                    p.apply_scroll(cmd);
+                                                }
                                             }
                                             dirty = true;
                                         }

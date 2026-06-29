@@ -533,9 +533,16 @@ impl Compositor {
             }
             (Mode::Drive, InputEvent::Quit) => CompositorAction::Quit,
             // Scrollback entry (rebound from bare `Space` to a leader combo, x-1356).
+            // Freeze the viewport immediately by scrolling up one line: alacritty
+            // only holds the display when the offset is non-zero, so entering at
+            // offset 0 on a busy agent would keep scrolling with new output
+            // (gemini review).
             (Mode::Drive, InputEvent::EnterScrollback) => {
                 self.mode = Mode::Scrollback;
-                CompositorAction::NoOp
+                CompositorAction::Scroll {
+                    pane_idx: self.focus,
+                    cmd: ScrollCmd::LineUp,
+                }
             }
             (Mode::Drive, InputEvent::Keystroke(bytes)) => {
                 let idx = self.focus;
@@ -1185,10 +1192,16 @@ mod tests {
     fn enter_scrollback_flips_mode_and_exit_returns_and_snaps() {
         let panes = live_panes(2);
         let mut c = Compositor::new(2);
-        // Entry flips Drive -> Scrollback; the pane freezes where it is (the
-        // operator scrolls with the nav keys).
+        // Entry flips Drive -> Scrollback AND scrolls up one line to freeze the
+        // viewport immediately (alacritty only holds at a non-zero offset).
         let a = c.step(InputEvent::EnterScrollback, &panes);
-        assert_eq!(a, CompositorAction::NoOp);
+        assert_eq!(
+            a,
+            CompositorAction::Scroll {
+                pane_idx: 0,
+                cmd: ScrollCmd::LineUp
+            }
+        );
         assert_eq!(c.mode(), Mode::Scrollback);
 
         let a = c.step(InputEvent::ExitScrollback, &panes);
