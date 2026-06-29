@@ -3,6 +3,8 @@
 Send messages between agents in different projects without losing context across iterations.
 
 > **Note (2026-06):** the headless `fno watch` launchd drain daemon, its `fswatch` loop, and archive rotation were removed. The cross-session relay supersedes the autonomous-push use case; recipients now drain with `fno mail drain` (run manually or by an autonomous worker). Sections describing `fno watch install/status/uninstall` no longer apply.
+>
+> **Migration:** if you previously ran `fno watch install`, the launchd job is now orphaned (its plist points at the deleted `scripts/abi-watch.sh`). Remove it once: `launchctl bootout gui/$(id -u)/com.fno.watch.<project> 2>/dev/null; rm -f ~/Library/LaunchAgents/com.fno.watch.<project>.plist` (`<project>` = your `project:` name).
 
 ## Onboarding a project to the inbox fleet
 

@@ -2,7 +2,7 @@
 
 The inbox lets four agent roles (footnote, acme-web, example-pipeline, marketing) communicate across projects with traceable, idempotent message delivery. Megawalk drains each project's inbox at the top of every iteration so cross-project knowledge survives session compaction, project boundaries, and offline windows.
 
-> **Note (2026-06):** the headless `fno watch` launchd drain daemon (`scripts/abi-watch.sh`, the `com.fno.watch` plist, `install-drain-prompt.sh`), the in-session unread-mail wake hooks, and archive rotation (`inbox/archive.py`) were removed. The cross-session relay supersedes the autonomous-push use case; recipients drain with `fno mail drain` (manual or via an autonomous worker). The headless-drain subsection below is retained for historical context only. Megawalk itself was also cut earlier, so its Step 0 drain is historical too.
+> **Note (2026-06):** the headless `fno watch` launchd drain daemon (`scripts/abi-watch.sh`, the `com.fno.watch` plist, `install-drain-prompt.sh`), the in-session unread-mail wake hooks, and archive rotation (`inbox/archive.py`) were removed. The cross-session relay supersedes the autonomous-push use case; recipients drain with `fno mail drain` (manual or via an autonomous worker). The headless-drain subsection below is retained for historical context only. Megawalk itself was also cut earlier, so its Step 0 drain is historical too. Operators who previously ran `fno watch install` should remove the now-orphaned launchd job once; see the migration note in `docs/guides/cross-project-inbox.md`.
 
 ## Surfaces ownership: turning peer detection into a mechanical check
 
