@@ -2024,7 +2024,14 @@ fn base_groups(
             sidelines.extend(squads::squad_groups(rail_rows, squads));
             sidelines
         }
-        _ => group::group_by(rail_rows, group_key),
+        // Row-field partitions go through `group_by`. Enumerated (not `_`) so a
+        // future non-row-field variant fails to compile here until it gets an
+        // arm, rather than silently routing to `group_by` (which short-circuits
+        // it to an empty, blank rail).
+        group::GroupKey::Cwd
+        | group::GroupKey::Session
+        | group::GroupKey::Provider
+        | group::GroupKey::Status => group::group_by(rail_rows, group_key),
     }
 }
 
