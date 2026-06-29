@@ -1,60 +1,51 @@
 //! Compositor state machines (ab-3c063856, Waves 3.1 + 3.2 + 4.1).
 //!
 //! Two interacting machines, both pure and unit-testable so the run loop
-//! (Wave 5.1) can wire them to tokio + tokio-tungstenite + crossterm
-//! without re-deriving any rules:
+//! can wire them to tokio + tokio-tungstenite + crossterm without re-deriving
+//! any rules. Owned-PTY model (x-1356): footnote owns every panel's PTY, so
+//! there is no watch/drive split and no exclusive-driver claim - focus IS the
+//! keystroke target.
 //!
-//! 1. **Per-pane connection state** ([`ConnState`], Wave 3.1) -
-//!    `connecting → watching → {driving, busy_elsewhere, disconnected,
-//!    exited}`. Each [`ConnEvent`] yields a [`ConnAction`] the run loop
-//!    must execute (open a watcher socket, send a drive RPC, send a
-//!    detach control frame, log a denial flash, …). The "distinct
-//!    `connecting` vs blank `watching`" silent-failure invariant
-//!    (AC1-FR) and the "claim released on every exit path" invariant
-//!    (Domain Pitfall + AC4-FR) live here.
+//! 1. **Per-pane connection state** ([`ConnState`]) - `connecting → live →
+//!    {disconnected, exited}`. Each [`ConnEvent`] yields a [`ConnAction`] the
+//!    run loop must execute (open the owned-PTY stream, feed the renderer,
+//!    reconnect). The "distinct `connecting` vs blank `live`" silent-failure
+//!    invariant (AC1-FR) lives here; there is nothing to detach on exit.
 //!
-//! 2. **Global mode + focus** ([`Compositor`], Waves 3.2 + 4.1) -
-//!    `Mode = WATCH | DRIVE`, focused pane index. Routes keystrokes:
-//!    in WATCH, the compositor consumes them (focus / take-over /
-//!    quit); in DRIVE, they forward to the focused pane's driver
-//!    socket. Promotion serializes a single `agent.drive` RPC ahead
-//!    of any input routing (Concurrency invariant; AC3-DOUBLE).
-//!    Demotion fires on Esc, WS-drop, agent-exit, and quit.
+//! 2. **Global mode + focus** ([`Compositor`]) - `Mode = DRIVE | SCROLLBACK`,
+//!    focused pane index. The resting mode is `Drive`: a bare keystroke
+//!    forwards to the focused pane's owned PTY, and mux commands (focus / page
+//!    / quit / scrollback entry) arrive through the leader key. `Scrollback`
+//!    is the one surviving modal island (the pane freezes and the nav keys
+//!    page its history).
 //!
-//! Both machines hold no I/O handles - those live in the run loop's
-//! struct that wraps a `Compositor` and an `HashMap<PaneId, JoinHandle>`
-//! or similar. The FSM API is `fn step(&mut self, event) -> Action`
-//! so the run loop can write a clean `match` dispatch.
+//! Both machines hold no I/O handles - those live in the run loop's struct.
+//! The FSM API is `fn step(&mut self, event) -> Action` so the run loop can
+//! write a clean `match` dispatch.
 
 /// Per-pane connection state.
 ///
-/// The placeholders the renderer paints (`connecting…`,
-/// `tailing (busy elsewhere)`, `disconnected - r to retry`,
-/// `exited (code N)`) are derived from this state, so the renderer can
-/// show "connecting" vs "watching" distinctly - closing the silent
-/// "never-arriving stream" failure mode (AC1-FR).
+/// footnote OWNS every panel's PTY (the herdr model), so there is no
+/// "watch vs drive" split and no exclusive-driver claim: a live pane is
+/// always drivable because the multiplexer is its sole writer. The
+/// pre-owned-PTY states (`PromotePending` / `Watching` / `Driving` /
+/// `BusyElsewhere`) collapsed into a single [`Live`] when watch mode was
+/// removed (x-1356). The renderer's placeholders (`connecting…`,
+/// `disconnected - r to retry`, `exited (code N)`) are still derived from
+/// this state, so a never-arriving stream stays visible (AC1-FR).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnState {
-    /// Watcher socket open, no bytes received yet. Distinct from
-    /// [`Watching`] so a never-arriving stream is visible. An idle agent
-    /// that has connected but emitted nothing remains here and is still
-    /// drivable on Enter - split from [`PromotePending`] to address the
-    /// "quiet agent can't be promoted" review finding (PR #370 Codex P2).
+    /// Stream open, no bytes received yet. Distinct from [`Live`] so a
+    /// never-arriving stream is visible. An idle owned pane that has
+    /// connected but emitted nothing stays here and is still drivable -
+    /// the moment you type, the bytes reach its PTY.
     Connecting,
-    /// Operator pressed Enter; the run loop has issued
-    /// `agent.drive(mode: "interactive")` and is awaiting the ack. No
-    /// further `SendDriveRpc` action fires on a re-press (AC3-DOUBLE).
-    PromotePending,
-    /// Live watcher receiving PTY bytes. Read-only.
-    Watching,
-    /// Driver claim held by this pane; input forwarded to its socket.
-    Driving,
-    /// Take-over denied - an external driver holds the agent. The pane
-    /// renders the agent's tail-clipped output with a `busy` label.
-    BusyElsewhere { holder: Option<String> },
-    /// WS dropped or never established. The renderer offers `r` to
-    /// retry. A pane that was [`Driving`] when the WS dropped re-enters
-    /// here, NEVER stays in [`Driving`] with a dead socket (AC2-FR).
+    /// Live: receiving PTY bytes and drivable. The multiplexer reads the
+    /// owned PTY master to render the tile and writes raw bytes to it to
+    /// drive - one connection, no take-over, no claim.
+    Live,
+    /// Stream dropped or never established. The renderer offers `r` to
+    /// retry.
     Disconnected { reason: String },
     /// Agent process exited. Terminal for this run; the renderer paints
     /// the last received frame plus `exited (code N)`.
@@ -62,51 +53,38 @@ pub enum ConnState {
 }
 
 impl ConnState {
-    /// Whether keystrokes from a DRIVE-mode focused pane can reach this
-    /// agent. Only `Driving` ever lets bytes through; anything else
-    /// (including `Watching`) eats them - the global mode is the second
-    /// guard, but a per-pane sanity check closes the door if the global
-    /// state were ever inconsistent.
+    /// Whether keystrokes from the focused pane reach this agent. Every
+    /// live or still-connecting owned pane routes input - footnote is the
+    /// sole writer, so there is no read-only state; only a dead or
+    /// disconnected pane eats keystrokes. (The run loop's per-pane sink
+    /// presence is the real transport guard.)
     pub fn can_route_input(&self) -> bool {
-        matches!(self, ConnState::Driving)
+        matches!(self, ConnState::Live | ConnState::Connecting)
     }
 
-    /// Whether the operator can attempt to promote this pane via Enter.
-    /// A pane that is `Exited`, `Disconnected`, already `Driving`, or
-    /// has an in-flight promote (`PromotePending`) cannot be promoted by
-    /// a fresh Enter. Critically, [`Connecting`] IS drivable - an idle
-    /// agent that has connected but emitted no bytes must still accept
-    /// take-over (PR #370 Codex P2).
+    /// Whether the operator can focus-and-drive this pane. Identical to
+    /// [`can_route_input`](Self::can_route_input) now that focus == drive
+    /// (no separate promote/take-over step): a connected owned pane is
+    /// always drivable, a dead one is not.
     pub fn is_drivable(&self) -> bool {
-        matches!(
-            self,
-            ConnState::Connecting | ConnState::Watching | ConnState::BusyElsewhere { .. }
-        )
+        matches!(self, ConnState::Live | ConnState::Connecting)
     }
 
     /// Whether the attention scanner should run a readiness check on this
-    /// pane (fu-grid-pagination, task 3.1). Only LIVE panes (`Watching` /
-    /// `Driving`) count: an `Exited` / `Disconnected` pane holds a frozen
-    /// last frame whose tail may end in a prompt glyph, which would
-    /// false-positive a "waiting" badge (Domain Pitfall / Invariant: count
-    /// only live panes). `Connecting`/`PromotePending`/`BusyElsewhere` are
-    /// also excluded - a waiting agent has drawn its prompt and so has
-    /// emitted bytes, landing it in `Watching`.
+    /// pane. Only `Live` panes count: an `Exited` / `Disconnected` pane
+    /// holds a frozen last frame whose tail may end in a prompt glyph,
+    /// which would false-positive a "waiting" badge (Invariant: count only
+    /// live panes). `Connecting` is excluded - a waiting agent has drawn
+    /// its prompt and so has emitted bytes, landing it in `Live`.
     pub fn is_scannable(&self) -> bool {
-        matches!(self, ConnState::Watching | ConnState::Driving)
+        matches!(self, ConnState::Live)
     }
 
     /// One-line label for the renderer's pane chrome.
     pub fn label(&self) -> String {
         match self {
             ConnState::Connecting => "connecting…".to_string(),
-            ConnState::PromotePending => "acquiring driver claim…".to_string(),
-            ConnState::Watching => "watching".to_string(),
-            ConnState::Driving => "driving".to_string(),
-            ConnState::BusyElsewhere { holder } => match holder {
-                Some(h) => format!("tailing (busy: driven by {h})"),
-                None => "tailing (busy elsewhere)".to_string(),
-            },
+            ConnState::Live => "live".to_string(),
             ConnState::Disconnected { reason } => format!("disconnected - {reason} (r to retry)"),
             ConnState::Exited { code } => format!("exited (code {code})"),
         }
@@ -116,49 +94,29 @@ impl ConnState {
 /// Events the run loop feeds into a pane's connection FSM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnEvent {
-    /// The watcher WS finished its initial handshake successfully.
+    /// The pane's owned-PTY stream finished its initial handshake.
     WatcherConnected,
-    /// PTY bytes arrived from the watcher WS.
+    /// PTY bytes arrived from the owned-PTY stream.
     BytesReceived(Vec<u8>),
-    /// `agent.drive` RPC with `mode: "interactive"` was acked OK.
-    DriveClaimAcquired,
-    /// `agent.drive` RPC was rejected because another driver holds the
-    /// agent (an `ErrorCode::Busy` from `protocol.rs`).
-    DriveClaimDenied { holder: Option<String> },
-    /// The operator's release request landed: detach control frame sent
-    /// and ack'd.
-    DriveClaimReleased,
-    /// The WebSocket dropped - either the operator quit, the daemon
-    /// closed the connection, or the network went away.
+    /// The stream dropped - the operator quit, the daemon closed the
+    /// connection, or the network went away.
     WsClosed { reason: String },
     /// The agent's child process exited.
     AgentExited { code: i32 },
-    /// The operator pressed Enter on this focused pane.
-    PromoteRequested,
-    /// The operator pressed Esc while in DRIVE mode (only meaningful
-    /// for the currently-driving pane).
-    ReleaseRequested,
     /// The operator pressed `r` on a disconnected pane.
     RetryRequested,
 }
 
 /// Side-effect the run loop must perform after a transition. The FSM
-/// itself is pure; actions describe the network / WS / log work the run
-/// loop owns.
+/// itself is pure; actions describe the stream / render work the run loop
+/// owns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnAction {
-    /// Open the watcher WS for this pane.
+    /// Open the owned-PTY stream for this pane.
     OpenWatcher,
     /// Feed these bytes into the pane's render parser.
     FeedRenderer(Vec<u8>),
-    /// Send `agent.drive` with `mode: "interactive"` (the take-over RPC).
-    SendDriveRpc,
-    /// Send the `{"t":"detach","reason":"..."}` control frame.
-    SendDetach,
-    /// Flash a denial in the pane chrome (Enter pressed on undrivable
-    /// or busy-elsewhere pane; AC2-ERR).
-    FlashDenial(String),
-    /// Re-attempt the watcher connection.
+    /// Re-attempt the stream connection.
     Reconnect,
     /// No external work required.
     NoOp,
@@ -167,57 +125,34 @@ pub enum ConnAction {
 impl ConnState {
     /// Step the FSM. Returns the action the run loop must perform.
     ///
-    /// **Rules pinned by the plan:**
-    /// - `WsClosed` while `Driving` → `Disconnected` AND a `SendDetach`
-    ///   is NOT issued (the WS is already gone; the daemon's per-
-    ///   session watchdog will release the claim on heartbeat timeout
-    ///   per `drive.rs`'s `HEARTBEAT_TIMEOUT`). The release-on-every-
-    ///   exit-path invariant (AC4-FR / Concurrency) means the FSM
-    ///   never lingers in `Driving` on a dead socket.
-    /// - `AgentExited` while `Driving` → `Exited`. The claim is gone
-    ///   with the agent.
-    /// - `PromoteRequested` on `Watching` → `Connecting` (the request
-    ///   is async; the run loop will fire `SendDriveRpc` and we wait
-    ///   for `DriveClaimAcquired` or `DriveClaimDenied`). Double-
-    ///   Enter inside this window is a no-op (AC3-DOUBLE).
-    /// - `DriveClaimDenied` while `Connecting` (post-promote) →
-    ///   `BusyElsewhere` (NOT back to `Watching` - the operator
-    ///   needs to see a denial flash; the renderer reads
-    ///   `BusyElsewhere` for the label).
+    /// Owned-PTY model (x-1356): there is no promote/claim/release
+    /// lifecycle - footnote owns the PTY, so a pane is `Connecting` until
+    /// its first bytes flip it `Live`, and any exit path (`WsClosed` /
+    /// `AgentExited`) lands in `Disconnected` / `Exited` with nothing to
+    /// detach. The renderer keeps the last frame on a dead pane.
     pub fn step(&mut self, event: ConnEvent) -> ConnAction {
         use ConnEvent::*;
         use ConnState::*;
 
         // ---- Fast path: BytesReceived ----
         //
-        // BytesReceived is the high-frequency event (one per PTY chunk
-        // on the watcher WS). Handling it here avoids the heap-alloc-
-        // prone `self.clone()` of the catch-all match below: `ConnState`
-        // carries `String`s in `BusyElsewhere` and `Disconnected`, so a
-        // clone-per-byte would copy a String per PTY chunk on every
-        // pane. Caught by gemini-code-assist on PR #370.
+        // The high-frequency event (one per PTY chunk). Handled first to
+        // avoid the `self.clone()` of the catch-all match below
+        // (`Disconnected` carries a `String`, so a clone-per-byte would
+        // copy it on every chunk).
         if let BytesReceived(bytes) = event {
             return match self {
                 Connecting => {
-                    *self = Watching;
+                    *self = Live;
                     ConnAction::FeedRenderer(bytes)
                 }
-                Watching | Driving | BusyElsewhere { .. } | PromotePending => {
-                    ConnAction::FeedRenderer(bytes)
-                }
-                // Bytes after exit / disconnect are dropped (cannot
-                // arrive on a closed socket but covers the buffered-
-                // frame race).
+                Live => ConnAction::FeedRenderer(bytes),
+                // Bytes after exit / disconnect are dropped (buffered-frame race).
                 Exited { .. } | Disconnected { .. } => ConnAction::NoOp,
             };
         }
 
-        // ---- Low-frequency events ----
-        //
-        // These fire on operator actions (promote / release / quit) and
-        // network transitions (ws-closed, agent-exited). The cloned
-        // pattern is fine here because the events are infrequent and
-        // the match shape is easier to audit than a state-machine table.
+        // ---- Low-frequency events (stream transitions, retry) ----
         let next: ConnState;
         let action: ConnAction;
 
@@ -225,113 +160,19 @@ impl ConnState {
             // BytesReceived already handled in the fast path above.
             (_, BytesReceived(_)) => unreachable!(),
 
-            // ---- watcher establishment ----
+            // Handshake completing before any bytes: stay Connecting until
+            // the first byte flips us Live (keeps a never-arriving stream
+            // visible). A late handshake from a previous cycle is a no-op.
             (Connecting, WatcherConnected) => {
                 next = Connecting;
                 action = ConnAction::NoOp;
             }
-
-            // ---- promote ----
-            (Watching, PromoteRequested) | (Connecting, PromoteRequested) => {
-                // C3 fix: an idle Connecting pane (no bytes yet, but
-                // socket open) IS drivable. The transition mirrors the
-                // Watching path: fire the drive RPC, await ack in
-                // PromotePending.
-                next = PromotePending;
-                action = ConnAction::SendDriveRpc;
-            }
-            (BusyElsewhere { .. }, PromoteRequested) => {
-                // Operator may still try - daemon's stale takeover may
-                // evict the other driver (drive.rs::STALE_DRIVER_IDLE).
-                next = PromotePending;
-                action = ConnAction::SendDriveRpc;
-            }
-            (PromotePending, PromoteRequested) => {
-                // AC3-DOUBLE: a second Enter inside the inflight window
-                // is a no-op; the first RPC serializes.
-                next = PromotePending;
-                action = ConnAction::NoOp;
-            }
-            (Driving, PromoteRequested) => {
-                // Already driving; redundant Enter is a no-op.
-                next = Driving;
-                action = ConnAction::NoOp;
-            }
-            (Exited { code }, PromoteRequested) => {
-                next = Exited { code };
-                action = ConnAction::FlashDenial("agent has exited".to_string());
-            }
-            (Disconnected { reason }, PromoteRequested) => {
-                next = Disconnected { reason };
-                action = ConnAction::FlashDenial("disconnected".to_string());
-            }
-
-            // ---- claim outcomes ----
-            (PromotePending, DriveClaimAcquired) => {
-                next = Driving;
-                action = ConnAction::NoOp;
-            }
-            (_, DriveClaimAcquired) => {
-                // Acquired without a corresponding PromotePending is a
-                // logic bug (stale ack); keep the current state.
-                next = self.clone();
-                action = ConnAction::NoOp;
-            }
-            (PromotePending, DriveClaimDenied { holder }) => {
-                next = BusyElsewhere {
-                    holder: holder.clone(),
-                };
-                action = ConnAction::FlashDenial(match holder {
-                    Some(h) => format!("busy: driven by {h}"),
-                    None => "busy: another driver holds this agent".to_string(),
-                });
-            }
-            (_, DriveClaimDenied { .. }) => {
+            (_, WatcherConnected) => {
                 next = self.clone();
                 action = ConnAction::NoOp;
             }
 
-            // ---- release ----
-            (Driving, ReleaseRequested) => {
-                next = Watching;
-                action = ConnAction::SendDetach;
-            }
-            (PromotePending, ReleaseRequested) => {
-                // C2 fix: Esc pressed after Enter but before the claim
-                // ack arrives. Abort the in-flight promote: snap back
-                // to Watching so the compositor mode can sync back to
-                // WATCH (see Compositor::observe_pane_states). The run
-                // loop is responsible for either cancelling the WS
-                // upgrade or, if the ack races and lands after, immediately
-                // sending detach when it sees the per-pane state is no
-                // longer PromotePending.
-                next = Watching;
-                action = ConnAction::NoOp;
-            }
-            (_, ReleaseRequested) => {
-                next = self.clone();
-                action = ConnAction::NoOp;
-            }
-            (Driving, DriveClaimReleased) => {
-                next = Watching;
-                action = ConnAction::NoOp;
-            }
-            (_, DriveClaimReleased) => {
-                next = self.clone();
-                action = ConnAction::NoOp;
-            }
-
-            // ---- WS drop ----
-            (Driving, WsClosed { reason }) | (PromotePending, WsClosed { reason }) => {
-                // AC2-FR: never linger with a dead socket. The daemon's
-                // heartbeat watchdog releases the claim on its side
-                // (drive.rs::HEARTBEAT_TIMEOUT); the FSM demotes here
-                // without issuing SendDetach (the socket is already
-                // gone). PromotePending behaves the same way - the
-                // in-flight RPC failed at the transport layer.
-                next = Disconnected { reason };
-                action = ConnAction::NoOp;
-            }
+            // ---- stream drop ----
             (_, WsClosed { reason }) => {
                 next = Disconnected { reason };
                 action = ConnAction::NoOp;
@@ -339,9 +180,6 @@ impl ConnState {
 
             // ---- agent exit ----
             (_, AgentExited { code }) => {
-                // AC4-HP / AC4-FR: an exit from any state lands us in
-                // Exited; if we were driving (or promoting), the claim
-                // is gone with the agent.
                 next = Exited { code };
                 action = ConnAction::NoOp;
             }
@@ -355,14 +193,6 @@ impl ConnState {
                 next = self.clone();
                 action = ConnAction::NoOp;
             }
-
-            // ---- watcher connected when not in Connecting ----
-            (_, WatcherConnected) => {
-                // A late-arriving handshake event from a previous
-                // connection cycle; treat as no-op.
-                next = self.clone();
-                action = ConnAction::NoOp;
-            }
         }
 
         *self = next;
@@ -371,19 +201,24 @@ impl ConnState {
 }
 
 /// Global compositor mode.
+///
+/// Owned-PTY model (x-1356): there is only one mode. footnote owns every
+/// panel's PTY, so the focused pane is ALWAYS live-driven - bare keystrokes
+/// forward straight to it, exactly like a terminal multiplexer. Multiplexer
+/// commands (focus / page / quit) arrive through the leader key
+/// ([`super::leader`]), never by stealing a bare key. The former
+/// `Watch` (read-only, keystroke-eating) variant was removed with watch mode
+/// (x-1356); `Scrollback` survives as the one remaining modal state (entered
+/// via a leader combo, not a bare key).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Default: panes render read-only; stdin is the compositor's
-    /// command surface (arrows / tab focus, Enter take-over, q quit).
-    Watch,
-    /// One pane (the focused one) is driver-attached; stdin forwards
-    /// to its socket.
+    /// The focused pane is live-driven; stdin forwards to its owned PTY.
     Drive,
-    /// The focused pane is frozen and the operator is scrolling its
-    /// captured history (modal "scrollback mode"). Entered from WATCH via
-    /// `Space`; exited with `Esc` (which snaps the pane back to its live
-    /// tail). Paging / focus / promote keys are inert while scrolling - the
-    /// operator is pinned to the entry pane (Locked Decision 5).
+    /// The focused pane is frozen and the operator is paging its captured
+    /// history (modal "scrollback mode"). Entered from `Drive` via a leader
+    /// combo; exited with `Esc`, which snaps the pane back to its live tail.
+    /// Paging / focus / keystrokes are inert while scrolling - the operator is
+    /// pinned to the entry pane (Locked Decision 5).
     Scrollback,
 }
 
@@ -407,40 +242,46 @@ pub enum ScrollCmd {
 }
 
 /// Compositor-level events fed by the input handler.
+///
+/// Owned-PTY model (x-1356): a bare keystroke is always a [`Keystroke`] for
+/// the focused pane. The focus/page/quit events are emitted ONLY for keys
+/// the input handler resolved behind the leader; they never come from a bare
+/// key (that would steal it from the agent). The former promote / release
+/// events were removed with watch mode; the scrollback events survive, now
+/// reached through the leader rather than a bare `Space`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
-    /// Move focus to the next drivable pane.
+    /// Move focus to the next pane (leader command).
     FocusNext,
-    /// Move focus to the previous drivable pane.
+    /// Move focus to the previous pane (leader command).
     FocusPrev,
-    /// Promote the focused pane to DRIVE (claim attempt).
-    Promote,
-    /// Release the current driver and return to WATCH.
-    Release,
-    /// Quit the compositor.
+    /// Quit the compositor (leader command).
     Quit,
-    /// Flip to the next page (`]` / PgDn in WATCH). Clamps at the last page
-    /// (no wrap); relocates focus to the new page's first pane so the focused
+    /// Flip to the next page (leader command). Clamps at the last page (no
+    /// wrap); relocates focus to the new page's first pane so the focused
     /// index stays in the visible slice (fu-grid-pagination, Invariant).
     PageNext,
-    /// Flip to the previous page (`[` / PgUp in WATCH). Clamps at page 0.
+    /// Flip to the previous page (leader command). Clamps at page 0.
     PagePrev,
-    /// A keystroke from the operator - bytes destined for either the
-    /// focused pane (DRIVE) or eaten by the compositor (WATCH).
+    /// A keystroke from the operator, forwarded to the focused pane's owned
+    /// PTY (the default for every bare key).
     Keystroke(Vec<u8>),
-    /// Enter scrollback mode on the focused pane (`Space` in WATCH). The
-    /// no-history guard lives in the run loop (it owns the panes); the
-    /// compositor flips the mode and scrolls up one line to freeze the view.
+    /// Enter scrollback on the focused pane (leader command). Freezes the
+    /// pane and pins focus until exit.
     EnterScrollback,
-    /// Leave scrollback and return to WATCH (`Esc`); the run loop snaps the
-    /// pane to its live tail.
+    /// Leave scrollback; snaps the pane back to its live tail.
     ExitScrollback,
-    /// Scroll the focused pane within scrollback mode.
+    /// Scroll the frozen pane up one line (older).
     ScrollLineUp,
+    /// Scroll the frozen pane down one line (newer).
     ScrollLineDown,
+    /// Scroll the frozen pane up one page.
     ScrollPageUp,
+    /// Scroll the frozen pane down one page.
     ScrollPageDown,
+    /// Jump to the oldest retained line.
     ScrollTop,
+    /// Jump to the live tail (display offset 0).
     ScrollBottom,
 }
 
@@ -449,19 +290,11 @@ pub enum InputEvent {
 pub enum CompositorAction {
     /// Nothing to do.
     NoOp,
-    /// Forward bytes to pane `pane_idx`'s driver socket (DRIVE only).
+    /// Forward bytes to pane `pane_idx`'s owned-PTY sink.
     ForwardKeystrokes { pane_idx: usize, bytes: Vec<u8> },
-    /// Tell pane `pane_idx`'s connection FSM that the operator wants to
-    /// promote it (the FSM will yield the actual `SendDriveRpc`).
-    AttemptPromote { pane_idx: usize },
-    /// Tell pane `pane_idx`'s connection FSM that the operator wants to
-    /// release the driver (the FSM will yield the actual `SendDetach`).
-    AttemptRelease { pane_idx: usize },
-    /// Scroll pane `pane_idx`'s captured history (scrollback mode). The run
-    /// loop translates `cmd` to an `alacritty_terminal` scroll and applies it
-    /// to the pane's terminal.
+    /// Scroll pane `pane_idx`'s captured history (scrollback mode).
     Scroll { pane_idx: usize, cmd: ScrollCmd },
-    /// Quit the run loop; release any held driver claim first.
+    /// Quit the run loop.
     Quit,
 }
 
@@ -494,7 +327,7 @@ impl Compositor {
     /// thing `new` must do is not assume a first pane exists.
     pub fn new(pane_count: usize) -> Self {
         Compositor {
-            mode: Mode::Watch,
+            mode: Mode::Drive,
             focus: 0,
             pane_count,
             // Single page until the run loop's first recompute_pagination.
@@ -560,26 +393,14 @@ impl Compositor {
         }
     }
 
-    /// Re-synchronize the global mode against the per-pane states.
+    /// Re-sync the compositor against the per-pane states after a per-pane
+    /// FSM transition (pane added / removed / exited).
     ///
-    /// **Call this from the run loop after every per-pane FSM transition.**
-    /// The compositor flips to [`Mode::Drive`] eagerly on Enter (before
-    /// the RPC ack lands) so that subsequent keystrokes route correctly
-    /// once the per-pane FSM enters [`ConnState::Driving`]. But several
-    /// outcomes leave the focused pane non-Driving even though the
-    /// compositor still believes it is in DRIVE:
-    ///
-    /// - Claim denied → pane enters `BusyElsewhere`
-    /// - WS dropped → pane enters `Disconnected`
-    /// - Agent exited → pane enters `Exited`
-    /// - In-flight promote aborted via Esc → pane enters `Watching`
-    /// - PromotePending raced with the ack (we already snapped back)
-    ///
-    /// In each case the compositor mode must return to WATCH so the
-    /// next keystroke is consumed as a compositor command, not silently
-    /// dropped by the per-pane gate. Without this sync the global mode
-    /// would stay DRIVE forever while keystrokes vanish. Caught by
-    /// chatgpt-codex-connector on PR #370.
+    /// Owned-PTY model (x-1356): there is no mode to re-sync - the focused
+    /// pane is always live-driven and a bare keystroke always forwards to it.
+    /// This now only keeps `pane_count`/focus in range and signals quit when
+    /// the fleet empties. (Pre-rip-out this also snapped a stale DRIVE back to
+    /// WATCH when a claim dropped; with no claim and no WATCH that is moot.)
     ///
     /// Returns `CompositorAction::NoOp` in the common case;
     /// `CompositorAction::Quit` if pane_count has dropped to zero.
@@ -589,17 +410,6 @@ impl Compositor {
         }
         if self.pane_count == 0 {
             return CompositorAction::Quit;
-        }
-        if self.mode == Mode::Drive {
-            let idx = self.focus;
-            let still_driving =
-                idx < pane_states.len() && matches!(pane_states[idx], ConnState::Driving);
-            if !still_driving {
-                // Focused pane is no longer the active driver. Snap
-                // the global mode back so subsequent keystrokes route
-                // as compositor commands again.
-                self.mode = Mode::Watch;
-            }
         }
         CompositorAction::NoOp
     }
@@ -613,7 +423,6 @@ impl Compositor {
             // The run loop should exit when this hits zero; clamp so
             // any inflight access doesn't panic.
             self.focus = 0;
-            self.mode = Mode::Watch;
             self.current_page = 0;
             return;
         }
@@ -698,135 +507,54 @@ impl Compositor {
             return CompositorAction::Quit;
         }
 
+        // Owned-PTY model (x-1356): `Drive` is the sole live mode - a bare
+        // keystroke always forwards to the focused pane's owned PTY; the
+        // focus/page/quit events only ever arrive resolved behind the leader
+        // key, so they are mux commands, never stolen bare keys. `Scrollback`
+        // is the one surviving modal state (pane frozen, leader-entered).
         match (self.mode, event) {
-            // ---- WATCH: focus + take-over + quit; bytes eaten ----
-            (Mode::Watch, InputEvent::FocusNext) => {
+            (Mode::Drive, InputEvent::FocusNext) => {
                 self.focus = next_focus(self.focus, pane_states, /*forward=*/ true);
-                self.follow_focus_page(); // task 2.2: focus-follow auto-advance
+                self.follow_focus_page();
                 CompositorAction::NoOp
             }
-            (Mode::Watch, InputEvent::FocusPrev) => {
+            (Mode::Drive, InputEvent::FocusPrev) => {
                 self.focus = next_focus(self.focus, pane_states, /*forward=*/ false);
                 self.follow_focus_page();
                 CompositorAction::NoOp
             }
-            // ---- WATCH: page navigation (task 2.1) ----
-            (Mode::Watch, InputEvent::PageNext) => {
+            (Mode::Drive, InputEvent::PageNext) => {
                 self.page_next();
                 CompositorAction::NoOp
             }
-            (Mode::Watch, InputEvent::PagePrev) => {
+            (Mode::Drive, InputEvent::PagePrev) => {
                 self.page_prev();
                 CompositorAction::NoOp
             }
-            (Mode::Watch, InputEvent::Promote) => {
-                let idx = self.focus;
-                if idx < pane_states.len() && pane_states[idx].is_drivable() {
-                    // Pre-flip the mode so a follow-up Keystroke in the
-                    // same tick routes to the soon-to-be driving pane.
-                    // The run loop fires SendDriveRpc and only the
-                    // DriveClaimAcquired event yields actual byte
-                    // routing through the per-pane FSM.
-                    //
-                    // NOTE: the global mode flip BEFORE claim ack is
-                    // safe because the per-pane FSM still refuses byte
-                    // routing via can_route_input() = matches Driving
-                    // only. So a stray pre-ack keystroke is dropped at
-                    // the second guard (per-pane). The "claim acquired
-                    // BEFORE flipping input routing" invariant
-                    // (Concurrency) is honored by the per-pane gate,
-                    // which is the load-bearing check.
-                    self.mode = Mode::Drive;
-                    CompositorAction::AttemptPromote { pane_idx: idx }
-                } else {
-                    // AC3-HP: WATCH consumes Enter and emits no bytes.
-                    CompositorAction::NoOp
-                }
-            }
-            (Mode::Watch, InputEvent::Release) => {
-                // Esc in WATCH is a no-op (no driver to release).
-                CompositorAction::NoOp
-            }
-            (Mode::Watch, InputEvent::Keystroke(_)) => {
-                // AC3-HP: no keystroke reaches any agent in WATCH.
-                CompositorAction::NoOp
-            }
-            (Mode::Watch, InputEvent::Quit) => CompositorAction::Quit,
-            // ---- WATCH: enter scrollback on the focused pane ----
-            // The no-history guard lives in the run loop (it owns the panes);
-            // here we flip the mode AND scroll up one line. That scroll is
-            // load-bearing: alacritty only freezes the viewport when the
-            // display offset is non-zero, so entering at offset 0 would keep
-            // following the live tail on a busy agent (chatgpt-codex, PR #387).
-            // One line up moves the offset to >=1, freezing immediately; the
-            // run loop has already verified history exists. Scroll/exit events
-            // are WATCH-only by construction (key_to_input never emits them in
-            // WATCH), so they fall through to the catch-all as no-ops.
-            (Mode::Watch, InputEvent::EnterScrollback) => {
+            (Mode::Drive, InputEvent::Quit) => CompositorAction::Quit,
+            // Scrollback entry (rebound from bare `Space` to a leader combo, x-1356).
+            (Mode::Drive, InputEvent::EnterScrollback) => {
                 self.mode = Mode::Scrollback;
-                CompositorAction::Scroll {
-                    pane_idx: self.focus,
-                    cmd: ScrollCmd::LineUp,
-                }
+                CompositorAction::NoOp
             }
-            (Mode::Watch, _) => CompositorAction::NoOp,
-
-            // ---- DRIVE: keystrokes forward; Release demotes ----
             (Mode::Drive, InputEvent::Keystroke(bytes)) => {
                 let idx = self.focus;
+                // Every connected owned pane routes input (footnote is the
+                // sole writer). A dead/disconnected pane eats the bytes; the
+                // run loop's sink-presence check is the real transport guard.
                 if idx < pane_states.len() && pane_states[idx].can_route_input() {
                     CompositorAction::ForwardKeystrokes {
                         pane_idx: idx,
                         bytes,
                     }
                 } else {
-                    // Per-pane gate refused. The DriveClaimAcquired
-                    // event for this pane has not landed yet (or the
-                    // claim dropped). Eat the bytes rather than queue
-                    // them - the operator sees no echo and presses
-                    // again, which is the right UX for a half-second
-                    // claim-acquisition window.
                     CompositorAction::NoOp
                 }
             }
-            (Mode::Drive, InputEvent::Release) => {
-                let idx = self.focus;
-                // AC2-UI: release demotes to WATCH.
-                self.mode = Mode::Watch;
-                CompositorAction::AttemptRelease { pane_idx: idx }
-            }
-            (Mode::Drive, InputEvent::FocusNext)
-            | (Mode::Drive, InputEvent::FocusPrev)
-            | (Mode::Drive, InputEvent::Promote)
-            | (Mode::Drive, InputEvent::PageNext)
-            | (Mode::Drive, InputEvent::PagePrev) => {
-                // In DRIVE mode focus-change, Enter, and page keys forward to
-                // the agent as keystrokes (Tab is meaningful inside shells,
-                // Enter inside REPLs, `[`/`]` are real characters). The run
-                // loop maps the original raw key bytes into a Keystroke event
-                // (key_to_input never classifies these as page/focus events in
-                // DRIVE), so reaching here means the input handler classified
-                // them - in DRIVE it should not, but be defensive. Paging is
-                // WATCH-only (Locked Decision 2): a page key never flips a page
-                // while a driver claim is held.
-                CompositorAction::NoOp
-            }
-            (Mode::Drive, InputEvent::Quit) => {
-                // q in DRIVE forwards as a keystroke too (q is a real
-                // character agents may want to receive); but Quit as a
-                // distinct event only arrives in WATCH per the input
-                // handler. Defensive: release first, then quit.
-                self.mode = Mode::Watch;
-                CompositorAction::Quit
-            }
-            // Scroll / scrollback-entry events are WATCH-only (Locked Decision
-            // 4: scrollback is not reachable from DRIVE - the agent's own TUI
-            // scrollback handles in-drive review). Inert if they arrive.
             (Mode::Drive, _) => CompositorAction::NoOp,
 
-            // ---- SCROLLBACK: scroll the frozen focused pane; Esc exits ----
-            // The focused pane is pinned for the duration; focus / paging /
-            // promote / keystroke / re-entry are inert (Locked Decision 5).
+            // Scrollback: the focused pane is frozen and pinned; focus / paging
+            // / keystrokes / re-entry are inert (Locked Decision 5).
             (Mode::Scrollback, InputEvent::ScrollLineUp) => CompositorAction::Scroll {
                 pane_idx: self.focus,
                 cmd: ScrollCmd::LineUp,
@@ -854,7 +582,7 @@ impl Compositor {
             (Mode::Scrollback, InputEvent::ExitScrollback) => {
                 // Exit always snaps the pane to its live tail (Locked Decision
                 // 7) so the operator can never be stranded in a frozen view.
-                self.mode = Mode::Watch;
+                self.mode = Mode::Drive;
                 CompositorAction::Scroll {
                     pane_idx: self.focus,
                     cmd: ScrollCmd::Bottom,
@@ -925,26 +653,24 @@ mod tests {
 
     // ---- ConnState transition tests (Wave 3.1) ----
 
-    /// AC1-HP / AC1-FR: a watcher that has not yet received bytes shows
-    /// "connecting…", distinct from a blank "watching".
+    /// AC1-HP / AC1-FR: a pane that has not yet received bytes shows
+    /// "connecting…"; the first byte flips it Live.
     #[test]
-    fn watch_connect_then_first_bytes_promote_to_watching() {
+    fn connect_then_first_bytes_flip_to_live() {
         let mut s = ConnState::Connecting;
-        // Connection finished its handshake but bytes have not arrived.
         let a = s.step(ConnEvent::WatcherConnected);
         assert_eq!(a, ConnAction::NoOp);
         assert!(matches!(s, ConnState::Connecting));
-        // First bytes flip to Watching.
         let a = s.step(ConnEvent::BytesReceived(b"hello".to_vec()));
         assert_eq!(a, ConnAction::FeedRenderer(b"hello".to_vec()));
-        assert_eq!(s, ConnState::Watching);
+        assert_eq!(s, ConnState::Live);
     }
 
-    /// AC4-HP: agent exit anywhere lands in Exited; bytes from a
-    /// buffered frame after exit are dropped.
+    /// AC4-HP: agent exit anywhere lands in Exited; bytes from a buffered
+    /// frame after exit are dropped.
     #[test]
-    fn agent_exit_from_watching_lands_in_exited_and_drops_bytes() {
-        let mut s = ConnState::Watching;
+    fn agent_exit_lands_in_exited_and_drops_bytes() {
+        let mut s = ConnState::Live;
         s.step(ConnEvent::AgentExited { code: 42 });
         assert_eq!(s, ConnState::Exited { code: 42 });
         let a = s.step(ConnEvent::BytesReceived(vec![1, 2, 3]));
@@ -952,23 +678,11 @@ mod tests {
         assert_eq!(s, ConnState::Exited { code: 42 });
     }
 
-    /// AC4-FR: agent exit while driving releases the claim (the daemon
-    /// drops it with the agent) and lands in Exited.
+    /// AC2-FR: a stream drop on a live pane lands in Disconnected - never
+    /// linger Live on a dead socket. Owned-PTY: nothing to detach.
     #[test]
-    fn agent_exit_during_drive_lands_in_exited() {
-        let mut s = ConnState::Driving;
-        let a = s.step(ConnEvent::AgentExited { code: -1 });
-        assert_eq!(a, ConnAction::NoOp);
-        assert_eq!(s, ConnState::Exited { code: -1 });
-    }
-
-    /// AC2-FR: WS drop during driving demotes to Disconnected - never
-    /// linger in Driving on a dead socket. SendDetach is NOT issued
-    /// because the socket is already gone (the daemon's heartbeat
-    /// watchdog releases the claim on its side).
-    #[test]
-    fn ws_drop_during_drive_demotes_to_disconnected() {
-        let mut s = ConnState::Driving;
+    fn ws_drop_on_live_lands_in_disconnected() {
+        let mut s = ConnState::Live;
         let a = s.step(ConnEvent::WsClosed {
             reason: "broken pipe".to_string(),
         });
@@ -981,100 +695,7 @@ mod tests {
         );
     }
 
-    /// AC2-HP: promote from Watching → SendDriveRpc, then DriveClaimAcquired
-    /// → Driving.
-    #[test]
-    fn promote_happy_path_acquires_claim() {
-        let mut s = ConnState::Watching;
-        let a = s.step(ConnEvent::PromoteRequested);
-        assert_eq!(a, ConnAction::SendDriveRpc);
-        assert!(matches!(s, ConnState::PromotePending));
-        let a = s.step(ConnEvent::DriveClaimAcquired);
-        assert_eq!(a, ConnAction::NoOp);
-        assert_eq!(s, ConnState::Driving);
-    }
-
-    /// C3 fix: an idle agent in Connecting (handshake done, no bytes
-    /// yet) is drivable; Enter fires the drive RPC and transitions to
-    /// PromotePending. Mirrors the Watching path.
-    #[test]
-    fn promote_from_connecting_fires_drive_rpc() {
-        let mut s = ConnState::Connecting;
-        assert!(s.is_drivable(), "idle Connecting must be drivable");
-        let a = s.step(ConnEvent::PromoteRequested);
-        assert_eq!(a, ConnAction::SendDriveRpc);
-        assert_eq!(s, ConnState::PromotePending);
-    }
-
-    /// AC2-ERR: promote denial lands in BusyElsewhere with a flash, not
-    /// in Driving.
-    #[test]
-    fn promote_denied_lands_in_busy_elsewhere() {
-        let mut s = ConnState::Watching;
-        s.step(ConnEvent::PromoteRequested);
-        assert_eq!(s, ConnState::PromotePending);
-        let a = s.step(ConnEvent::DriveClaimDenied {
-            holder: Some("op-jane".to_string()),
-        });
-        assert!(matches!(a, ConnAction::FlashDenial(_)));
-        assert!(
-            matches!(s, ConnState::BusyElsewhere { holder } if holder.as_deref() == Some("op-jane"))
-        );
-    }
-
-    /// C2 fix: Esc pressed during PromotePending (after Enter, before
-    /// ack) aborts the in-flight promote - state returns to Watching.
-    /// The run loop is responsible for either cancelling the in-flight
-    /// WS upgrade or immediately sending detach when the late ack lands.
-    #[test]
-    fn release_during_promote_pending_aborts_to_watching() {
-        let mut s = ConnState::Watching;
-        s.step(ConnEvent::PromoteRequested);
-        assert_eq!(s, ConnState::PromotePending);
-        let a = s.step(ConnEvent::ReleaseRequested);
-        assert_eq!(a, ConnAction::NoOp);
-        assert_eq!(s, ConnState::Watching);
-    }
-
-    /// Once aborted via Release-during-PromotePending, a late
-    /// DriveClaimAcquired must NOT reactivate Driving - the catch-all
-    /// stale-ack rule applies.
-    #[test]
-    fn late_ack_after_abort_does_not_reactivate_drive() {
-        let mut s = ConnState::Watching;
-        s.step(ConnEvent::PromoteRequested);
-        s.step(ConnEvent::ReleaseRequested);
-        assert_eq!(s, ConnState::Watching);
-        let a = s.step(ConnEvent::DriveClaimAcquired);
-        assert_eq!(a, ConnAction::NoOp);
-        assert_eq!(s, ConnState::Watching, "stale ack must not stick");
-    }
-
-    /// AC3-DOUBLE: a second PromoteRequested inside the inflight window
-    /// is a no-op - claim acquisition serializes through the first RPC.
-    #[test]
-    fn double_promote_serialized_to_single_claim() {
-        let mut s = ConnState::Watching;
-        let a1 = s.step(ConnEvent::PromoteRequested);
-        assert_eq!(a1, ConnAction::SendDriveRpc);
-        let a2 = s.step(ConnEvent::PromoteRequested);
-        assert_eq!(
-            a2,
-            ConnAction::NoOp,
-            "second Enter must not fire a second RPC"
-        );
-    }
-
-    /// AC2-UI: release from Driving sends a detach and returns to Watching.
-    #[test]
-    fn release_from_drive_returns_to_watching() {
-        let mut s = ConnState::Driving;
-        let a = s.step(ConnEvent::ReleaseRequested);
-        assert_eq!(a, ConnAction::SendDetach);
-        assert_eq!(s, ConnState::Watching);
-    }
-
-    /// Retry from Disconnected re-attempts the watcher connection.
+    /// Retry from Disconnected re-attempts the owned-PTY connection.
     #[test]
     fn retry_from_disconnected_reopens_watcher() {
         let mut s = ConnState::Disconnected {
@@ -1085,110 +706,39 @@ mod tests {
         assert!(matches!(s, ConnState::Connecting));
     }
 
-    /// Promote on an exited pane flashes a denial and stays Exited.
+    /// Owned-PTY: every live or still-connecting pane routes input (footnote
+    /// is the sole writer); a dead / disconnected pane does not.
     #[test]
-    fn promote_on_exited_flashes_denial() {
-        let mut s = ConnState::Exited { code: 0 };
-        let a = s.step(ConnEvent::PromoteRequested);
-        assert!(matches!(a, ConnAction::FlashDenial(_)));
-        assert_eq!(s, ConnState::Exited { code: 0 });
-    }
-
-    /// can_route_input is true ONLY in Driving - the per-pane gate that
-    /// closes the "stray keystroke during claim-acquire window" loophole.
-    #[test]
-    fn can_route_input_only_in_driving() {
-        assert!(!ConnState::Connecting.can_route_input());
-        assert!(!ConnState::PromotePending.can_route_input());
-        assert!(!ConnState::Watching.can_route_input());
-        assert!(ConnState::Driving.can_route_input());
-        assert!(!ConnState::BusyElsewhere { holder: None }.can_route_input());
+    fn can_route_input_only_when_live_or_connecting() {
+        assert!(ConnState::Connecting.can_route_input());
+        assert!(ConnState::Live.can_route_input());
         assert!(!ConnState::Disconnected { reason: "x".into() }.can_route_input());
         assert!(!ConnState::Exited { code: 0 }.can_route_input());
     }
 
-    /// PromotePending is NOT drivable - a second Enter inside the
-    /// inflight window must be a no-op (AC3-DOUBLE), and other UI that
-    /// asks "should I let Enter fire?" must say no.
+    /// is_drivable mirrors can_route_input now that focus == drive (no
+    /// separate promote/claim step).
     #[test]
-    fn promote_pending_is_not_drivable() {
-        assert!(!ConnState::PromotePending.is_drivable());
-    }
-
-    /// C1 fix: when the focused pane is no longer Driving, the
-    /// compositor mode snaps back to WATCH on the next observe call.
-    /// Covers denial, WS-drop, exit, and abort cases.
-    #[test]
-    fn observe_snaps_mode_back_when_focused_pane_leaves_driving() {
-        let mut comp = Compositor::new(2);
-        let mut states = watching_panes(2);
-        comp.step(InputEvent::FocusNext, &states);
-        comp.step(InputEvent::Promote, &states);
-        assert_eq!(comp.mode(), Mode::Drive);
-        // Simulate the per-pane FSM walking PromotePending → Driving →
-        // some demoted state.
-        states[1] = ConnState::PromotePending;
-        states[1].step(ConnEvent::DriveClaimAcquired);
-        assert_eq!(states[1], ConnState::Driving);
-        comp.observe_pane_states(&states); // still Driving → mode unchanged
-        assert_eq!(comp.mode(), Mode::Drive);
-
-        // Denial path: pane goes to BusyElsewhere; mode must snap back.
-        states[1] = ConnState::BusyElsewhere { holder: None };
-        comp.observe_pane_states(&states);
-        assert_eq!(
-            comp.mode(),
-            Mode::Watch,
-            "denied pane should snap mode to WATCH"
-        );
-    }
-
-    /// C1 fix corollary: WS drop on the driving pane also snaps mode
-    /// back. The per-pane FSM has already demoted to Disconnected.
-    #[test]
-    fn observe_snaps_mode_on_ws_drop() {
-        let mut comp = Compositor::new(1);
-        let mut states = vec![ConnState::Watching];
-        comp.step(InputEvent::Promote, &states);
-        states[0] = ConnState::PromotePending;
-        states[0].step(ConnEvent::DriveClaimAcquired);
-        comp.observe_pane_states(&states);
-        assert_eq!(comp.mode(), Mode::Drive);
-        states[0].step(ConnEvent::WsClosed {
-            reason: "lost".to_string(),
-        });
-        comp.observe_pane_states(&states);
-        assert_eq!(comp.mode(), Mode::Watch);
-    }
-
-    /// C1 fix: agent exit during DRIVE snaps mode back to WATCH.
-    #[test]
-    fn observe_snaps_mode_on_agent_exit() {
-        let mut comp = Compositor::new(1);
-        let mut states = vec![ConnState::Watching];
-        comp.step(InputEvent::Promote, &states);
-        states[0] = ConnState::PromotePending;
-        states[0].step(ConnEvent::DriveClaimAcquired);
-        comp.observe_pane_states(&states);
-        assert_eq!(comp.mode(), Mode::Drive);
-        states[0].step(ConnEvent::AgentExited { code: 1 });
-        comp.observe_pane_states(&states);
-        assert_eq!(comp.mode(), Mode::Watch);
+    fn is_drivable_only_when_live_or_connecting() {
+        assert!(ConnState::Connecting.is_drivable());
+        assert!(ConnState::Live.is_drivable());
+        assert!(!ConnState::Disconnected { reason: "x".into() }.is_drivable());
+        assert!(!ConnState::Exited { code: 0 }.is_drivable());
     }
 
     // ---- Compositor transition tests (Wave 3.2 + 4.1) ----
 
-    fn watching_panes(n: usize) -> Vec<ConnState> {
-        (0..n).map(|_| ConnState::Watching).collect()
+    fn live_panes(n: usize) -> Vec<ConnState> {
+        (0..n).map(|_| ConnState::Live).collect()
     }
 
     /// AC3-HP: WATCH cycles focus on FocusNext / FocusPrev without
     /// emitting any bytes to any agent.
     #[test]
-    fn watch_focus_cycles_without_keystrokes() {
-        let panes = watching_panes(3);
+    fn focus_cycles_without_emitting_bytes() {
+        let panes = live_panes(3);
         let mut c = Compositor::new(3);
-        assert_eq!(c.mode(), Mode::Watch);
+        assert_eq!(c.mode(), Mode::Drive);
         assert_eq!(c.focus(), 0);
         let a = c.step(InputEvent::FocusNext, &panes);
         assert_eq!(a, CompositorAction::NoOp);
@@ -1201,45 +751,13 @@ mod tests {
         assert_eq!(c.focus(), 2, "focus should wrap backward");
     }
 
-    /// AC3-HP again: stdin keystrokes in WATCH are eaten.
-    #[test]
-    fn watch_keystrokes_dont_reach_panes() {
-        let panes = watching_panes(2);
-        let mut c = Compositor::new(2);
-        let a = c.step(InputEvent::Keystroke(b"abc".to_vec()), &panes);
-        assert_eq!(a, CompositorAction::NoOp);
-    }
-
-    /// AC2-HP step: Promote on a drivable focused pane flips to DRIVE
-    /// and emits AttemptPromote.
-    #[test]
-    fn promote_flips_mode_and_emits_attempt() {
-        let panes = watching_panes(2);
-        let mut c = Compositor::new(2);
-        c.step(InputEvent::FocusNext, &panes);
-        let a = c.step(InputEvent::Promote, &panes);
-        assert_eq!(a, CompositorAction::AttemptPromote { pane_idx: 1 });
-        assert_eq!(c.mode(), Mode::Drive);
-    }
-
-    /// AC2-ERR: Promote on an undrivable focused pane (Exited /
-    /// Disconnected) is a no-op and stays in WATCH.
-    #[test]
-    fn promote_on_exited_pane_is_noop() {
-        let panes = vec![ConnState::Exited { code: 0 }, ConnState::Watching];
-        let mut c = Compositor::new(2);
-        let a = c.step(InputEvent::Promote, &panes);
-        assert_eq!(a, CompositorAction::NoOp);
-        assert_eq!(c.mode(), Mode::Watch);
-    }
-
     /// AC3-HP: focus skips undrivable panes when cycling.
     #[test]
     fn focus_skips_undrivable_panes() {
         let panes = vec![
-            ConnState::Watching,
+            ConnState::Live,
             ConnState::Exited { code: 0 },
-            ConnState::Watching,
+            ConnState::Live,
         ];
         let mut c = Compositor::new(3);
         c.step(InputEvent::FocusNext, &panes);
@@ -1261,8 +779,8 @@ mod tests {
     #[test]
     fn pane_removal_clamps_focus() {
         let mut c = Compositor::new(3);
-        c.step(InputEvent::FocusNext, &watching_panes(3));
-        c.step(InputEvent::FocusNext, &watching_panes(3));
+        c.step(InputEvent::FocusNext, &live_panes(3));
+        c.step(InputEvent::FocusNext, &live_panes(3));
         assert_eq!(c.focus(), 2);
         c.set_pane_count(2);
         assert!(c.focus() < 2, "focus must clamp on shrink");
@@ -1283,62 +801,13 @@ mod tests {
         assert_eq!(c.focus(), 0, "set_focus is a no-op on an empty fleet");
     }
 
-    /// AC2-UI: Release from DRIVE returns to WATCH and emits
-    /// AttemptRelease for the focused pane.
+    /// Owned-PTY: a bare keystroke forwards to the focused live pane - focus
+    /// IS drive, with no promote/claim gate to pass first.
     #[test]
-    fn release_demotes_drive_to_watch() {
-        // Both panes Watching at first so FocusNext can reach pane 1
-        // (Driving is NOT drivable, so a Driving seed would have
-        // trapped focus at 0).
-        let mut panes = watching_panes(2);
+    fn keystrokes_forward_to_focused_live_pane() {
         let mut c = Compositor::new(2);
+        let panes = live_panes(2);
         c.step(InputEvent::FocusNext, &panes);
-        c.step(InputEvent::Promote, &panes);
-        // The claim is then acquired by the run loop; the per-pane
-        // FSM transitions PromotePending -> Driving (the action the
-        // run loop owns).
-        panes[1] = ConnState::PromotePending; // Promote moved it here
-        panes[1].step(ConnEvent::DriveClaimAcquired);
-        assert_eq!(panes[1], ConnState::Driving);
-        let a = c.step(InputEvent::Release, &panes);
-        assert_eq!(a, CompositorAction::AttemptRelease { pane_idx: 1 });
-        assert_eq!(c.mode(), Mode::Watch);
-    }
-
-    /// Concurrency invariant: bytes do NOT route to a pane whose per-
-    /// pane FSM is not in Driving, even while the global mode is DRIVE.
-    /// This is the load-bearing guard that closes the "claim-acquire
-    /// window" hole.
-    #[test]
-    fn keystrokes_during_claim_acquire_are_dropped() {
-        let mut c = Compositor::new(2);
-        let panes = vec![
-            ConnState::Watching,
-            ConnState::PromotePending, // RPC inflight, claim not yet acquired
-        ];
-        c.step(InputEvent::FocusNext, &panes);
-        c.step(InputEvent::Promote, &panes); // flips mode to Drive
-        assert_eq!(c.mode(), Mode::Drive);
-        // Pane 1's per-pane state is PromotePending (mid-RPC) so a
-        // keystroke must NOT reach it.
-        let a = c.step(InputEvent::Keystroke(b"x".to_vec()), &panes);
-        assert_eq!(a, CompositorAction::NoOp);
-    }
-
-    /// Once the claim is acquired, keystrokes route to the focused
-    /// pane.
-    #[test]
-    fn keystrokes_route_to_driving_pane() {
-        let mut c = Compositor::new(2);
-        // Start with both Watching so FocusNext can land on pane 1.
-        let mut panes = watching_panes(2);
-        c.step(InputEvent::FocusNext, &panes);
-        c.step(InputEvent::Promote, &panes); // global mode -> Drive
-                                             // Now the per-pane FSM is updated by the run loop after the
-                                             // claim acquisition lands.
-        panes[1] = ConnState::PromotePending;
-        panes[1].step(ConnEvent::DriveClaimAcquired);
-        assert_eq!(panes[1], ConnState::Driving);
         let a = c.step(InputEvent::Keystroke(b"hello".to_vec()), &panes);
         assert_eq!(
             a,
@@ -1349,12 +818,21 @@ mod tests {
         );
     }
 
-    /// Quit in WATCH yields Quit; the run loop releases any held claim
-    /// before exit.
+    /// A keystroke to a dead (Exited) focused pane is dropped - the per-pane
+    /// gate (`can_route_input`) refuses it.
     #[test]
-    fn quit_in_watch_yields_quit_action() {
+    fn keystrokes_to_dead_pane_are_dropped() {
+        let mut c = Compositor::new(1);
+        let panes = vec![ConnState::Exited { code: 0 }];
+        let a = c.step(InputEvent::Keystroke(b"x".to_vec()), &panes);
+        assert_eq!(a, CompositorAction::NoOp);
+    }
+
+    /// Quit yields Quit so the run loop exits cleanly.
+    #[test]
+    fn quit_yields_quit_action() {
         let mut c = Compositor::new(2);
-        let panes = watching_panes(2);
+        let panes = live_panes(2);
         let a = c.step(InputEvent::Quit, &panes);
         assert_eq!(a, CompositorAction::Quit);
     }
@@ -1405,7 +883,7 @@ mod tests {
         c.set_focus(1);
         assert_eq!(c.focus(), 1);
         // step() also self-syncs pane_count against the live states slice.
-        let panes = watching_panes(3);
+        let panes = live_panes(3);
         c.step(InputEvent::FocusNext, &panes);
         assert_eq!(c.pane_count(), 3);
     }
@@ -1425,7 +903,7 @@ mod tests {
     fn recompute_anchors_current_page_on_focused_agent() {
         let mut c = Compositor::new(10);
         // Walk focus to pane 7 (all drivable so FocusNext steps by one).
-        let panes = watching_panes(10);
+        let panes = live_panes(10);
         for _ in 0..7 {
             c.step(InputEvent::FocusNext, &panes);
         }
@@ -1448,7 +926,7 @@ mod tests {
         let mut c = Compositor::new(10);
         c.recompute_pagination(4); // 3 pages
                                    // Force-view the last page by focusing a late pane then recomputing.
-        let panes = watching_panes(10);
+        let panes = live_panes(10);
         for _ in 0..9 {
             c.step(InputEvent::FocusNext, &panes);
         }
@@ -1467,7 +945,7 @@ mod tests {
         for focus_target in 0..12 {
             for cap in 1..=12 {
                 let mut c = Compositor::new(12);
-                let panes = watching_panes(12);
+                let panes = live_panes(12);
                 for _ in 0..focus_target {
                     c.step(InputEvent::FocusNext, &panes);
                 }
@@ -1489,7 +967,7 @@ mod tests {
     fn set_pane_count_keeps_current_page_valid() {
         let mut c = Compositor::new(10);
         c.recompute_pagination(4); // 3 pages
-        let panes = watching_panes(10);
+        let panes = live_panes(10);
         for _ in 0..9 {
             c.step(InputEvent::FocusNext, &panes);
         }
@@ -1509,7 +987,7 @@ mod tests {
     fn page_next_advances_and_relocates_focus() {
         let mut c = Compositor::new(10);
         c.recompute_pagination(4); // 3 pages, C=4, focus 0, page 0
-        let panes = watching_panes(10);
+        let panes = live_panes(10);
         c.step(InputEvent::PageNext, &panes);
         assert_eq!(c.current_page(), 1);
         assert_eq!(c.focus(), 4, "focus → first pane of page 1");
@@ -1524,7 +1002,7 @@ mod tests {
     fn page_next_clamps_at_last_page_no_wrap() {
         let mut c = Compositor::new(10);
         c.recompute_pagination(4);
-        let panes = watching_panes(10);
+        let panes = live_panes(10);
         c.step(InputEvent::PageNext, &panes); // → page 1
         c.step(InputEvent::PageNext, &panes); // → page 2 (last)
         let focus_before = c.focus();
@@ -1539,7 +1017,7 @@ mod tests {
     fn page_prev_clamps_at_zero_and_relocates() {
         let mut c = Compositor::new(10);
         c.recompute_pagination(4);
-        let panes = watching_panes(10);
+        let panes = live_panes(10);
         c.step(InputEvent::PageNext, &panes); // page 1
         c.step(InputEvent::PageNext, &panes); // page 2
         c.step(InputEvent::PagePrev, &panes); // page 1
@@ -1555,7 +1033,7 @@ mod tests {
     #[test]
     fn page_keys_inert_single_page() {
         let mut c = Compositor::new(3); // capacity 3, 1 page
-        let panes = watching_panes(3);
+        let panes = live_panes(3);
         c.step(InputEvent::PageNext, &panes);
         assert_eq!(c.current_page(), 0);
         c.step(InputEvent::PagePrev, &panes);
@@ -1569,7 +1047,7 @@ mod tests {
     fn focus_follow_advances_page_on_boundary_crossing() {
         let mut c = Compositor::new(10);
         c.recompute_pagination(4); // C=4, page 0
-        let panes = watching_panes(10);
+        let panes = live_panes(10);
         // Tab within page 0 (focus 1,2,3) stays on page 0.
         c.step(InputEvent::FocusNext, &panes); // focus 1
         assert_eq!(c.current_page(), 0);
@@ -1589,7 +1067,7 @@ mod tests {
     fn focus_follow_wraps_to_page_zero() {
         let mut c = Compositor::new(6);
         c.recompute_pagination(2); // C=2 → 3 pages
-        let panes = watching_panes(6);
+        let panes = live_panes(6);
         for _ in 0..5 {
             c.step(InputEvent::FocusNext, &panes);
         }
@@ -1605,7 +1083,7 @@ mod tests {
     fn focus_prev_follows_page_backward() {
         let mut c = Compositor::new(10);
         c.recompute_pagination(4);
-        let panes = watching_panes(10);
+        let panes = live_panes(10);
         // Jump to page 2 via page key (focus 8).
         c.step(InputEvent::PageNext, &panes);
         c.step(InputEvent::PageNext, &panes);
@@ -1691,12 +1169,7 @@ mod tests {
     fn conn_state_labels_are_nonempty() {
         for s in [
             ConnState::Connecting,
-            ConnState::Watching,
-            ConnState::Driving,
-            ConnState::BusyElsewhere { holder: None },
-            ConnState::BusyElsewhere {
-                holder: Some("op".into()),
-            },
+            ConnState::Live,
             ConnState::Disconnected { reason: "x".into() },
             ConnState::Exited { code: 0 },
         ] {
@@ -1706,23 +1179,16 @@ mod tests {
 
     // ── Scrollback mode FSM ──────────────────────────────────────────────
 
-    /// AC1-HP / AC4-HP: Space enters scrollback (mode flip, no action), Esc
-    /// exits back to WATCH and snaps the focused pane to its live tail.
+    /// Leader+Space enters scrollback (mode flip, no action); Esc exits back
+    /// to driving and snaps the focused pane to its live tail.
     #[test]
     fn enter_scrollback_flips_mode_and_exit_returns_and_snaps() {
-        let panes = watching_panes(2);
+        let panes = live_panes(2);
         let mut c = Compositor::new(2);
-        // Entry flips to Scrollback AND scrolls up one line to freeze the
-        // viewport immediately (chatgpt-codex, PR #387).
+        // Entry flips Drive -> Scrollback; the pane freezes where it is (the
+        // operator scrolls with the nav keys).
         let a = c.step(InputEvent::EnterScrollback, &panes);
-        assert_eq!(
-            a,
-            CompositorAction::Scroll {
-                pane_idx: 0,
-                cmd: ScrollCmd::LineUp
-            },
-            "entry freezes the pane by scrolling up one line"
-        );
+        assert_eq!(a, CompositorAction::NoOp);
         assert_eq!(c.mode(), Mode::Scrollback);
 
         let a = c.step(InputEvent::ExitScrollback, &panes);
@@ -1734,13 +1200,13 @@ mod tests {
             },
             "exit snaps to the live tail (Locked Decision 7)"
         );
-        assert_eq!(c.mode(), Mode::Watch);
+        assert_eq!(c.mode(), Mode::Drive);
     }
 
     /// AC1-HP: scroll keys in scrollback emit Scroll actions for the focused pane.
     #[test]
     fn scroll_events_emit_scroll_actions_for_focused_pane() {
-        let panes = watching_panes(3);
+        let panes = live_panes(3);
         let mut c = Compositor::new(3);
         c.step(InputEvent::FocusNext, &panes); // focus 1
         c.step(InputEvent::EnterScrollback, &panes);
@@ -1764,11 +1230,11 @@ mod tests {
         }
     }
 
-    /// Locked Decision 5: focus / paging / promote / keystroke are inert while
-    /// scrolling (the operator is pinned to the entry pane).
+    /// Locked Decision 5: focus / paging / keystroke are inert while scrolling
+    /// (the operator is pinned to the entry pane).
     #[test]
     fn inert_keys_in_scrollback_are_noops() {
-        let panes = watching_panes(3);
+        let panes = live_panes(3);
         let mut c = Compositor::new(3);
         c.step(InputEvent::EnterScrollback, &panes);
         for ev in [
@@ -1776,7 +1242,6 @@ mod tests {
             InputEvent::FocusPrev,
             InputEvent::PageNext,
             InputEvent::PagePrev,
-            InputEvent::Promote,
             InputEvent::Keystroke(b"x".to_vec()),
             InputEvent::EnterScrollback, // re-entry is idempotent
         ] {
@@ -1784,17 +1249,5 @@ mod tests {
             assert_eq!(c.focus(), 0, "focus is pinned in scrollback");
             assert_eq!(c.mode(), Mode::Scrollback);
         }
-    }
-
-    /// Locked Decision 4: scrollback is not reachable from DRIVE.
-    #[test]
-    fn enter_scrollback_inert_in_drive() {
-        let panes = watching_panes(2);
-        let mut c = Compositor::new(2);
-        c.step(InputEvent::Promote, &panes); // -> Drive
-        assert_eq!(c.mode(), Mode::Drive);
-        let a = c.step(InputEvent::EnterScrollback, &panes);
-        assert_eq!(a, CompositorAction::NoOp);
-        assert_eq!(c.mode(), Mode::Drive, "scrollback never engages from DRIVE");
     }
 }

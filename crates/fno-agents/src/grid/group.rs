@@ -418,15 +418,6 @@ pub fn attention_view(groups: &[Group], waiting: &[bool]) -> Vec<Group> {
 
 // ── Rail selection state ─────────────────────────────────────────────────────
 
-/// Which axis the user is currently interacting with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusAxis {
-    /// Arrows navigate the rail; the compositor is in watch mode.
-    RailNav,
-    /// Keystrokes forward to the focused PTY; rail keys are suspended.
-    PaneDrive,
-}
-
 /// What the main area renders (US3). Toggled live with `Tab`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainMode {
@@ -463,8 +454,12 @@ pub struct RailState {
     /// site from desyncing it with a bare `selected_agent_idx` write. Mutate it
     /// only through the nav methods (or alongside `selected_agent_idx`).
     pub(crate) selected_group_key: Option<String>,
-    /// The active focus axis.
-    pub axis: FocusAxis,
+    /// Sustained rail-nav (browse) sub-mode (x-1356). `false` = driving the
+    /// focused pane (resting state); `true` = browsing the rail (the former
+    /// `RailNav` keymap, leader-entered). This is purely an input-routing flag
+    /// like `Mode::Scrollback` - the watch/drive *claim* axis is gone (owning
+    /// the PTY means focus IS drive, with no promote/release/denial).
+    pub nav_mode: bool,
     /// The active group-by key.
     pub group_key: GroupKey,
     /// What the main area renders: a single focused pane, or the selected
@@ -481,7 +476,7 @@ impl RailState {
         RailState {
             selected_agent_idx: None,
             selected_group_key: None,
-            axis: FocusAxis::RailNav,
+            nav_mode: false,
             group_key,
             // E5c AC-2: a space auto-tiles its members. GroupTile is the
             // default so >1 agent in one project shows as tiled panes without a
@@ -613,35 +608,16 @@ impl RailState {
         self.set_pos(groups, new_pos)
     }
 
-    /// Enter drive mode on the currently selected agent.
-    /// Returns `false` (and stays RailNav) when no agent is selected.
-    pub fn enter_drive(&mut self) -> bool {
-        if self.selected_agent_idx.is_some() {
-            self.axis = FocusAxis::PaneDrive;
-            true
-        } else {
-            false
-        }
+    /// Enter the sustained rail-nav browse sub-mode (leader-entered). No claim
+    /// is acquired - browsing the rail just routes keys to the rail keymap; the
+    /// focused pane keeps owning its PTY. Always succeeds.
+    pub fn enter_nav(&mut self) {
+        self.nav_mode = true;
     }
 
-    /// Exit drive mode, returning to RailNav. Always succeeds.
-    pub fn exit_drive(&mut self) {
-        self.axis = FocusAxis::RailNav;
-    }
-
-    /// Revert the axis to RailNav when the driven agent exits or its socket
-    /// drops (AC2-FR). Returns `true` iff the axis actually changed, so the
-    /// caller can force a full-paint and surface an "agent exited" cue rather
-    /// than stranding the operator in a phantom PaneDrive whose keystrokes
-    /// vanish into a closed PTY. Idempotent: a no-op (returns `false`) in
-    /// RailNav.
-    pub fn revert_to_nav(&mut self) -> bool {
-        if self.axis == FocusAxis::PaneDrive {
-            self.axis = FocusAxis::RailNav;
-            true
-        } else {
-            false
-        }
+    /// Leave rail-nav, returning to driving the focused pane.
+    pub fn exit_nav(&mut self) {
+        self.nav_mode = false;
     }
 
     // ── Main-area mode (US3) ─────────────────────────────────────────────────
@@ -1607,63 +1583,28 @@ mod tests {
         assert_eq!(rs.selected_group_key.as_deref(), Some("A"));
     }
 
-    // ── Focus axis transitions ────────────────────────────────────────────
+    // ── Rail-nav sub-mode (x-1356: replaces the watch/drive axis) ──────────
 
     #[test]
-    fn ac2_focus_axis_enter_and_exit_drive() {
-        let rows = make_rows(&[("wkA", "/alpha", "codex", "live")]);
-        let groups = group_by(&rows, GroupKey::Cwd);
-        let mut state = RailState::new(GroupKey::Cwd);
-        state.re_anchor(&groups);
-
-        // Start in RailNav.
-        assert_eq!(state.axis, FocusAxis::RailNav);
-
-        // Enter drive.
-        let entered = state.enter_drive();
-        assert!(entered);
-        assert_eq!(state.axis, FocusAxis::PaneDrive);
-
-        // Exit drive (Esc).
-        state.exit_drive();
-        assert_eq!(state.axis, FocusAxis::RailNav);
+    fn nav_mode_defaults_to_driving() {
+        // Owned-PTY resting state is driving the focused pane, not browsing -
+        // the rail is entered via the leader, not the default.
+        let state = RailState::new(GroupKey::Cwd);
+        assert!(!state.nav_mode, "fresh rail starts driving, not in nav");
     }
 
     #[test]
-    fn ac2_err_drive_refused_when_no_selection() {
+    fn nav_mode_enter_and_exit() {
         let mut state = RailState::new(GroupKey::Cwd);
-        assert_eq!(state.selected_agent_idx, None);
 
-        // Drive refused when nothing is selected.
-        let entered = state.enter_drive();
-        assert!(!entered);
-        assert_eq!(
-            state.axis,
-            FocusAxis::RailNav,
-            "axis stays RailNav after refusal"
-        );
-    }
+        // Leader enters the sustained browse sub-mode (no selection needed -
+        // there is no claim to acquire, unlike the old enter_drive).
+        state.enter_nav();
+        assert!(state.nav_mode);
 
-    // ── AC2-FR: driven agent exits -> axis auto-reverts to RailNav ────────
-    #[test]
-    fn ac2_fr_revert_to_nav_on_driven_exit() {
-        let rows = make_rows(&[("wkA", "/alpha", "codex", "live")]);
-        let groups = group_by(&rows, GroupKey::Cwd);
-        let mut state = RailState::new(GroupKey::Cwd);
-        state.re_anchor(&groups);
-        assert!(state.enter_drive());
-        assert_eq!(state.axis, FocusAxis::PaneDrive);
-
-        // The driven agent exits -> revert reports a real change.
-        assert!(
-            state.revert_to_nav(),
-            "first revert from PaneDrive returns true"
-        );
-        assert_eq!(state.axis, FocusAxis::RailNav);
-
-        // Idempotent: already in RailNav -> no-op, returns false.
-        assert!(!state.revert_to_nav(), "revert in RailNav is a no-op");
-        assert_eq!(state.axis, FocusAxis::RailNav);
+        // Esc / Enter returns to driving.
+        state.exit_nav();
+        assert!(!state.nav_mode);
     }
 
     // ── Group key labels ──────────────────────────────────────────────────
