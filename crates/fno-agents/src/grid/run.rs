@@ -1235,7 +1235,9 @@ fn raster_footer(
     frame: &mut ScreenBuffer,
     paged: &PageLayout,
     comp: &Compositor,
-    host_interactive: &[bool],
+    // Owned-PTY: the footer hint no longer branches on host_mode (no
+    // "Enter drive" vs "watch only"); kept in the signature for the caller.
+    _host_interactive: &[bool],
     transient_hint: Option<&str>,
     badges: &[(usize, usize)],
     cap_note: Option<(usize, usize)>,
@@ -1783,16 +1785,15 @@ async fn open_watch_pane(
     idx: usize,
     rows: u16,
     cols: u16,
-    interactive: bool,
     tx: &mpsc::Sender<PaneMsg>,
 ) -> WatchOpen {
     let pane = Pane::new(rows, cols);
-    // Owned-PTY model (x-1356): one bidirectional connection per pane. A
-    // drivable pane opens "interactive" so its sink carries keystrokes; an
-    // exec (one-shot) pane opens "watch" - the daemon rejects a drive WS for
-    // it, and it never takes input anyway (host_interactive is the marker).
-    let mode = if interactive { "interactive" } else { "watch" };
-    match open_drive_ws(home, name, mode).await {
+    // Owned-PTY model (x-1356): every pane renders over a cheap "watch"
+    // connection (no drive slot - the daemon caps interactive drives at
+    // DEFAULT_MAX_CONCURRENT_DRIVES). The single interactive connection that
+    // carries keystrokes is opened lazily for the pane actually being driven
+    // (see `ensure_drive_sink`), so only one drive slot is ever held.
+    match open_drive_ws(home, name, "watch").await {
         Ok(ws) => {
             let (mut sink, mut source) = ws.split();
             if send_resize(&mut sink, rows, cols).await.is_err() {
@@ -2204,8 +2205,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
         // Non-empty fleet => paged0 is Some (only the empty front door is None).
         let layout0 = paged0.as_ref().expect("non-empty fleet has a layout");
         let (rows, cols) = target_pane_inner(layout0, idx);
-        let (pane, state, sink) =
-            open_watch_pane(home, name, idx, rows, cols, host_interactive[idx], &tx).await;
+        let (pane, state, sink) = open_watch_pane(home, name, idx, rows, cols, &tx).await;
         panes.push(pane);
         states.push(state);
         watch_sinks.push(sink);
@@ -2216,6 +2216,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // correct from the first frame. The empty front door (paged0 None) has no
     // panes; capacity 1 is a harmless placeholder until the first live-add.
     comp.recompute_pagination(paged0.as_ref().map(|p| p.capacity).unwrap_or(1));
+    // The single interactive drive connection, opened lazily for the pane being
+    // driven (one slot against the daemon's interactive-drive cap).
+    let mut drive_sink: DriveSink = None;
 
     // Terminal setup via crossterm. Using `crossterm::terminal::enable_raw_mode`
     // (rather than a hand-rolled libc cfmakeraw) is load-bearing: it
@@ -2544,7 +2547,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                 Ok(paged) => {
                                                     let (rows, cols) = target_pane_inner(&paged, new_idx);
                                                     let (pane, state, sink) =
-                                                        open_watch_pane(home, &name, new_idx, rows, cols, true, &tx).await;
+                                                        open_watch_pane(home, &name, new_idx, rows, cols, &tx).await;
                                                     // A /target worker is interactive claude.
                                                     host_interactive.push(true);
                                                     panes.push(pane);
@@ -2734,7 +2737,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             InputEvent::Keystroke(leader::leader_bytes(&leader_cfg)),
                                             &states,
                                         );
-                                        if handle_action(act, &mut watch_sinks).await {
+                                        if handle_action(act, &mut drive_sink, &names, home).await {
                                             break;
                                         }
                                         dirty = true;
@@ -3102,7 +3105,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                         InputEvent::Keystroke(leader::leader_bytes(&leader_cfg)),
                                         &states,
                                     );
-                                    if handle_action(act, &mut watch_sinks).await {
+                                    if handle_action(act, &mut drive_sink, &names, home).await {
                                         break;
                                     }
                                     dirty = true;
@@ -3153,7 +3156,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     // key is reported and NOT forwarded to the agent.
                                     match leader_command(cmdkey) {
                                         Some(InputEvent::Quit) => {
-                                            if handle_action(CompositorAction::Quit, &mut watch_sinks).await {
+                                            if handle_action(CompositorAction::Quit, &mut drive_sink, &names, home).await {
                                                 break;
                                             }
                                         }
@@ -3187,7 +3190,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             // page just relocates the live cursor - no claim
                                             // to release on the old pane or acquire on the new.
                                             let act = comp.step(input, &states);
-                                            if handle_action(act, &mut watch_sinks).await {
+                                            if handle_action(act, &mut drive_sink, &names, home).await {
                                                 break;
                                             }
                                             dirty = true;
@@ -3239,7 +3242,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                         }
                                     }
                                     other => {
-                                        if handle_action(other, &mut watch_sinks).await {
+                                        if handle_action(other, &mut drive_sink, &names, home).await {
                                             break; // Quit
                                         }
                                     }
@@ -3444,10 +3447,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         if matches!(comp.observe_pane_states(&states), CompositorAction::Quit) {
                             break;
                         }
-                        // Owned-PTY: nothing to release on exit - there is no drive
-                        // claim and no second sink. Focus re-anchors to a live member
-                        // via the rail's existing re_anchor; a dead focused pane simply
-                        // renders "exited" and eats keystrokes (no axis to revert).
+                        // Owned-PTY: no drive claim to release. Drop the lazy
+                        // interactive connection if it pointed at this pane (its
+                        // daemon-side slot is gone with the agent). Focus re-anchors
+                        // via the rail's existing re_anchor; a dead pane renders
+                        // "exited" and eats keystrokes (no axis to revert).
+                        if drive_sink.as_ref().map(|(i, _)| *i) == Some(idx) {
+                            drive_sink = None;
+                        }
                         // codex P2: this exit just shrank the tiled survivor set
                         // (AC3-FR reflow). The next paint redraws the survivors at
                         // their new LARGER tile size, but their PTYs keep the old
@@ -3474,8 +3481,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         if matches!(comp.observe_pane_states(&states), CompositorAction::Quit) {
                             break;
                         }
-                        // Owned-PTY: the single sink dropped; the pane renders
-                        // "disconnected - r to retry". No drive claim to revert.
+                        // Owned-PTY: the watch sink dropped; the pane renders
+                        // "disconnected - r to retry". Drop the interactive drive
+                        // connection too if it pointed here.
+                        if drive_sink.as_ref().map(|(i, _)| *i) == Some(idx) {
+                            drive_sink = None;
+                        }
                         dirty = true;
                     }
                     None => break,
@@ -3549,10 +3560,13 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
         }
     }
 
-    // Teardown: detach every pane's owned-PTY sink so the daemon drops the
-    // grid as a writer cleanly. The terminal (raw mode + alternate screen +
-    // cursor) is restored by `TerminalGuard`'s Drop when `_guard` falls out of
-    // scope at the end of this function.
+    // Teardown: detach the interactive drive connection (releases its daemon
+    // slot) and every pane's watch sink so the daemon drops the grid cleanly.
+    // The terminal (raw mode + alternate screen + cursor) is restored by
+    // `TerminalGuard`'s Drop when `_guard` falls out of scope.
+    if let Some((_, sink)) = drive_sink.take() {
+        close_driver_sink(sink, "grid_quit").await;
+    }
     for sink in watch_sinks.into_iter().flatten() {
         close_driver_sink(sink, "grid_quit").await;
     }
@@ -3633,7 +3647,51 @@ fn mouse_to_input(kind: MouseEventKind, mode: Mode, has_history: bool) -> Option
 /// loop should quit. Owned-PTY model (x-1356): the only I/O action is
 /// forwarding keystrokes to the focused pane's single owned-PTY sink - there
 /// is no promote/release, so no second "interactive" connection to open.
-async fn handle_action(action: CompositorAction, watch_sinks: &mut [Option<WsSink>]) -> bool {
+/// The single interactive drive connection, keyed to the pane it controls.
+/// At most ONE is ever open: the daemon counts interactive ("controlling")
+/// connections against `DEFAULT_MAX_CONCURRENT_DRIVES` and they are per-agent
+/// exclusive, so the grid renders every pane over cheap "watch" connections
+/// and holds just one interactive slot for the pane being driven.
+type DriveSink = Option<(usize, WsSink)>;
+
+/// Point the one interactive drive connection at `pane_idx`, opening it lazily
+/// and closing any previous one first (release the old slot before claiming
+/// the new). Returns the sink, or `None` if the daemon refused (agent driven
+/// elsewhere, cap full) - the caller drops the keystrokes.
+async fn ensure_drive_sink<'a>(
+    drive_sink: &'a mut DriveSink,
+    pane_idx: usize,
+    name: &str,
+    home: &AgentsHome,
+) -> Option<&'a mut WsSink> {
+    if drive_sink.as_ref().map(|(i, _)| *i) != Some(pane_idx) {
+        if let Some((_, old)) = drive_sink.take() {
+            close_driver_sink(old, "refocus").await;
+        }
+        match open_drive_ws(home, name, "interactive").await {
+            Ok(ws) => {
+                let (sink, mut source) = ws.split();
+                // Drain + discard the interactive stream's echo; the pane
+                // renders from its own "watch" connection.
+                tokio::spawn(async move { while source.next().await.is_some() {} });
+                *drive_sink = Some((pane_idx, sink));
+            }
+            Err(_) => return None,
+        }
+    }
+    drive_sink.as_mut().map(|(_, s)| s)
+}
+
+/// Apply a compositor action that may require I/O. Returns `true` when the loop
+/// should quit. Owned-PTY model (x-1356): the only I/O action is forwarding
+/// keystrokes, which lazily opens the single interactive drive connection for
+/// the focused pane (the dispatch has already refused exec panes).
+async fn handle_action(
+    action: CompositorAction,
+    drive_sink: &mut DriveSink,
+    names: &[String],
+    home: &AgentsHome,
+) -> bool {
     match action {
         CompositorAction::Quit => return true,
         CompositorAction::NoOp => {}
@@ -3641,12 +3699,10 @@ async fn handle_action(action: CompositorAction, watch_sinks: &mut [Option<WsSin
         // never reaches here. Handle it for exhaustiveness.
         CompositorAction::Scroll { .. } => {}
         CompositorAction::ForwardKeystrokes { pane_idx, bytes } => {
-            // Every live pane owns one bidirectional sink (opened "interactive"
-            // for drivable panes, "watch" for exec); focus routes keystrokes
-            // straight to it. An exec pane's daemon-side watch connection
-            // simply ignores the input.
-            if let Some(sink) = watch_sinks.get_mut(pane_idx).and_then(Option::as_mut) {
-                let _ = sink.send(Message::Binary(bytes.into())).await;
+            if let Some(name) = names.get(pane_idx) {
+                if let Some(sink) = ensure_drive_sink(drive_sink, pane_idx, name, home).await {
+                    let _ = sink.send(Message::Binary(bytes.into())).await;
+                }
             }
         }
     }
