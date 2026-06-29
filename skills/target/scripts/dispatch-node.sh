@@ -44,6 +44,15 @@ set -uo pipefail
 command -v fno >/dev/null 2>&1 || { echo "failed: - reason=\"fno not on PATH\"" >&2; echo "summary: launched=0 parked=0 already=0 done=0 failed=1 capped=0"; exit 1; }
 command -v jq  >/dev/null 2>&1 || { echo "failed: - reason=\"jq not on PATH\""  >&2; echo "summary: launched=0 parked=0 already=0 done=0 failed=1 capped=0"; exit 1; }
 
+# Canonical MAIN checkout for deterministic --fresh isolation (x-73ca). The
+# git-common-dir's parent is the main checkout even when the dispatcher runs
+# from a linked worktree; `fno worktree ensure --repo <this>` then creates the
+# worker's conductor worktree off origin/main. Empty when not in a git repo
+# (the --fresh arm falls back to the Rust runtime's own --fresh resolution).
+CANONICAL_ROOT=""
+_gcd="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
+[[ -n "$_gcd" ]] && CANONICAL_ROOT="$(dirname "$_gcd")"
+
 # ---- arg parse --------------------------------------------------------------
 NODES=()
 ALL_READY=0
@@ -271,8 +280,8 @@ for id in "${NODES[@]}"; do
     cwd_hint="--cwd $node_cwd "
     dry_cwd="$node_cwd"
   elif [[ "$HERE" -eq 0 ]]; then
-    cwd_hint="--fresh "
-    dry_cwd="<canonical main (--fresh)>"
+    cwd_hint="--cwd <fno worktree ensure> "
+    dry_cwd="<conductor worktree (ensure), else --fresh>"
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -318,11 +327,22 @@ for id in "${NODES[@]}"; do
   spawn_err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/dispatch-node-$$.err")"
   # Three explicit branches (NOT an optional-flag array): bash 3.2 (macOS)
   # errors on `"${arr[@]}"` for an empty array under `set -u`. node cwd ->
-  # --cwd; no node cwd + default -> --fresh (canonical); --here -> inherit.
+  # --cwd; no node cwd + default -> ensure a conductor worktree and pass --cwd
+  # it (deterministic isolation, x-73ca), falling back to --fresh on any ensure
+  # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
+  launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
     spawn_out="$(fno agents spawn --provider claude --cwd "$node_cwd" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
-    spawn_out="$(fno agents spawn --provider claude --fresh "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    wt=""
+    [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
+    if [[ -n "$wt" ]]; then
+      spawn_out="$(fno agents spawn --provider claude --cwd "$wt" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      launch_cwd="$wt"
+    else
+      spawn_out="$(fno agents spawn --provider claude --fresh "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      launch_cwd="<canonical main (--fresh)>"
+    fi
   else
     spawn_out="$(fno agents spawn --provider claude "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
@@ -357,7 +377,7 @@ for id in "${NODES[@]}"; do
   fi
   # Launched. Leave the reservation to expire by TTL (the worker now owns
   # node:<id>, which guards later dispatches).
-  echo "launched $id name=$agent_name session=$sid cwd=${node_cwd:-$(pwd)} hint=\"fno agents logs $agent_name\""
+  echo "launched $id name=$agent_name session=$sid cwd=${launch_cwd} hint=\"fno agents logs $agent_name\""
   n_launched=$((n_launched + 1))
 done
 
