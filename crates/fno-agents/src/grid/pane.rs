@@ -711,7 +711,7 @@ mod tests {
     fn is_waiting_true_on_prompt_glyph_when_watching() {
         let mut pane = Pane::new(3, 20);
         pane.feed("codex 0.130\nbuild X\n\u{276f} ".as_bytes());
-        assert!(pane.is_waiting(&ConnState::Watching));
+        assert!(pane.is_waiting(&ConnState::Live));
     }
 
     /// A live pane with no prompt glyph (mid-render) is not waiting.
@@ -719,7 +719,7 @@ mod tests {
     fn is_waiting_false_without_prompt_glyph() {
         let mut pane = Pane::new(3, 20);
         pane.feed(b"loading a long banner of text");
-        assert!(!pane.is_waiting(&ConnState::Watching));
+        assert!(!pane.is_waiting(&ConnState::Live));
     }
 
     /// AC2-ERR / Domain Pitfall: an EXITED pane's frozen last frame ending in
@@ -736,7 +736,7 @@ mod tests {
             reason: "lost".into()
         }));
         // Same frame, but live → it IS waiting (proves the gate is the cause).
-        assert!(pane.is_waiting(&ConnState::Watching));
+        assert!(pane.is_waiting(&ConnState::Live));
     }
 
     /// A busy/auth wall on a live pane is not waiting (shared readiness
@@ -745,7 +745,7 @@ mod tests {
     fn is_waiting_false_on_busy_or_wall() {
         let mut pane = Pane::new(4, 30);
         pane.feed("running tool\nEsc to interrupt\n\u{276f} ".as_bytes());
-        assert!(!pane.is_waiting(&ConnState::Watching));
+        assert!(!pane.is_waiting(&ConnState::Live));
     }
 
     // ---- Wave 4.2 tests: winsize policy + debouncer + tail-clip ----

@@ -19,7 +19,6 @@
 //! [`render_to`]) are unit-tested; the async wiring is exercised live (it
 //! needs a daemon + agents, covered by the manual run path).
 
-use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -275,66 +274,58 @@ fn resolve_host_modes(names: &[String], home: &AgentsHome) -> Vec<bool> {
     host_modes_from_rows(rows, names)
 }
 
-/// Decide whether an operator input is an Enter-to-drive on a `host_mode=exec`
-/// pane, which the grid refuses (exec agents are one-shot and watch-only).
-/// Pure + testable; the run loop turns a `true` into a transient watch-only
-/// hint instead of stepping the compositor into DRIVE. (ab-7fd7ae49)
-fn promote_blocked_by_exec(
-    input: &InputEvent,
-    mode: Mode,
-    focus: usize,
-    host_interactive: &[bool],
-) -> bool {
-    matches!(input, InputEvent::Promote)
-        && mode == Mode::Watch
-        && !host_interactive.get(focus).copied().unwrap_or(false)
+/// Map a bare crossterm key to a [`Keystroke`](InputEvent::Keystroke) for the
+/// focused pane's owned PTY.
+///
+/// Owned-PTY model (x-1356): every bare key forwards to the focused agent -
+/// there is no WATCH that eats keys and no Esc-releases-drive. Ctrl-C maps to
+/// the `0x03` control byte via [`key_to_bytes`] and reaches the agent (so you
+/// can interrupt it); quitting the grid is a leader command ([`leader_command`]),
+/// never a bare key. An unmappable key yields `None` (dropped, not guessed).
+fn key_to_input(key: KeyEvent) -> Option<InputEvent> {
+    key_to_bytes(key).map(InputEvent::Keystroke)
 }
 
-/// Map a crossterm key event to a compositor [`InputEvent`].
+/// Map a post-leader key to a multiplexer [`InputEvent`] (focus / page / quit).
 ///
-/// Pure + testable. In WATCH, Tab / arrows move focus, Enter promotes,
-/// `q` and Ctrl-C quit, other chars are eaten (returned as `Keystroke`
-/// which the compositor drops in WATCH). In DRIVE, every key becomes a
-/// `Keystroke` forwarded to the focused agent, EXCEPT Esc which releases
-/// and Ctrl-C which still quits the whole grid (an operator escape hatch).
-fn key_to_input(key: KeyEvent, mode: Mode) -> Option<InputEvent> {
+/// Pure + testable. This is the command set the leader unlocks - the former
+/// WATCH keymap minus the promote/scrollback verbs that watch mode removed.
+/// A bare key never reaches here (it forwards to the agent); only a key the
+/// operator typed AFTER the leader does.
+fn leader_command(key: KeyEvent) -> Option<InputEvent> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     if ctrl && matches!(key.code, KeyCode::Char('c')) {
         return Some(InputEvent::Quit);
     }
-    match mode {
-        Mode::Watch => match key.code {
-            KeyCode::Tab | KeyCode::Right | KeyCode::Down => Some(InputEvent::FocusNext),
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => Some(InputEvent::FocusPrev),
-            // Page navigation (fu-grid-pagination, task 2.1). `]`/`[` are the
-            // always-available pair (Claude's Discretion 1); PgDn/PgUp alias
-            // them. Inert when single-page (Compositor::page_* clamp to a
-            // no-op at page_count == 1).
-            KeyCode::Char(']') | KeyCode::PageDown => Some(InputEvent::PageNext),
-            KeyCode::Char('[') | KeyCode::PageUp => Some(InputEvent::PagePrev),
-            KeyCode::Enter => Some(InputEvent::Promote),
-            // Space enters scrollback on the focused pane (the run loop gates
-            // on the pane having history). `Space` is otherwise inert in WATCH.
-            KeyCode::Char(' ') => Some(InputEvent::EnterScrollback),
-            KeyCode::Char('q') => Some(InputEvent::Quit),
-            _ => None, // other keys are inert in WATCH
-        },
-        Mode::Drive => match key.code {
-            KeyCode::Esc => Some(InputEvent::Release),
-            _ => key_to_bytes(key).map(InputEvent::Keystroke),
-        },
-        // SCROLLBACK is modal: the keymap is repurposed to scroll the frozen
-        // focused pane. Esc exits to WATCH; everything unmapped is inert.
-        Mode::Scrollback => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => Some(InputEvent::ScrollLineUp),
-            KeyCode::Down | KeyCode::Char('j') => Some(InputEvent::ScrollLineDown),
-            KeyCode::PageUp => Some(InputEvent::ScrollPageUp),
-            KeyCode::PageDown => Some(InputEvent::ScrollPageDown),
-            KeyCode::Char('g') | KeyCode::Home => Some(InputEvent::ScrollTop),
-            KeyCode::Char('G') | KeyCode::End => Some(InputEvent::ScrollBottom),
-            KeyCode::Esc => Some(InputEvent::ExitScrollback),
-            _ => None,
-        },
+    match key.code {
+        KeyCode::Tab | KeyCode::Right | KeyCode::Down => Some(InputEvent::FocusNext),
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Up => Some(InputEvent::FocusPrev),
+        // Page navigation. `]`/`[` are the always-available pair; PgDn/PgUp
+        // alias them. Inert when single-page (Compositor::page_* clamp).
+        KeyCode::Char(']') | KeyCode::PageDown => Some(InputEvent::PageNext),
+        KeyCode::Char('[') | KeyCode::PageUp => Some(InputEvent::PagePrev),
+        // Scrollback entry, rebound from the former bare `Space` to leader+Space
+        // (bare Space now forwards to the agent like any other key, x-1356).
+        KeyCode::Char(' ') => Some(InputEvent::EnterScrollback),
+        KeyCode::Char('q') => Some(InputEvent::Quit),
+        _ => None,
+    }
+}
+
+/// Map a bare key to a scrollback [`InputEvent`] while the focused pane is
+/// frozen ([`Mode::Scrollback`]). `Esc` exits; everything unmapped is inert so
+/// a stray key never leaks to the frozen agent. Pure + testable, mirroring
+/// [`key_to_input`] for the scrollback keymap.
+fn scrollback_key(key: KeyEvent) -> Option<InputEvent> {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => Some(InputEvent::ScrollLineUp),
+        KeyCode::Down | KeyCode::Char('j') => Some(InputEvent::ScrollLineDown),
+        KeyCode::PageUp => Some(InputEvent::ScrollPageUp),
+        KeyCode::PageDown => Some(InputEvent::ScrollPageDown),
+        KeyCode::Char('g') | KeyCode::Home => Some(InputEvent::ScrollTop),
+        KeyCode::Char('G') | KeyCode::End => Some(InputEvent::ScrollBottom),
+        KeyCode::Esc => Some(InputEvent::ExitScrollback),
+        _ => None,
     }
 }
 
@@ -1244,7 +1235,9 @@ fn raster_footer(
     frame: &mut ScreenBuffer,
     paged: &PageLayout,
     comp: &Compositor,
-    host_interactive: &[bool],
+    // Owned-PTY: the footer hint no longer branches on host_mode (no
+    // "Enter drive" vs "watch only"); kept in the signature for the caller.
+    _host_interactive: &[bool],
     transient_hint: Option<&str>,
     badges: &[(usize, usize)],
     cap_note: Option<(usize, usize)>,
@@ -1254,19 +1247,17 @@ fn raster_footer(
         // A transient operator message overrides the footer for one frame.
         truncate(h, paged.footer.cols as usize)
     } else if comp.mode() == Mode::Scrollback {
-        // Modal scrollback footer: the position indicator plus the scroll
-        // keymap. No pagination chrome - the operator is pinned to one pane.
+        // Scrollback mode owns the footer: show the offset + the scroll/exit
+        // affordance (the pane is frozen; Esc snaps back to the live tail).
         truncate(
-            &format!(
-                "SCROLLBACK -{scroll_offset}  ·  ↑↓ line · PgUp/PgDn page · g/G ends · Esc live"
-            ),
+            &format!("SCROLLBACK -{scroll_offset} · ↑↓ scroll · Esc live"),
             paged.footer.cols as usize,
         )
     } else {
         // Pagination chrome is the load-bearing footer content (the operator's
         // awareness of off-screen agents), so it leads the line and survives
-        // truncation on a narrow terminal; the mode hint fills whatever space is
-        // left. Single-page keeps the fuller v1-style hint (AC1-UI: no chrome).
+        // truncation on a narrow terminal; the mux hint fills whatever space is
+        // left.
         let mut line = String::new();
         if !paged.is_single_page() {
             // 1-indexed page display for humans.
@@ -1275,27 +1266,18 @@ fn raster_footer(
                 paged.current_page + 1,
                 paged.page_count
             ));
-            if comp.mode() == Mode::Watch {
-                for (page, count) in badges {
-                    line.push_str(&format!("  ▸p{}●{}", page + 1, count));
-                }
+            for (page, count) in badges {
+                line.push_str(&format!("  ▸p{}●{}", page + 1, count));
             }
             line.push_str("  ·  ");
         }
-        // Enter affordance is host_mode-aware for the focused pane (ab-7fd7ae49):
-        // "Enter drive" only when it is an interactive host, else "watch only".
-        let focus_interactive = host_interactive.get(comp.focus()).copied().unwrap_or(false);
-        let hint = match (comp.mode(), paged.is_single_page(), focus_interactive) {
-            (Mode::Watch, true, true) => "WATCH - ↹/arrows focus · Enter drive · q quit",
-            (Mode::Watch, true, false) => {
-                "WATCH - ↹/arrows focus · Enter: exec - watch only · q quit"
-            }
-            (Mode::Watch, false, true) => "[ ] page · ↹ focus · Enter drive · q quit",
-            (Mode::Watch, false, false) => "[ ] page · ↹ focus · Enter: exec - watch only · q quit",
-            (Mode::Drive, _, _) => "DRIVE - leader for mux · Esc release · Ctrl-C quit",
-            // Scrollback is handled by the dedicated branch above; this arm
-            // exists only for exhaustiveness and is never reached at runtime.
-            (Mode::Scrollback, _, _) => "SCROLLBACK - Esc live",
+        // Owned-PTY model (x-1356): every pane is live - type straight into the
+        // focused one; the leader unlocks mux commands. No WATCH/DRIVE split,
+        // no take-over, no per-pane "exec - watch only".
+        let hint = if paged.is_single_page() {
+            "type into the focused pane  ·  leader then: ↹ focus · q quit"
+        } else {
+            "type into the focused pane  ·  leader then: ↹ focus · ] [ page · q quit"
         };
         line.push_str(hint);
         if let Some((shown, total)) = cap_note {
@@ -1475,12 +1457,13 @@ fn raster_footer_rail(
     attn: Option<&str>,
     hint: Option<&str>,
 ) {
-    let (axis_label, keymap) = match rail_state.axis {
-        group::FocusAxis::RailNav => (
-            "WATCH",
-            "↑↓ select · Enter/d drive · Tab tile · g regroup · a attn · t railless · q quit",
-        ),
-        group::FocusAxis::PaneDrive => ("DRIVE", "Esc release · Ctrl-C quit"),
+    let (axis_label, keymap) = if rail_state.nav_mode {
+        (
+            "NAV",
+            "↑↓ select · Enter/d drive · Tab tile · g regroup · a attn · t hide · Esc drive",
+        )
+    } else {
+        ("DRIVE", "type to drive the pane · leader for rail commands")
     };
     let key_label = rail_state.group_key.label();
     // The mode token names the active main-area mode (US3 footer invariant). It
@@ -1583,9 +1566,9 @@ fn build_frame_rail(
                 .get(focused_idx)
                 .map(ConnState::label)
                 .unwrap_or_else(|| "?".to_string());
-            // Accent the border when in PaneDrive (AC2-UI).
-            let drive_focused = focused && matches!(rail_state.axis, group::FocusAxis::PaneDrive);
-            raster_border(&mut frame, tile, drive_focused || focused);
+            // Owned-PTY: the focused pane is always the drive target, so the
+            // accent keys off plain focus (the PaneDrive axis is gone, x-1356).
+            raster_border(&mut frame, tile, focused);
             raster_title(&mut frame, tile, name, &label, focused);
             if let Some(snap) = vis_snapshots.first_mut() {
                 raster_pane_interior(&mut frame, tile, snap);
@@ -1686,14 +1669,15 @@ fn raster_footer_rail_group(
     attn: Option<&str>,
     hint: Option<&str>,
 ) {
-    let (axis_label, keymap) = match rail_state.axis {
-        group::FocusAxis::RailNav => (
-            "WATCH",
-            // `Enter focus` drills into the selected tile (-> Single); `d` drives
-            // it directly; `Tab` also toggles back to Single (Open Q2 / drill-down).
-            "↑↓ select · Enter focus · Tab single · d drive · ]/[ page · g regroup · a attn · t railless · q quit",
-        ),
-        group::FocusAxis::PaneDrive => ("DRIVE", "Esc release · Ctrl-C quit"),
+    let (axis_label, keymap) = if rail_state.nav_mode {
+        (
+            "NAV",
+            // `Enter` drills into the selected tile (-> Single); `d` drives it
+            // directly; `Tab` also toggles back to Single (Open Q2 / drill-down).
+            "↑↓ select · Enter focus · Tab single · d drive · ]/[ page · g regroup · a attn · t hide · Esc drive",
+        )
+    } else {
+        ("DRIVE", "type to drive the pane · leader for rail commands")
     };
     let key_label = rail_state.group_key.label();
     let filter_seg = attention_filter_label(rail_state.attention_filter);
@@ -1804,6 +1788,11 @@ async fn open_watch_pane(
     tx: &mpsc::Sender<PaneMsg>,
 ) -> WatchOpen {
     let pane = Pane::new(rows, cols);
+    // Owned-PTY model (x-1356): every pane renders over a cheap "watch"
+    // connection (no drive slot - the daemon caps interactive drives at
+    // DEFAULT_MAX_CONCURRENT_DRIVES). The single interactive connection that
+    // carries keystrokes is opened lazily for the pane actually being driven
+    // (see `ensure_drive_sink`), so only one drive slot is ever held.
     match open_drive_ws(home, name, "watch").await {
         Ok(ws) => {
             let (mut sink, mut source) = ws.split();
@@ -1858,15 +1847,11 @@ async fn resize_all_panes(
     paged: &PageLayout,
     panes: &mut [Pane],
     watch_sinks: &mut [Option<WsSink>],
-    driver_sinks: &mut BTreeMap<usize, WsSink>,
 ) {
     for (idx, pane) in panes.iter_mut().enumerate() {
         let (rows, cols) = target_pane_inner(paged, idx);
         pane.resize(rows, cols);
         if let Some(sink) = watch_sinks.get_mut(idx).and_then(Option::as_mut) {
-            let _ = send_resize(sink, rows, cols).await;
-        }
-        if let Some(sink) = driver_sinks.get_mut(&idx) {
             let _ = send_resize(sink, rows, cols).await;
         }
     }
@@ -1899,7 +1884,6 @@ async fn resize_rail_focus(
     focused_idx: usize,
     panes: &mut [Pane],
     watch_sinks: &mut [Option<WsSink>],
-    driver_sinks: &mut BTreeMap<usize, WsSink>,
 ) {
     let Some((rows, cols)) = rail_main_inner(tty) else {
         return;
@@ -1909,9 +1893,6 @@ async fn resize_rail_focus(
     };
     pane.resize(rows, cols);
     if let Some(sink) = watch_sinks.get_mut(focused_idx).and_then(Option::as_mut) {
-        let _ = send_resize(sink, rows, cols).await;
-    }
-    if let Some(sink) = driver_sinks.get_mut(&focused_idx) {
         let _ = send_resize(sink, rows, cols).await;
     }
 }
@@ -1928,7 +1909,6 @@ async fn resize_rail_group(
     members: &[usize],
     panes: &mut [Pane],
     watch_sinks: &mut [Option<WsSink>],
-    driver_sinks: &mut BTreeMap<usize, WsSink>,
 ) {
     let main = &rail_page.main;
     let uniform = main.uniform_pane_inner();
@@ -1946,9 +1926,6 @@ async fn resize_rail_group(
         };
         pane.resize(rows, cols);
         if let Some(sink) = watch_sinks.get_mut(gidx).and_then(Option::as_mut) {
-            let _ = send_resize(sink, rows, cols).await;
-        }
-        if let Some(sink) = driver_sinks.get_mut(&gidx) {
             let _ = send_resize(sink, rows, cols).await;
         }
     }
@@ -2095,7 +2072,6 @@ async fn apply_group_tile_resize(
     squads: &squads::SquadStore,
     panes: &mut [Pane],
     watch_sinks: &mut [Option<WsSink>],
-    driver_sinks: &mut BTreeMap<usize, WsSink>,
 ) {
     let groups = rail_view_groups(rail_rows, rs, panes, states, squads);
     let Some(sel_group) = rs.selected_group(&groups) else {
@@ -2112,15 +2088,11 @@ async fn apply_group_tile_resize(
     }
     let page = rs.selected_group_page(&live_group, main_capacity(tty));
     if let Ok(rp) = layout::compute_with_rail_page(tty, layout::RAIL_COLS, n, page) {
-        resize_rail_group(&rp, &live_group.members, panes, watch_sinks, driver_sinks).await;
+        resize_rail_group(&rp, &live_group.members, panes, watch_sinks).await;
     }
 }
 
-async fn ping_open_sinks(
-    watch_sinks: &mut [Option<WsSink>],
-    driver_sinks: &mut BTreeMap<usize, WsSink>,
-    states: &mut [ConnState],
-) {
+async fn ping_open_sinks(watch_sinks: &mut [Option<WsSink>], states: &mut [ConnState]) {
     for (idx, sink) in watch_sinks.iter_mut().enumerate() {
         if let Some(open) = sink.as_mut() {
             if send_ping(open).await.is_err() {
@@ -2131,21 +2103,6 @@ async fn ping_open_sinks(
                     });
                 }
             }
-        }
-    }
-
-    let mut dead = Vec::new();
-    for (idx, sink) in driver_sinks.iter_mut() {
-        if send_ping(sink).await.is_err() {
-            dead.push(*idx);
-        }
-    }
-    for idx in dead {
-        driver_sinks.remove(&idx);
-        if let Some(state) = states.get_mut(idx) {
-            state.step(ConnEvent::WsClosed {
-                reason: "driver ping failed".into(),
-            });
         }
     }
 }
@@ -2259,9 +2216,9 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // correct from the first frame. The empty front door (paged0 None) has no
     // panes; capacity 1 is a harmless placeholder until the first live-add.
     comp.recompute_pagination(paged0.as_ref().map(|p| p.capacity).unwrap_or(1));
-    // Take-over driver sinks, keyed by pane index. Present only while a pane
-    // is being driven.
-    let mut driver_sinks: BTreeMap<usize, WsSink> = BTreeMap::new();
+    // The single interactive drive connection, opened lazily for the pane being
+    // driven (one slot against the daemon's interactive-drive cap).
+    let mut drive_sink: DriveSink = None;
 
     // Terminal setup via crossterm. Using `crossterm::terminal::enable_raw_mode`
     // (rather than a hand-rolled libc cfmakeraw) is load-bearing: it
@@ -2422,19 +2379,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                     &squad_store,
                     &mut panes,
                     &mut watch_sinks,
-                    &mut driver_sinks,
                 )
                 .await;
             }
             group::MainMode::Single => {
-                resize_rail_focus(
-                    tty,
-                    comp.focus(),
-                    &mut panes,
-                    &mut watch_sinks,
-                    &mut driver_sinks,
-                )
-                .await;
+                resize_rail_focus(tty, comp.focus(), &mut panes, &mut watch_sinks).await;
             }
         }
     }
@@ -2607,7 +2556,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                     comp.set_pane_count(panes.len());
                                                     comp.recompute_pagination(paged.capacity);
                                                     comp.set_focus(new_idx);
-                                                    resize_all_panes(&paged, &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                                    resize_all_panes(&paged, &mut panes, &mut watch_sinks).await;
                                                     // Keep rail_rows 1:1 with panes so a
                                                     // worker launched while rail mode is
                                                     // active appears in the grouping
@@ -2722,13 +2671,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         // handler and key_to_input so the overlay intercepts keys
                         // without altering the normal keymap. Ctrl-C passes through
                         // (Passthrough); when open, Inert swallows keys incl. `n`.
-                        match help_key_action(key, comp.mode(), help_open) {
-                            HelpAction::Toggle => {
-                                help_open = !help_open;
-                                prev_frame = None; // overlay appears/disappears -> full-paint
-                                dirty = true;
-                                continue;
-                            }
+                        match help_key_action(key, help_open) {
                             HelpAction::Close => {
                                 help_open = false;
                                 prev_frame = None; // overlay disappears -> full-paint
@@ -2743,18 +2686,10 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // Fall through to the normal key handling below.
                             }
                         }
-                        // E5b: `n` in WATCH opens the goal launcher (panes
-                        // present; the empty front door already starts open).
-                        if launcher.is_none()
-                            && comp.mode() == Mode::Watch
-                            && matches!(key.code, KeyCode::Char('n'))
-                            && !key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            launcher = Some(Launcher::new());
-                            hint = Some("goal> ".to_string());
-                            dirty = true;
-                            continue;
-                        }
+                        // E5b: the goal launcher opens via leader+n now (bare `n`
+                        // types to the focused agent in the owned-PTY model); see the
+                        // tiled leader dispatch below. The empty front door still
+                        // starts the launcher open on its own.
                         // ── Rail-mode key handling (ab-1fab1fdf, Phase 1) ──
                         // Intercept rail keys BEFORE key_to_input so `g`/`t`/`d`/
                         // Up/Down/Enter/Esc are not forwarded to the existing
@@ -2772,36 +2707,69 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         if rail_fits {
                         if let Some(rs) = rail_state.as_mut() {
                             let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
-                            match (rs.axis, key.code) {
-                                // Ctrl-C always quits regardless of mode.
-                                (_, KeyCode::Char('c')) if ctrl => {
+                            // Owned-PTY rail (x-1356): the resting state is DRIVING the
+                            // focused pane. The leader opens a sustained "rail-nav" browse
+                            // sub-mode (like scrollback); its keys then read un-prefixed
+                            // until Esc/Enter. `nav_key` is Some when this key runs the rail
+                            // keymap below - fed either by the sustained sub-mode or by the
+                            // leader command that just entered it. When None, a bare key
+                            // falls through to the PTY-forward path (rail_consumed stays
+                            // false), exactly like the tiled grid.
+                            let nav_key: Option<KeyCode> = if rs.nav_mode {
+                                Some(key.code)
+                            } else {
+                                let (next, decision) = leader::step(leader, &key, &leader_cfg);
+                                leader = next;
+                                match decision {
+                                    LeaderDecision::EnterPending => {
+                                        let lk = leader_cfg.format_compact();
+                                        hint = Some(format!(
+                                            "LEADER ({lk}) - rail: \u{2191}\u{2193} select \u{b7} g group \u{b7} Tab zoom \u{b7} a attn \u{b7} ] [ page \u{b7} m recruit \u{b7} t hide \u{b7} Esc drive"
+                                        ));
+                                        dirty = true;
+                                        rail_consumed = true;
+                                        None
+                                    }
+                                    LeaderDecision::SendPrefix => {
+                                        // Double-tap leader -> the literal leader byte to the
+                                        // focused PTY (no key is permanently stolen).
+                                        let act = comp.step(
+                                            InputEvent::Keystroke(leader::leader_bytes(&leader_cfg)),
+                                            &states,
+                                        );
+                                        if handle_action(act, &mut drive_sink, &names, home).await {
+                                            break;
+                                        }
+                                        dirty = true;
+                                        rail_consumed = true;
+                                        None
+                                    }
+                                    LeaderDecision::Command(cmdkey) => {
+                                        // Enter the sustained browse sub-mode, seeded by this key.
+                                        rs.enter_nav();
+                                        Some(cmdkey.code)
+                                    }
+                                    // Bare key while driving: forward to the focused PTY below.
+                                    LeaderDecision::Forward => None,
+                                }
+                            };
+                            if let Some(code) = nav_key {
+                                rail_consumed = true;
+                                match code {
+                                // Ctrl-C always quits.
+                                KeyCode::Char('c') if ctrl => {
                                     break;
                                 }
-                                // PaneDrive: Esc exits drive AND releases the driver
-                                // claim. The release is routed through handle_action so
-                                // the interactive socket is detached and the claim does
-                                // not leak until grid teardown (sigma-review finding).
-                                (group::FocusAxis::PaneDrive, KeyCode::Esc) => {
-                                    rs.exit_drive();
-                                    let action = comp.step(InputEvent::Release, &states);
-                                    if handle_action(action, &mut comp, &mut states, &names,
-                                                     &panes, &mut driver_sinks, home).await {
-                                        break;
-                                    }
-                                    prev_frame = None; // Domain Pitfall: axis change -> full-paint
+                                // Esc returns to driving the focused pane (no claim to
+                                // release - focus already IS the drive target).
+                                KeyCode::Esc => {
+                                    rs.exit_nav();
+                                    prev_frame = None; // mode change -> full-paint
                                     hint = None;
                                     dirty = true;
-                                    rail_consumed = true;
                                 }
-                                // PaneDrive: all other keys fall through to key_to_input,
-                                // which sees Mode::Drive and forwards them to the focused
-                                // pane's driver socket. comp.focus == the driven agent
-                                // (aligned on drive entry), so the forward targets it.
-                                (group::FocusAxis::PaneDrive, _) => {
-                                    // rail_consumed stays false: fall through.
-                                }
-                                // RailNav: `t` toggles the rail off (back to tiled grid).
-                                (group::FocusAxis::RailNav, KeyCode::Char('t')) => {
+                                // `t` hides the rail (back to the tiled grid).
+                                KeyCode::Char('t') => {
                                     rail_state = None;
                                     // The rail enlarged the focused pane to the main
                                     // area; re-tile every pane so the railless grid
@@ -2809,18 +2777,18 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     if let Ok(paged) =
                                         layout::compute_page(tty, panes.len(), comp.current_page())
                                     {
-                                        resize_all_panes(&paged, &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                        resize_all_panes(&paged, &mut panes, &mut watch_sinks).await;
                                     }
                                     prev_frame = None; // region map changed -> full-paint
                                     hint = None;
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                // RailNav: `g` cycles the group-by key. Selection
+                                // nav: `g` cycles the group-by key. Selection
                                 // re-anchors to the same agent and the compositor focus
                                 // follows it so the main pane and drive target stay on
                                 // that agent across the re-partition (AC4-FR).
-                                (group::FocusAxis::RailNav, KeyCode::Char('g')) => {
+                                (KeyCode::Char('g')) => {
                                     rs.cycle_group_key();
                                     let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel) = rs.re_anchor(&groups) {
@@ -2830,11 +2798,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                 // Focus follows the agent into its new
                                                 // group; size that group's tiles (AC4-FR).
                                                 apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
-                                                    &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                                    &mut panes, &mut watch_sinks).await;
                                             }
                                             group::MainMode::Single => {
                                                 resize_rail_focus(tty, sel, &mut panes,
-                                                    &mut watch_sinks, &mut driver_sinks).await;
+                                                    &mut watch_sinks).await;
                                             }
                                         }
                                     }
@@ -2843,10 +2811,10 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                // RailNav: Up/Down move the selection; the compositor
+                                // nav: Up/Down move the selection; the compositor
                                 // focus follows so the selected agent fills the main
                                 // area (AC1-UI / AC2-HP).
-                                (group::FocusAxis::RailNav, KeyCode::Up) => {
+                                (KeyCode::Up) => {
                                     let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel) = rs.move_up(&groups) {
                                         comp.set_focus(sel);
@@ -2855,12 +2823,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                 // Selection move can cross a page; size the
                                                 // group's tiles + force a full repaint.
                                                 apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
-                                                    &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                                    &mut panes, &mut watch_sinks).await;
                                                 prev_frame = None;
                                             }
                                             group::MainMode::Single => {
                                                 resize_rail_focus(tty, sel, &mut panes,
-                                                    &mut watch_sinks, &mut driver_sinks).await;
+                                                    &mut watch_sinks).await;
                                             }
                                         }
                                     }
@@ -2868,19 +2836,19 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                (group::FocusAxis::RailNav, KeyCode::Down) => {
+                                (KeyCode::Down) => {
                                     let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel) = rs.move_down(&groups) {
                                         comp.set_focus(sel);
                                         match rs.main_mode {
                                             group::MainMode::GroupTile => {
                                                 apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
-                                                    &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                                    &mut panes, &mut watch_sinks).await;
                                                 prev_frame = None;
                                             }
                                             group::MainMode::Single => {
                                                 resize_rail_focus(tty, sel, &mut panes,
-                                                    &mut watch_sinks, &mut driver_sinks).await;
+                                                    &mut watch_sinks).await;
                                             }
                                         }
                                     }
@@ -2888,7 +2856,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                // RailNav: Enter on a tile in GroupTile drills INTO it -
+                                // nav: Enter on a tile in GroupTile drills INTO it -
                                 // drop to Single focused on the selected tile (Open Q2 /
                                 // drill-down). This guarded arm precedes the Enter/`d`
                                 // drive arm, so Enter-in-GroupTile zooms while Enter-in-
@@ -2897,7 +2865,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // -> Drive; Tab/Esc back out. Mirrors the Tab->Single path
                                 // (resize the focused pane to the full main area, then
                                 // full-paint the region-map change).
-                                (group::FocusAxis::RailNav, KeyCode::Enter)
+                                (KeyCode::Enter)
                                     if matches!(rs.main_mode, group::MainMode::GroupTile) =>
                                 {
                                     // codex P2: if the selection is on a member that
@@ -2931,23 +2899,20 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     if let Some(sel) = rs.selected_agent_idx {
                                         comp.set_focus(sel);
                                         resize_rail_focus(tty, sel, &mut panes,
-                                            &mut watch_sinks, &mut driver_sinks).await;
+                                            &mut watch_sinks).await;
                                     }
                                     prev_frame = None; // region map changed -> full-paint
                                     hint = None;
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                // RailNav: Enter / `d` drive the selected agent. Both
-                                // enter PaneDrive (focus-axis state table). The promote
-                                // is routed through handle_action so the interactive
-                                // driver socket actually opens (sigma-review: the prior
-                                // rail path discarded the AttemptPromote action and
-                                // pre-checked is_drivable on the SELECTED agent while
-                                // promoting comp.focus, so DRIVE engaged on the wrong
-                                // pane with no socket and silently ate every keystroke).
-                                (group::FocusAxis::RailNav, KeyCode::Enter)
-                                | (group::FocusAxis::RailNav, KeyCode::Char('d')) => {
+                                // Enter / `d`: select the agent and return to driving it.
+                                // Owned-PTY: no promote, no claim, no denial - aligning focus
+                                // IS driving. A dead or exec pane can't be driven, so surface
+                                // a cue and stay in nav rather than dropping into a pane that
+                                // eats keystrokes.
+                                (KeyCode::Enter)
+                                | (KeyCode::Char('d')) => {
                                     let sel = rs.selected_agent_idx;
                                     let drivable = sel
                                         .and_then(|i| states.get(i))
@@ -2963,51 +2928,29 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     if !drivable {
                                         hint = Some(format!("{who}: not drivable (exited / disconnected)"));
                                     } else if !interactive {
-                                        // Exec agents are one-shot and watch-only; opening
-                                        // a drive WS would be rejected by the daemon.
+                                        // Exec agents are one-shot and watch-only (host_mode
+                                        // marker); their pane connection is read-only.
                                         hint = Some(format!(
-                                            "{who} is an exec agent - watch only (drive needs host_mode=interactive)"
+                                            "{who} is an exec agent - watch only (host_mode=interactive drives)"
                                         ));
                                     } else if let Some(idx) = sel {
-                                        // Align compositor focus to the selected agent so
-                                        // promote + subsequent keystroke forwarding target
-                                        // it, then open the real driver socket.
+                                        // Align focus to the selected agent and drop back to
+                                        // driving it - bare keys now reach its owned PTY.
                                         comp.set_focus(idx);
-                                        let action = comp.step(InputEvent::Promote, &states);
-                                        if handle_action(action, &mut comp, &mut states, &names,
-                                                         &panes, &mut driver_sinks, home).await {
-                                            break;
-                                        }
-                                        // Only flip the rail axis to PaneDrive if the
-                                        // interactive claim actually landed. The daemon can
-                                        // deny it (agent driven elsewhere, RPC error, claim
-                                        // race) -> handle_action steps DriveClaimDenied and
-                                        // observe_pane_states snaps comp back to WATCH, but
-                                        // the rail axis is a separate flag. Flipping it
-                                        // unconditionally would strand the operator in a
-                                        // phantom DRIVE with no driver_sink, silently eating
-                                        // keystrokes (sigma-review re-verify, same class as
-                                        // the exit-path revert). Stay in RailNav with a cue.
-                                        if matches!(states.get(idx), Some(ConnState::Driving)) {
-                                            rs.enter_drive();
-                                        } else {
-                                            hint = Some(format!(
-                                                "{who}: drive denied (busy elsewhere or unavailable)"
-                                            ));
-                                        }
+                                        rs.exit_nav();
                                     }
-                                    prev_frame = None; // axis change -> full-paint
+                                    prev_frame = None; // mode change -> full-paint
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                // RailNav: `m` recruits the selected agent into a
+                                // nav: `m` recruits the selected agent into a
                                 // squad (x-5b3e). Opens the modal squad-name prompt
                                 // seeded with the agent's name; the recruit itself
                                 // runs on submit. The agent is captured now so a
                                 // later selection move cannot retarget it. (When the
                                 // x-d97d rail leader lands, this rebinds to
                                 // `leader m` - the recruit verb is unchanged.)
-                                (group::FocusAxis::RailNav, KeyCode::Char('m')) => {
+                                (KeyCode::Char('m')) => {
                                     if let Some(agent) =
                                         rs.selected_agent_idx.and_then(|i| names.get(i)).cloned()
                                     {
@@ -3022,27 +2965,27 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                // RailNav: `q` quits.
-                                (group::FocusAxis::RailNav, KeyCode::Char('q')) => {
+                                // nav: `q` quits.
+                                (KeyCode::Char('q')) => {
                                     break;
                                 }
-                                // RailNav: Tab toggles the main area between Single and
+                                // nav: Tab toggles the main area between Single and
                                 // GroupTile (US3). The region map changes (one big pane
                                 // <-> a tiled group), so force a full repaint and re-size
                                 // the now-visible panes - the flip is atomic (AC3-UI).
-                                (group::FocusAxis::RailNav, KeyCode::Tab) => {
+                                (KeyCode::Tab) => {
                                     rs.toggle_main_mode();
                                     match rs.main_mode {
                                         group::MainMode::GroupTile => {
                                             apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
-                                                &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                                &mut panes, &mut watch_sinks).await;
                                         }
                                         group::MainMode::Single => {
                                             // Back to one big pane: re-size the focused
                                             // pane to the full main area (gemini HIGH).
                                             if let Some(sel) = rs.selected_agent_idx {
                                                 resize_rail_focus(tty, sel, &mut panes,
-                                                    &mut watch_sinks, &mut driver_sinks).await;
+                                                    &mut watch_sinks).await;
                                             }
                                         }
                                     }
@@ -3051,15 +2994,15 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                // RailNav: page within a tiled group (GroupTile only).
+                                // nav: page within a tiled group (GroupTile only).
                                 // ]/PageDown -> next page, [/PageUp -> previous. Moves the
                                 // selection by a page (the rendered page follows it), so
                                 // the accented/drive target stays on screen. Inert in
                                 // Single mode (AC3-ERR).
-                                (group::FocusAxis::RailNav, KeyCode::Char(']'))
-                                | (group::FocusAxis::RailNav, KeyCode::PageDown)
-                                | (group::FocusAxis::RailNav, KeyCode::Char('['))
-                                | (group::FocusAxis::RailNav, KeyCode::PageUp) => {
+                                (KeyCode::Char(']'))
+                                | (KeyCode::PageDown)
+                                | (KeyCode::Char('['))
+                                | (KeyCode::PageUp) => {
                                     if matches!(rs.main_mode, group::MainMode::GroupTile) {
                                         let forward = matches!(
                                             key.code,
@@ -3078,20 +3021,20 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             comp.set_focus(sel);
                                         }
                                         apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
-                                            &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                            &mut panes, &mut watch_sinks).await;
                                         prev_frame = None; // page slice changed -> full-paint
                                         hint = None;
                                         dirty = true;
                                     }
                                     rail_consumed = true;
                                 }
-                                // RailNav: `a` toggles the attention filter - the rail
+                                // nav: `a` toggles the attention filter - the rail
                                 // lists only agents waiting for input (idle + exited
                                 // hidden). The visible member set changes, so re-anchor
                                 // selection onto a still-visible agent (or surface an
                                 // empty-state hint when nothing is waiting) and
                                 // full-repaint, mirroring the `g` regroup discipline.
-                                (group::FocusAxis::RailNav, KeyCode::Char('a')) => {
+                                (KeyCode::Char('a')) => {
                                     rs.toggle_attention_filter();
                                     let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     match rs.re_anchor(&groups) {
@@ -3100,11 +3043,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             match rs.main_mode {
                                                 group::MainMode::GroupTile => {
                                                     apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
-                                                        &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                                        &mut panes, &mut watch_sinks).await;
                                                 }
                                                 group::MainMode::Single => {
                                                     resize_rail_focus(tty, sel, &mut panes,
-                                                        &mut watch_sinks, &mut driver_sinks).await;
+                                                        &mut watch_sinks).await;
                                                 }
                                             }
                                             hint = None;
@@ -3122,29 +3065,15 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                // All other RailNav keys are consumed (the rail owns the
-                                // keyboard in RailNav).
-                                (group::FocusAxis::RailNav, _) => {
-                                    rail_consumed = true;
-                                }
-                            }
-                        } else {
-                            // Rail not active; `t` enters rail mode from the tiled grid.
-                            let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
-                            if !ctrl && key.code == KeyCode::Char('t') && comp.mode() == Mode::Watch {
-                                let mut rs = RailState::new(GroupKey::Cwd);
-                                let groups = base_groups(&rail_rows, rs.group_key, &squad_store);
-                                if let Some(sel) = rs.re_anchor(&groups) {
-                                    comp.set_focus(sel);
-                                    resize_rail_focus(tty, sel, &mut panes, &mut watch_sinks, &mut driver_sinks).await;
-                                }
-                                rail_state = Some(rs);
-                                prev_frame = None; // region map changed -> full-paint
-                                hint = None;
-                                dirty = true;
-                                rail_consumed = true;
-                            }
+                                // All other keys are consumed while browsing - the
+                                // rail-nav sub-mode owns the keyboard until Esc/Enter.
+                                _ => {}
+                                } // end match code
+                            } // end if let Some(code) = nav_key
                         }
+                        // Rail entry from the tiled grid is a leader command (leader+t);
+                        // bare `t` now types to the focused agent. Handled in the tiled
+                        // leader dispatch below.
                         } // end if rail_fits
 
                         if !rail_consumed {
@@ -3176,8 +3105,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                         InputEvent::Keystroke(leader::leader_bytes(&leader_cfg)),
                                         &states,
                                     );
-                                    if handle_action(act, &mut comp, &mut states, &names,
-                                                     &panes, &mut driver_sinks, home).await {
+                                    if handle_action(act, &mut drive_sink, &names, home).await {
                                         break;
                                     }
                                     dirty = true;
@@ -3187,39 +3115,54 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     hint = None;
                                     let ctrl_cmd = cmdkey.modifiers.contains(KeyModifiers::CONTROL);
                                     if !ctrl_cmd && matches!(cmdkey.code, KeyCode::Char('?')) {
-                                        // leader + ? opens the help overlay. Release any
-                                        // drive first so the existing WATCH help gate
-                                        // (q/Esc/?) can close it.
-                                        if comp.mode() == Mode::Drive {
-                                            let rel = comp.step(InputEvent::Release, &states);
-                                            if handle_action(rel, &mut comp, &mut states, &names,
-                                                             &panes, &mut driver_sinks, home).await {
-                                                break;
-                                            }
-                                        }
+                                        // leader + ? toggles the help overlay. Owned-PTY:
+                                        // no drive to release first - focus is always live.
                                         help_open = !help_open;
                                         prev_frame = None; // overlay toggled -> full-paint
                                         dirty = true;
                                         continue;
                                     }
-                                    // The mux command set is the former WATCH keymap;
-                                    // an unbound key is reported and NOT forwarded.
-                                    match key_to_input(cmdkey, Mode::Watch) {
+                                    if !ctrl_cmd && matches!(cmdkey.code, KeyCode::Char('t')) {
+                                        // leader + t shows the rail (bare `t` now types to
+                                        // the focused agent). Mirrors the former bare-`t`
+                                        // entry; only meaningful when the rail fits.
+                                        if rail_fits && rail_state.is_none() {
+                                            let mut rs = RailState::new(GroupKey::Cwd);
+                                            let groups =
+                                                base_groups(&rail_rows, rs.group_key, &squad_store);
+                                            if let Some(sel) = rs.re_anchor(&groups) {
+                                                comp.set_focus(sel);
+                                                resize_rail_focus(tty, sel, &mut panes, &mut watch_sinks)
+                                                    .await;
+                                            }
+                                            rail_state = Some(rs);
+                                            prev_frame = None; // region map changed -> full-paint
+                                            hint = None;
+                                        } else {
+                                            hint = Some("rail does not fit this terminal".to_string());
+                                        }
+                                        dirty = true;
+                                        continue;
+                                    }
+                                    if !ctrl_cmd && matches!(cmdkey.code, KeyCode::Char('n')) {
+                                        // leader + n opens the goal launcher (spawn a worker);
+                                        // bare `n` now types to the focused agent.
+                                        launcher = Some(Launcher::new());
+                                        hint = Some("goal> ".to_string());
+                                        dirty = true;
+                                        continue;
+                                    }
+                                    // The leader unlocks the mux command set; an unbound
+                                    // key is reported and NOT forwarded to the agent.
+                                    match leader_command(cmdkey) {
                                         Some(InputEvent::Quit) => {
-                                            if handle_action(CompositorAction::Quit, &mut comp,
-                                                             &mut states, &names, &panes,
-                                                             &mut driver_sinks, home).await {
+                                            if handle_action(CompositorAction::Quit, &mut drive_sink, &names, home).await {
                                                 break;
                                             }
                                         }
                                         Some(InputEvent::EnterScrollback) => {
-                                            if comp.mode() == Mode::Drive {
-                                                let rel = comp.step(InputEvent::Release, &states);
-                                                if handle_action(rel, &mut comp, &mut states, &names,
-                                                                 &panes, &mut driver_sinks, home).await {
-                                                    break;
-                                                }
-                                            }
+                                            // Enter scrollback on the focused pane, unless it
+                                            // has no overflowed history to freeze onto.
                                             let no_history = panes
                                                 .get(comp.focus())
                                                 .map(|p| p.history_size())
@@ -3230,6 +3173,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             } else if let CompositorAction::Scroll { pane_idx, cmd } =
                                                 comp.step(InputEvent::EnterScrollback, &states)
                                             {
+                                                // Entry scrolls up one line to freeze the viewport.
                                                 if let Some(p) = panes.get_mut(pane_idx) {
                                                     p.apply_scroll(cmd);
                                                 }
@@ -3242,67 +3186,18 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             | InputEvent::PageNext
                                             | InputEvent::PagePrev),
                                         ) => {
-                                            // Seamless switch-and-drive ONLY when already
-                                            // driving: release the current claim, move
-                                            // focus/page, then re-promote the new pane so
-                                            // the operator keeps driving without an
-                                            // explicit Enter. Release(old)+Promote(new) act
-                                            // on different agents, so the per-agent claims
-                                            // do not race. When NOT driving (WATCH), this is
-                                            // plain navigation: move focus/page and DO NOT
-                                            // claim drive, or leader+focus/page in WATCH
-                                            // would silently start driving and steal the
-                                            // next keystrokes (codex P2 on PR #79).
-                                            let was_driving = comp.mode() == Mode::Drive;
-                                            if was_driving {
-                                                let rel = comp.step(InputEvent::Release, &states);
-                                                if handle_action(rel, &mut comp, &mut states, &names,
-                                                                 &panes, &mut driver_sinks, home).await {
-                                                    break;
-                                                }
-                                            }
+                                            // Owned-PTY: focus IS drive, so moving focus or
+                                            // page just relocates the live cursor - no claim
+                                            // to release on the old pane or acquire on the new.
                                             let act = comp.step(input, &states);
-                                            if handle_action(act, &mut comp, &mut states, &names,
-                                                             &panes, &mut driver_sinks, home).await {
+                                            if handle_action(act, &mut drive_sink, &names, home).await {
                                                 break;
-                                            }
-                                            if was_driving
-                                                && !promote_blocked_by_exec(&InputEvent::Promote, comp.mode(),
-                                                                            comp.focus(), &host_interactive)
-                                                && states.get(comp.focus())
-                                                    .map(ConnState::is_drivable)
-                                                    .unwrap_or(false)
-                                            {
-                                                let prom = comp.step(InputEvent::Promote, &states);
-                                                if handle_action(prom, &mut comp, &mut states, &names,
-                                                                 &panes, &mut driver_sinks, home).await {
-                                                    break;
-                                                }
-                                            }
-                                            dirty = true;
-                                        }
-                                        Some(InputEvent::Promote) => {
-                                            // leader + Enter drives the focused pane
-                                            // (no-op if already driving it).
-                                            if promote_blocked_by_exec(&InputEvent::Promote, comp.mode(),
-                                                                       comp.focus(), &host_interactive) {
-                                                let who = names.get(comp.focus())
-                                                    .map(String::as_str).unwrap_or("?");
-                                                hint = Some(format!(
-                                                    "{who} is an exec agent - watch only (drive needs host_mode=interactive)"
-                                                ));
-                                            } else {
-                                                let prom = comp.step(InputEvent::Promote, &states);
-                                                if handle_action(prom, &mut comp, &mut states, &names,
-                                                                 &panes, &mut driver_sinks, home).await {
-                                                    break;
-                                                }
                                             }
                                             dirty = true;
                                         }
                                         _ => {
                                             hint = Some(format!(
-                                                "unknown leader command ({} then: \u{21b9} focus \u{b7} ] [ page \u{b7} Enter drive \u{b7} Space scrollback \u{b7} ? help \u{b7} q quit)",
+                                                "unknown leader command ({} then: \u{21b9} focus \u{b7} ] [ page \u{b7} Space scrollback \u{b7} ? help \u{b7} q quit)",
                                                 leader_cfg.format_compact()
                                             ));
                                             dirty = true;
@@ -3315,43 +3210,39 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 }
                             }
                         }
-                        if let Some(input) = key_to_input(key, comp.mode()) {
+                        // Owned-PTY dispatch: in `Drive` every bare key forwards to
+                        // the focused agent's PTY; in `Scrollback` the pane is frozen
+                        // and the keymap pages its history instead.
+                        let input = match comp.mode() {
+                            Mode::Scrollback => scrollback_key(key),
+                            Mode::Drive => key_to_input(key),
+                        };
+                        if let Some(input) = input {
                             // Any operator key clears a prior transient hint.
                             hint = None;
-                            let no_history = matches!(input, InputEvent::EnterScrollback)
-                                && panes
-                                    .get(comp.focus())
-                                    .map(|p| p.history_size())
-                                    .unwrap_or(0)
-                                    == 0;
-                            if no_history {
-                                // Space on a pane that has not overflowed its
-                                // screen: nothing to scroll. Stay in WATCH and
-                                // surface a transient hint (AC1-ERR / AC2-EDGE).
-                                hint = Some("no scrollback history".to_string());
-                                dirty = true;
-                            } else if promote_blocked_by_exec(&input, comp.mode(), comp.focus(), &host_interactive) {
-                                // Enter on a host_mode=exec pane: one-shot agent,
-                                // watch-only. Surface a hint instead of opening a
-                                // drive WS the daemon would reject. (ab-7fd7ae49)
+                            // Exec panes refuse keystrokes (host_interactive marker):
+                            // surface a hint rather than leak bytes the daemon's
+                            // watch-only connection would drop anyway (ab-7fd7ae49).
+                            let exec_refuses = matches!(input, InputEvent::Keystroke(_))
+                                && !host_interactive.get(comp.focus()).copied().unwrap_or(true);
+                            if exec_refuses {
                                 let who = names.get(comp.focus()).map(String::as_str).unwrap_or("?");
                                 hint = Some(format!(
-                                    "{who} is an exec agent - watch only (drive needs host_mode=interactive)"
+                                    "{who} is an exec agent - watch only (host_mode=interactive drives)"
                                 ));
                                 dirty = true;
                             } else {
                                 match comp.step(input, &states) {
                                     // Scroll mutates the focused pane's terminal;
                                     // apply it here where `panes` is mutable
-                                    // (handle_action borrows it immutably).
+                                    // (handle_action does not borrow it).
                                     CompositorAction::Scroll { pane_idx, cmd } => {
                                         if let Some(p) = panes.get_mut(pane_idx) {
                                             p.apply_scroll(cmd);
                                         }
                                     }
                                     other => {
-                                        if handle_action(other, &mut comp, &mut states, &names,
-                                                          &panes, &mut driver_sinks, home).await {
+                                        if handle_action(other, &mut drive_sink, &names, home).await {
                                             break; // Quit
                                         }
                                     }
@@ -3386,8 +3277,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         if tiled_grid {
                             match m.kind {
                                 MouseEventKind::Down(MouseButton::Left)
-                                    if comp.mode() == Mode::Watch =>
+                                    if comp.mode() == Mode::Drive =>
                                 {
+                                    // Owned-PTY: a click focuses the pane under the cursor,
+                                    // and focus IS drive - there is no separate
+                                    // click-again-to-drive step. Re-clicking the focused
+                                    // pane is a harmless no-op.
                                     let hit = layout::compute_page(
                                         tty,
                                         panes.len(),
@@ -3397,43 +3292,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     .and_then(|p| p.pane_at(m.column, m.row));
                                     if let Some(idx) = hit {
                                         hint = None;
-                                        if idx == comp.focus() {
-                                            // Re-click the focused pane → drive.
-                                            // Reuses the keyboard Promote path:
-                                            // claim attempt + the exec guard.
-                                            let input = InputEvent::Promote;
-                                            if promote_blocked_by_exec(
-                                                &input,
-                                                comp.mode(),
-                                                idx,
-                                                &host_interactive,
-                                            ) {
-                                                let who = names
-                                                    .get(idx)
-                                                    .map(String::as_str)
-                                                    .unwrap_or("?");
-                                                hint = Some(format!(
-                                                    "{who} is an exec agent - watch only (drive needs host_mode=interactive)"
-                                                ));
-                                            } else {
-                                                let action = comp.step(input, &states);
-                                                if handle_action(
-                                                    action,
-                                                    &mut comp,
-                                                    &mut states,
-                                                    &names,
-                                                    &panes,
-                                                    &mut driver_sinks,
-                                                    home,
-                                                )
-                                                .await
-                                                {
-                                                    break; // Quit
-                                                }
-                                            }
-                                        } else {
-                                            comp.set_focus(idx);
-                                        }
+                                        comp.set_focus(idx);
                                         dirty = true;
                                     }
                                 }
@@ -3445,7 +3304,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     // (gemini review). In SCROLLBACK the operator is
                                     // pinned to the entry pane (Locked Decision 5), so
                                     // the cursor position is not consulted.
-                                    let proceed = if comp.mode() == Mode::Watch {
+                                    let proceed = if comp.mode() == Mode::Drive {
                                         let hit = layout::compute_page(
                                             tty,
                                             panes.len(),
@@ -3491,7 +3350,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             // in WATCH is already at the live tail → a
                                             // silent no-op.
                                             if matches!(m.kind, MouseEventKind::ScrollUp)
-                                                && comp.mode() == Mode::Watch
+                                                && comp.mode() == Mode::Drive
                                             {
                                                 hint =
                                                     Some("no scrollback history".to_string());
@@ -3522,7 +3381,6 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     &paged,
                                     &mut panes,
                                     &mut watch_sinks,
-                                    &mut driver_sinks,
                                 )
                                 .await;
                             }
@@ -3545,7 +3403,6 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             &squad_store,
                                             &mut panes,
                                             &mut watch_sinks,
-                                            &mut driver_sinks,
                                         )
                                         .await;
                                     }
@@ -3555,7 +3412,6 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             comp.focus(),
                                             &mut panes,
                                             &mut watch_sinks,
-                                            &mut driver_sinks,
                                         )
                                         .await;
                                     }
@@ -3591,20 +3447,13 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         if matches!(comp.observe_pane_states(&states), CompositorAction::Quit) {
                             break;
                         }
-                        driver_sinks.remove(&idx);
-                        // AC2-FR: if the rail was driving the agent that just exited,
-                        // revert the focus axis to RailNav so keystrokes move the rail
-                        // (not a dead PTY) and surface a cue. observe_pane_states already
-                        // snapped the compositor mode back to WATCH; the rail axis is a
-                        // separate flag that must be reverted too.
-                        if comp.focus() == idx {
-                            if let Some(rs) = rail_state.as_mut() {
-                                if rs.revert_to_nav() {
-                                    let who = names.get(idx).map(String::as_str).unwrap_or("agent");
-                                    hint = Some(format!("{who} exited - released drive"));
-                                    prev_frame = None; // axis change -> full-paint
-                                }
-                            }
+                        // Owned-PTY: no drive claim to release. Drop the lazy
+                        // interactive connection if it pointed at this pane (its
+                        // daemon-side slot is gone with the agent). Focus re-anchors
+                        // via the rail's existing re_anchor; a dead pane renders
+                        // "exited" and eats keystrokes (no axis to revert).
+                        if drive_sink.as_ref().map(|(i, _)| *i) == Some(idx) {
+                            drive_sink = None;
                         }
                         // codex P2: this exit just shrank the tiled survivor set
                         // (AC3-FR reflow). The next paint redraws the survivors at
@@ -3618,7 +3467,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         if let Some(rs) = rail_state.as_ref() {
                             if matches!(rs.main_mode, group::MainMode::GroupTile) {
                                 apply_group_tile_resize(rs, tty, &rail_rows, &states, &squad_store,
-                                    &mut panes, &mut watch_sinks, &mut driver_sinks).await;
+                                    &mut panes, &mut watch_sinks).await;
                                 prev_frame = None; // tile sizes changed -> full-paint
                             }
                         }
@@ -3632,17 +3481,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         if matches!(comp.observe_pane_states(&states), CompositorAction::Quit) {
                             break;
                         }
-                        driver_sinks.remove(&idx);
-                        // AC2-FR (socket-drop variant): revert the rail axis when the
-                        // driven agent's watcher/driver socket drops, same as exit.
-                        if comp.focus() == idx {
-                            if let Some(rs) = rail_state.as_mut() {
-                                if rs.revert_to_nav() {
-                                    let who = names.get(idx).map(String::as_str).unwrap_or("agent");
-                                    hint = Some(format!("{who} disconnected - released drive"));
-                                    prev_frame = None; // axis change -> full-paint
-                                }
-                            }
+                        // Owned-PTY: the watch sink dropped; the pane renders
+                        // "disconnected - r to retry". Drop the interactive drive
+                        // connection too if it pointed here.
+                        if drive_sink.as_ref().map(|(i, _)| *i) == Some(idx) {
+                            drive_sink = None;
                         }
                         dirty = true;
                     }
@@ -3703,7 +3546,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 }
             }
             _ = ping.tick() => {
-                ping_open_sinks(&mut watch_sinks, &mut driver_sinks, &mut states).await;
+                ping_open_sinks(&mut watch_sinks, &mut states).await;
                 // E5b: with the front door up (no panes) observe_pane_states
                 // would report Quit on its 0-pane guard. Don't tear down the
                 // grid while the operator is at the launcher.
@@ -3712,28 +3555,19 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 {
                     break;
                 }
-                // codex P2: a driver ping failure drops the sink and
-                // observe_pane_states snaps comp back to WATCH, but the rail axis
-                // is a separate flag. Reconcile it so a dead driver socket can't
-                // strand the rail in PaneDrive (same revert as the exit/close paths).
-                if comp.mode() != Mode::Drive {
-                    if let Some(rs) = rail_state.as_mut() {
-                        if rs.revert_to_nav() {
-                            let who = names.get(comp.focus()).map(String::as_str).unwrap_or("agent");
-                            hint = Some(format!("{who} disconnected - released drive"));
-                            prev_frame = None; // axis change -> full-paint
-                        }
-                    }
-                }
                 dirty = true;
             }
         }
     }
 
-    // Teardown: release any held driver claim. The terminal (raw mode +
-    // alternate screen + cursor) is restored by `TerminalGuard`'s Drop when
-    // `_guard` falls out of scope at the end of this function.
-    for (_idx, sink) in driver_sinks {
+    // Teardown: detach the interactive drive connection (releases its daemon
+    // slot) and every pane's watch sink so the daemon drops the grid cleanly.
+    // The terminal (raw mode + alternate screen + cursor) is restored by
+    // `TerminalGuard`'s Drop when `_guard` falls out of scope.
+    if let Some((_, sink)) = drive_sink.take() {
+        close_driver_sink(sink, "grid_quit").await;
+    }
+    for sink in watch_sinks.into_iter().flatten() {
         close_driver_sink(sink, "grid_quit").await;
     }
     0
@@ -3800,9 +3634,9 @@ fn apply_scroll_action(action: CompositorAction, panes: &mut [Pane]) {
 /// mode-transition is unit-testable. (E5a mouse-native.)
 fn mouse_to_input(kind: MouseEventKind, mode: Mode, has_history: bool) -> Option<InputEvent> {
     match (kind, mode) {
-        // First wheel-up notch enters scrollback, which itself scrolls up one
-        // line — only meaningful when the pane has history to freeze onto.
-        (MouseEventKind::ScrollUp, Mode::Watch) if has_history => Some(InputEvent::EnterScrollback),
+        // First wheel-up notch (while driving) enters scrollback, which itself
+        // scrolls up one line — only when the pane has history to freeze onto.
+        (MouseEventKind::ScrollUp, Mode::Drive) if has_history => Some(InputEvent::EnterScrollback),
         (MouseEventKind::ScrollUp, Mode::Scrollback) => Some(InputEvent::ScrollLineUp),
         (MouseEventKind::ScrollDown, Mode::Scrollback) => Some(InputEvent::ScrollLineDown),
         _ => None,
@@ -3810,14 +3644,52 @@ fn mouse_to_input(kind: MouseEventKind, mode: Mode, has_history: bool) -> Option
 }
 
 /// Apply a compositor action that may require I/O. Returns `true` when the
-/// loop should quit.
+/// loop should quit. Owned-PTY model (x-1356): the only I/O action is
+/// forwarding keystrokes to the focused pane's single owned-PTY sink - there
+/// is no promote/release, so no second "interactive" connection to open.
+/// The single interactive drive connection, keyed to the pane it controls.
+/// At most ONE is ever open: the daemon counts interactive ("controlling")
+/// connections against `DEFAULT_MAX_CONCURRENT_DRIVES` and they are per-agent
+/// exclusive, so the grid renders every pane over cheap "watch" connections
+/// and holds just one interactive slot for the pane being driven.
+type DriveSink = Option<(usize, WsSink)>;
+
+/// Point the one interactive drive connection at `pane_idx`, opening it lazily
+/// and closing any previous one first (release the old slot before claiming
+/// the new). Returns the sink, or `None` if the daemon refused (agent driven
+/// elsewhere, cap full) - the caller drops the keystrokes.
+async fn ensure_drive_sink<'a>(
+    drive_sink: &'a mut DriveSink,
+    pane_idx: usize,
+    name: &str,
+    home: &AgentsHome,
+) -> Option<&'a mut WsSink> {
+    if drive_sink.as_ref().map(|(i, _)| *i) != Some(pane_idx) {
+        if let Some((_, old)) = drive_sink.take() {
+            close_driver_sink(old, "refocus").await;
+        }
+        match open_drive_ws(home, name, "interactive").await {
+            Ok(ws) => {
+                let (sink, mut source) = ws.split();
+                // Drain + discard the interactive stream's echo; the pane
+                // renders from its own "watch" connection.
+                tokio::spawn(async move { while source.next().await.is_some() {} });
+                *drive_sink = Some((pane_idx, sink));
+            }
+            Err(_) => return None,
+        }
+    }
+    drive_sink.as_mut().map(|(_, s)| s)
+}
+
+/// Apply a compositor action that may require I/O. Returns `true` when the loop
+/// should quit. Owned-PTY model (x-1356): the only I/O action is forwarding
+/// keystrokes, which lazily opens the single interactive drive connection for
+/// the focused pane (the dispatch has already refused exec panes).
 async fn handle_action(
     action: CompositorAction,
-    comp: &mut Compositor,
-    states: &mut [ConnState],
+    drive_sink: &mut DriveSink,
     names: &[String],
-    panes: &[Pane],
-    driver_sinks: &mut BTreeMap<usize, WsSink>,
     home: &AgentsHome,
 ) -> bool {
     match action {
@@ -3826,47 +3698,11 @@ async fn handle_action(
         // Scroll is applied inline by the run loop (it needs `&mut panes`); it
         // never reaches here. Handle it for exhaustiveness.
         CompositorAction::Scroll { .. } => {}
-        CompositorAction::AttemptPromote { pane_idx } => {
-            // Fire the per-pane drive RPC, then open an interactive
-            // connection to carry input. The watcher keeps feeding the
-            // pane's render; the driver connection's output is drained and
-            // discarded to avoid double-rendering + WS backpressure.
-            let conn_action = states[pane_idx].step(ConnEvent::PromoteRequested);
-            if matches!(conn_action, ConnAction::SendDriveRpc) {
-                match open_drive_ws(home, &names[pane_idx], "interactive").await {
-                    Ok(ws) => {
-                        let (mut sink, mut source) = ws.split();
-                        let (rows, cols) = panes[pane_idx].size();
-                        let _ = send_resize(&mut sink, rows, cols).await;
-                        driver_sinks.insert(pane_idx, sink);
-                        states[pane_idx].step(ConnEvent::DriveClaimAcquired);
-                        // Drain + discard the driver connection's output.
-                        tokio::spawn(async move { while source.next().await.is_some() {} });
-                    }
-                    Err(_) => {
-                        states[pane_idx].step(ConnEvent::DriveClaimDenied { holder: None });
-                    }
-                }
-                comp.observe_pane_states(states);
-            }
-        }
-        CompositorAction::AttemptRelease { pane_idx } => {
-            states[pane_idx].step(ConnEvent::ReleaseRequested);
-            if let Some(mut sink) = driver_sinks.remove(&pane_idx) {
-                let _ = sink
-                    .send(Message::Text(
-                        json!({"t": "detach", "reason": "release"})
-                            .to_string()
-                            .into(),
-                    ))
-                    .await;
-                let _ = sink.close().await;
-            }
-            comp.observe_pane_states(states);
-        }
         CompositorAction::ForwardKeystrokes { pane_idx, bytes } => {
-            if let Some(sink) = driver_sinks.get_mut(&pane_idx) {
-                let _ = sink.send(Message::Binary(bytes.into())).await;
+            if let Some(name) = names.get(pane_idx) {
+                if let Some(sink) = ensure_drive_sink(drive_sink, pane_idx, name, home).await {
+                    let _ = sink.send(Message::Binary(bytes.into())).await;
+                }
             }
         }
     }
@@ -3879,8 +3715,6 @@ async fn handle_action(
 /// Pure + testable; the run loop dispatches on this rather than inlining the match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HelpAction {
-    /// Open the overlay (overlay was closed) or close it (overlay was open).
-    Toggle,
     /// Close the overlay (e.g. Esc / `q` while open).
     Close,
     /// Swallow this key; the overlay is open and this key navigates nothing.
@@ -3889,26 +3723,24 @@ enum HelpAction {
     Passthrough,
 }
 
-/// Pure decision fn for `?`-overlay key events. The run loop calls this BEFORE
-/// `key_to_input` so the overlay can intercept keys without altering the normal
-/// keymap. Ctrl-C is NOT intercepted here - `key_to_input` handles it, and this
-/// fn returns `Passthrough` so the caller hits `key_to_input` as usual.
-fn help_key_action(key: KeyEvent, mode: Mode, help_open: bool) -> HelpAction {
+/// Pure decision fn for the `?`-overlay key events. The run loop calls this
+/// BEFORE the normal key dispatch so an OPEN overlay can intercept keys.
+///
+/// Owned-PTY (x-1356): the overlay OPENS via `leader + ?` (handled in the leader
+/// dispatch), never a bare `?` - a bare `?` types to the focused agent like any
+/// other key. So this fn only intercepts keys while the overlay is already
+/// open: `Esc`/`q` close it, anything else is inert (it does not leak to the
+/// agent behind the overlay). Closed -> everything passes through. Ctrl-C always
+/// passes through to the outer Quit handler.
+fn help_key_action(key: KeyEvent, help_open: bool) -> HelpAction {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    // Ctrl-C: always let the outer handler deal with it (Quit path).
     if ctrl {
         return HelpAction::Passthrough;
     }
-    match (mode, help_open, key.code) {
-        // The help overlay is WATCH-only. DRIVE forwards every key to the agent
-        // and SCROLLBACK keeps its own scroll keymap, so both fall through to
-        // key_to_input untouched (codex peer P2: `?` must not toggle outside WATCH).
-        (Mode::Watch, _, KeyCode::Char('?')) => HelpAction::Toggle,
-        // WATCH + overlay open: Esc / q close; everything else is inert.
-        (Mode::Watch, true, KeyCode::Char('q') | KeyCode::Esc) => HelpAction::Close,
-        (Mode::Watch, true, _) => HelpAction::Inert,
-        // Everything else (DRIVE, SCROLLBACK, overlay closed + not `?`): pass through.
-        _ => HelpAction::Passthrough,
+    match (help_open, key.code) {
+        (true, KeyCode::Char('q') | KeyCode::Esc) => HelpAction::Close,
+        (true, _) => HelpAction::Inert,
+        (false, _) => HelpAction::Passthrough,
     }
 }
 
@@ -4050,10 +3882,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits_in_both_modes() {
+    fn ctrl_c_forwards_as_byte_and_is_leader_quit() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(key_to_input(key, Mode::Watch), Some(InputEvent::Quit));
-        assert_eq!(key_to_input(key, Mode::Drive), Some(InputEvent::Quit));
+        // Owned-PTY: a bare Ctrl-C forwards 0x03 to the agent (so you can
+        // interrupt it); quitting the grid is a leader command.
+        assert_eq!(key_to_input(key), Some(InputEvent::Keystroke(vec![0x03])));
+        assert_eq!(leader_command(key), Some(InputEvent::Quit));
     }
 
     // ── Launcher (E5b) ──────────────────────────────────────────────────
@@ -4174,115 +4008,112 @@ mod tests {
         assert!(prev.is_some(), "records the screen buffer for diffing");
     }
 
+    /// The leader unlocks the mux command set (the former WATCH keymap).
     #[test]
-    fn watch_mode_key_mapping() {
+    fn leader_command_mux_mapping() {
         let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(leader_command(k(KeyCode::Tab)), Some(InputEvent::FocusNext));
         assert_eq!(
-            key_to_input(k(KeyCode::Tab), Mode::Watch),
-            Some(InputEvent::FocusNext)
-        );
-        assert_eq!(
-            key_to_input(k(KeyCode::BackTab), Mode::Watch),
+            leader_command(k(KeyCode::BackTab)),
             Some(InputEvent::FocusPrev)
         );
         assert_eq!(
-            key_to_input(k(KeyCode::Right), Mode::Watch),
+            leader_command(k(KeyCode::Right)),
             Some(InputEvent::FocusNext)
         );
         assert_eq!(
-            key_to_input(k(KeyCode::Left), Mode::Watch),
+            leader_command(k(KeyCode::Left)),
             Some(InputEvent::FocusPrev)
         );
         assert_eq!(
-            key_to_input(k(KeyCode::Enter), Mode::Watch),
-            Some(InputEvent::Promote)
-        );
-        assert_eq!(
-            key_to_input(k(KeyCode::Char('q')), Mode::Watch),
+            leader_command(k(KeyCode::Char('q'))),
             Some(InputEvent::Quit)
         );
-        // A plain letter is inert in WATCH.
-        assert_eq!(key_to_input(k(KeyCode::Char('x')), Mode::Watch), None);
+        // Scrollback entry moved to leader+Space (bare Space types now).
+        assert_eq!(
+            leader_command(k(KeyCode::Char(' '))),
+            Some(InputEvent::EnterScrollback)
+        );
+        // An unbound leader key is reported, not forwarded.
+        assert_eq!(leader_command(k(KeyCode::Char('x'))), None);
     }
 
     #[test]
-    fn watch_page_keys_map_to_page_events() {
+    fn leader_page_keys_map_to_page_events() {
         let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
         assert_eq!(
-            key_to_input(k(KeyCode::Char(']')), Mode::Watch),
+            leader_command(k(KeyCode::Char(']'))),
             Some(InputEvent::PageNext)
         );
         assert_eq!(
-            key_to_input(k(KeyCode::Char('[')), Mode::Watch),
+            leader_command(k(KeyCode::Char('['))),
             Some(InputEvent::PagePrev)
         );
         assert_eq!(
-            key_to_input(k(KeyCode::PageDown), Mode::Watch),
+            leader_command(k(KeyCode::PageDown)),
             Some(InputEvent::PageNext)
         );
         assert_eq!(
-            key_to_input(k(KeyCode::PageUp), Mode::Watch),
+            leader_command(k(KeyCode::PageUp)),
             Some(InputEvent::PagePrev)
         );
     }
 
-    /// AC3-ERR: page keys in DRIVE forward to the agent as bytes; they do NOT
-    /// produce a page event (so the grid never flips while driving).
+    /// Owned-PTY: every bare key forwards to the focused agent as bytes -
+    /// page keys, letters, Enter, Esc, arrows, control bytes.
     #[test]
-    fn drive_page_keys_forward_to_agent_not_flip() {
+    fn bare_keys_forward_to_agent() {
         let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
         assert_eq!(
-            key_to_input(k(KeyCode::Char(']')), Mode::Drive),
+            key_to_input(k(KeyCode::Char(']'))),
             Some(InputEvent::Keystroke(b"]".to_vec()))
         );
         assert_eq!(
-            key_to_input(k(KeyCode::Char('[')), Mode::Drive),
-            Some(InputEvent::Keystroke(b"[".to_vec()))
-        );
-        assert_eq!(
-            key_to_input(k(KeyCode::PageDown), Mode::Drive),
+            key_to_input(k(KeyCode::PageDown)),
             Some(InputEvent::Keystroke(b"\x1b[6~".to_vec()))
         );
         assert_eq!(
-            key_to_input(k(KeyCode::PageUp), Mode::Drive),
-            Some(InputEvent::Keystroke(b"\x1b[5~".to_vec()))
-        );
-    }
-
-    #[test]
-    fn drive_mode_forwards_keystrokes_and_esc_releases() {
-        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
-        assert_eq!(
-            key_to_input(k(KeyCode::Esc), Mode::Drive),
-            Some(InputEvent::Release)
+            key_to_input(k(KeyCode::Esc)),
+            Some(InputEvent::Keystroke(b"\x1b".to_vec()))
         );
         assert_eq!(
-            key_to_input(k(KeyCode::Char('a')), Mode::Drive),
+            key_to_input(k(KeyCode::Char('a'))),
             Some(InputEvent::Keystroke(b"a".to_vec()))
         );
         assert_eq!(
-            key_to_input(k(KeyCode::Enter), Mode::Drive),
+            key_to_input(k(KeyCode::Enter)),
             Some(InputEvent::Keystroke(b"\r".to_vec()))
+        );
+        assert_eq!(
+            key_to_input(k(KeyCode::Up)),
+            Some(InputEvent::Keystroke(b"\x1b[A".to_vec()))
         );
     }
 
     #[test]
     fn ctrl_letter_maps_to_control_byte() {
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        // Ctrl-A = 0x01 forwarded in DRIVE.
-        assert_eq!(
-            key_to_input(key, Mode::Drive),
-            Some(InputEvent::Keystroke(vec![0x01]))
-        );
+        // Ctrl-A = 0x01 forwarded to the agent.
+        assert_eq!(key_to_input(key), Some(InputEvent::Keystroke(vec![0x01])));
     }
 
+    /// Scrollback keymap: the frozen-pane nav keys.
     #[test]
-    fn arrow_keys_map_to_ansi_in_drive() {
+    fn scrollback_keymap() {
         let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
         assert_eq!(
-            key_to_input(k(KeyCode::Up), Mode::Drive),
-            Some(InputEvent::Keystroke(b"\x1b[A".to_vec()))
+            scrollback_key(k(KeyCode::Up)),
+            Some(InputEvent::ScrollLineUp)
         );
+        assert_eq!(
+            scrollback_key(k(KeyCode::Char('j'))),
+            Some(InputEvent::ScrollLineDown)
+        );
+        assert_eq!(
+            scrollback_key(k(KeyCode::Esc)),
+            Some(InputEvent::ExitScrollback)
+        );
+        assert_eq!(scrollback_key(k(KeyCode::Char('z'))), None);
     }
 
     #[test]
@@ -4335,7 +4166,7 @@ mod tests {
         let mut pane = Pane::new(paged.tiles[0].rows - 2, paged.tiles[0].cols - 2);
         pane.feed(b"hello from agent");
         let snaps = vec![pane.snapshot()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let comp = Compositor::new(1);
         let mut buf: Vec<u8> = Vec::new();
         render_to(
@@ -4355,7 +4186,10 @@ mod tests {
         // Focused (only) pane uses heavy border corners.
         assert!(s.contains('┏'), "heavy top-left border for focused pane");
         assert!(s.contains("wkA"), "title shows agent name");
-        assert!(s.contains("WATCH"), "footer shows WATCH mode");
+        assert!(
+            s.contains("leader"),
+            "footer shows the owned-PTY leader hint"
+        );
         assert!(s.contains("hello from agent"), "pane content painted");
         // AC1-UI: single-page renders no pagination chrome.
         assert!(
@@ -4380,7 +4214,7 @@ mod tests {
             .iter()
             .map(|tile| Pane::new(tile.rows - 2, tile.cols - 2).snapshot())
             .collect();
-        let states = vec![ConnState::Watching; n];
+        let states = vec![ConnState::Live; n];
         let mut comp = Compositor::new(n);
         comp.recompute_pagination(4);
         // Pane 5 lives on page 1 (off-screen from page 0) and is waiting.
@@ -4427,55 +4261,16 @@ mod tests {
         );
     }
 
+    /// Owned-PTY: the tiled footer advertises "type into the focused pane" +
+    /// the leader, and a transient hint overrides it for one frame.
     #[test]
-    fn promote_blocked_only_on_exec_pane_in_watch() {
-        let hi = vec![true, false]; // pane 0 interactive, pane 1 exec
-                                    // Enter on the exec pane (focus 1) in WATCH is blocked.
-        assert!(promote_blocked_by_exec(
-            &InputEvent::Promote,
-            Mode::Watch,
-            1,
-            &hi
-        ));
-        // Enter on the interactive pane (focus 0) is allowed (drives).
-        assert!(!promote_blocked_by_exec(
-            &InputEvent::Promote,
-            Mode::Watch,
-            0,
-            &hi
-        ));
-        // Non-Promote events are never blocked.
-        assert!(!promote_blocked_by_exec(
-            &InputEvent::FocusNext,
-            Mode::Watch,
-            1,
-            &hi
-        ));
-        // In DRIVE, Enter forwards as a keystroke; the gate must not fire.
-        assert!(!promote_blocked_by_exec(
-            &InputEvent::Promote,
-            Mode::Drive,
-            1,
-            &hi
-        ));
-        // Out-of-range focus is treated as exec (watch-only), the safe default.
-        assert!(promote_blocked_by_exec(
-            &InputEvent::Promote,
-            Mode::Watch,
-            9,
-            &hi
-        ));
-    }
-
-    #[test]
-    fn footer_is_host_mode_aware_and_shows_hint() {
+    fn footer_shows_leader_hint_and_transient() {
         let paged = layout::compute_page(TtySize::new(24, 80), 1, 0).unwrap();
         let names = vec!["wkA".to_string()];
         let snaps = vec![Pane::new(paged.tiles[0].rows - 2, paged.tiles[0].cols - 2).snapshot()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let comp = Compositor::new(1);
 
-        // Interactive focus => "Enter drive".
         let mut buf = Vec::new();
         render_to(
             &mut buf,
@@ -4491,28 +4286,9 @@ mod tests {
         )
         .unwrap();
         let s = String::from_utf8_lossy(&buf);
-        assert!(s.contains("Enter drive"), "interactive footer, got: {s:?}");
-
-        // Exec focus => "watch only", never "Enter drive".
-        let mut buf = Vec::new();
-        render_to(
-            &mut buf,
-            &paged,
-            &names,
-            &snaps,
-            &states,
-            &comp,
-            &[false],
-            None,
-            &[],
-            None,
-        )
-        .unwrap();
-        let s = String::from_utf8_lossy(&buf);
-        assert!(s.contains("watch only"), "exec footer, got: {s:?}");
         assert!(
-            !s.contains("Enter drive"),
-            "exec footer must not offer drive"
+            s.contains("focused pane") && s.contains("leader"),
+            "owned-PTY footer, got: {s:?}"
         );
 
         // A transient hint replaces the mode line entirely.
@@ -4537,10 +4313,10 @@ mod tests {
         );
     }
 
-    /// AC3-UI: in DRIVE the footer shows the DRIVE hint and omits the page
-    /// hint / attention badges (paging is WATCH-only).
+    /// A multi-page grid always shows `Page n/P` and off-screen attention
+    /// badges in the footer (paging is a leader command, always available).
     #[test]
-    fn render_footer_drive_hides_page_hint_and_badges() {
+    fn render_footer_multipage_shows_page_and_badges() {
         let t = TtySize::new(13, 40); // capacity 4 → multi-page
         let n = 9;
         let paged = layout::compute_page(t, n, 0).unwrap();
@@ -4550,15 +4326,10 @@ mod tests {
             .iter()
             .map(|tile| Pane::new(tile.rows - 2, tile.cols - 2).snapshot())
             .collect();
-        // Drive the focused pane (pane 0, on page 0): Promote a drivable
-        // Watching pane flips the global mode to Drive (the footer keys off
-        // comp.mode(), not per-pane state).
-        let states = vec![ConnState::Watching; n];
+        let states = vec![ConnState::Live; n];
         let mut comp = Compositor::new(n);
         comp.recompute_pagination(4);
-        comp.step(InputEvent::Promote, &states); // focus 0 drivable → mode Drive
-        assert_eq!(comp.mode(), Mode::Drive);
-        // An off-screen waiting agent would normally badge - it must not in DRIVE.
+        // Pane 5 lives off-screen (page 1) and is waiting.
         let mut waiting = vec![false; n];
         waiting[5] = true;
         let badges = off_screen_waiting_by_page(&waiting, paged.capacity, paged.current_page);
@@ -4577,11 +4348,13 @@ mod tests {
         )
         .unwrap();
         let s = String::from_utf8_lossy(&buf);
-        assert!(s.contains("DRIVE"), "footer shows DRIVE hint, got: {s:?}");
-        assert!(!s.contains("[ ] page"), "DRIVE footer omits the page hint");
         assert!(
-            !s.contains("▸p"),
-            "DRIVE footer suppresses attention badges"
+            s.contains("Page "),
+            "multi-page footer shows the page indicator"
+        );
+        assert!(
+            s.contains("▸p"),
+            "off-screen waiting agent badges in the footer"
         );
     }
 
@@ -4592,7 +4365,7 @@ mod tests {
         let paged = layout::compute_page(TtySize::new(24, 80), 1, 0).unwrap();
         let names = vec!["wkA".to_string()];
         let snaps = vec![Pane::new(paged.tiles[0].rows - 2, paged.tiles[0].cols - 2).snapshot()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let comp = Compositor::new(1);
         let mut buf: Vec<u8> = Vec::new();
         render_to(
@@ -4673,11 +4446,11 @@ mod tests {
         use MouseEventKind::{ScrollDown, ScrollUp};
         // WATCH + history: the first wheel-up notch enters scrollback.
         assert_eq!(
-            mouse_to_input(ScrollUp, Mode::Watch, true),
+            mouse_to_input(ScrollUp, Mode::Drive, true),
             Some(InputEvent::EnterScrollback)
         );
         // WATCH + no history: nothing (the caller surfaces the hint instead).
-        assert_eq!(mouse_to_input(ScrollUp, Mode::Watch, false), None);
+        assert_eq!(mouse_to_input(ScrollUp, Mode::Drive, false), None);
         // SCROLLBACK: wheel up/down walk the history regardless of has_history.
         assert_eq!(
             mouse_to_input(ScrollUp, Mode::Scrollback, false),
@@ -4688,10 +4461,10 @@ mod tests {
             Some(InputEvent::ScrollLineDown)
         );
         // Wheel-down in WATCH: already at the live tail → no-op.
-        assert_eq!(mouse_to_input(ScrollDown, Mode::Watch, true), None);
+        assert_eq!(mouse_to_input(ScrollDown, Mode::Drive, true), None);
         // Non-wheel events never route through here.
         assert_eq!(
-            mouse_to_input(MouseEventKind::Moved, Mode::Watch, true),
+            mouse_to_input(MouseEventKind::Moved, Mode::Drive, true),
             None
         );
     }
@@ -4703,7 +4476,7 @@ mod tests {
         let paged = layout::compute_page(TtySize::new(24, 80), 1, 0).unwrap();
         let names = vec!["wkA".to_string()];
         let mut snaps = vec![one_pane(b"hello").pop().unwrap().snapshot()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let comp = Compositor::new(1);
         let a = build_frame(
             &paged,
@@ -4733,7 +4506,7 @@ mod tests {
     fn paint_clears_first_frame_then_diffs_without_clear() {
         let tty = TtySize::new(24, 80);
         let names = vec!["wkA".to_string()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let comp = Compositor::new(1);
         let hi = vec![true];
 
@@ -4794,7 +4567,7 @@ mod tests {
     fn paint_diff_repaints_only_the_changed_cell() {
         let tty = TtySize::new(24, 80);
         let names = vec!["wkA".to_string()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let comp = Compositor::new(1);
         let hi = vec![true];
 
@@ -4847,7 +4620,7 @@ mod tests {
     #[test]
     fn paint_resize_takes_full_paint_path() {
         let names = vec!["wkA".to_string()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let comp = Compositor::new(1);
         let hi = vec![true];
 
@@ -4984,36 +4757,9 @@ mod tests {
         );
     }
 
-    // ── Scrollback keymap + affordance ───────────────────────────────────
-
-    #[test]
-    fn watch_space_enters_scrollback() {
-        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
-        assert_eq!(
-            key_to_input(k(KeyCode::Char(' ')), Mode::Watch),
-            Some(InputEvent::EnterScrollback)
-        );
-    }
-
-    #[test]
-    fn scrollback_keymap_maps_scroll_and_exit() {
-        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
-        for (code, want) in [
-            (KeyCode::Up, InputEvent::ScrollLineUp),
-            (KeyCode::Char('k'), InputEvent::ScrollLineUp),
-            (KeyCode::Down, InputEvent::ScrollLineDown),
-            (KeyCode::Char('j'), InputEvent::ScrollLineDown),
-            (KeyCode::PageUp, InputEvent::ScrollPageUp),
-            (KeyCode::PageDown, InputEvent::ScrollPageDown),
-            (KeyCode::Char('g'), InputEvent::ScrollTop),
-            (KeyCode::Char('G'), InputEvent::ScrollBottom),
-            (KeyCode::Esc, InputEvent::ExitScrollback),
-        ] {
-            assert_eq!(key_to_input(k(code), Mode::Scrollback), Some(want));
-        }
-        // Unmapped keys are inert in scrollback.
-        assert_eq!(key_to_input(k(KeyCode::Char('z')), Mode::Scrollback), None);
-    }
+    // ── Scrollback affordance ────────────────────────────────────────────
+    // (The scrollback keymap is unit-tested as `scrollback_keymap` and the
+    // leader+Space entry as `leader_command_mux_mapping`.)
 
     /// AC1-HP / AC1-UI: in scrollback the footer shows the position indicator
     /// and exit affordance, and the focused pane's title carries a SCROLLBACK
@@ -5033,7 +4779,7 @@ mod tests {
         let off = pane.scroll_offset();
         assert!(off >= 1, "pane scrolled up into history");
         let snaps = vec![pane.snapshot()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let mut comp = Compositor::new(1);
         comp.step(InputEvent::EnterScrollback, &states);
         assert_eq!(comp.mode(), Mode::Scrollback);
@@ -5378,7 +5124,7 @@ mod tests {
         raster_footer_rail(&mut frame, &footer, &rs, None, None);
         let line = row_text(&frame, 0);
         // AC4-UI: footer always names the active group-by key + axis.
-        assert!(line.contains("WATCH"), "axis label missing: {line}");
+        assert!(line.contains("DRIVE"), "axis label missing: {line}");
         assert!(
             line.contains("group-by: provider"),
             "active group-by key missing: {line}"
@@ -5401,7 +5147,7 @@ mod tests {
         raster_footer_rail_group(&mut frame, &footer, &rs, "codex", 1, 3, None, None);
         let line = row_text(&frame, 0);
         // Footer invariant: mode + focus axis + group-by key always present.
-        assert!(line.contains("WATCH"), "axis missing: {line}");
+        assert!(line.contains("DRIVE"), "axis missing: {line}");
         assert!(line.contains("tile"), "mode token missing: {line}");
         assert!(
             line.contains("group-by: provider"),
@@ -5446,7 +5192,7 @@ mod tests {
         let badges =
             group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
         let names = vec!["wkA".to_string(), "wkB".to_string()];
-        let states = vec![ConnState::Watching, ConnState::Watching];
+        let states = vec![ConnState::Live, ConnState::Live];
 
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
         rs.main_mode = group::MainMode::GroupTile;
@@ -5535,7 +5281,7 @@ mod tests {
         let badges =
             group::compute_badges_from_live(&groups, &[false, false], &[false, false], &[], 0);
         let names = vec!["wkA".to_string(), "wkB".to_string()];
-        let states = vec![ConnState::Watching, ConnState::Watching];
+        let states = vec![ConnState::Live, ConnState::Live];
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
         rs.main_mode = group::MainMode::GroupTile;
         rs.selected_agent_idx = Some(0);
@@ -5625,9 +5371,9 @@ mod tests {
         ];
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
         let states = vec![
-            ConnState::Watching,
+            ConnState::Live,
             ConnState::Exited { code: 0 },
-            ConnState::Watching,
+            ConnState::Live,
         ];
         let live = live_group_of(&groups[0], &states);
         // Header is the repo basename (US1); key_value keeps the full path.
@@ -5653,9 +5399,9 @@ mod tests {
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
         let names = vec!["wkA".to_string(), "wkB".to_string(), "wkC".to_string()];
         let states = vec![
-            ConnState::Watching,
+            ConnState::Live,
             ConnState::Exited { code: 0 },
-            ConnState::Watching,
+            ConnState::Live,
         ];
         let badges = group::compute_badges_from_live(
             &groups,
@@ -5774,7 +5520,7 @@ mod tests {
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
         let badges = group::compute_badges_from_live(&groups, &[true], &[false], &[], 0); // wkA waiting
         let names = vec!["wkA".to_string()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
         rs.selected_agent_idx = Some(0);
         let tty = layout::TtySize::new(24, 80);
@@ -5853,7 +5599,8 @@ mod tests {
             cols: 120,
         };
         let mut frame = ScreenBuffer::blank(1, 120);
-        let rs = group::RailState::new(group::GroupKey::Cwd);
+        let mut rs = group::RailState::new(group::GroupKey::Cwd);
+        rs.enter_nav(); // the drill-down keymap shows while browsing
         raster_footer_rail_group(&mut frame, &footer, &rs, "/repo/x", 0, 1, None, None);
         let line = row_text(&frame, 0);
         assert!(
@@ -5873,6 +5620,7 @@ mod tests {
             cols: 100,
         };
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
+        rs.enter_nav(); // the `a` toggle is advertised in the browse keymap
 
         // Off: no filter token, and the keymap advertises the toggle.
         let mut frame = ScreenBuffer::blank(1, 100);
@@ -5939,7 +5687,7 @@ mod tests {
             json!({"name": "wkB", "cwd": "/repo/x", "provider": "codex", "status": "live"}),
         ];
         let groups = group::group_by(&rows, group::GroupKey::Cwd);
-        let states = vec![ConnState::Exited { code: 0 }, ConnState::Watching]; // wkA exited
+        let states = vec![ConnState::Exited { code: 0 }, ConnState::Live]; // wkA exited
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
         rs.main_mode = group::MainMode::GroupTile;
         rs.selected_agent_idx = Some(0); // selection on the exited wkA (hidden)
@@ -6032,71 +5780,51 @@ mod tests {
         assert!(text_rail.contains("Tab"), "rail lines must mention Tab");
     }
 
-    /// AC-E5c-3: ? in WATCH toggles to Open; ? in DRIVE forwards as Keystroke.
+    /// Owned-PTY: bare `?` always passes through (it types to the agent; the
+    /// overlay opens via leader+?). While open it is inert like any other key.
     #[test]
-    fn ac_e5c_3_help_key_action_question_mark_watch_vs_drive() {
-        // AC-E5c-3: WATCH ? -> Toggle; DRIVE ? -> Passthrough (agent gets the byte).
+    fn help_key_action_question_mark_passes_through_or_inert() {
         let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        // Overlay closed: `?` forwards to the agent (run loop hits key_to_input).
         assert_eq!(
-            help_key_action(k(KeyCode::Char('?')), Mode::Watch, false),
-            HelpAction::Toggle,
-        );
-        assert_eq!(
-            help_key_action(k(KeyCode::Char('?')), Mode::Watch, true),
-            HelpAction::Toggle,
-        );
-        // In DRIVE ? must go to the agent, not open/close the overlay.
-        assert_eq!(
-            help_key_action(k(KeyCode::Char('?')), Mode::Drive, false),
+            help_key_action(k(KeyCode::Char('?')), false),
             HelpAction::Passthrough,
+        );
+        // Overlay open: `?` is inert (does not leak behind the overlay).
+        assert_eq!(
+            help_key_action(k(KeyCode::Char('?')), true),
+            HelpAction::Inert,
         );
     }
 
-    /// AC-E5c-3: while the overlay is open, navigation keys are inert.
+    /// While the overlay is open, navigation keys are inert; q closes.
     #[test]
-    fn ac_e5c_3_help_key_action_inert_while_open() {
-        // AC-E5c-3: Tab / arrows must NOT navigate underneath a visible overlay.
+    fn help_key_action_inert_while_open() {
         let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(help_key_action(k(KeyCode::Tab), true), HelpAction::Inert);
+        assert_eq!(help_key_action(k(KeyCode::Right), true), HelpAction::Inert);
         assert_eq!(
-            help_key_action(k(KeyCode::Tab), Mode::Watch, true),
-            HelpAction::Inert,
-        );
-        assert_eq!(
-            help_key_action(k(KeyCode::Right), Mode::Watch, true),
-            HelpAction::Inert,
-        );
-        assert_eq!(
-            help_key_action(k(KeyCode::Char('q')), Mode::Watch, true),
+            help_key_action(k(KeyCode::Char('q')), true),
             HelpAction::Close,
         );
     }
 
-    /// AC-E5c-3: Esc closes the overlay when it is open.
+    /// Esc closes the overlay when open; passes through when closed.
     #[test]
-    fn ac_e5c_3_help_key_action_esc_closes() {
-        // AC-E5c-3: Esc with overlay open -> Close; closed -> Passthrough (normal Esc handling).
+    fn help_key_action_esc_closes() {
         let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(help_key_action(k(KeyCode::Esc), true), HelpAction::Close);
         assert_eq!(
-            help_key_action(k(KeyCode::Esc), Mode::Watch, true),
-            HelpAction::Close,
-        );
-        // Esc with overlay closed is irrelevant to this fn; Passthrough means
-        // the run loop handles it via key_to_input as usual.
-        assert_eq!(
-            help_key_action(k(KeyCode::Esc), Mode::Watch, false),
+            help_key_action(k(KeyCode::Esc), false),
             HelpAction::Passthrough,
         );
     }
 
-    /// AC-E5c-3: Ctrl-C always quits regardless of overlay state.
+    /// Ctrl-C always passes through to the outer Quit handler, overlay or not.
     #[test]
-    fn ac_e5c_3_help_key_action_ctrl_c_always_quits() {
-        // AC-E5c-3: Ctrl-C is the operator escape hatch; it must quit even with overlay open.
+    fn help_key_action_ctrl_c_always_passes_through() {
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(
-            help_key_action(ctrl_c, Mode::Watch, true),
-            HelpAction::Passthrough, // let the outer loop handle Ctrl-C via key_to_input
-        );
+        assert_eq!(help_key_action(ctrl_c, true), HelpAction::Passthrough);
     }
 
     /// AC-E5c-3: overlay render does not corrupt the frame and is visible.
@@ -6158,7 +5886,7 @@ mod tests {
     fn build_frame_palette_applied_to_border_cells() {
         let tty = TtySize::new(24, 80);
         let names = vec!["wkA".to_string()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let comp = Compositor::new(1);
         let paged = layout::compute_page(tty, 1, 0).unwrap();
         let mut snaps = vec![one_pane(b"hello").pop().unwrap().snapshot()];
@@ -6193,7 +5921,7 @@ mod tests {
     fn build_frame_fixed_palette_preserves_default_colors() {
         let tty = TtySize::new(24, 80);
         let names = vec!["wkA".to_string()];
-        let states = vec![ConnState::Watching];
+        let states = vec![ConnState::Live];
         let comp = Compositor::new(1);
         let paged = layout::compute_page(tty, 1, 0).unwrap();
         let mut snaps = vec![one_pane(b"hello").pop().unwrap().snapshot()];
