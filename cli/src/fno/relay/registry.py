@@ -27,6 +27,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -159,15 +160,74 @@ def unregister(session_id: str, path: Optional[Path] = None) -> None:
             _write(entries, path)
 
 
+def _agents_home() -> Path:
+    """The fno-agents home (mirrors :func:`fno.relay.roundtrip._agents_home`):
+    ``$FNO_AGENTS_HOME`` else ``$HOME/.fno/agents``. Kept local so this module does
+    not import roundtrip (which imports this one -- a cycle)."""
+    env = os.environ.get("FNO_AGENTS_HOME")
+    return Path(env) if env else Path.home() / ".fno" / "agents"
+
+
+# short_id is a worker-socket path segment, so a surfaced peer's id must be a safe
+# token (mirrors roundtrip._SHORT_ID_RE) -- a malformed registry row never path-traverses.
+_AGENT_SHORT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _live_agents_workers() -> dict[str, RegistryEntry]:
+    """Live interactive NON-claude owned-PTY workers from the canonical agents
+    registry -- the cross-harness bridge (G4 / x-3f34). claude peers are surfaced by
+    :func:`discover_live_sessions` and routed on the session-uuid lane; this makes a
+    codex / gemini / ... interactive worker an addressable relay peer keyed by its
+    ``short_id``, with a ``worker:<short_id>`` inject handle the daemon routes through
+    ``worker.submit``. A missing / corrupt / non-object registry yields ``{}`` (a junk
+    registry must never deny lookup)."""
+    reg = _agents_home() / "registry.json"
+    try:
+        data = json.loads(reg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    rows = data.get("agents") or data.get("entries") or []
+    if not isinstance(rows, list):
+        return {}
+    out: dict[str, RegistryEntry] = {}
+    for e in rows:
+        if not isinstance(e, dict):
+            continue
+        provider = e.get("provider")
+        if provider in (None, "claude"):
+            continue  # claude rides the discover + session-uuid lane, not this bridge
+        if e.get("host_mode") not in (None, "interactive"):
+            continue  # only an interactive PTY worker serves worker.submit
+        if e.get("status") not in (None, "live"):
+            continue  # a dead worker holds no live PTY
+        short_id = e.get("short_id")
+        if not isinstance(short_id, str) or not _AGENT_SHORT_ID_RE.match(short_id):
+            continue  # short_id is a socket path segment -- must be safe
+        pid = e.get("pid")
+        out[short_id] = RegistryEntry(
+            session_id=short_id,
+            provider=provider,
+            pid=pid if isinstance(pid, int) else 0,
+            cwd=e.get("cwd"),
+            inject_handle=f"worker:{short_id}",
+            status="live",
+            name=e.get("name"),
+        )
+    return out
+
+
 def index(
     path: Optional[Path] = None,
     *,
     include_discovered: bool = True,
 ) -> dict[str, RegistryEntry]:
     """The full live index: persisted footnote peers folded over live-discovered
-    claude sessions. Persisted peers win a session-id clash (they carry the real
-    ``inject_handle``); discovery refreshes ``status``/``cwd`` for everything
-    else."""
+    claude sessions and live non-claude agents-workers (the cross-harness bridge).
+    Persisted peers win a session-id clash (they carry the real ``inject_handle``);
+    discovery refreshes ``status``/``cwd`` for everything else. Non-claude workers
+    are keyed by ``short_id`` so they never clash with a claude session uuid."""
     merged: dict[str, RegistryEntry] = {}
     if include_discovered:
         for s in discover_live_sessions():
@@ -181,5 +241,6 @@ def index(
                 name=s.handle,
                 transcript_path=transcript_path_for(s.session_id),
             )
+        merged.update(_live_agents_workers())  # cross-harness peers (codex/gemini/...)
     merged.update(load(path))  # persisted peers win
     return merged
