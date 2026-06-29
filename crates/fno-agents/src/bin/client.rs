@@ -907,6 +907,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--from-name",
         "--timeout",
         "--model",
+        "--mode",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -2516,6 +2517,24 @@ mod tests {
         assert_eq!(params["host_mode"], "interactive");
         let sid = params["session_id"].as_str().expect("minted session_id");
         assert_eq!(sid.split('-').count(), 5, "minted a uuid: {sid}");
+    }
+
+    #[test]
+    fn host_claude_interactive_accepts_equals_form_mode() {
+        // codex P2 PR#88: `--mode=interactive` must normalize like the other
+        // value flags, not fall through to "unknown flag".
+        let args = vec![
+            "wk-c".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--mode=interactive".to_string(),
+        ];
+        let (_m, params) = build_request("host", &args).unwrap();
+        assert_eq!(params["mode"], "interactive");
+        assert!(
+            params["session_id"].as_str().is_some(),
+            "equals-form mode still mints the session id"
+        );
     }
 
     #[test]
