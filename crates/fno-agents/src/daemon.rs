@@ -1152,15 +1152,11 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                             None
                         },
                         yolo,
-                        // Sentinel-prompt seam (E4.1 + G5 Track A): the relay
-                        // passes its `<<<RELAY>>>` system prompt so the spawned
-                        // pane's replies are parseable; grid spawns omit the key.
-                        // Threaded for ANY interactive provider - each decides how
-                        // (or whether) to honor it in create_interactive_argv
-                        // (claude --append-system-prompt, codex
-                        // -c developer_instructions, agy degrades unsteered). A
-                        // spawn that omits the key gets None and is byte-unchanged.
-                        append_system_prompt: if interactive {
+                        // Sentinel-prompt seam (E4.1): the relay passes its
+                        // `<<<RELAY>>>` system prompt so the spawned pane's
+                        // replies are parseable; grid spawns omit it. Interactive
+                        // claude only - codex/gemini keep their argv byte-unchanged.
+                        append_system_prompt: if interactive && provider == "claude" {
                             p.get("append_system_prompt")
                                 .and_then(|v| v.as_str())
                                 .map(String::from)
