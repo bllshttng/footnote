@@ -50,6 +50,12 @@ pub enum ConnState {
     /// Agent process exited. Terminal for this run; the renderer paints
     /// the last received frame plus `exited (code N)`.
     Exited { code: i32 },
+    /// A claude `--bg` roster session surfaced as a static status card
+    /// (x-57eb, Option A). It owns NO fno worker socket and receives no PTY
+    /// stream - the pane is fed a one-shot card (cwd + age + `↵ attach`) at
+    /// build time and never steps the stream FSM. Not drivable as an fno PTY:
+    /// the focused-card Enter shells out to native `claude attach` instead.
+    BgRoster,
 }
 
 impl ConnState {
@@ -70,6 +76,16 @@ impl ConnState {
         matches!(self, ConnState::Live | ConnState::Connecting)
     }
 
+    /// Whether focus navigation (Tab / arrows) may land on this pane. Every
+    /// drivable pane is focusable; additionally a [`BgRoster`](Self::BgRoster)
+    /// card is focusable so the operator can reach its `↵ attach` affordance,
+    /// even though it is NOT a drivable fno PTY - focusing it routes Enter to
+    /// native `claude attach`, never PTY keystrokes (x-57eb). A dead pane
+    /// (`Exited` / `Disconnected`) is neither drivable nor focusable.
+    pub fn is_focusable(&self) -> bool {
+        self.is_drivable() || matches!(self, ConnState::BgRoster)
+    }
+
     /// Whether the attention scanner should run a readiness check on this
     /// pane. Only `Live` panes count: an `Exited` / `Disconnected` pane
     /// holds a frozen last frame whose tail may end in a prompt glyph,
@@ -87,6 +103,7 @@ impl ConnState {
             ConnState::Live => "live".to_string(),
             ConnState::Disconnected { reason } => format!("disconnected - {reason} (r to retry)"),
             ConnState::Exited { code } => format!("exited (code {code})"),
+            ConnState::BgRoster => "bg \u{b7} \u{21b5} attach".to_string(),
         }
     }
 }
@@ -148,7 +165,9 @@ impl ConnState {
                 }
                 Live => ConnAction::FeedRenderer(bytes),
                 // Bytes after exit / disconnect are dropped (buffered-frame race).
-                Exited { .. } | Disconnected { .. } => ConnAction::NoOp,
+                // A bg-roster card has no stream, so bytes never reach it; the arm
+                // exists only for exhaustiveness.
+                Exited { .. } | Disconnected { .. } | BgRoster => ConnAction::NoOp,
             };
         }
 
@@ -641,9 +660,10 @@ pub fn off_screen_waiting_by_page(
     counts.into_iter().collect()
 }
 
-/// Pick the next drivable focus index in cyclic order. If no pane is
-/// drivable, focus stays put (the operator sees no change but no
-/// keystroke leaks either).
+/// Pick the next focusable focus index in cyclic order. Focusable includes
+/// drivable panes AND bg-roster cards (so Tab/arrows can reach a `--bg` card's
+/// attach affordance on a mixed fleet, x-57eb). If no pane is focusable, focus
+/// stays put (the operator sees no change but no keystroke leaks either).
 fn next_focus(current: usize, pane_states: &[ConnState], forward: bool) -> usize {
     let n = pane_states.len();
     if n == 0 {
@@ -656,7 +676,7 @@ fn next_focus(current: usize, pane_states: &[ConnState], forward: bool) -> usize
         } else {
             (idx + n - 1) % n
         };
-        if pane_states[idx].is_drivable() {
+        if pane_states[idx].is_focusable() {
             return idx;
         }
     }
@@ -780,6 +800,21 @@ mod tests {
         assert_eq!(c.focus(), 2, "should skip the exited pane in the middle");
         c.step(InputEvent::FocusNext, &panes);
         assert_eq!(c.focus(), 0, "should wrap to the live first pane");
+    }
+
+    /// x-57eb: focus navigation reaches a bg-roster card (focusable but not
+    /// drivable) on a mixed fleet, so its `↵ attach` affordance is reachable
+    /// by Tab/arrows - not only by mouse. Regression guard for the codex P2.
+    #[test]
+    fn focus_reaches_bg_roster_card() {
+        assert!(ConnState::BgRoster.is_focusable());
+        assert!(!ConnState::BgRoster.is_drivable());
+        let panes = vec![ConnState::Live, ConnState::BgRoster, ConnState::Live];
+        let mut c = Compositor::new(3);
+        c.step(InputEvent::FocusNext, &panes);
+        assert_eq!(c.focus(), 1, "Tab must land on the bg card, not skip it");
+        c.step(InputEvent::FocusNext, &panes);
+        assert_eq!(c.focus(), 2);
     }
 
     /// AC3-HP corner: when no pane is drivable, focus stays put.

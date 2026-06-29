@@ -274,6 +274,195 @@ fn resolve_host_modes(names: &[String], home: &AgentsHome) -> Vec<bool> {
     host_modes_from_rows(rows, names)
 }
 
+// ── claude --bg roster cards (x-57eb, Option A) ───────────────────────────────
+//
+// `claude --bg` sessions are interactive threads claude's OWN daemon owns
+// (`~/.claude/daemon/roster.json`). They carry no fno worker socket, so the grid
+// never enumerated them (`resolve_agent_names` reads the fno registry only). We
+// surface each roster-only session as a STATUS CARD (cwd + age + `↵ attach`) and
+// route its drive to native `claude attach` - NOT an fno-rendered PTY (that would
+// be the rejected Option B). The roster read side is `crate::claude_roster`.
+
+/// One claude `--bg` session resolved into a grid status card. Owned data so it
+/// outlives the borrowed roster it was read from.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RosterBgCard {
+    /// The session short id (first 8-hex segment); the pane name + display key.
+    pub name: String,
+    /// Full session UUID - what native `claude attach <id>` consumes.
+    pub session_id: String,
+    /// The worker's cwd; its basename leads the card.
+    pub cwd: String,
+    /// Worker start time (unix secs) when the roster carried a parseable epoch;
+    /// `None` for the human-date-string drift (>=2.1.195), which degrades age to
+    /// "?" rather than failing.
+    pub proc_start: Option<u64>,
+}
+
+/// The roster-only `--bg` cards: claude roster workers whose session is NOT
+/// already represented in the fno registry. Dedup by short_id AND full
+/// session_id; the registry row WINS on overlap (an fno-spawned interactive
+/// claude is already a registry pane, so its roster twin must not double-list).
+/// Pure for testability; the I/O wrapper is [`resolve_bg_roster_cards`].
+pub(crate) fn roster_bg_cards_from(
+    registry_rows: &[Value],
+    roster: &[&crate::claude_roster::RosterWorker],
+) -> Vec<RosterBgCard> {
+    let mut reg_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for r in registry_rows {
+        if let Some(s) = r.get("short_id").and_then(Value::as_str) {
+            reg_ids.insert(s);
+        }
+        if let Some(s) = r.get("session_id").and_then(Value::as_str) {
+            reg_ids.insert(s);
+        }
+    }
+    roster
+        .iter()
+        .filter(|w| !reg_ids.contains(w.session_id.as_str()) && !reg_ids.contains(w.short_id()))
+        .map(|w| RosterBgCard {
+            name: w.short_id().to_string(),
+            session_id: w.session_id.clone(),
+            cwd: w.cwd.clone(),
+            proc_start: w.proc_start,
+        })
+        .collect()
+}
+
+/// Read the fno registry + the claude daemon roster and return the roster-only
+/// `--bg` cards. A missing / unparseable roster yields zero cards and never
+/// errors (the grid degrades to "no bg sessions", AC-ERR). The registry read
+/// mirrors the other enumeration sites (absent => no rows).
+fn resolve_bg_roster_cards(home: &AgentsHome) -> Vec<RosterBgCard> {
+    let registry_rows: Vec<Value> = std::fs::read(home.registry_json())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| {
+            v.get("agents")
+                .or_else(|| v.get("entries"))
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default();
+    // load_default already degrades a missing roster to empty; an unparseable
+    // one (Err) also yields zero cards here rather than failing grid startup.
+    let roster = match crate::claude_roster::ClaudeRoster::load_default() {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    roster_bg_cards_from(&registry_rows, &roster.workers_deduped())
+}
+
+/// Human age label from a `proc_start` unix-secs epoch vs `now`. `None` (the
+/// date-string drift) or a future timestamp degrade to "?". Pure.
+//
+// ponytail: assumes `proc_start` is seconds. In practice the live roster carries
+// a date STRING that parses to None, so this branch is rarely hit; a numeric
+// epoch unit mismatch would only mis-scale a cosmetic age label, never break.
+fn bg_age_label(proc_start: Option<u64>, now: u64) -> String {
+    match proc_start {
+        Some(t) if now >= t => {
+            let secs = now - t;
+            if secs < 3600 {
+                format!("{}m", secs / 60)
+            } else if secs < 86_400 {
+                format!("{}h", secs / 3600)
+            } else {
+                format!("{}d", secs / 86_400)
+            }
+        }
+        _ => "?".to_string(),
+    }
+}
+
+/// Current wall clock in unix seconds (0 on a pre-epoch clock error).
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Build a static status-card [`Pane`] for a claude `--bg` session: cwd
+/// basename, age, and the `↵ attach` affordance. No worker socket and no WS
+/// stream are opened (Option A) - the card text is fed once into the pane's
+/// emulator. CRLF line ends because the emulator runs in raw mode.
+fn bg_card_pane(card: &RosterBgCard, rows: u16, cols: u16, now: u64) -> Pane {
+    let mut pane = Pane::new(rows, cols);
+    let base = card
+        .cwd
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(card.cwd.as_str());
+    let age = bg_age_label(card.proc_start, now);
+    let text = format!(
+        "\r\n  claude --bg\r\n  {}\r\n  cwd  {base}\r\n  age  {age}\r\n\r\n  \u{21b5} attach\r\n",
+        card.name,
+    );
+    pane.feed(text.as_bytes());
+    pane
+}
+
+/// Suspend the grid's raw mode + alternate screen, exec native
+/// `claude attach <session_id>` with inherited stdio, then RESTORE the terminal
+/// so the operator lands back in the grid (not the native detach-to-empty-shell
+/// seam). The terminal is restored regardless of the attach outcome; the caller
+/// forces a full repaint (`prev_frame = None`) and surfaces any error via the
+/// footer hint. (x-57eb, Change 3)
+///
+/// `async` + `tokio::process` is load-bearing on the current-thread runtime: a
+/// synchronous `std::process::Command::status()` would block the SOLE executor
+/// thread for the whole (interactive, possibly minutes-long) attach, starving
+/// every spawned task - including the watch-sink readers draining the other
+/// panes' WS streams (gemini review HIGH on PR #96). Awaiting the child keeps
+/// the executor free to drain them while the operator is attached; the grid is
+/// paused (alt screen left) but its background tasks stay alive.
+async fn attach_bg_session(session_id: &str) -> Result<(), String> {
+    use crossterm::{
+        cursor,
+        event::{DisableMouseCapture, EnableMouseCapture},
+        execute, terminal,
+    };
+    // Suspend (mirror TerminalGuard::drop) so claude attach owns a clean TTY.
+    // termios / alt-screen state is process-global, so the sync crossterm calls
+    // are correct regardless of which thread later runs the child.
+    let _ = execute!(
+        io::stderr(),
+        DisableMouseCapture,
+        terminal::LeaveAlternateScreen,
+        cursor::Show
+    );
+    let _ = terminal::disable_raw_mode();
+
+    // Inherit stdio (the default) so the child owns the real TTY interactively.
+    let status = tokio::process::Command::new("claude")
+        .arg("attach")
+        .arg(session_id)
+        .status()
+        .await;
+
+    // Restore (mirror TerminalGuard::enter) ALWAYS, even on attach failure, so
+    // the grid is never left in raw mode / on the alt screen.
+    let _ = terminal::enable_raw_mode();
+    let _ = execute!(
+        io::stderr(),
+        terminal::EnterAlternateScreen,
+        EnableMouseCapture,
+        cursor::Hide
+    );
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!(
+            "claude attach exited {}",
+            s.code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "by signal".into())
+        )),
+        Err(e) => Err(format!("claude attach failed: {e} (is `claude` on PATH?)")),
+    }
+}
+
 /// Map a bare crossterm key to a [`Keystroke`](InputEvent::Keystroke) for the
 /// focused pane's owned PTY.
 ///
@@ -2233,6 +2422,33 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
         "host_interactive must be 1:1 with names"
     );
 
+    // Merge claude --bg roster sessions as status cards (x-57eb, Option A).
+    // These are interactive threads claude's own daemon owns; they carry NO fno
+    // worker socket, so they open zero WS connections and are exempt from the
+    // soft cap (the cap bounds eager connections, of which a card has none).
+    // `roster_cards` is aligned 1:1 with `names`/`panes`: None for a real fno
+    // pane, Some(card) for a bg card. Drive routes to native `claude attach`
+    // (the focused-card Enter affordance), never an fno PTY. Gated to --all (the
+    // fleet view / bare front door); explicit-name invocations are unaffected.
+    let mut roster_cards: Vec<Option<RosterBgCard>> = vec![None; names.len()];
+    if parsed.all {
+        for card in resolve_bg_roster_cards(home) {
+            names.push(card.name.clone());
+            host_interactive.push(false); // not an fno PTY: Enter attaches, no keystrokes
+            roster_cards.push(Some(card));
+        }
+    }
+    debug_assert_eq!(
+        roster_cards.len(),
+        names.len(),
+        "roster_cards must be 1:1 with names"
+    );
+    debug_assert_eq!(
+        host_interactive.len(),
+        names.len(),
+        "host_interactive must stay 1:1 with names after the roster merge"
+    );
+
     let daemon_bin = resolve_daemon_bin();
     if let Err(e) = ensure_daemon(home, &daemon_bin).await {
         eprintln!("fno-agents grid: {e}");
@@ -2279,10 +2495,18 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
         // Non-empty fleet => paged0 is Some (only the empty front door is None).
         let layout0 = paged0.as_ref().expect("non-empty fleet has a layout");
         let (rows, cols) = target_pane_inner(layout0, idx);
-        let (pane, state, sink) = open_watch_pane(home, name, idx, rows, cols, &tx).await;
-        panes.push(pane);
-        states.push(state);
-        watch_sinks.push(sink);
+        if let Some(card) = roster_cards.get(idx).and_then(Option::as_ref) {
+            // Roster --bg card: no worker socket exists, so NEVER open_watch_pane
+            // (AC-EDGE). A static card is fed once; the pane has no live stream.
+            panes.push(bg_card_pane(card, rows, cols, unix_now_secs()));
+            states.push(ConnState::BgRoster);
+            watch_sinks.push(None);
+        } else {
+            let (pane, state, sink) = open_watch_pane(home, name, idx, rows, cols, &tx).await;
+            panes.push(pane);
+            states.push(state);
+            watch_sinks.push(sink);
+        }
     }
 
     let mut comp = Compositor::new(panes.len());
@@ -2641,6 +2865,10 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                         open_watch_pane(home, &name, new_idx, rows, cols, &tx).await;
                                                     // A /target worker is interactive claude.
                                                     host_interactive.push(true);
+                                                    // Keep roster_cards 1:1 with panes: a
+                                                    // live-added worker is a real fno pane,
+                                                    // never a bg card (x-57eb).
+                                                    roster_cards.push(None);
                                                     panes.push(pane);
                                                     states.push(state);
                                                     watch_sinks.push(sink);
@@ -3311,13 +3539,47 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         if let Some(input) = input {
                             // Any operator key clears a prior transient hint.
                             hint = None;
+                            let focus = comp.focus();
+                            // Roster --bg card (x-57eb): a keystroke on a focused bg
+                            // card never reaches an fno PTY (there is none). Enter
+                            // shells out to native `claude attach`; any other key
+                            // hints. Non-keystroke inputs (focus / page / scrollback /
+                            // quit) fall through to the normal dispatch unchanged. A bg
+                            // card is also host_interactive=false, so this branch must
+                            // precede `exec_refuses` below.
+                            let bg_keystroke = matches!(input, InputEvent::Keystroke(_))
+                                && roster_cards.get(focus).map(Option::is_some).unwrap_or(false);
                             // Exec panes refuse keystrokes (host_interactive marker):
                             // surface a hint rather than leak bytes the daemon's
                             // watch-only connection would drop anyway (ab-7fd7ae49).
                             let exec_refuses = matches!(input, InputEvent::Keystroke(_))
-                                && !host_interactive.get(comp.focus()).copied().unwrap_or(true);
-                            if exec_refuses {
-                                let who = names.get(comp.focus()).map(String::as_str).unwrap_or("?");
+                                && !host_interactive.get(focus).copied().unwrap_or(true);
+                            if bg_keystroke {
+                                let is_enter = matches!(
+                                    &input,
+                                    InputEvent::Keystroke(b) if b.as_slice() == b"\r"
+                                );
+                                if is_enter {
+                                    if let Some(card) =
+                                        roster_cards.get(focus).and_then(Option::as_ref)
+                                    {
+                                        // Attach takes over the terminal; on return the
+                                        // screen is dirty, so force a full repaint.
+                                        if let Err(e) = attach_bg_session(&card.session_id).await {
+                                            hint = Some(e);
+                                        }
+                                        prev_frame = None;
+                                    }
+                                } else {
+                                    let who =
+                                        names.get(focus).map(String::as_str).unwrap_or("?");
+                                    hint = Some(format!(
+                                        "{who} is a claude --bg session - press Enter to attach"
+                                    ));
+                                }
+                                dirty = true;
+                            } else if exec_refuses {
+                                let who = names.get(focus).map(String::as_str).unwrap_or("?");
                                 hint = Some(format!(
                                     "{who} is an exec agent - watch only (host_mode=interactive drives)"
                                 ));
@@ -3939,6 +4201,102 @@ mod tests {
         };
         let home = AgentsHome::from_env();
         assert_eq!(resolve_agent_names(&parsed, &home).unwrap(), vec!["a", "b"]);
+    }
+
+    // ── claude --bg roster cards (x-57eb) ────────────────────────────────────
+
+    fn roster_worker(session_id: &str, cwd: &str) -> crate::claude_roster::RosterWorker {
+        crate::claude_roster::RosterWorker {
+            session_id: session_id.to_string(),
+            pid: None,
+            proc_start: None,
+            pty_sock: None,
+            pty_auth: None,
+            cli_version: None,
+            cwd: cwd.to_string(),
+            worktree_path: None,
+        }
+    }
+
+    // AC-HP (Change 1): a roster session absent from the registry becomes a card.
+    #[test]
+    fn roster_only_worker_becomes_a_card() {
+        let registry = vec![json!({"name": "wkA", "provider": "codex", "short_id": "aaaa1111"})];
+        let w = roster_worker("bbbb2222-3333-4444-5555-666677778888", "/Users/x/code/proj");
+        let roster = vec![&w];
+        let cards = roster_bg_cards_from(&registry, &roster);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].name, "bbbb2222");
+        assert_eq!(cards[0].session_id, "bbbb2222-3333-4444-5555-666677778888");
+        assert_eq!(cards[0].cwd, "/Users/x/code/proj");
+    }
+
+    // AC-EDGE (dedup): a session in BOTH registry and roster appears once
+    // (registry wins). Dedups by short_id AND by full session_id.
+    #[test]
+    fn roster_card_dedups_against_registry_by_short_and_full_id() {
+        let w_short = roster_worker("aaaa1111-0000-0000-0000-000000000000", "/a");
+        let w_full = roster_worker("ffff9999-1111-2222-3333-444455556666", "/b");
+        let w_new = roster_worker("cccc3333-7777-8888-9999-aaaabbbbcccc", "/c");
+        // Registry carries one as short_id, one as full session_id.
+        let registry = vec![
+            json!({"name": "wk1", "short_id": "aaaa1111"}),
+            json!({"name": "wk2", "session_id": "ffff9999-1111-2222-3333-444455556666"}),
+        ];
+        let roster = vec![&w_short, &w_full, &w_new];
+        let cards = roster_bg_cards_from(&registry, &roster);
+        // Only the truly-new session survives; both overlaps are deduped out.
+        assert_eq!(
+            cards.len(),
+            1,
+            "registry rows win on overlap (one row per session)"
+        );
+        assert_eq!(cards[0].name, "cccc3333");
+    }
+
+    // AC-ERR: an empty roster yields zero cards (the absent-roster degrade path
+    // resolves to an empty worker list, never an error).
+    #[test]
+    fn empty_roster_yields_zero_cards() {
+        let registry = vec![json!({"name": "wkA", "short_id": "aaaa1111"})];
+        let roster: Vec<&crate::claude_roster::RosterWorker> = Vec::new();
+        assert!(roster_bg_cards_from(&registry, &roster).is_empty());
+    }
+
+    #[test]
+    fn bg_age_label_buckets_and_degrades() {
+        assert_eq!(bg_age_label(Some(1_000), 1_000 + 120), "2m");
+        assert_eq!(bg_age_label(Some(1_000), 1_000 + 7_200), "2h");
+        assert_eq!(bg_age_label(Some(1_000), 1_000 + 172_800), "2d");
+        // None (the date-string drift) and a future stamp both degrade to "?".
+        assert_eq!(bg_age_label(None, 5_000), "?");
+        assert_eq!(bg_age_label(Some(9_999), 1_000), "?");
+    }
+
+    // AC-HP (Change 2): a --bg card shows cwd basename + age + the attach hint.
+    #[test]
+    fn bg_card_pane_renders_cwd_age_and_attach_hint() {
+        let card = RosterBgCard {
+            name: "bbbb2222".to_string(),
+            session_id: "bbbb2222-3333-4444-5555-666677778888".to_string(),
+            cwd: "/Users/x/code/myproj".to_string(),
+            proc_start: Some(1_000),
+        };
+        let pane = bg_card_pane(&card, 12, 40, 1_000 + 3_600);
+        let snap = pane.snapshot();
+        let mut text = String::new();
+        for r in 0..snap.rows {
+            for c in 0..snap.cols {
+                if let Some(cell) = snap.cell(r, c) {
+                    text.push_str(&cell.text);
+                }
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("myproj"), "card shows cwd basename: {text:?}");
+        assert!(text.contains("1h"), "card shows age: {text:?}");
+        assert!(text.contains("attach"), "card shows attach hint: {text:?}");
+        // No PTY stream is opened: the pane is fed a one-shot card only.
     }
 
     #[test]
