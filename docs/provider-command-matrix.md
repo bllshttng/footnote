@@ -6,6 +6,8 @@
 
 > **opencode.** opencode has **no PTY provider** in `fno-agents` (readiness + stop-hook only), so it is **headless-only**: `spawn --provider opencode` cannot resolve an interactive pane and stays a non-tiled run. The x-3ab8 interactive default applies only to the four PTY providers; opencode is unaffected. File a follow-up node if an opencode PTY provider is wanted.
 
+> **Runtime scope.** The spawn semantics here (interactive-by-default, `--once` headless, `host` == `spawn --mode interactive`) describe the **Rust runtime** — the shipped default that intercepts `fno agents` in a normal install. The **Python fallback** (`FNO_AGENTS_RUNTIME=python`, or no installed `fno-agents` binary) has no daemon-owned PTY lane, so it cannot host an interactive pane: there, `spawn` stays the legacy client-side dispatch (`claude --bg`, codex/gemini exec) and `spawn --provider claude --once` keeps its old behavior. Don't rely on the interactive-default contract in a Python-fallback environment.
+
 ## The matrix
 
 Legend: **yes** / **no** / **n/a** / **partial** (works under a stated condition).
