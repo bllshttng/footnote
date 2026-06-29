@@ -843,6 +843,42 @@ async fn run_restart() -> i32 {
     code
 }
 
+/// Mint a random UUID (RFC-4122 v4) to pin an interactive claude `--session-id`.
+/// The daemon refuses an interactive claude host without a pinned session id
+/// (the single-writer claim + transcript discovery key on it); a fresh host
+/// supplies one client-side.
+// ponytail: v4 from /dev/urandom, not the `uuid` crate. `--session-id` only
+// needs a unique, well-formed UUID -- v7's time-ordering buys nothing for a
+// session pin, so a 16-byte CSPRNG read stays dependency-free.
+fn mint_session_uuid() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    let got = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .is_ok();
+    if !got {
+        // Never panic: mix wall-clock nanos with the pid. Collision is
+        // implausible for a session pin and /dev/urandom is the real path.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mix = nanos ^ ((std::process::id() as u128) << 96);
+        b = mix.to_be_bytes();
+    }
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC-4122 variant
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
 /// Build (method, params) from a verb and its flags.
 fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String> {
     let mut params = Map::new();
@@ -924,6 +960,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--session-id" => {
                 params.insert("session_id".into(), str_arg(&mut it, "--session-id")?);
+            }
+            "--mode" => {
+                // Disambiguates claude's two interactive-host lanes: `interactive`
+                // (PTY pane, subscription-billed) vs the default stream-json adopt.
+                // The daemon reads `mode`; codex/gemini ignore it. (`drive --mode`
+                // is a different parser and never reaches build_request.)
+                params.insert("mode".into(), str_arg(&mut it, "--mode")?);
             }
             "--cc-session-id" => {
                 params.insert("cc_session_id".into(), str_arg(&mut it, "--cc-session-id")?);
@@ -1037,9 +1080,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "agent.ask"
         }
         "host" => {
-            // Fresh interactive host: `host <name> --provider codex|gemini ["<task>"]`.
-            // Same spawn IPC as `spawn`, but host_mode=interactive routes to the
-            // provider's interactive argv. Empty task -> bare interactive session.
+            // Fresh interactive host: `host <name> --provider codex|gemini|claude
+            // [--mode interactive] ["<task>"]`. Same spawn IPC as `spawn`, but
+            // host_mode=interactive routes to the provider's interactive argv.
+            // Empty task -> bare interactive session.
             let name = positional.first().ok_or("host needs a <name>")?;
             params.insert("name".into(), Value::String(name.clone()));
             if !params.contains_key("message") && positional.len() > 1 {
@@ -1049,6 +1093,20 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 "host_mode".into(),
                 Value::String(fno_agents::state::HOST_MODE_INTERACTIVE.into()),
             );
+            // Interactive claude (PTY pane) requires a pinned session id: the
+            // daemon refuses without one (single-writer claim + transcript
+            // discovery key on it). Mint one unless the caller already pinned a
+            // session_id or is resuming one (--from). codex/gemini are unaffected.
+            let claude_interactive = params.get("provider").and_then(Value::as_str)
+                == Some("claude")
+                && params.get("mode").and_then(Value::as_str)
+                    == Some(fno_agents::state::CLAUDE_MODE_INTERACTIVE);
+            if claude_interactive
+                && !params.contains_key("session_id")
+                && !params.contains_key("resume_id")
+            {
+                params.insert("session_id".into(), Value::String(mint_session_uuid()));
+            }
             "agent.spawn"
         }
         "promote" => {
@@ -1640,7 +1698,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     // ab-351427cb: these verbs are dispatchable in build_request / as specials
     // but were missing from --help, and `<verb> --help` errored instead of
     // printing usage.
-    "host <name> --provider codex|gemini [<task>]",
+    "host <name> --provider codex|gemini|claude [--mode interactive] [<task>]",
     "promote <name> --from <session-uuid> [--provider claude]",
     "drive-authority [--json]",
     "trace [options]",
@@ -2416,6 +2474,80 @@ mod tests {
     fn host_needs_a_name() {
         let args = vec!["--provider".to_string(), "codex".to_string()];
         assert!(build_request("host", &args).is_err());
+    }
+
+    #[test]
+    fn mint_session_uuid_is_well_formed_v4() {
+        let u = mint_session_uuid();
+        let parts: Vec<&str> = u.split('-').collect();
+        assert_eq!(parts.len(), 5, "uuid has five dash-separated groups: {u}");
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "uuid group widths: {u}"
+        );
+        assert!(
+            u.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
+            "uuid is hex + dashes: {u}"
+        );
+        // version nibble (group 3, first char) is '4'; variant nibble (group 4,
+        // first char) is one of 8/9/a/b.
+        assert_eq!(parts[2].chars().next().unwrap(), '4', "v4 version: {u}");
+        assert!(
+            matches!(parts[3].chars().next().unwrap(), '8' | '9' | 'a' | 'b'),
+            "rfc-4122 variant: {u}"
+        );
+        assert_ne!(mint_session_uuid(), u, "two mints differ");
+    }
+
+    #[test]
+    fn host_claude_interactive_mints_session_id() {
+        let args = vec![
+            "wk-c".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--mode".to_string(),
+            "interactive".to_string(),
+        ];
+        let (method, params) = build_request("host", &args).unwrap();
+        assert_eq!(method, "agent.spawn");
+        assert_eq!(params["provider"], "claude");
+        assert_eq!(params["mode"], "interactive");
+        assert_eq!(params["host_mode"], "interactive");
+        let sid = params["session_id"].as_str().expect("minted session_id");
+        assert_eq!(sid.split('-').count(), 5, "minted a uuid: {sid}");
+    }
+
+    #[test]
+    fn host_claude_interactive_keeps_explicit_session_id() {
+        let args = vec![
+            "wk-c".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--mode".to_string(),
+            "interactive".to_string(),
+            "--session-id".to_string(),
+            "019e7157-4236-7bb1-b274-ebbac6040ace".to_string(),
+        ];
+        let (_m, params) = build_request("host", &args).unwrap();
+        assert_eq!(params["session_id"], "019e7157-4236-7bb1-b274-ebbac6040ace");
+    }
+
+    #[test]
+    fn host_codex_does_not_mint_session_id() {
+        // The mint is claude+interactive only; codex must be byte-unchanged.
+        let args = vec![
+            "wk-x".to_string(),
+            "--provider".to_string(),
+            "codex".to_string(),
+            "--mode".to_string(),
+            "interactive".to_string(),
+        ];
+        let (_m, params) = build_request("host", &args).unwrap();
+        assert!(
+            params.get("session_id").is_none(),
+            "no mint for codex interactive host"
+        );
     }
 
     #[test]
