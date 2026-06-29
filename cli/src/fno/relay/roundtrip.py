@@ -37,8 +37,10 @@ import struct
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
+from fno.agents.events import emit
+from fno.mail.envelope import harness_for_provider
 from fno.relay.registry import transcript_path_for
 
 # claude turns are slow (the spike saw multi-second turns + model latency); give
@@ -319,6 +321,98 @@ def submit_via_worker(sock_path: Path, framed: str, *, settle_ms: int = DEFAULT_
     return bool(res and res.get("submitted"))
 
 
+# ---------------------------------------------------------------------------
+# Per-harness reply capture seam (G4 / x-3f34): structured | transcript | pty-tail.
+#
+# Injection is harness-agnostic (worker.submit drives any owned-PTY worker), but
+# reply capture is NOT: claude reads its transcript jsonl, a codex/gemini/shell pane
+# may have neither structured output nor a transcript. So capture is a strategy
+# resolved per harness behind one seam -- read the harness's OWN truth where it has
+# one, fall back to a PTY-pane tail (worker.snapshot) as the safe default, and
+# degrade (never zero) when a strategy throws on schema drift.
+# ---------------------------------------------------------------------------
+
+def snapshot_via_worker(sock_path: Path) -> Optional[str]:
+    """Read a worker's current PTY pane via the ``worker.snapshot`` RPC -- the
+    harness-agnostic capture source every owned-PTY worker serves (worker.rs).
+    NEVER raises; returns None when the worker socket is gone/unreachable."""
+    res = _worker_rpc(sock_path, "worker.snapshot", {})
+    if not res:
+        return None
+    text = res.get("text")
+    return text if isinstance(text, str) else None
+
+
+def _pane_replies(snapshot: Optional[str]) -> list[str]:
+    """Sentinel-wrapped replies extracted from a PTY pane snapshot -- the pty-tail
+    capture (the safe default for a harness with no transcript). Same sentinel
+    contract as the transcript strategy; the pane is the source, not the parser."""
+    if not snapshot:
+        return []
+    return [m.strip() for m in _SENTINEL_RE.findall(snapshot)]
+
+
+# A capture strategy reads the recipient's own source of truth and returns the
+# sentinel replies seen so far (the deliver loop compares the count to a baseline,
+# so a strategy is a pure poll). Uniform kwargs; each uses only what it needs.
+CaptureStrategy = Callable[..., list[str]]
+
+
+def _transcript_strategy(*, session_id: Optional[str] = None,
+                         config_dir: Optional[str] = None, **_) -> list[str]:
+    """The claude strategy: faithful sentinel replies from the transcript jsonl."""
+    return _transcript_replies(session_id, config_dir) if session_id else []
+
+
+def _pty_tail_strategy(*, sock: Optional[Path] = None, **_) -> list[str]:
+    """The safe default: sentinel replies tailed from the worker's PTY pane."""
+    return _pane_replies(snapshot_via_worker(sock)) if sock is not None else []
+
+
+# harness (the <fno_mail> vocabulary, e.g. "claude-code") -> its capture strategy.
+# An UNregistered harness uses the pty-tail default, so adding a harness to the
+# cross-harness relay is a registration (or nothing), not a new injection path (US4).
+_CAPTURE_STRATEGIES: dict[str, CaptureStrategy] = {"claude-code": _transcript_strategy}
+
+
+def register_capture_strategy(harness: str, strategy: CaptureStrategy) -> None:
+    """Register a per-harness reply-capture strategy (US4 / AC4-FR). A harness with
+    no registered strategy falls back to pty-tail (``worker.snapshot``) -- the safe
+    default -- so onboarding a harness never touches the injection path."""
+    _CAPTURE_STRATEGIES[harness] = strategy
+
+
+def capture_replies(
+    provider: Optional[str],
+    *,
+    sock: Optional[Path] = None,
+    short_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    config_dir: Optional[str] = None,
+    events_path: Optional[Path] = None,
+) -> list[str]:
+    """Resolve the recipient harness's capture strategy and read its replies, with a
+    defensive degrade: if the strategy throws (e.g. transcript/structured schema
+    drift on a harness version bump), fall back to the pty-tail default and emit
+    ``relay_capture_degraded`` -- one harness's drift never zeroes the reply
+    (AC5-ERR / the defensive-foreign-parse rule).
+
+    Every locator a strategy might need is threaded through (``sock`` for pty-tail,
+    ``short_id`` for a worker-keyed structured log, ``session_id``/``config_dir`` for
+    the claude transcript); each strategy takes ``**_`` and uses only its own. A
+    registered structured strategy that keys on the worker id therefore has it
+    (gemini HIGH on PR #89)."""
+    harness = harness_for_provider(provider)
+    strategy = _CAPTURE_STRATEGIES.get(harness, _pty_tail_strategy)
+    try:
+        return strategy(sock=sock, short_id=short_id, session_id=session_id, config_dir=config_dir)
+    except Exception as exc:  # noqa: BLE001 - a capture strategy must never sink the relay
+        emit("relay_capture_degraded", path=events_path, harness=harness, error=str(exc))
+        if strategy is _pty_tail_strategy:
+            return []  # already the floor -- nothing safer to degrade to
+        return _pty_tail_strategy(sock=sock)
+
+
 def deliver_session(
     session_id: str,
     framed: str,
@@ -359,28 +453,94 @@ def deliver_session(
     if short_id is None:
         raise RuntimeError(f"relay_deliver_failed: no live daemon worker for session {session_id}")
     sock = _worker_sock(short_id)
+    return _submit_and_capture(
+        sock, framed,
+        lambda: _transcript_replies(session_id, config_dir),
+        settle_ms=settle_ms, timeout=timeout,
+        subject=f"worker {short_id} for session {session_id}",
+    )
 
-    base_tx = len(_transcript_replies(session_id, config_dir))
+
+def _submit_and_capture(
+    sock: Path,
+    framed: str,
+    capture: Callable[[], list[str]],
+    *,
+    settle_ms: int,
+    timeout: float,
+    subject: str,
+) -> str:
+    """Shared inject + poll-for-reply loop for every owned-PTY worker lane: submit
+    via ``worker.submit``, then poll ``capture`` (the lane's reply source) until a
+    NEW sentinel reply lands, with one bounded re-inject past the 60% mark. The only
+    per-lane difference is ``capture`` (transcript for claude, the per-harness seam
+    for everyone else) -- injection is identical, which is the whole G4 thesis.
+
+    Raises RuntimeError when the worker is unreachable (first submit) or died before
+    replying (failed re-inject), TimeoutError when a live worker took the turn but
+    produced no reply within ``timeout``. ``subject`` labels the failure."""
+    base = len(capture())
     if not submit_via_worker(sock, framed, settle_ms=settle_ms):
-        raise RuntimeError(f"relay_deliver_failed: worker {short_id} unreachable for session {session_id}")
+        raise RuntimeError(f"relay_deliver_failed: {subject} unreachable")
 
     deadline = time.monotonic() + timeout
     retried = False
     while time.monotonic() < deadline:
         time.sleep(_POLL_INTERVAL_SEC)
-        tx = _transcript_replies(session_id, config_dir)
-        if len(tx) > base_tx:
+        tx = capture()
+        if len(tx) > base:
             return tx[-1]
         if not retried and time.monotonic() > deadline - timeout * 0.6:
             # The first submit landed (the worker was live), so a FAILED re-inject
             # means the worker died mid-turn -- surface that as a hard failure now
             # rather than waiting out the full timeout.
             if not submit_via_worker(sock, framed, settle_ms=settle_ms):
-                raise RuntimeError(
-                    f"relay_deliver_failed: worker {short_id} died before reply for session {session_id}"
-                )
+                raise RuntimeError(f"relay_deliver_failed: {subject} died before reply")
             retried = True
-    raise TimeoutError(f"no reply from session {session_id} within {timeout:.0f}s")
+    raise TimeoutError(f"no reply from {subject} within {timeout:.0f}s")
+
+
+def deliver_worker(
+    short_id: str,
+    framed: str,
+    *,
+    provider: Optional[str],
+    settle_ms: int = DEFAULT_SETTLE_MS,
+    timeout: float = DEFAULT_HOP_TIMEOUT_SEC,
+    events_path: Optional[Path] = None,
+) -> str:
+    """Inject ``framed`` into a NON-claude owned-PTY worker via ``worker.submit`` and
+    capture its reply through the per-harness seam (:func:`capture_replies`, pty-tail
+    by default) -- the cross-harness live hop (US1/US3).
+
+    The injection vehicle is the SAME ``worker.submit`` claude uses; only capture
+    differs (a codex/gemini pane has no claude transcript). There is NO ``session:``
+    claim probe: that single-writer interlock is claude-transcript-specific (it
+    guards against a second ``--session-id`` writer corrupting the jsonl); a non-claude
+    interactive worker holds no such claim, so the live ``worker.sock`` -- resolved
+    by the routing vehicle -- IS the routability signal, and the worker actor's own
+    single-socket serialization prevents interleaving.
+
+    CONTRACT (relay-targeted peer): like :func:`deliver_session`, capture reads the
+    ``<<<RELAY>>>...<<<ENDRELAY>>>`` sentinels a peer is steered to wrap replies in. A
+    peer that is not relay-targeted answers without the sentinels, so this surfaces as
+    a ``TimeoutError`` (a missing sentinel is indistinguishable from a slow turn).
+    claude is steered via the daemon spawn's ``append_system_prompt`` (RELAY_SYSTEM_PROMPT);
+    the equivalent non-claude spawn-lane steering is the tracked follow-up (codex P1 on
+    PR #89), the same way the claude-adopt steering was deferred (x-e027 LD#2). Until then
+    a non-claude peer must be primed to use the sentinel protocol to round-trip.
+
+    Raises RuntimeError when ``short_id`` is path-unsafe or the worker is unreachable,
+    TimeoutError when a live worker produced no reply within ``timeout``."""
+    if not _SHORT_ID_RE.match(short_id or ""):
+        raise RuntimeError(f"relay_deliver_failed: unsafe worker short_id {short_id!r}")
+    sock = _worker_sock(short_id)
+    return _submit_and_capture(
+        sock, framed,
+        lambda: capture_replies(provider, sock=sock, short_id=short_id, events_path=events_path),
+        settle_ms=settle_ms, timeout=timeout,
+        subject=f"worker {short_id}",
+    )
 
 
 # ---------------------------------------------------------------------------

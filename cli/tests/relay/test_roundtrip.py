@@ -592,3 +592,168 @@ def test_live_deliver_via_daemon_worker(monkeypatch):
         assert " " in reply, f"reply not faithful (space-collapsed?): {reply!r}"
     finally:
         subprocess.run(["fno", "agents", "stop", name], capture_output=True, timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# G4 / x-3f34: cross-harness reply capture seam + non-claude worker.submit lane.
+# Injection is harness-agnostic (worker.submit); capture is a per-harness strategy
+# (transcript for claude, pty-tail via worker.snapshot as the safe default).
+# ---------------------------------------------------------------------------
+
+def test_snapshot_via_worker_reads_pane_text(monkeypatch):
+    seen = {}
+
+    def fake_rpc(sock, method, params, **kw):
+        seen.update(method=method)
+        return {"text": "pane <<<RELAY>>>hi<<<ENDRELAY>>>", "child_alive": True}
+
+    monkeypatch.setattr(rt_mod, "_worker_rpc", fake_rpc)
+    assert rt_mod.snapshot_via_worker(rt_mod.Path("/x/worker.sock")) == "pane <<<RELAY>>>hi<<<ENDRELAY>>>"
+    assert seen["method"] == "worker.snapshot"
+
+
+def test_snapshot_via_worker_none_when_unreachable_or_malformed(monkeypatch):
+    monkeypatch.setattr(rt_mod, "_worker_rpc", lambda *a, **k: None)
+    assert rt_mod.snapshot_via_worker(rt_mod.Path("/x/worker.sock")) is None
+    # a non-string `text` (malformed) degrades to None, never crashes
+    monkeypatch.setattr(rt_mod, "_worker_rpc", lambda *a, **k: {"text": ["x"]})
+    assert rt_mod.snapshot_via_worker(rt_mod.Path("/x/worker.sock")) is None
+
+
+def test_pane_replies_extracts_sentinels_faithfully():
+    snap = "noise\n<<<RELAY>>>one two  three<<<ENDRELAY>>>\nmore noise"
+    assert rt_mod._pane_replies(snap) == ["one two  three"]
+    assert rt_mod._pane_replies(None) == []
+    assert rt_mod._pane_replies("no sentinel here") == []
+
+
+def test_capture_replies_claude_uses_transcript(monkeypatch):
+    # The claude harness ("claude-code") resolves to the transcript strategy.
+    monkeypatch.setattr(rt_mod, "_transcript_replies", lambda sid, cd=None: ["from transcript"])
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker",
+                        lambda sock: pytest.fail("claude must not pty-tail"))
+    assert rt_mod.capture_replies("claude", session_id="sid") == ["from transcript"]
+
+
+def test_capture_replies_codex_defaults_to_pty_tail(monkeypatch):
+    # AC3-EDGE: a harness with no registered strategy (codex) captures via the
+    # pty-tail default -- the "from structured output" assumption never blocks it.
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker",
+                        lambda sock: "<<<RELAY>>>codex says hi<<<ENDRELAY>>>")
+    assert rt_mod.capture_replies("codex", sock=rt_mod.Path("/x/w.sock")) == ["codex says hi"]
+
+
+def test_capture_replies_degrades_to_pty_tail_on_drift(monkeypatch):
+    # AC5-ERR: a registered strategy that throws (schema drift on a version bump)
+    # degrades to pty-tail and emits relay_capture_degraded -- never zeroes the reply.
+    def boom(**_):
+        raise ValueError("transcript schema drifted")
+
+    monkeypatch.setitem(rt_mod._CAPTURE_STRATEGIES, "driftco", boom)
+    monkeypatch.setattr(rt_mod, "harness_for_provider", lambda p: "driftco")
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker",
+                        lambda sock: "<<<RELAY>>>fallback reply<<<ENDRELAY>>>")
+    events = []
+    monkeypatch.setattr(rt_mod, "emit", lambda kind, **kw: events.append((kind, kw)))
+    out = rt_mod.capture_replies("driftco", sock=rt_mod.Path("/x/w.sock"))
+    assert out == ["fallback reply"]
+    assert events and events[0][0] == "relay_capture_degraded"
+    assert events[0][1].get("harness") == "driftco"
+
+
+def test_capture_replies_pty_tail_failure_returns_empty_not_crash(monkeypatch):
+    # When pty-tail IS the strategy and the snapshot itself is unreachable, capture
+    # returns [] (the floor) rather than raising -- a dead worker is a timeout, not a crash.
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker", lambda sock: None)
+    assert rt_mod.capture_replies("codex", sock=rt_mod.Path("/x/w.sock")) == []
+
+
+def test_capture_replies_threads_worker_id_to_strategy(monkeypatch):
+    # gemini HIGH (PR #89): a registered structured strategy that keys on the worker
+    # id must RECEIVE it. capture_replies threads sock/short_id/session_id/config_dir.
+    got = {}
+
+    def id_keyed_strategy(**kw):
+        got.update(kw)
+        return ["structured reply"]
+
+    monkeypatch.setattr(rt_mod, "harness_for_provider", lambda p: "idkeyed")
+    monkeypatch.setitem(rt_mod._CAPTURE_STRATEGIES, "idkeyed", id_keyed_strategy)
+    out = rt_mod.capture_replies("idprovider", sock=rt_mod.Path("/x/w.sock"), short_id="phasesta")
+    assert out == ["structured reply"]
+    assert got.get("short_id") == "phasesta"  # the worker id is available to the strategy
+
+
+def test_deliver_worker_passes_short_id_to_capture(monkeypatch):
+    # The non-claude lane must hand its short_id to the capture seam so a structured
+    # strategy can locate the right worker's output (gemini HIGH, PR #89).
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: True)
+    seen = {}
+    n = {"i": 0}
+
+    def fake_capture(provider, *, sock, short_id=None, **kw):
+        seen.update(provider=provider, short_id=short_id)
+        n["i"] += 1
+        return ["reply"] if n["i"] >= 2 else []
+
+    monkeypatch.setattr(rt_mod, "capture_replies", fake_capture)
+    rt_mod.deliver_worker("phasesta", "framed", provider="codex", timeout=5)
+    assert seen == {"provider": "codex", "short_id": "phasesta"}
+
+
+def test_register_capture_strategy_adds_a_harness(monkeypatch):
+    # AC4-FR: adding a harness is registering a strategy, not a new injection path.
+    calls = {"n": 0}
+
+    def shell_strategy(**_):
+        calls["n"] += 1
+        return ["shell reply"]
+
+    monkeypatch.setattr(rt_mod, "harness_for_provider", lambda p: "shellharness")
+    # register under a copy so the global table is not mutated across tests
+    monkeypatch.setitem(rt_mod._CAPTURE_STRATEGIES, "shellharness", shell_strategy)
+    assert rt_mod.capture_replies("shellprovider", sock=rt_mod.Path("/x/w.sock")) == ["shell reply"]
+    assert calls["n"] == 1
+
+
+# --- deliver_worker: the non-claude worker.submit lane (US1) ---
+
+def test_deliver_worker_routes_via_worker_submit_and_pty_tail(monkeypatch):
+    # AC1-HP (unit): inject via worker.submit to the codex worker's sock, capture the
+    # reply via pty-tail -- a cross-harness round-trip with no claude transcript.
+    _fake_clock(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(rt_mod, "submit_via_worker",
+                        lambda sock, *a, **k: seen.update(sock=str(sock)) or True)
+    n = {"i": 0}
+
+    def fake_capture(provider, *, sock, **kw):
+        n["i"] += 1
+        return ["codex reply over pty"] if n["i"] >= 2 else []  # call 1 = baseline
+
+    monkeypatch.setattr(rt_mod, "capture_replies", fake_capture)
+    out = rt_mod.deliver_worker("phasesta", "framed", provider="codex", timeout=10)
+    assert out == "codex reply over pty"
+    assert seen["sock"].endswith("/phasesta/worker.sock")
+
+
+def test_deliver_worker_rejects_unsafe_short_id():
+    with pytest.raises(RuntimeError, match="unsafe worker short_id"):
+        rt_mod.deliver_worker("../../etc", "framed", provider="codex")
+
+
+def test_deliver_worker_raises_when_unreachable(monkeypatch):
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: False)
+    monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: [])
+    with pytest.raises(RuntimeError, match="unreachable"):
+        rt_mod.deliver_worker("phasesta", "framed", provider="codex")
+
+
+def test_deliver_worker_times_out_with_live_worker(monkeypatch):
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: True)
+    monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: [])  # never replies
+    with pytest.raises(TimeoutError, match="no reply"):
+        rt_mod.deliver_worker("phasesta", "framed", provider="codex", timeout=5)

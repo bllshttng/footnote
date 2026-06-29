@@ -323,13 +323,27 @@ def daemon_deliver(
     """
     from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim  # noqa: PLC0415
     from fno.relay.roundtrip import (  # noqa: PLC0415
-        deliver_attached, deliver_session, interactive_claim_holder,
+        deliver_attached, deliver_session, deliver_worker, interactive_claim_holder,
         resolve_attached_short_id, resolve_worker_short_id,
     )
 
     holder = holder or f"relay-daemon:{_pid()}"
 
     def _deliver(res: Resolution, framed: str) -> Optional[str]:
+        # Cross-harness lane (G4 / x-3f34): a non-claude owned-PTY worker carries a
+        # ``worker:<short_id>`` inject handle (the registry bridge). Route it through
+        # the SAME ``worker.submit`` and capture via the per-harness seam (pty-tail by
+        # default). No ``session:`` claim probe -- that single-writer interlock is
+        # claude-transcript-specific (it guards against a second ``--session-id``
+        # writer corrupting the jsonl); a non-claude interactive worker holds no such
+        # claim, so the live ``worker.sock`` is the routability signal and the worker
+        # actor's single-socket serialization prevents interleaving.
+        if res.inject_handle and res.inject_handle.startswith("worker:"):
+            short_id = res.inject_handle.split(":", 1)[1]
+            return deliver_worker(
+                short_id, framed, provider=res.provider, settle_ms=settle_ms, timeout=timeout
+            )
+
         sid = res.session_id
         if not sid:
             raise RuntimeError("relay_deliver_failed: resolution carries no session_id")

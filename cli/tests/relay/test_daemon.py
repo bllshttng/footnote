@@ -394,3 +394,66 @@ def test_daemon_deliver_raises_without_session_id(tmp_path, monkeypatch):
     deliver = daemon.daemon_deliver()
     with pytest.raises(RuntimeError, match="no session_id"):
         deliver(_resolution(""), "framed")
+
+
+# ---------------------------------------------------------------------------
+# G4 / x-3f34: cross-harness routing. A non-claude recipient carries a
+# worker:<short_id> inject handle and routes through worker.submit + pty-tail
+# capture, with NO session: claim probe (the claude-transcript interlock).
+# ---------------------------------------------------------------------------
+
+def _codex_idx(handle="worker:phasesta"):
+    return {"B": RegistryEntry(session_id="phasesta", provider="codex", pid=7,
+                               inject_handle=handle, name="phasestall")}
+
+
+def test_route_message_delivers_to_codex_worker(bus, events):
+    # The no-inject-handle gate passes for a worker:<id> handle and a framed
+    # cross-harness turn delivers exactly once (US1).
+    e = env.make_relay_envelope(from_session="A", to="session:B", body="hi codex",
+                                provider_from="claude", from_model="opus")
+    append(e)
+    rec = _Recorder()
+    results = daemon.run_once(deliver=rec, index=_codex_idx(), events_path=events, seen=set())
+    assert [r.status for r in results] == ["routed"]
+    assert len(rec.calls) == 1
+    evs = [x for x in _read_events(events) if x["kind"] == "relay_routed"]
+    assert len(evs) == 1 and evs[0]["provider"] == "codex"
+
+
+def test_route_message_refuses_unframed_cross_harness(bus, events):
+    # AC2-FR: a cross-harness turn that cannot be framed (missing provenance) is
+    # refused, never injected unframed -- the spike's contested-relay failure made
+    # impossible by construction.
+    e = env.make_relay_envelope(from_session="A", to="session:B", body="x",
+                                provider_from="")  # no provider -> unframable
+    rec = _Recorder()
+    res = daemon.route_message(e, deliver=rec, index=_codex_idx(), events_path=events, seen=set())
+    assert res.status == "dropped" and res.reason == "unframed-cross-provider"
+    assert rec.calls == []
+    assert any(x["kind"] == "relay_dropped" and x["reason"] == "unframed-cross-provider"
+               for x in _read_events(events))
+
+
+def test_daemon_deliver_routes_worker_handle_via_deliver_worker(tmp_path, monkeypatch):
+    # The real vehicle: a worker:<short_id> resolution routes through deliver_worker
+    # (worker.submit + pty-tail), parsing the short_id from the handle. No claim probe.
+    from fno.relay import roundtrip
+    from fno.relay.router import Resolution
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    seen = {}
+
+    def fake_deliver_worker(short_id, framed, *, provider, **kw):
+        seen.update(short_id=short_id, framed=framed, provider=provider)
+        return "codex pane reply"
+
+    monkeypatch.setattr(roundtrip, "deliver_worker", fake_deliver_worker)
+    # If the claim lane were taken instead, it would need resolve_worker_short_id;
+    # fail loudly if the worker handle did not short-circuit the claude machinery.
+    monkeypatch.setattr(roundtrip, "resolve_worker_short_id",
+                        lambda sid: pytest.fail("must not probe the claude claim lane"))
+    deliver = daemon.daemon_deliver()
+    res = Resolution(session_id="phasesta", provider="codex", inject_handle="worker:phasesta")
+    assert deliver(res, "framed turn") == "codex pane reply"
+    assert seen == {"short_id": "phasesta", "framed": "framed turn", "provider": "codex"}
