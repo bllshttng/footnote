@@ -1667,6 +1667,19 @@ class ConfigBlock(BaseModel):
             return v
         return {}
 
+    @field_validator("recovery", mode="before")
+    @classmethod
+    def _coerce_recovery(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``recovery:`` degrades to defaults.
+
+        ``recovery: true`` (or a list, or null) cannot build the block; fall
+        back to defaults rather than raising out of the whole settings load.
+        A dict passes through so field defaults/validators still apply.
+        """
+        if isinstance(v, (dict, RecoveryBlock)):
+            return v
+        return {}
+
     @field_validator("logs", mode="before")
     @classmethod
     def _coerce_logs(cls, v: object) -> object:

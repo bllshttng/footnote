@@ -30,40 +30,49 @@ class TestClassify:
     def test_needs_input_never_nudged_even_when_stale(self):
         # AC2-EDGE: a needs-input session is waiting on a human, not stalled.
         old = _iso(_now() - timedelta(hours=1))
-        assert recovery.classify("needs-input", old, _now(), 300, False) == recovery.SKIP_NEEDS_INPUT
+        assert recovery.classify("needs-input", old, _now(), 300) == recovery.SKIP_NEEDS_INPUT
 
     @pytest.mark.parametrize("state", ["done", "completed", "failed"])
     def test_terminal_states_skipped(self, state):
         # AC3-EDGE: a clean terminal is never re-nudged.
         old = _iso(_now() - timedelta(hours=1))
-        assert recovery.classify(state, old, _now(), 300, False) == recovery.SKIP_TERMINAL
+        assert recovery.classify(state, old, _now(), 300) == recovery.SKIP_TERMINAL
 
-    def test_promise_present_skipped(self):
-        # AC3 / AC5: <promise> emitted -> done, never nudge, even if state stale.
-        old = _iso(_now() - timedelta(hours=1))
-        assert recovery.classify("running", old, _now(), 300, True) == recovery.SKIP_DONE
+    def test_past_promise_does_not_force_skip(self):
+        # codex P2: a <promise> is only the model's completion claim; loop-check
+        # can reject it and the session keeps going. So a stale running session
+        # is still a nudge target regardless of any past promise — "done" is the
+        # terminal job state, not a transcript promise. (No promise input exists.)
+        stale = _iso(_now() - timedelta(seconds=600))
+        assert recovery.classify("running", stale, _now(), 300) == recovery.NUDGE
+
+    def test_naive_now_does_not_raise(self):
+        # gemini medium: a timezone-naive now must not raise on subtraction.
+        stale = _iso(_now() - timedelta(seconds=600))
+        naive_now = _now().replace(tzinfo=None)
+        assert recovery.classify("running", stale, naive_now, 300) == recovery.NUDGE
 
     def test_running_and_fresh_is_not_stale(self):
         fresh = _iso(_now() - timedelta(seconds=30))
-        assert recovery.classify("running", fresh, _now(), 300, False) == recovery.NOT_STALE
+        assert recovery.classify("running", fresh, _now(), 300) == recovery.NOT_STALE
 
     def test_running_and_stale_nudges(self):
         # AC1-HP: idle past the threshold, work incomplete -> nudge.
         stale = _iso(_now() - timedelta(seconds=600))
-        assert recovery.classify("running", stale, _now(), 300, False) == recovery.NUDGE
+        assert recovery.classify("running", stale, _now(), 300) == recovery.NUDGE
 
     def test_empty_or_unknown_state_stale_nudges(self):
         # A clean connection-close leaves state at the last value (often "running"
         # or empty); freshness is what distinguishes wedged from working.
         stale = _iso(_now() - timedelta(seconds=600))
-        assert recovery.classify("", stale, _now(), 300, False) == recovery.NUDGE
+        assert recovery.classify("", stale, _now(), 300) == recovery.NUDGE
 
     def test_missing_updated_at_is_conservative(self):
         # Can't prove idleness -> do not nudge.
-        assert recovery.classify("running", None, _now(), 300, False) == recovery.NOT_STALE
+        assert recovery.classify("running", None, _now(), 300) == recovery.NOT_STALE
 
     def test_unparseable_updated_at_is_conservative(self):
-        assert recovery.classify("running", "not-a-date", _now(), 300, False) == recovery.NOT_STALE
+        assert recovery.classify("running", "not-a-date", _now(), 300) == recovery.NOT_STALE
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +135,11 @@ def _stale_candidate(tmp_path, short_id="aaaa1111", sock="/tmp/a.sock"):
 class _Harness:
     """Collects emitted events and socket sends for assertions."""
 
-    def __init__(self, state="running", updated_age_s=600, promise=False, sock_live=True):
+    def __init__(self, state="running", updated_age_s=600, sock_live=True):
         self.events: list[tuple[str, dict]] = []
         self.sends: list[tuple[str, str]] = []
         self._state = state
         self._updated = _iso(_now() - timedelta(seconds=updated_age_s))
-        self._promise = promise
         self._sock_live = sock_live
 
     def emit(self, etype, data):
@@ -139,9 +147,6 @@ class _Harness:
 
     def read_state(self, jobs_dir):
         return recovery._SnapshotView(self._state, self._updated)
-
-    def read_promise(self, jobs_dir):
-        return self._promise
 
     def liveness(self, sock):
         return self._sock_live
@@ -161,7 +166,7 @@ class TestSweep:
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
-            emit=h.emit, read_state_fn=h.read_state, read_promise_fn=h.read_promise,
+            emit=h.emit, read_state_fn=h.read_state,
             liveness_fn=h.liveness, send_fn=h.send,
         )
         assert len(h.sends) == 1
@@ -175,24 +180,26 @@ class TestSweep:
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)],
             counts={},
-            emit=h.emit, read_state_fn=h.read_state, read_promise_fn=h.read_promise,
+            emit=h.emit, read_state_fn=h.read_state,
             liveness_fn=h.liveness, send_fn=h.send,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_skipped"]
         assert h.events[0][1]["reason"] == "needs-input"
 
-    def test_done_promise_no_send_no_event(self, tmp_path):
-        h = _Harness(promise=True)
+    def test_terminal_state_no_send_no_event(self, tmp_path):
+        # A done/completed session is silent (no event), not noise. "Done" is the
+        # terminal job state, the system's real completion authority.
+        h = _Harness(state="completed")
         recovery.recovery_sweep(
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)],
             counts={},
-            emit=h.emit, read_state_fn=h.read_state, read_promise_fn=h.read_promise,
+            emit=h.emit, read_state_fn=h.read_state,
             liveness_fn=h.liveness, send_fn=h.send,
         )
         assert h.sends == []
-        assert h.events == []  # a done session is silent, not noise
+        assert h.events == []
 
     def test_cap_reached_emits_capped_once_no_send(self, tmp_path):
         # AC4-INV: at the cap, no further nudges; recovery_capped emitted.
@@ -202,7 +209,7 @@ class TestSweep:
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
-            emit=h.emit, read_state_fn=h.read_state, read_promise_fn=h.read_promise,
+            emit=h.emit, read_state_fn=h.read_state,
             liveness_fn=h.liveness, send_fn=h.send,
         )
         assert h.sends == []
@@ -219,7 +226,7 @@ class TestSweep:
                 _now(), _Cfg(),
                 candidates=[_stale_candidate(tmp_path)],
                 counts=counts,
-                emit=h.emit, read_state_fn=h.read_state, read_promise_fn=h.read_promise,
+                emit=h.emit, read_state_fn=h.read_state,
                 liveness_fn=h.liveness, send_fn=h.send,
             )
         assert h.event_types().count("recovery_capped") == 1
@@ -232,7 +239,7 @@ class TestSweep:
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)],
             counts={},
-            emit=h.emit, read_state_fn=h.read_state, read_promise_fn=h.read_promise,
+            emit=h.emit, read_state_fn=h.read_state,
             liveness_fn=h.liveness, send_fn=h.send,
         )
         assert h.sends == []
@@ -251,7 +258,7 @@ class TestSweep:
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)],
             counts={},
-            emit=h.emit, read_state_fn=h.read_state, read_promise_fn=h.read_promise,
+            emit=h.emit, read_state_fn=h.read_state,
             liveness_fn=h.liveness, send_fn=boom,
         )
         assert "recovery_skipped" in h.event_types()
@@ -260,6 +267,31 @@ class TestSweep:
 # ---------------------------------------------------------------------------
 # run_recovery_sweep — the high-level entry (registry join -> sweep -> persist)
 # ---------------------------------------------------------------------------
+
+class TestRobustness:
+    """Review-driven hardening: malformed inputs must degrade, never crash."""
+
+    def test_config_recovery_non_mapping_degrades_to_defaults(self):
+        # gemini high: `recovery: true` / null must not crash settings load.
+        from fno.config import ConfigBlock
+
+        assert ConfigBlock(recovery=True).recovery.enabled is True
+        assert ConfigBlock(recovery=None).recovery.idle_threshold_seconds == 900
+        assert ConfigBlock(recovery=["x"]).recovery.max_nudges == 3
+
+    def test_load_counts_corrupt_utf8_returns_empty(self, tmp_path, monkeypatch):
+        # gemini high: a non-UTF-8 counter file must not raise UnicodeDecodeError.
+        p = tmp_path / "recovery-nudges.json"
+        p.write_bytes(b"\xff\xfe not utf8")
+        monkeypatch.setattr(recovery, "_counts_path", lambda: p)
+        assert recovery.load_counts() == {}
+
+    def test_load_counts_non_dict_json_returns_empty(self, tmp_path, monkeypatch):
+        p = tmp_path / "recovery-nudges.json"
+        p.write_text("[1, 2, 3]", encoding="utf-8")
+        monkeypatch.setattr(recovery, "_counts_path", lambda: p)
+        assert recovery.load_counts() == {}
+
 
 class TestSafeReadState:
     def test_non_object_state_json_degrades_not_raises(self, tmp_path):
@@ -290,7 +322,6 @@ class TestRunRecoverySweep:
             registry_load=lambda: entries,
             locate_fn=lambda sid: live.get(sid),
             read_state_fn=h.read_state,
-            read_promise_fn=h.read_promise,
             liveness_fn=h.liveness,
             send_fn=h.send,
             load_counts_fn=lambda: {},
@@ -316,7 +347,6 @@ class TestRunRecoverySweep:
             registry_load=lambda: entries,
             locate_fn=lambda sid: live.get(sid),
             read_state_fn=h.read_state,
-            read_promise_fn=h.read_promise,
             liveness_fn=h.liveness,
             send_fn=h.send,
             load_counts_fn=lambda: dict(prior),

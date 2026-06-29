@@ -61,7 +61,6 @@ _SendError = ProviderSocketError
 NUDGE = "nudge"
 SKIP_NEEDS_INPUT = "skip-needs-input"
 SKIP_TERMINAL = "skip-terminal"
-SKIP_DONE = "skip-done"
 NOT_STALE = "not-stale"
 
 # States that mean "finished, never re-nudge". ``needs-input`` is handled
@@ -84,26 +83,31 @@ def classify(
     updated_at: Optional[str],
     now: datetime,
     idle_threshold_s: int,
-    promise_present: bool,
 ) -> str:
     """Decide what to do with one footnote-launched bg session.
 
     Returns one of :data:`NUDGE`, :data:`SKIP_NEEDS_INPUT`,
-    :data:`SKIP_TERMINAL`, :data:`SKIP_DONE`, :data:`NOT_STALE`.
+    :data:`SKIP_TERMINAL`, :data:`NOT_STALE`.
 
-    Order matters: terminal / needs-input / promise are checked before
-    staleness so a done-or-waiting session is never nudged regardless of how
-    stale its ``state.json`` is. Only a non-terminal, non-waiting, no-promise
-    session whose ``updatedAt`` is older than the threshold is a nudge target.
-    A missing or unparseable ``updatedAt`` is treated conservatively as
-    not-stale (we cannot prove idleness, so we do not nudge).
+    Order matters: terminal / needs-input are checked before staleness so a
+    done-or-waiting session is never nudged regardless of how stale its
+    ``state.json`` is. Only a non-terminal, non-waiting session whose
+    ``updatedAt`` is older than the threshold is a nudge target. A missing or
+    unparseable ``updatedAt`` is treated conservatively as not-stale (we cannot
+    prove idleness, so we do not nudge).
+
+    "Done" is read from the CC job ``state`` (``done``/``completed``/``failed``),
+    NOT from a ``<promise>`` in the transcript: a target ``<promise>`` is only
+    the model's *claim* of completion. loop-check's done-reads can reject it and
+    the session keeps going, so a past promise does not mean the work shipped —
+    a session that emitted ``<promise>`` and was then blocked is still working
+    and must remain recoverable. The terminal job state is the real authority,
+    and it is reached only when the session actually exited cleanly.
     """
     if state == "needs-input":
         return SKIP_NEEDS_INPUT
     if state in _TERMINAL:
         return SKIP_TERMINAL
-    if promise_present:
-        return SKIP_DONE
     age = _age_seconds(updated_at, now)
     if age is None or age < idle_threshold_s:
         return NOT_STALE
@@ -111,8 +115,13 @@ def classify(
 
 
 def _age_seconds(updated_at: Optional[str], now: datetime) -> Optional[float]:
-    """Seconds since ``updated_at`` (ISO8601), or None if absent/unparseable."""
-    if not updated_at:
+    """Seconds since ``updated_at`` (ISO8601), or None if absent/unparseable.
+
+    Both operands are normalized to timezone-aware UTC before subtracting so a
+    naive ``now`` (or a naive ``updatedAt``) never raises a mixed-aware/naive
+    ``TypeError``.
+    """
+    if not isinstance(updated_at, str) or not updated_at.strip():
         return None
     raw = updated_at.strip()
     if raw.endswith("Z"):
@@ -123,6 +132,8 @@ def _age_seconds(updated_at: Optional[str], now: datetime) -> Optional[float]:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     return (now - dt).total_seconds()
 
 
@@ -171,7 +182,13 @@ def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Can
         loc = locate_fn(short_id)
         if loc is None:
             continue
-        out.append(Candidate(short_id=short_id, sock_path=loc.messaging_socket_path, jobs_dir=loc.jobs_dir))
+        sock = getattr(loc, "messaging_socket_path", None)
+        jobs_dir = getattr(loc, "jobs_dir", None)
+        if not sock or jobs_dir is None:
+            # locate_session's contract guarantees both, but a future locator
+            # variant might not; skip rather than build an unusable candidate.
+            continue
+        out.append(Candidate(short_id=short_id, sock_path=sock, jobs_dir=jobs_dir))
     return out
 
 
@@ -197,7 +214,6 @@ def recovery_sweep(
     counts: dict,
     emit: Callable[[str, dict], None],
     read_state_fn: Callable,
-    read_promise_fn: Callable,
     liveness_fn: Callable[[str], bool],
     send_fn: Callable[[str, str, str], None],
 ) -> None:
@@ -213,14 +229,13 @@ def recovery_sweep(
     """
     for c in candidates:
         snap = read_state_fn(c.jobs_dir)
-        promise = read_promise_fn(c.jobs_dir)
-        decision = classify(snap.state, snap.updated_at, now, cfg.idle_threshold_seconds, promise)
+        decision = classify(snap.state, snap.updated_at, now, cfg.idle_threshold_seconds)
 
         if decision == SKIP_NEEDS_INPUT:
             emit("recovery_skipped", {"short_id": c.short_id, "reason": "needs-input"})
             continue
         if decision != NUDGE:
-            # SKIP_TERMINAL / SKIP_DONE / NOT_STALE: nothing to say.
+            # SKIP_TERMINAL / NOT_STALE: nothing to say.
             continue
 
         n = counts.get(c.short_id, 0)
@@ -249,25 +264,6 @@ def recovery_sweep(
 # Real I/O seams + the high-level entry the pr_watch tick calls
 # ---------------------------------------------------------------------------
 
-def read_promise(jobs_dir) -> bool:
-    """True if ``timeline.jsonl`` contains a ``<promise>`` (session is done).
-
-    Reads only the tail (last 64KB) — a ``<promise>`` is emitted at the end of
-    the run, and the tail keeps the scan O(1) regardless of timeline length.
-    Any read error is treated as "no promise" (conservative; a missing promise
-    only risks an extra nudge, which the cap bounds).
-    """
-    timeline = Path(jobs_dir) / "timeline.jsonl"
-    try:
-        size = timeline.stat().st_size
-        with open(timeline, "rb") as fh:
-            if size > 65536:
-                fh.seek(size - 65536)
-            return b"<promise>" in fh.read()
-    except OSError:
-        return False
-
-
 def _counts_path() -> Path:
     from fno import paths
 
@@ -275,11 +271,17 @@ def _counts_path() -> Path:
 
 
 def load_counts() -> dict:
-    """Load the per-session nudge counter (empty on any read/parse failure)."""
+    """Load the per-session nudge counter (empty on any read/parse failure).
+
+    ``UnicodeDecodeError`` (a corrupt non-UTF-8 file) is caught alongside
+    OSError/JSONDecodeError so a damaged counter file degrades to "start fresh"
+    rather than crashing the sweep.
+    """
     try:
-        return json.loads(_counts_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(_counts_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def save_counts(counts: dict) -> None:
@@ -310,11 +312,12 @@ def _safe_read_state(jobs_dir):
     try:
         snap = read_state_json(Path(jobs_dir))
         return _SnapshotView(snap.state, snap.updated_at)
-    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError):
         # AttributeError/TypeError: a valid-JSON-but-non-object state.json (a
-        # bare string/list) makes the parser's ``.get(...)`` raise. Degrade to
-        # an empty view so ONE malformed session never aborts the sweep for the
-        # rest of this tick; the next tick retries.
+        # bare string/list) makes the parser's ``.get(...)`` raise.
+        # UnicodeDecodeError: a corrupt non-UTF-8 state.json. Either way, degrade
+        # to an empty view so ONE malformed session never aborts the sweep for
+        # the rest of this tick; the next tick retries.
         return _SnapshotView("", None)
 
 
@@ -333,7 +336,6 @@ def run_recovery_sweep(
     registry_load: Optional[Callable] = None,
     locate_fn: Optional[Callable] = None,
     read_state_fn: Optional[Callable] = None,
-    read_promise_fn: Optional[Callable] = None,
     liveness_fn: Optional[Callable] = None,
     send_fn: Optional[Callable] = None,
     load_counts_fn: Optional[Callable] = None,
@@ -365,7 +367,6 @@ def run_recovery_sweep(
 
         send_fn = send_to_session
     read_state_fn = read_state_fn or _safe_read_state
-    read_promise_fn = read_promise_fn or read_promise
     load_counts_fn = load_counts_fn or load_counts
     save_counts_fn = save_counts_fn or save_counts
 
@@ -377,7 +378,7 @@ def run_recovery_sweep(
     recovery_sweep(
         now, cfg,
         candidates=candidates, counts=counts, emit=emit,
-        read_state_fn=read_state_fn, read_promise_fn=read_promise_fn,
+        read_state_fn=read_state_fn,
         liveness_fn=liveness_fn, send_fn=send_fn,
     )
 
