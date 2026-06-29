@@ -291,6 +291,15 @@ pub enum CompositorAction {
     /// Nothing to do.
     NoOp,
     /// Forward bytes to pane `pane_idx`'s owned-PTY sink.
+    ///
+    /// Carries HUMAN keystrokes only - the operator typing into the focused
+    /// pane (built solely from `InputEvent::Keystroke` while driving). The
+    /// human IS the provenance, so this raw inject is intentionally unframed.
+    /// Agent->agent messaging must NOT borrow this path: a cross-agent message
+    /// routes through the relay (`fno mail send` -> dispatch -> relay daemon),
+    /// which applies the `<fno_mail from=.. harness=.. model=..>` provenance
+    /// framing and refuses an unframed cross-provider inject. A raw pane write
+    /// for agent traffic would be an unframed bypass = bug.
     ForwardKeystrokes { pane_idx: usize, bytes: Vec<u8> },
     /// Scroll pane `pane_idx`'s captured history (scrollback mode).
     Scroll { pane_idx: usize, cmd: ScrollCmd },
