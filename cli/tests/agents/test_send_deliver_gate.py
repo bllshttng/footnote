@@ -1087,6 +1087,195 @@ def test_deliver_live_claude_mcp_error_falls_back_to_socket(
 
 
 # ---------------------------------------------------------------------------
+# node x-849b: dual-lane live inject. An owned-PTY worker (host_mode=interactive)
+# is driven via worker.submit, not control.sock; the worker-lane turn carries the
+# same <fno_mail> envelope. Neither lane live -> durable.
+# ---------------------------------------------------------------------------
+
+def test_deliver_live_claude_worker_lane_delivers_with_envelope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP / AC2-HP / AC2-UI: an owned-PTY worker recipient is reached via
+    worker.submit (live, not durable), and the submitted turn carries the
+    <fno_mail> envelope with an 8-hex `from` and no `session=` attribute."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import AgentEntry, write_registry
+    write_registry([
+        AgentEntry(
+            name="sender",
+            provider="claude",
+            cwd="/tmp",
+            log_path="/tmp/sender.log",
+            claude_session_uuid="5e9de401-1111-2222-3333-444444444444",
+            status="live",
+        ),
+        AgentEntry(
+            name="pty-worker",
+            provider="claude",
+            cwd="/tmp",
+            log_path="/tmp/pty-worker.log",
+            claude_session_uuid="aaaa0001-2222-3333-4444-555555555555",
+            status="live",
+        ),
+    ])
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.providers import claude as claude_mod
+    from fno.relay import roundtrip
+
+    # Reach the inject tail: switchboard demotes, no MCP channel.
+    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        dispatch_mod, "_daemon_rpc",
+        lambda method, params, **kw: {"delivered": False, "reason": "not-a-live-stream-thread"},
+    )
+
+    # The recipient resolves to a live owned-PTY worker lane.
+    monkeypatch.setattr(roundtrip, "resolve_live_lane", lambda sid: ("worker", "wkA"))
+    monkeypatch.setattr(roundtrip, "_worker_sock", lambda short_id: Path(f"/tmp/{short_id}/worker.sock"))
+
+    submitted: list = []
+
+    def _ok_submit(sock, framed, **kw):
+        submitted.append({"sock": str(sock), "framed": framed})
+        return True
+
+    monkeypatch.setattr(roundtrip, "submit_via_worker", _ok_submit)
+    # The control.sock lane must NOT be taken when a worker lane resolves.
+    monkeypatch.setattr(
+        dispatch_mod, "_mail_inject_claude",
+        lambda *a, **kw: pytest.fail("control.sock lane taken for an owned-PTY worker"),
+    )
+
+    from fno.agents.dispatch import dispatch_send
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(
+        name="pty-worker",
+        message="ping the worker",
+        provider=None,
+        cwd=cwd,
+        from_name="sender",
+    )
+
+    assert result.delivery == "hosted", "owned-PTY worker must deliver live, not durable"
+    assert len(submitted) == 1, "exactly one worker.submit"
+    assert submitted[0]["sock"] == "/tmp/wkA/worker.sock"
+    framed = submitted[0]["framed"]
+    # AC2-HP: the worker-lane turn carries the paired <fno_mail> envelope.
+    assert framed.startswith('<fno_mail from="'), framed
+    assert framed.rstrip().endswith("</fno_mail>"), framed
+    assert "ping the worker" in framed
+    # AC2-UI: `from` is the sender's 8-hex short id; no `session=` attribute.
+    import re
+
+    assert re.match(r'^<fno_mail from="[0-9a-f]{8}"', framed), framed
+    assert "session=" not in framed
+
+
+def test_deliver_live_claude_no_live_lane_queues_durable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-EDGE: a recipient with no live worker.sock AND no live control.sock
+    still queues durable (exit 0, delivery != hosted)."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import AgentEntry, write_registry
+    write_registry([
+        AgentEntry(
+            name="offline-claude",
+            provider="claude",
+            cwd="/tmp",
+            log_path="/tmp/offline-claude.log",
+            claude_session_uuid="bbbb0002-1111-2222-3333-444444444444",
+            status="live",
+        )
+    ])
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.providers import claude as claude_mod
+    from fno.relay import roundtrip
+
+    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        dispatch_mod, "_daemon_rpc",
+        lambda method, params, **kw: {"delivered": False, "reason": "not-a-live-stream-thread"},
+    )
+    # Neither lane resolves live; the control.sock inject also misses.
+    monkeypatch.setattr(roundtrip, "resolve_live_lane", lambda sid: None)
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda *a, **kw: False)
+
+    from fno.agents.dispatch import dispatch_send
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(
+        name="offline-claude", message="hello?", provider=None, cwd=cwd
+    )
+    assert result.delivery != "hosted", "no live lane -> durable fallback"
+
+
+def test_deliver_live_claude_worker_unreachable_falls_through_to_control(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """codex P2 (#95): a STALE live-looking interactive row can coexist with a
+    valid adopted row for one uuid. When the worker lane is chosen but its sock is
+    gone (submit_via_worker -> False), delivery must fall through to the
+    control.sock lane instead of demoting straight to durable."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import AgentEntry, write_registry
+    write_registry([
+        AgentEntry(
+            name="dual-row",
+            provider="claude",
+            cwd="/tmp",
+            log_path="/tmp/dual-row.log",
+            claude_session_uuid="cccc0003-1111-2222-3333-444444444444",
+            status="live",
+        )
+    ])
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.providers import claude as claude_mod
+    from fno.relay import roundtrip
+
+    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        dispatch_mod, "_daemon_rpc",
+        lambda method, params, **kw: {"delivered": False, "reason": "not-a-live-stream-thread"},
+    )
+    # The worker lane resolves (a stale-looking interactive row) but its sock is gone.
+    monkeypatch.setattr(roundtrip, "resolve_live_lane", lambda sid: ("worker", "wkStale"))
+    monkeypatch.setattr(roundtrip, "_worker_sock", lambda short_id: Path(f"/tmp/{short_id}/worker.sock"))
+    monkeypatch.setattr(roundtrip, "submit_via_worker", lambda *a, **kw: False)
+
+    # The control.sock lane (the coexisting adopted row) delivers on the fall-through.
+    inject_calls: list = []
+
+    def _ok_inject(recipient: str, text: str) -> bool:
+        inject_calls.append({"recipient": recipient, "text": text})
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _ok_inject)
+
+    from fno.agents.dispatch import dispatch_send
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(
+        name="dual-row", message="reach me on control", provider=None, cwd=cwd
+    )
+
+    assert result.delivery == "hosted", "worker-fail must fall through to control, not durable"
+    assert len(inject_calls) == 1, "the control.sock lane must be tried on worker failure"
+    # The fall-through still carries the <fno_mail> envelope (same wrapped turn).
+    assert inject_calls[0]["text"].startswith('<fno_mail from="')
+
+
+# ---------------------------------------------------------------------------
 # node x-1f23: the autonomous relay continuations carry <fno_mail>, not just
 # the seed (codex P2). Chat (no mail ctxs) stays raw.
 # ---------------------------------------------------------------------------
