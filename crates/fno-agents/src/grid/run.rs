@@ -409,13 +409,23 @@ fn bg_card_pane(card: &RosterBgCard, rows: u16, cols: u16, now: u64) -> Pane {
 /// seam). The terminal is restored regardless of the attach outcome; the caller
 /// forces a full repaint (`prev_frame = None`) and surfaces any error via the
 /// footer hint. (x-57eb, Change 3)
-fn attach_bg_session(session_id: &str) -> Result<(), String> {
+///
+/// `async` + `tokio::process` is load-bearing on the current-thread runtime: a
+/// synchronous `std::process::Command::status()` would block the SOLE executor
+/// thread for the whole (interactive, possibly minutes-long) attach, starving
+/// every spawned task - including the watch-sink readers draining the other
+/// panes' WS streams (gemini review HIGH on PR #96). Awaiting the child keeps
+/// the executor free to drain them while the operator is attached; the grid is
+/// paused (alt screen left) but its background tasks stay alive.
+async fn attach_bg_session(session_id: &str) -> Result<(), String> {
     use crossterm::{
         cursor,
         event::{DisableMouseCapture, EnableMouseCapture},
         execute, terminal,
     };
     // Suspend (mirror TerminalGuard::drop) so claude attach owns a clean TTY.
+    // termios / alt-screen state is process-global, so the sync crossterm calls
+    // are correct regardless of which thread later runs the child.
     let _ = execute!(
         io::stderr(),
         DisableMouseCapture,
@@ -424,10 +434,12 @@ fn attach_bg_session(session_id: &str) -> Result<(), String> {
     );
     let _ = terminal::disable_raw_mode();
 
-    let status = std::process::Command::new("claude")
+    // Inherit stdio (the default) so the child owns the real TTY interactively.
+    let status = tokio::process::Command::new("claude")
         .arg("attach")
         .arg(session_id)
-        .status();
+        .status()
+        .await;
 
     // Restore (mirror TerminalGuard::enter) ALWAYS, even on attach failure, so
     // the grid is never left in raw mode / on the alt screen.
@@ -3553,7 +3565,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     {
                                         // Attach takes over the terminal; on return the
                                         // screen is dirty, so force a full repaint.
-                                        if let Err(e) = attach_bg_session(&card.session_id) {
+                                        if let Err(e) = attach_bg_session(&card.session_id).await {
                                             hint = Some(e);
                                         }
                                         prev_frame = None;
