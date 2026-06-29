@@ -3772,6 +3772,11 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                         hint = Some(format!(
                                                             "removed {agent} from *{squad}"
                                                         ));
+                                                        // Membership changed -> the rail
+                                                        // layout shifts; force a full paint.
+                                                        // The no-op paths only change the
+                                                        // footer hint, which `dirty` repaints.
+                                                        prev_frame = None;
                                                     }
                                                     Ok(false) => {
                                                         hint = Some(format!(
@@ -3789,7 +3794,6 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             }
                                         }
                                     }
-                                    prev_frame = None; // membership changed -> full-paint
                                     dirty = true;
                                     rail_consumed = true;
                                 }
