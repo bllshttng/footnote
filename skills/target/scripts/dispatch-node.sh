@@ -50,8 +50,11 @@ command -v jq  >/dev/null 2>&1 || { echo "failed: - reason=\"jq not on PATH\""  
 # worker's conductor worktree off origin/main. Empty when not in a git repo
 # (the --fresh arm falls back to the Rust runtime's own --fresh resolution).
 CANONICAL_ROOT=""
-_gcd="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
-[[ -n "$_gcd" ]] && CANONICAL_ROOT="$(dirname "$_gcd")"
+_gcd_raw="$(git rev-parse --git-common-dir 2>/dev/null)"
+if [[ -n "$_gcd_raw" ]]; then            # guard so we never `cd ""` (a no-op that
+  _gcd="$(cd "$_gcd_raw" 2>/dev/null && pwd -P)"   # would falsely set a non-git cwd)
+  [[ -n "$_gcd" ]] && CANONICAL_ROOT="$(dirname "$_gcd")"
+fi
 
 # ---- arg parse --------------------------------------------------------------
 NODES=()
