@@ -1676,6 +1676,106 @@ pub fn dispatch_claude_spawn(
     }
 }
 
+/// Dispatch a `claude -p` truly-headless one-shot (x-2c27 `headless` substrate).
+///
+/// Unlike [`dispatch_claude_spawn`] (the detached `--bg` thread, which returns a
+/// short-id receipt), this runs `claude -p` SYNCHRONOUSLY to completion, prints
+/// the model's reply to stdout, and exits - no registry row, no short-id, no
+/// driveable pane. `claude` never *defaults* to `-p`; this is the one lane that
+/// shells it (Locked Decision 4). `ask` and the relay claude hop keep `--bg`.
+///
+/// A headless run cannot answer permission prompts, so it always passes
+/// `--dangerously-skip-permissions` (mirrors the agy/codex once lanes); `yolo`
+/// is therefore a no-op, accepted only for signature parity. `claude_home` is
+/// unused (no session registry for an ephemeral one-shot) and kept for parity
+/// with the bg path's signature.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_claude_headless(
+    _claude_home: &ClaudeHome,
+    name: &str,
+    message: &str,
+    from_name: &str,
+    cwd: &Path,
+    _yolo: bool,
+    _timeout: Option<Duration>,
+) -> AskOutcome {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    if let Err(msg) = validate_spawn_inputs(name, from_name) {
+        return AskOutcome::err(msg, 2);
+    }
+
+    // Python-truthiness parity with the once lanes: only an EMPTY message
+    // becomes "hello"; a whitespace-only prompt passes through unchanged.
+    let effective = if message.is_empty() { "hello" } else { message };
+    let use_stdin = use_stdin_for(effective);
+
+    let mut argv: Vec<String> = vec![
+        "claude".into(),
+        "-p".into(),
+        "--dangerously-skip-permissions".into(),
+    ];
+    if !use_stdin {
+        argv.push(effective.to_string());
+    }
+
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    cmd.current_dir(cwd);
+    cmd.env("FNO_AGENT_SELF", name);
+    cmd.env("FNO_AGENT_PROVIDER", "claude");
+    cmd.env("FNO_AGENT_FROM", from_name);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.stdin(if use_stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return AskOutcome::err(format!("claude CLI not found: {}", e), 127);
+        }
+        Err(e) => return AskOutcome::err(e.to_string(), 127),
+    };
+
+    // Large (>200KB) prompts go via stdin on a detached writer thread so a
+    // filling stdout pipe can't deadlock a synchronous write. The common path
+    // (argv) skips this entirely.
+    let stdin_writer = if use_stdin {
+        child.stdin.take().map(|mut s| {
+            let data = effective.to_string();
+            std::thread::spawn(move || {
+                let _ = s.write_all(data.as_bytes());
+            })
+        })
+    } else {
+        None
+    };
+
+    // ponytail: block until claude -p exits; `_timeout` is NOT enforced here.
+    // Unlike the `--bg` lane (which bounds the launch because the detached fork
+    // inherits stdout and could orphan), a `-p` one-shot has no detached child
+    // to orphan and terminates on its own. wait_with_output drains both pipes,
+    // so no pipe-fill deadlock. Add a bounded wait only if a real hang appears.
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return AskOutcome::err(format!("claude -p wait failed: {}", e), 1),
+    };
+    if let Some(h) = stdin_writer {
+        let _ = h.join();
+    }
+
+    AskOutcome {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(1),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn followup(
     _home: &AgentsHome,

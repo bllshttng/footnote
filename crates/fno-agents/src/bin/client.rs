@@ -541,32 +541,35 @@ fn maybe_run_agy_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
 
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
 ///
-/// x-3ab8 flipped the claude default: a plain `spawn` is now an owned interactive
-/// daemon pane (fall through), and `--once` is claude's headless opt-out.
-/// - claude + --once: dispatch_claude_spawn (the headless `claude --bg` thread, JSON receipt).
-/// - claude + no --once: return None (fall through to the daemon owned-interactive lane).
-/// - codex/gemini/agy + --once: dispatch_*_once (one-shot, client-side).
-/// - codex/gemini/agy + no --once: return None (fall through to daemon PTY worker).
-/// - no resolvable provider: stderr usage error + exit 2.
+/// x-2c27 names the session substrate as one axis with three values; this arm
+/// routes the two non-default ones client-side and falls through for `pane`.
+/// - `pane` (default): owned interactive daemon pane -> None (fall through).
+/// - claude + `bg`: dispatch_claude_spawn (the detached `claude --bg` thread).
+/// - claude + `headless`: dispatch_claude_headless (the `claude -p` one-shot).
+/// - codex/gemini/agy + `headless`: dispatch_*_once (one-shot, client-side).
+/// - codex/gemini/agy + `bg`: hard error (bg is claude-only -> use headless).
+/// - no resolvable / unknown provider: stderr usage error + exit 2.
 ///
 /// Returns `Some(exit_code)` when handled client-side, `None` to fall through.
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
     use fno_agents::agy_ask::dispatch_agy_once;
-    use fno_agents::claude_ask::{dispatch_claude_spawn, py_repr, ClaudeHome};
+    use fno_agents::claude_ask::{
+        dispatch_claude_headless, dispatch_claude_spawn, py_repr, ClaudeHome,
+    };
     use fno_agents::codex_ask::dispatch_codex_once;
     use fno_agents::gemini_ask::dispatch_gemini_once;
     use fno_agents::state::load_registry;
 
     let provider_param = params.get("provider").and_then(|v| v.as_str());
-    // `once` is a CLIENT-ONLY routing flag: build_request inserts it for the
-    // spawn verb and this is its sole consumer. It must never be forwarded in
-    // a daemon-bound request (the daemon has no once semantics; the codex/
-    // gemini plain-spawn fall-through below sends params WITHOUT acting on it,
-    // which is correct because the daemon ignores unknown params).
-    let once = params
-        .get("once")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // `substrate` is a CLIENT-ONLY routing key: build_request validates and
+    // inserts it (default `pane`) for the spawn verb and this is its sole
+    // consumer. It is never forwarded in a daemon-bound request (the `pane`
+    // fall-through below sends params WITHOUT it mattering; the daemon ignores
+    // unknown params).
+    let substrate = params
+        .get("substrate")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pane");
 
     // unwrap_or_default is acceptable HERE (unlike the ask pre-check, which
     // must exit 12 on a corrupt registry): this collision check is advisory;
@@ -606,15 +609,14 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         .unwrap_or("abilities");
     // --cwd > --fresh > caller cwd (AC6); resolve_dispatch_cwd canonicalizes an
     // explicit --cwd and shells to git only when --fresh && !--here. Resolve only
-    // for CLIENT-SIDE spawns, which are now exactly the `--once` dispatches (claude
-    // --once / codex --once / gemini --once / agy --once). Everything WITHOUT
-    // --once -- including plain claude (x-3ab8) -- falls through to the daemon RPC
-    // below, which resolves canonical itself; resolving here too would double the
-    // git call and the redirect note (review MEDIUM 3).
-    let cwd = if once {
-        resolve_dispatch_cwd(params)
-    } else {
+    // for CLIENT-SIDE spawns, which are the non-`pane` substrates (bg + headless).
+    // The `pane` substrate falls through to the daemon RPC below, which resolves
+    // canonical itself; resolving here too would double the git call and the
+    // redirect note (review MEDIUM 3).
+    let cwd = if substrate == "pane" {
         std::path::PathBuf::new()
+    } else {
+        resolve_dispatch_cwd(params)
     };
     let timeout = params
         .get("timeout")
@@ -627,15 +629,43 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // agy honors an optional --model (exact agy model name); other providers ignore it.
     let model = params.get("model").and_then(|v| v.as_str());
 
-    match provider {
-        // x-3ab8: plain `spawn --provider claude` now defaults to an owned
-        // interactive daemon pane (host_mode=interactive set in build_request) ->
-        // fall through (None) to the daemon RPC, exactly like host. `--once` is
-        // claude's headless opt-out: the persistent `claude --bg` fire-and-forget
-        // thread (NOT a grid pane; claude owns that PTY, adoption is x-cb89).
-        "claude" if once => {
+    // Validate the provider FIRST so an unknown provider is a client-side
+    // error (exit 2) for every substrate, never a fall-through to the daemon.
+    if !matches!(provider, "claude" | "codex" | "gemini" | "agy") {
+        eprintln!(
+            "unknown provider {}; supported: claude, codex, gemini, agy",
+            py_repr(provider)
+        );
+        return Some(2);
+    }
+
+    // Each provider module defines its OWN AskOutcome struct (nominally
+    // distinct types), so `emit!` prints+returns inline per arm rather than via
+    // one shared closure that could not name all four types.
+    macro_rules! emit {
+        ($outcome:expr) => {{
+            let outcome = $outcome;
+            if !outcome.stderr.is_empty() {
+                eprint!("{}", outcome.stderr);
+            }
+            if !outcome.stdout.is_empty() {
+                print!("{}", outcome.stdout);
+            }
+            Some(outcome.exit_code)
+        }};
+    }
+
+    match (provider, substrate) {
+        // pane (default): plain `spawn` is an owned interactive daemon pane
+        // (host_mode=interactive set in build_request) -> fall through (None) to
+        // the daemon RPC, exactly like host. The x-3ab8 default; unchanged.
+        (_, "pane") => None,
+
+        // claude bg: the detached `claude --bg` thread (appears in `claude
+        // agents`; attach/peek/reply; NOT a grid pane). claude-only by nature.
+        ("claude", "bg") => {
             let claude_home = ClaudeHome::from_env();
-            let outcome = dispatch_claude_spawn(
+            emit!(dispatch_claude_spawn(
                 home,
                 &claude_home,
                 name,
@@ -645,58 +675,55 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 yolo,
                 timeout,
                 &[],
-            );
-            if !outcome.stderr.is_empty() {
-                eprint!("{}", outcome.stderr);
-            }
-            if !outcome.stdout.is_empty() {
-                print!("{}", outcome.stdout);
-            }
-            Some(outcome.exit_code)
+            ))
         }
-        "claude" => None,
-        "codex" if once => {
-            let outcome = dispatch_codex_once(home, name, message, from_name, &cwd, yolo, timeout);
-            if !outcome.stderr.is_empty() {
-                eprint!("{}", outcome.stderr);
-            }
-            if !outcome.stdout.is_empty() {
-                print!("{}", outcome.stdout);
-            }
-            Some(outcome.exit_code)
+        // claude headless: a truly headless `claude -p` one-shot (no thread, no
+        // grid row; runs to completion and exits). The one place claude shells
+        // `-p` (Locked Decision 4); ask/relay keep `--bg`.
+        ("claude", "headless") => {
+            let claude_home = ClaudeHome::from_env();
+            emit!(dispatch_claude_headless(
+                &claude_home,
+                name,
+                message,
+                from_name,
+                &cwd,
+                yolo,
+                timeout,
+            ))
         }
-        "gemini" if once => {
-            let outcome = dispatch_gemini_once(home, name, message, from_name, &cwd, yolo, timeout);
-            if !outcome.stderr.is_empty() {
-                eprint!("{}", outcome.stderr);
-            }
-            if !outcome.stdout.is_empty() {
-                print!("{}", outcome.stdout);
-            }
-            Some(outcome.exit_code)
-        }
-        "agy" if once => {
+
+        // codex/gemini/agy headless: the client-side one-shot (codex --exec /
+        // gemini -p / agy -p).
+        ("codex", "headless") => emit!(dispatch_codex_once(
+            home, name, message, from_name, &cwd, yolo, timeout,
+        )),
+        ("gemini", "headless") => emit!(dispatch_gemini_once(
+            home, name, message, from_name, &cwd, yolo, timeout,
+        )),
+        ("agy", "headless") => {
             // agy is stateless (plain text, no session id): a one-shot `agy -p`.
             // It ignores `yolo` (headless create always passes
             // --dangerously-skip-permissions) and honors an optional --model.
-            let outcome = dispatch_agy_once(home, name, message, from_name, &cwd, model, timeout);
-            if !outcome.stderr.is_empty() {
-                eprint!("{}", outcome.stderr);
-            }
-            if !outcome.stdout.is_empty() {
-                print!("{}", outcome.stdout);
-            }
-            Some(outcome.exit_code)
+            emit!(dispatch_agy_once(
+                home, name, message, from_name, &cwd, model, timeout,
+            ))
         }
-        // codex/gemini/agy without --once: fall through to the daemon PTY worker.
-        "codex" | "gemini" | "agy" => None,
-        other => {
+
+        // bg is claude-only (Locked Decision 2): codex/gemini/agy have no
+        // detached-interactive substrate. Hard error pointing to headless;
+        // never a silent substrate swap.
+        (other, "bg") => {
             eprintln!(
-                "unknown provider {}; supported: claude, codex, gemini, agy",
+                "substrate 'bg' (detached interactive thread) is claude-only; provider {} has no detached-thread substrate - use --substrate headless for a one-shot",
                 py_repr(other)
             );
             Some(2)
         }
+
+        // Unreachable: provider is validated known above and substrate is
+        // validated to pane|bg|headless in build_request.
+        _ => None,
     }
 }
 
@@ -940,6 +967,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--timeout",
         "--model",
         "--mode",
+        "--substrate",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -1046,10 +1074,32 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 // NOTE: --yolo is accepted and forwarded; daemon ignores it for now.
                 params.insert("yolo".into(), Value::Bool(true));
             }
+            "--substrate" => {
+                // The session-substrate selector (x-2c27): pane (owned-PTY,
+                // default) | bg (claude --bg detached thread, claude-only) |
+                // headless (claude -p / codex --exec / agy -p one-shot). The
+                // sole routing key the spawn arm reads (replaces --once).
+                let v = str_arg(&mut it, "--substrate")?;
+                match v.as_str() {
+                    Some("pane") | Some("bg") | Some("headless") => {
+                        params.insert("substrate".into(), v);
+                    }
+                    other => {
+                        return Err(format!(
+                            "--substrate must be one of: pane, bg, headless (got {})",
+                            other.unwrap_or("")
+                        ));
+                    }
+                }
+            }
             "--once" | "-o" => {
-                // spawn --once: create + exchange + teardown. Client-side only;
-                // not forwarded to the daemon (codex/gemini --once bypasses it).
-                params.insert("once".into(), Value::Bool(true));
+                // Back-compat alias: every live `--once` caller is a codex/gemini
+                // one-shot, i.e. headless. Map it to --substrate headless so old
+                // callers keep working without the conflated `once` boolean. An
+                // explicit --substrate already present wins.
+                params
+                    .entry("substrate")
+                    .or_insert_with(|| Value::String("headless".into()));
             }
             "--fresh" => {
                 // Resolve the worker cwd to the canonical repo root (main
@@ -1102,16 +1152,21 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             if !params.contains_key("message") && positional.len() > 1 {
                 params.insert("message".into(), Value::String(positional[1..].join(" ")));
             }
-            // x-3ab8: spawn defaults to an owned interactive pane (drivable grid
-            // pane) for PTY-capable providers. `--once` is the headless opt-out
+            // x-3ab8/x-2c27: spawn defaults to an owned interactive pane (the
+            // `pane` substrate) for PTY-capable providers. Only `pane` gets the
+            // interactive host_mode/mint; `bg` (claude --bg) and `headless`
+            // (-p/--exec) are client-side one-shots that never touch the daemon
             // (byte-unchanged: no host_mode, no mint). An unknown provider keeps
             // today's behavior (the daemon's provider_for_pty errors as before).
-            let once = params.get("once").and_then(Value::as_bool).unwrap_or(false);
+            let substrate = params
+                .get("substrate")
+                .and_then(Value::as_str)
+                .unwrap_or("pane");
             let pty_capable = matches!(
                 params.get("provider").and_then(Value::as_str),
                 Some("claude") | Some("codex") | Some("gemini") | Some("agy")
             );
-            if !once && pty_capable {
+            if substrate == "pane" && pty_capable {
                 apply_interactive_defaults(&mut params);
             }
             "agent.spawn"
@@ -1741,7 +1796,7 @@ fn exit_code_for(code: ErrorCode) -> i32 {
 /// list against that set, so a new verb cannot land without a `--help` entry
 /// (ab-351427cb).
 const CLIENT_VERB_USAGE: &[&str] = &[
-    "spawn <name> --provider <p> [--cwd <dir>|--fresh|--here] --argv -- <cmd...>",
+    "spawn <name> --provider <p> [--substrate pane|bg|headless] [--cwd <dir>|--fresh|--here] --argv -- <cmd...>",
     "ask <name> <message> [--cwd <dir>|--fresh|--here]",
     "list [--all]",
     "status",
@@ -2672,8 +2727,8 @@ mod tests {
 
     #[test]
     fn spawn_once_is_headless_byte_unchanged() {
-        // AC1-ERR: --once is the headless opt-out -> no host_mode, no mint,
-        // for EVERY provider.
+        // AC1-EDGE: --once is the back-compat alias for --substrate headless ->
+        // no host_mode, no mint, for EVERY provider; substrate=headless.
         for provider in ["claude", "codex", "gemini", "agy"] {
             let args = vec![
                 "wk".to_string(),
@@ -2682,6 +2737,11 @@ mod tests {
                 "--once".to_string(),
             ];
             let (_m, params) = build_request("spawn", &args).unwrap();
+            assert_eq!(
+                params.get("substrate").and_then(|v| v.as_str()),
+                Some("headless"),
+                "{provider} --once aliases to substrate=headless"
+            );
             assert!(
                 params.get("host_mode").is_none(),
                 "{provider} --once: no host_mode"
@@ -2691,6 +2751,80 @@ mod tests {
                 "{provider} --once: no mint"
             );
         }
+    }
+
+    #[test]
+    fn spawn_substrate_pane_is_default_and_interactive() {
+        // AC1-UI: no --substrate -> pane -> interactive defaults applied (the
+        // x-3ab8 owned-PTY behavior is the strictly-additive default).
+        let args = vec![
+            "wk".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+        ];
+        let (_m, params) = build_request("spawn", &args).unwrap();
+        assert!(
+            params.get("substrate").is_none(),
+            "no substrate key when omitted"
+        );
+        assert_eq!(params["host_mode"], "interactive");
+        // Explicit --substrate pane is identical (interactive defaults applied).
+        let args = vec![
+            "wk".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "pane".to_string(),
+        ];
+        let (_m, params) = build_request("spawn", &args).unwrap();
+        assert_eq!(params["substrate"], "pane");
+        assert_eq!(params["host_mode"], "interactive");
+    }
+
+    #[test]
+    fn spawn_substrate_bg_and_headless_suppress_interactive() {
+        // bg + headless are client-side one-shots: no host_mode, no mint.
+        for sub in ["bg", "headless"] {
+            let args = vec![
+                "wk".to_string(),
+                "--provider".to_string(),
+                "claude".to_string(),
+                "--substrate".to_string(),
+                sub.to_string(),
+            ];
+            let (_m, params) = build_request("spawn", &args).unwrap();
+            assert_eq!(params["substrate"], sub);
+            assert!(params.get("host_mode").is_none(), "{sub}: no host_mode");
+            assert!(params.get("session_id").is_none(), "{sub}: no mint");
+        }
+    }
+
+    #[test]
+    fn spawn_substrate_rejects_unknown_value() {
+        let args = vec![
+            "wk".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "detached".to_string(),
+        ];
+        let err = build_request("spawn", &args).unwrap_err();
+        assert!(err.contains("--substrate must be one of"), "got: {err}");
+    }
+
+    #[test]
+    fn spawn_explicit_substrate_wins_over_once_alias() {
+        // --substrate set explicitly is not clobbered by a trailing --once.
+        let args = vec![
+            "wk".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "bg".to_string(),
+            "--once".to_string(),
+        ];
+        let (_m, params) = build_request("spawn", &args).unwrap();
+        assert_eq!(params["substrate"], "bg");
     }
 
     #[test]
