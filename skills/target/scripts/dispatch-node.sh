@@ -288,7 +288,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude ${cwd_hint}$agent_name '$tgt_cmd'\""
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=\"${dry_cwd}\" hint=\"would run: fno agents spawn --provider claude ${cwd_hint}$agent_name '$tgt_cmd'\""
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -380,7 +380,7 @@ for id in "${NODES[@]}"; do
   fi
   # Launched. Leave the reservation to expire by TTL (the worker now owns
   # node:<id>, which guards later dispatches).
-  echo "launched $id name=$agent_name session=$sid cwd=${launch_cwd} hint=\"fno agents logs $agent_name\""
+  echo "launched $id name=$agent_name session=$sid cwd=\"${launch_cwd}\" hint=\"fno agents logs $agent_name\""
   n_launched=$((n_launched + 1))
 done
 

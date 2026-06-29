@@ -184,6 +184,7 @@ def _worktree_ensure(repo: str, name: str, branch: Optional[str]) -> int:
     if setup.is_file():
         subprocess.run(
             ["bash", str(setup)],
+            cwd=str(wt),  # WORKTREE env drives it, but run from the worktree too
             env={**os.environ, "CANONICAL": str(top), "WORKTREE": str(wt)},
             capture_output=True,
         )
