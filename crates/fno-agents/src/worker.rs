@@ -228,14 +228,29 @@ fn clamp_settle(raw: Option<u64>) -> u64 {
 /// between the text and the CR (default `DEFAULT_SETTLE_MS`, capped at
 /// `MAX_SETTLE_MS` via `clamp_settle`); generous because a polluted SessionStart
 /// banner can still be churning when the text lands.
+/// Frame `text` in bracketed-paste markers (`ESC[200~` ... `ESC[201~`) so a TUI
+/// buffers it as one atomic paste rather than a keystroke burst (node x-849b).
+fn bracketed_paste(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + 12);
+    out.extend_from_slice(b"\x1b[200~");
+    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(b"\x1b[201~");
+    out
+}
+
 async fn submit_keys(pty: &PtySession, req: &Request) -> Response {
     let text = match req.params.get("data").and_then(|v| v.as_str()) {
         Some(t) => t,
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `data` (string)"),
     };
     let settle_ms = clamp_settle(req.params.get("settle_ms").and_then(|v| v.as_u64()));
-    // 1. write the text (no trailing CR).
-    if let Err(e) = pty.write_input(text.as_bytes()) {
+    // 1. write the text framed in bracketed paste (no trailing CR). Framing signals
+    //    the TUI to buffer the payload atomically instead of processing it as fast
+    //    keystrokes, which drops chars under render load (node x-849b: a worker.submit
+    //    injection arrived as "consiered don.Rply in4 trse lines"). The control.sock
+    //    op:reply lane is inherently lossless (programmatic input), so this is
+    //    worker-lane-only.
+    if let Err(e) = pty.write_input(&bracketed_paste(text)) {
         return Response::err(
             req.id,
             ErrorCode::Internal,
@@ -808,6 +823,27 @@ mod tests {
         assert_eq!(clamp_settle(Some(250)), 250);
         assert_eq!(clamp_settle(Some(MAX_SETTLE_MS + 1)), MAX_SETTLE_MS);
         assert_eq!(clamp_settle(Some(u64::MAX)), MAX_SETTLE_MS);
+    }
+
+    #[test]
+    fn bracketed_paste_frames_payload_losslessly() {
+        // node x-849b: a bulk keystroke write drops chars under TUI render load
+        // (observed: "consiered don.Rply in4 trse lines"). Bracketed paste signals
+        // an atomic buffer; assert the payload round-trips byte-for-byte between
+        // the markers. (The atomic-buffering benefit is a live-TUI property `cat`
+        // cannot reproduce, so the unit check is on the framing, not a PTY replay.)
+        let msg = "First sentence. Second sentence with more words. Third one too, long enough to exceed any keystroke-burst buffer and prove nothing is dropped.";
+        let framed = bracketed_paste(msg);
+        assert!(
+            framed.starts_with(b"\x1b[200~"),
+            "must open with paste-start"
+        );
+        assert!(framed.ends_with(b"\x1b[201~"), "must close with paste-end");
+        assert_eq!(
+            &framed[6..framed.len() - 6],
+            msg.as_bytes(),
+            "payload mangled"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
