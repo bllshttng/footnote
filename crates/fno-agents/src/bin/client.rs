@@ -904,10 +904,7 @@ fn apply_interactive_defaults(params: &mut Map<String, Value>) {
         }
         let is_pty_lane = params.get("mode").and_then(Value::as_str)
             == Some(fno_agents::state::CLAUDE_MODE_INTERACTIVE);
-        if is_pty_lane
-            && !params.contains_key("session_id")
-            && !params.contains_key("resume_id")
-        {
+        if is_pty_lane && !params.contains_key("session_id") && !params.contains_key("resume_id") {
             params.insert("session_id".into(), Value::String(mint_session_uuid()));
         }
     }
@@ -1398,9 +1395,18 @@ fn format_success(
             // serde_json::to_string (NOT _pretty) keeps it one line for the
             // line-by-line `json.loads` consumers. `--once` spawns are handled
             // client-side and never reach here.
-            let short_id = result.get("short_id").and_then(|v| v.as_str()).unwrap_or("");
-            let provider = result.get("provider").and_then(|v| v.as_str()).unwrap_or("");
-            let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("live");
+            let short_id = result
+                .get("short_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let provider = result
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let status = result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("live");
             Some(
                 serde_json::to_string(&json!({
                     "name": name,
@@ -2632,10 +2638,17 @@ mod tests {
         // AC1-HP: spawn --provider <pty> (no --once) -> host_mode=interactive.
         // codex/gemini/agy never mint a session id (claude-only).
         for provider in ["codex", "gemini", "agy"] {
-            let args = vec!["wk".to_string(), "--provider".to_string(), provider.to_string()];
+            let args = vec![
+                "wk".to_string(),
+                "--provider".to_string(),
+                provider.to_string(),
+            ];
             let (method, params) = build_request("spawn", &args).unwrap();
             assert_eq!(method, "agent.spawn");
-            assert_eq!(params["host_mode"], "interactive", "{provider} default-interactive");
+            assert_eq!(
+                params["host_mode"], "interactive",
+                "{provider} default-interactive"
+            );
             assert!(params.get("session_id").is_none(), "{provider} never mints");
         }
     }
@@ -2643,7 +2656,11 @@ mod tests {
     #[test]
     fn spawn_claude_default_is_pty_lane_with_minted_session() {
         // claude default -> PTY lane (mode=interactive) + a minted session id.
-        let args = vec!["wk".to_string(), "--provider".to_string(), "claude".to_string()];
+        let args = vec![
+            "wk".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+        ];
         let (_m, params) = build_request("spawn", &args).unwrap();
         assert_eq!(params["host_mode"], "interactive");
         assert_eq!(params["mode"], "interactive");
@@ -2679,7 +2696,11 @@ mod tests {
         // AC1-EDGE (Boundaries): an unknown provider keeps today's behavior; the
         // daemon's provider_for_pty errors on it as before, so we must NOT force
         // host_mode (which would change the error surface).
-        let args = vec!["wk".to_string(), "--provider".to_string(), "opencode".to_string()];
+        let args = vec![
+            "wk".to_string(),
+            "--provider".to_string(),
+            "opencode".to_string(),
+        ];
         let (_m, params) = build_request("spawn", &args).unwrap();
         assert!(
             params.get("host_mode").is_none(),
@@ -2705,7 +2726,8 @@ mod tests {
             assert_eq!(m_spawn, m_host, "{provider}: same method");
             if provider == "claude" {
                 assert!(
-                    p_spawn["session_id"].as_str().is_some() && p_host["session_id"].as_str().is_some(),
+                    p_spawn["session_id"].as_str().is_some()
+                        && p_host["session_id"].as_str().is_some(),
                     "both mint a claude session id"
                 );
                 p_spawn.as_object_mut().unwrap().remove("session_id");
