@@ -186,6 +186,10 @@ FIELD_META: dict[str, Meta] = {
     "config.pr_watch.retries": Meta("never", "PR-watcher consecutive-failure park threshold."),
     "config.pr_watch.max_age_days": Meta("never", "PR-watcher: park PRs older than N days."),
     "config.pr_watch.model": Meta("never", "Claude model used for headless PR-watcher skill fires."),
+    # --- config.recovery.* ---
+    "config.recovery.enabled": Meta("advanced", "Enable the session auto-recovery watchdog (resumes idle-but-incomplete bg sessions; rides the pr_watch tick)."),
+    "config.recovery.idle_threshold_seconds": Meta("never", "How stale a bg session must be before a resume nudge fires (seconds)."),
+    "config.recovery.max_nudges": Meta("never", "Per-session cap on resume nudges before the watchdog gives up."),
     # --- config.health_monitor.* ---
     "config.health_monitor.enabled": Meta("advanced", "Enable backlog health monitoring."),
     "config.health_monitor.thresholds.idea_pile_depth": Meta("never", "Breach threshold: idea pile depth."),

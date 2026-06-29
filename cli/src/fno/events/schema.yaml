@@ -1995,6 +1995,48 @@ event_types:
           type: integer
           description: "Number of PRs for which a skill was successfully dispatched this tick."
 
+  - name: recovery_nudge
+    description: "Session auto-recovery (x-f47c) injected a resume nudge into a footnote-launched bg session that was idle-but-incomplete after an abnormal turn termination."
+    sources: [daemon]
+    data:
+      required: [short_id, nudge_count]
+      properties:
+        short_id:
+          type: string
+          description: "The 8-hex jobId of the recovered bg session."
+        nudge_count:
+          type: integer
+          description: "How many nudges this session has now received (1-based; capped by config.recovery.max_nudges)."
+
+  - name: recovery_skipped
+    description: "Session auto-recovery looked at an idle-stale bg session and deliberately did NOT nudge it (waiting on a human, unreachable socket, or a failed send)."
+    sources: [daemon]
+    data:
+      required: [short_id, reason]
+      properties:
+        short_id:
+          type: string
+          description: "The 8-hex jobId of the bg session that was spared."
+        reason:
+          type: string
+          description: "Why the nudge was skipped: needs-input | socket-unreachable | send-failed."
+        error:
+          type: string
+          description: "The send failure detail; present only when reason=send-failed."
+
+  - name: recovery_capped
+    description: "Session auto-recovery reached the per-session nudge cap (config.recovery.max_nudges); no further nudges fire for this session. Emitted once on the transition, not every tick."
+    sources: [daemon]
+    data:
+      required: [short_id, nudges]
+      properties:
+        short_id:
+          type: string
+          description: "The 8-hex jobId of the bg session that hit the cap."
+        nudges:
+          type: integer
+          description: "The nudge count at which the cap was reached (== config.recovery.max_nudges)."
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

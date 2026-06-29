@@ -1105,6 +1105,45 @@ class PrWatchBlock(BaseModel):
     model: str = Field(default="claude-haiku-4-5", min_length=1)
 
 
+class RecoveryBlock(BaseModel):
+    """Session auto-recovery watchdog settings (nested under 'config.recovery').
+
+    Controls the Layer-2 watchdog (x-f47c) that rides the ``pr_watch`` launchd
+    tick: it finds footnote-launched bg sessions which went idle-but-incomplete
+    after an abnormal turn termination and re-injects a resume nudge. It only
+    runs when ``pr_watch`` is installed (it shares that cadence) AND ``enabled``
+    here is true; even then it is a no-op unless an idle-stale footnote bg
+    session exists.
+
+    Fields
+    ------
+    enabled:
+        True to run the recovery sweep each pr_watch tick (default True; the
+        target audience for pr_watch is exactly bg-session operators). Set
+        false to keep pr_watch's PR polling without the resume nudges.
+    idle_threshold_seconds:
+        How stale a session's state.json must be before it is treated as
+        idle-but-incomplete (default 900 = 15 min). This MUST exceed the
+        longest expected single-tool runtime: a session mid-way through a long
+        ``cargo build`` / test suite is busy but emits no turn events, so its
+        state.json freezes while it is legitimately working — too low a value
+        nudges a working session. 15 min clears that while still recovering a
+        genuinely wedged session long before Claude Code's ~1h reaper abandons
+        it. Tunable per workload (the motivating repro stalled ~3.5 min, but a
+        human was watching; an autonomous watchdog is deliberately patient).
+    max_nudges:
+        Per-session cap on resume nudges before the watchdog gives up and emits
+        ``recovery_capped`` (default 3) so a genuinely wedged session surfaces
+        instead of looping forever.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    idle_threshold_seconds: int = Field(default=900, gt=0)
+    max_nudges: int = Field(default=3, ge=1)
+
+
 class LogsBlock(BaseModel):
     """Append-log rotation caps (nested under 'config.logs').
 
@@ -1609,6 +1648,7 @@ class ConfigBlock(BaseModel):
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
     logs: LogsBlock = Field(default_factory=LogsBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
+    recovery: RecoveryBlock = Field(default_factory=RecoveryBlock)
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
     collision: CollisionBlock = Field(default_factory=CollisionBlock)
     work: WorkBlock = Field(default_factory=WorkBlock)
@@ -1624,6 +1664,19 @@ class ConfigBlock(BaseModel):
         settings load. A dict passes through so the inner coercers still run.
         """
         if isinstance(v, (dict, ModelRoutingBlock)):
+            return v
+        return {}
+
+    @field_validator("recovery", mode="before")
+    @classmethod
+    def _coerce_recovery(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``recovery:`` degrades to defaults.
+
+        ``recovery: true`` (or a list, or null) cannot build the block; fall
+        back to defaults rather than raising out of the whole settings load.
+        A dict passes through so field defaults/validators still apply.
+        """
+        if isinstance(v, (dict, RecoveryBlock)):
             return v
         return {}
 
