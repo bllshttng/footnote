@@ -847,18 +847,15 @@ async fn run_restart() -> i32 {
 /// The daemon refuses an interactive claude host without a pinned session id
 /// (the single-writer claim + transcript discovery key on it); a fresh host
 /// supplies one client-side.
-// ponytail: v4 from /dev/urandom, not the `uuid` crate. `--session-id` only
-// needs a unique, well-formed UUID -- v7's time-ordering buys nothing for a
-// session pin, so a 16-byte CSPRNG read stays dependency-free.
+// ponytail: v4 from getrandom (the OS CSPRNG), not the `uuid` crate.
+// `--session-id` only needs a unique, well-formed UUID -- v7's time-ordering
+// buys nothing for a session pin. getrandom is already in the tree, so this
+// adds no compile cost and is cross-platform (unlike a `/dev/urandom` read).
 fn mint_session_uuid() -> String {
-    use std::io::Read;
     let mut b = [0u8; 16];
-    let got = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut b))
-        .is_ok();
-    if !got {
+    if getrandom::fill(&mut b).is_err() {
         // Never panic: mix wall-clock nanos with the pid. Collision is
-        // implausible for a session pin and /dev/urandom is the real path.
+        // implausible for a session pin and getrandom is the real path.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
