@@ -5,7 +5,14 @@ native EnterWorktree/ExitWorktree tools (or `git worktree add` directly).
 This CLI exposes the bookkeeping subset of the old git-worktrees skill:
 listing active worktrees with target status, cleaning up stale ones, and
 archiving (remove directory, keep branch).
+
+`ensure` is the mechanical dispatch-time primitive (node x-73ca): the
+deterministic-isolation behaviour PR #29 gave the bash spawn path, exposed as
+a CLI verb so the two Rust-intercepted code-dispatch callers (`dispatch-node.sh`
+and `/do`'s foreign-wave prose) can shell it. It lives here, NOT under
+`fno agents` (Rust-intercepted runtime), so the default install can reach it.
 """
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -73,3 +80,130 @@ def cleanup(
 def archive(name: str = typer.Argument(..., help="Worktree branch or path to archive.")) -> None:
     """Remove the worktree directory but keep the branch."""
     raise typer.Exit(code=_run_lifecycle("archive", name))
+
+
+# --- ensure: mechanical dispatch-time isolation primitive (x-73ca) ----------
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True
+    )
+
+
+def _abs_git_path(repo: Path, which: str) -> Optional[Path]:
+    """Absolute path of a repo's git-dir or git-common-dir (symlink-resolved)."""
+    out = _git(repo, "rev-parse", f"--{which}")
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    p = Path(out.stdout.strip())
+    if not p.is_absolute():
+        p = repo / p
+    return p.resolve()
+
+
+def _base_ref(repo: Path) -> Optional[str]:
+    """The ref a fresh dispatch branch is based on. Prefer origin/main so the
+    worker never inherits the dispatcher's stale-ahead local HEAD (the
+    phantom-deletion bug this verb retires, Locked Decision 5). Falls back to
+    HEAD (None) only when no remote-tracking main exists (e.g. a local repo)."""
+    for ref in ("origin/main", "origin/master"):
+        if _git(repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0:
+            return ref
+    return None
+
+
+def _worktree_ensure(repo: str, name: str, branch: Optional[str]) -> int:
+    """Idempotently ensure `~/conductor/workspaces/<repo>/<name>` exists.
+
+    On success prints the worktree path on stdout (exit 0). On ANY failure
+    prints a reason on stderr and NOTHING on stdout (non-zero), so a caller's
+    `wt=$(fno worktree ensure ...)` reads empty and falls back to its prior
+    cwd -- the dispatch is never blocked. Mechanism only: the caller owns the
+    "is this a code payload / a main checkout" policy.
+    """
+    repo_path = Path(repo)
+    top_out = _git(repo_path, "rev-parse", "--show-toplevel")
+    if top_out.returncode != 0 or not top_out.stdout.strip():
+        typer.echo(f"worktree ensure: {repo} is not a git repository", err=True)
+        return 1
+    top = Path(top_out.stdout.strip()).resolve()
+
+    # Only a MAIN checkout may spawn a worktree (git-dir == git-common-dir);
+    # a linked worktree has no business nesting another.
+    gdir = _abs_git_path(top, "git-dir")
+    common = _abs_git_path(top, "git-common-dir")
+    if gdir is None or common is None or gdir != common:
+        typer.echo(
+            f"worktree ensure: {top} is a linked worktree, not a main checkout; refusing to nest",
+            err=True,
+        )
+        return 1
+
+    wt = Path.home() / "conductor" / "workspaces" / top.name / name
+
+    # Idempotent reuse: an existing registered worktree rooted at wt -> reuse.
+    if wt.exists():
+        inside = _git(wt, "rev-parse", "--is-inside-work-tree")
+        wt_top = _git(wt, "rev-parse", "--show-toplevel")
+        if (
+            inside.returncode == 0
+            and inside.stdout.strip() == "true"
+            and wt_top.returncode == 0
+            and Path(wt_top.stdout.strip()).resolve() == wt.resolve()
+        ):
+            typer.echo(str(wt))
+            return 0
+        # Exists but is NOT our worktree: never clobber a stray dir.
+        typer.echo(
+            f"worktree ensure: {wt} exists but is not a worktree; not clobbering",
+            err=True,
+        )
+        return 1
+
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    br = branch or f"feature/{name}"
+    if _git(top, "show-ref", "--verify", "--quiet", f"refs/heads/{br}").returncode == 0:
+        # Branch already exists (e.g. a re-dispatch after archive) -> check it out.
+        add = _git(top, "worktree", "add", str(wt), br)
+    else:
+        base = _base_ref(top)
+        add_args = ["worktree", "add", str(wt), "-b", br]
+        if base:
+            add_args.append(base)
+        add = _git(top, *add_args)
+    if add.returncode != 0:
+        typer.echo(
+            f"worktree ensure: git worktree add failed: {add.stderr.strip() or add.stdout.strip()}",
+            err=True,
+        )
+        return 1
+
+    # Link gitignored shared state (footnote-ecosystem only; absent -> skip).
+    setup = top / "scripts" / "setup" / "setup-worktree.sh"
+    if setup.is_file():
+        subprocess.run(
+            ["bash", str(setup)],
+            env={**os.environ, "CANONICAL": str(top), "WORKTREE": str(wt)},
+            capture_output=True,
+        )
+
+    typer.echo(str(wt))  # the ONLY stdout line -> the caller's $wt
+    return 0
+
+
+@app.command()
+def ensure(
+    repo: str = typer.Option(..., "--repo", help="Repo MAIN checkout to spawn a worktree from."),
+    name: str = typer.Option(..., "--name", help="Worktree name (dir + default branch suffix)."),
+    branch: Optional[str] = typer.Option(
+        None, "--branch", help="Branch to create/checkout (default: feature/<name>)."
+    ),
+) -> None:
+    """Ensure a conductor worktree for <name>; print its path (mechanism-only).
+
+    Used by dispatch callers to deterministically isolate a code worker instead
+    of relying on the worker to self-isolate in-session. Failure is non-fatal:
+    exits non-zero with empty stdout so the caller falls back to its prior cwd.
+    """
+    raise typer.Exit(code=_worktree_ensure(repo, name, branch))
