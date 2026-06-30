@@ -104,3 +104,45 @@ def test_agents_confirm_invalid_enum_fails_read(tmp_path, monkeypatch):
     )
     assert r.exit_code != 0
     assert r.output.strip() != "never"
+
+
+# ---------------------------------------------------------------------------
+# Optional leading `config.` prefix (x-8b64 E): `review.required_bots` is
+# retried as `config.review.required_bots`. The review gate defaults to that
+# key but the shorthand used to error "unknown config key".
+# ---------------------------------------------------------------------------
+
+_BOTS_SETTINGS = (
+    "schema_version: 1\nconfig:\n  review:\n    required_bots:\n"
+    "      - chatgpt-codex-connector\n"
+)
+
+
+def test_get_review_required_bots_shorthand(tmp_path, monkeypatch):
+    """`review.required_bots` (no `config.` prefix) resolves."""
+    r = _run(
+        ["config", "get", "review.required_bots"],
+        tmp_path, monkeypatch, _BOTS_SETTINGS,
+    )
+    assert r.exit_code == 0, r.output
+    assert "chatgpt-codex-connector" in r.output
+
+
+def test_get_review_required_bots_full_path_still_works(tmp_path, monkeypatch):
+    """The explicit `config.` prefix is unchanged."""
+    r = _run(
+        ["config", "get", "config.review.required_bots"],
+        tmp_path, monkeypatch, _BOTS_SETTINGS,
+    )
+    assert r.exit_code == 0, r.output
+    assert "chatgpt-codex-connector" in r.output
+
+
+def test_get_unknown_key_without_prefix_still_errors(tmp_path, monkeypatch):
+    """The prefix fallback must not mask a genuinely unknown key."""
+    r = _run(
+        ["config", "get", "review.no_such_field"],
+        tmp_path, monkeypatch, "schema_version: 1\n",
+    )
+    assert r.exit_code != 0
+    assert "no_such_field" in r.output or "unknown" in r.output.lower()

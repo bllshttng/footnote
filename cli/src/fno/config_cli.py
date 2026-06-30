@@ -337,6 +337,11 @@ def get_cmd(
     caller can read one value (e.g. the decomposition ceiling fallback)
     without re-implementing settings lookup. Scalars print bare; nested
     objects print as JSON. Unknown keys exit non-zero.
+
+    The leading ``config.`` is optional: a bare ``review.required_bots`` is
+    retried as ``config.review.required_bots`` so a caller need not remember
+    the redundant prefix (x-8b64 E: the review gate defaults to
+    ``config.review.required_bots`` but the shorthand used to error).
     """
     import json
     import sys
@@ -344,15 +349,25 @@ def get_cmd(
     from fno.config import load_settings
     from pydantic import BaseModel
 
-    node: object = load_settings()
-    for part in key.split("."):
-        if isinstance(node, BaseModel) and part in type(node).model_fields:
-            node = getattr(node, part)
-        elif isinstance(node, dict) and part in node:
-            node = node[part]
-        else:
-            typer.echo(f"error: unknown config key '{key}'", file=sys.stderr)
-            raise typer.Exit(code=1)
+    root = load_settings()
+
+    def _traverse(dotted: str) -> tuple[bool, object]:
+        node: object = root
+        for part in dotted.split("."):
+            if isinstance(node, BaseModel) and part in type(node).model_fields:
+                node = getattr(node, part)
+            elif isinstance(node, dict) and part in node:
+                node = node[part]
+            else:
+                return (False, None)
+        return (True, node)
+
+    ok, node = _traverse(key)
+    if not ok and not key.startswith("config."):
+        ok, node = _traverse(f"config.{key}")
+    if not ok:
+        typer.echo(f"error: unknown config key '{key}'", file=sys.stderr)
+        raise typer.Exit(code=1)
 
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())
