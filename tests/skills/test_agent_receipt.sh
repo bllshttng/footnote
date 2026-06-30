@@ -368,14 +368,28 @@ else
   fail "AC1-FR empty short_id: $OUT"
 fi
 
-# ---- AC1-FR companion: a non-8-hex short_id -> failed ----------------------
+# ---- AC1-FR companion (x-61b7): substrate decides the short_id SHAPE --------
+# The default/pane substrate is the owned-PTY daemon worker, whose short_id is a
+# NAME-SLUG from derive_short_id() (daemon.rs) - not 8-hex. The receipt guard
+# must accept it (it previously reported a false `failed` for a live worker).
 reset_log
-OUT="$(MOCK_SPAWN_OUT="$(spawn_json deadbeefxyz codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+OUT="$(MOCK_SPAWN_OUT="$(spawn_json spawngoa codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec)"
-if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" != *"result=launched"* ]]; then
-  pass "AC1-FR non-8-hex short_id -> failed"
+if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=spawngoa"* ]]; then
+  pass "AC1-FR pane name-slug short_id -> launched"
 else
-  fail "AC1-FR non-8-hex short_id: $OUT"
+  fail "AC1-FR pane name-slug short_id: $OUT"
+fi
+
+# ...but the bg lane (client-side claude --bg) really returns an 8-hex id, so its
+# strict shape is preserved: a name-slug there still fails.
+reset_log
+OUT="$(MOCK_SPAWN_OUT="$(claude_receipt spawngoa tgt-x)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+       run_spawn --name tgt-x --provider claude --message "/target ab-deadbeef no-merge" --node ab-deadbeef --substrate bg)"
+if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" != *"result=launched"* ]]; then
+  pass "AC1-FR bg lane keeps strict 8-hex (name-slug -> failed)"
+else
+  fail "AC1-FR bg lane strict 8-hex: $OUT"
 fi
 
 # ---- AC1-FR (sigma-review finding 1): a multi-line .short_id must NOT pass --
