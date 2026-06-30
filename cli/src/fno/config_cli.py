@@ -541,7 +541,9 @@ def schema(
     if check:
         try:
             current = target.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # Unreadable or non-UTF-8 committed file -> treat as stale (differs
+            # from the freshly rendered text), prompting a regenerate.
             current = None
         if current != rendered:
             typer.echo(
