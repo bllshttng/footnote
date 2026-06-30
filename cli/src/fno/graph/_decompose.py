@@ -137,7 +137,7 @@ def separate_plan_path(base: str, slug: str) -> str:
     stored plan_path) or the resolved-on-disk base (the file to scaffold).
     """
     p = Path(base)
-    stem = p.name[:-3] if p.name.endswith(".md") else p.name
+    stem = p.stem if p.name.endswith(".md") else p.name
     return str(p.with_name(f"{stem}.group-{slug}.md"))
 
 
@@ -148,9 +148,11 @@ def scaffold_separate_plan(group: NormalizedGroup, epic_id: str, source_doc: str
     Map; the builder fills the concrete change/file/verify detail. Deliberately a
     STUB, not a full plan - the epic doc remains the source of truth for scope.
     """
+    # Escape so a title containing a double quote can't emit invalid YAML.
+    yaml_title = group["title"].replace("\\", "\\\\").replace('"', '\\"')
     return (
         f'---\n'
-        f'title: "{group["title"]}"\n'
+        f'title: "{yaml_title}"\n'
         f'status: ready\n'
         f'kind: quick-plan\n'
         f'parent_epic: {epic_id}\n'
@@ -199,7 +201,7 @@ def find_orphans(
     """
     frag_prefix = f"{base}#group-"
     p = Path(base)
-    stem = p.name[:-3] if p.name.endswith(".md") else p.name
+    stem = p.stem if p.name.endswith(".md") else p.name
     sep_prefix = str(p.with_name(f"{stem}.group-"))  # path minus "<slug>.md"
     orphans: list[dict] = []
     for e in entries:

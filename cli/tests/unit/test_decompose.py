@@ -1012,6 +1012,24 @@ def test_plans_mode_switch_fragment_to_separate_upserts(tmp_path, monkeypatch):
         assert Path(c["plan_path"]).exists()
 
 
+def test_plans_separate_title_with_quotes_emits_valid_yaml(tmp_path, monkeypatch):
+    """A group title containing a double quote must not break the scaffold's YAML
+    frontmatter (gemini review: escape quotes)."""
+    import yaml
+
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    groups = [{"slug": "1", "title": 'Group "alpha": the \\ case', "waves": "1",
+               "blocked_by_groups": []}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    child = next(e for e in read_entries() if e.get("parent") == "ab-epic0001")
+    body = Path(child["plan_path"]).read_text()
+    front = body.split("---\n", 2)[1]
+    fm = yaml.safe_load(front)
+    assert fm["title"] == 'Group "alpha": the \\ case'
+
+
 def test_plans_invalid_value_rejected_atomically(graph_env):
     """An unknown --plans value errors before any graph write."""
     g, read_entries = graph_env
