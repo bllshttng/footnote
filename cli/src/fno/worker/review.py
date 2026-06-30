@@ -80,27 +80,15 @@ def build_review_runner(
     from fno.review.orchestrator import AGENT_NAMES
     from fno.review.runners import agents_spawn_runner, claude_runner
 
-    # Failure Modes / Boundaries: a map key naming an unknown agent is an
-    # operator typo. Warn once and ignore it (the selector iterates the real
-    # panel below, so the bad key is otherwise silently dropped).
-    unknown_keys = [k for k in agent_providers if k not in AGENT_NAMES]
-    if unknown_keys:
-        print(
-            "[review] cross-model: config.review.agent_providers names unknown "
-            f"agent(s) {unknown_keys}; ignoring (known agents: {list(AGENT_NAMES)})",
-            file=sys.stderr,
-        )
+    _warn_unknown_agent_keys(agent_providers)
 
-    resolved = {
-        agent: pr.resolve_agent_provider(
-            agent,
-            agent_providers=agent_providers,
-            implementer_provider=implementer_provider,
-            available_providers=available_providers,
-            known_agents=AGENT_NAMES,
-        )
-        for agent in base_prompts
-    }
+    resolved = pr.resolve_panel_providers(
+        list(base_prompts),
+        agent_providers=agent_providers,
+        implementer_provider=implementer_provider,
+        available_providers=available_providers,
+        known_agents=AGENT_NAMES,
+    )
     # Cache dimension = the per-agent REQUESTED routing (not just the set of
     # kinds), so two configs that assign the same kinds to different agents
     # (e.g. {code_reviewer: codex} vs {silent_failure_hunter: codex}) never
@@ -139,6 +127,92 @@ def build_review_runner(
     return _runner, prompts, provider_set
 
 
+def _read_cross_model_config() -> tuple[dict[str, str], bool]:
+    """Read ``(agent_providers, cross_model_enabled)``. Fail-safe to ``({}, False)``.
+
+    The one place both the panel runner and the ``--print-providers`` accessor
+    read the cross-model config, so they cannot disagree on whether cross-model
+    is engaged.
+    """
+    try:
+        from fno.config import load_settings
+
+        review_cfg = load_settings().config.review
+        return dict(review_cfg.agent_providers or {}), bool(review_cfg.cross_model.enabled)
+    except Exception as exc:  # noqa: BLE001 - never let config break review
+        print(
+            f"[review] cross-model config read failed; running all-claude: {exc}",
+            file=sys.stderr,
+        )
+        return {}, False
+
+
+def _warn_unknown_agent_keys(agent_providers: dict[str, str]) -> None:
+    """Warn (stderr) on agent_providers keys that name no real panel agent.
+
+    A key naming an unknown agent is an operator typo - most often the
+    hyphenated `code-reviewer` instead of the underscore `code_reviewer`. The
+    map is still truthy (cross-model engages) but the bad key matches nothing,
+    so without this warning sigma would silently route all-claude. Both the
+    panel runner and the --print-providers accessor call this, so neither path
+    swallows the typo (parity).
+    """
+    from fno.review.orchestrator import AGENT_NAMES
+
+    unknown = [k for k in agent_providers if k not in AGENT_NAMES]
+    if unknown:
+        print(
+            "[review] cross-model: config.review.agent_providers names unknown "
+            f"agent(s) {unknown}; ignoring (known agents: {list(AGENT_NAMES)})",
+            file=sys.stderr,
+        )
+
+
+def resolve_session_id(
+    session_id: Optional[str], state_path: Path
+) -> Optional[str]:
+    """Resolve the session nonce: explicit arg, else the state file's value.
+
+    The ONE place both the panel run (``review``) and the ``--print-providers``
+    accessor resolve the session, so the implementer-provider read - which
+    ``alternate`` cross-model routing excludes - is identical across the two
+    surfaces (no drift). Returns ``None`` when neither source has it; callers
+    decide whether that is fatal (the panel raises; routing defaults to claude).
+    """
+    if session_id:
+        return session_id
+    return _read_state(state_path).get("session_id")
+
+
+def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
+    """Resolve every panel agent -> provider via the SAME path the panel uses.
+
+    The accessor behind ``fno review --print-providers``: it gives the
+    ``/review sigma`` skill the identical per-agent routing the ``fno review``
+    panel would dispatch, so the two surfaces never drift (the "one resolution
+    path" invariant). Returns an empty dict when cross-model is OFF (all-claude).
+    Never raises.
+    """
+    agent_providers, enabled = _read_cross_model_config()
+    if not (enabled or agent_providers):
+        return {}
+
+    _warn_unknown_agent_keys(agent_providers)
+
+    from fno.review import provider_resolution as pr
+    from fno.review.orchestrator import AGENT_NAMES
+
+    implementer = pr.load_implementer_provider(session_id or "")
+    available = pr.available_provider_kinds()
+    return pr.resolve_panel_providers(
+        list(AGENT_NAMES),
+        agent_providers=agent_providers,
+        implementer_provider=implementer,
+        available_providers=available,
+        known_agents=AGENT_NAMES,
+    )
+
+
 def _resolve_cross_model_runner(
     session_id: str, *, worker_pids: list[int]
 ) -> tuple[Optional[Any], Optional[dict[str, str]], Optional[list[str]]]:
@@ -147,19 +221,7 @@ def _resolve_cross_model_runner(
     Returns ``(None, None, None)`` when cross-model is OFF, on any config-read
     failure (fail-safe to all-claude), or when the panel has no prompts.
     """
-    try:
-        from fno.config import load_settings
-
-        review_cfg = load_settings().config.review
-        agent_providers = dict(review_cfg.agent_providers or {})
-        enabled = bool(review_cfg.cross_model.enabled)
-    except Exception as exc:  # noqa: BLE001 - never let config break review
-        print(
-            f"[review] cross-model config read failed; running all-claude: {exc}",
-            file=sys.stderr,
-        )
-        return None, None, None
-
+    agent_providers, enabled = _read_cross_model_config()
     if not (enabled or agent_providers):
         return None, None, None
 
@@ -220,9 +282,7 @@ def review(
     state_path = Path(state_path)
 
     # Resolve session_id
-    if session_id is None:
-        state = _read_state(state_path)
-        session_id = state.get("session_id")
+    session_id = resolve_session_id(session_id, state_path)
     if not session_id:
         raise ValueError("session_id must be provided or present in state file")
 

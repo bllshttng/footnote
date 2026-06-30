@@ -254,9 +254,10 @@ Exclude common non-plan files: lock files, `.fno/*`, test fixtures, `node_module
 - New UI states may need new error handling paths
 
 <!--
-  Per-agent provider routing schema and dispatch flow are documented in
-  docs/provider-rotation.md#per-agent-routing-spec-3. The schema lives
-  under config.agents.<name>.provider in .fno/settings.yaml.
+  Cross-model review routing (config.review.cross_model / agent_providers) is
+  documented in the "Cross-Model Review Routing" section below. It is resolved
+  by `fno review --print-providers`, the SAME resolver the `fno review` panel
+  uses, so /review sigma and fno review never drift.
 -->
 
 ## After the review: what happens with findings
@@ -268,94 +269,84 @@ COMPLETION.md so they surface to human reviewers rather than disappearing.
 There is no gate artifact to write and no `fno gate` call to make. The review happened;
 the six-agent panel output is the proof. The PR description carries the verdict forward.
 
-## Per-Agent Provider Routing (optional)
+## Cross-Model Review Routing (optional)
 
-Each subagent (`code-reviewer`, `silent-failure-hunter`, `type-design-analyzer`, etc.) can be pinned to a specific provider via `config.agents.<agent-name>.provider` in `.fno/settings.yaml`. If that key is unset, the agent uses the globally active provider - today's behavior, fully back-compatible.
-
-Example `settings.yaml` block:
+By default every panel agent runs on Claude (via `Task()`). An operator can route
+specific agents to a different coding model (`codex` / `gemini`) for a genuine
+cross-model read by setting `config.review.cross_model` / `config.review.agent_providers`
+in `.fno/settings.yaml` - the SAME config the internal `fno review` panel honors.
+When neither is set, this whole section is a no-op and the panel is byte-for-byte
+today's all-Claude run.
 
 ```yaml
 config:
-  agents:
-    code-reviewer:
-      provider: claude-anthropic
-    silent-failure-hunter:
-      provider: gemini-pro-1
-    type-design-analyzer:
-      provider: glm-zhipu
+  review:
+    cross_model:
+      enabled: true        # turn the correctness agents cross-model by default
+    agent_providers:       # optional explicit pins (override the default)
+      code_reviewer: codex
+      silent_failure_hunter: gemini
 ```
 
-Agent names under `config.agents.<name>` MUST exactly match the `subagent_type` strings passed to `Task()` (case-sensitive). This is the same constraint as the existing `AGENTS_DISPATCHED` list - the same string is used in both places.
+Agent names are the orchestrator's underscore form (`code_reviewer`,
+`silent_failure_hunter`, `type_design_analyzer`, `integration_test_analyzer`,
+`ux_flow_tester`, `multi_device_checker`) - NOT the hyphenated `Task()`
+`subagent_type` (`code-reviewer`). The mapping is just `_`<->`-`.
 
-### Resolve provider before each Task() call
+### Step R1: resolve routing (do NOT reimplement it)
 
-Before invoking each subagent, resolve its provider and CLI via two pure config helpers:
+Before dispatching the panel, ask the CLI for the per-agent routing. This is the
+ONE resolver - the same `provider_resolution` path `fno review` dispatches through -
+so `/review sigma` and `fno review` never disagree:
 
-```python
-provider_id = resolve_agent_provider(agent_name)  # config.agents.<name>.provider or global active
-cli = resolve_agent_cli(provider_id)              # "claude" | "gemini" | "codex" | "openclaw" | "hermes"
+```bash
+# --session-id is optional; pass it when running inside a target session so the
+# implementer-provider (cross-model excludes it) is accurate.
+ROUTING="$(fno review --print-providers ${SESSION_ID:+--session-id "$SESSION_ID"})"
 ```
 
-Both functions are pure reads of the loaded config and can be called inline. `resolve_agent_provider` returns the pinned provider id when `config.agents.<name>.provider` is set; otherwise it returns the global active provider's id. `resolve_agent_cli` maps the provider id to its CLI identifier.
+`$ROUTING` is JSON `{ "<agent_underscore>": {"provider": "claude|codex|gemini",
+"degraded": bool, "reason": str|null}, ... }`, or `{}` when cross-model is OFF.
 
-### Wrap each Task() call in dispatch_sigma_subagent()
+### Step R2: dispatch each agent by its resolved provider
 
-The `dispatch_sigma_subagent()` context manager from `cli/src/fno/sigma_dispatch.py` handles spawn/complete event emission so the `verify_event_evidence` path in the stop hook (Task 3.1, `ab-978e93ed`) can confirm non-Claude subagent dispatches. Use it for EVERY subagent invocation:
+For each panel agent, read `provider` from `$ROUTING` (default `claude` when the
+key is absent or `$ROUTING` is `{}`):
 
-```python
-# For each subagent in AGENTS_DISPATCHED:
-provider_id = resolve_agent_provider(agent_name)  # from config.agents or global active
-cli = resolve_agent_cli(provider_id)              # claude | gemini | codex | openclaw | hermes
+- **`claude`** -> dispatch via `Task(subagent_type="<agent-hyphen>", prompt=...)`
+  exactly as today. This is the only path the headless megawalk Driver ever takes
+  (megawalk does not set cross-model), so the HEADLESS-SAFE invariant holds.
+- **`codex` / `gemini`** -> run a synchronous one-shot, the SAME lane `/review peer`
+  uses. Write the agent's review brief to a file (shell-safe), then YOU run it
+  (never the user) so the reply returns in-context:
 
-with dispatch_sigma_subagent(
-    agent_name=agent_name,
-    provider_id=provider_id,
-    cli=cli,
-    prompt=...,
-) as dispatch:
-    if cli == "claude":
-        # For Claude: the skill owns the Task() invocation.
-        # dispatch_sigma_subagent only emits the paired events.
-        result = Task(subagent_type=agent_name, prompt=...)
-        dispatch.record_complete(stdout=result.stdout, exit_code=0)
-    else:
-        # For non-Claude paths (gemini, codex, openclaw):
-        # dispatch_sigma_subagent owns the subprocess.
-        # The context manager exits with the result captured in dispatch.result.
-        # hermes is currently NotImplementedError - route to an available provider.
-        pass  # control flow handled inside the context manager
-    # After exit, paired subagent_spawn + subagent_complete events are
-    # on disk in .fno/events.jsonl.
-```
+  ```bash
+  fno agents spawn --provider "$PROVIDER" --once -t 300 "sigma-$AGENT" "$(cat "$BRIEF")"
+  ```
 
-### Finding Attribution: provider_id on each finding
+  Judge by exit code + emptiness only: exit 0 + non-empty stdout -> fold those
+  findings into the report; **non-zero or empty (or the daemon/binary is missing)
+  -> fall back to `Task()` on Claude** for that agent and note the fallback. NEVER
+  fabricate findings to fill the gap.
 
-When merging findings from the dispatched agents into the final review report, each
-finding object MUST carry a `provider_id` field set to the dispatching agent's resolved
-provider - the same string returned by `resolve_agent_provider(agent_name)` and passed
-to `dispatch_sigma_subagent(provider_id=...)`. Adjacent to the existing `agent` field:
+- **`degraded: true`** (the resolver already returned `provider: claude` because no
+  alternate was available) -> dispatch on Claude and surface `reason` in the report
+  so the run reads as "cross-model unavailable: ran on claude" rather than silently
+  appearing cross-modeled.
 
-```yaml
-- file: path/to/foo.py
-  line: 42
-  severity: high
-  message: "swallowed exception hides DB write failure"
-  agent: silent-failure-hunter
-  provider_id: gemini-pro-1
-```
+### Finding attribution
 
-This field is forensics-only. It does NOT affect verdict logic - a HIGH finding from
-any provider is still a HIGH finding and triggers the same blocking behavior. Severity
-remains the gate-passing input. The `provider_id` is for post-mortem analysis:
-future audit_loop iterations can use it to detect patterns like "all my Gemini findings
-disappeared between iterations - did Gemini go down?" without re-running the review.
+When a finding comes from a cross-modeled agent, tag it with the dispatching
+`provider` (from `$ROUTING`) next to the existing `agent` field. This is
+forensics-only: a HIGH finding is HIGH regardless of provider and triggers the
+same blocking behavior. The forensic `subagent_spawn` / `subagent_complete` event
+pair (via `dispatch_sigma_subagent` in `cli/src/fno/sigma_dispatch.py`) may still
+be emitted for non-Claude dispatches; it does not affect the verdict.
 
-When `config.agents.<name>.provider` is unset (pure-Claude run), `provider_id` is the
-global active provider's id (e.g., `"claude-anthropic"`). It is never empty or absent.
+### Quick cross-model second opinion
 
-### Pure-Claude vs mixed-provider behavior
-
-**Pure-Claude runs** (no `config.agents.<name>` set for any agent): dispatch events are emitted for forensics. Behavior is byte-for-byte identical to pre-Spec-3 runs.
-
-**Mixed runs** (at least one agent pinned to a non-Claude provider): each `subagent_spawn` + `subagent_complete` pair lands on disk in `.fno/events.jsonl` for forensic correlation. See `references/agent-selection.md` for the config schema.
+This routing cross-models the *panel*. For a fast one-shot read of a whole diff
+from another model without running the six-agent panel, use
+`/review peer [PR#|branch] [codex|gemini]` instead - it is advisory and never
+satisfies a `required_bots` gate.
 

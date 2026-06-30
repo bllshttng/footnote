@@ -302,9 +302,13 @@ This is Spec 1 of 4. Specs 2-4 extend the substrate with automation:
 
 - **Reactive failover (Spec 2, planned):** no automatic switching when a provider
   hits a rate limit or returns an error. You must run `fno providers use` manually.
-- **Per-agent sigma-review routing (Spec 3):** each
-  sigma-review subagent can be pinned to a specific provider via `config.agents.<name>.provider`.
-  See [Per-agent routing (Spec 3)](#per-agent-routing-spec-3) below.
+- **Per-agent sigma-review routing (Spec 3):** sigma-review subagents can be
+  routed to a different coding model (`codex` / `gemini`). The shipped path is
+  `config.review.cross_model` / `config.review.agent_providers`, resolved by the
+  same `provider_resolution` code both `fno review` and `/review sigma`
+  (via `fno review --print-providers`) dispatch through. The Spec-3 design below
+  named a `config.agents.<name>.provider` key that was never wired - use the
+  `config.review.*` keys instead.
 - **Per-phase pinning + proactive round-robin (Spec 4, planned):** no automatic
   rotation across providers between phases. All phases in a session use the same
   active provider.
@@ -495,6 +499,13 @@ The sidecar feeds:
 ---
 
 ## Per-agent routing (Spec 3)
+
+> **Shipped path:** the wired cross-model routing for `/review sigma` and
+> `fno review` uses `config.review.cross_model` / `config.review.agent_providers`
+> (see `skills/review/sigma.md` -> "Cross-Model Review Routing"), resolved by
+> `cli/src/fno/review/provider_resolution.py`. The `config.agents.<name>.provider`
+> schema described in the rest of this section is the original Spec-3 design and
+> was never wired; prefer the `config.review.*` keys.
 
 Spec 3 lets each sigma-review subagent run on a
 different provider, so model blind-spots cancel across reviews. The routing config

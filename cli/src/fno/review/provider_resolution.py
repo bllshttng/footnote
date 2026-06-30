@@ -164,6 +164,33 @@ def resolve_agent_provider(
     )
 
 
+def resolve_panel_providers(
+    agents: Sequence[str],
+    *,
+    agent_providers: dict[str, str],
+    implementer_provider: str,
+    available_providers: Sequence[str],
+    known_agents: Sequence[str] | None = None,
+) -> dict[str, ResolvedProvider]:
+    """Resolve every panel ``agent`` to a provider. The single resolution path.
+
+    A thin map over :func:`resolve_agent_provider` so the ``fno review`` panel
+    (``build_review_runner``) and the ``/review sigma`` skill (via
+    ``fno review --print-providers``) resolve through ONE code path - the
+    "one resolution path, no drift" invariant. Never raises.
+    """
+    return {
+        agent: resolve_agent_provider(
+            agent,
+            agent_providers=agent_providers,
+            implementer_provider=implementer_provider,
+            available_providers=available_providers,
+            known_agents=known_agents,
+        )
+        for agent in agents
+    }
+
+
 # ---------------------------------------------------------------------------
 # I/O wrappers (production wiring) - thin, defensive, reuse the substrate.
 # ---------------------------------------------------------------------------
