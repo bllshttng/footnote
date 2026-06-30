@@ -1013,7 +1013,11 @@ def maybe_spawn_think(
     #    the operator opted in via config.think_spawn.attended: spawn (AC4-HP, B).
     #    Default 'offer' is byte-for-byte x-6a10.
     if presence == "attended" and _attended_mode(project_root, env=environ) == "offer":
-        print(f"spawn_think: born-with-why handoff -> {seed.offer_line}", file=sys.stderr)
+        print(
+            f"spawn_think: OFFER PENDING (nothing spawned). "
+            f"Ask the operator whether to run `{seed.offer_line}` now, or skip.",
+            file=sys.stderr,
+        )
         _emit(
             EVENT_OFFERED,
             {"node_id": node_id, "trigger": reason, "presence": "attended",

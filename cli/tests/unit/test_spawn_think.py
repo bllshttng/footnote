@@ -244,6 +244,12 @@ def test_attended_offers_line_not_spawn(iso, monkeypatch, patch_spawn, capsys):
     assert res.decision == "offered" and spawn_calls == []
     assert res.offer_line.startswith("/think x-2222aaaa")
     assert "\n" not in res.offer_line  # single copy-pasteable line (AC2-UI)
+    # x-af8d AC1-HP: the offer stderr line is imperative ("nothing spawned"),
+    # not the old `handoff ->` status log that the agent misread as a spawn.
+    err = capsys.readouterr().err
+    assert "OFFER PENDING (nothing spawned)" in err
+    assert "/think x-2222aaaa" in err
+    assert "handoff ->" not in err
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "think_offered"
 
