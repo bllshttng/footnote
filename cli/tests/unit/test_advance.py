@@ -912,3 +912,65 @@ def test_dependents_honors_dependent_repo_walker(iso, monkeypatch):
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
     )
     assert results[0].decision == "skipped" and results[0].reason == "walker-live"
+
+
+# ---------------------------------------------------------------------------
+# x-e9cf: the spawn command carries --substrate bg (the missed 4th dispatch
+# surface). These exercise the REAL _spawn_worker - every other test patches it.
+# ---------------------------------------------------------------------------
+
+
+def _capture_spawn_argv(monkeypatch):
+    """Patch advance's subprocess.run to capture argv and return a valid receipt."""
+    captured = {}
+
+    def fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+        return _FakeProc(returncode=0, stdout=_RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    return captured
+
+
+def test_spawn_worker_passes_substrate_bg(monkeypatch):
+    """AC1-HP: the fire-and-forget spawn carries `--substrate bg` immediately
+    after `--provider claude` (the x-3ab8 default `pane` would stall it)."""
+    captured = _capture_spawn_argv(monkeypatch)
+    sid = adv._spawn_worker("ab-2222aaaa", "/tmp/x", "some-slug")
+    assert sid == "abc12345"  # receipt parse unchanged
+    cmd = captured["cmd"]
+    assert "--substrate" in cmd and cmd[cmd.index("--substrate") + 1] == "bg"
+    i = cmd.index("--provider")
+    assert cmd[i : i + 4] == ["--provider", "claude", "--substrate", "bg"]
+
+
+def test_spawn_worker_reconcile_keeps_substrate_bg(monkeypatch):
+    """AC4-EDGE: the G4 `--reconcile` variant still carries `--substrate bg`
+    (substrate is orthogonal to the /target ... --reconcile payload token)."""
+    captured = _capture_spawn_argv(monkeypatch)
+    sid = adv._spawn_worker(
+        "ab-2222aaaa", "/tmp/x", "some-slug", reconcile_manifest="/tmp/m.md"
+    )
+    assert sid == "abc12345"
+    cmd = captured["cmd"]
+    i = cmd.index("--provider")
+    assert cmd[i : i + 4] == ["--provider", "claude", "--substrate", "bg"]
+    assert any("--reconcile /tmp/m.md ab-2222aaaa" in tok for tok in cmd)
+
+
+def test_spawn_worker_error_contract_unchanged(monkeypatch):
+    """AC1-ERR: the --substrate bg addition must not alter the error contract -
+    exit 2 + 'already exists' -> SpawnAlreadyRunning; other non-zero -> SpawnError."""
+    monkeypatch.setattr(
+        adv.subprocess, "run",
+        lambda *a, **k: _FakeProc(returncode=2, stderr="agent already exists"),
+    )
+    with pytest.raises(adv.SpawnAlreadyRunning):
+        adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug")
+
+    monkeypatch.setattr(
+        adv.subprocess, "run",
+        lambda *a, **k: _FakeProc(returncode=1, stderr="boom"),
+    )
+    with pytest.raises(adv.SpawnError):
+        adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug")

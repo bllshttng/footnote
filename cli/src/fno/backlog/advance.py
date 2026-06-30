@@ -237,11 +237,15 @@ def _spawn_worker(
     *,
     reconcile_manifest: Optional[str] = None,
 ) -> str:
-    """Dispatch a fire-and-forget ``/target`` claude bg worker.
+    """Dispatch a fire-and-forget detached ``claude --bg`` ``/target`` worker.
 
-    Mirrors skills/target/scripts/dispatch-node.sh exactly: ``no-merge`` rides
-    as a command token (NOT an env var; the shipped sibling proves this is the
-    reliable channel), the agent is named ``target-<full-node-id>-<slug>`` (see
+    Mirrors the current skills/target/scripts/dispatch-node.sh: it spawns with
+    ``--substrate bg`` (the detached ``claude --bg`` thread that self-isolates
+    into a worktree), NOT the post-x-3ab8 default ``pane`` substrate, which is an
+    owned-PTY pane that would STALL a fire-and-forget dispatch at the placement
+    prompt (x-2c27 fixed this everywhere; this 4th surface was missed). ``no-merge``
+    rides as a command token (NOT an env var; the shipped sibling proves this is
+    the reliable channel), the agent is named ``target-<full-node-id>-<slug>`` (see
     ``_worker_agent_name``), and the cwd resolves to the node's recorded root
     (``--cwd``) or canonical main (``--fresh``).
 
@@ -256,7 +260,7 @@ def _spawn_worker(
     agent_name = _worker_agent_name(
         node_id, node_slug, prefix="reconcile" if is_reconcile else "target"
     )
-    cmd = ["fno", "agents", "spawn", "--provider", "claude"]
+    cmd = ["fno", "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
