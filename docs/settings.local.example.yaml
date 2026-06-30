@@ -32,5 +32,5 @@ config:
   # Post-merge ritual: where this repo's prose follow-ups get written.
   post_merge:
     enabled: true          # already the code default; shown for awareness
-    # parking_lot_path: internal/<area>/parking-lot.md
+    # parking_lot_path: docs/<area>/parking-lot.md
     # self_reap: true      # close the merged node as part of the ritual
