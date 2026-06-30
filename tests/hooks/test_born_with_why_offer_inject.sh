@@ -57,7 +57,22 @@ offered_line()    { printf '{"ts":"%s","type":"think_offered","source":"backlog"
 offered_no_line() { printf '{"ts":"%s","type":"think_offered","source":"backlog","data":{"node_id":"%s"}}\n' "$1" "$2"; }
 other_line()      { printf '{"ts":"%s","type":"think_spawned","source":"backlog","data":{"node_id":"%s"}}\n' "$1" "$2"; }
 
-run_hook() { ( cd "$WORK" && bash "$HOOK" </dev/null ); }
+# Stub `fno` so the resolve-guard's `fno backlog get <id>` is deterministic: it
+# exits nonzero (unresolvable) for any id in $FNO_STUB_PHANTOM, else 0 (resolves).
+# Prepended to PATH in run_hook so it shadows any real installed fno.
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/fno" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "backlog" && "${2:-}" == "get" ]]; then
+  for p in ${FNO_STUB_PHANTOM:-}; do [[ "${3:-}" == "$p" ]] && exit 1; done
+fi
+exit 0
+STUB
+chmod +x "$WORK/bin/fno"
+
+# FNO_STUB_PHANTOM is read from the outer env per-test (default empty -> every id
+# resolves, so the pre-existing scenarios below are unaffected).
+run_hook() { ( cd "$WORK" && PATH="$WORK/bin:$PATH" FNO_STUB_PHANTOM="${FNO_STUB_PHANTOM:-}" bash "$HOOK" </dev/null ); }
 
 # ── Silent: no events file ───────────────────────────────────────────
 out="$(run_hook)" || fail "hook nonzero with no events file"
@@ -105,6 +120,19 @@ other_line "2026-06-30T06:00:00Z" "x-cccc3333" >> "$EVENTS"
 out="$(run_hook)" || fail "hook nonzero on non-offer tail"
 [[ -z "$out" ]] || fail "expected silence for non-offer events, got: $out"
 pass "silent when only non-offer events appended"
+
+# ── Resolve-guard: a phantom offer (node no longer resolves) is suppressed ──
+offered_line "2026-06-30T07:00:00Z" "ab-phantom9" >> "$EVENTS"
+out="$(FNO_STUB_PHANTOM="ab-phantom9" run_hook)" || fail "hook nonzero on phantom offer"
+[[ -z "$out" ]] || fail "resolve-guard: phantom offer surfaced (should be suppressed): $out"
+pass "resolve-guard: phantom (unresolvable) offer suppressed"
+
+# ── Resolve-guard: a real offer still surfaces (guard drops only phantoms) ──
+offered_line "2026-06-30T07:30:00Z" "x-eeee5555" >> "$EVENTS"
+out="$(run_hook)" || fail "hook nonzero on real offer after phantom"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-eeee5555"* ]] || fail "resolve-guard: real offer after a phantom did not surface"
+pass "resolve-guard: real offer still surfaces after a suppressed phantom"
 
 # ── Wiring: hooks.json registers the hook under UserPromptSubmit ──────
 python3 -c "import json; json.load(open('$HOOKS_JSON'))" || fail "hooks.json failed JSON parse"
