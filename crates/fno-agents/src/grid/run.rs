@@ -3394,6 +3394,25 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                                 format!("{name} launched (terminal too small to tile it)")
                                             });
                                             if tiled {
+                                                // The launcher FOCUSES the new pane
+                                                // (comp.focus moved). Single renders
+                                                // rs.selected_agent_idx, but input
+                                                // drives comp.focus() - so pull the
+                                                // rail selection onto the just-focused
+                                                // pane, else the operator types into
+                                                // the new agent while looking at the
+                                                // old one (a desync the GroupTile
+                                                // default hid by tiling the whole
+                                                // group). Mirrors the nav idiom in
+                                                // reverse: selection follows focus.
+                                                if let Some(rs) = rail_state.as_mut() {
+                                                    rs.selected_agent_idx = Some(comp.focus());
+                                                    let view = rail_view_groups(
+                                                        &rail_rows, rs, &panes, &states,
+                                                        &squad_store,
+                                                    );
+                                                    rs.re_anchor(&view);
+                                                }
                                                 // Rail mode: size the new pane for the
                                                 // rail region, not the tiled grid
                                                 // live_add_pane just applied (codex

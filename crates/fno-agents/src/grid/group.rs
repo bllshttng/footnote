@@ -1586,6 +1586,43 @@ mod tests {
         assert_eq!(rs.selected_group_key.as_deref(), Some("A"));
     }
 
+    #[test]
+    fn re_anchor_follows_focus_to_newly_launched_pane() {
+        // With Single the default, the launcher focuses a freshly-added pane
+        // (comp.focus -> new index) while the rail selection still sits on the
+        // old agent with a now-stale group key. Single renders
+        // selected_agent_idx, so the launcher must pull the selection onto the
+        // focused pane or the operator types into the new agent while seeing the
+        // old one (the desync the GroupTile default hid by tiling the group).
+        // This encodes the group-layer kernel of that sync: point selection at
+        // the new occurrence + re_anchor, despite the stale key.
+        let mut rs = RailState::new(GroupKey::Cwd);
+        let rows = make_rows(&[
+            ("wkA", "/repo/alpha", "claude", "live"),
+            ("wkB", "/repo/beta", "claude", "live"),
+        ]);
+        let groups = group_by(&rows, GroupKey::Cwd);
+        rs.selected_agent_idx = Some(0); // on wkA (alpha)
+        rs.re_anchor(&groups);
+        assert_eq!(rs.selected_group_key.as_deref(), Some("/repo/alpha"));
+
+        // A new worker wkC is launched in a third cwd and focused (index 2).
+        let rows2 = make_rows(&[
+            ("wkA", "/repo/alpha", "claude", "live"),
+            ("wkB", "/repo/beta", "claude", "live"),
+            ("wkC", "/repo/gamma", "claude", "live"),
+        ]);
+        let groups2 = group_by(&rows2, GroupKey::Cwd);
+        rs.selected_agent_idx = Some(2); // selection follows comp.focus()
+        let sel = rs.re_anchor(&groups2);
+        assert_eq!(sel, Some(2), "selection lands on the just-launched pane");
+        assert_eq!(
+            rs.selected_group_key.as_deref(),
+            Some("/repo/gamma"),
+            "group key follows the agent (stale alpha key replaced)"
+        );
+    }
+
     // ── Rail-nav sub-mode (x-1356: replaces the watch/drive axis) ──────────
 
     #[test]
