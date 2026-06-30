@@ -18,6 +18,7 @@ This is the introspection family (``fno whoami`` / ``fno status``), reusing
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -222,33 +223,67 @@ def render(lines: List[OrientLine]) -> str:
     return "\n".join(f"{(ln.label + ':'):<{width + 1}} {ln.value}" for ln in lines)
 
 
-def load_orientation(project_root: Path) -> List[OrientLine]:
+def load_orientation(
+    project_root: Path,
+    *,
+    node_id: Optional[str] = None,
+    plan_path: Optional[str] = None,
+) -> List[OrientLine]:
     """Build the report by reading the session manifest (best-effort).
 
     Resolves node_id / plan_path / manifest_raw from ``target-state.md`` when it
     exists; degrades to a manifest-less report (substrate-resolved attended, no
-    node) otherwise. Never raises.
+    node) otherwise. Explicit ``node_id`` / ``plan_path`` override the manifest
+    values (for ``fno target status <node>``). Never raises.
     """
-    node_id: Optional[str] = None
-    plan_path: Optional[str] = None
-    manifest_raw: Optional[Dict[str, Any]] = None
+    manifest_raw = _read_manifest(project_root)
+    if node_id is None:
+        nid = str((manifest_raw or {}).get("graph_node_id") or "").strip()
+        if nid and nid != "null":
+            node_id = nid
+    if plan_path is None:
+        pp = str((manifest_raw or {}).get("plan_path") or "").strip().strip("\"'")
+        if pp and pp != "null":
+            plan_path = pp
+    return build_report(
+        project_root, node_id=node_id, plan_path=plan_path, manifest_raw=manifest_raw
+    )
+
+
+# Body keys appended below the frontmatter (init-target-state.sh writes them as
+# `key: value` lines, NOT YAML frontmatter), so load_agent_context (frontmatter
+# only) never sees them. Mirror _maybe_dispatch_work_start's regex read.
+_BODY_KEYS = ("graph_node_id", "target_claim_key", "target_claim_holder")
+
+
+def _read_manifest(project_root: Path) -> Optional[Dict[str, Any]]:
+    """Merged session manifest: frontmatter (via load_agent_context) + the body
+    `key: value` lines that carry graph_node_id / target_claim_*. None when no
+    manifest exists. Never raises."""
+    raw: Optional[Dict[str, Any]] = None
     try:
         from fno.agent.state import load_agent_context
 
         ctx = load_agent_context()
         if ctx.session is not None:
-            manifest_raw = ctx.session.raw
-            nid = str(manifest_raw.get("graph_node_id") or "").strip()
-            if nid and nid != "null":
-                node_id = nid
-            pp = str(manifest_raw.get("plan_path") or "").strip().strip("\"'")
-            if pp and pp != "null":
-                plan_path = pp
-    except Exception:  # noqa: BLE001 - no manifest is fine; report what we can
+            raw = dict(ctx.session.raw)
+    except Exception:  # noqa: BLE001 - no/unreadable manifest is fine
         pass
-    return build_report(
-        project_root, node_id=node_id, plan_path=plan_path, manifest_raw=manifest_raw
-    )
+    manifest = project_root / ".fno" / "target-state.md"
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return raw
+    for key in _BODY_KEYS:
+        if raw and raw.get(key):
+            continue
+        m = re.search(rf"^{key}\s*:\s*(.+)$", text, re.MULTILINE)
+        if m:
+            val = m.group(1).strip().strip("\"'")
+            if val and val != "null":
+                raw = raw or {}
+                raw[key] = val
+    return raw
 
 
 def _self_check() -> None:

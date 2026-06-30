@@ -115,5 +115,39 @@ def test_build_report_is_read_only_six_lines(monkeypatch, tmp_path) -> None:
     assert labels == ["node", "attended", "worktree", "tests", "plan", "done-when"]
 
 
+def test_read_manifest_merges_body_keys(tmp_path, monkeypatch) -> None:
+    # graph_node_id + target_claim_* live in the manifest BODY, below the
+    # frontmatter load_agent_context parses -- _read_manifest must regex them in.
+    (tmp_path / ".fno").mkdir()
+    (tmp_path / ".fno" / "target-state.md").write_text(
+        '---\nattended: true\n---\n# Target Session State\n'
+        'target_claim_key: "node:x-7"\n'
+        'target_claim_holder: "target-session:z"\n'
+        "graph_node_id: x-7\n",
+        encoding="utf-8",
+    )
+
+    def _no_frontmatter(*_a, **_k):
+        raise RuntimeError("force body-only path")
+
+    monkeypatch.setattr("fno.agent.state.load_agent_context", _no_frontmatter)
+    raw = orient._read_manifest(tmp_path)
+    assert raw is not None
+    assert raw["graph_node_id"] == "x-7"
+    assert raw["target_claim_key"] == "node:x-7"
+    # and the node line then reports in-progress from that claim
+    line = orient._node_line("x-7", tmp_path, manifest_raw=raw)
+    monkeypatch.setattr(orient, "_graph_entry", lambda *_: {"_status": "ready"})
+    assert "in-progress" in orient._node_line("x-7", tmp_path, manifest_raw=raw)
+
+
+def test_load_orientation_node_override(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(orient, "_read_manifest", lambda _: {"graph_node_id": "x-manifest"})
+    monkeypatch.setattr(orient, "_graph_entry", lambda *_: None)
+    lines = orient.load_orientation(tmp_path, node_id="x-override")
+    node = next(ln.value for ln in lines if ln.label == "node")
+    assert "x-override" in node and "x-manifest" not in node
+
+
 def test_self_check_runs() -> None:
     orient._self_check()
