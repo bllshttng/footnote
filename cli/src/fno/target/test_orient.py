@@ -32,6 +32,15 @@ def test_node_line_shipped(monkeypatch) -> None:
     assert orient._node_line("x-1", Path("/"), manifest_raw={}) == "shipped (PR #42 merged)"
 
 
+def test_node_line_done_without_pr(monkeypatch) -> None:
+    # A done node with no PR (advisory/no-ship/manual) must read terminal, not
+    # fall through to in-progress/fresh.
+    monkeypatch.setattr(orient, "_graph_entry", lambda *_: {"_status": "done"})
+    raw = {"target_claim_key": "node:x-1", "target_claim_holder": "ts:me"}
+    line = orient._node_line("x-1", Path("/"), manifest_raw=raw)
+    assert line == "done (no PR)"
+
+
 def test_node_line_half_done(monkeypatch) -> None:
     monkeypatch.setattr(
         orient, "_graph_entry", lambda *_: {"_status": "ready", "pr_number": 7}

@@ -100,8 +100,11 @@ def _node_line(
         return f"unknown (not in graph) | {resolve}"
     status = str(entry.get("_status") or entry.get("status") or "").strip()
     pr = entry.get("pr_number")
-    if status == "done" and pr:
-        return f"shipped (PR #{pr} merged)"
+    # `done` is terminal FIRST, before any PR-metadata branch: an advisory /
+    # no-ship / manually-completed node is `done` without a PR, and must not
+    # fall through to claim/fresh and misorient a resumed agent toward rework.
+    if status == "done":
+        return f"shipped (PR #{pr} merged)" if pr else "done (no PR)"
     if pr:
         return f"half-done (PR #{pr})"
     # In-progress: the current manifest itself holds this node's claim. (A
