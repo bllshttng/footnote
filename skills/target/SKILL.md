@@ -28,6 +28,7 @@ resolve node  →  fno target start <node>   worktree off origin/main + claim + 
 
 That is the whole job when a backlog node or plan is already bound. `fno target start` prints an orientation report (node, worktree, tests, done-when) - read it and go. Everything below is detail on a spine step or an **"only if"** branch you skip unless its trigger fires:
 
+- **only if** you are already inside a worktree (an attended `/target` in a linked worktree): `fno target start` is a no-op there ("already isolated; nothing created") - run `fno target init --input <node>` (add `--plan-path <path>` for a plan) instead. `start` is the cold-start-from-canonical verb; `init` is what writes the manifest, claims the node, and prints the orienter.
 - **only if** you were handed a bare idea (no plan): run `/think` then `/blueprint` before implementing.
 - **only if** `.fno/target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
 - **only if** dispatching nodes fire-and-forget: [§0a Background Dispatch](#0a-background-dispatch-bg).
