@@ -80,16 +80,7 @@ def build_review_runner(
     from fno.review.orchestrator import AGENT_NAMES
     from fno.review.runners import agents_spawn_runner, claude_runner
 
-    # Failure Modes / Boundaries: a map key naming an unknown agent is an
-    # operator typo. Warn once and ignore it (the selector iterates the real
-    # panel below, so the bad key is otherwise silently dropped).
-    unknown_keys = [k for k in agent_providers if k not in AGENT_NAMES]
-    if unknown_keys:
-        print(
-            "[review] cross-model: config.review.agent_providers names unknown "
-            f"agent(s) {unknown_keys}; ignoring (known agents: {list(AGENT_NAMES)})",
-            file=sys.stderr,
-        )
+    _warn_unknown_agent_keys(agent_providers)
 
     resolved = pr.resolve_panel_providers(
         list(base_prompts),
@@ -156,6 +147,27 @@ def _read_cross_model_config() -> tuple[dict[str, str], bool]:
         return {}, False
 
 
+def _warn_unknown_agent_keys(agent_providers: dict[str, str]) -> None:
+    """Warn (stderr) on agent_providers keys that name no real panel agent.
+
+    A key naming an unknown agent is an operator typo - most often the
+    hyphenated `code-reviewer` instead of the underscore `code_reviewer`. The
+    map is still truthy (cross-model engages) but the bad key matches nothing,
+    so without this warning sigma would silently route all-claude. Both the
+    panel runner and the --print-providers accessor call this, so neither path
+    swallows the typo (parity).
+    """
+    from fno.review.orchestrator import AGENT_NAMES
+
+    unknown = [k for k in agent_providers if k not in AGENT_NAMES]
+    if unknown:
+        print(
+            "[review] cross-model: config.review.agent_providers names unknown "
+            f"agent(s) {unknown}; ignoring (known agents: {list(AGENT_NAMES)})",
+            file=sys.stderr,
+        )
+
+
 def resolve_session_id(
     session_id: Optional[str], state_path: Path
 ) -> Optional[str]:
@@ -184,6 +196,8 @@ def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
     agent_providers, enabled = _read_cross_model_config()
     if not (enabled or agent_providers):
         return {}
+
+    _warn_unknown_agent_keys(agent_providers)
 
     from fno.review import provider_resolution as pr
     from fno.review.orchestrator import AGENT_NAMES

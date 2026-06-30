@@ -184,3 +184,21 @@ def test_print_providers_resolves_session_from_state(
     )
     assert result.exit_code == 0
     assert seen["sid"] == "SESS-FROM-STATE"
+
+
+def test_routing_warns_on_unknown_agent_key(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A hyphenated typo (code-reviewer) engages cross-model but matches no real
+    agent; the accessor warns (parity with build_review_runner) and routes claude."""
+    monkeypatch.setattr(
+        review_mod,
+        "_read_cross_model_config",
+        lambda: ({"code-reviewer": "codex"}, True),  # hyphen typo, not a real key
+    )
+    monkeypatch.setattr(pr, "load_implementer_provider", lambda _sid: "claude")
+    monkeypatch.setattr(pr, "available_provider_kinds", lambda: ["claude", "codex"])
+
+    routing = review_mod.panel_provider_routing("s")
+    assert all(rp.provider == "claude" for rp in routing.values())
+    assert "unknown" in capsys.readouterr().err.lower()
