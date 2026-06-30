@@ -1153,7 +1153,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                         },
                         yolo,
                         // Sentinel-prompt seam (E4.1 + G5 Track A): the relay
-                        // passes its `<<<RELAY>>>` system prompt so the spawned
+                        // passes its sentinel system prompt so the spawned
                         // pane's replies are parseable; grid spawns omit the key.
                         // Threaded for ANY interactive provider - each decides how
                         // (or whether) to honor it in create_interactive_argv

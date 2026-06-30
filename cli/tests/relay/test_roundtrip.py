@@ -67,7 +67,7 @@ def test_transcript_replies_faithful_text(tmp_path, monkeypatch):
     rows = [
         {"type": "user", "message": {"content": "hi"}},
         {"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "<<<RELAY>>>hello there friend<<<ENDRELAY>>>"}]}},
+            {"type": "text", "text": "RELAY9BEGINhello there friendRELAY9END"}]}},
     ]
     tx.write_text("\n".join(json.dumps(r) for r in rows))
     monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: str(tx))
@@ -88,7 +88,7 @@ def test_transcript_replies_robust_and_faithful(tmp_path, monkeypatch):
         json.dumps('a bare string containing "assistant" literally'),  # parses to str -> skip
         json.dumps({"type": "assistant", "message": "assistant"}),     # message non-dict -> skip
         json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "<<<RELAY>>>hi   there\tfriend<<<ENDRELAY>>>"}]}}),
+            {"type": "text", "text": "RELAY9BEGINhi   there\tfriendRELAY9END"}]}}),
     ]
     tx.write_text("\n".join(lines))
     monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: str(tx))
@@ -103,7 +103,7 @@ def test_transcript_replies_skips_non_string_text(tmp_path, monkeypatch):
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": None}]}}),
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": ["x"]}]}}),
         json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "<<<RELAY>>>ok now<<<ENDRELAY>>>"}]}}),
+            {"type": "text", "text": "RELAY9BEGINok nowRELAY9END"}]}}),
     ]
     tx.write_text("\n".join(lines))
     monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: str(tx))
@@ -118,7 +118,7 @@ def test_transcript_replies_honors_config_dir(tmp_path):
     proj.mkdir(parents=True)
     (proj / "sess.jsonl").write_text(json.dumps(
         {"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "<<<RELAY>>>a b c<<<ENDRELAY>>>"}]}}))
+            {"type": "text", "text": "RELAY9BEGINa b cRELAY9END"}]}}))
     assert rt_mod._transcript_replies("sess", cfg) == ["a b c"]
 
 
@@ -644,10 +644,10 @@ def test_snapshot_via_worker_reads_pane_text(monkeypatch):
 
     def fake_rpc(sock, method, params, **kw):
         seen.update(method=method)
-        return {"text": "pane <<<RELAY>>>hi<<<ENDRELAY>>>", "child_alive": True}
+        return {"text": "pane RELAY9BEGINhiRELAY9END", "child_alive": True}
 
     monkeypatch.setattr(rt_mod, "_worker_rpc", fake_rpc)
-    assert rt_mod.snapshot_via_worker(rt_mod.Path("/x/worker.sock")) == "pane <<<RELAY>>>hi<<<ENDRELAY>>>"
+    assert rt_mod.snapshot_via_worker(rt_mod.Path("/x/worker.sock")) == "pane RELAY9BEGINhiRELAY9END"
     assert seen["method"] == "worker.snapshot"
 
 
@@ -659,11 +659,25 @@ def test_snapshot_via_worker_none_when_unreachable_or_malformed(monkeypatch):
     assert rt_mod.snapshot_via_worker(rt_mod.Path("/x/worker.sock")) is None
 
 
-def test_pane_replies_extracts_sentinels_faithfully():
-    snap = "noise\n<<<RELAY>>>one two  three<<<ENDRELAY>>>\nmore noise"
-    assert rt_mod._pane_replies(snap) == ["one two  three"]
+def test_pane_replies_normalizes_ansi_and_softwrap():
+    # A TUI pane repaints a streaming reply with per-token ANSI and soft-wraps it
+    # across rows; _pane_replies strips the escapes and collapses the wrap so the
+    # reply is clean and has a STABLE identity (what prime-and-discard excludes on).
+    snap = (
+        "noise\nRELAY9BEGINone two\x1b[m\r\n  \x1b[38;2;1;2;3mthree  four"
+        "RELAY9END\nmore noise"
+    )
+    assert rt_mod._pane_replies(snap) == ["one two three four"]
     assert rt_mod._pane_replies(None) == []
     assert rt_mod._pane_replies("no sentinel here") == []
+
+
+def test_normalize_pane_text_is_stable_across_streaming_renders():
+    # The SAME logical reply captured at two streaming stages (different ANSI/wrap)
+    # normalizes to one string -- the property the discard-set exclude relies on.
+    a = "hi \x1b[6bthere\r\n  friend"
+    b = "hi there\x1b[m \x1b[38;2;9;9;9mfriend"
+    assert rt_mod._normalize_pane_text(a) == rt_mod._normalize_pane_text(b) == "hi there friend"
 
 
 def test_capture_replies_claude_uses_transcript(monkeypatch):
@@ -678,7 +692,7 @@ def test_capture_replies_codex_defaults_to_pty_tail(monkeypatch):
     # AC3-EDGE: a harness with no registered strategy (codex) captures via the
     # pty-tail default -- the "from structured output" assumption never blocks it.
     monkeypatch.setattr(rt_mod, "snapshot_via_worker",
-                        lambda sock: "<<<RELAY>>>codex says hi<<<ENDRELAY>>>")
+                        lambda sock: "RELAY9BEGINcodex says hiRELAY9END")
     assert rt_mod.capture_replies("codex", sock=rt_mod.Path("/x/w.sock")) == ["codex says hi"]
 
 
@@ -691,7 +705,7 @@ def test_capture_replies_degrades_to_pty_tail_on_drift(monkeypatch):
     monkeypatch.setitem(rt_mod._CAPTURE_STRATEGIES, "driftco", boom)
     monkeypatch.setattr(rt_mod, "harness_for_provider", lambda p: "driftco")
     monkeypatch.setattr(rt_mod, "snapshot_via_worker",
-                        lambda sock: "<<<RELAY>>>fallback reply<<<ENDRELAY>>>")
+                        lambda sock: "RELAY9BEGINfallback replyRELAY9END")
     events = []
     monkeypatch.setattr(rt_mod, "emit", lambda kind, **kw: events.append((kind, kw)))
     out = rt_mod.capture_replies("driftco", sock=rt_mod.Path("/x/w.sock"))
@@ -796,3 +810,215 @@ def test_deliver_worker_times_out_with_live_worker(monkeypatch):
     monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: [])  # never replies
     with pytest.raises(TimeoutError, match="no reply"):
         rt_mod.deliver_worker("phasesta", "framed", provider="codex", timeout=5)
+
+
+# --- agy prime-and-discard (x-defe): the in-band steer for a flagless harness ---
+
+def _settling_snapshot(monkeypatch):
+    """snapshot_via_worker mock: one change (echo/ack render) then a stable pane,
+    so _prime_agy's pane-idle settle fires under the fake clock."""
+    calls = {"i": 0}
+
+    def fake_snap(sock):
+        calls["i"] += 1
+        return "PRE" if calls["i"] == 1 else "IDLE"  # changes once, then idle
+
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker", fake_snap)
+
+
+def _never_idle_snapshot(monkeypatch):
+    """snapshot_via_worker mock whose pane keeps changing (the spinner never stops),
+    so _prime_agy never settles -> the prime is unconfirmed."""
+    calls = {"i": 0}
+
+    def fake_snap(sock):
+        calls["i"] += 1
+        return f"frame{calls['i']}"
+
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker", fake_snap)
+
+
+def test_prime_agy_returns_discard_set_on_pane_idle(monkeypatch):
+    # Settle = the pane goes idle (stops changing); returns the matches present in
+    # the idle pane (the steer echo + ack) as the discard set.
+    _fake_clock(monkeypatch)
+    _settling_snapshot(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: True)
+    monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: ["ECHO", "ACK"])
+    out = rt_mod._prime_agy("phasesta", rt_mod.Path("/x/w.sock"), "agy",
+                            settle_ms=1000, events_path=None)
+    assert out == frozenset({"ECHO", "ACK"})
+
+
+def test_prime_agy_none_on_submit_failure(monkeypatch):
+    _fake_clock(monkeypatch)
+    _settling_snapshot(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: False)
+    monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: ["ECHO"])
+    assert rt_mod._prime_agy("phasesta", rt_mod.Path("/x/w.sock"), "agy",
+                             settle_ms=1000, events_path=None) is None
+
+
+def test_prime_agy_none_when_pane_never_idle(monkeypatch):
+    # The spinner never stops (pane keeps changing) -> the prime cannot be confirmed.
+    _fake_clock(monkeypatch)
+    _never_idle_snapshot(monkeypatch)
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: True)
+    monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: ["ECHO"])
+    assert rt_mod._prime_agy("phasesta", rt_mod.Path("/x/w.sock"), "agy",
+                             settle_ms=1000, events_path=None) is None
+
+
+def test_deliver_worker_primes_agy_and_discards_echo(monkeypatch):
+    # AC1-HP + AC4-EDGE: agy is primed in-band, and the priming echo + ack are
+    # EXCLUDED from capture so only agy's own wrapped reply is returned.
+    _fake_clock(monkeypatch)
+    _settling_snapshot(monkeypatch)
+    monkeypatch.setattr(rt_mod, "_PRIMED_WORKERS", {})
+    submits = []
+    state = {"real_sent": False}
+
+    def fake_submit(sock, text, **k):
+        submits.append(text)
+        if text != rt_mod.RELAY_SYSTEM_PROMPT:
+            state["real_sent"] = True
+        return True
+
+    def fake_capture(provider, *, sock, **kw):
+        # echo + ack are present throughout; the real reply lands after the real turn
+        return ["ECHO", "ACK", "REAL"] if state["real_sent"] else ["ECHO", "ACK"]
+
+    monkeypatch.setattr(rt_mod, "submit_via_worker", fake_submit)
+    monkeypatch.setattr(rt_mod, "capture_replies", fake_capture)
+    out = rt_mod.deliver_worker("phasesta", "framed-real", provider="agy", timeout=30)
+    assert out == "REAL"                                  # echo/ack discarded
+    assert submits[0] == rt_mod.RELAY_SYSTEM_PROMPT       # primed FIRST
+    assert "framed-real" in submits                       # then the real turn
+    # cache entry is now (socket identity, discard set)
+    assert rt_mod._PRIMED_WORKERS["phasesta"][1] == frozenset({"ECHO", "ACK"})
+
+
+def test_deliver_worker_agy_prime_unconfirmed_raises(monkeypatch):
+    # AC2-ERR: a prime that never confirms fails the deliver (no fake delivery).
+    _fake_clock(monkeypatch)
+    _never_idle_snapshot(monkeypatch)
+    monkeypatch.setattr(rt_mod, "_PRIMED_WORKERS", {})
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: True)
+    monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: [])
+    with pytest.raises(RuntimeError, match="relay_prime_failed"):
+        rt_mod.deliver_worker("phasesta", "framed", provider="agy", timeout=20)
+
+
+def test_deliver_worker_agy_failed_prime_not_cached_so_retry_reprimes(monkeypatch):
+    # AC8-FR: a failed prime is NOT recorded, so the worker stays unprimed and a
+    # later deliver re-attempts the prime.
+    _fake_clock(monkeypatch)
+    _never_idle_snapshot(monkeypatch)
+    monkeypatch.setattr(rt_mod, "_PRIMED_WORKERS", {})
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: True)
+    monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: [])
+    with pytest.raises(RuntimeError, match="relay_prime_failed"):
+        rt_mod.deliver_worker("phasesta", "framed", provider="agy", timeout=20)
+    assert "phasesta" not in rt_mod._PRIMED_WORKERS       # not cached -> retry re-primes
+
+
+def test_deliver_worker_agy_skips_prime_when_already_primed(monkeypatch):
+    # AC7-FR (caching half): a worker already in the primed-set is not re-primed;
+    # its stored discard set still filters the priming noise.
+    _fake_clock(monkeypatch)
+    # The cache entry must carry the CURRENT socket identity to be served; pin it.
+    monkeypatch.setattr(rt_mod, "_sock_identity", lambda sock: (1, 2))
+    monkeypatch.setattr(rt_mod, "_PRIMED_WORKERS", {"phasesta": ((1, 2), frozenset({"OLDECHO"}))})
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker",
+                        lambda sock: pytest.fail("cached worker must not be re-primed"))
+    submits = []
+    state = {"real": False}
+
+    def fake_submit(sock, text, **k):
+        submits.append(text)
+        state["real"] = True
+        return True
+
+    def fake_capture(provider, *, sock, **kw):
+        return ["OLDECHO", "REAL"] if state["real"] else ["OLDECHO"]
+
+    monkeypatch.setattr(rt_mod, "submit_via_worker", fake_submit)
+    monkeypatch.setattr(rt_mod, "capture_replies", fake_capture)
+    out = rt_mod.deliver_worker("phasesta", "framed", provider="agy", timeout=10)
+    assert out == "REAL"
+    assert rt_mod.RELAY_SYSTEM_PROMPT not in submits      # did NOT re-prime
+    assert submits == ["framed"]
+
+
+def test_prime_agy_none_when_snapshot_unreachable(monkeypatch):
+    # gemini HIGH (PR #103): a None snapshot (worker died after submit) must NOT be
+    # conflated with an empty pane "". The old code settled last=="" and returned
+    # frozenset() (a false prime success); the fix `continue`s so the prime times
+    # out and returns None.
+    _fake_clock(monkeypatch)
+    calls = {"i": 0}
+
+    def fake_snap(sock):
+        calls["i"] += 1
+        return "PRE" if calls["i"] == 1 else None  # pre renders, then worker dies
+
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker", fake_snap)
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: True)
+    monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: ["ECHO", "ACK"])
+    assert rt_mod._prime_agy("phasesta", rt_mod.Path("/x/w.sock"), "agy",
+                             settle_ms=1000, events_path=None) is None
+
+
+def test_deliver_worker_agy_reprimes_when_socket_recreated(monkeypatch):
+    # codex P2 (PR #103): a reused short_id whose worker.sock is a NEW inode must
+    # NOT inherit the stale primed entry -- it has to re-prime so the new session
+    # actually gets RELAY_SYSTEM_PROMPT.
+    _fake_clock(monkeypatch)
+    _settling_snapshot(monkeypatch)
+    # Current socket identity differs from the cached one -> cache miss -> re-prime.
+    monkeypatch.setattr(rt_mod, "_sock_identity", lambda sock: (9, 9))
+    monkeypatch.setattr(rt_mod, "_PRIMED_WORKERS",
+                        {"phasesta": ((1, 1), frozenset({"STALEECHO"}))})
+    submits = []
+    state = {"real": False}
+
+    def fake_submit(sock, text, **k):
+        submits.append(text)
+        if text != rt_mod.RELAY_SYSTEM_PROMPT:
+            state["real"] = True
+        return True
+
+    def fake_capture(provider, *, sock, **kw):
+        return ["ECHO", "ACK", "REAL"] if state["real"] else ["ECHO", "ACK"]
+
+    monkeypatch.setattr(rt_mod, "submit_via_worker", fake_submit)
+    monkeypatch.setattr(rt_mod, "capture_replies", fake_capture)
+    out = rt_mod.deliver_worker("phasesta", "framed-real", provider="agy", timeout=30)
+    assert out == "REAL"
+    assert submits[0] == rt_mod.RELAY_SYSTEM_PROMPT        # re-primed despite stale cache
+    # cache now carries the NEW identity + fresh discard set
+    assert rt_mod._PRIMED_WORKERS["phasesta"] == ((9, 9), frozenset({"ECHO", "ACK"}))
+
+
+def test_deliver_worker_codex_is_not_primed(monkeypatch):
+    # Spawn-steered harnesses (codex/claude) are never primed in-band.
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(rt_mod, "_PRIMED_WORKERS", {})
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker",
+                        lambda sock: pytest.fail("codex must not be primed"))
+    submits = []
+    n = {"i": 0}
+
+    def fake_submit(sock, text, **k):
+        submits.append(text)
+        return True
+
+    def fake_capture(provider, *, sock, **kw):
+        n["i"] += 1
+        return ["r"] if n["i"] >= 2 else []
+
+    monkeypatch.setattr(rt_mod, "submit_via_worker", fake_submit)
+    monkeypatch.setattr(rt_mod, "capture_replies", fake_capture)
+    rt_mod.deliver_worker("phasesta", "framed", provider="codex", timeout=10)
+    assert submits == ["framed"]                          # no prime turn
+    assert rt_mod.RELAY_SYSTEM_PROMPT not in submits

@@ -52,7 +52,8 @@ pub struct CreateContext {
     pub yolo: bool,
     /// Optional system prompt appended at spawn (interactive claude only, the
     /// "sentinel-prompt seam", inside-out-multiplexer E4.1): a relay-targeted
-    /// spawn passes the `<<<RELAY>>>` sentinel prompt so its replies are
+    /// spawn passes the relay sentinel prompt (`RELAY_SYSTEM_PROMPT`, the
+    /// bracket-free `RELAY9BEGIN`/`RELAY9END` markers) so its replies are
     /// parseable; a grid-spawned claude passes `None` and runs unsteered. One
     /// PTY, two consumers with different prompts (the seam the design flags).
     pub append_system_prompt: Option<String>,
@@ -499,7 +500,7 @@ impl Provider for CodexProvider {
         ];
         argv.extend(Self::sandbox_create(ctx.yolo));
         // Relay reply-steering (G5 Track A): a relay-targeted spawn carries the
-        // `<<<RELAY>>>` sentinel prompt in `append_system_prompt`; codex honors it
+        // relay sentinel prompt in `append_system_prompt`; codex honors it
         // via `-c developer_instructions=<steer>` (an ADDITIVE developer-role
         // message, NOT `base_instructions` which REPLACES codex's own system
         // prompt). Passed as a single `-c key=value` argv element, never
@@ -976,13 +977,15 @@ impl Provider for AgyProvider {
     }
 
     fn create_interactive_argv(&self, ctx: &CreateContext) -> Option<Vec<String>> {
-        // Relay reply-steering (G5 Track A): agy (Antigravity CLI) has no
-        // system-prompt FLAG - the codex/claude `--append-system-prompt`
-        // flag-steer model does not transfer (agy's base prompt is server-side).
-        // A file-based channel exists (an `--add-dir` rules dir carrying an
-        // `AGENTS.md` sentinel rule) but it is deferred to a follow-up node, so
-        // v1 does NOT steer agy at spawn. Degrade: log `relay_steer_unsupported`
-        // and spawn UNSTEERED - never a project-file write, never a spawn error.
+        // Relay reply-steering (G5 Track A / x-defe): agy (Antigravity CLI) has no
+        // spawn-time system-prompt FLAG - the codex/claude `--append-system-prompt`
+        // flag-steer model does not transfer (agy's base prompt is server-side; its
+        // `-c` is `--continue`; `--add-dir`/`AGENTS.md` does NOT load as rules,
+        // verified live). So agy is NOT steered at spawn here. It is steered IN-BAND
+        // by the relay: a priming user-turn (`roundtrip._prime_agy`) carrying
+        // RELAY_SYSTEM_PROMPT, which persists across the session. The spawn argv is
+        // therefore intentionally bare; the daemon-threaded `append_system_prompt`
+        // is a no-op at this layer (logged once for observability, NOT an error).
         if ctx
             .append_system_prompt
             .as_deref()
@@ -990,7 +993,7 @@ impl Provider for AgyProvider {
             .is_some()
         {
             eprintln!(
-                "relay_steer_unsupported{{agy}}: append_system_prompt dropped (no agy steer channel); spawning unsteered"
+                "relay_steer_via_prime{{agy}}: no spawn-time steer flag; the relay primes this worker in-band (roundtrip._prime_agy)"
             );
         }
         // Fresh interactive agy. `-i/--prompt-interactive` seeds a prompt then
@@ -1470,18 +1473,20 @@ mod tests {
         );
     }
 
-    /// AC1-ERR: agy has no steer channel, so a relay-targeted agy spawn degrades -
-    /// the argv is byte-identical to an unsteered spawn (the steer is dropped, the
-    /// daemon logs `relay_steer_unsupported{agy}`); the spawn never errors.
+    /// agy has no spawn-time steer FLAG, so its argv is byte-identical whether or
+    /// not `append_system_prompt` is set: agy is steered IN-BAND by the relay
+    /// (a priming turn, `roundtrip._prime_agy`), not at spawn. The daemon logs
+    /// `relay_steer_via_prime{agy}` for observability; the spawn never errors and
+    /// the argv never gains a steer token.
     #[test]
-    fn agy_interactive_argv_degrades_when_steered() {
+    fn agy_interactive_argv_is_bare_regardless_of_steer() {
         let mut ctx = create_ctx();
         ctx.append_system_prompt = Some("WRAP IN SENTINELS".into());
         let steered = AgyProvider.create_interactive_argv(&ctx).unwrap();
         let unsteered = AgyProvider.create_interactive_argv(&create_ctx()).unwrap();
         assert_eq!(
             steered, unsteered,
-            "agy drops the steer and spawns byte-unchanged"
+            "agy argv is bare; steering is in-band via the relay prime, not the spawn flag"
         );
     }
 
