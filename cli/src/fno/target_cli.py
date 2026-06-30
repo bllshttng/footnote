@@ -22,7 +22,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -407,3 +409,172 @@ def _maybe_dispatch_work_start() -> None:
             on_node_work_start(node, project_root=repo_root)
     except Exception:  # noqa: BLE001 - additive; never affect the init exit code
         pass
+
+
+# --------------------------------------------------------------------------- #
+# `fno target start` - one-verb cold-start (x-d91b).
+# --------------------------------------------------------------------------- #
+def _wt_name(node: str) -> str:
+    """Filesystem-safe worktree name from a node id/slug or feature text.
+
+    A node id (``x-d91b``) or slug is already clean and round-trips unchanged;
+    free-text input is slugified so the dir/branch name never carries spaces or
+    shell-hostile characters. Bounded so a long feature string cannot produce a
+    pathological path component.
+    """
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", node.strip().lower()).strip("-")
+    return s[:60] or "target"
+
+
+def _resolve_fno_cmd() -> list[str]:
+    """Locate the ``fno`` executable to compose its own subcommands.
+
+    PATH first, then a sibling of the running interpreter (the editable/uv
+    install layout). Falls back to the bare name so a misconfigured PATH still
+    surfaces a real subprocess error rather than a silent no-op.
+    """
+    found = shutil.which("fno")
+    if found:
+        return [found]
+    sibling = Path(sys.executable).parent / "fno"
+    if sibling.exists():
+        return [str(sibling)]
+    return ["fno"]
+
+
+def _git_out(cwd: Path, *args: str) -> Optional[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return proc.stdout.strip()
+
+
+def _is_linked_worktree(cwd: Path) -> bool:
+    """True if ``cwd`` is inside a git LINKED worktree (git-dir != common-dir).
+
+    This is the location verdict ``ok`` condition in pure git terms: a linked
+    worktree means we are already isolated and ``start`` must no-op rather than
+    nest a worktree inside a worktree.
+    """
+    gdir = _git_out(cwd, "rev-parse", "--git-dir")
+    common = _git_out(cwd, "rev-parse", "--git-common-dir")
+    if not gdir or not common:
+        return False
+
+    def _abs(p: str) -> Path:
+        path = Path(p)
+        return (path if path.is_absolute() else cwd / path).resolve()
+
+    return _abs(gdir) != _abs(common)
+
+
+@target_app.command()
+def start(
+    node: str = typer.Argument(
+        ..., help="Backlog node id/slug to start (or feature text)."
+    ),
+    plan_path: Optional[str] = typer.Option(
+        None, "--plan-path", help="Path to an existing plan to execute."
+    ),
+    size: Optional[str] = typer.Option(
+        None, "--size", help="Size profile: S, M, or L (forwarded to init)."
+    ),
+) -> None:
+    """Cold-start a worktree-isolated target session in ONE verb.
+
+    Collapses the five-move bootstrap a bg ``/target`` does by hand - whose two
+    silent killers (``.fno`` whole-dir symlink -> init refuses; base behind
+    origin/main -> phantom-deletion PRs) live only in agent memory - into one
+    idempotent verb with a printed receipt, so a memory-less agent succeeds.
+
+    Composes: ``fno worktree ensure`` (create/reuse off origin/main, never local
+    HEAD) -> heal ``.fno`` + link shared state -> ``fno target init`` (writes the
+    manifest, claims the node exactly once) -> receipt. Run from INSIDE a valid
+    worktree it is a no-op.
+    """
+    cwd = Path.cwd()
+
+    # Boundary: already isolated -> no-op, create nothing (x-45e6 case).
+    if _is_linked_worktree(cwd):
+        typer.echo(f"already isolated at {cwd}; nothing created.")
+        return
+
+    repo_root_s = _git_out(cwd, "rev-parse", "--show-toplevel")
+    if not repo_root_s:
+        typer.echo(
+            f"fno target start: {cwd} is not a git repository.", err=True
+        )
+        raise typer.Exit(code=1)
+    repo_root = Path(repo_root_s)
+    fno = _resolve_fno_cmd()
+    name = _wt_name(node)
+
+    # 1. Create/reuse the worktree off origin/main (x-73ca). ensure prints the
+    #    worktree path on stdout and is idempotent (reuse) + refuses to nest.
+    ens = subprocess.run(
+        fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name],
+        capture_output=True,
+        text=True,
+    )
+    wt = ens.stdout.strip()
+    if ens.returncode != 0 or not wt:
+        typer.echo(
+            f"fno target start: worktree ensure failed (step: ensure): "
+            f"{ens.stderr.strip() or 'no path on stdout'}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    wt_path = Path(wt)
+
+    # 2. Heal .fno when it arrived as a whole-dir symlink (the memory-only fix,
+    #    now in code), then link shared state via the canonical setup hook.
+    fno_dir = wt_path / ".fno"
+    healed = False
+    if fno_dir.is_symlink():
+        fno_dir.unlink()
+        fno_dir.mkdir()
+        healed = True
+    from fno.worktree import _run_setup_worktree_hook
+
+    rc, tail = _run_setup_worktree_hook(repo_root, wt_path)
+    if rc not in (0, -1):
+        # Non-fatal: the worktree is still usable; name it but do not abort.
+        typer.echo(
+            f"fno target start: setup-worktree.sh exited {rc} (non-fatal): {tail}",
+            err=True,
+        )
+
+    # Idempotent re-run from canonical: a manifest already in the worktree means
+    # init has run (write-once) - skip it, never double-claim or error.
+    manifest = wt_path / ".fno" / "target-state.md"
+    fno_state = "healed" if healed else "ok"
+    if manifest.exists() and not manifest.is_symlink():
+        typer.echo(
+            f"worktree={wt_path}  .fno={fno_state}  base=origin/main  "
+            f"node=already-claimed"
+        )
+        return
+
+    # 3. Init the session FROM the worktree (binds owner_cwd, claims the node
+    #    exactly once - preserve the existing one-call claim).
+    init_cmd = fno + ["target", "init", "--input", node]
+    if plan_path:
+        init_cmd += ["--plan-path", plan_path]
+    if size:
+        init_cmd += ["--size", size]
+    init = subprocess.run(init_cmd, cwd=str(wt_path))
+    if init.returncode != 0:
+        typer.echo(
+            f"fno target start: target init failed (step: init, exit "
+            f"{init.returncode}); worktree at {wt_path} is created but unclaimed.",
+            err=True,
+        )
+        raise typer.Exit(code=init.returncode)
+
+    # 4. Receipt - one parse-friendly line a memory-less agent acts on.
+    typer.echo(
+        f"worktree={wt_path}  .fno={fno_state}  base=origin/main  node=claimed"
+    )
+    typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
