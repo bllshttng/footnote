@@ -489,11 +489,14 @@ def schema(
     wizard_plan: bool = typer.Option(
         False, "--wizard-plan", help="Emit the wizard-asked fields as JSON."
     ),
+    yaml: bool = typer.Option(
+        False, "--yaml", help="Emit a commented example settings.yaml (every key at its default)."
+    ),
     write: bool = typer.Option(
-        False, "--write", help="With --markdown: regenerate docs/configuration-guide.md."
+        False, "--write", help="With --markdown/--yaml: regenerate the committed reference file."
     ),
     check: bool = typer.Option(
-        False, "--check", help="With --markdown: exit non-zero if the committed docs differ."
+        False, "--check", help="With --markdown/--yaml: exit non-zero if the committed file differs."
     ),
 ) -> None:
     """Generate config artifacts from the model + registry.
@@ -509,10 +512,10 @@ def schema(
 
     from fno.config import schema_gen
 
-    selected = sum([json_schema, markdown, wizard_plan])
+    selected = sum([json_schema, markdown, wizard_plan, yaml])
     if selected > 1:
         typer.echo(
-            "error: pick at most one of --json-schema / --markdown / --wizard-plan",
+            "error: pick at most one of --json-schema / --markdown / --wizard-plan / --yaml",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -524,40 +527,47 @@ def schema(
         typer.echo(schema_gen.wizard_plan())
         return
 
-    # --markdown (default)
-    rendered = schema_gen.render_markdown()
-    docs_path = _repo_root() / "docs" / "configuration-guide.md"
+    # --yaml selects the example file; --markdown (default) selects the guide.
+    # Both share the write/check/echo plumbing below.
+    if yaml:
+        rendered = schema_gen.render_example_yaml()
+        target = _repo_root() / "docs" / "settings.example.yaml"
+        regen = "fno config schema --yaml --write"
+    else:
+        rendered = schema_gen.render_markdown()
+        target = _repo_root() / "docs" / "configuration-guide.md"
+        regen = "fno config schema --markdown --write"
 
     if check:
         try:
-            current = docs_path.read_text(encoding="utf-8")
+            current = target.read_text(encoding="utf-8")
         except OSError:
             current = None
         if current != rendered:
             typer.echo(
-                f"error: {docs_path} is stale; run `fno config schema --markdown --write`",
+                f"error: {target} is stale; run `{regen}`",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        typer.echo(f"{docs_path} is up to date")
+        typer.echo(f"{target} is up to date")
         return
 
     if write:
-        docs_path.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         # Atomic temp + replace so a write error never truncates the committed
         # file (AC5-FR). Write to a temp in the same dir, then os.replace.
-        fd, tmp = tempfile.mkstemp(dir=str(docs_path.parent), suffix=".md.tmp")
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(rendered)
-            os.replace(tmp, docs_path)
+            os.replace(tmp, target)
         except Exception:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             raise
-        typer.echo(f"wrote {docs_path}")
+        typer.echo(f"wrote {target}")
         return
 
     typer.echo(rendered)

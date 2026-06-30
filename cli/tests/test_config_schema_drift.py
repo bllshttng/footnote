@@ -64,6 +64,31 @@ def test_committed_docs_are_fresh() -> None:
     )
 
 
+def test_example_yaml_is_deterministic_and_valid() -> None:
+    """The example yaml regenerates byte-identically and is a valid config."""
+    import yaml
+
+    from fno.config import SettingsModel
+
+    rendered = schema_gen.render_example_yaml()
+    assert rendered == schema_gen.render_example_yaml()
+    # Parses as YAML and round-trips through the model (defaults are valid).
+    SettingsModel.model_validate(yaml.safe_load(rendered))
+
+
+def test_committed_example_yaml_is_fresh() -> None:
+    """docs/settings.example.yaml must equal the generator's output.
+
+    Regenerate with `fno config schema --yaml --write`.
+    """
+    example = _repo_root() / "docs" / "settings.example.yaml"
+    committed = example.read_text(encoding="utf-8")
+    assert committed == schema_gen.render_example_yaml(), (
+        "docs/settings.example.yaml is stale; run "
+        "`fno config schema --yaml --write`"
+    )
+
+
 def test_wizard_surfaced_paths_are_real_leaves() -> None:
     """Every always/advanced field maps to a real model leaf (kills the
     DEAD-key class: a wizard cannot ask about a key that doesn't exist)."""
