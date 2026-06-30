@@ -1302,30 +1302,27 @@ fn paint<W: Write>(
                         if let Ok(rail_page) =
                             layout::compute_with_rail_page(tty, layout::RAIL_COLS, group_size, page)
                         {
-                            // Build the page's global pane indices and their
-                            // snapshots in lockstep so slot/snapshot stay aligned
-                            // even if a pane lookup ever misses (membership is 1:1
-                            // with panes, so in practice every lookup hits).
-                            let mut page_members: Vec<usize> = Vec::new();
-                            let mut vis_snapshots: Vec<PaneSnapshot> = Vec::new();
-                            for slot in 0..rail_page.main.tiles.len() {
-                                let member_pos = rail_page.main.page_start + slot;
-                                if let Some(&gidx) = live_group.members.get(member_pos) {
-                                    // Push in lockstep so page_members[slot] stays
-                                    // aligned with tiles[slot]. A missing pane (should
-                                    // not happen - membership is 1:1 with panes) gets
-                                    // an empty snapshot rather than being skipped, which
-                                    // would shift every later tile left and leave the
-                                    // last tiles unrendered (gemini HIGH, PR #399).
-                                    page_members.push(gidx);
-                                    vis_snapshots.push(
-                                        panes
-                                            .get(gidx)
-                                            .map(Pane::snapshot)
-                                            .unwrap_or_else(empty_pane_snapshot),
-                                    );
-                                }
-                            }
+                            // page_members is the single source of truth shared
+                            // with the mouse hit-test (rail_main_hit), so a click
+                            // resolves to the exact pane painted here. A missing
+                            // pane (should not happen - membership is 1:1 with
+                            // panes) gets an empty snapshot rather than being
+                            // skipped, which would shift every later tile left and
+                            // leave the last tiles unrendered.
+                            let page_members = rail_group_page_members(
+                                &live_group.members,
+                                rail_page.main.page_start,
+                                rail_page.main.tiles.len(),
+                            );
+                            let mut vis_snapshots: Vec<PaneSnapshot> = page_members
+                                .iter()
+                                .map(|&gidx| {
+                                    panes
+                                        .get(gidx)
+                                        .map(Pane::snapshot)
+                                        .unwrap_or_else(empty_pane_snapshot)
+                                })
+                                .collect();
                             break 'build build_frame_rail_group(
                                 &rail_page,
                                 names,
@@ -2382,6 +2379,95 @@ fn live_group_of(sel_group: &group::Group, states: &[ConnState]) -> group::Group
         header: sel_group.header.clone(),
         key_value: sel_group.key_value.clone(),
         members: group::live_members(sel_group, &exited),
+    }
+}
+
+/// The global pane indices tiled in the main area for one rail GroupTile page,
+/// in slot order: `page_members[slot]` is the gidx painted in `main.tiles[slot]`.
+/// Both the renderer (snapshot + accent) and the mouse hit-test ([`rail_main_hit`])
+/// derive the page through this one function, so a click always resolves to the
+/// exact pane the operator saw. A partial last page yields fewer entries than
+/// `tile_count` (the trailing tiles render empty); `live_members` is the LIVE
+/// survivor list, so a member that has exited drops its tile and is never
+/// addressable as a live pane.
+fn rail_group_page_members(
+    live_members: &[usize],
+    page_start: usize,
+    tile_count: usize,
+) -> Vec<usize> {
+    (0..tile_count)
+        .filter_map(|slot| live_members.get(page_start + slot).copied())
+        .collect()
+}
+
+/// Resolve the rail main-area pane under `(col, row)`, recomputing the layout
+/// from current state so it matches what the renderer drew (geometry is never
+/// cached from the painted frame - it would go stale as the fleet changes
+/// between frames). Returns the global pane index plus the occupied group's
+/// `key_value`, so the caller can re-anchor the rail selection onto the hit
+/// tile. In GroupTile the cursor picks one of the tiled members; in Single the
+/// one pane filling the main area is the selected/driven member (so the wheel
+/// can scroll it - the click arm treats Single as a no-op upstream since that
+/// pane is already driven). `None` for an empty/absent group, a too-small
+/// layout, or a cursor on no tile (footer / inter-tile gutter / rail column /
+/// past the last tile) - each a silent no-op.
+#[allow(clippy::too_many_arguments)]
+fn rail_main_hit(
+    rs: &group::RailState,
+    rail_rows: &[Value],
+    panes: &[Pane],
+    states: &[ConnState],
+    squads: &squads::SquadStore,
+    tty: TtySize,
+    col: u16,
+    row: u16,
+) -> Option<(usize, String)> {
+    let groups = rail_view_groups(rail_rows, rs, panes, states, squads);
+    let sel_group = rs.selected_group(&groups)?;
+    match rs.main_mode {
+        group::MainMode::GroupTile => {
+            let live_group = live_group_of(sel_group, states);
+            if live_group.members.is_empty() {
+                return None;
+            }
+            let page = rs.selected_group_page(&live_group, main_capacity(tty));
+            let rail_page = layout::compute_with_rail_page(
+                tty,
+                layout::RAIL_COLS,
+                live_group.members.len(),
+                page,
+            )
+            .ok()?;
+            // `pane_at` returns `page_start + slot`; recover the slot to index the
+            // shared page_members table (so render and hit-test cannot disagree on
+            // slot -> gidx).
+            let member_pos = rail_page.main.pane_at(col, row)?;
+            let slot = member_pos.checked_sub(rail_page.main.page_start)?;
+            let page_members = rail_group_page_members(
+                &live_group.members,
+                rail_page.main.page_start,
+                rail_page.main.tiles.len(),
+            );
+            let gidx = *page_members.get(slot)?;
+            Some((gidx, sel_group.key_value.clone()))
+        }
+        group::MainMode::Single => {
+            // One pane fills the main area: the selected/driven member. Hit-test
+            // the single main tile so a cursor on the footer or rail column is
+            // still ignored. `end()` is private to layout, so test the half-open
+            // rect inline against the pub fields (mirrors `PageLayout::pane_at`).
+            let rail_layout = layout::compute_with_rail(tty, layout::RAIL_COLS, 1).ok()?;
+            let tile = rail_layout.main.tiles.first()?;
+            let in_tile = row >= tile.row
+                && row < tile.row + tile.rows
+                && col >= tile.col
+                && col < tile.col + tile.cols;
+            if !in_tile {
+                return None;
+            }
+            let gidx = rs.selected_agent_idx?;
+            Some((gidx, sel_group.key_value.clone()))
+        }
     }
 }
 
@@ -4332,6 +4418,98 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             }
                                         }
                                     }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else if let Some(rs) = rail_state.as_mut() {
+                            // ── Rail-mode mouse (Phase 1: main-area click + wheel) ──
+                            // Rail active and fits: split on the column. The rail
+                            // column [0, RAIL_COLS) keeps keyboard semantics (a
+                            // rail-row click is a separate geometry, not built yet);
+                            // the main area [RAIL_COLS, cols) gets click-to-drive +
+                            // wheel, mirroring the tiled path. Geometry is recomputed
+                            // at click time from current state (rail_main_hit), never
+                            // cached from the painted frame; Moved events never reach
+                            // here so they never allocate a layout.
+                            match m.kind {
+                                MouseEventKind::Down(MouseButton::Left)
+                                    if comp.mode() == Mode::Drive
+                                        && matches!(
+                                            rs.main_mode,
+                                            group::MainMode::GroupTile
+                                        ) =>
+                                {
+                                    // GroupTile only: clicking a member's tile
+                                    // drives it. (Single click is a no-op - the one
+                                    // pane is already driven - so it falls through.)
+                                    // Focus routes the owned-PTY input; the rail
+                                    // accent is driven by selected_agent_idx (not
+                                    // comp.focus), so it must re-anchor too or the
+                                    // visible accent desyncs from where keystrokes
+                                    // land. Set the (agent, group key) pair together
+                                    // per the RailState field invariant. A click on
+                                    // dead space resolves to None -> silent no-op.
+                                    if let Some((gidx, key)) = rail_main_hit(
+                                        rs, &rail_rows, &panes, &states, &squad_store, tty,
+                                        m.column, m.row,
+                                    ) {
+                                        comp.set_focus(gidx);
+                                        rs.selected_agent_idx = Some(gidx);
+                                        rs.selected_group_key = Some(key);
+                                        hint = None;
+                                        dirty = true;
+                                    }
+                                }
+                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                    // Mirror the tiled wheel: in Drive the wheel
+                                    // targets the pane under the cursor (re-focus +
+                                    // re-anchor if it moved, ignore dead space); in
+                                    // Scrollback the operator is pinned to the entry
+                                    // pane, cursor not consulted.
+                                    let proceed = if comp.mode() == Mode::Drive {
+                                        match rail_main_hit(
+                                            rs, &rail_rows, &panes, &states, &squad_store, tty,
+                                            m.column, m.row,
+                                        ) {
+                                            Some((gidx, key)) => {
+                                                if comp.focus() != gidx {
+                                                    comp.set_focus(gidx);
+                                                    rs.selected_agent_idx = Some(gidx);
+                                                    rs.selected_group_key = Some(key);
+                                                    dirty = true;
+                                                }
+                                                true
+                                            }
+                                            None => false,
+                                        }
+                                    } else {
+                                        true
+                                    };
+                                    let has_history = panes
+                                        .get(comp.focus())
+                                        .map(|p| p.history_size())
+                                        .unwrap_or(0)
+                                        > 0;
+                                    if proceed {
+                                        match mouse_to_input(m.kind, comp.mode(), has_history) {
+                                            Some(input) => {
+                                                let action = comp.step(input, &states);
+                                                apply_scroll_action(action, &mut panes);
+                                                hint = None;
+                                                dirty = true;
+                                            }
+                                            None => {
+                                                if matches!(m.kind, MouseEventKind::ScrollUp)
+                                                    && comp.mode() == Mode::Drive
+                                                {
+                                                    hint = Some(
+                                                        "no scrollback history".to_string(),
+                                                    );
+                                                    dirty = true;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -6799,6 +6977,21 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn rail_group_page_members_maps_slots_to_live_gidx() {
+        // The shared render/hit-test source of truth: slot -> page_members[slot]
+        // must hold so a click lands on the painted pane.
+        let live = vec![10usize, 11, 12, 13, 14];
+        // Full first page: three tiles -> first three live members.
+        assert_eq!(rail_group_page_members(&live, 0, 3), vec![10, 11, 12]);
+        // Partial last page: 2 members remain but 3 tiles -> truncates, no stale idx.
+        assert_eq!(rail_group_page_members(&live, 3, 3), vec![13, 14]);
+        // page_start past the end -> empty (no panic, the click no-ops).
+        assert!(rail_group_page_members(&live, 5, 2).is_empty());
+        // Empty group -> empty (AC1-EDGE: empty fleet never indexes []).
+        assert!(rail_group_page_members(&[], 0, 4).is_empty());
     }
 
     #[test]
