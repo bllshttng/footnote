@@ -29,7 +29,7 @@ resolve node  →  fno target start <node>   worktree off origin/main + claim + 
 That is the whole job when a backlog node or plan is already bound. `fno target start` prints an orientation report (node, worktree, tests, done-when) - read it and go. Everything below is detail on a spine step or an **"only if"** branch you skip unless its trigger fires:
 
 - **only if** you were handed a bare idea (no plan): run `/think` then `/blueprint` before implementing.
-- **only if** `target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
+- **only if** `.fno/target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
 - **only if** dispatching nodes fire-and-forget: [§0a Background Dispatch](#0a-background-dispatch-bg).
 - **only if** spawned to de-stub a merged blocker: [§0b Reconcile mode](#0b-reconcile-mode---reconcile-manifest).
 - **only if** a Claude Plan-Mode plan was just approved: [§3f-pm Plan Mode Front Door](#3f-pm-plan-mode-front-door-mode-1-claude-code-only).
@@ -64,7 +64,7 @@ The wrapper re-invokes the CLI until the session terminates (DonePRGreen, Budget
 
 ## Completion: what you do
 
-Emit `<promise>MISSION COMPLETE: ...</promise>` when the PR is up and CI is green - **promise early**, the external reads hold it. An unsatisfied read just blocks-and-retries naming what is missing; a premature promise never short-circuits the gate. You are a bg/unattended agent, so your terminal state is a **green, reviewed, mergeable PR**, not a merged one: hand the merge to a human (any out-of-band merge also satisfies `done()`). The gate reads `config.review.required_bots` (default `["chatgpt-codex-connector"]`); internal `/review` is advisory.
+Emit `<promise>MISSION COMPLETE: ...</promise>` when the PR is up and CI is green - **promise early**, the external reads hold it. An unsatisfied read just blocks-and-retries naming what is missing; a premature promise never short-circuits the gate. You are a bg/unattended agent, so your terminal state is a **green, reviewed, mergeable PR**, not a merged one: hand the merge to a human (any out-of-band merge also satisfies `done()`). The gate reads `config.review.required_bots`; the loop-check code default is empty `[]` (no review gate, so a fresh install never hangs on an unconfigured bot), and a maintainer sets it explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. Internal `/review` is advisory.
 
 Run tests with `fno test [paths...]` (pins worktree `PYTHONPATH`, bypasses rtk, returns the real exit code) and read a PR's CI with `fno pr status <n>` (one `green|red|pending|unknown` verdict) - not bare `pytest` or hand-rolled `jq`. To cancel: `touch .fno/.target-cancelled`.
 
