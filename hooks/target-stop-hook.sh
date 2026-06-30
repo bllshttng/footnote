@@ -42,9 +42,12 @@ if [[ ! -f "$STATE_FILE" ]]; then
 fi
 
 # ── 3. Foreign-session guard (PR #388 fix class) ──────────────────────────────
-# Extract claude_transcript_id from state frontmatter.
-MANIFEST_CTID=$(grep '^claude_transcript_id:' "$STATE_FILE" 2>/dev/null \
-    | head -1 | sed 's/^claude_transcript_id:[[:space:]]*//' | tr -d '[:space:]')
+# Extract the claude session id from state frontmatter. Read the current key
+# (claude_session_id) first, falling back to the pre-x-2de3 key
+# (the pre-rename claude_transcript_id) so an in-flight manifest written by an older binary
+# still parses for one release.
+MANIFEST_CTID=$(grep -E '^(claude_session_id|claude_transcript_id):' "$STATE_FILE" 2>/dev/null \
+    | head -1 | sed -E 's/^(claude_session_id|claude_transcript_id):[[:space:]]*//' | tr -d '[:space:]')
 
 # "null" = init ran without transcript-id env vars (diagnostic/non-Claude
 # starts); treat it like empty so the guard never disables the hook (codex

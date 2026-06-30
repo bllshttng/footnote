@@ -89,7 +89,10 @@ print(f'YAML: session_id={sid!r}')
 pass "(a): YAML parses and session_id matches"
 
 # ── (b) No TARGET_SESSION_ID => generated id matches expected pattern ─
-log "(b): no TARGET_SESSION_ID => generated id matches [0-9]{8}T[0-9]{6}Z-<pid>-..."
+# Segment 2 carries an optional 2-char provider provenance infix
+# glued to the pid ({ts}-cl{pid}-{hex} for a claude self-mint). The id MUST
+# still split to exactly 3 dash-segments so split('-')[0] consumers are safe.
+log "(b): no TARGET_SESSION_ID => generated id matches [0-9]{8}T[0-9]{6}Z-<infix><pid>-..."
 
 make_repo TMP_B
 _ALL_TMPS+=("$TMP_B")
@@ -108,11 +111,28 @@ STATE_B="${TMP_B}/.fno/target-state.md"
 SESSION_ID_B=$(grep '^session_id:' "$STATE_B" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
 [[ -n "$SESSION_ID_B" ]] || fail "(b): session_id is empty"
 
-# Must match: YYYYMMDDTHHMMSSz-<digits>-<chars>
-# Pattern: 8 digits, T, 6 digits, Z, -, one or more digits, -, one or more chars
-if ! echo "$SESSION_ID_B" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9]+-'; then
-  fail "(b): generated session_id '${SESSION_ID_B}' does not match expected pattern [0-9]{8}T[0-9]{6}Z-<pid>-..."
+# Must match: YYYYMMDDTHHMMSSZ-<optional 2-char infix><digits>-<chars>
+# Pattern: 8 digits, T, 6 digits, Z, -, optional 2 lowercase infix, one or more
+# digits (pid), -, one or more chars (entropy).
+if ! echo "$SESSION_ID_B" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[a-z]{0,2}[0-9]+-'; then
+  fail "(b): generated session_id '${SESSION_ID_B}' does not match expected pattern [0-9]{8}T[0-9]{6}Z-<infix><pid>-..."
 fi
 pass "(b): generated session_id '${SESSION_ID_B}' matches expected pattern"
+
+# Invariant: exactly 3 dash-segments regardless of infix (split('-')[0]
+# consumers like dispatch.py read segment 0 = timestamp and must stay safe).
+SEG_COUNT_B=$(echo "$SESSION_ID_B" | awk -F- '{print NF}')
+[[ "$SEG_COUNT_B" -eq 3 ]] \
+  || fail "(b): session_id '${SESSION_ID_B}' has ${SEG_COUNT_B} dash-segments, expected exactly 3"
+pass "(b): session_id keeps exactly 3 dash-segments (infix lives inside segment 2)"
+
+# AC2-HP: this harness detects provider=claude, so segment 2 must carry
+# the 'cl' provider infix immediately before the pid.
+SEG2_B=$(echo "$SESSION_ID_B" | cut -d- -f2)
+if echo "$SEG2_B" | grep -qE '^cl[0-9]+$'; then
+  pass "(b): claude self-mint carries the 'cl' provenance infix ('${SEG2_B}')"
+else
+  log "(b): segment 2 '${SEG2_B}' has no 'cl' infix (non-claude provider in this harness) - infix is optional, skipping"
+fi
 
 log "All session_id scenarios passed"

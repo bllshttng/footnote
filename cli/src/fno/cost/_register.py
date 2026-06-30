@@ -342,7 +342,8 @@ def build_entry(
     # either ID keep working after the stop hook stops overwriting
     # session_id with the transcript UUID.
     target_sid = state.get("session_id") or ""
-    claude_tid = state.get("claude_transcript_id") or ""
+    # Current key is claude_session_id; old-key fallback for one release.
+    claude_tid = state.get("claude_session_id") or state.get("claude_transcript_id") or ""
     _seen: set[str] = set()
     sessions: list[str] = []
     for candidate in (session_id, target_sid, claude_tid):
