@@ -90,6 +90,17 @@ The loop continues until `<promise>MISSION COMPLETE: ...</promise>` AND the worl
 
 To cancel: `touch .fno/.target-cancelled` (or invoke `/target cancel`). The shim detects the sentinel and terminates with `Interrupted`.
 
+### bg terminal state, promise timing, and the review gate (x-8b64)
+
+- **A bg/unattended agent cannot merge** (the two-factor merge guard refuses an unattended actor). Its terminal state is a **green, reviewed, mergeable PR**, not a merged one. Emit `<promise>MISSION COMPLETE: ...</promise>` once the PR is green and reviewed, then hand the merge off to a human. **Any merge path counts as done:** a PR merged out-of-band (web/mobile UI, or `gh pr merge`) satisfies `done()` as `DonePRGreen` on the next stop-hook fire - the loop stops re-poking a finished session.
+- **Promise early; the external reads hold it.** You do not need to wait for the external review to pass before emitting `<promise>`. Emit it when the work is shipped (PR up, CI green); if the required bot has not reviewed yet, the `done()` reads simply block-and-retry (naming the missing bot) until the world catches up. A premature promise is safe - it never short-circuits the gate.
+- **The gate reads `config.review.required_bots`, NOT `external_reviewers`.** Internal sigma-review is advisory; the external required bot is the gate. Read the current value with `fno config get review.required_bots` (the bare key works; the `config.` prefix is optional). An empty list declares the no-review-gate path (PR + CI carry the gate).
+
+### Running tests / reading CI here (x-8b64)
+
+- **Run the Python suite with `fno test [paths...]`**, not a bare `pytest`. It pins `PYTHONPATH` to the worktree source (a bare `pytest` in a worktree imports the *canonical* `fno`), bypasses rtk (a bare `pytest`/`cargo` can stall for minutes under rtk), and returns pytest's **real exit code** (no `... | tail && echo OK`, which masks failures into a false green). For `cargo`, prefix the run with `RTK_DISABLED=1` to take the same scoped rtk bypass.
+- **Read a PR's CI verdict with `fno pr status <n>`**, not hand-rolled `jq` over `statusCheckRollup` or `gh pr checks` (which disagrees with the rollup). It prints one JSON verdict (`green|red|pending|unknown`) and exits 0/1/2/3 accordingly; an in-progress check reads as pending, a PR with no checks reads as unknown - neither is a false red.
+
 ### What changed (ab-d0337fbc)
 
 The pre-wedge control plane had three layers removed in Tasks 1.1-3.2: (1) the 1101-line bash stop hook with thrash/budget/phase-stall/help-escalation/orphan detectors and three-factor gate provenance machinery (~7575 LOC of `scripts/lib/` helpers deleted); (2) the `fno gate` CLI surface and `gates/` package (~1460 LOC + both `gate_reality_map.yaml` copies deleted); (3) the phase verifier scripts in `skills/target/scripts/verifiers/` (~900 LOC deleted). The replacement is `fno-agents loop-check` (a single Rust verb) + the 118-line shim.
