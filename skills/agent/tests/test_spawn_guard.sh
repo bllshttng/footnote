@@ -37,7 +37,9 @@ case "$1 $2" in
     echo '{"agents":[]}'; exit 0 ;;
   "agents spawn"|"agents host")
     if [[ "${STUB_SPAWN_FAIL:-0}" == "1" ]]; then echo "spawn boom" >&2; exit 1; fi
-    echo '{"name":"x","short_id":"deadbeef","provider":"claude","status":"live"}'; exit 0 ;;
+    # short_id is programmable (default 8-hex) so the receipt-shape tests can feed
+    # a daemon name-slug / empty / torn value. `-` (not `:-`) keeps an explicit "".
+    echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"provider\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
     exit 0 ;;
   *) exit 0 ;;
@@ -103,6 +105,41 @@ out="$(STUB_VERDICT='{"verdict":"SHOULD_NOT_BE_READ"}' \
   run --name w7 --provider claude --message 'just a free-text task')"
 ok 'no-node -> launched' "$(field "$out")" 'launched'
 no  'no-node skipped guard' "$(calllog)" 'agents spawn-guard'
+
+# --- receipt SHAPE by substrate (x-61b7) -------------------------------------
+# The default/pane substrate is the owned-PTY daemon worker; derive_short_id()
+# (daemon.rs) hands it a NAME-SLUG short_id, not 8-hex. The guard must accept it.
+DISP='{"verdict":"dispatchable","reservation_key":"dispatch:'"$NODE"'","reservation_holder":"dispatch-skill:1"}'
+
+# AC1-HP: a pane name-slug receipt -> launched (was a false `failed`).
+out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='spawngoa' \
+  run --name spawn-goal --provider claude --message '/target x' --node "$NODE")"
+ok  'pane slug -> launched'        "$(field "$out")" 'launched'
+has 'pane slug short_id surfaced' "$out" 'short_id=spawngoa'
+
+# AC1-HP2: a name-slug with a numeric collision suffix (base{n}) -> launched.
+out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='spawnthi1' \
+  run --name spawn-think --provider claude --message '/target x' --node "$NODE")"
+ok  'pane slug+suffix -> launched' "$(field "$out")" 'launched'
+
+# AC1-ERR: an empty .short_id still FAILS on the pane lane (cardinal guard).
+out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='' \
+  run --name spawn-empty --provider claude --message '/target x' --node "$NODE")"
+ok 'pane empty short_id -> failed' "$(field "$out")" 'failed'
+
+# AC1-ERR2: a multi-line .short_id (banner leak) still FAILS (whole-string match).
+out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='junk\ndeadbeef' \
+  run --name spawn-torn --provider claude --message '/target x' --node "$NODE")"
+ok 'pane torn short_id -> failed'  "$(field "$out")" 'failed'
+
+# AC1-EDGE: the bg lane keeps the strict 8-hex rule. A real 8-hex validates...
+out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='b92eec14' \
+  run --name spawn-bg --provider claude --message '/target x' --node "$NODE" --substrate bg)"
+ok 'bg 8-hex -> launched'          "$(field "$out")" 'launched'
+# ...but a name-slug on the bg lane is still rejected (that lane really returns hex).
+out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='spawngoa' \
+  run --name spawn-bg2 --provider claude --message '/target x' --node "$NODE" --substrate bg)"
+ok 'bg slug -> failed'             "$(field "$out")" 'failed'
 
 # --- summary -----------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
