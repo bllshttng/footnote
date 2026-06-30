@@ -390,6 +390,12 @@ pub(crate) fn maybe_stale_hint(msg: String, abi_bin: &str) -> String {
 ///
 /// The infix distinguishes the assigning driver at a glance in logs:
 /// "mw" = megawalk, "mt" = megatron (group 3).
+///
+/// The self-mint path in init-target-state.sh extends this vocabulary
+/// with 2-char PROVIDER codes when no driver pre-assigned the key - "cl" =
+/// claude, "cx" = codex, "gm" = gemini, "ag" = agy, "hm" = hermes, "oc" =
+/// opencode. Driver tags win when present (a megawalk session stays "mw");
+/// the provider code only fills the slot on the direct/bg self-mint path.
 pub(crate) fn gen_session_key_with_infix(infix: &str) -> String {
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let pid = std::process::id();

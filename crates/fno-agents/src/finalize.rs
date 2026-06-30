@@ -155,7 +155,10 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
         };
         match k {
             "session_id" => set(&mut m.session_id, v),
-            "claude_transcript_id" => set(&mut m.claude_transcript_id, v),
+            // Current key is claude_session_id; accept the pre-rename
+            // claude_transcript_id as a fallback for one release. `set` keeps the
+            // first non-empty value, so the current key (written first) wins.
+            "claude_session_id" | "claude_transcript_id" => set(&mut m.claude_transcript_id, v),
             "plan_path" => set(&mut m.plan_path, v),
             "input" => set(&mut m.input, v),
             "graph_node_id" => set(&mut m.graph_node_id, v),
@@ -1287,6 +1290,26 @@ mod tests {
         assert_eq!(m.claude_transcript_id.as_deref(), Some("de977b03-aaaa"));
         assert_eq!(m.graph_node_id.as_deref(), Some("ab-f8e5f214"));
         assert_eq!(m.input.as_deref(), Some("ab-f8e5f214 no-merge"));
+    }
+
+    #[test]
+    fn manifest_reads_new_claude_session_id_key() {
+        // The current key is claude_session_id (renamed from
+        // claude_transcript_id). A manifest written by the new minter carries an
+        // infix-tagged session_id and the new claude key; both must parse.
+        let content = "---\n\
+            session_id: 20260630T192705Z-cl52366-8979b6\n\
+            claude_session_id: 26bf185f-a747-4624\n\
+            ---\n";
+        let m = parse_manifest_fields(content);
+        assert_eq!(
+            m.session_id.as_deref(),
+            Some("20260630T192705Z-cl52366-8979b6")
+        );
+        assert_eq!(
+            m.claude_transcript_id.as_deref(),
+            Some("26bf185f-a747-4624")
+        );
     }
 
     #[test]

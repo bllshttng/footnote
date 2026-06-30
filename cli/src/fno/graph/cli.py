@@ -209,7 +209,11 @@ def _session_provenance(running_cwd: Optional[str] = None) -> dict:
     if session and harness == "claude":
         try:
             text = (Path(cwd) / ".fno" / "target-state.md").read_text(encoding="utf-8")
-            if _scan_md_field(text, "claude_transcript_id") == session:
+            # Current key is claude_session_id; old-key fallback for one release.
+            manifest_claude_sid = _scan_md_field(text, "claude_session_id") or _scan_md_field(
+                text, "claude_transcript_id"
+            )
+            if manifest_claude_sid == session:
                 nid = _scan_md_field(text, "graph_node_id")
                 if nid and nid.lower() != "null":
                     source_node_id = nid
