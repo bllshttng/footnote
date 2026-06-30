@@ -1,0 +1,65 @@
+# footnote GLOBAL settings starter  ->  copy to ~/.fno/settings.yaml
+#
+# Global config is the baseline shared by EVERY footnote project on this
+# machine. Each project's .fno/settings.yaml is deep-merged on top, so a project
+# overrides only the keys it needs. Any key may live in either file; the split
+# between this file and settings.local.example.yaml is the typical home, not a
+# rule.
+#
+# This is an opinionated QUICKSTART with recommended values. Absent keys fall
+# back to their code defaults (every one of the ~100 settings has a default),
+# so you only keep the lines you actually want to change. For the COMPLETE list
+# of every setting and its code default, see docs/settings.example.yaml.
+#
+# Code defaults for the opt-in features below are `false`; the lines here turn
+# on the safe productivity ones. Billing- and safety-sensitive features stay
+# off (see the commented block at the bottom).
+
+config:
+  # --- recommended productivity defaults (code default: false) ---
+  auto_continue:
+    enabled: true          # merge-triggered auto-continue of the ready backlog
+  think_spawn:
+    enabled: true          # born-with-why: spawn a /think for generated ideas
+
+  # Your standing cross-model review panel, used by /review. If it's the same
+  # across all your repos, set it once here; a project can still override.
+  review:
+    external_reviewers:
+      - gemini
+      - codex
+
+  # Worktree placement for every repo on this machine: <base>/<repo>/<name>.
+  # Leave unset for the harness-native <repo>/.claude/worktrees/<name>.
+  paths:
+    worktrees_base: ~/conductor/workspaces
+
+  # --- these already default ON; listed so you know the knobs exist ---
+  recovery:
+    enabled: true          # background-session auto-recovery
+  health_monitor:
+    enabled: true          # backlog health metrics + thresholds
+  model_routing:
+    enabled: true          # role/provider routing
+
+# Read by hooks/worktree-setup.sh from the TOP-LEVEL `worktree:` block (the hook
+# greps it with sed; it never looks under config:). Keep this key here.
+worktree:
+  auto_install: true       # run dep install on new worktrees; false to skip
+
+# --- opt-in / safety-sensitive: OFF on purpose. Uncomment to enable. ---
+# config:
+#   auto_merge:
+#     enabled: true        # auto-merge once external review passes (BILLING)
+#   pr_watch:
+#     enabled: true        # poll PRs and implement external review
+#   active_backlog:
+#     enabled: true        # continuous board-drain daemon
+#   review:
+#     cross_model:
+#       enabled: true      # route sigma-review agents to a second provider
+#   agents:
+#     codex:
+#       headless_yolo: true   # SAFETY: bypasses codex sandbox prompts
+#     gemini:
+#       headless_yolo: true

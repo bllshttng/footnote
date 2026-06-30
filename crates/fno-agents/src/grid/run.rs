@@ -3650,7 +3650,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // re-anchors to the same agent and the compositor focus
                                 // follows it so the main pane and drive target stay on
                                 // that agent across the re-partition (AC4-FR).
-                                (KeyCode::Char('g')) => {
+                                KeyCode::Char('g') => {
                                     rs.cycle_group_key();
                                     let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel) = rs.re_anchor(&groups) {
@@ -3676,7 +3676,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // nav: Up/Down move the selection; the compositor
                                 // focus follows so the selected agent fills the main
                                 // area (AC1-UI / AC2-HP).
-                                (KeyCode::Up) => {
+                                KeyCode::Up => {
                                     let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel) = rs.move_up(&groups) {
                                         comp.set_focus(sel);
@@ -3698,7 +3698,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     dirty = true;
                                     rail_consumed = true;
                                 }
-                                (KeyCode::Down) => {
+                                KeyCode::Down => {
                                     let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     if let Some(sel) = rs.move_down(&groups) {
                                         comp.set_focus(sel);
@@ -3727,7 +3727,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // -> Drive; Tab/Esc back out. Mirrors the Tab->Single path
                                 // (resize the focused pane to the full main area, then
                                 // full-paint the region-map change).
-                                (KeyCode::Enter)
+                                KeyCode::Enter
                                     if matches!(rs.main_mode, group::MainMode::GroupTile) =>
                                 {
                                     // codex P2: if the selection is on a member that
@@ -3773,8 +3773,8 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // IS driving. A dead or exec pane can't be driven, so surface
                                 // a cue and stay in nav rather than dropping into a pane that
                                 // eats keystrokes.
-                                (KeyCode::Enter)
-                                | (KeyCode::Char('d')) => {
+                                KeyCode::Enter
+                                | KeyCode::Char('d') => {
                                     let sel = rs.selected_agent_idx;
                                     let drivable = sel
                                         .and_then(|i| states.get(i))
@@ -3812,7 +3812,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // later selection move cannot retarget it. (When the
                                 // x-d97d rail leader lands, this rebinds to
                                 // `leader m` - the recruit verb is unchanged.)
-                                (KeyCode::Char('m')) => {
+                                KeyCode::Char('m') => {
                                     if let Some(agent) =
                                         rs.selected_agent_idx.and_then(|i| names.get(i)).cloned()
                                     {
@@ -3845,7 +3845,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // keypress so a later selection move cannot retarget
                                 // the mutation (Concurrency), mirroring `m`. Always
                                 // emits a toast - never a silent no-op.
-                                (KeyCode::Char('r')) => {
+                                KeyCode::Char('r') => {
                                     if rs.group_key != group::GroupKey::Squad {
                                         hint = Some(
                                             "switch to squad view (g) to remove".to_string(),
@@ -3906,14 +3906,14 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     rail_consumed = true;
                                 }
                                 // nav: `q` quits.
-                                (KeyCode::Char('q')) => {
+                                KeyCode::Char('q') => {
                                     break;
                                 }
                                 // nav: Tab toggles the main area between Single and
                                 // GroupTile (US3). The region map changes (one big pane
                                 // <-> a tiled group), so force a full repaint and re-size
                                 // the now-visible panes - the flip is atomic (AC3-UI).
-                                (KeyCode::Tab) => {
+                                KeyCode::Tab => {
                                     rs.toggle_main_mode();
                                     match rs.main_mode {
                                         group::MainMode::GroupTile => {
@@ -3939,10 +3939,10 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // selection by a page (the rendered page follows it), so
                                 // the accented/drive target stays on screen. Inert in
                                 // Single mode (AC3-ERR).
-                                (KeyCode::Char(']'))
-                                | (KeyCode::PageDown)
-                                | (KeyCode::Char('['))
-                                | (KeyCode::PageUp) => {
+                                KeyCode::Char(']')
+                                | KeyCode::PageDown
+                                | KeyCode::Char('[')
+                                | KeyCode::PageUp => {
                                     if matches!(rs.main_mode, group::MainMode::GroupTile) {
                                         let forward = matches!(
                                             key.code,
@@ -3974,7 +3974,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                 // selection onto a still-visible agent (or surface an
                                 // empty-state hint when nothing is waiting) and
                                 // full-repaint, mirroring the `g` regroup discipline.
-                                (KeyCode::Char('a')) => {
+                                KeyCode::Char('a') => {
                                     rs.toggle_attention_filter();
                                     let groups = rail_view_groups(&rail_rows, rs, &panes, &states, &squad_store);
                                     match rs.re_anchor(&groups) {

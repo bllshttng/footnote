@@ -1,0 +1,36 @@
+# footnote LOCAL settings starter  ->  copy to <project>/.fno/settings.yaml
+#
+# Project-local config holds the per-project deltas that override your global
+# ~/.fno/settings.yaml. Keep machine-wide preferences in global (see
+# settings.global.example.yaml); keep what is unique to THIS repo here. Any key
+# may live in either file.
+#
+# Opinionated QUICKSTART. Absent keys fall back to their code defaults, so this
+# file stays small on purpose. For every available setting + its default, see
+# docs/settings.example.yaml. Once copied, .fno/settings.yaml is gitignored.
+
+config:
+  project:
+    id: my-project         # short id for this repo (used in ledger + labels)
+    # vision: >
+    #   One-paragraph north star for this project. Fed to /think and the
+    #   roadmap generator so generated work stays on-mission.
+
+  # Backlog node id prefix + hex width for this repo (e.g. 'proj' -> proj-a3f9).
+  backlog:
+    id_prefix: proj
+
+  # Obsidian vault wiring; only if this project's docs/plans live in a vault.
+  obsidian:
+    enabled: false         # set true + a vault area name to route docs there
+    # vault: my-vault
+
+  # --- recommended per-project workflow toggles (code default: false) ---
+  target:
+    auto_launch_on_blueprint: true   # /blueprint then auto-kicks /target
+
+  # Post-merge ritual: where this repo's prose follow-ups get written.
+  post_merge:
+    enabled: true          # already the code default; shown for awareness
+    # parking_lot_path: docs/<area>/parking-lot.md
+    # self_reap: true      # close the merged node as part of the ritual
