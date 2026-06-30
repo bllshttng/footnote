@@ -83,6 +83,28 @@ enum PaneMsg {
     Exited(usize, i32),
     /// The watcher WS for pane `idx` closed / errored.
     Closed(usize, String),
+    /// Result of one detached discovery run (x-87f7). The ping arm spawns the
+    /// discovery I/O off the loop task; this carries its resolved output back so
+    /// the loop applies the cheap, in-memory tiling without ever awaiting I/O.
+    Discovered(DiscoveryResult),
+}
+
+/// Output of one [`discover_children`] run, applied on the `rx.recv()` arm
+/// (x-87f7). Carries the RESOLVED tiling inputs (name + host_mode + the child's
+/// real registry rail row) so the apply arm never re-reads the registry on the
+/// loop task (Locked Decision 2). `probed`/`survived` drive the cache write-back
+/// applied against the live cache on apply.
+struct DiscoveryResult {
+    /// Survivors to tile: (name, host_mode, real registry rail row).
+    panes: Vec<(String, bool, Value)>,
+    /// Fresh `--bg` roster cards (already deduped vs the registry rows by
+    /// `roster_bg_cards_from`; the apply arm additionally dedups vs the live
+    /// `roster_cards`).
+    cards: Vec<RosterBgCard>,
+    /// Every name the `worker.ping` probe ran for this run (cache write-back domain).
+    probed: Vec<String>,
+    /// The subset that passed the probe (cleared from the cache; never cached).
+    survived: Vec<String>,
 }
 
 /// Resolve the agent names to tile.
@@ -2481,7 +2503,8 @@ fn new_registry_names(fresh: Vec<String>, known: &[String]) -> Vec<String> {
 /// Drop candidate names whose last `worker.ping` failure is still within
 /// `ttl` (x-c226). A name is eligible to (re)probe when it is unseen, or its
 /// cached failure is at least `ttl` old (`>=`, so the TTL boundary re-probes -
-/// AC3-EDGE). Pure: the probe + cache writes happen in [`poll_live_discover`].
+/// AC3-EDGE). Pure: the probe runs in [`discover_children`]; the cache
+/// write-back applies on the `PaneMsg::Discovered` arm (x-87f7).
 fn cache_candidates(
     new: Vec<String>,
     cache: &std::collections::HashMap<String, std::time::Instant>,
@@ -2699,166 +2722,114 @@ async fn reapply_rail_sizing(
     }
 }
 
-/// Poll-discover externally-spawned children on the shared 3s tick (x-45e6,
-/// Change 2 + 3). Re-reads the fno registry + the claude `--bg` roster and
-/// live-adds any row not already tiled - no restart, no focus-steal. Gated to
-/// `--all` (the fleet view): an explicit-name invocation has a fixed roster and
-/// nothing to discover. Vanished rows are LEFT on screen (registry: the Exited
-/// badge via the state machine; roster: a stale card) - removal is out of scope
-/// (the plan's "MAY drop"; we don't, to avoid the multi-vector removal hazard).
-#[allow(clippy::too_many_arguments)]
-async fn poll_live_discover(
-    parsed: &GridArgs,
-    home: &AgentsHome,
-    tx: &mpsc::Sender<PaneMsg>,
-    tty: TtySize,
-    comp: &mut Compositor,
-    names: &mut Vec<String>,
-    panes: &mut Vec<Pane>,
-    states: &mut Vec<ConnState>,
-    watch_sinks: &mut Vec<Option<WsSink>>,
-    host_interactive: &mut Vec<bool>,
-    roster_cards: &mut Vec<Option<RosterBgCard>>,
-    rail_rows: &mut Vec<Value>,
-    repo_cache: &mut repo::RepoCache,
-    rail_state: Option<&group::RailState>,
-    squad_store: &squads::SquadStore,
-    failed_probe_cache: &mut std::collections::HashMap<String, std::time::Instant>,
-) {
-    if !parsed.all {
-        return; // explicit-name fleet is fixed; nothing to discover
-    }
-    // The soft cap bounds EAGER WATCHER CONNECTIONS, so it counts only real fno
-    // panes (roster cards open no socket and are exempt at startup; codex PR #98
-    // P2). Count the `None` slots in roster_cards = the real PTY panes. Raise via
-    // FNO_GRID_MAX_PANES.
-    let cap = max_panes();
-    let pane_count = |roster_cards: &[Option<RosterBgCard>]| -> usize {
-        roster_cards.iter().filter(|c| c.is_none()).count()
-    };
-    let mut added = false;
+/// Detached discovery task body (x-87f7, Approach B). All of the discovery
+/// I/O that used to run inline in the ping arm - the registry read, the
+/// `worker.ping` probe, the claude `--bg` roster load - moved off the loop
+/// task so no I/O latency can starve the key-event arm. Owns its inputs so the
+/// future is `'static + Send` (the explicit reversal of x-c226's `join_all`
+/// borrow, which is kept INSIDE the probe here). Splits at the I/O / `&mut`
+/// line (Locked Decision 1): this does only reads + the probe and resolves the
+/// tiling inputs; every `&mut` pane-vector mutation stays on the loop task in
+/// the `PaneMsg::Discovered` apply arm.
+///
+/// ALWAYS returns a `DiscoveryResult` (empty on a registry/roster error), so
+/// the caller's single `tx.send` after this `.await` fires unconditionally and
+/// the in-flight guard can never wedge (AC3-FR). `--all` gating happens at the
+/// ping arm; this is only spawned when there is something to discover.
+async fn discover_children(
+    home: AgentsHome,
+    names_snapshot: Vec<String>,
+    cache_snapshot: std::collections::HashMap<String, std::time::Instant>,
+) -> DiscoveryResult {
+    // Read + parse the registry ONCE and reuse the rows for both the pane diff
+    // and the roster diff (gemini PR #98). Absent / unparseable => empty (AC1-ERR /
+    // read_registry_rows' empty-on-error contract), and we still return below.
+    //
+    // x-87f7 (PR #108 review): the grid runs on a current-thread tokio runtime
+    // (src/bin/client.rs), so `tokio::spawn` does NOT move work to another thread -
+    // a synchronous `std::fs::read` here would block the only runtime thread and
+    // still starve the key-event arm (defeating US1 / AC1-ERR). Run the blocking
+    // registry + roster reads on the blocking pool (enabled by `enable_all`) so the
+    // loop keeps polling input during a slow/large/NFS read. The probe below is
+    // async (socket I/O) and yields on its own, so it stays inline.
+    let home_for_read = home.clone();
+    let rows = tokio::task::spawn_blocking(move || read_registry_rows(&home_for_read))
+        .await
+        .unwrap_or_default(); // JoinError (closure panic) -> empty, keep always-return
 
-    // Read + parse the registry ONCE per tick and reuse the rows for both the
-    // pane diff and the roster diff (gemini PR #98: avoid up to 4 redundant
-    // reads/parses of registry.json on the hot 3s executor tick). parsed.all is
-    // guaranteed true here, so resolve_agent_names reduces to filter_pty_agents.
-    let rows = read_registry_rows(home);
-
-    // ── Registry diff: new PTY panes (Change 2) ─────────────────────────────
     // x-c226: skip candidates whose `worker.ping` failed within FAILED_PROBE_TTL
     // (stable stream-json lanes), so the steady state truly probes nothing and a
-    // busy fleet never starves input. A single `now` for the whole tick.
+    // busy fleet never starves input. A single `now` for the whole run; the cache
+    // write-back recomputes its own `now` on the apply arm (negligible skew).
     let now = std::time::Instant::now();
-    let new_names = cache_candidates(
-        new_registry_names(filter_pty_agents(&rows), names),
-        failed_probe_cache,
+    let candidates = cache_candidates(
+        new_registry_names(filter_pty_agents(&rows), &names_snapshot),
+        &cache_snapshot,
         now,
         FAILED_PROBE_TTL,
     );
-    if !new_names.is_empty() {
-        // Same authoritative PTY-protocol gate as startup, but the worker.ping
-        // probe runs ONLY for not-recently-failed new candidates (steady state:
-        // no probe), over the rows we already hold - now concurrently (join_all).
-        let probed = new_names.clone();
-        let new_names = prune_non_pty_claude_with_rows(new_names, &rows, home).await;
-        // Cache the gate-failures (probed minus survivors) so they are not
-        // re-probed every tick; clear any survivor's stale entry (a survivor is
-        // never cached - AC2-FR). Compare by name via a HashSet of survivors.
-        let survived: std::collections::HashSet<&str> =
-            new_names.iter().map(String::as_str).collect();
-        for name in &probed {
-            if survived.contains(name.as_str()) {
-                failed_probe_cache.remove(name);
-            } else {
-                failed_probe_cache.insert(name.clone(), now);
-            }
-        }
-        if !new_names.is_empty() {
-            let host_modes = host_modes_from_rows(&rows, &new_names);
-            for (name, host_mode) in new_names.iter().zip(host_modes) {
-                if pane_count(roster_cards) >= cap {
-                    break;
-                }
-                // The child's REAL registry row so rail grouping uses its true
-                // provider/cwd (a `spawn --cwd` child may live in another repo).
-                let rail_row = rows
-                    .iter()
-                    .find(|r| r.get("name").and_then(Value::as_str) == Some(name.as_str()))
-                    .cloned()
-                    .unwrap_or_else(|| json!({ "name": name }));
-                // focus=false: a poll-discovered pane never steals focus (AC2-UI).
-                added |= live_add_pane(
-                    home,
-                    name,
-                    host_mode,
-                    tx,
-                    tty,
-                    comp,
-                    names,
-                    panes,
-                    states,
-                    watch_sinks,
-                    host_interactive,
-                    roster_cards,
-                    rail_rows,
-                    repo_cache,
-                    rail_row,
-                    false,
-                )
-                .await;
-            }
-        }
-    }
-    // Sweep expired failures so the cache stays bounded by the live within-TTL
-    // failure count and a name whose session has left the registry self-heals
-    // (x-c226 AC1-FR). Cheap: the map holds only failed claude lanes.
-    failed_probe_cache
-        .retain(|_, failed_at| now.saturating_duration_since(*failed_at) < FAILED_PROBE_TTL);
 
-    // ── Roster diff: new --bg status cards (Change 3) ───────────────────────
-    // roster_bg_cards_from dedups against the registry rows, so a session that
-    // became an fno pane above is NOT returned here (AC3-EDGE: added once). A
-    // missing / unparseable roster yields zero cards (AC3-ERR). Reuses the rows
-    // read once above (gemini PR #98). Cards open no socket, so they are NOT
-    // capped (matching the startup roster merge).
-    let fresh_cards = match crate::claude_roster::ClaudeRoster::load_default() {
-        Ok(r) => roster_bg_cards_from(&rows, &r.workers_deduped()),
-        Err(_) => Vec::new(),
-    };
-    let new_cards = new_roster_cards(fresh_cards, roster_cards);
-    for card in new_cards {
-        added |= live_add_roster_card(
-            card,
-            tty,
-            comp,
-            names,
-            panes,
-            states,
-            watch_sinks,
-            host_interactive,
-            roster_cards,
-            rail_rows,
-            repo_cache,
-        )
-        .await;
+    let mut panes: Vec<(String, bool, Value)> = Vec::new();
+    let mut probed: Vec<String> = Vec::new();
+    let mut survived: Vec<String> = Vec::new();
+    if !candidates.is_empty() {
+        // Same authoritative PTY-protocol gate as startup, run concurrently
+        // (join_all) over the rows we already hold. The borrow of the owned
+        // `home`/`rows` stays inside the probe (Domain Pitfall: do NOT hoist it
+        // across the spawn).
+        probed = candidates.clone();
+        let survivors = prune_non_pty_claude_with_rows(candidates, &rows, &home).await;
+        let host_modes = host_modes_from_rows(&rows, &survivors);
+        for (name, host_mode) in survivors.iter().zip(host_modes) {
+            // The child's REAL registry row so rail grouping uses its true
+            // provider/cwd (a `spawn --cwd` child may live in another repo). Carry
+            // it in the result so the apply arm never re-reads the registry on the
+            // loop (Locked Decision 2).
+            let rail_row = rows
+                .iter()
+                .find(|r| r.get("name").and_then(Value::as_str) == Some(name.as_str()))
+                .cloned()
+                .unwrap_or_else(|| json!({ "name": name }));
+            panes.push((name.clone(), host_mode, rail_row));
+        }
+        survived = survivors;
     }
 
-    // A live-add sized the new pane(s) for the tiled grid; in rail mode reapply
-    // the rail-region sizing so the visible pane(s) don't render shrunk until
-    // the next manual rail resize (codex PR #98 P2).
-    if added {
-        reapply_rail_sizing(
-            rail_state,
-            tty,
-            rail_rows,
-            states,
-            squad_store,
-            comp.focus(),
-            panes,
-            watch_sinks,
-        )
-        .await;
+    // Roster diff: roster_bg_cards_from dedups against the registry rows, so a
+    // session that became an fno pane above is NOT returned (AC3-EDGE). A missing /
+    // unparseable roster yields zero cards (AC2-ERR). The apply arm additionally
+    // dedups vs the live `roster_cards`. The blocking roster file read runs on the
+    // blocking pool for the same current-thread reason as the registry read above;
+    // the cheap, pure card diff stays on this task (it borrows `rows`). A load Err
+    // OR a JoinError (closure panic) both degrade to zero cards.
+    let cards =
+        match tokio::task::spawn_blocking(crate::claude_roster::ClaudeRoster::load_default).await {
+            Ok(Ok(r)) => roster_bg_cards_from(&rows, &r.workers_deduped()),
+            _ => Vec::new(),
+        };
+
+    DiscoveryResult {
+        panes,
+        cards,
+        probed,
+        survived,
     }
+}
+
+/// Indices of a [`DiscoveryResult`]'s survivor `panes` whose name is not already
+/// in the live `names` (x-87f7). The one new race Approach B introduces: a
+/// survivor may have been tiled (startup / manual recruit / a prior discovery)
+/// between the task's `names` snapshot and the apply arm. Re-filtering here closes
+/// it so the apply arm never double-adds a pane (AC2-FR), keeping the seven
+/// parallel pane vectors aligned. Pure.
+fn fresh_survivors(panes: &[(String, bool, Value)], names: &[String]) -> Vec<usize> {
+    let known: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
+    panes
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _, _))| !known.contains(name.as_str()))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 // ── Run loop ──────────────────────────────────────────────────────────────
@@ -3092,6 +3063,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // worker.ping) every tick, which was starving grid input on a busy fleet.
     let mut failed_probe_cache: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
+    // x-87f7 in-flight guard: true while a detached discover_children task is
+    // running. Set when the ping arm spawns it; reset on the PaneMsg::Discovered
+    // apply arm (always, even on an error/empty result - the task ALWAYS sends -
+    // so discovery can never permanently wedge, AC3-FR). At most one task at a
+    // time, so the cache write-back has no lost-update race (Invariant).
+    let mut discover_in_flight = false;
     let mut initial_rail_rows: Vec<Value> = {
         // Read registry rows once for richer grouping (cwd, provider, status).
         // Fall back to name-only synthetic rows if the registry is absent.
@@ -4436,6 +4413,112 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                         }
                         dirty = true;
                     }
+                    Some(PaneMsg::Discovered(result)) => {
+                        // x-87f7 apply arm: the detached task finished; do the
+                        // cheap, in-memory tiling here on the single loop task. No
+                        // file/network I/O runs here (Domain Pitfall) - the only
+                        // awaits are the LOCAL resize ioctls inside live_add_*.
+                        // Clear the guard FIRST so even an early break below can't
+                        // wedge discovery (AC3-FR).
+                        discover_in_flight = false;
+
+                        // Cache write-back against the LIVE cache (not the task's
+                        // snapshot): a name that newly tiled is cleared, a name that
+                        // newly failed is inserted with the apply-time `now`. Same
+                        // logic the old inline path ran (x-c226), now here.
+                        let now = std::time::Instant::now();
+                        let survived: std::collections::HashSet<&str> =
+                            result.survived.iter().map(String::as_str).collect();
+                        for name in &result.probed {
+                            if survived.contains(name.as_str()) {
+                                failed_probe_cache.remove(name);
+                            } else {
+                                failed_probe_cache.insert(name.clone(), now);
+                            }
+                        }
+                        // Sweep expired failures so the cache stays bounded and a
+                        // departed session self-heals (x-c226 AC1-FR).
+                        failed_probe_cache.retain(|_, failed_at| {
+                            now.saturating_duration_since(*failed_at) < FAILED_PROBE_TTL
+                        });
+
+                        // The soft cap counts only real fno panes (the `None` slots
+                        // in roster_cards); roster cards open no socket and are
+                        // exempt (codex PR #98 P2).
+                        let cap = max_panes();
+                        let pane_count = |roster_cards: &[Option<RosterBgCard>]| -> usize {
+                            roster_cards.iter().filter(|c| c.is_none()).count()
+                        };
+                        let mut added = false;
+
+                        // Re-filter survivors against the CURRENT names (AC2-FR): a
+                        // survivor may have tiled since the snapshot. focus=false:
+                        // a poll-discovered pane never steals focus (AC2-UI).
+                        for i in fresh_survivors(&result.panes, &names) {
+                            if pane_count(&roster_cards) >= cap {
+                                break; // honor the cap (AC2-EDGE)
+                            }
+                            let (name, host_mode, rail_row) = &result.panes[i];
+                            added |= live_add_pane(
+                                home,
+                                name,
+                                *host_mode,
+                                &tx,
+                                tty,
+                                &mut comp,
+                                &mut names,
+                                &mut panes,
+                                &mut states,
+                                &mut watch_sinks,
+                                &mut host_interactive,
+                                &mut roster_cards,
+                                &mut rail_rows,
+                                &mut repo_cache,
+                                rail_row.clone(),
+                                false,
+                            )
+                            .await;
+                        }
+
+                        // Roster cards: dedup against the live roster_cards by
+                        // session_id (AC3-EDGE). Cards open no socket, so they are
+                        // NOT capped (matching the startup roster merge).
+                        let new_cards = new_roster_cards(result.cards, &roster_cards);
+                        for card in new_cards {
+                            added |= live_add_roster_card(
+                                card,
+                                tty,
+                                &mut comp,
+                                &mut names,
+                                &mut panes,
+                                &mut states,
+                                &mut watch_sinks,
+                                &mut host_interactive,
+                                &mut roster_cards,
+                                &mut rail_rows,
+                                &mut repo_cache,
+                            )
+                            .await;
+                        }
+
+                        // A live-add sized the new pane(s) for the tiled grid; in
+                        // rail mode reapply the rail-region sizing so the visible
+                        // pane(s) don't render shrunk (codex PR #98 P2).
+                        if added {
+                            reapply_rail_sizing(
+                                rail_state.as_ref(),
+                                tty,
+                                &rail_rows,
+                                &states,
+                                &squad_store,
+                                comp.focus(),
+                                &mut panes,
+                                &mut watch_sinks,
+                            )
+                            .await;
+                            dirty = true;
+                        }
+                    }
                     None => break,
                 }
             }
@@ -4496,13 +4579,27 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                 // x-45e6: live-discover externally-spawned children (orchestrator
                 // panes via `fno agents spawn --cwd`, fresh `claude --bg` sessions)
                 // on the existing tick - tiles within one cadence, no restart.
-                poll_live_discover(
-                    &parsed, home, &tx, tty, &mut comp, &mut names, &mut panes,
-                    &mut states, &mut watch_sinks, &mut host_interactive,
-                    &mut roster_cards, &mut rail_rows, &mut repo_cache,
-                    rail_state.as_ref(), &squad_store, &mut failed_probe_cache,
-                )
-                .await;
+                // x-87f7: the discovery I/O (registry read + worker.ping probe +
+                // roster load) runs on a DETACHED task so this arm never `.await`s
+                // it - no discovery latency can starve the key-event arm. The task
+                // ALWAYS sends exactly one PaneMsg::Discovered (even empty/error),
+                // applied + guard-cleared on the rx.recv() arm below.
+                if parsed.all && !discover_in_flight {
+                    discover_in_flight = true;
+                    // Owned snapshots: tokio::spawn needs 'static + Send. `home`
+                    // is a cheap PathBuf wrapper (Locked Decision 3); the probe's
+                    // join_all borrow stays inside discover_children.
+                    let home_owned = home.clone();
+                    let names_snapshot = names.clone();
+                    let cache_snapshot = failed_probe_cache.clone();
+                    let tx_disc = tx.clone();
+                    tokio::spawn(async move {
+                        // Single send after the await, no early return between, so
+                        // AC3-FR holds on every path (success / error / empty).
+                        let result = discover_children(home_owned, names_snapshot, cache_snapshot).await;
+                        let _ = tx_disc.send(PaneMsg::Discovered(result)).await;
+                    });
+                }
                 ping_open_sinks(&mut watch_sinks, &mut states).await;
                 // E5b: with the front door up (no panes) observe_pane_states
                 // would report Quit on its 0-pane guard. Don't tear down the
@@ -4891,6 +4988,35 @@ mod tests {
         // AC1-EDGE: every new name is within TTL -> empty candidate set.
         let all_cached = vec!["fresh_fail".to_string()];
         assert!(cache_candidates(all_cached, &cache, now, ttl).is_empty());
+    }
+
+    // x-87f7 AC2-FR: the apply arm re-filters the task's survivors against the
+    // CURRENT names, so a survivor that tiled between snapshot and apply is not
+    // double-added; genuinely-new survivors keep their slot. The returned indices
+    // are into the result's `panes`, preserving order.
+    #[test]
+    fn fresh_survivors_skips_already_tiled() {
+        let panes = vec![
+            ("wkA".to_string(), false, json!({ "name": "wkA" })), // already tiled -> dropped
+            ("wkB".to_string(), true, json!({ "name": "wkB" })),  // new -> kept (idx 1)
+            ("wkC".to_string(), false, json!({ "name": "wkC" })), // new -> kept (idx 2)
+        ];
+        let names = vec!["wkA".to_string()];
+        assert_eq!(fresh_survivors(&panes, &names), vec![1, 2]);
+
+        // All survivors already present -> nothing to tile.
+        let all_present = vec!["wkA".to_string(), "wkB".to_string(), "wkC".to_string()];
+        assert!(fresh_survivors(&panes, &all_present).is_empty());
+    }
+
+    // x-87f7 AC1-EDGE: an empty DiscoveryResult (no survivors) tiles nothing; the
+    // helper is total over the empty case (the in-flight guard still clears on the
+    // apply arm, verified by reading).
+    #[test]
+    fn fresh_survivors_empty_result() {
+        let panes: Vec<(String, bool, Value)> = Vec::new();
+        let names = vec!["wkA".to_string()];
+        assert!(fresh_survivors(&panes, &names).is_empty());
     }
 
     // ── recruit picker + cycle (x-0175) ──────────────────────────────────────
