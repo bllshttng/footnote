@@ -728,6 +728,30 @@ fn read_pr_info(
         .unwrap_or("")
         .to_string();
 
+    // x-8b64 (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
+    // web/mobile, or `gh pr merge`) is done regardless of whether the required
+    // bot ever reviewed it or whether CI is still green post-merge - the merge
+    // IS the authority. Short-circuit the now-irrelevant CI + review polls
+    // (which also avoids a transient gh blip on those reads re-blocking a
+    // finished session). The single merge signal is `state` from the same
+    // `gh pr view` call that `reconcile`/`fno pr verify` read - one signal, not
+    // two independently-polled sources. done()'s `head_shipped` guard still
+    // applies downstream: an unpushed commit on top of a merged PR stays
+    // unshipped work.
+    if state == PrState::Merged {
+        return Ok(PrInfo {
+            state,
+            number,
+            head_oid,
+            ci_conclusion: CiConclusion::Skipped,
+            latest_review_ts: "none".to_string(),
+            reviewed: true,
+            missing_bots: Vec::new(),
+            unaddressed_findings: Vec::new(),
+            review_skipped: true,
+        });
+    }
+
     // Read 2: CI checks
     let ci_conclusion = if ci_declared_none {
         CiConclusion::Skipped

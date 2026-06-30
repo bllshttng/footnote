@@ -170,6 +170,48 @@ exit 1"#,
         );
         MockBins { _dir: dir, gh, git }
     }
+
+    /// x-8b64 (E): PR merged out-of-band. `gh pr view` reports state=MERGED.
+    /// CI is FAILURE and there are NO reviews - proving the merge short-circuits
+    /// both the CI and review reads (a merged PR is terminal). git HEAD matches
+    /// headRefOid so done()'s head_shipped guard passes.
+    fn merged() -> Self {
+        let dir = TempDir::new().unwrap();
+        let gh = make_script(
+            dir.path(),
+            "gh",
+            r#"
+if echo "$*" | grep -q -- "--version"; then
+  echo 'gh version 2.x'; exit 0
+fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{"state":"MERGED","number":42,"headRefName":"feat","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000042"}'
+  exit 0
+fi
+# These must NOT be reached for a merged PR; return red/empty so the test
+# fails loudly if the short-circuit ever regresses.
+if echo "$*" | grep -q "checks"; then
+  echo '[{"name":"unit-tests","state":"FAILURE","bucket":"fail"}]'
+  exit 0
+fi
+if echo "$*" | grep -q "pulls/"; then
+  echo '[]'
+  exit 0
+fi
+if echo "$*" | grep -q "reviews"; then
+  echo '{"reviews":[],"comments":[]}'
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let git = make_script(
+            dir.path(),
+            "git",
+            r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000042""#,
+        );
+        MockBins { _dir: dir, gh, git }
+    }
 }
 
 /// Write a settings.yaml to `<cwd>/.fno/settings.yaml` so tests are
@@ -352,6 +394,54 @@ fn ac1_hp_promise_green_pr_done() {
     assert!(
         events_content.contains("DonePRGreen"),
         "DonePRGreen in termination event"
+    );
+}
+
+/// x-8b64 (E): promise with an out-of-band MERGED PR -> DonePRGreen, even
+/// though CI is red and NO required bot reviewed. The merge is terminal; the
+/// stop-hook must stop re-poking a finished session.
+#[test]
+fn out_of_band_merged_pr_done() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-merged1", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::merged();
+
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(code, 0, "exit code must be 0 for allow");
+    assert_eq!(d.decision, "allow");
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "a merged PR must terminate DonePRGreen despite red CI / no review; got {:?} ({})",
+        d.termination_reason,
+        d.message
     );
 }
 

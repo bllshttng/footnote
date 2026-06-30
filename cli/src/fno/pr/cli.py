@@ -70,6 +70,27 @@ def verify(
 
 
 @pr_app.command(
+    "status",
+    help=(
+        "One authoritative CI verdict for a PR from statusCheckRollup. Prints a "
+        "JSON line {pr, verdict, settled, green, checks}; exit 0 green, 1 red, "
+        "2 pending, 3 unknown (no checks), 4 fetch error, 127 gh-missing. "
+        "In-progress checks read as pending, never red."
+    ),
+)
+def status(pr_number: int = typer.Argument(..., help="GitHub PR number")) -> None:
+    from fno.pr import _status
+    from fno.pr._proc import ToolMissing
+
+    try:
+        rc = _status.run_status(str(pr_number))
+    except ToolMissing as exc:
+        typer.echo(f"fno pr status: {exc.tool} not found on PATH", err=True)
+        rc = 127
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
     "rebase",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
