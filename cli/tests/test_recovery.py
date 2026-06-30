@@ -356,3 +356,210 @@ class TestRunRecoverySweep:
         assert "gone9999" not in saved
         assert "capped:gone9999" not in saved
         assert saved["aaaa1111"] == 1
+
+
+# ---------------------------------------------------------------------------
+# out-of-usage provider failover (x-7abe) — wire attempt_swap into the watchdog
+# ---------------------------------------------------------------------------
+
+class TestClassifySessionError:
+    """classify_session_error reuses the shipped normalize() text rules."""
+
+    def test_rate_limit_text_is_swap_class(self):
+        err = recovery.classify_session_error("API Error: rate limit exceeded, retry later")
+        assert err is not None
+        assert err.triggers_swap is True
+
+    def test_quota_text_is_swap_class(self):
+        err = recovery.classify_session_error("Error: quota exceeded for this model")
+        assert err is not None
+        assert err.triggers_swap is True
+
+    def test_connection_drop_is_not_swap_class(self):
+        # AC2-FR: a clean connection-drop carries no quota/5xx marker, so it is
+        # not a swap trigger — the watchdog nudges it exactly as x-f47c does.
+        err = recovery.classify_session_error("API Error: Connection closed mid-response")
+        assert err is None or err.triggers_swap is False
+
+    def test_no_output_returns_none(self):
+        assert recovery.classify_session_error(None) is None
+        assert recovery.classify_session_error("") is None
+        assert recovery.classify_session_error(123) is None  # non-str
+
+
+class _FailoverHarness(_Harness):
+    """A sweep harness with a controllable last-error and a fake failover_fn."""
+
+    def __init__(self, output_result=None, outcome="swapped", **kw):
+        super().__init__(**kw)
+        self._output = output_result
+        self._outcome = outcome
+        self.failover_calls: list = []
+
+    def read_state(self, jobs_dir):
+        return recovery._SnapshotView(self._state, self._updated, self._output)
+
+    def failover(self, candidate, err):
+        self.failover_calls.append((candidate.short_id, err.error_class))
+        return self._outcome
+
+
+class TestFailoverSweep:
+    def _run(self, h, tmp_path):
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)],
+            counts={},
+            emit=h.emit, read_state_fn=h.read_state,
+            liveness_fn=h.liveness, send_fn=h.send,
+            failover_fn=h.failover,
+        )
+
+    def test_swap_class_routes_to_failover_not_nudge(self, tmp_path):
+        # AC1-FR: a quota-died bg session swaps + re-dispatches, never nudges.
+        h = _FailoverHarness(output_result="API Error: rate limit exceeded", outcome="swapped")
+        self._run(h, tmp_path)
+        assert len(h.failover_calls) == 1
+        assert h.sends == []                       # NOT nudged
+        assert h.event_types() == ["failover_swapped"]
+
+    def test_connection_drop_still_nudges(self, tmp_path):
+        # AC2-FR: a clean connection-drop is unchanged — failover never called.
+        h = _FailoverHarness(output_result="API Error: Connection closed mid-response")
+        self._run(h, tmp_path)
+        assert h.failover_calls == []
+        assert h.sends and h.sends[0][1] == recovery.CONTINUE_MESSAGE
+        assert h.event_types() == ["recovery_nudge"]
+
+    def test_no_output_result_nudges(self, tmp_path):
+        # No last-error text (the common idle case): unchanged nudge.
+        h = _FailoverHarness(output_result=None)
+        self._run(h, tmp_path)
+        assert h.failover_calls == []
+        assert h.event_types() == ["recovery_nudge"]
+
+    def test_blocked_thrash_emits_blocked_no_nudge(self, tmp_path):
+        # AC2-EDGE: storm-cap reached -> bounded stop, no nudge churn.
+        h = _FailoverHarness(output_result="rate limit", outcome="blocked-thrash")
+        self._run(h, tmp_path)
+        assert h.sends == []
+        assert h.event_types() == ["failover_blocked"]
+        assert h.events[0][1]["reason"] == "blocked-thrash"
+
+    def test_queue_exhausted_emits_blocked_no_nudge(self, tmp_path):
+        # AC1-EDGE: no eligible alternate -> bounded stop, no nudge.
+        h = _FailoverHarness(output_result="quota exceeded", outcome="queue-exhausted")
+        self._run(h, tmp_path)
+        assert h.sends == []
+        assert h.event_types() == ["failover_blocked"]
+        assert h.events[0][1]["reason"] == "queue-exhausted"
+
+    def test_no_swap_outcome_falls_through_to_nudge(self, tmp_path):
+        # Controller declined (NO_SWAP_NEEDED): defensive fall-through to nudge.
+        h = _FailoverHarness(output_result="rate limit", outcome="no-swap")
+        self._run(h, tmp_path)
+        assert h.event_types() == ["recovery_nudge"]
+
+    def test_failover_disabled_when_fn_absent(self, tmp_path):
+        # Backward compat: no failover_fn -> swap-class error still nudges (today).
+        h = _FailoverHarness(output_result="rate limit exceeded")
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)],
+            counts={},
+            emit=h.emit, read_state_fn=h.read_state,
+            liveness_fn=h.liveness, send_fn=h.send,
+            # failover_fn omitted
+        )
+        assert h.failover_calls == []
+        assert h.event_types() == ["recovery_nudge"]
+
+
+class TestDefaultFailover:
+    """The real failover_fn maps SwapDecision -> the sweep's outcome strings and
+    only re-dispatches on SWAPPED. Controller + settings are monkeypatched so no
+    real provider rotation / subprocess fires."""
+
+    def _patch(self, monkeypatch, decision, new_provider="codex", redispatched=None):
+        from fno.adapters.providers import failover as fo_mod
+        from fno.adapters.providers import loader as loader_mod
+        from fno.adapters.providers import dispatch as dispatch_mod
+
+        class _Result:
+            def __init__(self):
+                self.decision = decision
+                self.new_provider_id = new_provider
+
+        class _Ctrl:
+            def __init__(self, **kw):
+                pass
+
+            def attempt_swap(self, *, current_provider_id, error):
+                return _Result()
+
+        class _Snap:
+            id = "claude"
+
+        monkeypatch.setattr(fo_mod, "FailoverController", _Ctrl)
+        monkeypatch.setattr(loader_mod, "read_active_provider_atomic", lambda **kw: _Snap())
+        monkeypatch.setattr(dispatch_mod, "_default_settings_path", lambda: "/tmp/settings.yaml")
+        if redispatched is not None:
+            monkeypatch.setattr(
+                recovery, "_redispatch",
+                lambda cand, prov: redispatched.append((cand.short_id, prov)),
+            )
+
+    def test_swapped_redispatches_and_returns_swapped(self, monkeypatch, tmp_path):
+        from fno.adapters.providers.failover import SwapDecision
+
+        calls: list = []
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_provider="codex", redispatched=calls)
+        cand = _stale_candidate(tmp_path)
+        err = recovery.classify_session_error("rate limit exceeded")
+        assert recovery._default_failover(cand, err) == "swapped"
+        assert calls == [(cand.short_id, "codex")]   # re-dispatch fired with new provider
+
+    def test_blocked_thrash_maps_and_no_redispatch(self, monkeypatch, tmp_path):
+        from fno.adapters.providers.failover import SwapDecision
+
+        calls: list = []
+        self._patch(monkeypatch, SwapDecision.BLOCKED_THRASH, redispatched=calls)
+        err = recovery.classify_session_error("rate limit")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "blocked-thrash"
+        assert calls == []
+
+    def test_queue_exhausted_maps(self, monkeypatch, tmp_path):
+        from fno.adapters.providers.failover import SwapDecision
+
+        self._patch(monkeypatch, SwapDecision.QUEUE_EXHAUSTED)
+        err = recovery.classify_session_error("quota exceeded")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "queue-exhausted"
+
+    def test_controller_error_degrades_to_no_swap(self, monkeypatch, tmp_path):
+        from fno.adapters.providers import dispatch as dispatch_mod
+
+        def boom():
+            raise RuntimeError("settings unreadable")
+
+        monkeypatch.setattr(dispatch_mod, "_default_settings_path", boom)
+        err = recovery.classify_session_error("rate limit")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "no-swap"
+
+
+class TestNodeIdFromWorktree:
+    def test_reads_graph_node_id(self, tmp_path):
+        fno_dir = tmp_path / ".fno"
+        fno_dir.mkdir()
+        (fno_dir / "target-state.md").write_text(
+            'session_id: abc\ngraph_node_id: x-7abe\nprovider: claude\n', encoding="utf-8")
+        assert recovery._node_id_from_worktree(str(tmp_path)) == "x-7abe"
+
+    def test_quoted_value_is_unquoted(self, tmp_path):
+        fno_dir = tmp_path / ".fno"
+        fno_dir.mkdir()
+        (fno_dir / "target-state.md").write_text(
+            'graph_node_id: "x-1234"\n', encoding="utf-8")
+        assert recovery._node_id_from_worktree(str(tmp_path)) == "x-1234"
+
+    def test_missing_file_returns_none(self, tmp_path):
+        assert recovery._node_id_from_worktree(str(tmp_path)) is None
