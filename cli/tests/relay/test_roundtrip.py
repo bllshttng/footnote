@@ -894,7 +894,8 @@ def test_deliver_worker_primes_agy_and_discards_echo(monkeypatch):
     assert out == "REAL"                                  # echo/ack discarded
     assert submits[0] == rt_mod.RELAY_SYSTEM_PROMPT       # primed FIRST
     assert "framed-real" in submits                       # then the real turn
-    assert rt_mod._PRIMED_WORKERS["phasesta"] == frozenset({"ECHO", "ACK"})
+    # cache entry is now (socket identity, discard set)
+    assert rt_mod._PRIMED_WORKERS["phasesta"][1] == frozenset({"ECHO", "ACK"})
 
 
 def test_deliver_worker_agy_prime_unconfirmed_raises(monkeypatch):
@@ -925,7 +926,9 @@ def test_deliver_worker_agy_skips_prime_when_already_primed(monkeypatch):
     # AC7-FR (caching half): a worker already in the primed-set is not re-primed;
     # its stored discard set still filters the priming noise.
     _fake_clock(monkeypatch)
-    monkeypatch.setattr(rt_mod, "_PRIMED_WORKERS", {"phasesta": frozenset({"OLDECHO"})})
+    # The cache entry must carry the CURRENT socket identity to be served; pin it.
+    monkeypatch.setattr(rt_mod, "_sock_identity", lambda sock: (1, 2))
+    monkeypatch.setattr(rt_mod, "_PRIMED_WORKERS", {"phasesta": ((1, 2), frozenset({"OLDECHO"}))})
     monkeypatch.setattr(rt_mod, "snapshot_via_worker",
                         lambda sock: pytest.fail("cached worker must not be re-primed"))
     submits = []
@@ -945,6 +948,56 @@ def test_deliver_worker_agy_skips_prime_when_already_primed(monkeypatch):
     assert out == "REAL"
     assert rt_mod.RELAY_SYSTEM_PROMPT not in submits      # did NOT re-prime
     assert submits == ["framed"]
+
+
+def test_prime_agy_none_when_snapshot_unreachable(monkeypatch):
+    # gemini HIGH (PR #103): a None snapshot (worker died after submit) must NOT be
+    # conflated with an empty pane "". The old code settled last=="" and returned
+    # frozenset() (a false prime success); the fix `continue`s so the prime times
+    # out and returns None.
+    _fake_clock(monkeypatch)
+    calls = {"i": 0}
+
+    def fake_snap(sock):
+        calls["i"] += 1
+        return "PRE" if calls["i"] == 1 else None  # pre renders, then worker dies
+
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker", fake_snap)
+    monkeypatch.setattr(rt_mod, "submit_via_worker", lambda *a, **k: True)
+    monkeypatch.setattr(rt_mod, "capture_replies", lambda *a, **k: ["ECHO", "ACK"])
+    assert rt_mod._prime_agy("phasesta", rt_mod.Path("/x/w.sock"), "agy",
+                             settle_ms=1000, events_path=None) is None
+
+
+def test_deliver_worker_agy_reprimes_when_socket_recreated(monkeypatch):
+    # codex P2 (PR #103): a reused short_id whose worker.sock is a NEW inode must
+    # NOT inherit the stale primed entry -- it has to re-prime so the new session
+    # actually gets RELAY_SYSTEM_PROMPT.
+    _fake_clock(monkeypatch)
+    _settling_snapshot(monkeypatch)
+    # Current socket identity differs from the cached one -> cache miss -> re-prime.
+    monkeypatch.setattr(rt_mod, "_sock_identity", lambda sock: (9, 9))
+    monkeypatch.setattr(rt_mod, "_PRIMED_WORKERS",
+                        {"phasesta": ((1, 1), frozenset({"STALEECHO"}))})
+    submits = []
+    state = {"real": False}
+
+    def fake_submit(sock, text, **k):
+        submits.append(text)
+        if text != rt_mod.RELAY_SYSTEM_PROMPT:
+            state["real"] = True
+        return True
+
+    def fake_capture(provider, *, sock, **kw):
+        return ["ECHO", "ACK", "REAL"] if state["real"] else ["ECHO", "ACK"]
+
+    monkeypatch.setattr(rt_mod, "submit_via_worker", fake_submit)
+    monkeypatch.setattr(rt_mod, "capture_replies", fake_capture)
+    out = rt_mod.deliver_worker("phasesta", "framed-real", provider="agy", timeout=30)
+    assert out == "REAL"
+    assert submits[0] == rt_mod.RELAY_SYSTEM_PROMPT        # re-primed despite stale cache
+    # cache now carries the NEW identity + fresh discard set
+    assert rt_mod._PRIMED_WORKERS["phasesta"] == ((9, 9), frozenset({"ECHO", "ACK"}))
 
 
 def test_deliver_worker_codex_is_not_primed(monkeypatch):

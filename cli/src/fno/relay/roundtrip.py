@@ -589,11 +589,26 @@ _PRIME_TIMEOUT_SEC = 60.0
 # was captured as the reply).
 _PRIME_STABLE_POLLS = 3
 
-# Per-worker primed state for THIS relay process: short_id -> the frozenset of
-# sentinel matches present in the idle pane after priming (the discard set). A
-# fresh process re-primes idempotently (re-asserts the same format). A failed
-# prime is NOT recorded, so a later deliver re-attempts it (AC8-FR).
-_PRIMED_WORKERS: dict[str, frozenset] = {}
+# Per-worker primed state for THIS relay process: short_id -> (socket identity,
+# the frozenset of sentinel matches present in the idle pane after priming -- the
+# discard set). The socket identity ((st_dev, st_ino)) is carried so a recreated
+# worker that REUSES the same short_id (e.g. `fno agents rm` then respawn under
+# the same agent name) does NOT inherit the stale primed entry: its new
+# worker.sock is a different inode, so the cache misses and we re-prime. Without
+# it the new session never gets RELAY_SYSTEM_PROMPT and relay delivery times out
+# (codex P2, PR #103). A fresh process re-primes idempotently; a failed prime is
+# NOT recorded, so a later deliver re-attempts it (AC8-FR).
+_PRIMED_WORKERS: dict[str, tuple[Optional[tuple], frozenset]] = {}
+
+
+def _sock_identity(sock: Path) -> Optional[tuple]:
+    """(st_dev, st_ino) of the worker socket, or None if it cannot be stat'd. Used
+    to invalidate the primed cache when a reused short_id points at a NEW socket."""
+    try:
+        st = sock.stat()
+        return (st.st_dev, st.st_ino)
+    except OSError:
+        return None
 
 
 def _prime_agy(
@@ -627,7 +642,14 @@ def _prime_agy(
     while time.monotonic() < deadline:
         time.sleep(_POLL_INTERVAL_SEC)
         snap = snapshot_via_worker(sock)
-        pane = _ANSI_RE.sub("", snap) if snap else ""
+        if snap is None:
+            # A None snapshot means the worker is unreachable / the RPC failed --
+            # NOT an empty pane. Conflating it with "" lets a worker that died
+            # after submit settle on last=="" and return frozenset() as a false
+            # prime success. Skip the poll so the prime times out instead (gemini
+            # HIGH, PR #103).
+            continue
+        pane = _ANSI_RE.sub("", snap)
         if pane == last:
             stable += 1
             if changed and stable >= _PRIME_STABLE_POLLS:
@@ -683,16 +705,20 @@ def deliver_worker(
     # priming echo + ack. claude/codex are spawn-steered and skip this entirely.
     discard: frozenset = frozenset()
     if provider in _RELAY_PRIME_PROVIDERS:
+        ident = _sock_identity(sock)
         cached = _PRIMED_WORKERS.get(short_id)
-        if cached is not None:
-            discard = cached
+        # Serve the cached discard set only when it belongs to THIS socket. A None
+        # ident (sock vanished) never matches, so it falls through to re-prime,
+        # which fails loud rather than serving a stale set for a dead worker.
+        if cached is not None and ident is not None and cached[0] == ident:
+            discard = cached[1]
         else:
             seen = _prime_agy(short_id, sock, provider, settle_ms=settle_ms, events_path=events_path)
             if seen is None:
                 raise RuntimeError(
                     f"relay_prime_failed: agy worker {short_id} did not confirm the steer"
                 )
-            _PRIMED_WORKERS[short_id] = seen
+            _PRIMED_WORKERS[short_id] = (ident, seen)
             discard = seen
 
     def capture() -> list:
