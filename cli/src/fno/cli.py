@@ -86,6 +86,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "find":          ("fno.graph.cli:cmd_find",            "Fuzzy search across graph entries."),
     "research":      ("fno.research:research_command",     "Retrieve + store: ddgs backbone -> self-fetch -> sources.jsonl."),
     "new":           ("fno.graph.cli:cmd_new",             "Create a new graph entry without a plan file."),
+    "test":          ("fno.test_cmd:test_command",         "Run pytest honestly: worktree-pinned PYTHONPATH, rtk-bypassed, real exit code."),
     "update":        ("fno.update:update_command",         "Reinstall fno from its source directory."),
     "upgrade":       ("fno.update:update_command",         "Reinstall fno from its source directory.", {"hidden": True}),
 }
