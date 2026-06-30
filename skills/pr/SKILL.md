@@ -39,6 +39,14 @@ Parse the first argument token:
 - **`create`** -> mode is `create`. Print `running create (PR via Haiku worker)`. The remaining tokens are create's own arguments. Go to "Step 2".
 - **`check`** -> mode is `check`. Print `running check (poll for review)`. The remaining tokens are check's arguments (`[PR#]`). Go to "Step 3".
 - **`merged`** -> mode is `merged`. Print `running merged (post-merge ritual)`. The remaining tokens are merged's arguments (`[PR#]`). Go to "Step 4".
+- **`merge`** -> ambiguous: one word off `merged`, and on the opposite side of the merge event. Do NOT guess. Print and stop with a non-zero result:
+
+  ```
+  '/pr merge' is ambiguous - did you mean:
+    fno pr merge   land the PR now (the merge primitive, a CLI verb)
+    /pr merged     run the post-merge ritual on an already-merged PR
+  ```
+
 - **any other non-empty token** -> this is an unknown mode (likely a typo). Do NOT default, do NOT guess. Print:
 
   ```
