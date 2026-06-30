@@ -705,6 +705,7 @@ def on_node_born(
     run_state: Optional[RunState] = None,
     graph_path: Optional[Path] = None,
     persisted: bool = False,
+    quiet: bool = False,
 ) -> Optional[ThinkSpawnResult]:
     """Single post-persist birth hook: every node-creation path routes here.
 
@@ -763,7 +764,7 @@ def on_node_born(
                 (e for e in read_graph(gp) if e.get("id") == node_id), node
             )
         return maybe_spawn_think(
-            durable, project_root=project_root, run_state=run_state
+            durable, project_root=project_root, run_state=run_state, quiet=quiet
         )
     except Exception as exc:  # noqa: BLE001 - additive; never wedge node birth
         _LOG.debug("on_node_born: non-fatal dispatch failure: %s", exc)
@@ -936,6 +937,7 @@ def maybe_spawn_think(
     env: Optional[dict] = None,
     run_state: Optional[RunState] = None,
     invocation_suffix: Optional[str] = None,
+    quiet: bool = False,
 ) -> ThinkSpawnResult:
     """Evaluate + execute the context /think spawn for a node at a trigger moment.
 
@@ -994,11 +996,15 @@ def maybe_spawn_think(
     cap = _max_per_run(project_root)
     if rs.spawned >= cap:
         if not rs.truncation_logged:
-            print(
-                f"spawn_think: blast-radius cap reached ({cap}); "
-                f"skipping further /think spawns this run",
-                file=sys.stderr,
-            )
+            # quiet: same stream-pollution reason as the offer print below - a
+            # bulk decompose --json over the cap must not leak this warning into
+            # a captured JSON stream. Still mark it handled so the cap is enforced.
+            if not quiet:
+                print(
+                    f"spawn_think: blast-radius cap reached ({cap}); "
+                    f"skipping further /think spawns this run",
+                    file=sys.stderr,
+                )
             rs.truncation_logged = True
         return skip("cap-exceeded", detail=f"max_per_run={cap}")
 
@@ -1017,11 +1023,16 @@ def maybe_spawn_think(
     #    the operator opted in via config.think_spawn.attended: spawn (AC4-HP, B).
     #    Default 'offer' is byte-for-byte x-6a10.
     if presence == "attended" and _attended_mode(project_root, env=environ) == "offer":
-        print(
-            f"spawn_think: OFFER PENDING (nothing spawned). "
-            f"Ask the operator whether to run `{seed.offer_line}` now, or skip.",
-            file=sys.stderr,
-        )
+        # quiet: a machine-mode caller (e.g. `decompose --json`) suppresses the
+        # human-facing offer print so it can't pollute a captured JSON stream; the
+        # durable EVENT_OFFERED below still fires, so the offer survives for
+        # `fno backlog pick`.
+        if not quiet:
+            print(
+                f"spawn_think: OFFER PENDING (nothing spawned). "
+                f"Ask the operator whether to run `{seed.offer_line}` now, or skip.",
+                file=sys.stderr,
+            )
         _emit(
             EVENT_OFFERED,
             {"node_id": node_id, "trigger": reason, "presence": "attended",

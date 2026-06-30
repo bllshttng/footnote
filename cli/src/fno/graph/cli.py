@@ -915,7 +915,11 @@ def cmd_decompose(
                 child = by_id.get(cid)
                 if child is not None:
                     # Already the persisted, slugged node -> skip the re-read.
-                    on_node_born(child, run_state=born_rs, persisted=True)
+                    # quiet in --json mode: the born-with-why offer is a human
+                    # prompt with no consumer in a machine pipe, and its stderr
+                    # print pollutes a captured JSON stream (test_json_output_shape).
+                    on_node_born(child, run_state=born_rs, persisted=True,
+                                 quiet=json_mode(ctx))
         except Exception:  # noqa: BLE001 - additive; never wedge the decompose
             pass
 
