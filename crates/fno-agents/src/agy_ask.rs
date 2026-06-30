@@ -29,7 +29,7 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -213,6 +213,116 @@ impl std::fmt::Display for AgyAskError {
 }
 
 impl std::error::Error for AgyAskError {}
+
+// ===========================================================================
+// Folder-trust pre-grant
+// ===========================================================================
+
+/// Grant agy folder-trust for `cwd` by upserting it into
+/// `~/.gemini/trustedFolders.json` — the record agy reads. agy shares Gemini's
+/// `~/.gemini/` config root but, unlike gemini, exposes no `--skip-trust` flag,
+/// so the spawn cannot bypass the prompt with an argv flag the way every gemini
+/// spawn does. This is the agy analogue of gemini's unconditional `--skip-trust`.
+///
+/// Without it, an INTERACTIVE agy worker launched in a not-yet-trusted cwd blocks
+/// on agy's "Do you trust this folder?" modal, which eats the relay's priming
+/// steer (`relay_prime_failed`) and the worker is born unusable.
+/// `--dangerously-skip-permissions` (already on the agy spawn) auto-approves tool
+/// calls only; it does not touch folder trust.
+///
+/// Best-effort: any I/O or parse failure logs once and returns, leaving agy to
+/// prompt exactly as before (no regression, no panic). Idempotent: a no-op when
+/// the cwd is already trusted or sits under a `TRUST_PARENT` ancestor.
+pub fn ensure_agy_folder_trusted(cwd: &Path) {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return; // HOME unset: best-effort, agy prompts as before.
+    };
+    ensure_trusted_at(&home.join(".gemini").join("trustedFolders.json"), cwd);
+}
+
+/// Inner, fully unit-testable core: upsert `cwd -> "TRUST_FOLDER"` into the
+/// trusted-folders map at `file`. Split out so tests can drive it against a temp
+/// dir without touching the real `~/.gemini` config.
+///
+/// Uses the cwd EXACTLY as agy will open it (absolute, NOT canonicalized): agy
+/// matches the literal cwd string it is launched in, so resolving symlinks (e.g.
+/// `/tmp` -> `/private/tmp` on macOS) would write a key agy never checks.
+/// Verified against a live agy `-i` probe.
+fn ensure_trusted_at(file: &Path, cwd: &Path) {
+    // Absolutize without canonicalizing (see fn doc). The daemon always forwards
+    // an absolute cwd; the relative branch is a defensive fallback.
+    let cwd_abs = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|d| d.join(cwd))
+            .unwrap_or_else(|_| cwd.to_path_buf())
+    };
+    let cwd_key = cwd_abs.to_string_lossy().into_owned();
+
+    // Read the existing map (absent -> empty). A parse failure or a non-object
+    // root is left UNTOUCHED — never clobber the user's real grants (shared with
+    // interactive gemini/agy).
+    let mut map: serde_json::Map<String, serde_json::Value> = match std::fs::read_to_string(file) {
+        Ok(s) if s.trim().is_empty() => serde_json::Map::new(),
+        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+            Ok(serde_json::Value::Object(m)) => m,
+            _ => {
+                eprintln!(
+                    "fno-agents: agy trust: {:?} is not a JSON object; leaving untouched",
+                    file
+                );
+                return;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(e) => {
+            eprintln!("fno-agents: agy trust: cannot read {:?}: {}", file, e);
+            return;
+        }
+    };
+
+    // Coverage check: exact key present (any value), or an ancestor TRUST_PARENT.
+    // Either way agy already trusts this cwd — no write.
+    if map.contains_key(&cwd_key) {
+        return;
+    }
+    for (k, v) in &map {
+        if v.as_str() == Some("TRUST_PARENT") && cwd_abs.starts_with(Path::new(k)) {
+            return;
+        }
+    }
+
+    // Grant only the exact cwd (TRUST_FOLDER, never TRUST_PARENT): never over-trust
+    // siblings/children the worker has no business in.
+    map.insert(
+        cwd_key,
+        serde_json::Value::String("TRUST_FOLDER".to_string()),
+    );
+
+    let Ok(serialized) = serde_json::to_string_pretty(&map) else {
+        return;
+    };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Atomic write: temp file alongside the target (same filesystem) + rename, so
+    // two racing agy spawns never publish a half-written file. Last writer wins;
+    // a lost insert self-heals on the next spawn (it re-detects + re-inserts).
+    let tmp = file.with_extension(format!("tmp.{}", std::process::id()));
+    if std::fs::write(&tmp, serialized.as_bytes()).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("fno-agents: agy trust: temp write failed near {:?}", file);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, file) {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!(
+            "fno-agents: agy trust: rename into {:?} failed: {}",
+            file, e
+        );
+    }
+}
 
 /// Result of a successful agy one-shot invocation.
 #[derive(Debug, Clone)]
@@ -566,4 +676,94 @@ pub fn maybe_run_agy_ask(home: &AgentsHome, params: &serde_json::Value, name: &s
          use 'fno agents spawn --provider agy --once <name> -m <prompt>' for a one-shot."
     );
     Some(2)
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    fn read_map(file: &Path) -> serde_json::Map<String, serde_json::Value> {
+        let s = std::fs::read_to_string(file).unwrap();
+        match serde_json::from_str(&s).unwrap() {
+            serde_json::Value::Object(m) => m,
+            other => panic!("not a JSON object: {other:?}"),
+        }
+    }
+
+    // AC4-EDGE: absent file -> created with exactly {cwd: "TRUST_FOLDER"}.
+    #[test]
+    fn absent_file_created_with_trust_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".gemini").join("trustedFolders.json");
+        let cwd = dir.path().join("work");
+        ensure_trusted_at(&file, &cwd);
+        let map = read_map(&file);
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get(cwd.to_string_lossy().as_ref())
+                .and_then(|v| v.as_str()),
+            Some("TRUST_FOLDER")
+        );
+    }
+
+    // AC3-UI: exact key already present (any value) -> no rewrite.
+    #[test]
+    fn exact_key_present_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("trustedFolders.json");
+        let cwd = dir.path().join("work");
+        let key = cwd.to_string_lossy().into_owned();
+        // Pre-seed with a DIFFERENT value to prove no rewrite (would flip to
+        // TRUST_FOLDER if we touched it).
+        std::fs::write(&file, format!("{{\n  {key:?}: \"TRUST_PARENT\"\n}}")).unwrap();
+        let before = std::fs::read_to_string(&file).unwrap();
+        ensure_trusted_at(&file, &cwd);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    // AC3-UI: cwd under an ancestor TRUST_PARENT entry -> no write.
+    #[test]
+    fn under_trust_parent_ancestor_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("trustedFolders.json");
+        let parent = dir.path().join("workspaces");
+        let cwd = parent.join("proj").join("wt");
+        let pkey = parent.to_string_lossy().into_owned();
+        std::fs::write(&file, format!("{{\n  {pkey:?}: \"TRUST_PARENT\"\n}}")).unwrap();
+        let before = std::fs::read_to_string(&file).unwrap();
+        ensure_trusted_at(&file, &cwd);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    // AC2-ERR: corrupt / non-object file -> left untouched, function returns.
+    #[test]
+    fn corrupt_file_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("trustedFolders.json");
+        let corrupt = "this is not json {{{";
+        std::fs::write(&file, corrupt).unwrap();
+        ensure_trusted_at(&file, &dir.path().join("work"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), corrupt);
+    }
+
+    // Invariants: existing unrelated entries preserved after an insert.
+    #[test]
+    fn existing_entries_preserved_on_insert() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("trustedFolders.json");
+        std::fs::write(&file, "{\n  \"/some/other/dir\": \"TRUST_FOLDER\"\n}").unwrap();
+        let cwd = dir.path().join("work");
+        ensure_trusted_at(&file, &cwd);
+        let map = read_map(&file);
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get("/some/other/dir").and_then(|v| v.as_str()),
+            Some("TRUST_FOLDER")
+        );
+        assert_eq!(
+            map.get(cwd.to_string_lossy().as_ref())
+                .and_then(|v| v.as_str()),
+            Some("TRUST_FOLDER")
+        );
+    }
 }

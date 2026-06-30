@@ -1323,6 +1323,17 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         None
     };
 
+    // Pre-trust the agy spawn cwd: agy has no `--skip-trust` flag, so an
+    // interactive agy worker launched in a not-yet-trusted cwd blocks on agy's
+    // "Do you trust this folder?" modal, which eats the relay's priming steer.
+    // Grant trust the same way a human "trust" click does. Best-effort + idempotent
+    // (a no-op when the cwd is already covered, e.g. under a TRUST_PARENT ancestor).
+    // Only the interactive PTY lane gates on folder trust; the headless `agy -p`
+    // one-shot (agy_ask) runs untrusted, so it is deliberately not wired here.
+    if provider == "agy" {
+        crate::agy_ask::ensure_agy_folder_trusted(&cwd);
+    }
+
     // Spawn the worker in its own process group (Outcome B: survives a kill of
     // the daemon's group; SIGKILL to the daemon pid alone never propagates).
     // We use std (not tokio) Command and forget the handle, then reap exited
