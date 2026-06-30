@@ -424,7 +424,8 @@ pub enum MainMode {
     /// One focused agent fills the main area at full width (Tab zooms here).
     Single,
     /// The selected agent's whole group tiles side-by-side in the main area.
-    /// The E5c default (AC-2): a space shows its members auto-tiled.
+    /// Reached via `Tab` from the `Single` default; was the E5c AC-2 default
+    /// before the 2026-06-29 reversal.
     GroupTile,
 }
 
@@ -478,10 +479,12 @@ impl RailState {
             selected_group_key: None,
             nav_mode: false,
             group_key,
-            // E5c AC-2: a space auto-tiles its members. GroupTile is the
-            // default so >1 agent in one project shows as tiled panes without a
-            // Tab toggle; a single-member space tiles as one full-width pane.
-            main_mode: MainMode::GroupTile,
+            // Single is the default (maintainer preference 2026-06-29,
+            // reversing E5c AC-2): a bare `grid` rests on one full-width focused
+            // pane, navigable up/down the rail, with `Tab` to tile the whole
+            // group side-by-side when the operator wants it. All entry paths
+            // funnel through `new()`, so this one seed sets the default.
+            main_mode: MainMode::Single,
             attention_filter: false,
         }
     }
@@ -1637,28 +1640,37 @@ mod tests {
         let mut rs = RailState::new(GroupKey::Cwd);
         assert_eq!(
             rs.main_mode,
-            MainMode::GroupTile,
-            "GroupTile (auto-tile) is the E5c default"
+            MainMode::Single,
+            "Single (one full-width pane) is the default"
         );
-        rs.toggle_main_mode();
-        assert_eq!(rs.main_mode, MainMode::Single, "Tab zooms to a single pane");
         rs.toggle_main_mode();
         assert_eq!(
             rs.main_mode,
             MainMode::GroupTile,
-            "Tab toggles back to GroupTile"
+            "Tab tiles the whole group"
         );
+        // Tab is an involution: two toggles from the Single default return to
+        // Single (round-trip identity, Invariants / "Tab involution").
+        rs.toggle_main_mode();
+        assert_eq!(rs.main_mode, MainMode::Single, "Tab toggles back to Single");
     }
 
     #[test]
-    fn ac_e5c_2_space_auto_tiles_members_by_default() {
-        // E5c AC-2: two agents in one project (cwd) render as two tiled panes
-        // within that space BY DEFAULT - GroupTile, no Tab toggle required.
-        let rs = RailState::new(GroupKey::Cwd);
+    fn ac_space_shows_single_pane_by_default() {
+        // Reverses E5c AC-2 (maintainer preference 2026-06-29): two agents in
+        // one project (cwd) rest on a single full-width focused pane BY DEFAULT
+        // - the group tiles only ON Tab, not without a keystroke.
+        let mut rs = RailState::new(GroupKey::Cwd);
+        assert_eq!(
+            rs.main_mode,
+            MainMode::Single,
+            "a space shows one focused pane by default"
+        );
+        rs.toggle_main_mode();
         assert_eq!(
             rs.main_mode,
             MainMode::GroupTile,
-            "a space auto-tiles its members by default (E5c AC-2)"
+            "the group still tiles, but only on Tab"
         );
     }
 
@@ -1762,17 +1774,17 @@ mod tests {
     #[test]
     fn ac4_fr_main_mode_survives_group_key_cycle() {
         // The chosen main_mode must persist across a `g` re-partition; only the
-        // key changes. Toggle off the GroupTile default to prove a non-default
+        // key changes. Toggle off the Single default to prove a non-default
         // choice survives too.
         let mut rs = RailState::new(GroupKey::Cwd);
-        assert_eq!(rs.main_mode, MainMode::GroupTile, "E5c default");
-        rs.toggle_main_mode(); // -> Single
-        assert_eq!(rs.main_mode, MainMode::Single);
+        assert_eq!(rs.main_mode, MainMode::Single, "single-pane default");
+        rs.toggle_main_mode(); // -> GroupTile
+        assert_eq!(rs.main_mode, MainMode::GroupTile);
         rs.cycle_group_key();
         assert_eq!(rs.group_key, GroupKey::Session);
         assert_eq!(
             rs.main_mode,
-            MainMode::Single,
+            MainMode::GroupTile,
             "regroup keeps the chosen main_mode"
         );
     }

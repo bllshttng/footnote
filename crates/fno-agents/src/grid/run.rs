@@ -3173,10 +3173,10 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // pane, keeping rail_rows 1:1 with panes (codex peer-review P2).
     let mut rail_rows: Vec<Value> = initial_rail_rows;
     // If launched with the rail, size the panes for the INITIAL main_mode so
-    // the first frame is correct without waiting for a resize event. GroupTile
-    // is the E5c default (AC-2), so a space with >1 live agent must tile its
-    // members from frame one; Single sizes the focused pane to the full main
-    // area (gemini HIGH). Mirrors the `Tab`-toggle resize paths (codex P2).
+    // the first frame is correct without waiting for a resize event. Single is
+    // the default, so a bare `grid` sizes the focused pane to the full
+    // main area from frame one; GroupTile (reached via `Tab`) tiles the space's
+    // members instead. Mirrors the `Tab`-toggle resize paths (codex P2).
     if let Some(rs) = rail_state.as_ref() {
         match rs.main_mode {
             group::MainMode::GroupTile => {
@@ -6976,7 +6976,8 @@ mod tests {
             cols: 80,
         };
         let mut rs = group::RailState::new(group::GroupKey::Cwd);
-        // E5c flips the default to GroupTile; force Single for this leg.
+        // Single is the default; set it explicitly so this leg is
+        // self-documenting and independent of the constructor seed.
         rs.main_mode = group::MainMode::Single;
 
         // Single mode -> the mode token reads `single |` (and never `tile |`).
