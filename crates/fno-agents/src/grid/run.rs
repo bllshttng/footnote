@@ -2400,14 +2400,17 @@ fn rail_group_page_members(
         .collect()
 }
 
-/// Resolve the rail main-area pane under `(col, row)` in GroupTile, recomputing
-/// the rail page layout from current state so it matches what the renderer drew
-/// (geometry is never cached from the painted frame - it would go stale as the
-/// fleet changes between frames). Returns the global pane index plus the occupied
-/// group's `key_value`, so the caller can re-anchor the rail selection onto the
-/// clicked tile. `None` for Single main mode, an empty/absent group, a too-small
-/// layout, or a click that lands on no tile (footer / inter-tile gutter / past
-/// the last tile) - each a silent no-op.
+/// Resolve the rail main-area pane under `(col, row)`, recomputing the layout
+/// from current state so it matches what the renderer drew (geometry is never
+/// cached from the painted frame - it would go stale as the fleet changes
+/// between frames). Returns the global pane index plus the occupied group's
+/// `key_value`, so the caller can re-anchor the rail selection onto the hit
+/// tile. In GroupTile the cursor picks one of the tiled members; in Single the
+/// one pane filling the main area is the selected/driven member (so the wheel
+/// can scroll it - the click arm treats Single as a no-op upstream since that
+/// pane is already driven). `None` for an empty/absent group, a too-small
+/// layout, or a cursor on no tile (footer / inter-tile gutter / rail column /
+/// past the last tile) - each a silent no-op.
 #[allow(clippy::too_many_arguments)]
 fn rail_main_hit(
     rs: &group::RailState,
@@ -2419,30 +2422,53 @@ fn rail_main_hit(
     col: u16,
     row: u16,
 ) -> Option<(usize, String)> {
-    if !matches!(rs.main_mode, group::MainMode::GroupTile) {
-        return None;
-    }
     let groups = rail_view_groups(rail_rows, rs, panes, states, squads);
     let sel_group = rs.selected_group(&groups)?;
-    let live_group = live_group_of(sel_group, states);
-    if live_group.members.is_empty() {
-        return None;
-    }
-    let page = rs.selected_group_page(&live_group, main_capacity(tty));
-    let rail_page =
-        layout::compute_with_rail_page(tty, layout::RAIL_COLS, live_group.members.len(), page)
+    match rs.main_mode {
+        group::MainMode::GroupTile => {
+            let live_group = live_group_of(sel_group, states);
+            if live_group.members.is_empty() {
+                return None;
+            }
+            let page = rs.selected_group_page(&live_group, main_capacity(tty));
+            let rail_page = layout::compute_with_rail_page(
+                tty,
+                layout::RAIL_COLS,
+                live_group.members.len(),
+                page,
+            )
             .ok()?;
-    // `pane_at` returns `page_start + slot`; recover the slot to index the shared
-    // page_members table (so render and hit-test cannot disagree on slot -> gidx).
-    let member_pos = rail_page.main.pane_at(col, row)?;
-    let slot = member_pos.checked_sub(rail_page.main.page_start)?;
-    let page_members = rail_group_page_members(
-        &live_group.members,
-        rail_page.main.page_start,
-        rail_page.main.tiles.len(),
-    );
-    let gidx = *page_members.get(slot)?;
-    Some((gidx, sel_group.key_value.clone()))
+            // `pane_at` returns `page_start + slot`; recover the slot to index the
+            // shared page_members table (so render and hit-test cannot disagree on
+            // slot -> gidx).
+            let member_pos = rail_page.main.pane_at(col, row)?;
+            let slot = member_pos.checked_sub(rail_page.main.page_start)?;
+            let page_members = rail_group_page_members(
+                &live_group.members,
+                rail_page.main.page_start,
+                rail_page.main.tiles.len(),
+            );
+            let gidx = *page_members.get(slot)?;
+            Some((gidx, sel_group.key_value.clone()))
+        }
+        group::MainMode::Single => {
+            // One pane fills the main area: the selected/driven member. Hit-test
+            // the single main tile so a cursor on the footer or rail column is
+            // still ignored. `end()` is private to layout, so test the half-open
+            // rect inline against the pub fields (mirrors `PageLayout::pane_at`).
+            let rail_layout = layout::compute_with_rail(tty, layout::RAIL_COLS, 1).ok()?;
+            let tile = rail_layout.main.tiles.first()?;
+            let in_tile = row >= tile.row
+                && row < tile.row + tile.rows
+                && col >= tile.col
+                && col < tile.col + tile.cols;
+            if !in_tile {
+                return None;
+            }
+            let gidx = rs.selected_agent_idx?;
+            Some((gidx, sel_group.key_value.clone()))
+        }
+    }
 }
 
 /// The unfiltered base groups for the active view: the manual squads from the
@@ -4408,17 +4434,22 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                             // here so they never allocate a layout.
                             match m.kind {
                                 MouseEventKind::Down(MouseButton::Left)
-                                    if comp.mode() == Mode::Drive =>
+                                    if comp.mode() == Mode::Drive
+                                        && matches!(
+                                            rs.main_mode,
+                                            group::MainMode::GroupTile
+                                        ) =>
                                 {
                                     // GroupTile only: clicking a member's tile
-                                    // drives it. Focus routes the owned-PTY input;
-                                    // the rail accent is driven by
-                                    // selected_agent_idx (not comp.focus), so it
-                                    // must re-anchor too or the visible accent
-                                    // desyncs from where keystrokes land. Set the
-                                    // (agent, group key) pair together per the
-                                    // RailState field invariant. A click on dead
-                                    // space resolves to None -> silent no-op.
+                                    // drives it. (Single click is a no-op - the one
+                                    // pane is already driven - so it falls through.)
+                                    // Focus routes the owned-PTY input; the rail
+                                    // accent is driven by selected_agent_idx (not
+                                    // comp.focus), so it must re-anchor too or the
+                                    // visible accent desyncs from where keystrokes
+                                    // land. Set the (agent, group key) pair together
+                                    // per the RailState field invariant. A click on
+                                    // dead space resolves to None -> silent no-op.
                                     if let Some((gidx, key)) = rail_main_hit(
                                         rs, &rail_rows, &panes, &states, &squad_store, tty,
                                         m.column, m.row,
