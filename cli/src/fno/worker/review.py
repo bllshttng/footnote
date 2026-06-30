@@ -156,6 +156,22 @@ def _read_cross_model_config() -> tuple[dict[str, str], bool]:
         return {}, False
 
 
+def resolve_session_id(
+    session_id: Optional[str], state_path: Path
+) -> Optional[str]:
+    """Resolve the session nonce: explicit arg, else the state file's value.
+
+    The ONE place both the panel run (``review``) and the ``--print-providers``
+    accessor resolve the session, so the implementer-provider read - which
+    ``alternate`` cross-model routing excludes - is identical across the two
+    surfaces (no drift). Returns ``None`` when neither source has it; callers
+    decide whether that is fatal (the panel raises; routing defaults to claude).
+    """
+    if session_id:
+        return session_id
+    return _read_state(state_path).get("session_id")
+
+
 def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
     """Resolve every panel agent -> provider via the SAME path the panel uses.
 
@@ -252,9 +268,7 @@ def review(
     state_path = Path(state_path)
 
     # Resolve session_id
-    if session_id is None:
-        state = _read_state(state_path)
-        session_id = state.get("session_id")
+    session_id = resolve_session_id(session_id, state_path)
     if not session_id:
         raise ValueError("session_id must be provided or present in state file")
 

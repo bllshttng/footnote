@@ -142,3 +142,45 @@ def test_print_providers_flag_emits_routing_json(
     routing = json.loads(result.stdout.strip())
     assert routing["code_reviewer"]["provider"] == "codex"
     assert set(routing) == set(AGENT_NAMES)
+
+
+# ---- session resolution parity with the panel (Gemini HIGH: no drift) ----
+
+
+def test_resolve_session_id_prefers_explicit_then_state(tmp_path) -> None:
+    state = tmp_path / "target-state.md"
+    state.write_text("---\nsession_id: FROM-STATE\n---\n", encoding="utf-8")
+    # explicit wins
+    assert review_mod.resolve_session_id("EXPLICIT", state) == "EXPLICIT"
+    # falls back to the state file
+    assert review_mod.resolve_session_id(None, state) == "FROM-STATE"
+    # neither -> None (caller defaults; routing -> claude implementer)
+    assert review_mod.resolve_session_id(None, tmp_path / "missing.md") is None
+
+
+def test_print_providers_resolves_session_from_state(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--print-providers without --session-id reads session from state, like the
+    panel run, so the implementer-provider (excluded by `alternate`) matches."""
+    state = tmp_path / "target-state.md"
+    state.write_text("---\nsession_id: SESS-FROM-STATE\n---\n", encoding="utf-8")
+    monkeypatch.setattr(
+        review_mod,
+        "_read_cross_model_config",
+        lambda: ({"code_reviewer": "codex"}, True),
+    )
+    seen: dict[str, str] = {}
+
+    def _fake_impl(sid: str) -> str:
+        seen["sid"] = sid
+        return "claude"
+
+    monkeypatch.setattr(pr, "load_implementer_provider", _fake_impl)
+    monkeypatch.setattr(pr, "available_provider_kinds", lambda: ["claude", "codex"])
+
+    result = CliRunner().invoke(
+        app, ["review", "--print-providers", "--state", str(state)]
+    )
+    assert result.exit_code == 0
+    assert seen["sid"] == "SESS-FROM-STATE"

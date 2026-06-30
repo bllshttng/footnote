@@ -397,15 +397,20 @@ def review(
     # OFF). This is the seam that lets /review sigma honor config.review.cross_model
     # without a parallel resolver (US3, no drift).
     if print_providers:
-        from fno.worker.review import panel_provider_routing
+        from fno.worker.review import panel_provider_routing, resolve_session_id
 
+        # Resolve the session the SAME way the panel run does (explicit flag,
+        # else target-state.md) so the implementer-provider read - which
+        # `alternate` routing excludes - matches; otherwise the skill could
+        # resolve a different provider than the panel (drift).
+        sid = resolve_session_id(session, state or Path(".fno/target-state.md"))
         routing = {
             agent: {
                 "provider": rp.provider,
                 "degraded": rp.degraded,
                 "reason": rp.reason,
             }
-            for agent, rp in panel_provider_routing(session).items()
+            for agent, rp in panel_provider_routing(sid).items()
         }
         typer.echo(json.dumps(routing))
         return
