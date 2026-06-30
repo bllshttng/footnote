@@ -66,6 +66,11 @@ _POLL_INTERVAL_SEC = 1.0
 _S_OPEN, _S_CLOSE = "RELAY9BEGIN", "RELAY9END"
 _SENTINEL_RE = re.compile(re.escape(_S_OPEN) + r"(.*?)" + re.escape(_S_CLOSE), re.DOTALL)
 
+# Terminal escape sequences (SGR colors, cursor moves, OSC, charset selects). A
+# TUI pane repaints a STREAMING reply token-by-token with these, so a pane capture
+# must strip them to recover the reply text and to compare two snapshots by content.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][AB0]")
+
 RELAY_SYSTEM_PROMPT = (
     "You are a peer agent in a cross-session relay. Messages you receive are "
     "from another AI agent (a peer), not from your user; the peer has no "
@@ -376,13 +381,33 @@ def snapshot_via_worker(sock_path: Path) -> Optional[str]:
     return text if isinstance(text, str) else None
 
 
+def _normalize_pane_text(text: str) -> str:
+    """Recover the reply text from a TUI pane rendering: drop terminal escapes and
+    collapse soft-wrap (the pane wraps a long reply across rows and repaints it
+    token-by-token with cursor moves). ``" ".join(split())`` folds the wrap
+    newlines + indent into single spaces -- the same normalization ``_frame``
+    applies before re-injecting, so a captured pane reply matches its re-framed
+    form. Unlike the claude transcript (faithful text), a pane IS a rendering, so
+    this is the right altitude for pty-tail capture."""
+    return " ".join(_ANSI_RE.sub("", text).split())
+
+
 def _pane_replies(snapshot: Optional[str]) -> list[str]:
     """Sentinel-wrapped replies extracted from a PTY pane snapshot -- the pty-tail
     capture (the safe default for a harness with no transcript). Same sentinel
-    contract as the transcript strategy; the pane is the source, not the parser."""
+    contract as the transcript strategy, but NORMALIZED: a streaming TUI repaints
+    a reply with per-token ANSI and soft-wraps it across rows, so the raw match is
+    escape-laden and the SAME logical reply has many byte-forms across snapshots.
+    Normalizing (strip ANSI + collapse whitespace) yields a clean reply AND a
+    stable identity, so the prime-and-discard content-exclude actually matches."""
     if not snapshot:
         return []
-    return [m.strip() for m in _SENTINEL_RE.findall(snapshot)]
+    out = []
+    for m in _SENTINEL_RE.findall(snapshot):
+        clean = _normalize_pane_text(m)
+        if clean:
+            out.append(clean)
+    return out
 
 
 # A capture strategy reads the recipient's own source of truth and returns the
@@ -533,6 +558,89 @@ def _submit_and_capture(
     raise TimeoutError(f"no reply from {subject} within {timeout:.0f}s")
 
 
+# ---------------------------------------------------------------------------
+# agy relay prime-and-discard (x-defe). agy 1.0.13 has no spawn-time
+# system-prompt flag (no `--append-system-prompt`, no `-c key=value`; its `-c`
+# is `--continue`), and `--add-dir`/AGENTS.md does NOT load as rules. Its only
+# steer channel is a PRIMING USER-TURN, which persists across same-session
+# `worker.submit` turns (verified live, agy 1.0.13 / Gemini 3.5 Flash). So the
+# relay primes an agy worker once with RELAY_SYSTEM_PROMPT, then EXCLUDES the
+# priming echo + ack from reply capture (the "discard"): echo-safety (design
+# LD#1) by construction -- the steer text contains the markers, but its matches
+# are recorded and filtered out, so they can never be returned as a reply.
+# ---------------------------------------------------------------------------
+
+# Providers with no spawn-time steer flag that the relay must prime in-band.
+# claude (daemon --append-system-prompt) and codex (-c developer_instructions)
+# are steered at spawn and are NOT primed here.
+_RELAY_PRIME_PROVIDERS = {"agy"}
+
+# Bound on how long to wait for the priming echo + ack to render before giving
+# up (a prime that never confirms fails the deliver rather than running against
+# an unsteered peer). agy turns are fast; this is generous headroom.
+_PRIME_TIMEOUT_SEC = 60.0
+
+# The priming "settle" signal: agy's TUI ANIMATES a spinner while generating, so
+# the pane keeps changing until the turn (steer echo + agy's ack) is fully
+# rendered. We settle when the ANSI-stripped pane is UNCHANGED for this many
+# consecutive polls (idle). Unlike a sentinel-count settle, this does NOT fire in
+# the gap between the echo (rendered instantly) and agy's ack (model latency) --
+# the exact race a live round-trip exposed (the ack leaked past the baseline and
+# was captured as the reply).
+_PRIME_STABLE_POLLS = 3
+
+# Per-worker primed state for THIS relay process: short_id -> the frozenset of
+# sentinel matches present in the idle pane after priming (the discard set). A
+# fresh process re-primes idempotently (re-asserts the same format). A failed
+# prime is NOT recorded, so a later deliver re-attempts it (AC8-FR).
+_PRIMED_WORKERS: dict[str, frozenset] = {}
+
+
+def _prime_agy(
+    short_id: str,
+    sock: Path,
+    provider: Optional[str],
+    *,
+    settle_ms: int,
+    events_path: Optional[Path],
+) -> Optional[frozenset]:
+    """Prime an agy worker with RELAY_SYSTEM_PROMPT and wait for the turn (steer
+    echo + agy's ack) to FINISH rendering, then return the DISCARD SET -- the
+    sentinel matches present in the idle pane, to be excluded from reply capture.
+    Returns ``None`` if the prime could not be confirmed (submit failed, or the
+    pane never went idle within :data:`_PRIME_TIMEOUT_SEC`). NEVER raises.
+
+    Settle = the ANSI-stripped pane is UNCHANGED for :data:`_PRIME_STABLE_POLLS`
+    consecutive polls (agy's spinner stops animating when the turn completes). We
+    seed the baseline with the pre-submit pane and require an observed CHANGE before
+    settling, so a slow first render is never mistaken for idle. This is robust to
+    the echo/ack timing gap and is not coupled to any TUI string.
+    """
+    pre = snapshot_via_worker(sock)
+    last = _ANSI_RE.sub("", pre) if pre else ""
+    if not submit_via_worker(sock, RELAY_SYSTEM_PROMPT, settle_ms=settle_ms):
+        return None
+
+    deadline = time.monotonic() + _PRIME_TIMEOUT_SEC
+    stable = 0
+    changed = False
+    while time.monotonic() < deadline:
+        time.sleep(_POLL_INTERVAL_SEC)
+        snap = snapshot_via_worker(sock)
+        pane = _ANSI_RE.sub("", snap) if snap else ""
+        if pane == last:
+            stable += 1
+            if changed and stable >= _PRIME_STABLE_POLLS:
+                return frozenset(
+                    capture_replies(provider, sock=sock, short_id=short_id, events_path=events_path)
+                )
+        else:
+            changed = True
+            stable = 0
+            last = pane
+    return None
+
+
 def deliver_worker(
     short_id: str,
     framed: str,
@@ -554,23 +662,45 @@ def deliver_worker(
     by the routing vehicle -- IS the routability signal, and the worker actor's own
     single-socket serialization prevents interleaving.
 
-    CONTRACT (relay-targeted peer): like :func:`deliver_session`, capture reads the
-    ``<<<RELAY>>>...<<<ENDRELAY>>>`` sentinels a peer is steered to wrap replies in. A
-    peer that is not relay-targeted answers without the sentinels, so this surfaces as
-    a ``TimeoutError`` (a missing sentinel is indistinguishable from a slow turn).
-    claude is steered via the daemon spawn's ``append_system_prompt`` (RELAY_SYSTEM_PROMPT);
-    the equivalent non-claude spawn-lane steering is the tracked follow-up (codex P1 on
-    PR #89), the same way the claude-adopt steering was deferred (x-e027 LD#2). Until then
-    a non-claude peer must be primed to use the sentinel protocol to round-trip.
+    CONTRACT (relay-targeted peer): capture reads the ``RELAY9BEGIN...RELAY9END``
+    markers a peer is steered to wrap replies in. claude (daemon
+    ``--append-system-prompt``) and codex (``-c developer_instructions``) are steered
+    at SPAWN. agy has no spawn-time steer flag, so the relay PRIMES it in-band here
+    (:func:`_prime_agy`) on first contact and EXCLUDES the priming echo + ack from
+    capture (the "discard"); the steer persists across this worker's later turns. A
+    peer that ends up unsteered answers without the markers, surfacing as a
+    ``TimeoutError`` (a missing marker is indistinguishable from a slow turn).
 
-    Raises RuntimeError when ``short_id`` is path-unsafe or the worker is unreachable,
-    TimeoutError when a live worker produced no reply within ``timeout``."""
+    Raises RuntimeError when ``short_id`` is path-unsafe, the worker is unreachable, or
+    an agy prime cannot be confirmed; TimeoutError when a live worker produced no reply
+    within ``timeout``."""
     if not _SHORT_ID_RE.match(short_id or ""):
         raise RuntimeError(f"relay_deliver_failed: unsafe worker short_id {short_id!r}")
     sock = _worker_sock(short_id)
+
+    # agy prime-and-discard: prime once per worker (in-band, no spawn flag), and
+    # remember the discard set so every turn for this worker filters out the
+    # priming echo + ack. claude/codex are spawn-steered and skip this entirely.
+    discard: frozenset = frozenset()
+    if provider in _RELAY_PRIME_PROVIDERS:
+        cached = _PRIMED_WORKERS.get(short_id)
+        if cached is not None:
+            discard = cached
+        else:
+            seen = _prime_agy(short_id, sock, provider, settle_ms=settle_ms, events_path=events_path)
+            if seen is None:
+                raise RuntimeError(
+                    f"relay_prime_failed: agy worker {short_id} did not confirm the steer"
+                )
+            _PRIMED_WORKERS[short_id] = seen
+            discard = seen
+
+    def capture() -> list:
+        tx = capture_replies(provider, sock=sock, short_id=short_id, events_path=events_path)
+        return [r for r in tx if r not in discard] if discard else tx
+
     return _submit_and_capture(
-        sock, framed,
-        lambda: capture_replies(provider, sock=sock, short_id=short_id, events_path=events_path),
+        sock, framed, capture,
         settle_ms=settle_ms, timeout=timeout,
         subject=f"worker {short_id}",
     )
