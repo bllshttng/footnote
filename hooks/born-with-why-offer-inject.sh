@@ -74,6 +74,17 @@ printf '%s' "$size" > "$CURSOR" 2>/dev/null || true
 node_id="${parsed%%$'\t'*}"
 offer_cmd="${parsed#*$'\t'}"
 [[ -n "$node_id" ]] || exit 0
+
+# Resolve-guard: suppress a phantom offer whose node no longer resolves in the
+# backlog -- removed, superseded, or a never-persisted legacy-prefix id. There is
+# nothing to /think about, so surfacing it just nags the operator (recurring with
+# orphaned `ab-`-prefixed offers). The cursor already advanced above, so this
+# never re-fires for that offer. Degrade to surfacing when `fno` is unavailable,
+# so a missing resolver never suppresses a real offer.
+if command -v fno >/dev/null 2>&1 && ! fno backlog get "$node_id" >/dev/null 2>&1; then
+    exit 0
+fi
+
 # Fall back to the router-valid dispatch form if the event carried no offer_line.
 [[ -n "$offer_cmd" ]] || offer_cmd="/think dispatch ${node_id}"
 
