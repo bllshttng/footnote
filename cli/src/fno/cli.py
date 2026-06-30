@@ -364,6 +364,13 @@ def review(
         None, "--artifacts-dir", help="artifacts directory"
     ),
     no_cache: bool = typer.Option(False, "--no-cache", help="bypass cache"),
+    print_providers: bool = typer.Option(
+        False,
+        "--print-providers",
+        help="Print the per-agent cross-model provider routing as JSON and exit "
+        "(no panel run). The /review sigma skill consumes this so it dispatches "
+        "the same providers as the fno review panel.",
+    ),
     json_output: bool = typer.Option(
         False,
         "--json", "-J",
@@ -383,6 +390,25 @@ def review(
     ctx.ensure_object(dict)
     if json_output:
         ctx.obj["json"] = True
+
+    # --print-providers: resolve the per-agent routing via the SAME path the
+    # panel uses (worker.review.panel_provider_routing -> resolve_panel_providers)
+    # and exit before any diff/panel work. Empty {} means all-claude (cross-model
+    # OFF). This is the seam that lets /review sigma honor config.review.cross_model
+    # without a parallel resolver (US3, no drift).
+    if print_providers:
+        from fno.worker.review import panel_provider_routing
+
+        routing = {
+            agent: {
+                "provider": rp.provider,
+                "degraded": rp.degraded,
+                "reason": rp.reason,
+            }
+            for agent, rp in panel_provider_routing(session).items()
+        }
+        typer.echo(json.dumps(routing))
+        return
 
     state_path = state or Path(".fno/target-state.md")
 

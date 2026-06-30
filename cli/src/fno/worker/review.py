@@ -91,16 +91,13 @@ def build_review_runner(
             file=sys.stderr,
         )
 
-    resolved = {
-        agent: pr.resolve_agent_provider(
-            agent,
-            agent_providers=agent_providers,
-            implementer_provider=implementer_provider,
-            available_providers=available_providers,
-            known_agents=AGENT_NAMES,
-        )
-        for agent in base_prompts
-    }
+    resolved = pr.resolve_panel_providers(
+        list(base_prompts),
+        agent_providers=agent_providers,
+        implementer_provider=implementer_provider,
+        available_providers=available_providers,
+        known_agents=AGENT_NAMES,
+    )
     # Cache dimension = the per-agent REQUESTED routing (not just the set of
     # kinds), so two configs that assign the same kinds to different agents
     # (e.g. {code_reviewer: codex} vs {silent_failure_hunter: codex}) never
@@ -139,6 +136,53 @@ def build_review_runner(
     return _runner, prompts, provider_set
 
 
+def _read_cross_model_config() -> tuple[dict[str, str], bool]:
+    """Read ``(agent_providers, cross_model_enabled)``. Fail-safe to ``({}, False)``.
+
+    The one place both the panel runner and the ``--print-providers`` accessor
+    read the cross-model config, so they cannot disagree on whether cross-model
+    is engaged.
+    """
+    try:
+        from fno.config import load_settings
+
+        review_cfg = load_settings().config.review
+        return dict(review_cfg.agent_providers or {}), bool(review_cfg.cross_model.enabled)
+    except Exception as exc:  # noqa: BLE001 - never let config break review
+        print(
+            f"[review] cross-model config read failed; running all-claude: {exc}",
+            file=sys.stderr,
+        )
+        return {}, False
+
+
+def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
+    """Resolve every panel agent -> provider via the SAME path the panel uses.
+
+    The accessor behind ``fno review --print-providers``: it gives the
+    ``/review sigma`` skill the identical per-agent routing the ``fno review``
+    panel would dispatch, so the two surfaces never drift (the "one resolution
+    path" invariant). Returns an empty dict when cross-model is OFF (all-claude).
+    Never raises.
+    """
+    agent_providers, enabled = _read_cross_model_config()
+    if not (enabled or agent_providers):
+        return {}
+
+    from fno.review import provider_resolution as pr
+    from fno.review.orchestrator import AGENT_NAMES
+
+    implementer = pr.load_implementer_provider(session_id or "")
+    available = pr.available_provider_kinds()
+    return pr.resolve_panel_providers(
+        list(AGENT_NAMES),
+        agent_providers=agent_providers,
+        implementer_provider=implementer,
+        available_providers=available,
+        known_agents=AGENT_NAMES,
+    )
+
+
 def _resolve_cross_model_runner(
     session_id: str, *, worker_pids: list[int]
 ) -> tuple[Optional[Any], Optional[dict[str, str]], Optional[list[str]]]:
@@ -147,19 +191,7 @@ def _resolve_cross_model_runner(
     Returns ``(None, None, None)`` when cross-model is OFF, on any config-read
     failure (fail-safe to all-claude), or when the panel has no prompts.
     """
-    try:
-        from fno.config import load_settings
-
-        review_cfg = load_settings().config.review
-        agent_providers = dict(review_cfg.agent_providers or {})
-        enabled = bool(review_cfg.cross_model.enabled)
-    except Exception as exc:  # noqa: BLE001 - never let config break review
-        print(
-            f"[review] cross-model config read failed; running all-claude: {exc}",
-            file=sys.stderr,
-        )
-        return None, None, None
-
+    agent_providers, enabled = _read_cross_model_config()
     if not (enabled or agent_providers):
         return None, None, None
 
