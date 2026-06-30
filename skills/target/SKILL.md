@@ -11,6 +11,31 @@ requires:
     - "git >= 2.30"
 ---
 
+# Target
+
+**Get it done.** From idea to a green, reviewed PR.
+
+## The spine (happy path - read this first)
+
+```
+resolve node  →  fno target start <node>   worktree off origin/main + claim + init prints the orienter
+              →  implement                  edit the plan; atomic commits as you go
+              →  /review                     internal sigma panel (cheap insurance)
+              →  validate                    fno test  (real exit code; not bare pytest)
+              →  /pr create                  Haiku worker opens the PR
+              →  <promise>MISSION COMPLETE...  PR green + reviewed = done; you're bg, so hand the merge to a human
+```
+
+That is the whole job when a backlog node or plan is already bound. `fno target start` prints an orientation report (node, worktree, tests, done-when) - read it and go. Everything below is detail on a spine step or an **"only if"** branch you skip unless its trigger fires:
+
+- **only if** you were handed a bare idea (no plan): run `/think` then `/blueprint` before implementing.
+- **only if** `target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
+- **only if** dispatching nodes fire-and-forget: [§0a Background Dispatch](#0a-background-dispatch-bg).
+- **only if** spawned to de-stub a merged blocker: [§0b Reconcile mode](#0b-reconcile-mode---reconcile-manifest).
+- **only if** a Claude Plan-Mode plan was just approved: [§3f-pm Plan Mode Front Door](#3f-pm-plan-mode-front-door-mode-1-claude-code-only).
+
+---
+
 <HARD-GATE>
 NEVER edit ~/.fno/graph.json directly via Edit/Write tools or `jq -i`/`sed -i`.
 ALWAYS use `fno backlog` commands or call `locked_mutate_graph()` from Python.
@@ -25,10 +50,6 @@ There are NO gate booleans, NO `current_phase`, NO `status` field, NO `quality_c
 
 > **Multi-CLI:** If not on Claude Code, see [references/cli-tool-mapping.md](references/cli-tool-mapping.md) for tool equivalents.
 
-# Target
-
-**Get it done.** From idea to merged PR.
-
 Provider parity is hook-driven. The shared state machine and completion gates stay canonical; provider-specific behavior must come from the hooks layer and provider-scoped agent artifacts rather than from forked per-provider pipelines. Gemini's stable baseline is sequential fallback; it may upgrade into experimental project-agent mode only when the workspace explicitly opts in and `.gemini/agents/` is present.
 
 ## Optional: external loop wrapper
@@ -41,69 +62,13 @@ bash scripts/run-target-loop.sh path/to/plan/
 
 The wrapper re-invokes the CLI until the session terminates (DonePRGreen, Budget, NoProgress, or Interrupted). The in-Claude-Code interactive experience remains the recommended default for walk-up feature work. Note: the legacy `fno loop` verb is removed (step-5 group 3); `fno-agents loop-check` is the stop authority and `fno-agents loop run` is the loop runtime.
 
-## Completion Model
+## Completion: what you do
 
-### The immutable manifest
+Emit `<promise>MISSION COMPLETE: ...</promise>` when the PR is up and CI is green - **promise early**, the external reads hold it. An unsatisfied read just blocks-and-retries naming what is missing; a premature promise never short-circuits the gate. You are a bg/unattended agent, so your terminal state is a **green, reviewed, mergeable PR**, not a merged one: hand the merge to a human (any out-of-band merge also satisfies `done()`). The gate reads `config.review.required_bots` (default `["chatgpt-codex-connector"]`); internal `/review` is advisory.
 
-`target-state.md` is written once by `fno target init` and is never modified afterward. It is an input manifest: session_id, created_at, input, plan_path, target_size, skip flags (no_external, no_docs, no_ship, no_browser, no_clean, no_how_to, no_memory, no_deferrals_capture), has_ui, attended, advisory, budget caps, provider, owner binding fields, claude_transcript_id, cross_project, scratchpad_path, and auto_merge fields. The only legal post-init write is first-fill of an empty `plan_path` via `fno state set --field plan_path` (any other field write exits 5). There is no `status`, no `current_phase`, no `iteration`, no `blocked_reason`, no gate booleans, no provenance nonce.
+Run tests with `fno test [paths...]` (pins worktree `PYTHONPATH`, bypasses rtk, returns the real exit code) and read a PR's CI with `fno pr status <n>` (one `green|red|pending|unknown` verdict) - not bare `pytest` or hand-rolled `jq`. To cancel: `touch .fno/.target-cancelled`.
 
-### The stop hook shim
-
-`hooks/target-stop-hook.sh` is a 118-line read-only shim. It resolves the `fno-agents` binary in order: `$FNO_AGENTS_BIN`, repo `target/release`, repo `target/debug`, then PATH. When the binary is missing the shim emits a `loop_check_binary_missing` event to both `.fno/events.jsonl` and `~/.fno/events.jsonl` and allows exit (session must be re-spawned once the binary is available). The shim sources no `scripts/lib/*.sh` files and makes no decisions itself.
-
-### The loop-check verb
-
-The shim delegates all stop/allow logic to `fno-agents loop-check`. Output is one JSON object: `{decision, termination_reason, message, fires, fingerprint}`. Exit 0 for both allow and block; exit 2 for CLI misuse only.
-
-**Decision algorithm:**
-
-1. If `<aborted reason="...">` appears in transcript output: terminate with `Aborted`.
-2. If `<promise>MISSION COMPLETE: ...</promise>` appears: run the `done()` read. If the read passes, terminate with the appropriate `TerminationReason`. If an external read fails, block with the failing read named; the session continues.
-3. If no promise: run the backstop check.
-
-**`done()` reads** (what must be true when a promise is seen):
-
-- PR exists for HEAD commit and CI is green. When `no_ship: true`, this is skipped.
-- Every bot in `config.review.required_bots` has at least one completed review pass (default `["chatgpt-codex-connector"]`; explicit `[]` declares the no-review-gate path - PR + CI carry the gate). When `no_external: true` in the manifest, the review reads are skipped (step 2, ab-f1c5a9ed).
-- No unaddressed blocking inline finding (codex P1 / gemini critical|high on `/pulls/N/comments`). A finding is addressed when its thread has a non-bot reply AND (a fix commit landed after it OR the reply carries `wontfix:`). `/pr check` Step 8a is the matching writer.
-- CI is green on the PR. When `ci.declared_none: true` in settings, the CI read is skipped (the project declared CI is not applicable).
-- A promise with an unsatisfied read blocks with the failing read named (missing bot or finding path:line); the loop continues until the world catches up.
-
-**Backstop:** A 4-component fingerprint (`HEAD sha | PR state | CI conclusion | latest review/comment ts`) unchanged across N consecutive fires (3 unattended / 5 attended) terminates with `NoProgress`. A "done but mute" session (all reads pass but no promise) resolves as a late `DonePRGreen`. Budget cap (`config.budget` nested, or flat `budget_cap` fallback) terminates with `Budget`. gh-errored fires are transparent to the streak (an outage freezes it; budget is the sole ceiling), while a no-PR fire counts as real world-state.
-
-**TerminationReason enum:** `DonePRGreen | DoneAdvisory | NoWork | Budget | NoProgress | Interrupted | Aborted`
-
-Events land in both `.fno/events.jsonl` and `~/.fno/events.jsonl` with envelope `{ts, type, source:"hook", data}`. Event kinds: `loop_check`, `termination`, `loop_check_gh_error`, `loop_advisory_mode`, `loop_check_binary_missing`, `loop_check_legacy_manifest`.
-
-**Degraded modes:**
-
-- (a) No `gh` binary: advisory mode only. `promise` -> `DoneAdvisory`; `aborted` -> `Aborted`; unattended refuses. Cancel sentinel `.fno/.target-cancelled` -> `Interrupted`.
-- (b) Transient gh failure during a `done()` read: the affected read fails closed (emits `loop_check_gh_error`, blocks with the failing read named). The loop retries on the next stop-hook fire; the backstop clock keeps ticking.
-
-**Back-compat:** Legacy manifests (have a `status:` key, pre-wedge) trigger allow-exit immediately; a `loop_check_legacy_manifest` event is emitted and no `done()` or backstop runs. This lets old workflows exit cleanly without a full session restart.
-
-**Advisory units** (`no_ship: true` or `advisory: true` in manifest): promise + budget only. No gh machine needed.
-
-### The Golden Rule
-
-The loop continues until `<promise>MISSION COMPLETE: ...</promise>` AND the world agrees (PR green + reviewed), or a backstop, budget cap, or cancel sentinel terminates it. Emit `<promise>` only when the pipeline is genuinely done. The loop-check verb decides; you cannot self-authorize completion by writing to any file.
-
-To cancel: `touch .fno/.target-cancelled` (or invoke `/target cancel`). The shim detects the sentinel and terminates with `Interrupted`.
-
-### bg terminal state, promise timing, and the review gate (x-8b64)
-
-- **A bg/unattended agent cannot merge** (the two-factor merge guard refuses an unattended actor). Its terminal state is a **green, reviewed, mergeable PR**, not a merged one. Emit `<promise>MISSION COMPLETE: ...</promise>` once the PR is green and reviewed, then hand the merge off to a human. **Any merge path counts as done:** a PR merged out-of-band (web/mobile UI, or `gh pr merge`) satisfies `done()` as `DonePRGreen` on the next stop-hook fire - the loop stops re-poking a finished session.
-- **Promise early; the external reads hold it.** You do not need to wait for the external review to pass before emitting `<promise>`. Emit it when the work is shipped (PR up, CI green); if the required bot has not reviewed yet, the `done()` reads simply block-and-retry (naming the missing bot) until the world catches up. A premature promise is safe - it never short-circuits the gate.
-- **The gate reads `config.review.required_bots`, NOT `external_reviewers`.** Internal sigma-review is advisory; the external required bot is the gate. Read the current value with `fno config get review.required_bots` (the bare key works; the `config.` prefix is optional). An empty list declares the no-review-gate path (PR + CI carry the gate).
-
-### Running tests / reading CI here (x-8b64)
-
-- **Run the Python suite with `fno test [paths...]`**, not a bare `pytest`. It pins `PYTHONPATH` to the worktree source (a bare `pytest` in a worktree imports the *canonical* `fno`), bypasses rtk (a bare `pytest`/`cargo` can stall for minutes under rtk), and returns pytest's **real exit code** (no `... | tail && echo OK`, which masks failures into a false green). For `cargo`, prefix the run with `RTK_DISABLED=1` to take the same scoped rtk bypass.
-- **Read a PR's CI verdict with `fno pr status <n>`**, not hand-rolled `jq` over `statusCheckRollup` or `gh pr checks` (which disagrees with the rollup). It prints one JSON verdict (`green|red|pending|unknown`) and exits 0/1/2/3 accordingly; an in-progress check reads as pending, a PR with no checks reads as unknown - neither is a false red.
-
-### What changed (ab-d0337fbc)
-
-The pre-wedge control plane had three layers removed in Tasks 1.1-3.2: (1) the 1101-line bash stop hook with thrash/budget/phase-stall/help-escalation/orphan detectors and three-factor gate provenance machinery (~7575 LOC of `scripts/lib/` helpers deleted); (2) the `fno gate` CLI surface and `gates/` package (~1460 LOC + both `gate_reality_map.yaml` copies deleted); (3) the phase verifier scripts in `skills/target/scripts/verifiers/` (~900 LOC deleted). The replacement is `fno-agents loop-check` (a single Rust verb) + the 118-line shim.
+Completion is decided by `fno-agents loop-check` from external truth (PR + CI + review), not from any file you write - you cannot self-authorize. The full machinery (immutable manifest, stop-hook shim, `done()` read list, fingerprint backstop, `TerminationReason`, degraded modes) is one Read hop away in **[references/completion-model.md](references/completion-model.md)**.
 
 ## The Full Pipeline
 
@@ -152,7 +117,17 @@ Docs and browser testing run BEFORE `/pr create` so they ride in the same PR, ge
 
 See [references/usage-detail.md](references/usage-detail.md) for model-optimization rationale (when to keep Opus inline vs spawn cheaper agents).
 
-**CRITICAL:** All phases run by default. You do NOT decide which phases to skip. Only the user (via CLI flags) or project config (via `.fno/settings.yaml`) can skip phases. If neither sets a skip flag, the phase MUST run.
+**Phase applicability is judgment, not a gate.** Every phase above is available; run the ones the work needs. User skip flags (CLI) and project config (`.fno/settings.yaml`) still force-skip. Otherwise judge by what the change is:
+
+- **/think + /blueprint**: only if you started from a bare idea. A bound node or plan skips straight to implement.
+- **/do waves**: for a multi-task plan with parallelizable waves. A single-file or locked refactor runs **inline**, not through the wave orchestrator.
+- **/simplify (clean)**: only with the `clean` modifier, or on AI-slop-prone new code.
+- **/review**: run it; it is cheap insurance. For a tiny prose/config change a light self-review is enough.
+- **/ship-docs**: skip for an internal refactor with no public API or architecture change; run it when behavior or a public surface changed.
+- **browser testing**: only if `has_ui`.
+- **/pr create + `<promise>`**: always. That is the deliverable.
+
+When unsure whether ceremony applies, prefer running it. But never let "did every phase fire?" gate the promise - completion is the world (PR green + reviewed), not a phase checklist.
 
 ## Usage
 
@@ -327,12 +302,14 @@ Even when skipped, the skip is recorded in target-state.md so it's auditable.
 
 **What gets checked:** See [references/preflight-checks.md](references/preflight-checks.md) for the full check catalog (working tree clean, branch state, deps installed, auth valid, disk space, codemap freshness). Checks that produce `warn` or `unknown` do not block - only `fail` status blocks.
 
-### 3h. Phase Handoff Artifacts (MANDATORY)
+### 3h. Phase Handoff Artifacts (best-effort)
 
-Each phase writes a small structured artifact at the end of its work and reads
-the prior phase's artifact at the start. This gives every pipeline transition a
-clean handoff without requiring the next phase to reconstruct context from the
-full session transcript.
+Best-effort, not a gate: `loop-check` never reads these, so a missing artifact
+never blocks completion. They are a convenience - each phase writes a small
+structured artifact at the end of its work and reads the prior phase's at the
+start, so a pipeline transition has a clean handoff without the next phase
+reconstructing context from the full session transcript. Write them when the run
+spans multiple phases; skip them for a short single-phase change.
 
 **Source the helper at the start of each phase:**
 
@@ -602,6 +579,7 @@ Configuration lives in `.fno/settings.yaml` (project-local) with `~/.fno/setting
 
 ## References
 
+- [references/completion-model.md](references/completion-model.md) - Completion internals: manifest, stop-hook shim, loop-check verb, done() reads, backstop, TerminationReason
 - [references/state-schema.md](references/state-schema.md) - Immutable manifest field list and write-once rule
 - [references/size-profiles.md](references/size-profiles.md) - Size capability matrix
 - [references/flag-migration.md](references/flag-migration.md) - Override-flag list
