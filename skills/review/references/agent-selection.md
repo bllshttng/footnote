@@ -226,45 +226,38 @@ If `pnpm test` or `pnpm typecheck` fails:
 - Report the failure prominently (not buried in the report)
 - The review verdict MUST be "FAIL" regardless of agent results
 
-## Per-Agent Provider Pinning
+## Cross-Model Provider Routing
 
-Each agent in the selection matrix can be pinned to a specific LLM provider via `config.agents.<name>.provider` in `.fno/settings.yaml`. This is Spec 3 of the provider rotation initiative (`ab-978e93ed`).
+Panel agents can be routed to a different coding model (`codex` / `gemini`) via
+`config.review.cross_model` / `config.review.agent_providers` in
+`.fno/settings.yaml` - the SAME config the internal `fno review` panel honors,
+resolved by the same `provider_resolution` path. `/review sigma` reads it through
+`fno review --print-providers`, so the two surfaces never drift.
 
 ### Config schema
 
 ```yaml
 config:
-  agents:
-    code-reviewer:
-      provider: claude-anthropic
-    silent-failure-hunter:
-      provider: gemini-pro-1
-    type-design-analyzer:
-      provider: glm-zhipu
+  review:
+    cross_model:
+      enabled: true        # correctness agents cross-model by default
+    agent_providers:       # optional explicit pins (override the default)
+      code_reviewer: codex
+      silent_failure_hunter: gemini
 ```
 
-The `<name>` key must exactly match the `subagent_type` string passed to `Task()` (case-sensitive). The valid names are the agent identifiers used throughout this document: `code-reviewer`, `silent-failure-hunter`, `type-design-analyzer`, `ux-flow-tester`, `multi-device-checker`, `integration-test-analyzer`.
+Agent keys are the orchestrator's **underscore** names (`code_reviewer`,
+`silent_failure_hunter`, `type_design_analyzer`, `ux_flow_tester`,
+`multi_device_checker`, `integration_test_analyzer`) - the `_`<->`-` mapping of
+the hyphenated `Task()` `subagent_type`. A key naming an unknown agent is warned
+and ignored. When neither key is set, the panel is byte-for-byte today's
+all-Claude run.
 
-### Back-compat default
+### Dispatch + degradation
 
-When `config.agents.<name>` is unset for an agent, that agent resolves to the globally active provider's id and cli. The `resolve_agent_provider(name)` helper performs this lookup; `resolve_agent_cli(provider_id)` maps the id to a CLI identifier (`claude`, `gemini`, `codex`, `openclaw`, `hermes`). Both are pure reads from loaded config.
-
-Pure-Claude runs (no `config.agents` block at all) are byte-for-byte identical to pre-Spec-3 behavior.
-
-### Dispatch primitives by CLI
-
-The resolved `cli` field determines which execution path runs inside `dispatch_sigma_subagent()`:
-
-| `cli` value | Dispatch primitive | Notes |
-|-------------|-------------------|-------|
-| `claude` | `Task(subagent_type=..., prompt=...)` | Skill owns the Task() call; context manager emits events only |
-| `gemini` | subprocess via `dispatch_sigma_subagent` | Context manager owns the subprocess |
-| `codex` | subprocess via `dispatch_sigma_subagent` | Prompt fed via stdin |
-| `openclaw` | subprocess via `dispatch_sigma_subagent` | Uses `-p` flag |
-| `hermes` | `NotImplementedError` (Spec 3 scope) | Route to another provider until hermes adapter ships |
-
-### Event evidence requirement
-
-`dispatch_sigma_subagent()` emits a paired `subagent_spawn` + `subagent_complete` event to `.fno/events.jsonl` for every subagent invocation. In mixed-provider runs (at least one non-Claude agent), the stop hook's `verify_event_evidence` path (Task 3.1, `ab-978e93ed`) validates these pairs before accepting the gate. Each pair must be on disk before `<promise>` is emitted.
-
-For the run-time dispatch pseudocode see the **Per-Agent Provider Routing** section.
+Resolution and dispatch (claude -> `Task()`; codex/gemini -> `fno agents spawn
+--once`; unavailable alternate -> graceful fallback to claude with a `reason`)
+are owned by the **Cross-Model Review Routing** section in `sigma.md`. The
+`dispatch_sigma_subagent()` helper (`cli/src/fno/sigma_dispatch.py`) may still
+emit the forensic `subagent_spawn` / `subagent_complete` event pair for
+non-Claude dispatches; it is forensics-only and does not affect the verdict.
