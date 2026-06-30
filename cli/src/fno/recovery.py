@@ -441,11 +441,30 @@ def _node_id_from_worktree(cwd: str) -> Optional[str]:
     return None
 
 
+def _node_is_done(node: str) -> bool:
+    """True iff ``node`` resolves in the graph and is already ``done``.
+
+    Guards the respawn against a node that raced to completion (x-370f AC1-EDGE):
+    re-dispatching a finished node would spawn a worker with nothing to do. Any
+    load miss (absent / corrupt graph, unknown id) degrades to False so the
+    respawn proceeds — the claim + spawn path is the real backstop, not this read.
+    """
+    try:
+        from fno.graph.load import load_graph
+
+        for entry in load_graph():
+            if entry.get("id") == node:
+                return entry.get("_status") == "done"
+    except Exception:  # noqa: BLE001 - a status read must never crash the sweep
+        return False
+    return False
+
+
 def _redispatch(candidate: "Candidate") -> bool:
-    """Best-effort: stop the rate-limited session and respawn ``/target`` on the
-    now-active (swapped) provider, continuing in the SAME worktree (work-so-far
-    lives in the branch's atomic commits there). Returns True iff a replacement
-    worker was actually launched (spawn exit 0).
+    """Stop the rate-limited session and respawn ``/target`` on the now-active
+    (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
+    branch's atomic commits there). Returns True iff a replacement worker was
+    actually launched (spawn exit 0).
 
     Caller guarantees the new active provider's cli is ``claude`` before calling,
     so the substrate is ``bg`` (claude-only) and ``--provider claude`` selects
@@ -453,13 +472,16 @@ def _redispatch(candidate: "Candidate") -> bool:
     non-claude swap cannot bg-redispatch a multi-phase /target, so the caller
     skips this entirely — codex P1.)
 
-    ponytail: best-effort respawn. The respawn is gravy on top of the rotation;
-    if it fails (claim still held, manifest already initialized, spawn errors)
-    this returns False and the caller falls back to the bounded nudge, so the
-    session is never left dead-and-unnudged. Upgrade path if respawn proves flaky
-    in the wild: harden claim-reclaim + worktree continuity (the edges that
-    cannot be verified offline). Reuses the canonical ``fno agents spawn
-    --substrate bg`` shape from dispatch-node.sh.
+    Ordered reuse-first sequence (x-370f residual 1): stop the worker, then
+    ``fno claim force-release`` the node claim (the verified reliability gap —
+    ``stop`` alone does NOT free the claim, per the auto-continue-wedge finding,
+    so without this the respawn's ``target init`` refuses on the held claim and
+    the node goes claimed-but-idle), then spawn via the canonical shape. A
+    non-zero force-release means the claim is still held → skip the spawn (it
+    would refuse anyway) and let the caller nudge. Any miss returns False and the
+    caller falls back to the bounded nudge, so the session is never left
+    dead-and-unnudged. Reuses the canonical ``fno agents spawn --substrate bg``
+    shape from dispatch-node.sh.
     """
     import subprocess
 
@@ -469,15 +491,36 @@ def _redispatch(candidate: "Candidate") -> bool:
     node = _node_id_from_worktree(cwd)
     if not node:
         return False
+    if _node_is_done(node):
+        # Raced to completion: nothing to continue, so do not re-dispatch.
+        return False
     name = getattr(candidate, "name", None)
     agent = f"failover-{candidate.short_id}"
     try:
         if name:
-            # Release the dead session's node claim so the respawn can re-claim.
-            subprocess.run(
+            # Kill the rate-limited worker. This does NOT free its node claim.
+            stopped = subprocess.run(
                 ["fno", "agents", "stop", name],
                 cwd=cwd, capture_output=True, timeout=30, check=False,
             )
+            if stopped.returncode != 0:
+                # Stop failed → the worker may still be live. force-releasing its
+                # claim (an admin override that drops it regardless of holder) and
+                # then spawning would put two /target workers on one node. Bail to
+                # the nudge to preserve the at-most-one-worker invariant (codex P2).
+                return False
+        # Free the dead session's node claim so the respawn can re-claim it.
+        # force-release is idempotent (a claim already self-released by a late
+        # worker is success), so this also covers the stop/self-release race.
+        rel = subprocess.run(
+            ["fno", "claim", "force-release", f"node:{node}",
+             "-R", f"failover respawn {candidate.short_id}"],
+            cwd=cwd, capture_output=True, timeout=30, check=False,
+        )
+        if rel.returncode != 0:
+            # Claim still held → a spawn would refuse on it. Bail so the caller
+            # nudges instead of reporting a respawn that cannot start.
+            return False
         # --provider claude: the swap already installed the new claude record as
         # active in settings.yaml, so the kind is what spawn needs. no-merge: an
         # autonomous worker lands a PR for review, never auto-merges.
