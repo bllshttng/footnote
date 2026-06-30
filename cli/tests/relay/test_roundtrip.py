@@ -67,7 +67,7 @@ def test_transcript_replies_faithful_text(tmp_path, monkeypatch):
     rows = [
         {"type": "user", "message": {"content": "hi"}},
         {"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "<<<RELAY>>>hello there friend<<<ENDRELAY>>>"}]}},
+            {"type": "text", "text": "RELAY9BEGINhello there friendRELAY9END"}]}},
     ]
     tx.write_text("\n".join(json.dumps(r) for r in rows))
     monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: str(tx))
@@ -88,7 +88,7 @@ def test_transcript_replies_robust_and_faithful(tmp_path, monkeypatch):
         json.dumps('a bare string containing "assistant" literally'),  # parses to str -> skip
         json.dumps({"type": "assistant", "message": "assistant"}),     # message non-dict -> skip
         json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "<<<RELAY>>>hi   there\tfriend<<<ENDRELAY>>>"}]}}),
+            {"type": "text", "text": "RELAY9BEGINhi   there\tfriendRELAY9END"}]}}),
     ]
     tx.write_text("\n".join(lines))
     monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: str(tx))
@@ -103,7 +103,7 @@ def test_transcript_replies_skips_non_string_text(tmp_path, monkeypatch):
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": None}]}}),
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": ["x"]}]}}),
         json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "<<<RELAY>>>ok now<<<ENDRELAY>>>"}]}}),
+            {"type": "text", "text": "RELAY9BEGINok nowRELAY9END"}]}}),
     ]
     tx.write_text("\n".join(lines))
     monkeypatch.setattr(rt_mod, "transcript_path_for", lambda sid, projects_dir=None: str(tx))
@@ -118,7 +118,7 @@ def test_transcript_replies_honors_config_dir(tmp_path):
     proj.mkdir(parents=True)
     (proj / "sess.jsonl").write_text(json.dumps(
         {"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "<<<RELAY>>>a b c<<<ENDRELAY>>>"}]}}))
+            {"type": "text", "text": "RELAY9BEGINa b cRELAY9END"}]}}))
     assert rt_mod._transcript_replies("sess", cfg) == ["a b c"]
 
 
@@ -644,10 +644,10 @@ def test_snapshot_via_worker_reads_pane_text(monkeypatch):
 
     def fake_rpc(sock, method, params, **kw):
         seen.update(method=method)
-        return {"text": "pane <<<RELAY>>>hi<<<ENDRELAY>>>", "child_alive": True}
+        return {"text": "pane RELAY9BEGINhiRELAY9END", "child_alive": True}
 
     monkeypatch.setattr(rt_mod, "_worker_rpc", fake_rpc)
-    assert rt_mod.snapshot_via_worker(rt_mod.Path("/x/worker.sock")) == "pane <<<RELAY>>>hi<<<ENDRELAY>>>"
+    assert rt_mod.snapshot_via_worker(rt_mod.Path("/x/worker.sock")) == "pane RELAY9BEGINhiRELAY9END"
     assert seen["method"] == "worker.snapshot"
 
 
@@ -660,7 +660,7 @@ def test_snapshot_via_worker_none_when_unreachable_or_malformed(monkeypatch):
 
 
 def test_pane_replies_extracts_sentinels_faithfully():
-    snap = "noise\n<<<RELAY>>>one two  three<<<ENDRELAY>>>\nmore noise"
+    snap = "noise\nRELAY9BEGINone two  threeRELAY9END\nmore noise"
     assert rt_mod._pane_replies(snap) == ["one two  three"]
     assert rt_mod._pane_replies(None) == []
     assert rt_mod._pane_replies("no sentinel here") == []
@@ -678,7 +678,7 @@ def test_capture_replies_codex_defaults_to_pty_tail(monkeypatch):
     # AC3-EDGE: a harness with no registered strategy (codex) captures via the
     # pty-tail default -- the "from structured output" assumption never blocks it.
     monkeypatch.setattr(rt_mod, "snapshot_via_worker",
-                        lambda sock: "<<<RELAY>>>codex says hi<<<ENDRELAY>>>")
+                        lambda sock: "RELAY9BEGINcodex says hiRELAY9END")
     assert rt_mod.capture_replies("codex", sock=rt_mod.Path("/x/w.sock")) == ["codex says hi"]
 
 
@@ -691,7 +691,7 @@ def test_capture_replies_degrades_to_pty_tail_on_drift(monkeypatch):
     monkeypatch.setitem(rt_mod._CAPTURE_STRATEGIES, "driftco", boom)
     monkeypatch.setattr(rt_mod, "harness_for_provider", lambda p: "driftco")
     monkeypatch.setattr(rt_mod, "snapshot_via_worker",
-                        lambda sock: "<<<RELAY>>>fallback reply<<<ENDRELAY>>>")
+                        lambda sock: "RELAY9BEGINfallback replyRELAY9END")
     events = []
     monkeypatch.setattr(rt_mod, "emit", lambda kind, **kw: events.append((kind, kw)))
     out = rt_mod.capture_replies("driftco", sock=rt_mod.Path("/x/w.sock"))
