@@ -2744,7 +2744,18 @@ async fn discover_children(
     // Read + parse the registry ONCE and reuse the rows for both the pane diff
     // and the roster diff (gemini PR #98). Absent / unparseable => empty (AC1-ERR /
     // read_registry_rows' empty-on-error contract), and we still return below.
-    let rows = read_registry_rows(&home);
+    //
+    // x-87f7 (PR #108 review): the grid runs on a current-thread tokio runtime
+    // (src/bin/client.rs), so `tokio::spawn` does NOT move work to another thread -
+    // a synchronous `std::fs::read` here would block the only runtime thread and
+    // still starve the key-event arm (defeating US1 / AC1-ERR). Run the blocking
+    // registry + roster reads on the blocking pool (enabled by `enable_all`) so the
+    // loop keeps polling input during a slow/large/NFS read. The probe below is
+    // async (socket I/O) and yields on its own, so it stays inline.
+    let home_for_read = home.clone();
+    let rows = tokio::task::spawn_blocking(move || read_registry_rows(&home_for_read))
+        .await
+        .unwrap_or_default(); // JoinError (closure panic) -> empty, keep always-return
 
     // x-c226: skip candidates whose `worker.ping` failed within FAILED_PROBE_TTL
     // (stable stream-json lanes), so the steady state truly probes nothing and a
@@ -2787,11 +2798,15 @@ async fn discover_children(
     // Roster diff: roster_bg_cards_from dedups against the registry rows, so a
     // session that became an fno pane above is NOT returned (AC3-EDGE). A missing /
     // unparseable roster yields zero cards (AC2-ERR). The apply arm additionally
-    // dedups vs the live `roster_cards`.
-    let cards = match crate::claude_roster::ClaudeRoster::load_default() {
-        Ok(r) => roster_bg_cards_from(&rows, &r.workers_deduped()),
-        Err(_) => Vec::new(),
-    };
+    // dedups vs the live `roster_cards`. The blocking roster file read runs on the
+    // blocking pool for the same current-thread reason as the registry read above;
+    // the cheap, pure card diff stays on this task (it borrows `rows`). A load Err
+    // OR a JoinError (closure panic) both degrade to zero cards.
+    let cards =
+        match tokio::task::spawn_blocking(crate::claude_roster::ClaudeRoster::load_default).await {
+            Ok(Ok(r)) => roster_bg_cards_from(&rows, &r.workers_deduped()),
+            _ => Vec::new(),
+        };
 
     DiscoveryResult {
         panes,
