@@ -622,3 +622,114 @@ class TestNodeIdFromWorktree:
 
     def test_missing_file_returns_none(self, tmp_path):
         assert recovery._node_id_from_worktree(str(tmp_path)) is None
+
+
+class TestNodeIsDone:
+    """x-370f AC1-EDGE: the already-done guard reads node status, fail-open."""
+
+    def _patch_graph(self, monkeypatch, entries):
+        from fno.graph import load as gl
+        monkeypatch.setattr(gl, "load_graph", lambda *a, **k: entries)
+
+    def test_true_when_done(self, monkeypatch):
+        self._patch_graph(monkeypatch, [{"id": "x-370f", "_status": "done"}])
+        assert recovery._node_is_done("x-370f") is True
+
+    def test_false_when_not_done(self, monkeypatch):
+        self._patch_graph(monkeypatch, [{"id": "x-370f", "_status": "claimed"}])
+        assert recovery._node_is_done("x-370f") is False
+
+    def test_false_when_absent(self, monkeypatch):
+        self._patch_graph(monkeypatch, [{"id": "x-other", "_status": "done"}])
+        assert recovery._node_is_done("x-370f") is False
+
+    def test_load_error_degrades_to_false(self, monkeypatch):
+        from fno.graph import load as gl
+
+        def boom(*a, **k):
+            raise RuntimeError("corrupt graph")
+
+        monkeypatch.setattr(gl, "load_graph", boom)
+        assert recovery._node_is_done("x-370f") is False
+
+
+class TestRedispatch:
+    """x-370f residual 1: failover respawn frees the dead session's claim via
+    ``fno claim force-release`` before spawning, skips an already-done node, and
+    bails to the nudge (False) when the claim cannot be freed."""
+
+    def _cand(self):
+        return recovery.Candidate(
+            short_id="aaaa1111", sock_path="/tmp/a.sock", jobs_dir=None,
+            cwd="/wt/x-370f", name="dead-worker",
+        )
+
+    def _patch_resolve(self, monkeypatch, node="x-370f", done=False):
+        monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: node)
+        monkeypatch.setattr(recovery, "_node_is_done", lambda n: done)
+
+    def _patch_run(self, monkeypatch, *, force_release_rc=0, spawn_rc=0):
+        """Stub subprocess.run; record the (markered) calls for assertions."""
+        from types import SimpleNamespace
+        import subprocess as sp
+
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:3] == ["fno", "claim", "force-release"]:
+                return SimpleNamespace(returncode=force_release_rc)
+            if cmd[:3] == ["fno", "agents", "spawn"]:
+                return SimpleNamespace(returncode=spawn_rc)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        return calls
+
+    @staticmethod
+    def _index_of(calls, marker):
+        return next((i for i, c in enumerate(calls) if c[:3] == marker), None)
+
+    def test_force_release_before_spawn_happy_path(self, monkeypatch):
+        # AC1-HP: stop → force-release node:<id> → canonical claude bg spawn.
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(monkeypatch)
+        assert recovery._redispatch(self._cand()) is True
+
+        fr = self._index_of(calls, ["fno", "claim", "force-release"])
+        spawn = self._index_of(calls, ["fno", "agents", "spawn"])
+        assert fr is not None and spawn is not None
+        assert fr < spawn                      # claim freed strictly before spawn
+        assert "node:x-370f" in calls[fr]      # exact claim key
+        assert "-R" in calls[fr]               # required audit reason supplied
+        spawn_cmd = calls[spawn]
+        assert "--provider" in spawn_cmd and "claude" in spawn_cmd
+        assert "--substrate" in spawn_cmd and "bg" in spawn_cmd
+        assert "--cwd" in spawn_cmd and "/wt/x-370f" in spawn_cmd
+
+    def test_force_release_failure_skips_spawn(self, monkeypatch):
+        # AC1-ERR: force-release non-zero → no spawn, False so the caller nudges.
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(monkeypatch, force_release_rc=1)
+        assert recovery._redispatch(self._cand()) is False
+        assert self._index_of(calls, ["fno", "agents", "spawn"]) is None
+
+    def test_done_node_not_redispatched(self, monkeypatch):
+        # AC1-EDGE: already-done node → no stop/force-release/spawn at all.
+        self._patch_resolve(monkeypatch, done=True)
+        calls = self._patch_run(monkeypatch)
+        assert recovery._redispatch(self._cand()) is False
+        assert calls == []
+
+    def test_spawn_failure_returns_false(self, monkeypatch):
+        # Spawn exit non-zero (existing contract) → False so the caller nudges.
+        self._patch_resolve(monkeypatch)
+        self._patch_run(monkeypatch, spawn_rc=1)
+        assert recovery._redispatch(self._cand()) is False
+
+    def test_unresolvable_node_returns_false(self, monkeypatch):
+        # No node id in the worktree manifest → nothing to re-dispatch.
+        monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: None)
+        calls = self._patch_run(monkeypatch)
+        assert recovery._redispatch(self._cand()) is False
+        assert calls == []
