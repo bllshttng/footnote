@@ -346,7 +346,11 @@ def _owned_manifest_attended(project_root: Path, environ: dict) -> Optional[bool
         text = (project_root / ".fno" / "target-state.md").read_text(encoding="utf-8")
     except OSError:
         return None
-    if _scan_md_field(text, "claude_transcript_id") != sid:
+    # Current key is claude_session_id; old-key fallback for one release.
+    manifest_claude_sid = _scan_md_field(text, "claude_session_id") or _scan_md_field(
+        text, "claude_transcript_id"
+    )
+    if manifest_claude_sid != sid:
         return None
     raw = _scan_md_field(text, "attended")
     if raw is None:

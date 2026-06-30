@@ -32,6 +32,19 @@ def test_ac3_edge_session_id_valid_accepted():
     assert instance.session_id == "20260421T093631Z-97817-920dac"
 
 
+@pytest.mark.parametrize(
+    "sid",
+    [
+        "20260630T192705Z-cl52366-8979b6",  # provider infix (self-mint, claude)
+        "20260630T000000Z-mw42092-deadbe",  # driver infix (megawalk)
+    ],
+)
+def test_session_id_accepts_provenance_infix(sid):
+    """The 2-char provenance infix glued to the pid (segment 2) validates."""
+    Schema = load_schema("target")
+    assert Schema(session_id=sid).session_id == sid
+
+
 def test_ac3_edge_status_enum_invalid_rejected():
     """AC3-EDGE: Status must be IN_PROGRESS, COMPLETE, or BLOCKED."""
     Schema = load_schema("target")

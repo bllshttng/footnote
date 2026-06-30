@@ -236,7 +236,12 @@ def find_held_node(cwd: str = ".", session_uuid: Optional[str] = None) -> Option
         text = state.read_text(encoding="utf-8")
     except OSError:
         return None
-    if _scan_field(text, "claude_transcript_id") != session_uuid:
+    # Current key is claude_session_id; fall back to the pre-rename
+    # claude_transcript_id for one release so in-flight manifests still match.
+    manifest_claude_sid = _scan_field(text, "claude_session_id") or _scan_field(
+        text, "claude_transcript_id"
+    )
+    if manifest_claude_sid != session_uuid:
         return None  # manifest is not this worker's session — never guess
     value = _scan_field(text, "graph_node_id")
     if value and value.lower() != "null":

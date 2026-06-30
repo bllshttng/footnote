@@ -145,6 +145,11 @@ link_file ".fno/ledger.json"
 # ledger.md is the kanban rendering paired with ledger.json. Skip-if-missing
 # until the renderer has run at least once on the canonical.
 link_file ".fno/ledger.md"
+# carveouts.jsonl: a worktree-local carveout (deferred decision / out-of-scope
+# bug) must be visible to the canonical retro-triage harvest at merge, so link
+# it to canonical alongside the other shared ledgers. Skip-if-missing until the
+# first carveout lands.
+link_file ".fno/carveouts.jsonl"
 # codemap is a regenerated artifact; last-writer-wins is the desired
 # behavior so all worktrees see the latest map.
 link_artifact ".fno/codemap.md"
@@ -173,7 +178,14 @@ link_dir ".fno/wake-signals"
 # glob does not recurse into subdirectories, so symlinking only that subdir
 # gives us cross-worktree persistence without crossing the sweep's reach.
 # Codex flagged the original whole-dir link as P1 on PR #320 (round 2).
-mkdir -p "$WORKTREE/.fno/artifacts" "$CANONICAL/.fno/artifacts/consolidated"
+mkdir -p "$WORKTREE/.fno/artifacts"
+# Canonical-side consolidated dir: best-effort. When it already exists as a
+# symlink (pre-existing canonical state), `mkdir -p` trips ELOOP ("Too many
+# levels of symbolic links"). That is benign - the link target is already
+# there - but under `set -e` it would abort the WHOLE setup, leaving every
+# link below (.claude/skills, .agents, ...) uncreated. Guard it so the rest
+# of the linking always runs.
+mkdir -p "$CANONICAL/.fno/artifacts/consolidated" 2>/dev/null || true
 link_dir ".fno/artifacts/consolidated"
 
 # Shared Claude Code state (autoMemoryDirectory pin, permission allowlist,
