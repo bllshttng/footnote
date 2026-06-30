@@ -422,6 +422,39 @@ class TestFailoverSweep:
         assert len(h.failover_calls) == 1
         assert h.sends == []                       # NOT nudged
         assert h.event_types() == ["failover_swapped"]
+        assert h.events[0][1]["redispatched"] is True   # honest: worker started
+
+    def test_rotated_no_worker_emits_swapped_then_nudges(self, tmp_path):
+        # codex P1: the swap rotated the provider but no replacement worker
+        # started (non-claude target / spawn failed). The event must report
+        # redispatched=False (no phantom redispatch) AND the session still gets
+        # the bounded nudge rather than being left dead-and-unnudged.
+        h = _FailoverHarness(output_result="rate limit", outcome="rotated-no-worker")
+        self._run(h, tmp_path)
+        assert h.event_types() == ["failover_swapped", "recovery_nudge"]
+        assert h.events[0][1]["redispatched"] is False
+        assert len(h.sends) == 1
+
+    def test_one_swap_per_tick(self, tmp_path):
+        # codex P2: a swap mutates the GLOBAL active provider, so only one
+        # rotation may fire per tick; the second stale session nudges this tick
+        # (reconsidered next tick against the settled provider).
+        h = _FailoverHarness(output_result="rate limit", outcome="swapped")
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[
+                _stale_candidate(tmp_path, short_id="aaaa1111"),
+                _stale_candidate(tmp_path, short_id="bbbb2222", sock="/tmp/b.sock"),
+            ],
+            counts={},
+            emit=h.emit, read_state_fn=h.read_state,
+            liveness_fn=h.liveness, send_fn=h.send,
+            failover_fn=h.failover,
+        )
+        assert len(h.failover_calls) == 1            # only the first swaps
+        assert h.failover_calls[0][0] == "aaaa1111"
+        assert h.event_types() == ["failover_swapped", "recovery_nudge"]
+        assert h.sends[0][0] == "/tmp/b.sock"        # the second nudged
 
     def test_connection_drop_still_nudges(self, tmp_path):
         # AC2-FR: a clean connection-drop is unchanged — failover never called.
@@ -479,11 +512,12 @@ class TestFailoverSweep:
 
 
 class TestDefaultFailover:
-    """The real failover_fn maps SwapDecision -> the sweep's outcome strings and
-    only re-dispatches on SWAPPED. Controller + settings are monkeypatched so no
-    real provider rotation / subprocess fires."""
+    """The real failover_fn maps SwapDecision -> the sweep's outcome strings.
+    It re-reads the active provider's cli KIND after a swap and only
+    bg-redispatches when that kind is claude. Controller + settings are
+    monkeypatched so no real provider rotation / subprocess fires."""
 
-    def _patch(self, monkeypatch, decision, new_provider="codex", redispatched=None):
+    def _patch(self, monkeypatch, decision, new_cli="claude", redispatch_result=None, calls=None):
         from fno.adapters.providers import failover as fo_mod
         from fno.adapters.providers import loader as loader_mod
         from fno.adapters.providers import dispatch as dispatch_mod
@@ -491,7 +525,7 @@ class TestDefaultFailover:
         class _Result:
             def __init__(self):
                 self.decision = decision
-                self.new_provider_id = new_provider
+                self.new_provider_id = "claude-secondary"  # a RECORD id, not a kind
 
         class _Ctrl:
             def __init__(self, **kw):
@@ -501,35 +535,57 @@ class TestDefaultFailover:
                 return _Result()
 
         class _Snap:
-            id = "claude"
+            # .id is the record id (pre-swap read); .cli is the kind (post-swap read).
+            id = "claude-primary"
+            cli = new_cli
 
         monkeypatch.setattr(fo_mod, "FailoverController", _Ctrl)
         monkeypatch.setattr(loader_mod, "read_active_provider_atomic", lambda **kw: _Snap())
         monkeypatch.setattr(dispatch_mod, "_default_settings_path", lambda: "/tmp/settings.yaml")
-        if redispatched is not None:
-            monkeypatch.setattr(
-                recovery, "_redispatch",
-                lambda cand, prov: redispatched.append((cand.short_id, prov)),
-            )
+        if redispatch_result is not None:
+            def _fake_redispatch(cand):
+                if calls is not None:
+                    calls.append(cand.short_id)
+                return redispatch_result
+            monkeypatch.setattr(recovery, "_redispatch", _fake_redispatch)
 
-    def test_swapped_redispatches_and_returns_swapped(self, monkeypatch, tmp_path):
+    def test_swapped_claude_redispatch_ok_returns_swapped(self, monkeypatch, tmp_path):
         from fno.adapters.providers.failover import SwapDecision
 
         calls: list = []
-        self._patch(monkeypatch, SwapDecision.SWAPPED, new_provider="codex", redispatched=calls)
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
+                    redispatch_result=True, calls=calls)
         cand = _stale_candidate(tmp_path)
         err = recovery.classify_session_error("rate limit exceeded")
         assert recovery._default_failover(cand, err) == "swapped"
-        assert calls == [(cand.short_id, "codex")]   # re-dispatch fired with new provider
+        assert calls == [cand.short_id]              # redispatch was attempted
 
-    def test_blocked_thrash_maps_and_no_redispatch(self, monkeypatch, tmp_path):
+    def test_swapped_nonclaude_is_rotated_no_worker(self, monkeypatch, tmp_path):
+        # codex P1: a swap onto a non-claude provider cannot bg-redispatch a
+        # /target, so no worker starts — and _redispatch must not even be called.
         from fno.adapters.providers.failover import SwapDecision
 
         calls: list = []
-        self._patch(monkeypatch, SwapDecision.BLOCKED_THRASH, redispatched=calls)
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="codex",
+                    redispatch_result=True, calls=calls)
+        err = recovery.classify_session_error("rate limit")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "rotated-no-worker"
+        assert calls == []                           # never tried to bg-spawn on codex
+
+    def test_swapped_claude_redispatch_fails_is_rotated_no_worker(self, monkeypatch, tmp_path):
+        # The swap landed on claude but the spawn failed (returncode != 0).
+        from fno.adapters.providers.failover import SwapDecision
+
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude", redispatch_result=False)
+        err = recovery.classify_session_error("rate limit")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "rotated-no-worker"
+
+    def test_blocked_thrash_maps(self, monkeypatch, tmp_path):
+        from fno.adapters.providers.failover import SwapDecision
+
+        self._patch(monkeypatch, SwapDecision.BLOCKED_THRASH)
         err = recovery.classify_session_error("rate limit")
         assert recovery._default_failover(_stale_candidate(tmp_path), err) == "blocked-thrash"
-        assert calls == []
 
     def test_queue_exhausted_maps(self, monkeypatch, tmp_path):
         from fno.adapters.providers.failover import SwapDecision

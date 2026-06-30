@@ -252,7 +252,14 @@ def recovery_sweep(
     *swap-class* one (rate-limit / quota / auth / 5xx) routes to provider
     failover INSTEAD of a nudge - nudging "keep going" at a rate-limited provider
     just re-hits the limit. A connection-drop (non-swap class) still nudges.
+
+    At most ONE provider rotation fires per sweep tick (``rotated`` guard): a
+    swap mutates the *global* active provider, so a second candidate evaluated
+    after it would have its error mis-attributed to the already-swapped-to
+    provider (codex P2). The remaining stale sessions nudge this tick and are
+    reconsidered next tick against the settled provider.
     """
+    rotated = False  # one provider rotation per tick (P2: global active mutation)
     for c in candidates:
         snap = read_state_fn(c.jobs_dir)
         decision = classify(snap.state, snap.updated_at, now, cfg.idle_threshold_seconds)
@@ -269,16 +276,28 @@ def recovery_sweep(
         # same dead provider. Checked before the nudge cap (failover has its own
         # per-phase storm-cap inside attempt_swap) and before liveness (a swap
         # re-dispatches a fresh session, it does not need the dead socket).
-        if failover_fn is not None:
+        if failover_fn is not None and not rotated:
             err = classify_session_error(getattr(snap, "output_result", None))
             if err is not None and getattr(err, "triggers_swap", False):
                 outcome = failover_fn(c, err)
-                if outcome == "swapped":
-                    # Rotated to a healthy provider + re-dispatched a fresh
-                    # session; nudging the dead socket would be wrong.
-                    emit("failover_swapped", {"short_id": c.short_id})
-                    continue
-                if outcome == "blocked-thrash":
+                if outcome in ("swapped", "rotated-no-worker"):
+                    # Either way the global active provider rotated, so no
+                    # further swap this tick.
+                    rotated = True
+                    # Honest event: redispatched=True only when a replacement
+                    # worker actually started (codex P1 — a swallowed spawn
+                    # failure must NOT report a phantom redispatch).
+                    emit("failover_swapped", {
+                        "short_id": c.short_id,
+                        "redispatched": outcome == "swapped",
+                    })
+                    if outcome == "swapped":
+                        continue
+                    # "rotated-no-worker": the swap landed on a provider we
+                    # cannot bg-redispatch a /target onto (non-claude) or the
+                    # spawn failed; fall through to the bounded nudge so the
+                    # session is not left dead-and-unnudged (codex P1).
+                elif outcome == "blocked-thrash":
                     # Storm-cap reached: genuine churn, deliberate bounded stop.
                     emit("failover_blocked", {"short_id": c.short_id, "reason": outcome})
                     continue
@@ -410,7 +429,9 @@ def _node_id_from_worktree(cwd: str) -> Optional[str]:
     """
     try:
         text = (Path(cwd) / ".fno" / "target-state.md").read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError - a non-UTF-8
+        # manifest must degrade to "no node" rather than crash the sweep.
         return None
     for line in text.splitlines():
         s = line.strip()
@@ -420,28 +441,34 @@ def _node_id_from_worktree(cwd: str) -> Optional[str]:
     return None
 
 
-def _redispatch(candidate: "Candidate", new_provider: str) -> None:
+def _redispatch(candidate: "Candidate") -> bool:
     """Best-effort: stop the rate-limited session and respawn ``/target`` on the
-    swapped provider, continuing in the SAME worktree (work-so-far lives in the
-    branch's atomic commits there).
+    now-active (swapped) provider, continuing in the SAME worktree (work-so-far
+    lives in the branch's atomic commits there). Returns True iff a replacement
+    worker was actually launched (spawn exit 0).
 
-    ponytail: best-effort respawn. The GUARANTEED win is the swap itself - the
-    global provider pointer is rotated and the dead session stops getting
-    pointless nudges. This respawn is gravy: if it fails (claim still held,
-    manifest already initialized, spawn errors), the node stays claimed-but-idle
-    and the next ``fno backlog advance`` / a human picks it up on the now-healthy
-    provider. Upgrade path if respawn proves flaky in the wild: harden
-    claim-reclaim + worktree continuity (the unverified-offline edges). Reuses the
-    canonical ``fno agents spawn --substrate bg`` shape from dispatch-node.sh.
+    Caller guarantees the new active provider's cli is ``claude`` before calling,
+    so the substrate is ``bg`` (claude-only) and ``--provider claude`` selects
+    the now-active claude record the swap installed in settings.yaml. (A
+    non-claude swap cannot bg-redispatch a multi-phase /target, so the caller
+    skips this entirely — codex P1.)
+
+    ponytail: best-effort respawn. The respawn is gravy on top of the rotation;
+    if it fails (claim still held, manifest already initialized, spawn errors)
+    this returns False and the caller falls back to the bounded nudge, so the
+    session is never left dead-and-unnudged. Upgrade path if respawn proves flaky
+    in the wild: harden claim-reclaim + worktree continuity (the edges that
+    cannot be verified offline). Reuses the canonical ``fno agents spawn
+    --substrate bg`` shape from dispatch-node.sh.
     """
     import subprocess
 
     cwd = getattr(candidate, "cwd", None)
     if not cwd:
-        return
+        return False
     node = _node_id_from_worktree(cwd)
     if not node:
-        return
+        return False
     name = getattr(candidate, "name", None)
     agent = f"failover-{candidate.short_id}"
     try:
@@ -451,26 +478,35 @@ def _redispatch(candidate: "Candidate", new_provider: str) -> None:
                 ["fno", "agents", "stop", name],
                 cwd=cwd, capture_output=True, timeout=30, check=False,
             )
-        # no-merge: an autonomous worker lands a PR for review, never auto-merges.
-        subprocess.run(
-            ["fno", "agents", "spawn", "--provider", new_provider,
+        # --provider claude: the swap already installed the new claude record as
+        # active in settings.yaml, so the kind is what spawn needs. no-merge: an
+        # autonomous worker lands a PR for review, never auto-merges.
+        proc = subprocess.run(
+            ["fno", "agents", "spawn", "--provider", "claude",
              "--substrate", "bg", "--cwd", cwd, agent, f"/target no-merge {node}"],
             cwd=cwd, capture_output=True, timeout=60, check=False,
         )
+        return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
         # Non-fatal: the swap already landed; never let a respawn miss crash the
         # sweep for the rest of this tick.
-        pass
+        return False
 
 
 def _default_failover(candidate: "Candidate", error) -> str:
     """Real ``failover_fn``: rotate the active provider via the shipped controller.
 
-    Returns ``"swapped"`` / ``"blocked-thrash"`` / ``"queue-exhausted"`` /
-    ``"no-swap"``. ``phase_id`` is keyed on the dead session's short_id so the
-    controller's per-phase storm-cap bounds how many times one stuck session
-    rotates. Every failure mode degrades to ``"no-swap"`` (the caller then nudges
-    defensively) rather than crashing the sweep.
+    Returns one of:
+      - ``"swapped"``           rotated AND a replacement worker started,
+      - ``"rotated-no-worker"`` rotated but no worker (swapped onto a non-claude
+                                provider /target cannot bg-run, or the spawn
+                                failed) — the caller nudges as a fallback,
+      - ``"blocked-thrash"`` / ``"queue-exhausted"`` / ``"no-swap"``.
+
+    ``phase_id`` is keyed on the dead session's short_id so the controller's
+    per-phase storm-cap bounds how many times one stuck session rotates. Every
+    failure mode degrades to ``"no-swap"`` (the caller then nudges defensively)
+    rather than crashing the sweep.
     """
     from fno.adapters.providers.failover import FailoverController, SwapDecision
     from fno.adapters.providers.loader import read_active_provider_atomic
@@ -490,8 +526,18 @@ def _default_failover(candidate: "Candidate", error) -> str:
         return "no-swap"
 
     if result.decision is SwapDecision.SWAPPED:
-        _redispatch(candidate, result.new_provider_id)
-        return "swapped"
+        # The swap installed result.new_provider_id as the active record. Re-read
+        # to get its cli KIND (codex P1: new_provider_id is a record id like
+        # "claude-secondary", NOT the "claude"/"codex" kind that spawn wants).
+        try:
+            new_cli = read_active_provider_atomic(settings_path=settings_path).cli
+        except Exception:  # noqa: BLE001
+            return "rotated-no-worker"
+        # Autonomous /target only bg-runs on claude; a non-claude target cannot
+        # be bg-redispatched (the Rust client rejects --substrate bg for it).
+        if new_cli == "claude" and _redispatch(candidate):
+            return "swapped"
+        return "rotated-no-worker"
     if result.decision is SwapDecision.BLOCKED_THRASH:
         return "blocked-thrash"
     if result.decision is SwapDecision.QUEUE_EXHAUSTED:
