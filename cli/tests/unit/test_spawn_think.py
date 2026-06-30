@@ -254,6 +254,22 @@ def test_attended_offers_line_not_spawn(iso, monkeypatch, patch_spawn, capsys):
     assert len(evs) == 1 and evs[0]["type"] == "think_offered"
 
 
+def test_attended_quiet_suppresses_print_but_keeps_event(iso, monkeypatch, patch_spawn, capsys):
+    """x-c9d8: quiet=True (machine mode, e.g. `decompose --json`) drops the
+    human OFFER PENDING print so it can't pollute a captured stream, but the
+    durable think_offered event still fires and the decision is unchanged."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
+    _resolved(monkeypatch, ok=True, path="/t.jsonl")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent,
+                               quiet=True)
+    assert res.decision == "offered" and spawn_calls == []   # behavior unchanged
+    assert capsys.readouterr().err == ""                     # no human print at all
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "think_offered"  # event preserved
+
+
 def test_attended_unresolved_degrades_to_bare_line(iso, monkeypatch, patch_spawn):
     """AC2-ERR: attended + unresolved -> bare /think line, resolved=False."""
     monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
