@@ -446,13 +446,16 @@ class TestFailoverSweep:
         assert h.event_types() == ["failover_blocked"]
         assert h.events[0][1]["reason"] == "blocked-thrash"
 
-    def test_queue_exhausted_emits_blocked_no_nudge(self, tmp_path):
-        # AC1-EDGE: no eligible alternate -> bounded stop, no nudge.
+    def test_queue_exhausted_falls_through_to_nudge(self, tmp_path):
+        # AC1-EDGE (watchdog reading): no eligible alternate -> nothing to swap
+        # to, so fall back to the bounded x-f47c nudge (the rate-limit window may
+        # clear). Strictly no worse than the pre-failover watchdog for the common
+        # single-provider case; the per-session cap stops it spinning.
         h = _FailoverHarness(output_result="quota exceeded", outcome="queue-exhausted")
         self._run(h, tmp_path)
-        assert h.sends == []
-        assert h.event_types() == ["failover_blocked"]
-        assert h.events[0][1]["reason"] == "queue-exhausted"
+        assert len(h.sends) == 1
+        assert h.sends[0][1] == recovery.CONTINUE_MESSAGE
+        assert h.event_types() == ["recovery_nudge"]
 
     def test_no_swap_outcome_falls_through_to_nudge(self, tmp_path):
         # Controller declined (NO_SWAP_NEEDED): defensive fall-through to nudge.

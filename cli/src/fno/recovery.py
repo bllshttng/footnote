@@ -236,8 +236,9 @@ def recovery_sweep(
 
     Every decision that *matters* emits exactly one event:
       - ``failover_swapped`` when an out-of-usage session rotates providers,
-      - ``failover_blocked{reason}`` when a swap is wanted but bounded (thrash /
-        queue-exhausted),
+      - ``failover_blocked{reason}`` when a swap is wanted but storm-capped
+        (thrash). A queue-exhausted result (no alternate) is NOT blocked - it
+        falls through to the bounded nudge below,
       - ``recovery_nudge`` when a resume is injected,
       - ``recovery_skipped{reason}`` when an idle-stale session is deliberately
         spared (``needs-input``), unreachable, or the send failed,
@@ -273,13 +274,20 @@ def recovery_sweep(
             if err is not None and getattr(err, "triggers_swap", False):
                 outcome = failover_fn(c, err)
                 if outcome == "swapped":
+                    # Rotated to a healthy provider + re-dispatched a fresh
+                    # session; nudging the dead socket would be wrong.
                     emit("failover_swapped", {"short_id": c.short_id})
                     continue
-                if outcome in ("blocked-thrash", "queue-exhausted"):
+                if outcome == "blocked-thrash":
+                    # Storm-cap reached: genuine churn, deliberate bounded stop.
                     emit("failover_blocked", {"short_id": c.short_id, "reason": outcome})
                     continue
-                # "no-swap": the controller declined (e.g. NO_SWAP_NEEDED); fall
-                # through to the normal nudge defensively.
+                # "queue-exhausted" (no alternate provider exists — the common
+                # single-provider case) and "no-swap" (controller declined): fall
+                # through to the x-f47c nudge. With nothing to swap to, the
+                # bounded nudge is the right fallback — the rate-limit window may
+                # clear and the per-session cap stops it spinning, so this is
+                # strictly no worse than the pre-failover watchdog.
 
         n = counts.get(c.short_id, 0)
         if n >= cfg.max_nudges:
