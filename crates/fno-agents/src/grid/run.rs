@@ -2490,7 +2490,9 @@ fn cache_candidates(
 ) -> Vec<String> {
     new.into_iter()
         .filter(|name| match cache.get(name) {
-            Some(&failed_at) => now.duration_since(failed_at) >= ttl,
+            // saturating_*: Instant is monotonic, but the std docs warn a future
+            // version may reintroduce duration_since's panic; saturate to be safe.
+            Some(&failed_at) => now.saturating_duration_since(failed_at) >= ttl,
             None => true,
         })
         .collect()
@@ -2810,7 +2812,8 @@ async fn poll_live_discover(
     // Sweep expired failures so the cache stays bounded by the live within-TTL
     // failure count and a name whose session has left the registry self-heals
     // (x-c226 AC1-FR). Cheap: the map holds only failed claude lanes.
-    failed_probe_cache.retain(|_, failed_at| now.duration_since(*failed_at) < FAILED_PROBE_TTL);
+    failed_probe_cache
+        .retain(|_, failed_at| now.saturating_duration_since(*failed_at) < FAILED_PROBE_TTL);
 
     // ── Roster diff: new --bg status cards (Change 3) ───────────────────────
     // roster_bg_cards_from dedups against the registry rows, so a session that
