@@ -219,7 +219,10 @@ SESSION_ID="$(_parse_manifest_field "$STATE_FILE" "session_id")"
 PLAN_PATH="$(_parse_manifest_field "$STATE_FILE" "plan_path")"
 TARGET_SIZE="$(_parse_manifest_field "$STATE_FILE" "target_size")"
 AUTO_MERGE_APPROVED="$(_parse_manifest_field "$STATE_FILE" "auto_merge_approved")"
-TRANSCRIPT_ID="$(_parse_manifest_field "$STATE_FILE" "claude_transcript_id")"
+# Current key is claude_session_id; fall back to the pre-rename claude_transcript_id
+# for one release so an in-flight manifest written by an older binary still resolves.
+TRANSCRIPT_ID="$(_parse_manifest_field "$STATE_FILE" "claude_session_id")"
+[ -n "$TRANSCRIPT_ID" ] || TRANSCRIPT_ID="$(_parse_manifest_field "$STATE_FILE" "claude_transcript_id")"
 NODE_ID="$(_validate_node_id "$(_parse_body_field "$STATE_FILE" "graph_node_id")")"
 CLAIM_KEY="$(_parse_body_field "$STATE_FILE" "target_claim_key")"
 CLAIM_HOLDER="$(_parse_body_field "$STATE_FILE" "target_claim_holder")"
