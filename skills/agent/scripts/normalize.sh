@@ -173,6 +173,30 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
   # The trailing run may have consumed the whole payload (`codex yolo merge`
   # with no task) -> refuse with no spawn (Boundaries: empty task fails loud).
   [[ -z "$msg" ]] && emit_error "empty task: only posture modifiers, nothing to dispatch"
+  # Leading posture-word guard (x-ffc3): the posture vocabulary (bg|headless) is
+  # TRAILING only (consumed right-anchored above). A LEADING posture word whose
+  # remainder is a /command passthrough (e.g. `bg /goal ...`) is the user meaning
+  # the substrate but mis-ordering it; left alone it is not consumed, the payload
+  # then starts with the bareword (not '/'), and the feature default silently
+  # wraps it as a /target BUILD of the literal text. Refuse with the corrective
+  # trailing form instead.
+  #   - Scoped to a /-led remainder: genuine feature prose that merely begins with
+  #     the word (`headless browser screenshots`, `bg worker cleanup`) still flows
+  #     to the normal build path - only a clear mis-ordered dispatch is refused
+  #     (PR #106 codex P2). This is the plan's preferred narrow trigger.
+  #   - Exact-token, case-insensitive (matches the trailing parser's tr at l.150,
+  #     so a mobile-auto-capitalized `BG` is caught; `bgcolor`/`background` are not).
+  #   - Inside the ask/handoff/discuss==0 block, so a verbatim payload beginning
+  #     with the literal word "bg" is exempt (its posture words are never parsed).
+  _first_lc="$(printf '%s' "${msg%%[[:space:]]*}" | tr '[:upper:]' '[:lower:]')"
+  case "$_first_lc" in
+    bg|headless)
+      _rest="${msg#"${msg%%[[:space:]]*}"}"; _rest="${_rest#"${_rest%%[![:space:]]*}"}"  # trim
+      if [[ "$_rest" == /* ]]; then
+        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_rest} ${_first_lc}'. (A leading '${_first_lc}' would otherwise be wrapped into a /target build of the literal text.)"
+      fi
+      ;;
+  esac
 fi
 
 # ---- 1b. defensive flag-vocabulary scan (phone-mangled flag in prose) --------
