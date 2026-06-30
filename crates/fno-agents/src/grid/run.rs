@@ -67,6 +67,14 @@ type RailPaintArg<'a> = Option<(
 
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Per-step ceiling on opening a drive WS (x-d8fc). `open_drive_ws` runs inside
+/// the `select!` key-handler arm; an unbounded await there freezes the whole
+/// grid if the daemon never acks `agent.drive` (interactive-drive cap exhausted
+/// by a stuck fleet, target worker wedged, daemon busy). Mirrors the probe-path
+/// timeout x-c226 added to `worker_speaks_pty` (500ms); drive setup legitimately
+/// takes longer than a ping, so the ceiling is more generous.
+const DRIVE_OPEN_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// How long a claude name that failed the `worker.ping` PTY gate is kept out of
 /// the live-discover probe set (x-c226). A stable stream-json lane (host_mode=
 /// interactive, serves only `stream.*`) fails forever, so without this it is
@@ -2079,23 +2087,46 @@ fn truncate(s: &str, max: usize) -> String {
 /// "interactive"). Mirrors `drive_client::drive`'s connect → RPC → upgrade
 /// sequence. Returns the upgraded WS stream.
 async fn open_drive_ws(home: &AgentsHome, name: &str, mode: &str) -> Result<Ws, String> {
-    let mut conn = UnixStream::connect(home.supervisor_sock())
-        .await
-        .map_err(|e| format!("cannot reach daemon: {e}"))?;
+    // Every step is bounded by DRIVE_OPEN_TIMEOUT (x-d8fc): this runs inside the
+    // `select!` key arm, so an unbounded await freezes the whole grid. Mirrors
+    // `worker_speaks_pty`, which x-c226 wraps per step on the probe path.
+    let mut conn = match tokio::time::timeout(
+        DRIVE_OPEN_TIMEOUT,
+        UnixStream::connect(home.supervisor_sock()),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => return Err(format!("cannot reach daemon: {e}")),
+        Err(_) => return Err("drive timed out: cannot reach daemon".to_string()),
+    };
     let req = Request::new(1, "agent.drive", json!({"name": name, "mode": mode}));
-    write_request(&mut conn, &req)
-        .await
-        .map_err(|e| format!("drive request failed: {e}"))?;
-    let ack = read_response(&mut conn)
-        .await
-        .map_err(|e| format!("no drive ack: {e}"))?;
+    match tokio::time::timeout(DRIVE_OPEN_TIMEOUT, write_request(&mut conn, &req)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(format!("drive request failed: {e}")),
+        Err(_) => return Err("drive timed out: daemon did not accept request".to_string()),
+    }
+    let ack = match tokio::time::timeout(DRIVE_OPEN_TIMEOUT, read_response(&mut conn)).await {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => return Err(format!("no drive ack: {e}")),
+        // The killer await: the daemon caps interactive drives, so a clogged
+        // fleet leaves `agent.drive` unacked forever without this bound.
+        Err(_) => return Err("drive timed out: daemon/worker did not ack".to_string()),
+    };
     match ack.payload {
         ResponsePayload::Err(err) => return Err(err.message),
         ResponsePayload::Ok(_) => {}
     }
-    let (ws, _resp) = tokio_tungstenite::client_async("ws://localhost/drive", conn)
-        .await
-        .map_err(|e| format!("drive upgrade failed: {e}"))?;
+    let (ws, _resp) = match tokio::time::timeout(
+        DRIVE_OPEN_TIMEOUT,
+        tokio_tungstenite::client_async("ws://localhost/drive", conn),
+    )
+    .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => return Err(format!("drive upgrade failed: {e}")),
+        Err(_) => return Err("drive timed out: WS upgrade did not complete".to_string()),
+    };
     Ok(ws)
 }
 
@@ -3572,7 +3603,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             InputEvent::Keystroke(leader::leader_bytes(&leader_cfg)),
                                             &states,
                                         );
-                                        if handle_action(act, &mut drive_sink, &names, home).await {
+                                        if handle_action(act, &mut drive_sink, &names, home, &mut hint).await {
                                             break;
                                         }
                                         dirty = true;
@@ -4018,7 +4049,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                         InputEvent::Keystroke(leader::leader_bytes(&leader_cfg)),
                                         &states,
                                     );
-                                    if handle_action(act, &mut drive_sink, &names, home).await {
+                                    if handle_action(act, &mut drive_sink, &names, home, &mut hint).await {
                                         break;
                                     }
                                     dirty = true;
@@ -4069,7 +4100,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                     // key is reported and NOT forwarded to the agent.
                                     match leader_command(cmdkey) {
                                         Some(InputEvent::Quit) => {
-                                            if handle_action(CompositorAction::Quit, &mut drive_sink, &names, home).await {
+                                            if handle_action(CompositorAction::Quit, &mut drive_sink, &names, home, &mut hint).await {
                                                 break;
                                             }
                                         }
@@ -4103,7 +4134,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                             // page just relocates the live cursor - no claim
                                             // to release on the old pane or acquire on the new.
                                             let act = comp.step(input, &states);
-                                            if handle_action(act, &mut drive_sink, &names, home).await {
+                                            if handle_action(act, &mut drive_sink, &names, home, &mut hint).await {
                                                 break;
                                             }
                                             dirty = true;
@@ -4189,7 +4220,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                                         }
                                     }
                                     other => {
-                                        if handle_action(other, &mut drive_sink, &names, home).await {
+                                        if handle_action(other, &mut drive_sink, &names, home, &mut hint).await {
                                             break; // Quit
                                         }
                                     }
@@ -4620,6 +4651,7 @@ async fn ensure_drive_sink<'a>(
     pane_idx: usize,
     name: &str,
     home: &AgentsHome,
+    hint: &mut Option<String>,
 ) -> Option<&'a mut WsSink> {
     if drive_sink.as_ref().map(|(i, _)| *i) != Some(pane_idx) {
         if let Some((_, old)) = drive_sink.take() {
@@ -4633,7 +4665,14 @@ async fn ensure_drive_sink<'a>(
                 tokio::spawn(async move { while source.next().await.is_some() {} });
                 *drive_sink = Some((pane_idx, sink));
             }
-            Err(_) => return None,
+            // Surface the open failure (x-d8fc): with DRIVE_OPEN_TIMEOUT the
+            // drive no longer hangs, so a bounded failure must be a VISIBLE
+            // no-op via the footer, never a silently dead-focused pane. Route
+            // through `hint` - the compositor owns the terminal (no eprintln).
+            Err(e) => {
+                *hint = Some(format!("drive failed: {e} (Esc to release)"));
+                return None;
+            }
         }
     }
     drive_sink.as_mut().map(|(_, s)| s)
@@ -4648,6 +4687,7 @@ async fn handle_action(
     drive_sink: &mut DriveSink,
     names: &[String],
     home: &AgentsHome,
+    hint: &mut Option<String>,
 ) -> bool {
     match action {
         CompositorAction::Quit => return true,
@@ -4657,7 +4697,8 @@ async fn handle_action(
         CompositorAction::Scroll { .. } => {}
         CompositorAction::ForwardKeystrokes { pane_idx, bytes } => {
             if let Some(name) = names.get(pane_idx) {
-                if let Some(sink) = ensure_drive_sink(drive_sink, pane_idx, name, home).await {
+                if let Some(sink) = ensure_drive_sink(drive_sink, pane_idx, name, home, hint).await
+                {
                     let _ = sink.send(Message::Binary(bytes.into())).await;
                 }
             }
