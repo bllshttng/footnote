@@ -423,7 +423,35 @@ def _wt_name(node: str) -> str:
     pathological path component.
     """
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", node.strip().lower()).strip("-")
-    return s[:60] or "target"
+    # strip("-") AFTER the slice too: truncation can land on a hyphen and leave
+    # a trailing one (gemini PR #114).
+    return s[:60].strip("-") or "target"
+
+
+def _resolve_node_id(node: str) -> str:
+    """Resolve a slug / bare-hex input to its canonical backlog node id.
+
+    ``fno target init`` only derives the node id (and thus the node claim) from
+    an exact graph id or ``--plan-path``; a documented slug forwarded raw would
+    write ``graph_node_id: null`` and skip the claim, so another worker could
+    grab the same card (codex PR #114). Resolving here means a slug input still
+    claims its node. A non-match (free-text feature input) returns the arg
+    unchanged - init accepts text - so this only ever upgrades a resolvable id,
+    never blocks one. Best-effort: any load/resolve error falls through to raw.
+    """
+    try:
+        from fno.graph.fuzzy import resolve_node
+        from fno.graph.load import load_graph
+        from fno.paths import graph_json
+
+        data = load_graph(graph_json())
+        entries = data if isinstance(data, list) else []
+        match = resolve_node(node, entries)
+        if getattr(match, "kind", "none") == "exact" and getattr(match, "id", None):
+            return match.id
+    except Exception:  # noqa: BLE001 - best-effort; the raw arg still works
+        pass
+    return node
 
 
 def _resolve_fno_cmd() -> list[str]:
@@ -509,6 +537,10 @@ def start(
         raise typer.Exit(code=1)
     repo_root = Path(repo_root_s)
     fno = _resolve_fno_cmd()
+    # Resolve a slug/hex input to its canonical id so init claims the node (a raw
+    # slug would write graph_node_id: null and skip the claim) - both the
+    # worktree name and `init --input` then use the canonical id.
+    node = _resolve_node_id(node)
     name = _wt_name(node)
 
     # 1. Create/reuse the worktree off origin/main (x-73ca). ensure prints the

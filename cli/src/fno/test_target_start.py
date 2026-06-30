@@ -37,6 +37,38 @@ def test_wt_name_bounded():
     assert len(_wt_name("a" * 200)) == 60
 
 
+def test_wt_name_no_trailing_hyphen_after_truncation():
+    # Truncation lands on the hyphen at index 59 -> must be stripped (gemini #114).
+    out = _wt_name("a" * 59 + "-bug")
+    assert not out.endswith("-")
+    assert out == "a" * 59
+
+
+# --------------------------- slug -> id resolution ------------------------ #
+def test_resolve_node_id_upgrades_slug(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda p: [])
+    monkeypatch.setattr(
+        "fno.graph.fuzzy.resolve_node",
+        lambda q, e: SimpleNamespace(kind="exact", id="ab-1a2b3c4d"),
+    )
+    assert target_cli._resolve_node_id("dashless-spawn") == "ab-1a2b3c4d"
+
+
+def test_resolve_node_id_freetext_fallthrough(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda p: [])
+    monkeypatch.setattr(
+        "fno.graph.fuzzy.resolve_node",
+        lambda q, e: SimpleNamespace(kind="none", id=None),
+    )
+    assert target_cli._resolve_node_id("fix the login bug") == "fix the login bug"
+
+
 # ------------------------------- no-op branch ----------------------------- #
 def test_already_isolated_is_noop(monkeypatch):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
@@ -54,6 +86,7 @@ def test_already_isolated_is_noop(monkeypatch):
 def _wire_happy(monkeypatch, wt_path: Path, *, manifest_exists: bool):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(
         target_cli, "_git_out", lambda cwd, *a: "/canonical/repo"
     )
@@ -104,6 +137,7 @@ def test_existing_manifest_is_idempotent(monkeypatch, tmp_path):
 def test_ensure_failure_is_loud_and_skips_init(monkeypatch, tmp_path):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *a: "/canonical/repo")
     init_calls = []
 
