@@ -80,8 +80,9 @@ offer_cmd="${parsed#*$'\t'}"
 # nothing to /think about, so surfacing it just nags the operator (recurring with
 # orphaned `ab-`-prefixed offers). The cursor already advanced above, so this
 # never re-fires for that offer. Degrade to surfacing when `fno` is unavailable,
-# so a missing resolver never suppresses a real offer.
-if command -v fno >/dev/null 2>&1 && ! fno backlog get "$node_id" >/dev/null 2>&1; then
+# so a missing resolver never suppresses a real offer. Run from $REPO_ROOT so
+# resolution is deterministic even if config.paths.graph_json is project-local.
+if command -v fno >/dev/null 2>&1 && ! ( cd "$REPO_ROOT" && fno backlog get "$node_id" ) >/dev/null 2>&1; then
     exit 0
 fi
 
