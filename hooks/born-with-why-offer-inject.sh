@@ -38,11 +38,17 @@ offset=0
 # Nothing new appended since last scan.
 (( offset >= size )) && exit 0
 
-# Scan only the newly-appended tail. Per-line JSON parse so a malformed or
-# truncated line is skipped, not fatal. Latest think_offered node_id wins.
-node_id=$(tail -c +"$((offset + 1))" "$EVENTS" 2>/dev/null | python3 -c '
+# Scan only the slice [offset, size): bound the read with `head -c` so events
+# appended AFTER we captured `size` are NOT consumed here -- the cursor only
+# advances to `size`, so a racing append belongs to the next run, never both
+# (once-per-offer). Per-line JSON parse so a malformed/truncated line is skipped,
+# not fatal. Latest think_offered wins; carry its offer_line, the authoritative
+# command the offer path recorded (a reconstructed bare `/think <id>` is a single
+# non-mode token the router rejects -- skills/think/SKILL.md).
+parsed=$(tail -c +"$((offset + 1))" "$EVENTS" 2>/dev/null | head -c "$((size - offset))" 2>/dev/null | python3 -c '
 import sys, json
 nid = ""
+offer = ""
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -52,21 +58,28 @@ for line in sys.stdin:
     except Exception:
         continue
     if ev.get("type") == "think_offered":
-        x = (ev.get("data") or {}).get("node_id")
+        data = ev.get("data") or {}
+        x = data.get("node_id")
         if x:
             nid = x
-print(nid)
+            offer = data.get("offer_line") or ""
+print(nid + "\t" + offer)
 ' 2>/dev/null)
 
-# Advance the cursor to EOF regardless of what we found -- consuming the tail we
-# just scanned is what makes the reminder fire once per offer.
+# Advance the cursor to the captured EOF regardless of what we found -- consuming
+# exactly the [offset, size) slice we scanned is what makes the reminder fire
+# once per offer.
 printf '%s' "$size" > "$CURSOR" 2>/dev/null || true
 
+node_id="${parsed%%$'\t'*}"
+offer_cmd="${parsed#*$'\t'}"
 [[ -n "$node_id" ]] || exit 0
+# Fall back to the router-valid dispatch form if the event carried no offer_line.
+[[ -n "$offer_cmd" ]] || offer_cmd="/think dispatch ${node_id}"
 
 reminder="<system-reminder>
 A born-with-why offer is pending for ${node_id}. Surface it to the operator as a
-yes/no before wrapping up: \"Run /think ${node_id} now, or skip?\" This is an
+yes/no before wrapping up: \"Run \`${offer_cmd}\` now, or skip?\" This is an
 offer, not something that already ran - nothing was spawned.
 </system-reminder>"
 
