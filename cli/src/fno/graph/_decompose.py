@@ -11,6 +11,7 @@ duplicating. See internal/fno/plans/2026-05-24-epic-scoped-execution.md.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Optional, TypedDict
 
 # Slug must be filesystem/URL-safe so `#group-<slug>` is a stable plan fragment.
@@ -126,6 +127,53 @@ def child_plan_path(base: str, slug: str) -> str:
     return f"{base}#group-{slug}"
 
 
+def separate_plan_path(base: str, slug: str) -> str:
+    """Self-contained per-child plan path: `<dir>/<stem>.group-<slug>.md`.
+
+    The `separate` packaging mode (vs the default `fragment` `<base>#group-<slug>`)
+    points a child at its own quick-plan file - what a fresh-context bg `/target`
+    builder reads best. Pure string derivation so the same slug maps to the same
+    path on every run (idempotency), whether applied to the verbatim base (the
+    stored plan_path) or the resolved-on-disk base (the file to scaffold).
+    """
+    p = Path(base)
+    stem = p.stem if p.name.endswith(".md") else p.name
+    return str(p.with_name(f"{stem}.group-{slug}.md"))
+
+
+def scaffold_separate_plan(group: NormalizedGroup, epic_id: str, source_doc: str) -> str:
+    """A self-contained quick-plan stub for one group child.
+
+    Seeded from the group's wave range + a pointer to the epic's File Ownership
+    Map; the builder fills the concrete change/file/verify detail. Deliberately a
+    STUB, not a full plan - the epic doc remains the source of truth for scope.
+    """
+    # Escape so a title containing a double quote can't emit invalid YAML.
+    yaml_title = group["title"].replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        f'---\n'
+        f'title: "{yaml_title}"\n'
+        f'status: ready\n'
+        f'kind: quick-plan\n'
+        f'parent_epic: {epic_id}\n'
+        f'source_doc: {source_doc}\n'
+        f'---\n\n'
+        f'# {group["title"]}\n\n'
+        f'## Context\n\n'
+        f'Group child of epic `{epic_id}` (see `{source_doc}`). Covers wave(s) '
+        f'{group["waves"] or "(unset)"} of the epic\'s Execution Strategy. This is a '
+        f'self-contained quick-plan for a fresh-context builder; pull scope detail '
+        f'from the named waves and the epic\'s `## File Ownership Map`.\n\n'
+        f'## Changes\n\n'
+        f'<!-- Seeded from epic waves {group["waves"] or "(unset)"}. Fill in the '
+        f'concrete changes this group ships. -->\n\n'
+        f'## Files to Modify\n\n'
+        f'<!-- From the epic\'s File Ownership Map: the files this group owns. -->\n\n'
+        f'## Verification\n\n'
+        f'<!-- The checks that prove this group\'s slice works. -->\n'
+    )
+
+
 def is_shipped(node: dict) -> bool:
     """True when a group child node already has a PR / merge / completion signal.
 
@@ -145,19 +193,26 @@ def find_orphans(
 ) -> list[dict]:
     """Existing group children of the epic whose slug is absent from the new spec.
 
-    A child is a group node when it is parented to the epic and its plan_path
-    is `<base>#group-<slug>`. Returns those whose slug is not in keep_slugs, in
-    graph order, so a re-decomposition can surface or refuse the orphans.
+    A child is a group node when it is parented to the epic and its plan_path is
+    either the `fragment` form `<base>#group-<slug>` or the `separate` form
+    `<dir>/<stem>.group-<slug>.md`. Returns those whose slug is not in keep_slugs,
+    in graph order, so a re-decomposition can surface or refuse the orphans
+    regardless of which packaging mode created them.
     """
-    prefix = f"{base}#group-"
+    frag_prefix = f"{base}#group-"
+    p = Path(base)
+    stem = p.stem if p.name.endswith(".md") else p.name
+    sep_prefix = str(p.with_name(f"{stem}.group-"))  # path minus "<slug>.md"
     orphans: list[dict] = []
     for e in entries:
         if e.get("parent") != epic_id:
             continue
         pp = e.get("plan_path") or ""
-        if not pp.startswith(prefix):
-            continue
-        slug = pp[len(prefix):]
+        slug: Optional[str] = None
+        if pp.startswith(frag_prefix):
+            slug = pp[len(frag_prefix):]
+        elif pp.startswith(sep_prefix) and pp.endswith(".md"):
+            slug = pp[len(sep_prefix):-3]
         if slug and slug not in keep_slugs:
             orphans.append(e)
     return orphans

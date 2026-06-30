@@ -1,7 +1,7 @@
 ---
 name: blueprint
 description: "Create implementation blueprints (plans). Default: multi-phase BDD folder plan with waves and parallel execution. Use 'quick' for flat single-file plans for bugs and 1-session work. Use when: 'create plan', 'implementation blueprint', 'break this down', 'how should we build'."
-argument-hint: "[quick] [group N] [no-adopt] [no-collision-check] <feature-description> [--no-linear] [--no-collision-check]"
+argument-hint: "[quick] [group N | no-group] [--plans fragment|separate] [no-adopt] [no-collision-check] <feature-description> [--no-linear] [--no-collision-check]"
 ---
 
 # Abilities Plan
@@ -963,7 +963,8 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 | Modifier | Effect |
 |---|---|
 | `quick` | Skip ## Execution Strategy (single-task; stamp status + kill_criteria) |
-| `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [Bounded Epic Decomposition](#bounded-epic-decomposition-group-n). Omit to fall back to `config.blueprint.max_prs_per_epic`. |
+| `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [Bounded Epic Decomposition](#bounded-epic-decomposition-group-n). Omit `N` to fall back to `config.blueprint.max_prs_per_epic`. Auto-enabled for `scope: epic` docs. |
+| `no-group` | Opt OUT of auto-decomposition on a `scope: epic` doc: run the single-doc lean mutation (one epic node, one PR), the pre-auto-group behavior. |
 | `greenfield` | Skip File Ownership Map + Patterns to Reuse regardless of codebase state |
 | `brownfield` | Force file binding even on empty-codebase detect |
 | `rewrite` | Allow re-running on `status: ready` (replaces /blueprint sections only) |
@@ -1012,25 +1013,42 @@ each becoming one child backlog node and one PR. Waves stay the internal
 execution unit; a group bundles 1+ waves. See
 `internal/fno/plans/2026-05-24-epic-scoped-execution.md` (C1).
 
-**When it runs.** Only when the invocation carries the `group` keyword, OR
-the plan frontmatter declares `max_prs:`. A plain `/blueprint` keeps the
-current behavior (one epic node, one PR). This is opt-in by design.
+**When it runs.** Decomposition fires in either of two ways:
+
+- **Auto (epic inputs).** A bare `/blueprint <doc>` whose frontmatter declares
+  `scope: epic` (or whose `## Execution Strategy` has >1 wave) decomposes at the
+  resolved ceiling by default - so an epic never silently collapses into one
+  giant PR, and you never have to remember the `group` keyword. To opt OUT, pass
+  **`no-group`** (`/blueprint no-group <epic-doc>`): that preserves the exact old
+  single-PR behavior (the single-doc lean mutation) for an epic you have decided
+  really is one cohesive PR.
+- **Explicit (any doc).** The invocation carries the `group` keyword, OR the
+  plan frontmatter declares `max_prs:`. Use this to force a split on a doc that
+  is not flagged `scope: epic`.
+
+A **non-epic** doc with no `group`/`max_prs:` keeps the single-doc lean mutation
+unchanged - auto-group only changes the default for `scope: epic` inputs.
 
 **Resolve the ceiling `N`** (first match wins):
 
 1. Explicit `group N` (e.g. `/blueprint group 5 <doc>`) -> `N`.
-2. Bare `group` with per-plan `max_prs:` in frontmatter -> that value.
-3. Bare `group` with neither -> `config.blueprint.max_prs_per_epic`
+2. `group`/auto-group with per-plan `max_prs:` in frontmatter -> that value.
+3. `group`/auto-group with neither -> `config.blueprint.max_prs_per_epic`
    (default 4). Read it with:
    ```bash
    N=$(fno config get config.blueprint.max_prs_per_epic 2>/dev/null || echo 4)
    ```
-   If `fno config get` is unavailable, default to 4.
+   If `fno config get` is unavailable, default to 4. **Auto-group MUST degrade to
+   today's single-doc behavior (not error) if the config read fails** - treat an
+   unreadable ceiling as 4, never abort the blueprint.
 
 `N` is a **ceiling, not a quota** (Locked Decision #3): cohesive work uses
-fewer groups; never pad to `N`. Reject `group 0` / negative `N` with a
-non-zero exit and the message `group N must be >= 1` (AC1-ERR), creating
-nothing.
+fewer groups; never pad to `N`. This guardrail applies identically to
+auto-group - an auto-decompose must never produce more than `N` groups, and a
+`scope: epic` doc whose waves cohere into one group still ships ONE PR (record
+it in `## Delivery Groups`, never force a split). Reject `group 0` / negative
+`N` with a non-zero exit and the message `group N must be >= 1` (AC1-ERR),
+creating nothing.
 
 **Procedure** (after the epic node is intaken in step 9 / 11b, so `EPIC_ID`
 is known):
@@ -1105,6 +1123,31 @@ is known):
 **Slug stability.** Use stable slugs across re-decomposition so idempotency
 holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
 (`auth-flow`) are fine as long as they do not change between runs.
+
+**Packaging choice: `fragment` (default) vs `separate`.** Decompose can attach
+two kinds of per-child plan; pass `--plans` to pick (the skill surfaces the
+tradeoff so the operator chooses deliberately instead of hand-rolling it):
+
+- **`fragment` (default, lean):** `plan_path = <doc>#group-<slug>`, a fragment of
+  the shared epic doc. One source of truth, thinner per-child detail. Best when
+  the children are built in the same context that holds the epic doc.
+- **`separate`:** after decompose, scaffold a self-contained quick-plan stub per
+  child (Context / Changes / Files to Modify / Verification, seeded from the
+  group's waves + a pointer to the epic's File Ownership Map) and repoint each
+  child's `plan_path` to its own `<stem>.group-<slug>.md` file. Best for a
+  fresh-context bg `/target` builder, which reads a self-contained plan better
+  than a fragment of a larger doc.
+
+  ```bash
+  fno backlog decompose "$EPIC_ID" --max-prs "$N" --plans separate --groups "@/tmp/groups-$$.json"
+  ```
+
+  `separate` is idempotent on the slug just like `fragment` (re-running upserts
+  the same children, and an existing scaffolded file is never clobbered, so a
+  builder's edits survive a re-decompose). Switching modes on an
+  already-decomposed epic repoints the same children rather than duplicating.
+  When in doubt, default to `fragment`; reach for `separate` when you are about
+  to hand the children to fresh-context builders.
 
 ## Ready-gated auto-launch (opt-in, default OFF) — Phase 2 / US6
 

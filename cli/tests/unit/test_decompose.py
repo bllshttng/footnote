@@ -931,3 +931,111 @@ def test_ac6_edge_pure_hard_decompose_adds_no_contract_fields(graph_env):
         assert "dep" not in child
         assert "stub_against" not in child
         assert "contract_version" not in child
+
+
+# -- packaging choice (--plans fragment|separate) --
+
+
+def _separate_env(tmp_path, monkeypatch):
+    """A one-epic graph whose plan_path points at a real doc under tmp_path, so
+    separate-mode scaffolds land inside the test's tmp dir. Returns (read_entries, doc)."""
+    doc = tmp_path / "epic.md"
+    doc.write_text("---\nstatus: ready\nscope: epic\n---\n# Epic\n", encoding="utf-8")
+    epic = _node(
+        "ab-epic0001",
+        title="Epic",
+        plan_path=f"{doc}#anchor",
+        cwd=str(tmp_path),
+        _status="ready",
+    )
+    _, read_entries = _wire_graph(tmp_path, monkeypatch, epic)
+    return read_entries, doc
+
+
+def test_plans_separate_scaffolds_files_and_repoints(tmp_path, monkeypatch):
+    """--plans separate writes a self-contained quick-plan per child and repoints
+    each child's plan_path to that file (Change 2 / Verification 2)."""
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+         "--groups", _groups_json(THREE_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+
+    children = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+    assert len(children) == 3
+    for c in children:
+        pp = c["plan_path"]
+        assert "#group-" not in pp          # not a fragment
+        assert ".group-" in pp and pp.endswith(".md")
+        f = Path(pp)
+        assert f.exists(), f"scaffold not written: {f}"
+        body = f.read_text()
+        assert "kind: quick-plan" in body
+        assert "parent_epic: ab-epic0001" in body
+
+
+def test_plans_separate_idempotent_preserves_builder_edits(tmp_path, monkeypatch):
+    """Re-running separate mode upserts (no dupes) and never clobbers a file a
+    builder has already edited (Concurrency invariant)."""
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+             "--groups", _groups_json(THREE_GROUPS)])
+    before = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+    ids_before = sorted(e["id"] for e in before)
+    edited = Path(before[0]["plan_path"])
+    edited.write_text("# builder edits - keep\n", encoding="utf-8")
+
+    _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+             "--groups", _groups_json(THREE_GROUPS)])
+    after = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+    assert sorted(e["id"] for e in after) == ids_before   # no duplicates
+    assert edited.read_text() == "# builder edits - keep\n"  # not overwritten
+
+
+def test_plans_mode_switch_fragment_to_separate_upserts(tmp_path, monkeypatch):
+    """Switching fragment -> separate repoints the SAME children rather than
+    duplicating (idempotent on the slug across packaging modes)."""
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    _invoke(["backlog", "decompose", "ab-epic0001",
+             "--groups", _groups_json(THREE_GROUPS)])
+    frag = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+    assert all("#group-" in e["plan_path"] for e in frag)
+    frag_ids = sorted(e["id"] for e in frag)
+
+    _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+             "--groups", _groups_json(THREE_GROUPS)])
+    sep = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+    assert sorted(e["id"] for e in sep) == frag_ids   # same nodes, no dupes
+    for c in sep:
+        assert "#group-" not in c["plan_path"]
+        assert Path(c["plan_path"]).exists()
+
+
+def test_plans_separate_title_with_quotes_emits_valid_yaml(tmp_path, monkeypatch):
+    """A group title containing a double quote must not break the scaffold's YAML
+    frontmatter (gemini review: escape quotes)."""
+    import yaml
+
+    read_entries, doc = _separate_env(tmp_path, monkeypatch)
+    groups = [{"slug": "1", "title": 'Group "alpha": the \\ case', "waves": "1",
+               "blocked_by_groups": []}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "separate",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    child = next(e for e in read_entries() if e.get("parent") == "ab-epic0001")
+    body = Path(child["plan_path"]).read_text()
+    front = body.split("---\n", 2)[1]
+    fm = yaml.safe_load(front)
+    assert fm["title"] == 'Group "alpha": the \\ case'
+
+
+def test_plans_invalid_value_rejected_atomically(graph_env):
+    """An unknown --plans value errors before any graph write."""
+    g, read_entries = graph_env
+    before = read_entries()
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--plans", "bogus",
+                      "--groups", _groups_json(THREE_GROUPS)])
+    assert result.exit_code != 0
+    assert "fragment" in result.output.lower() or "separate" in result.output.lower()
+    assert read_entries() == before
