@@ -148,6 +148,13 @@ class Candidate:
     short_id: str
     sock_path: str
     jobs_dir: object  # pathlib.Path; opaque here so tests can pass a tmp_path
+    # cwd + name come from the registry row. They are unused on the nudge path
+    # and only carried for the failover re-dispatch (x-7abe): the worktree cwd
+    # holds the node's target-state.md, and the name is the handle for
+    # ``fno agents stop``. Both default None so nudge-path callers/tests need not
+    # supply them.
+    cwd: Optional[str] = None
+    name: Optional[str] = None
 
 
 @dataclass
@@ -155,11 +162,15 @@ class _SnapshotView:
     """Minimal view of state.json the sweep needs (state + updatedAt).
 
     The production ``read_state_fn`` returns a ``StateSnapshot`` which carries
-    these same two attributes, so it is a drop-in; tests construct this directly.
+    these same attributes, so it is a drop-in; tests construct this directly.
     """
 
     state: str
     updated_at: Optional[str]
+    # The dead session's last ``output.result`` text. For an out-of-usage death
+    # it carries the provider error ("API Error: ... rate limit ...") that the
+    # failover branch classifies (x-7abe). None on the nudge path / older tests.
+    output_result: Optional[str] = None
 
 
 def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Candidate]:
@@ -188,7 +199,10 @@ def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Can
             # locate_session's contract guarantees both, but a future locator
             # variant might not; skip rather than build an unusable candidate.
             continue
-        out.append(Candidate(short_id=short_id, sock_path=sock, jobs_dir=jobs_dir))
+        out.append(Candidate(
+            short_id=short_id, sock_path=sock, jobs_dir=jobs_dir,
+            cwd=getattr(entry, "cwd", None), name=getattr(entry, "name", None),
+        ))
     return out
 
 
@@ -216,17 +230,36 @@ def recovery_sweep(
     read_state_fn: Callable,
     liveness_fn: Callable[[str], bool],
     send_fn: Callable[[str, str, str], None],
+    failover_fn: Optional[Callable[["Candidate", object], str]] = None,
 ) -> None:
-    """Classify each candidate and act: nudge (capped), skip, or stay silent.
+    """Classify each candidate and act: failover, nudge (capped), skip, or stay silent.
 
     Every decision that *matters* emits exactly one event:
+      - ``failover_swapped`` when an out-of-usage session rotates providers,
+      - ``failover_blocked{reason}`` when a swap is wanted but storm-capped
+        (thrash). A queue-exhausted result (no alternate) is NOT blocked - it
+        falls through to the bounded nudge below,
       - ``recovery_nudge`` when a resume is injected,
       - ``recovery_skipped{reason}`` when an idle-stale session is deliberately
         spared (``needs-input``), unreachable, or the send failed,
       - ``recovery_capped`` once when a session hits the per-session nudge cap.
     A done / not-yet-stale session is silent (no event) so healthy ticks do not
     spam the log. All I/O is injected so this is unit-testable offline.
+
+    ``failover_fn`` (x-7abe) is the only way the failover branch activates: when
+    None (every nudge-path caller / test), the sweep behaves exactly as the
+    x-f47c watchdog. When supplied, a stale session whose last error is a
+    *swap-class* one (rate-limit / quota / auth / 5xx) routes to provider
+    failover INSTEAD of a nudge - nudging "keep going" at a rate-limited provider
+    just re-hits the limit. A connection-drop (non-swap class) still nudges.
+
+    At most ONE provider rotation fires per sweep tick (``rotated`` guard): a
+    swap mutates the *global* active provider, so a second candidate evaluated
+    after it would have its error mis-attributed to the already-swapped-to
+    provider (codex P2). The remaining stale sessions nudge this tick and are
+    reconsidered next tick against the settled provider.
     """
+    rotated = False  # one provider rotation per tick (P2: global active mutation)
     for c in candidates:
         snap = read_state_fn(c.jobs_dir)
         decision = classify(snap.state, snap.updated_at, now, cfg.idle_threshold_seconds)
@@ -237,6 +270,43 @@ def recovery_sweep(
         if decision != NUDGE:
             # SKIP_TERMINAL / NOT_STALE: nothing to say.
             continue
+
+        # Out-of-usage failover (x-7abe): a swap-class death means the provider
+        # is rate-limited/quota'd, so rotate + re-dispatch instead of nudging the
+        # same dead provider. Checked before the nudge cap (failover has its own
+        # per-phase storm-cap inside attempt_swap) and before liveness (a swap
+        # re-dispatches a fresh session, it does not need the dead socket).
+        if failover_fn is not None and not rotated:
+            err = classify_session_error(getattr(snap, "output_result", None))
+            if err is not None and getattr(err, "triggers_swap", False):
+                outcome = failover_fn(c, err)
+                if outcome in ("swapped", "rotated-no-worker"):
+                    # Either way the global active provider rotated, so no
+                    # further swap this tick.
+                    rotated = True
+                    # Honest event: redispatched=True only when a replacement
+                    # worker actually started (codex P1 — a swallowed spawn
+                    # failure must NOT report a phantom redispatch).
+                    emit("failover_swapped", {
+                        "short_id": c.short_id,
+                        "redispatched": outcome == "swapped",
+                    })
+                    if outcome == "swapped":
+                        continue
+                    # "rotated-no-worker": the swap landed on a provider we
+                    # cannot bg-redispatch a /target onto (non-claude) or the
+                    # spawn failed; fall through to the bounded nudge so the
+                    # session is not left dead-and-unnudged (codex P1).
+                elif outcome == "blocked-thrash":
+                    # Storm-cap reached: genuine churn, deliberate bounded stop.
+                    emit("failover_blocked", {"short_id": c.short_id, "reason": outcome})
+                    continue
+                # "queue-exhausted" (no alternate provider exists — the common
+                # single-provider case) and "no-swap" (controller declined): fall
+                # through to the x-f47c nudge. With nothing to swap to, the
+                # bounded nudge is the right fallback — the rate-limit window may
+                # clear and the per-session cap stops it spinning, so this is
+                # strictly no worse than the pre-failover watchdog.
 
         n = counts.get(c.short_id, 0)
         if n >= cfg.max_nudges:
@@ -311,7 +381,7 @@ def _safe_read_state(jobs_dir):
 
     try:
         snap = read_state_json(Path(jobs_dir))
-        return _SnapshotView(snap.state, snap.updated_at)
+        return _SnapshotView(snap.state, snap.updated_at, snap.output_result)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError):
         # AttributeError/TypeError: a valid-JSON-but-non-object state.json (a
         # bare string/list) makes the parser's ``.get(...)`` raise.
@@ -319,6 +389,160 @@ def _safe_read_state(jobs_dir):
         # to an empty view so ONE malformed session never aborts the sweep for
         # the rest of this tick; the next tick retries.
         return _SnapshotView("", None)
+
+
+# ---------------------------------------------------------------------------
+# Out-of-usage provider failover (x-7abe)
+#
+# This wires the already-built+tested failover engine
+# (``adapters/providers/error_taxonomy`` + ``failover.FailoverController``) into
+# the recovery watchdog - the ONLY live autonomous loop in production. The design
+# named an in-loop megawalk path as primary, but that path (``megawalk_drivers``,
+# ``DriverWithFallback``, ``map_*_error``) has zero production call sites and
+# footnote's real autonomous loop (Rust ``loop run`` + ``claude --bg`` +
+# stop-hook) has no synchronous Python point that catches a 429. So the watchdog
+# is the sole integration point and the in-loop "primary" is N/A. (cv-59ef0909)
+# ---------------------------------------------------------------------------
+
+def classify_session_error(output_result: Optional[str]):
+    """Classify a dead session's last ``output.result`` into a ``NormalizedError``.
+
+    Returns the ``NormalizedError`` (callers check ``.triggers_swap``) or None
+    when there is no text to classify. Reuses the shipped ``normalize`` text
+    rules - "rate limit" / "quota exceeded" -> swap-class; a clean connection-drop
+    has none of those markers -> UNKNOWN (``triggers_swap`` False), so it still
+    nudges. No new error logic.
+    """
+    if not output_result or not isinstance(output_result, str):
+        return None
+    from fno.adapters.providers.error_taxonomy import normalize
+
+    return normalize(http_status=None, exit_code=None, body=output_result)
+
+
+def _node_id_from_worktree(cwd: str) -> Optional[str]:
+    """Read ``graph_node_id`` from the dead session's worktree target-state.md.
+
+    The registry row carries the worktree cwd but not the node id; the immutable
+    manifest there does. Best-effort: any read/parse miss returns None and the
+    re-dispatch is skipped (the swap still happened).
+    """
+    try:
+        text = (Path(cwd) / ".fno" / "target-state.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError - a non-UTF-8
+        # manifest must degrade to "no node" rather than crash the sweep.
+        return None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("graph_node_id:"):
+            val = s.split(":", 1)[1].strip().strip('"').strip("'")
+            return val or None
+    return None
+
+
+def _redispatch(candidate: "Candidate") -> bool:
+    """Best-effort: stop the rate-limited session and respawn ``/target`` on the
+    now-active (swapped) provider, continuing in the SAME worktree (work-so-far
+    lives in the branch's atomic commits there). Returns True iff a replacement
+    worker was actually launched (spawn exit 0).
+
+    Caller guarantees the new active provider's cli is ``claude`` before calling,
+    so the substrate is ``bg`` (claude-only) and ``--provider claude`` selects
+    the now-active claude record the swap installed in settings.yaml. (A
+    non-claude swap cannot bg-redispatch a multi-phase /target, so the caller
+    skips this entirely — codex P1.)
+
+    ponytail: best-effort respawn. The respawn is gravy on top of the rotation;
+    if it fails (claim still held, manifest already initialized, spawn errors)
+    this returns False and the caller falls back to the bounded nudge, so the
+    session is never left dead-and-unnudged. Upgrade path if respawn proves flaky
+    in the wild: harden claim-reclaim + worktree continuity (the edges that
+    cannot be verified offline). Reuses the canonical ``fno agents spawn
+    --substrate bg`` shape from dispatch-node.sh.
+    """
+    import subprocess
+
+    cwd = getattr(candidate, "cwd", None)
+    if not cwd:
+        return False
+    node = _node_id_from_worktree(cwd)
+    if not node:
+        return False
+    name = getattr(candidate, "name", None)
+    agent = f"failover-{candidate.short_id}"
+    try:
+        if name:
+            # Release the dead session's node claim so the respawn can re-claim.
+            subprocess.run(
+                ["fno", "agents", "stop", name],
+                cwd=cwd, capture_output=True, timeout=30, check=False,
+            )
+        # --provider claude: the swap already installed the new claude record as
+        # active in settings.yaml, so the kind is what spawn needs. no-merge: an
+        # autonomous worker lands a PR for review, never auto-merges.
+        proc = subprocess.run(
+            ["fno", "agents", "spawn", "--provider", "claude",
+             "--substrate", "bg", "--cwd", cwd, agent, f"/target no-merge {node}"],
+            cwd=cwd, capture_output=True, timeout=60, check=False,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        # Non-fatal: the swap already landed; never let a respawn miss crash the
+        # sweep for the rest of this tick.
+        return False
+
+
+def _default_failover(candidate: "Candidate", error) -> str:
+    """Real ``failover_fn``: rotate the active provider via the shipped controller.
+
+    Returns one of:
+      - ``"swapped"``           rotated AND a replacement worker started,
+      - ``"rotated-no-worker"`` rotated but no worker (swapped onto a non-claude
+                                provider /target cannot bg-run, or the spawn
+                                failed) — the caller nudges as a fallback,
+      - ``"blocked-thrash"`` / ``"queue-exhausted"`` / ``"no-swap"``.
+
+    ``phase_id`` is keyed on the dead session's short_id so the controller's
+    per-phase storm-cap bounds how many times one stuck session rotates. Every
+    failure mode degrades to ``"no-swap"`` (the caller then nudges defensively)
+    rather than crashing the sweep.
+    """
+    from fno.adapters.providers.failover import FailoverController, SwapDecision
+    from fno.adapters.providers.loader import read_active_provider_atomic
+    from fno.adapters.providers.dispatch import _default_settings_path
+    from fno import paths
+
+    try:
+        settings_path = _default_settings_path()
+        active = read_active_provider_atomic(settings_path=settings_path).id
+        state_path = paths.state_dir() / "failover-state.json"
+        ctrl = FailoverController(
+            settings_path=settings_path, state_path=state_path,
+            phase_id=f"{candidate.short_id}:recovery",
+        )
+        result = ctrl.attempt_swap(current_provider_id=active, error=error)
+    except Exception:  # noqa: BLE001 - failover must never break the sweep
+        return "no-swap"
+
+    if result.decision is SwapDecision.SWAPPED:
+        # The swap installed result.new_provider_id as the active record. Re-read
+        # to get its cli KIND (codex P1: new_provider_id is a record id like
+        # "claude-secondary", NOT the "claude"/"codex" kind that spawn wants).
+        try:
+            new_cli = read_active_provider_atomic(settings_path=settings_path).cli
+        except Exception:  # noqa: BLE001
+            return "rotated-no-worker"
+        # Autonomous /target only bg-runs on claude; a non-claude target cannot
+        # be bg-redispatched (the Rust client rejects --substrate bg for it).
+        if new_cli == "claude" and _redispatch(candidate):
+            return "swapped"
+        return "rotated-no-worker"
+    if result.decision is SwapDecision.BLOCKED_THRASH:
+        return "blocked-thrash"
+    if result.decision is SwapDecision.QUEUE_EXHAUSTED:
+        return "queue-exhausted"
+    return "no-swap"
 
 
 def _prune_keep(key: str, live: set) -> bool:
@@ -340,6 +564,7 @@ def run_recovery_sweep(
     send_fn: Optional[Callable] = None,
     load_counts_fn: Optional[Callable] = None,
     save_counts_fn: Optional[Callable] = None,
+    failover_fn: Optional[Callable] = None,
 ) -> int:
     """Build the real seams, run one sweep, persist counts. Returns candidate count.
 
@@ -369,6 +594,11 @@ def run_recovery_sweep(
     read_state_fn = read_state_fn or _safe_read_state
     load_counts_fn = load_counts_fn or load_counts
     save_counts_fn = save_counts_fn or save_counts
+    # Default-on in production: the failover branch activates whenever a stale
+    # session's last error is swap-class. With a single configured provider the
+    # controller returns QUEUE_EXHAUSTED (a bounded stop), so wiring it on by
+    # default is safe (x-7abe).
+    failover_fn = failover_fn or _default_failover
 
     candidates = iter_candidates(registry_load(), locate_fn)
     counts = load_counts_fn()
@@ -380,6 +610,7 @@ def run_recovery_sweep(
         candidates=candidates, counts=counts, emit=emit,
         read_state_fn=read_state_fn,
         liveness_fn=liveness_fn, send_fn=send_fn,
+        failover_fn=failover_fn,
     )
 
     save_counts_fn(counts)
