@@ -81,6 +81,17 @@ cli/.venv/
 .claude/.skill-scoping-state.json
 # local runtime hook logs (never commit)
 .claude/hooks/
+# Same, nested: skill-scoping drops .claude/hooks/ inside subpackages (cli/, crates/...)
+**/.claude/hooks/
+
+# Persisted Workflow-tool scripts (local run artifacts, regenerated on demand)
+.claude/workflows/
+
+# Impeccable skill hook caches (any depth)
+**/.impeccable/
+
+# Conductor local workspace state
+.conductor/
 
 # understand-anything skill output (generated knowledge graph; keep local, never commit)
 .understand-anything/
