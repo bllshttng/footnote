@@ -67,6 +67,14 @@ type RailPaintArg<'a> = Option<(
 
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 
+/// How long a claude name that failed the `worker.ping` PTY gate is kept out of
+/// the live-discover probe set (x-c226). A stable stream-json lane (host_mode=
+/// interactive, serves only `stream.*`) fails forever, so without this it is
+/// re-probed at 500ms every 3s tick, starving grid input. 60s means a stable
+/// lane re-probes once/min (negligible) while a slow-starting real child still
+/// tiles within <=60s. Monotonic `Instant`, never wall-clock (NTP-safe).
+const FAILED_PROBE_TTL: Duration = Duration::from_secs(60);
+
 /// A message from a per-pane reader task to the main loop.
 enum PaneMsg {
     /// PTY output bytes for pane `idx`.
@@ -174,20 +182,31 @@ async fn prune_non_pty_claude_with_rows(
             .and_then(|r| r.get(key).and_then(Value::as_str))
             .map(str::to_string)
     };
-    let mut kept = Vec::with_capacity(names.len());
-    for name in names {
+    // Probe the candidates CONCURRENTLY (x-c226): the serial loop stalled the
+    // grid select! arm for N x 500ms. `join_all` over borrowed futures caps a
+    // burst at one ~500ms window. `join_all` (not `JoinSet`) because each probe
+    // borrows `&home` - no `'static + Send` requirement, no socket-context clone.
+    // Each future resolves to `(name, survives)` so the survivor/failure split
+    // is by the returned name, not a fragile index into a separate vec.
+    let probes = names.into_iter().map(|name| {
+        // Resolve provider/short_id synchronously so the async block borrows
+        // only `home` (the `rows`-borrowing `field` closure stays out of it).
         let provider = field(&name, "provider");
-        let ping_ok = if provider.as_deref() == Some("claude") {
-            let short_id = field(&name, "short_id").unwrap_or_default();
-            worker_speaks_pty(home, &short_id).await
-        } else {
-            false // unused for non-claude (survives_pty_gate ignores it)
-        };
-        if survives_pty_gate(provider.as_deref(), ping_ok) {
-            kept.push(name);
+        let short_id = field(&name, "short_id").unwrap_or_default();
+        async move {
+            let ping_ok = if provider.as_deref() == Some("claude") {
+                worker_speaks_pty(home, &short_id).await
+            } else {
+                false // unused for non-claude (survives_pty_gate ignores it)
+            };
+            (name, survives_pty_gate(provider.as_deref(), ping_ok))
         }
-    }
-    kept
+    });
+    futures_util::future::join_all(probes)
+        .await
+        .into_iter()
+        .filter_map(|(name, survives)| survives.then_some(name))
+        .collect()
 }
 
 /// PTY-driveable providers. claude joins codex/gemini in E2, but ONLY in its
@@ -2459,6 +2478,26 @@ fn new_registry_names(fresh: Vec<String>, known: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Drop candidate names whose last `worker.ping` failure is still within
+/// `ttl` (x-c226). A name is eligible to (re)probe when it is unseen, or its
+/// cached failure is at least `ttl` old (`>=`, so the TTL boundary re-probes -
+/// AC3-EDGE). Pure: the probe + cache writes happen in [`poll_live_discover`].
+fn cache_candidates(
+    new: Vec<String>,
+    cache: &std::collections::HashMap<String, std::time::Instant>,
+    now: std::time::Instant,
+    ttl: Duration,
+) -> Vec<String> {
+    new.into_iter()
+        .filter(|name| match cache.get(name) {
+            // saturating_*: Instant is monotonic, but the std docs warn a future
+            // version may reintroduce duration_since's panic; saturate to be safe.
+            Some(&failed_at) => now.saturating_duration_since(failed_at) >= ttl,
+            None => true,
+        })
+        .collect()
+}
+
 /// Roster cards whose session is not already carried by a tiled card (the poll
 /// diff, by session_id - AC3-EDGE). `known` is the grid's `roster_cards` vector
 /// (`None` for real fno panes, skipped). Pure.
@@ -2684,6 +2723,7 @@ async fn poll_live_discover(
     repo_cache: &mut repo::RepoCache,
     rail_state: Option<&group::RailState>,
     squad_store: &squads::SquadStore,
+    failed_probe_cache: &mut std::collections::HashMap<String, std::time::Instant>,
 ) {
     if !parsed.all {
         return; // explicit-name fleet is fixed; nothing to discover
@@ -2705,12 +2745,34 @@ async fn poll_live_discover(
     let rows = read_registry_rows(home);
 
     // ── Registry diff: new PTY panes (Change 2) ─────────────────────────────
-    let new_names = new_registry_names(filter_pty_agents(&rows), names);
+    // x-c226: skip candidates whose `worker.ping` failed within FAILED_PROBE_TTL
+    // (stable stream-json lanes), so the steady state truly probes nothing and a
+    // busy fleet never starves input. A single `now` for the whole tick.
+    let now = std::time::Instant::now();
+    let new_names = cache_candidates(
+        new_registry_names(filter_pty_agents(&rows), names),
+        failed_probe_cache,
+        now,
+        FAILED_PROBE_TTL,
+    );
     if !new_names.is_empty() {
         // Same authoritative PTY-protocol gate as startup, but the worker.ping
-        // probe runs ONLY for the new candidates (steady state: no probe), over
-        // the rows we already hold.
+        // probe runs ONLY for not-recently-failed new candidates (steady state:
+        // no probe), over the rows we already hold - now concurrently (join_all).
+        let probed = new_names.clone();
         let new_names = prune_non_pty_claude_with_rows(new_names, &rows, home).await;
+        // Cache the gate-failures (probed minus survivors) so they are not
+        // re-probed every tick; clear any survivor's stale entry (a survivor is
+        // never cached - AC2-FR). Compare by name via a HashSet of survivors.
+        let survived: std::collections::HashSet<&str> =
+            new_names.iter().map(String::as_str).collect();
+        for name in &probed {
+            if survived.contains(name.as_str()) {
+                failed_probe_cache.remove(name);
+            } else {
+                failed_probe_cache.insert(name.clone(), now);
+            }
+        }
         if !new_names.is_empty() {
             let host_modes = host_modes_from_rows(&rows, &new_names);
             for (name, host_mode) in new_names.iter().zip(host_modes) {
@@ -2747,6 +2809,11 @@ async fn poll_live_discover(
             }
         }
     }
+    // Sweep expired failures so the cache stays bounded by the live within-TTL
+    // failure count and a name whose session has left the registry self-heals
+    // (x-c226 AC1-FR). Cheap: the map holds only failed claude lanes.
+    failed_probe_cache
+        .retain(|_, failed_at| now.saturating_duration_since(*failed_at) < FAILED_PROBE_TTL);
 
     // ── Roster diff: new --bg status cards (Change 3) ───────────────────────
     // roster_bg_cards_from dedups against the registry rows, so a session that
@@ -3019,6 +3086,12 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
     // snapshot AND every live-added worker share it - git never re-spawns for a
     // cwd already seen (the Concurrency failure mode: no per-frame git).
     let mut repo_cache = repo::RepoCache::new();
+    // x-c226 negative-probe cache: claude name -> Instant its last `worker.ping`
+    // gate probe failed. Lives for the whole run so the live-discover poll skips
+    // re-probing stable stream-json lanes (host_mode=interactive but no
+    // worker.ping) every tick, which was starving grid input on a busy fleet.
+    let mut failed_probe_cache: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
     let mut initial_rail_rows: Vec<Value> = {
         // Read registry rows once for richer grouping (cwd, provider, status).
         // Fall back to name-only synthetic rows if the registry is absent.
@@ -4427,7 +4500,7 @@ pub async fn run(parsed: GridArgs, home: &AgentsHome) -> i32 {
                     &parsed, home, &tx, tty, &mut comp, &mut names, &mut panes,
                     &mut states, &mut watch_sinks, &mut host_interactive,
                     &mut roster_cards, &mut rail_rows, &mut repo_cache,
-                    rail_state.as_ref(), &squad_store,
+                    rail_state.as_ref(), &squad_store, &mut failed_probe_cache,
                 )
                 .await;
                 ping_open_sinks(&mut watch_sinks, &mut states).await;
@@ -4777,6 +4850,47 @@ mod tests {
         assert_eq!(new_registry_names(fresh, &known), vec!["wkC".to_string()]);
         // No new rows when the registry is unchanged.
         assert!(new_registry_names(known.clone(), &known).is_empty());
+    }
+
+    // x-c226: the negative-probe cache filter. A failed lane is skipped within
+    // TTL (AC1-EDGE / AC1-ERR) and re-probed at/after the boundary (AC3-EDGE).
+    #[test]
+    fn cache_candidates_skips_within_ttl_reprobes_after() {
+        use std::collections::HashMap;
+        use std::time::Instant;
+        let ttl = Duration::from_secs(60);
+        let now = Instant::now();
+        let mut cache: HashMap<String, Instant> = HashMap::new();
+        cache.insert("fresh_fail".into(), now); // just failed -> within TTL
+        cache.insert(
+            "boundary".into(),
+            now.checked_sub(ttl).expect("instant in range"),
+        ); // exactly TTL old -> eligible (>=)
+        cache.insert(
+            "expired".into(),
+            now.checked_sub(ttl + Duration::from_secs(1))
+                .expect("instant in range"),
+        ); // past TTL -> eligible
+
+        let new = vec![
+            "unseen".to_string(),     // not cached -> probe
+            "fresh_fail".to_string(), // within TTL -> skip
+            "boundary".to_string(),   // == TTL -> re-probe
+            "expired".to_string(),    // > TTL -> re-probe
+        ];
+        let out = cache_candidates(new, &cache, now, ttl);
+        assert_eq!(
+            out,
+            vec![
+                "unseen".to_string(),
+                "boundary".to_string(),
+                "expired".to_string()
+            ]
+        );
+
+        // AC1-EDGE: every new name is within TTL -> empty candidate set.
+        let all_cached = vec!["fresh_fail".to_string()];
+        assert!(cache_candidates(all_cached, &cache, now, ttl).is_empty());
     }
 
     // ── recruit picker + cycle (x-0175) ──────────────────────────────────────
