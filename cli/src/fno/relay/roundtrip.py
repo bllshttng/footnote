@@ -16,7 +16,7 @@ that uuid back over the spawn RPC); the relay is reduced to two relay-local jobs
 
 2. **Read replies from the transcript jsonl** (relay-local): the daemon-spawned
    peer writes `projects/<cwd-enc>/<session_id>.jsonl`; this module globs it by the
-   session id and extracts the `<<<RELAY>>>...<<<ENDRELAY>>>` sentinel a peer is
+   session id and extracts the `RELAY9BEGIN...RELAY9END` sentinel a peer is
    steered to wrap every reply in (`RELAY_SYSTEM_PROMPT`, carried on the daemon
    spawn). Faithful text -- no TUI space-collapse. There is NO pane fallback: the
    `peer.buf` master-fd buffer moved to the daemon, so the transcript is the sole
@@ -493,7 +493,7 @@ def deliver_session(
     CONTRACT (sentinel seam, resolved): the worker MUST have been spawned
     relay-targeted -- i.e. with :data:`RELAY_SYSTEM_PROMPT` appended (the daemon
     spawn's ``append_system_prompt``, E4.1), so every reply is wrapped in the
-    ``<<<RELAY>>>...<<<ENDRELAY>>>`` sentinels this reads. A grid- or generic-spawned
+    ``RELAY9BEGIN...RELAY9END`` sentinels this reads. A grid- or generic-spawned
     claude carries no such prompt and is therefore NOT relay-readable -- BY DESIGN.
     There is no turn-boundary heuristic fallback (it is unneeded: relay peers are
     always relay-spawned). The absence of a sentinel reply is indistinguishable
@@ -805,7 +805,7 @@ def deliver_attached(
 
     CONTRACT (sentinel seam): as with :func:`deliver_session`, the adopted peer must
     have been spawned relay-targeted (``RELAY_SYSTEM_PROMPT`` appended) so its reply
-    is wrapped in the ``<<<RELAY>>>...<<<ENDRELAY>>>`` sentinels :func:`_transcript_replies`
+    is wrapped in the ``RELAY9BEGIN...RELAY9END`` sentinels :func:`_transcript_replies`
     reads. A generic ``claude --bg`` session carries no such prompt and is NOT
     relay-readable -- that surfaces as the ``TimeoutError`` below (a missing sentinel
     is indistinguishable from a slow turn at read time). Wiring that spawn-lane is the
