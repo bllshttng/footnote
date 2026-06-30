@@ -233,6 +233,39 @@ def blast_check(
     typer.echo(result["verdict"] if quiet else json.dumps(result))
 
 
+@target_app.command("status")
+def status(
+    node: Optional[str] = typer.Argument(
+        None, help="Node id to orient on (default: read from the session manifest)."
+    ),
+    plan_path: Optional[str] = typer.Option(
+        None, "--plan-path", help="Plan to reconcile (default: manifest plan_path)."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit the report as a JSON object."
+    ),
+) -> None:
+    """Resolved orientation report: node, attended, worktree, tests, plan, done-when.
+
+    Strictly read-only -- never mutates the graph, manifest, or a claim. Each
+    line resolves independently; an unresolvable line prints `unknown` plus the
+    one command that resolves it. Re-run bare after compaction to re-orient.
+    """
+    from fno.target.orient import load_orientation, render
+
+    try:
+        from fno.paths import resolve_repo_root
+
+        root = resolve_repo_root()
+    except Exception:  # noqa: BLE001 - degrade to cwd when not in a repo
+        root = Path.cwd()
+    lines = load_orientation(root, node_id=node, plan_path=plan_path)
+    if json_output:
+        typer.echo(json.dumps({ln.label: ln.value for ln in lines}, indent=2))
+    else:
+        typer.echo(render(lines))
+
+
 @target_app.command()
 def init(
     input_: Optional[str] = typer.Option(
@@ -347,6 +380,17 @@ def init(
 
     env = dict(os.environ)
     env["TARGET_START"] = "1"
+    # Change D (x-a7be): resolve `attended` from the substrate before the bash
+    # manifest writer runs. A spawned/bg worker has no operator at the keyboard;
+    # the claude spawn path injects FNO_AGENT_SELF into EVERY spawned worker and
+    # a bg thread sets FNO_BG (the spawn_think precedent, codex PR #9). Marking
+    # the run unattended makes init stamp `attended: false`, so the skill
+    # surfaces offers as non-blocking lines instead of a [Y/n] that hangs a
+    # detached session. An explicit TARGET_UNATTENDED always wins.
+    if "TARGET_UNATTENDED" not in env and (
+        env.get("FNO_AGENT_SELF") or env.get("FNO_BG")
+    ):
+        env["TARGET_UNATTENDED"] = "1"
     if input_:
         env["TARGET_INPUT"] = input_
     if plan_path:
@@ -356,8 +400,23 @@ def init(
 
     result = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if result.returncode == 0:
+        _print_orientation_report()
         _maybe_dispatch_work_start()
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def _print_orientation_report() -> None:
+    """Change A (x-a7be): print the resolved situation report as init's first
+    orientation output. Reads the just-written manifest; strictly read-only and
+    fully non-fatal -- a degraded report never affects the init exit code.
+    """
+    try:
+        from fno.paths import resolve_repo_root
+        from fno.target.orient import load_orientation, render
+
+        typer.echo(render(load_orientation(resolve_repo_root())))
+    except Exception:  # noqa: BLE001 - orientation is additive; never block init
+        pass
 
 
 def _maybe_dispatch_work_start() -> None:

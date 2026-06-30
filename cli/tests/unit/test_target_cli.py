@@ -56,8 +56,13 @@ def test_target_init_shells_through_with_env(monkeypatch, tmp_path):
         returncode = 0
 
     def _stub_run(cmd, check=False, env=None, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["env"] = dict(env or {})
+        # Capture the bash init shell-through specifically. init() also runs git
+        # subprocesses both before (script-path resolution) and after (the
+        # post-init orientation report, x-a7be) the bash call; neither is the
+        # call under test.
+        if list(cmd)[:1] == ["bash"]:
+            captured["cmd"] = list(cmd)
+            captured["env"] = dict(env or {})
         return _Result()
 
     # Point the resolver at a fake plugin root that DOES contain the script.
@@ -96,7 +101,10 @@ def test_target_init_size_sets_target_size_env(monkeypatch, tmp_path):
         returncode = 0
 
     def _stub_run(cmd, check=False, env=None, **kwargs):
-        captured["env"] = dict(env or {})
+        # Capture the bash init call; git subprocesses (script resolution, the
+        # post-init orientation report) bracket it and are not under test.
+        if list(cmd)[:1] == ["bash"]:
+            captured["env"] = dict(env or {})
         return _Result()
 
     fake_root = _fake_plugin_root(tmp_path)
