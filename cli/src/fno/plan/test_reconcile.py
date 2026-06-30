@@ -62,6 +62,19 @@ def test_dedup_repeated_path(tmp_path: Path) -> None:
     assert len(delta.paths) == 1
 
 
+def test_absolute_path_does_not_bypass_repo_root(tmp_path: Path) -> None:
+    # An absolute path that exists on the host but is NOT under repo_root must be
+    # stale, not present: a bare `repo_root / "/abs/x.py"` would resolve to the
+    # host file (Path discards repo_root when joined with an absolute path).
+    outside = tmp_path / "outside.py"  # has a slash + .py ext -> matches the regex
+    outside.write_text("x = 1\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plan = _write(repo / "plan.md", f"touches `{outside.as_posix()}`\n")
+    delta = reconcile_plan(plan, repo)
+    assert delta.stale == 1 and delta.present == 0
+
+
 def test_self_check_runs() -> None:
     # The module ships a runnable assert-based self-check.
     from fno.plan import reconcile

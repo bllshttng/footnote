@@ -264,7 +264,10 @@ def _read_manifest(project_root: Path) -> Optional[Dict[str, Any]]:
     try:
         from fno.agent.state import load_agent_context
 
-        ctx = load_agent_context()
+        # Pin to project_root so the frontmatter read and the body read below
+        # resolve the SAME manifest (load_agent_context otherwise detects the
+        # root from cwd, which can differ under FNO_REPO_ROOT / a subdirectory).
+        ctx = load_agent_context(project_root_override=project_root)
         if ctx.session is not None:
             raw = dict(ctx.session.raw)
     except Exception:  # noqa: BLE001 - no/unreadable manifest is fine
@@ -272,7 +275,7 @@ def _read_manifest(project_root: Path) -> Optional[Dict[str, Any]]:
     manifest = project_root / ".fno" / "target-state.md"
     try:
         text = manifest.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return raw
     for key in _BODY_KEYS:
         if raw and raw.get(key):

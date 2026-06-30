@@ -80,7 +80,10 @@ def reconcile_plan(
     statuses: list[PathStatus] = []
     present = stale = 0
     for path in _extract_paths(text):
-        if (repo_root / path).exists():
+        # An absolute path would make `repo_root / path` discard repo_root and
+        # resolve to the host path; strip leading slashes so the check stays
+        # rooted in the repo (the displayed token keeps its original form).
+        if (repo_root / path.lstrip("/")).exists():
             statuses.append(PathStatus(path, "present"))
             present += 1
         else:
