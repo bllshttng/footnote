@@ -335,11 +335,24 @@ else
   short_id="$(printf '%s' "$spawn_out" | jq -r '.short_id // empty' 2>/dev/null)"
   # WHOLE-string match (not `grep -qx`, which matches ANY line): a multi-line
   # `.short_id` value - e.g. `{"short_id":"junk\ndeadbeef"}` or a banner leaking
-  # into the value - must NOT pass on one of its lines being 8-hex. `[[ =~ ]]`
+  # into the value - must NOT pass on one of its lines being valid. `[[ =~ ]]`
   # anchors `^...$` to the whole string, so any embedded newline or stray byte
   # fails (parity with the ask path's single-line requirement). bash 3.2 safe.
-  if [[ ! "$short_id" =~ ^[0-9a-f]{8}$ ]]; then
-    fail "no valid short-id receipt ($VERB JSON .short_id empty/missing/not-8-hex): $(sanitize "${spawn_out:-$spawn_err}")"
+  #
+  # The valid SHAPE depends on the substrate (x-61b7). Only `bg`/`headless` return
+  # a real 8-hex session-id prefix (client-side `claude --bg` / one-shot). The
+  # default/`pane` owned-PTY lane is a daemon worker whose short_id is a NAME-SLUG
+  # from derive_short_id() (daemon.rs): up to 8 ascii-alphanumerics of the name,
+  # an optional numeric collision suffix, or a `<base>-<ts>` fallback. The 8-hex
+  # rule wrongly rejected that slug and reported a false `failed` for a live
+  # worker; accept any single-line identifier-shaped token there (empty/torn
+  # still fail - the cardinal guard is intact on every lane).
+  case "$SUBSTRATE" in
+    bg|headless) short_id_shape='^[0-9a-f]{8}$' ;;
+    *)           short_id_shape='^[A-Za-z0-9_-]{1,40}$' ;;
+  esac
+  if [[ ! "$short_id" =~ $short_id_shape ]]; then
+    fail "no valid short-id receipt ($VERB JSON .short_id empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")"
   fi
 fi
 
