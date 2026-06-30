@@ -307,9 +307,18 @@ fn ensure_trusted_at(file: &Path, cwd: &Path) {
         let _ = std::fs::create_dir_all(dir);
     }
     // Atomic write: temp file alongside the target (same filesystem) + rename, so
-    // two racing agy spawns never publish a half-written file. Last writer wins;
-    // a lost insert self-heals on the next spawn (it re-detects + re-inserts).
-    let tmp = file.with_extension(format!("tmp.{}", std::process::id()));
+    // a reader never sees a half-written file. The temp name must be unique PER
+    // INVOCATION, not just per process: the daemon pre-trusts on concurrent tasks
+    // (two agy spawns racing on different cwds), and `std::process::id()` is
+    // identical across threads — a pid-only temp path would let one write clobber
+    // the other's temp before its rename (torn file / spurious I/O error). A
+    // process-wide atomic counter makes each writer's temp private, so every
+    // rename publishes a COMPLETE valid file. The remaining last-writer-wins on
+    // the final file is by design (a lost insert self-heals: the next spawn
+    // re-detects the absent cwd and re-inserts).
+    static TRUST_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TRUST_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = file.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
     if std::fs::write(&tmp, serialized.as_bytes()).is_err() {
         let _ = std::fs::remove_file(&tmp);
         eprintln!("fno-agents: agy trust: temp write failed near {:?}", file);
