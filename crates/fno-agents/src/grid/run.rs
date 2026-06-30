@@ -4670,7 +4670,7 @@ async fn ensure_drive_sink<'a>(
             // no-op via the footer, never a silently dead-focused pane. Route
             // through `hint` - the compositor owns the terminal (no eprintln).
             Err(e) => {
-                *hint = Some(format!("drive failed: {e} (Esc to release)"));
+                *hint = Some(format!("drive failed: {e}"));
                 return None;
             }
         }
