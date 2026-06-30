@@ -89,6 +89,34 @@ out="$(run 'make the bg job run faster')"
 check_eq   'x-2c27 mid-task bg not consumed' "$(field "$out" substrate)" ''
 check_contains 'x-2c27 mid-task bg stays in message' "$(field "$out" message)" 'bg job run faster'
 
+# --- x-ffc3: a LEADING posture word is refused, not silently /target-wrapped ---
+# Posture words (bg|headless) are TRAILING only. A leading one means the user
+# mis-ordered the substrate; left alone it falls through to the feature default
+# and is wrapped as a /target BUILD of the literal text. Refuse with the
+# corrective trailing form instead.
+out="$(run 'bg /goal x-ead3 residual')"
+check_eq       'x-ffc3 leading bg -> error'       "$(field "$out" status)"  'error'
+check_contains 'x-ffc3 leading bg cites trailing form' "$(field "$out" error)" '/goal x-ead3 residual bg'
+# Refusal emits no message= line at all, so nothing is /target-wrapped or launched.
+check_eq       'x-ffc3 leading bg emits no message wrap' "$(field "$out" message)" ''
+out="$(run 'headless build the billing thing')"
+check_eq       'x-ffc3 leading headless -> error'  "$(field "$out" status)" 'error'
+# Case-insensitive, matching the trailing parser's tr-lowercasing (mobile caps).
+out="$(run 'BG /goal x-ead3 residual')"
+check_eq       'x-ffc3 leading BG (caps) -> error' "$(field "$out" status)" 'error'
+check_contains 'x-ffc3 leading BG hint uses lowercase bg' "$(field "$out" error)" 'residual bg'
+# AC1-EDGE: a trailing posture word is unchanged (the guard fires on LEADING only)
+out="$(run '/goal x-ead3 residual bg')"
+check_eq       'x-ffc3 trailing bg substrate'      "$(field "$out" substrate)" 'bg'
+check_contains 'x-ffc3 trailing bg message intact' "$(field "$out" message)" '/goal x-ead3 residual'
+check_eq       'x-ffc3 trailing bg status ok'      "$(field "$out" status)" 'ok'
+# AC1-ERR: exact-token match -> a feature whose first word merely CONTAINS the
+# posture word (bgcolor / background) is not a false positive.
+out="$(run 'bgcolor picker for the grid')"
+check_eq       'x-ffc3 bgcolor not a false positive' "$(field "$out" status)" 'ok'
+out="$(run 'background sync worker')"
+check_eq       'x-ffc3 background not a false positive' "$(field "$out" status)" 'ok'
+
 # trailing `merge` after a non-posture token still binds (right-anchored run)
 out="$(run 'ab-22222222 merge')"
 check_eq   'trailing merge binds' "$(field "$out" allow_merge)" '1'

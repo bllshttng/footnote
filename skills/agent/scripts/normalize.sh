@@ -173,6 +173,25 @@ if [[ "$ASK_MODE" -eq 0 && "$HANDOFF_MODE" -eq 0 && "$DISCUSS_MODE" -eq 0 ]]; th
   # The trailing run may have consumed the whole payload (`codex yolo merge`
   # with no task) -> refuse with no spawn (Boundaries: empty task fails loud).
   [[ -z "$msg" ]] && emit_error "empty task: only posture modifiers, nothing to dispatch"
+  # Leading posture-word guard (x-ffc3): the posture vocabulary (bg|headless) is
+  # TRAILING only (consumed right-anchored above). A LEADING posture word is the
+  # user meaning the substrate but mis-ordering it; left alone it is not consumed,
+  # the payload then starts with the bareword (not '/'), and the feature default
+  # silently wraps it as a /target BUILD of the literal text. Refuse with the
+  # corrective trailing form instead. Exact-token `case` (never a prefix), so
+  # feature prose like "bgcolor picker" / "background sync" is untouched. Inside
+  # the ask/handoff/discuss==0 block, so a verbatim payload that literally begins
+  # with the word "bg" is exempt (its posture words are never parsed either).
+  _first_tok="${msg%%[[:space:]]*}"
+  # Lowercase for the match so a mobile-auto-capitalized `Bg`/`BG` is caught the
+  # same way the trailing parser lowercases tokens before its case-match (l.150).
+  case "$(printf '%s' "$_first_tok" | tr '[:upper:]' '[:lower:]')" in
+    bg|headless)
+      _rest="${msg#"$_first_tok"}"; _rest="${_rest#"${_rest%%[![:space:]]*}"}"  # trim
+      _posture="$(printf '%s' "$_first_tok" | tr '[:upper:]' '[:lower:]')"       # canonical lowercase
+      emit_error "posture words are trailing, not leading: write the task first then the substrate, e.g. 'spawn ${_rest:-<task>} ${_posture}'. (A leading '${_first_tok}' would otherwise be wrapped into a /target build of the literal text.)"
+      ;;
+  esac
 fi
 
 # ---- 1b. defensive flag-vocabulary scan (phone-mangled flag in prose) --------
