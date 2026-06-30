@@ -27,6 +27,10 @@ if git -C "$root" check-ignore -q .fno 2>/dev/null; then
     exit 0
 fi
 
-printf '\n# footnote local session state (machine-specific; never commit)\n.fno/\n' \
+# Write BOTH forms: `.fno/` ignores the directory (fresh-project case), and the
+# bare `.fno` ignores the symlink form (in a linked worktree `.fno` is a symlink
+# to canonical, which a dir-only pattern misses - without it the check above
+# never sees the path as ignored and the helper re-appends every session).
+printf '\n# footnote local session state (machine-specific; never commit)\n.fno/\n.fno\n' \
     >> "$root/.gitignore" 2>/dev/null || true
 exit 0
