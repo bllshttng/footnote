@@ -176,9 +176,29 @@ def _yaml_scalar(value: Any) -> str:
         risky = value == "" or value.strip() != value
         risky = risky or value[:1] in "~?-:!&*#|>@%\"'`[]{},"
         risky = risky or any(c in value for c in ":#")
+        # A bare string YAML would read as a bool/null/number must be quoted so
+        # the round-trip preserves it as a string (e.g. "true", "null", "123").
+        risky = risky or value.lower() in _YAML_RESERVED_WORDS
+        risky = risky or _looks_numeric(value)
         return json.dumps(value) if risky else value
     # list / dict / anything else: JSON is a valid YAML flow representation.
     return json.dumps(value)
+
+
+# Bare words YAML 1.1 readers coerce to bool/null; a string default equal to one
+# (case-insensitive) must be quoted to survive the round-trip.
+_YAML_RESERVED_WORDS = frozenset(
+    {"true", "false", "null", "yes", "no", "on", "off", "~", "none"}
+)
+
+
+def _looks_numeric(s: str) -> bool:
+    """True when YAML would parse ``s`` as a number (int/float/inf/nan)."""
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
 
 
 def render_example_yaml() -> str:
@@ -225,7 +245,10 @@ def render_example_yaml() -> str:
         indent = "  " * len(container)
         meta = _registry.meta_for(leaf.path)
         if meta and meta.doc:
-            lines.append(f"{indent}# {meta.doc}")
+            # Collapse any newlines so a multi-line blurb stays a single comment
+            # line (a raw 2nd line would be parsed as YAML, not a comment).
+            doc_line = " ".join(meta.doc.split())
+            lines.append(f"{indent}# {doc_line}")
         lines.append(f"{indent}{key}: {_yaml_scalar(leaf.default)}")
     lines.append("")
     return "\n".join(lines)
