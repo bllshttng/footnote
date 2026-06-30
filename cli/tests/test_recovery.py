@@ -668,7 +668,7 @@ class TestRedispatch:
         monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: node)
         monkeypatch.setattr(recovery, "_node_is_done", lambda n: done)
 
-    def _patch_run(self, monkeypatch, *, force_release_rc=0, spawn_rc=0):
+    def _patch_run(self, monkeypatch, *, stop_rc=0, force_release_rc=0, spawn_rc=0):
         """Stub subprocess.run; record the (markered) calls for assertions."""
         from types import SimpleNamespace
         import subprocess as sp
@@ -677,6 +677,8 @@ class TestRedispatch:
 
         def fake_run(cmd, **kw):
             calls.append(cmd)
+            if cmd[:3] == ["fno", "agents", "stop"]:
+                return SimpleNamespace(returncode=stop_rc)
             if cmd[:3] == ["fno", "claim", "force-release"]:
                 return SimpleNamespace(returncode=force_release_rc)
             if cmd[:3] == ["fno", "agents", "spawn"]:
@@ -706,6 +708,16 @@ class TestRedispatch:
         assert "--provider" in spawn_cmd and "claude" in spawn_cmd
         assert "--substrate" in spawn_cmd and "bg" in spawn_cmd
         assert "--cwd" in spawn_cmd and "/wt/x-370f" in spawn_cmd
+
+    def test_stop_failure_skips_force_release_and_spawn(self, monkeypatch):
+        # codex P2: a non-zero `fno agents stop` means the worker may still be
+        # live; force-releasing its claim + spawning would create two workers on
+        # one node. Bail to the nudge (no force-release, no spawn) → False.
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(monkeypatch, stop_rc=1)
+        assert recovery._redispatch(self._cand()) is False
+        assert self._index_of(calls, ["fno", "claim", "force-release"]) is None
+        assert self._index_of(calls, ["fno", "agents", "spawn"]) is None
 
     def test_force_release_failure_skips_spawn(self, monkeypatch):
         # AC1-ERR: force-release non-zero → no spawn, False so the caller nudges.

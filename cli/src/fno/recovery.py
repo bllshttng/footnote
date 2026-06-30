@@ -499,10 +499,16 @@ def _redispatch(candidate: "Candidate") -> bool:
     try:
         if name:
             # Kill the rate-limited worker. This does NOT free its node claim.
-            subprocess.run(
+            stopped = subprocess.run(
                 ["fno", "agents", "stop", name],
                 cwd=cwd, capture_output=True, timeout=30, check=False,
             )
+            if stopped.returncode != 0:
+                # Stop failed → the worker may still be live. force-releasing its
+                # claim (an admin override that drops it regardless of holder) and
+                # then spawning would put two /target workers on one node. Bail to
+                # the nudge to preserve the at-most-one-worker invariant (codex P2).
+                return False
         # Free the dead session's node claim so the respawn can re-claim it.
         # force-release is idempotent (a claim already self-released by a late
         # worker is success), so this also covers the stop/self-release race.
