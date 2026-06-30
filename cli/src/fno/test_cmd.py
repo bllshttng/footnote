@@ -80,17 +80,32 @@ def _run(args: Sequence[str]) -> int:
     root = _repo_root(Path.cwd()) or Path.cwd()
     interp = _resolve_interpreter(root)
 
+    # Default to THE Python suite (cli/tests) when no collection target was
+    # given. A bare `pytest` collects from cwd, which from the repo root pulls
+    # in script-style tests/ files that `raise SystemExit` at import (pytest
+    # INTERNALERROR, not a real run). A collection target is a non-flag arg
+    # that names a path or nodeid; a flag value like `-k expr` does not count.
+    pytest_args = list(args)
+    has_target = any(
+        (not a.startswith("-")) and ("::" in a or "/" in a or Path(a).exists())
+        for a in pytest_args
+    )
+    if not has_target:
+        pytest_args.append(str((root / "cli" / "tests").resolve()))
+
     env = os.environ.copy()
     src = str((root / "cli" / "src").resolve())
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src + (os.pathsep + existing if existing else "")
     env["RTK_DISABLED"] = "1"  # never let rtk re-wrap the child run
 
-    cmd = [interp, "-m", "pytest", *args]
+    cmd = [interp, "-m", "pytest", *pytest_args]
     try:
         proc = subprocess.run(cmd, env=env)  # inherit stdio; no pipe, no mask
-    except FileNotFoundError:
-        sys.stderr.write(f"fno test: interpreter not found: {interp}\n")
+    except OSError as exc:
+        # FileNotFoundError (missing) AND PermissionError (present but not
+        # executable) are both OSError; either means we could not run it.
+        sys.stderr.write(f"fno test: failed to run interpreter {interp}: {exc}\n")
         return 127
     return proc.returncode
 
