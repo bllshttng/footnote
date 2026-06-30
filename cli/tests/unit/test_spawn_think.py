@@ -153,6 +153,25 @@ def test_blast_radius_cap(iso, monkeypatch, patch_spawn, capsys):
     assert "blast-radius cap" in capsys.readouterr().err
 
 
+def test_blast_radius_cap_quiet_suppresses_warning(iso, monkeypatch, patch_spawn, capsys):
+    """x-c9d8 (gemini PR#120): quiet=True suppresses the cap warning print so a
+    bulk decompose --json over the cap can't pollute a captured stream, while
+    the cap is still enforced (over-cap node returns cap-exceeded)."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    monkeypatch.setattr(st, "_max_per_run", lambda root: 1)
+    _resolved(monkeypatch, ok=True)
+    rs = st.RunState()
+    env = dict(__import__("os").environ)
+
+    st.maybe_spawn_think(_node(id="x-a"), env=env, events_path=iso,
+                         project_root=iso.parent.parent, run_state=rs, quiet=True)
+    r2 = st.maybe_spawn_think(_node(id="x-b"), env=env, events_path=iso,
+                              project_root=iso.parent.parent, run_state=rs, quiet=True)
+
+    assert r2.decision == "skipped" and r2.reason == "cap-exceeded"  # cap enforced
+    assert "blast-radius cap" not in capsys.readouterr().err          # no leak
+
+
 def test_dedup_at_most_one_spawn(iso, monkeypatch, patch_spawn):
     """AC4-FR: two evaluations of the same node birth spawn at most once."""
     monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")

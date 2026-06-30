@@ -996,11 +996,15 @@ def maybe_spawn_think(
     cap = _max_per_run(project_root)
     if rs.spawned >= cap:
         if not rs.truncation_logged:
-            print(
-                f"spawn_think: blast-radius cap reached ({cap}); "
-                f"skipping further /think spawns this run",
-                file=sys.stderr,
-            )
+            # quiet: same stream-pollution reason as the offer print below - a
+            # bulk decompose --json over the cap must not leak this warning into
+            # a captured JSON stream. Still mark it handled so the cap is enforced.
+            if not quiet:
+                print(
+                    f"spawn_think: blast-radius cap reached ({cap}); "
+                    f"skipping further /think spawns this run",
+                    file=sys.stderr,
+                )
             rs.truncation_logged = True
         return skip("cap-exceeded", detail=f"max_per_run={cap}")
 
