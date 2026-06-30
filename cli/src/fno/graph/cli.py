@@ -548,14 +548,28 @@ def cmd_decompose(
         "--force", "-F",
         help="Allow a re-decomposition that orphans an already-shipped group child node.",
     ),
+    plans: str = typer.Option(
+        "fragment",
+        "--plans",
+        help=(
+            "Per-child plan packaging. 'fragment' (default): each child's "
+            "plan_path is a <epic-doc>#group-<slug> fragment of the shared doc "
+            "(lean, one source of truth). 'separate': scaffold a self-contained "
+            "quick-plan stub per child and repoint its plan_path to that file "
+            "(best for fresh-context bg /target builders)."
+        ),
+    ),
 ) -> None:
     """Upsert group child nodes under an epic (atomic + idempotent).
 
-    Each group becomes one child node (parent=epic, plan_path=<epic-doc>#group-<slug>)
-    bundling 1+ execution waves into a single shippable PR. Re-running with the
-    same slugs updates the existing children in place rather than duplicating.
-    The whole decomposition lands in one locked graph mutation, so a bad spec
-    leaves the graph exactly as it was (AC1-FR).
+    Each group becomes one child node (parent=epic) bundling 1+ execution waves
+    into a single shippable PR. The child's plan_path is either a
+    <epic-doc>#group-<slug> fragment (--plans fragment, default) or a
+    self-contained <stem>.group-<slug>.md quick-plan (--plans separate). Re-running
+    with the same slugs updates the existing children in place rather than
+    duplicating, keyed on the slug across both packaging modes. The whole
+    decomposition lands in one locked graph mutation, so a bad spec leaves the
+    graph exactly as it was (AC1-FR).
     """
     import sys as _sys
     from fno.graph._constants import mint_node_id
@@ -569,9 +583,16 @@ def cmd_decompose(
         find_orphans,
         is_shipped,
         plan_base,
+        scaffold_separate_plan,
+        separate_plan_path,
         validate_groups,
     )
     from fno.handoff.output import emit_error, json_mode
+
+    if plans not in ("fragment", "separate"):
+        emit_error(ctx, f"--plans must be 'fragment' or 'separate' (got {plans!r})")
+        raise typer.Exit(code=1)
+    separate = plans == "separate"
 
     # 1. Read the --groups source ('@file', '-' stdin, or a JSON literal),
     #    keeping read vs parse failures distinct so the message names the cause.
@@ -650,6 +671,7 @@ def cmd_decompose(
         epic_resolved_id = live_epic["id"]
         epic_id_box[0] = epic_resolved_id
         base = plan_base(live_epic.get("plan_path"))
+        verbatim_base_box[0] = base  # the relative base, for the source_doc seed
         # `base` (verbatim, possibly relative) is the node-identity key used by
         # child_plan_path below - DO NOT mutate it. For the set-expected
         # shell-out only, resolve a relative base against the epic's project
@@ -694,13 +716,19 @@ def cmd_decompose(
         slug_to_id: dict[str, str] = {}
         plan_to_group: list[tuple[dict, dict]] = []  # (node, normalized group)
         for grp in norm:
-            cpath = child_plan_path(base, grp["slug"])
+            frag_path = child_plan_path(base, grp["slug"])
+            sep_path = separate_plan_path(base, grp["slug"])
+            cpath = sep_path if separate else frag_path
+            # Tolerant lookup: a child is the same group whether its plan_path is
+            # currently the fragment or the separate-file form, so re-running -
+            # including a switch between --plans modes - upserts in place instead
+            # of duplicating (Concurrency invariant: idempotent on the slug).
             existing = next(
                 (
                     e
                     for e in graph_entries
                     if e.get("parent") == epic_resolved_id
-                    and e.get("plan_path") == cpath
+                    and e.get("plan_path") in (frag_path, sep_path)
                 ),
                 None,
             )
@@ -708,6 +736,9 @@ def cmd_decompose(
             if existing is not None:
                 action = "updated"
                 node = existing
+                # Repoint to the requested packaging (no-op when already in that
+                # mode) so the child stays addressable under its current form.
+                node["plan_path"] = cpath
                 # Re-running with an explicit route reprojects an existing child
                 # (e.g. a first pass inherited the epic's repo, a later pass adds
                 # per-group routing). No route leaves the child's repo untouched.
@@ -787,6 +818,7 @@ def cmd_decompose(
 
     orphan_box: list[list[str]] = [[]]
     base_box: list = [None]
+    verbatim_base_box: list = [None]
     downgrade_box: list[list[str]] = [[]]
     try:
         locked_mutate_graph(_graph_path(), mutator)
@@ -798,6 +830,33 @@ def cmd_decompose(
     orphan_ids = orphan_box[0]
     downgrades = downgrade_box[0]
 
+    # 3c. Scaffold per-child quick-plan files (--plans separate). Runs OUTSIDE
+    #     the graph lock (mirrors the _set_expected_count doc write below). The
+    #     graph mutation already repointed each child's plan_path to its separate
+    #     file; here we materialize the stub on disk. Skip a file that already
+    #     exists so a builder's edits and idempotent re-runs are never clobbered.
+    scaffolded: list[str] = []
+    if separate and base_box[0]:
+        source_doc = verbatim_base_box[0] or base_box[0]
+        for grp in norm:
+            disk_path = Path(separate_plan_path(base_box[0], grp["slug"]))
+            if disk_path.exists():
+                continue
+            try:
+                disk_path.parent.mkdir(parents=True, exist_ok=True)
+                disk_path.write_text(
+                    scaffold_separate_plan(grp, epic_resolved_id, source_doc),
+                    encoding="utf-8",
+                )
+                scaffolded.append(str(disk_path))
+            except OSError as e:
+                # Non-fatal: the graph is already the source of truth. Warn loudly
+                # so the missing stub is visible, never silently swallowed.
+                typer.echo(
+                    f"warning: could not scaffold separate plan {disk_path}: {e}",
+                    err=True,
+                )
+
     # 4. Report what happened (AC1-UI).
     if json_mode(ctx):
         typer.echo(json.dumps(
@@ -806,17 +865,25 @@ def cmd_decompose(
                 "groups": results,
                 "orphaned": orphan_ids,
                 "downgrades": downgrades,
+                "packaging": plans,
+                "scaffolded": scaffolded,
             },
             default=str,
         ))
     else:
         typer.echo(f"epic: {epic_resolved_id}")
-        typer.echo(f"decomposed into {len(results)} group child node(s):")
+        typer.echo(
+            f"decomposed into {len(results)} group child node(s) "
+            f"(packaging: {plans}):"
+        )
         for r in results:
             waves = f" waves {r['waves']}" if r["waves"] else ""
             blk = f" blocked_by={r['blocked_by']}" if r["blocked_by"] else ""
             tier = " dep=contract" if r.get("dep") == "contract" else ""
-            typer.echo(f"  {r['action']}: {r['id']} (#group-{r['slug']}){waves}{blk}{tier}")
+            marker = r["slug"] if separate else f"#group-{r['slug']}"
+            typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}")
+        for f in scaffolded:
+            typer.echo(f"  scaffolded plan: {f}")
         if orphan_ids:
             typer.echo(
                 f"warning: {len(orphan_ids)} group child node(s) no longer in the spec, "
