@@ -18,15 +18,18 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import secrets
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Literal, Optional
 
 import typer
+
+_LOG = logging.getLogger(__name__)
 
 BATCHES_DIRNAME = ".fno/batches"
 
@@ -123,7 +126,10 @@ def list_batches(root: Path) -> list[dict]:
     for p in sorted(d.glob("*.json")):
         try:
             out.append(json.loads(p.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            # Name the corrupt file rather than silently hiding it from the
+            # status view (the mutation path errors on it; status must not lie).
+            _LOG.warning("skipping unreadable batch file %s: %s", p, e)
             continue
     return out
 
@@ -252,11 +258,14 @@ SOLO_SIZES = {"L"}
 SOLO_PRIORITIES = {"p0"}
 
 
+BatchAction = Literal["ship_solo", "start", "join"]
+
+
 @dataclass
 class BatchDecision:
     """What to do with a candidate node at selection time."""
 
-    action: str  # "ship_solo" | "start" | "join"
+    action: BatchAction
     domain: str
     reason: str
 
@@ -431,7 +440,11 @@ def _load_batch_enabled() -> bool:
         from fno.config import load_settings
 
         return bool(load_settings().config.batch.enabled)
-    except Exception:  # noqa: BLE001 - a bad/absent settings file must not enable
+    except Exception as e:  # noqa: BLE001 - a bad/absent settings file must not enable
+        # Fail-safe to disabled, but leave a trace: otherwise an explicit
+        # `enabled: true` silenced by an unrelated settings error looks like a
+        # mystery ("I turned batching on and nothing batches").
+        _LOG.warning("config.batch.enabled unreadable (%s); batching disabled", e)
         return False
 
 
@@ -447,13 +460,29 @@ def cli_policy(
     """
     import subprocess
 
+    node_dict: Optional[dict] = None
     try:
         proc = subprocess.run(
             ["fno", "backlog", "get", node], capture_output=True, text=True, timeout=30
         )
-        node_dict = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else {"id": node}
-    except Exception:  # noqa: BLE001 - degrade to a bare id; policy tolerates missing fields
-        node_dict = {"id": node}
+        if proc.returncode == 0 and proc.stdout.strip():
+            node_dict = json.loads(proc.stdout)
+        else:
+            _LOG.warning(
+                "fno backlog get %s failed (rc=%s): %s",
+                node, proc.returncode, (proc.stderr or "").strip()[:200],
+            )
+    except Exception as e:  # noqa: BLE001
+        _LOG.warning("fno backlog get %s errored: %s", node, e)
+
+    if node_dict is None:
+        # Could not read the node's size/priority. Ship solo — the conservative
+        # direction: never pool a possibly-large (size:L) or drop-everything
+        # (p0) node into a shared batch PR on missing data. Degrading to a bare
+        # id would erase solo-eligibility and silently defeat the SOLO rule.
+        _emit(BatchDecision("ship_solo", "", "node lookup failed; shipping solo").to_dict())
+        return
+
     decision = decide_batch_action(
         node_dict, enabled=_load_batch_enabled(), root=_root_opt(root)
     )

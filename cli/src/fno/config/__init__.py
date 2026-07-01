@@ -1693,6 +1693,28 @@ class BatchBlock(BaseModel):
         _LOG.warning("config.batch.max_nodes=%r invalid; using default 3", v)
         return 3
 
+    @field_validator("max_loc", mode="before")
+    @classmethod
+    def _coerce_max_loc(cls, v: object) -> object:
+        """Degrade a non-positive / malformed ceiling to None (off).
+
+        `should_close` treats max_loc truthily (`if max_loc and cum_loc > ...`),
+        so a stray `max_loc: -1` / `0` would close every batch after the first
+        node — silently defeating the feature. A non-int-coercible value
+        (`max_loc: "lots"`) would raise ValidationError out of the whole
+        settings load. Both degrade to None (off), logged, matching max_nodes.
+        """
+        if v is None:
+            return None
+        if isinstance(v, (int, str)) and not isinstance(v, bool):
+            try:
+                if int(v) >= 1:
+                    return int(v)
+            except (TypeError, ValueError):
+                pass
+        _LOG.warning("config.batch.max_loc=%r invalid; disabling (None)", v)
+        return None
+
 
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
@@ -1734,6 +1756,21 @@ class ConfigBlock(BaseModel):
         settings load. A dict passes through so the inner coercers still run.
         """
         if isinstance(v, (dict, ModelRoutingBlock)):
+            return v
+        return {}
+
+    @field_validator("batch", mode="before")
+    @classmethod
+    def _coerce_batch(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``batch:`` degrades to defaults (disabled).
+
+        Mirrors ``_coerce_auto_merge``: ``batch: 42`` (or a list, or null)
+        cannot build the block; fall back to the default disabled block rather
+        than raising out of the whole settings load (which would break every
+        `fno` command, not just batching). A dict passes through so the inner
+        field coercers still run.
+        """
+        if isinstance(v, (dict, BatchBlock)):
             return v
         return {}
 
