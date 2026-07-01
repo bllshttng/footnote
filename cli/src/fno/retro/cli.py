@@ -170,7 +170,7 @@ def _emit_report(report: TriageReport, *, mode: str) -> None:
     if report.readonly_carveout_count:
         typer.echo(
             f"(PR #{report.pr_number}: {report.readonly_carveout_count} carve-out(s) "
-            "shown read-only - no owning session resolved for this --pr-number, so "
+            "shown read-only - no owning session resolved for this PR, so "
             "they were NOT filed or consumed under this PR)",
             err=True,
         )
@@ -290,8 +290,18 @@ def _process_payload(
     # Plural by design (list return): a batch PR owns MULTIPLE member sessions and
     # must harvest all of them. The synthetic path pre-sets one of these fields in
     # the payload, so this fallback never re-runs for it.
-    if session_ids is None and not carveouts_readonly and ledger_path is not None:
-        resolved = _resolve_pr_session_ids(ledger_path, pr_number, repo_slug)
+    #
+    # Fail-SAFE: this fires on the exact drain precondition (session_ids is None
+    # and not already read-only), so an unscoped harvest is structurally
+    # unreachable from here. A missing ledger_path (an internal caller that did
+    # not thread it) resolves to no owner -> read-only, NOT to the old drain -
+    # the guard must never fail open on the very footgun it exists to close.
+    if session_ids is None and not carveouts_readonly:
+        resolved = (
+            _resolve_pr_session_ids(ledger_path, pr_number, repo_slug)
+            if ledger_path is not None
+            else []
+        )
         if resolved:
             session_ids = resolved
         else:

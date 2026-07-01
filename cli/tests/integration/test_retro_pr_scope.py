@@ -600,3 +600,22 @@ def test_sentinel_harvest_batch_pr_owns_two_sessions(tmp_path):
     )
     assert sorted(report.harvested_carveout_ids) == ["cv-A", "cv-B"], report.harvested_carveout_ids
     assert report.readonly_carveout_count == 0
+
+
+def test_sentinel_harvest_no_ledger_is_readonly_not_drain(tmp_path):
+    """Fail-SAFE: a caller that omits ledger_path (the internal-caller footgun)
+    must route to read-only, NOT the old unscoped drain. Without a ledger the
+    owner can't be resolved, so carve-outs are surfaced read-only and left in
+    place - the drain precondition never reaches harvest_carveouts unscoped."""
+    _seed_two_session_carveouts(tmp_path)
+    sentinel = _write_sentinel(tmp_path / "retro-pending", "ab-dddd4444", 404)
+    rec = _Rec()
+    report, _removed = process_sentinel_file(
+        sentinel, repo_root=tmp_path, existing_nodes=[], comments=[],
+        carveout_root=tmp_path,  # NOTE: ledger_path deliberately omitted
+        create_fn=rec.create, inbox_fn=rec.inbox_append,
+    )
+    assert report.harvested_carveout_ids == [], report.harvested_carveout_ids
+    assert report.readonly_carveout_count == 2, report.readonly_carveout_count
+    remaining = (tmp_path / ".fno" / "carveouts.jsonl").read_text(encoding="utf-8")
+    assert "cv-A" in remaining and "cv-B" in remaining, remaining
