@@ -275,6 +275,69 @@ def session_pid(
     # else: emit nothing on stdout so `$(fno claim session-pid)` is empty.
 
 
+@cli.command(name="lane-acquire")
+def lane_acquire(
+    lane_id: str = typer.Option(..., "--lane-id", help="Unique lane identity (typically the node id)"),
+    max_lanes: int = typer.Option(..., "--max-lanes", help="Concurrency cap (>=1; 1 == sequential)"),
+    ttl: str = typer.Option("1h", "--ttl", help="Slot TTL; the owner refreshes while the lane is alive"),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Acquire a lane slot gated on the live-claim cap (parallel mode, x-42d5).
+
+    Exit 1 when the cap is full (no free slot) - the same "retry later" code as
+    a held claim. The cap is enforced by atomic slot acquisition, never a count.
+    """
+    from .lanes import acquire_lane_slot
+
+    try:
+        claim = acquire_lane_slot(
+            max_lanes=max_lanes, lane_id=lane_id, ttl_ms=_parse_ttl(ttl)
+        )
+    except ClaimValidationError as exc:
+        typer.echo(f"validation error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    if claim is None:
+        typer.echo(f"lane cap full (max_lanes={max_lanes})", err=True)
+        raise typer.Exit(code=1)
+
+    if json_output:
+        out = claim.to_yaml_dict()
+        out["lane_id"] = lane_id
+        typer.echo(json.dumps(out))
+    else:
+        typer.echo(f"acquired lane slot {claim.key} for lane {lane_id}")
+
+
+@cli.command(name="lane-release")
+def lane_release(
+    lane_id: str = typer.Option(..., "--lane-id", help="Lane identity to release"),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Release the lane slot held by LANE_ID. Silent success if it holds none."""
+    from .lanes import release_lane_slot
+
+    release_lane_slot(lane_id=lane_id)
+    if json_output:
+        typer.echo(json.dumps({"lane_id": lane_id, "released": True}))
+    else:
+        typer.echo(f"released lane {lane_id}")
+
+
+@cli.command(name="lane-count")
+def lane_count(
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Print the number of live lane slots (the DERIVED cap denominator)."""
+    from .lanes import active_lane_count
+
+    n = active_lane_count()
+    if json_output:
+        typer.echo(json.dumps({"active_lanes": n}))
+    else:
+        typer.echo(str(n))
+
+
 @cli.command(name="force-release")
 def force_release(
     key: str = typer.Argument(...),
