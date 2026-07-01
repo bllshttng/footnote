@@ -85,6 +85,14 @@ pub const INITIAL_RESIZE_TIMEOUT: Duration = Duration::from_secs(2);
 /// `agent.drive` ack. A client that never finishes the upgrade must not pin the
 /// controlling slot + authority window; on timeout the attach is abandoned.
 pub const UPGRADE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling on the cross-process claim probe in [`external_claude_writer`], which
+/// shells the `fno` (Python) CLI on the interactive-claude drive-OPEN path. On a
+/// loaded box (a grid of many agents) that spawn can outrun the client's 3s
+/// drive-open budget, so every interactive-claude refocus fails to open and the
+/// grid appears frozen. The in-process single-controller `table` slot is the
+/// primary writer guard; this probe only backstops an external relay, so it fails
+/// OPEN when it outruns this budget. Well under the client's `DRIVE_OPEN_TIMEOUT`.
+const CLAIM_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 /// PTY output poll cadence for the drive output pump.
 const OUTPUT_POLL_INTERVAL: Duration = Duration::from_millis(30);
 
@@ -339,27 +347,44 @@ fn external_session_writer(state: &SessionClaimState, self_holder: &str) -> Opti
 
 /// Read the cross-process `session:<uuid>` claim and return an EXTERNAL writer's
 /// holder if one is live (X1 / AC3-EDGE). Shells `fno claim status` on a blocking
-/// thread; any spawn / non-zero exit / parse failure reads as no external writer
-/// (fail-open).
+/// thread; any spawn / non-zero exit / parse failure - OR the probe outrunning
+/// [`CLAIM_PROBE_TIMEOUT`] - reads as no external writer (fail-open).
 async fn external_claude_writer(uuid: &str, self_holder: &str) -> Option<String> {
+    // Honor FNO_BIN (test/custom environments); fall back to PATH `fno`. var_os
+    // avoids silently dropping a non-UTF-8 path.
+    let fno_bin = std::env::var_os("FNO_BIN").unwrap_or_else(|| "fno".into());
+    external_claude_writer_bin(uuid, self_holder, fno_bin, CLAIM_PROBE_TIMEOUT).await
+}
+
+/// Testable core of [`external_claude_writer`]: the `fno` binary and the probe
+/// budget are explicit so a slow-probe (fail-open) regression can be exercised
+/// without mutating the process-global `FNO_BIN` env.
+async fn external_claude_writer_bin(
+    uuid: &str,
+    self_holder: &str,
+    fno_bin: std::ffi::OsString,
+    budget: Duration,
+) -> Option<String> {
     if uuid.is_empty() {
         return None;
     }
     let key = format!("session:{uuid}");
-    // Honor FNO_BIN (test/custom environments); fall back to PATH `fno`. var_os
-    // avoids silently dropping a non-UTF-8 path.
-    let fno_bin = std::env::var_os("FNO_BIN").unwrap_or_else(|| "fno".into());
-    let out = tokio::task::spawn_blocking(move || {
+    let probe = tokio::task::spawn_blocking(move || {
         std::process::Command::new(fno_bin)
             .args(["claim", "status", &key, "-J"])
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .output()
             .ok()
-    })
-    .await
-    .ok()
-    .flatten()?;
+    });
+    // Bound the probe: `fno` is a Python CLI, and on a busy machine its cold
+    // start can exceed the client's drive-open budget, stalling the grid on every
+    // interactive-claude refocus. On timeout, fail OPEN (drop the handle; the
+    // orphaned `output()` finishes and reaps itself on the blocking pool).
+    let out = match tokio::time::timeout(budget, probe).await {
+        Ok(Ok(Some(o))) => o,
+        _ => return None,
+    };
     if !out.status.success() {
         return None;
     }
@@ -1219,6 +1244,40 @@ mod tests {
                 self_holder
             ),
             Some("relay:abc".to_string())
+        );
+    }
+
+    /// Regression (rail -> drive freeze): the cross-process claim probe shells
+    /// the `fno` Python CLI on the interactive-claude drive-open path. A slow
+    /// probe must fail OPEN within `budget` rather than stall the drive open
+    /// (which, unbounded, exceeds the client's 3s budget and freezes the grid on
+    /// every refocus).
+    #[tokio::test]
+    async fn external_claude_writer_fails_open_when_probe_is_slow() {
+        let script = std::env::temp_dir().join(format!("slowfno_{}.sh", std::process::id()));
+        std::fs::write(&script, "#!/bin/sh\nsleep 5\necho '{}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let start = std::time::Instant::now();
+        let holder = external_claude_writer_bin(
+            "some-uuid",
+            "pty:x",
+            script.clone().into_os_string(),
+            Duration::from_millis(300),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(
+            holder, None,
+            "a slow probe must fail open (no external writer)"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "probe was not bounded: {elapsed:?}"
         );
     }
 

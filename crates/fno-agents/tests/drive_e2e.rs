@@ -215,6 +215,149 @@ async fn drive_roundtrips_input_output_and_manages_window_and_events() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+/// Repro for the rail -> drive freeze: the grid REFOCUS sequence. Two agents,
+/// each with a live WATCH connection (the eager startup model). Drive A over an
+/// interactive connection, then "refocus" to B exactly as `ensure_drive_sink`
+/// does: best-effort close A's interactive (detach + drop, no wait), then open
+/// an interactive drive to B and type into it. B's keystroke must echo back on
+/// B's watch stream. If refocus wedges the daemon/worker, B never echoes.
+#[tokio::test]
+async fn drive_refocus_to_second_agent_still_delivers_input() {
+    use futures_util::stream::{SplitSink, SplitStream};
+    use tokio_tungstenite::WebSocketStream;
+    type WsSink = SplitSink<WebSocketStream<UnixStream>, Message>;
+    type WsSrc = SplitStream<WebSocketStream<UnixStream>>;
+
+    async fn open_drive(home: &AgentsHome, name: &str, mode: &str) -> (WsSink, WsSrc) {
+        let mut conn = UnixStream::connect(home.supervisor_sock()).await.unwrap();
+        write_request(
+            &mut conn,
+            &Request::new(2, "agent.drive", json!({"name": name, "mode": mode})),
+        )
+        .await
+        .unwrap();
+        let ack = read_response(&mut conn).await.unwrap();
+        assert!(
+            !ack.is_err(),
+            "{mode} ack for {name} errored: {:?}",
+            ack.error()
+        );
+        let (ws, _h) = tokio_tungstenite::client_async("ws://localhost/drive", conn)
+            .await
+            .expect("ws upgrade");
+        ws.split()
+    }
+
+    async fn expect_echo(src: &mut WsSrc, needle: &[u8], budget: Duration) -> bool {
+        let mut acc: Vec<u8> = Vec::new();
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(200), src.next()).await {
+                Ok(Some(Ok(Message::Binary(b)))) => {
+                    acc.extend_from_slice(&b);
+                    if acc.windows(needle.len()).any(|w| w == needle) {
+                        return true;
+                    }
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(_))) | Ok(None) => return false,
+                Err(_) => {}
+            }
+        }
+        false
+    }
+
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let daemon_bin = PathBuf::from(DAEMON_BIN);
+    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let mut daemon = start_daemon(&home);
+
+    for (id, name) in [(1, "aaa"), (2, "bbb")] {
+        let resp = call(
+            &home,
+            &daemon_bin,
+            &Request::new(
+                id,
+                "agent.spawn",
+                json!({"name": name, "provider": "codex", "argv": ["cat"]}),
+            ),
+        )
+        .await
+        .expect("spawn");
+        assert!(!resp.is_err(), "spawn {name} failed: {:?}", resp.error());
+    }
+
+    // Eager watch on BOTH agents (startup model), each resized like the grid does.
+    let (mut a_watch_sink, mut _a_watch_src) = open_drive(&home, "aaa", "watch").await;
+    let (mut b_watch_sink, mut b_watch_src) = open_drive(&home, "bbb", "watch").await;
+    for s in [&mut a_watch_sink, &mut b_watch_sink] {
+        s.send(Message::Text(
+            json!({"t":"resize","rows":30,"cols":100})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    // Drive A. The interactive connection carries only keystrokes (no resize),
+    // so run_session's initial-resize handshake eats the first frame -> send a
+    // sacrificial byte, then the payload.
+    let (mut a_drive_sink, _a_drive_src) = open_drive(&home, "aaa", "interactive").await;
+    a_drive_sink
+        .send(Message::Binary(b"X".to_vec().into()))
+        .await
+        .unwrap();
+    a_drive_sink
+        .send(Message::Binary(b"AAA-echo\n".to_vec().into()))
+        .await
+        .unwrap();
+    assert!(
+        expect_echo(&mut _a_watch_src, b"AAA-echo", Duration::from_secs(5)).await,
+        "driving A never echoed (baseline drive broken)"
+    );
+
+    // --- REFOCUS to B (ensure_drive_sink: close old best-effort, open new). ---
+    let _ = a_drive_sink
+        .send(Message::Text(
+            json!({"t":"detach","reason":"refocus"}).to_string().into(),
+        ))
+        .await;
+    let _ = a_drive_sink.close().await;
+    drop(a_drive_sink);
+
+    let (mut b_drive_sink, _b_drive_src) = open_drive(&home, "bbb", "interactive").await;
+    b_drive_sink
+        .send(Message::Binary(b"X".to_vec().into()))
+        .await
+        .unwrap();
+    b_drive_sink
+        .send(Message::Binary(b"BBB-echo\n".to_vec().into()))
+        .await
+        .unwrap();
+    assert!(
+        expect_echo(&mut b_watch_src, b"BBB-echo", Duration::from_secs(5)).await,
+        "REFOCUS FREEZE: after driving A, driving B never delivered input (echo never arrived)"
+    );
+
+    let _ = call(
+        &home,
+        &daemon_bin,
+        &Request::new(90, "agent.stop", json!({"name": "aaa"})),
+    )
+    .await;
+    let _ = call(
+        &home,
+        &daemon_bin,
+        &Request::new(91, "agent.stop", json!({"name": "bbb"})),
+    )
+    .await;
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 /// A second interactive driver is refused while the first is active (exit 18 /
 /// Busy), and a Claude agent (no worker / PTY) cannot be driven.
 #[tokio::test]
