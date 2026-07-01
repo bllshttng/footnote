@@ -27,12 +27,14 @@ class FakeRun:
         view_url: str = "https://example/pr",
         api_ok: bool = False,
         toplevel: str | None = None,
+        behind_by: int = 0,
     ) -> None:
         self.gh_merge = gh_merge or Result(0, "", "")
         self.merged_at = merged_at
         self.view_url = view_url
         self.api_ok = api_ok
         self.toplevel = toplevel
+        self.behind_by = behind_by
         self.calls: list[list[str]] = []
 
     def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
@@ -49,8 +51,16 @@ class FakeRun:
             if cmd[1:3] == ["pr", "view"]:
                 if "mergedAt" in cmd:
                     return Result(0, self.merged_at + "\n", "")
+                if "baseRefName,headRefName" in cmd:
+                    return Result(
+                        0,
+                        json.dumps({"baseRefName": "main", "headRefName": "feature/x"}) + "\n",
+                        "",
+                    )
                 return Result(0, self.view_url + "\n", "")
             if cmd[1] == "api":
+                if len(cmd) > 2 and "/compare/" in cmd[2]:
+                    return Result(0, f"{self.behind_by}\n", "")
                 return Result(0, "", "") if self.api_ok else Result(1, "", "api failed")
         if tool == "bash":
             return Result(0, "", "")
@@ -58,9 +68,13 @@ class FakeRun:
 
 
 @pytest.fixture
-def enabled(monkeypatch):
+def enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
+    # Hermetic merge-lock: route the LD#9 serialization claim (and the lane
+    # probe) to a tmp claims root so tests never touch the repo's .fno/claims
+    # or contend with a real in-flight merge.
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
 
 
 def _last_json(capsys, *, stream="out") -> dict:
@@ -279,6 +293,96 @@ def test_guard_own_failure_does_not_block_merge(enabled, monkeypatch, capsys, tm
 
     monkeypatch.setattr(sm, "unreconciled_manifest_for_pr", _boom)
     fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+# ---- merge serialization + stale-base hold (parallel mode G4, LD#9) ----
+
+
+def _lock_key():
+    from fno.paths import resolve_canonical_repo_root
+
+    return f"merge:{resolve_canonical_repo_root()}"
+
+
+def test_merge_lock_held_by_peer_exits_2_held(enabled, monkeypatch, capsys, tmp_path):
+    from fno.claims.core import acquire_claim
+
+    acquire_claim(_lock_key(), "pr-merge:peer", reason="test peer merge")
+    monkeypatch.setattr(_merge, "_MERGE_LOCK_WAIT_S", 0)
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert "merge serialized" in obj["reason"]
+    # the gh merge was never attempted while a peer holds the lock
+    assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
+
+
+def test_merge_lock_released_after_merge(enabled, monkeypatch, tmp_path, capsys):
+    from fno.claims.core import acquire_claim
+
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 0
+    # a new holder can take the lock immediately -> it was released, not leaked
+    acquire_claim(_lock_key(), "pr-merge:next", reason="post-release probe")
+
+
+def test_merge_lock_unavailable_fails_open(enabled, monkeypatch, capsys, tmp_path):
+    import fno.paths as paths
+
+    def _boom():
+        raise RuntimeError("no canonical root")
+
+    monkeypatch.setattr(paths, "resolve_canonical_repo_root", _boom)
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_stale_base_with_live_lanes_holds_exit_2(enabled, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
+    fake = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        behind_by=3,
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert "stale base" in obj["reason"]
+    assert "fno pr rebase" in obj["reason"]
+    assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
+
+
+def test_stale_base_ignored_when_no_lanes(enabled, monkeypatch, capsys, tmp_path):
+    # Sequential path (no live lanes): behind-ness is never consulted and the
+    # merge proceeds exactly as before parallel mode existed.
+    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 0)
+    fake = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        behind_by=3,
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+    assert not any(len(c) > 2 and c[1] == "api" and "/compare/" in c[2] for c in fake.calls)
+
+
+def test_up_to_date_head_with_live_lanes_merges(enabled, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
+    fake = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        behind_by=0,
+    )
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"

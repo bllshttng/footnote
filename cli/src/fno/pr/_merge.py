@@ -21,12 +21,22 @@ import os
 import re
 import shutil
 import sys
-from typing import List, Optional, Sequence
+import time
+from contextlib import contextmanager
+from typing import Iterator, List, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
 
 _VALID_INVOKERS = {"target", "megawalk"}
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
+
+# Merge serialization (parallel mode, epic x-42d5 G4, Locked Decision #9):
+# builds run parallel, merges run ONE AT A TIME. The lock is held only around
+# the gh merge call (seconds), so the wait is short and bounded - a peer still
+# holding it past the window is reported as "held" (exit 2) for the caller to
+# retry, never an indefinite block.
+_MERGE_LOCK_WAIT_S = 120
+_MERGE_LOCK_POLL_S = 5
 
 
 def _emit(pr: int, outcome: str, reason: str, strategy: str, invoker: str, *, err: bool) -> None:
@@ -227,6 +237,90 @@ def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Merge serialization + stale-base hold (parallel mode G4, LD#9)
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _merge_lock() -> Iterator[str]:
+    """Serialize merges repo-wide; yield ``acquired`` | ``held`` | ``unavailable``.
+
+    One ``merge:<canonical-root>`` claim per project (repo-local routing, so
+    every worktree lane contends on the SAME lock - like ``walker:<root>``),
+    pid-liveness anchored so a crashed merger frees it instantly. Acquisition
+    polls for up to ``_MERGE_LOCK_WAIT_S`` (a merge holds it for seconds), then
+    yields ``held``. A claims-layer error yields ``unavailable`` and the merge
+    proceeds unserialized: the lock is coordination, GitHub stays the merge
+    authority, and our own tooling failing must never block a merge.
+    """
+    key = holder = None
+    try:
+        from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim
+        from fno.paths import resolve_canonical_repo_root
+
+        key = f"merge:{resolve_canonical_repo_root()}"
+        holder = f"pr-merge:{os.getpid()}"
+        deadline = time.monotonic() + _MERGE_LOCK_WAIT_S
+        while True:
+            try:
+                acquire_claim(key, holder, reason="serialized PR merge (LD#9)")
+                break
+            except ClaimHeldByOther:
+                if time.monotonic() >= deadline:
+                    yield "held"
+                    return
+                time.sleep(_MERGE_LOCK_POLL_S)
+    except Exception as exc:  # noqa: BLE001 - fail-open: lock is best-effort
+        sys.stderr.write(f"pr-merge: merge lock unavailable ({exc}); proceeding\n")
+        yield "unavailable"
+        return
+    try:
+        yield "acquired"
+    finally:
+        try:
+            release_claim(key, holder)
+        except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
+            pass
+
+
+def _live_lane_count() -> int:
+    """Live parallel-lane slots (0 on any probe miss, keeping sequential paths
+    byte-identical: the stale-base hold below only arms while lanes run)."""
+    try:
+        from fno.claims.lanes import active_lane_count
+
+        return active_lane_count()
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _behind_by(pr_number: int, cwd: str) -> int:
+    """Commits the PR head is behind its base branch. 0 on any probe miss:
+    the hold must never block a merge because our own read failed."""
+    view = _gh(["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd)
+    if not view.ok:
+        return 0
+    try:
+        refs = json.loads(view.stdout or "{}")
+    except json.JSONDecodeError:
+        return 0
+    base = refs.get("baseRefName")
+    head = refs.get("headRefName")
+    if not base or not head:
+        return 0
+    res = _gh(
+        ["api", f"repos/{{owner}}/{{repo}}/compare/{base}...{head}", "-q", ".behind_by"],
+        cwd,
+    )
+    if not res.ok:
+        return 0
+    try:
+        return int(res.stdout.strip())
+    except ValueError:
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
 
@@ -314,6 +408,42 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         _emit(pr_number, "failed", "gh CLI not installed", "none", invoker, err=True)
         return 127
 
+    # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
+    # Builds run parallel; merges run one at a time, and while lanes are live a
+    # PR whose head is behind its base is held for `fno pr rebase` first, so a
+    # lane never merges a stale base. Both checks run UNDER the lock: a peer
+    # merge landing between the freshness read and our merge is exactly the
+    # race the lock exists to close. Sequential runs (no live lanes) skip the
+    # freshness hold and see only an uncontended lock - behavior unchanged.
+    with _merge_lock() as lock:
+        if lock == "held":
+            _emit(
+                pr_number,
+                "held",
+                "merge serialized: another merge holds the lock; retry",
+                "none",
+                invoker,
+                err=False,
+            )
+            return 2
+        if _live_lane_count() > 0:
+            behind = _behind_by(pr_number, repo)
+            if behind > 0:
+                _emit(
+                    pr_number,
+                    "held",
+                    f"stale base: head is {behind} commit(s) behind base with "
+                    "parallel lanes live; run fno pr rebase, then retry",
+                    "none",
+                    invoker,
+                    err=False,
+                )
+                return 2
+        return _do_merge(pr_number, auto_merge, invoker, repo)
+
+
+def _do_merge(pr_number: int, auto_merge, invoker: str, repo: str) -> int:
+    """Steps (3)-(4): build + run the gh merge and classify the outcome."""
     # (3) Build command.
     strategy = auto_merge.merge_strategy
     cmd: List[str] = ["pr", "merge", str(pr_number), f"--{strategy}"]
