@@ -362,15 +362,18 @@ def _set_member_pr_refs(
 
 
 def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
-    """Requeue every member as an individual PR: clear the `batch` mark AND release
-    its `node:<id>` claim.
+    """Clear the `batch` mark on every member so they requeue as individual PRs.
 
-    Releasing the claim is load-bearing (codex P2): a DoneBatched member's
-    `node:<id>` claim is refreshed to a 2h TTL by MegawalkQueue's park path, so
-    clearing `batch` alone would NOT resurface it in `fno backlog next` (the live
-    claim still filters it) until the TTL expired - delaying the promised
-    individual-PR requeue by up to 2h. The batched worker has already exited when
-    an abandon runs (the daemon is sequential), so a non-strict release is safe.
+    Deliberately does NOT release the members' `node:<id>` claims. codex flagged
+    (P2) that a DoneBatched member's claim is TTL-held (2h) by MegawalkQueue's
+    park path, so a member requeued after a ship abandon stays filtered from
+    `fno backlog next` until that TTL expires - delaying the individual-PR
+    requeue by up to 2h on the rare abandon-after-success path. Force-releasing
+    it here is the obvious fix, but it violates the node-claim-release-authority
+    invariant (ab-588326a7: only the walker/handoff may release a node claim,
+    never a helper subprocess). The invariant outranks the P2; the requeue is
+    correct (eventual), only latency-bound. Aligning the batch-claim lifecycle is
+    deferred to cv-30d898f0 (the same 2h-TTL follow-up).
     """
     from fno.graph._intake import _find_node
     from fno.graph.store import locked_mutate_graph
@@ -386,22 +389,6 @@ def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
         return entries
 
     locked_mutate_graph(graph_json(), mutator)
-
-    # Release each member's node claim so the requeue is immediate, not TTL-gated.
-    # force_release (not release_claim): the claim's holder is the exited worker's
-    # session key, and a non-strict release with a different holder is a no-op -
-    # only the administrative override actually drops it.
-    try:
-        from fno.claims.core import force_release_claim
-        from fno.claims.io import claims_root_for
-    except Exception:  # noqa: BLE001 - claims layer unavailable; mark-clear alone still requeues (eventually)
-        return
-    for nid in ids:
-        key = f"node:{nid}"
-        try:
-            force_release_claim(key, "batch abandoned; requeue member", root=claims_root_for(key))
-        except Exception as e:  # noqa: BLE001 - best-effort; a held claim only delays this one requeue
-            _LOG.debug("batch abandon: node claim force-release failed for %s: %s", nid, e)
 
 
 def ship_batch(

@@ -321,19 +321,19 @@ def test_ship_closeable_scopes_peek_to_mission(tmp_path, graph, batching_on):
     assert "--mission" in next_calls[0] and "m-42" in next_calls[0]
 
 
-def test_abandon_force_releases_member_node_claims(tmp_path, graph, monkeypatch):
-    """Requeue must force-release each member's node claim, not just clear the
-    batch mark: a DoneBatched member's node:<id> claim is TTL-held, so clearing
-    the mark alone would leave `next` filtering it until the TTL expired."""
+def test_abandon_clears_marks_without_releasing_node_claims(tmp_path, graph, monkeypatch):
+    """Requeue clears the batch mark but does NOT release node claims: the
+    node-claim-release-authority invariant (ab-588326a7) forbids a helper
+    subprocess from releasing a node claim. The mark-clear alone requeues (the
+    claim TTL only gates latency; deferred to cv-30d898f0)."""
     graph([_member_node("x-1"), _member_node("x-2")])
-    released: list[str] = []
     import fno.claims.core as _core
-    import fno.claims.io as _io
-    monkeypatch.setattr(_core, "force_release_claim", lambda key, reason, root=None: released.append(key))
-    monkeypatch.setattr(_io, "claims_root_for", lambda key: tmp_path)
-
+    called = []
+    monkeypatch.setattr(_core, "force_release_claim", lambda *a, **k: called.append(a))
     B._clear_member_batch_marks(["x-1", "x-2"], root=tmp_path)
-    assert set(released) == {"node:x-1", "node:x-2"}
+    by_id = {n["id"]: n for n in _read_graph(tmp_path / "graph.json")}
+    assert by_id["x-1"]["batch"] is None and by_id["x-2"]["batch"] is None
+    assert called == [], "must NOT release node claims (ab-588326a7)"
 
 
 def test_pr_body_lists_members():
