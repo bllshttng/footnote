@@ -461,6 +461,138 @@ def _abandon_and_requeue(domain: str, members: list[str], root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Daemon-facing verbs (Wave 2 wiring): prepare (launch) + ship-closeable (close)
+# ---------------------------------------------------------------------------
+#
+# The active-backlog daemon (active_backlog.rs) is thin: it shells `batch
+# prepare` before dispatch (to learn solo-vs-batched + the shared worktree) and
+# `batch ship-closeable` after each tick (to ship any batch whose close
+# condition tripped). All the policy lives here in Python where it is testable.
+
+
+def _get_node(node_id: str, run: Runner) -> Optional[dict]:
+    """Fetch a node dict via `fno backlog get`, or None on any failure."""
+    try:
+        p = run(["fno", "backlog", "get", node_id])
+        if p.returncode == 0 and (p.stdout or "").strip():
+            return json.loads(p.stdout)
+    except Exception as e:  # noqa: BLE001
+        _LOG.warning("batch prepare: fno backlog get %s failed: %s", node_id, e)
+    return None
+
+
+def _peek_next(project: Optional[str], run: Runner) -> Optional[dict]:
+    """The next ready node (post batch-member exclusion), or None on drain/error."""
+    cmd = ["fno", "backlog", "next"]
+    if project:
+        cmd += ["--project", project]
+    try:
+        p = run(cmd)
+        out = (p.stdout or "").strip()
+        if p.returncode == 0 and out and out != "null":
+            node = json.loads(out)
+            return node if isinstance(node, dict) else None
+    except Exception as e:  # noqa: BLE001
+        _LOG.warning("batch: fno backlog next peek failed: %s", e)
+    return None
+
+
+def prepare_batch(
+    *, node_id: str, repo: str, root: Path, run: Runner = _run
+) -> dict:
+    """Decide solo-vs-batched for a candidate node and (on batch) resolve the
+    shared worktree, opening a new batch if needed.
+
+    Returns one of:
+      {"mode": "solo", "reason": ...}                          -> dispatch /target no-merge
+      {"mode": "batched", "domain", "worktree", "branch", "batch_id"}
+
+    Fail-safe: ANY error (node lookup, worktree ensure, disabled) degrades to
+    solo, so a broken batch setup never blocks or mis-dispatches a node.
+    """
+    node = _get_node(node_id, run)
+    if node is None:
+        return {"mode": "solo", "reason": "node lookup failed"}
+    decision = decide_batch_action(node, enabled=_load_batch_enabled(root), root=root)
+    if decision.action == "ship_solo":
+        return {"mode": "solo", "reason": decision.reason}
+
+    domain = decision.domain
+    if decision.action == "start":
+        name = f"batch-{_safe(domain)}"
+        branch = f"feature/{name}"
+        we = run(["fno", "worktree", "ensure", "--repo", repo, "--name", name, "--branch", branch])
+        worktree = (we.stdout or "").strip()
+        if we.returncode != 0 or not worktree:
+            return {"mode": "solo", "reason": f"worktree ensure failed: {(we.stderr or '').strip()[:160]}"}
+        try:
+            b = open_batch(
+                domain=domain, branch=branch, worktree=worktree,
+                max_nodes=_config_max_nodes(root), root=root,
+            )
+        except BatchExists:
+            # A peer opened the batch between decide and open; join it instead.
+            b = read_batch(domain, root)
+            if not _is_open(b):
+                return {"mode": "solo", "reason": "batch vanished after race"}
+        assert b is not None
+        return {
+            "mode": "batched", "domain": domain,
+            "worktree": b["worktree"], "branch": b["branch"], "batch_id": b["batch_id"],
+        }
+
+    # join: reuse the open batch's recorded worktree/branch.
+    b = read_batch(domain, root)
+    if not _is_open(b):
+        return {"mode": "solo", "reason": "no open batch to join"}
+    assert b is not None
+    return {
+        "mode": "batched", "domain": domain,
+        "worktree": b["worktree"], "branch": b["branch"], "batch_id": b["batch_id"],
+    }
+
+
+def ship_closeable(
+    *, project: Optional[str], root: Path, run: Runner = _run
+) -> list[ShipResult]:
+    """Ship every open batch whose close condition has tripped.
+
+    Called by the daemon after each tick. Peeks the next ready node once and
+    evaluates `should_close` per open batch: a batch closes when it is full, the
+    next ready node is a different domain (or size:L/p0), max_loc is exceeded, or
+    the backlog drained (next is None -> close whatever is open).
+    """
+    next_node = _peek_next(project, run)
+    max_loc = _config_max_loc(root)
+    results: list[ShipResult] = []
+    for b in list_batches(root):
+        if b.get("status") != "open":
+            continue
+        close, _reason = should_close(b, next_node, max_loc=max_loc)
+        if close:
+            results.append(ship_batch(domain=b["domain"], root=root, run=run))
+    return results
+
+
+def _config_max_nodes(root: Path) -> int:
+    try:
+        from fno.config import load_settings_for_repo
+
+        return int(load_settings_for_repo(Path(root)).config.batch.max_nodes)
+    except Exception:  # noqa: BLE001 - default matches config coercion
+        return 3
+
+
+def _config_max_loc(root: Path) -> Optional[int]:
+    try:
+        from fno.config import load_settings_for_repo
+
+        return load_settings_for_repo(Path(root)).config.batch.max_loc
+    except Exception:  # noqa: BLE001 - off by default
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Policy engine (Wave 2): join-or-start + close-condition, pure over inputs
 # ---------------------------------------------------------------------------
 
@@ -657,6 +789,30 @@ def cli_ship(
         raise typer.Exit(2)
     if result.action == "noop":
         raise typer.Exit(3)
+
+
+@cli.command("prepare")
+def cli_prepare(
+    node: str = typer.Option(..., "--node", "-n", help="Candidate node id."),
+    repo: str = typer.Option(..., "--repo", help="Repo MAIN checkout (for worktree ensure)."),
+    root: Optional[str] = typer.Option(None, "--root"),
+) -> None:
+    """Decide solo-vs-batched for a node; on batch, resolve the shared worktree.
+
+    The daemon shells this before dispatch. Emits {mode: solo|batched, ...}.
+    Always exit 0 (fail-safe degrades to solo); the daemon reads `mode`.
+    """
+    _emit(prepare_batch(node_id=node, repo=repo, root=_root_opt(root)))
+
+
+@cli.command("ship-closeable")
+def cli_ship_closeable(
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Scope the next-node peek."),
+    root: Optional[str] = typer.Option(None, "--root"),
+) -> None:
+    """Ship every open batch whose close condition tripped (daemon calls per tick)."""
+    results = ship_closeable(project=project, root=_root_opt(root))
+    _emit({"shipped": [r.to_dict() for r in results]})
 
 
 @cli.command("status")

@@ -141,6 +141,130 @@ def test_ship_gh_create_failure_abandons_and_requeues(tmp_path, graph):
     assert by_id["x-2"]["batch"] is None
 
 
+class PrepareGh:
+    """Runner double for prepare_batch: scripts `fno backlog get` + `fno worktree ensure`."""
+
+    def __init__(self, *, node: dict, worktree: str = "/wt/batch-code", we_rc: int = 0):
+        self.node = node
+        self.worktree = worktree
+        self.we_rc = we_rc
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, *, cwd=None):
+        self.calls.append(cmd)
+        if cmd[:3] == ["fno", "backlog", "get"]:
+            return _cp(0, json.dumps(self.node))
+        if cmd[:3] == ["fno", "worktree", "ensure"]:
+            return _cp(self.we_rc, self.worktree if self.we_rc == 0 else "", "boom" if self.we_rc else "")
+        return _cp(0, "")
+
+
+@pytest.fixture
+def batching_on(monkeypatch):
+    """Force config.batch.enabled True + max_nodes 3 for prepare/ship-closeable."""
+    monkeypatch.setattr(B, "_load_batch_enabled", lambda root=None: True)
+    monkeypatch.setattr(B, "_config_max_nodes", lambda root: 3)
+    monkeypatch.setattr(B, "_config_max_loc", lambda root: None)
+
+
+def test_prepare_solo_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(B, "_load_batch_enabled", lambda root=None: False)
+    gh = PrepareGh(node={"id": "x-1", "domain": "code", "size": "S", "priority": "p2"})
+    out = B.prepare_batch(node_id="x-1", repo=str(tmp_path), root=tmp_path, run=gh)
+    assert out["mode"] == "solo"
+
+
+def test_prepare_solo_for_size_l(tmp_path, batching_on):
+    gh = PrepareGh(node={"id": "x-1", "domain": "code", "size": "L", "priority": "p2"})
+    out = B.prepare_batch(node_id="x-1", repo=str(tmp_path), root=tmp_path, run=gh)
+    assert out["mode"] == "solo"
+    assert "ships alone" in out["reason"]
+
+
+def test_prepare_start_opens_batch_and_returns_worktree(tmp_path, batching_on):
+    gh = PrepareGh(
+        node={"id": "x-1", "domain": "code", "size": "S", "priority": "p2"},
+        worktree=str(tmp_path / "wt"),
+    )
+    out = B.prepare_batch(node_id="x-1", repo=str(tmp_path), root=tmp_path, run=gh)
+    assert out["mode"] == "batched"
+    assert out["domain"] == "code"
+    assert out["worktree"] == str(tmp_path / "wt")
+    # A batch is now open for the domain with the recorded worktree/branch.
+    b = B.read_batch("code", tmp_path)
+    assert b["status"] == "open"
+    assert b["worktree"] == str(tmp_path / "wt")
+
+
+def test_prepare_join_reuses_open_batch(tmp_path, batching_on):
+    _open(tmp_path, worktree=str(tmp_path / "shared"))
+    gh = PrepareGh(node={"id": "x-2", "domain": "code", "size": "S", "priority": "p2"})
+    out = B.prepare_batch(node_id="x-2", repo=str(tmp_path), root=tmp_path, run=gh)
+    assert out["mode"] == "batched"
+    assert out["worktree"] == str(tmp_path / "shared")
+    # join path never calls `fno worktree ensure` (reuses the recorded one).
+    assert not any(c[:3] == ["fno", "worktree", "ensure"] for c in gh.calls)
+
+
+def test_prepare_solo_when_worktree_ensure_fails(tmp_path, batching_on):
+    gh = PrepareGh(node={"id": "x-1", "domain": "code", "size": "S", "priority": "p2"}, we_rc=1)
+    out = B.prepare_batch(node_id="x-1", repo=str(tmp_path), root=tmp_path, run=gh)
+    assert out["mode"] == "solo"
+    assert "worktree ensure failed" in out["reason"]
+
+
+class CloseableRunner:
+    """Runner for ship_closeable: scripts `fno backlog next` + gh pr create."""
+
+    def __init__(self, *, next_node, create_url="https://github.com/o/r/pull/900\n"):
+        self.next_node = next_node
+        self.create_url = create_url
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, *, cwd=None):
+        self.calls.append(cmd)
+        if cmd[:3] == ["fno", "backlog", "next"]:
+            return _cp(0, json.dumps(self.next_node) if self.next_node else "null")
+        if cmd[:3] == ["gh", "pr", "list"]:
+            return _cp(0, "[]")
+        if cmd[:3] == ["gh", "pr", "create"]:
+            return _cp(0, self.create_url)
+        return _cp(0, "")
+
+
+def test_ship_closeable_ships_on_different_domain_next(tmp_path, graph, batching_on):
+    graph([_member_node("x-1")])
+    _open(tmp_path, worktree=str(tmp_path / "wt"))
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    # next ready node is a DIFFERENT domain -> should_close -> ship.
+    r = CloseableRunner(next_node={"id": "x-9", "domain": "docs"})
+    results = B.ship_closeable(project="fno", root=tmp_path, run=r)
+    assert len(results) == 1
+    assert results[0].action == "shipped"
+    assert B.read_batch("code", tmp_path)["status"] == "closed"
+
+
+def test_ship_closeable_keeps_open_on_same_domain_next(tmp_path, graph, batching_on):
+    graph([_member_node("x-1")])
+    _open(tmp_path, worktree=str(tmp_path / "wt"))
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    # next ready node is SAME domain and batch not full -> stay open (no ship).
+    r = CloseableRunner(next_node={"id": "x-9", "domain": "code"})
+    results = B.ship_closeable(project="fno", root=tmp_path, run=r)
+    assert results == []
+    assert B.read_batch("code", tmp_path)["status"] == "open"
+
+
+def test_ship_closeable_ships_on_drain(tmp_path, graph, batching_on):
+    graph([_member_node("x-1")])
+    _open(tmp_path, worktree=str(tmp_path / "wt"))
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    # no next ready node (drain) -> close whatever is open.
+    r = CloseableRunner(next_node=None)
+    results = B.ship_closeable(project="fno", root=tmp_path, run=r)
+    assert len(results) == 1 and results[0].action == "shipped"
+
+
 def test_pr_body_lists_members():
     batch = {
         "batch_id": "batch-abcd", "domain": "code",
