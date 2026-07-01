@@ -1,10 +1,11 @@
-//! `fno` cargo bootstrapper.
+//! The Python-CLI forwarding path (the original `fno` cargo bootstrapper).
 //!
-//! `cargo install fno` compiles this tiny shim to `~/.cargo/bin/fno`. Its only
-//! job is to make the *real* `fno` (the Python Typer CLI plus the three
-//! `fno-agents*` Rust binaries, shipped as the `fno` PyPI wheel) available and
-//! then forward to it. The CLI itself is never reimplemented here
-//! (foundation Locked Decision 12).
+//! Any `fno <args>` invocation that is not a mux role (see `main.rs`
+//! role-select) lands here. The job is unchanged from the pre-mux shim: make
+//! the *real* `fno` CLI (the Python Typer CLI plus the three `fno-agents*`
+//! Rust binaries, shipped as the `fno` PyPI wheel) available and then forward
+//! to it. The CLI itself is never reimplemented here (foundation Locked
+//! Decision 12).
 //!
 //! First-run flow:
 //!   1. ensure `uv` is present (download Astral's standalone uv if absent),
@@ -51,9 +52,10 @@ type BootResult<T> = Result<T, BootErr>;
 /// `fno`, so resolution keys on this constant either way.
 const TOOL_NAME: &str = "fno";
 
-fn main() {
-    let args: Vec<OsString> = env::args_os().skip(1).collect();
-    match run(&args) {
+/// Forward `args` to the provisioned wheel `fno`. Diverges: on success the
+/// process is replaced via exec; on failure it prints the error and exits.
+pub fn forward(args: &[OsString]) -> ! {
+    match run(args) {
         // run() either execs (diverges) or returns an error; Ok is unreachable.
         Ok(()) => unreachable!("run() must exec the wheel fno or return an error"),
         Err(e) => {

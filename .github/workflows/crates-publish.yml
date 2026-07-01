@@ -29,7 +29,7 @@ on:
   pull_request:
     paths:
       - crates/fno-agents/**
-      - crates/fno-bootstrap/**
+      - crates/fno/**
       - .github/workflows/crates-publish.yml
 
 permissions:
@@ -48,7 +48,7 @@ jobs:
           - crate: fno-agents
             dir: crates/fno-agents
           - crate: fno
-            dir: crates/fno-bootstrap
+            dir: crates/fno
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -85,7 +85,7 @@ jobs:
           - crate: fno-agents
             dir: crates/fno-agents
           - crate: fno
-            dir: crates/fno-bootstrap
+            dir: crates/fno
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
