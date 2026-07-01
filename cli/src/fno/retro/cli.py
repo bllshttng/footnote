@@ -235,6 +235,7 @@ def _process_payload(
     carveout_root: Optional[Path] = None,
     current_repo_slug: Optional[str] = None,
     node_root: Optional[Path] = None,
+    ledger_path: Optional[Path] = None,
 ) -> "tuple[TriageReport, bool]":
     """Triage one payload, from a sentinel file or a synthetic ``--pr`` request.
 
@@ -277,6 +278,24 @@ def _process_payload(
     # an arbitrary PR mis-attributes another session's deferred work; triage_pr
     # then surfaces them read-only instead of filing/consuming them.
     carveouts_readonly = bool(payload.get("carveouts_readonly"))
+
+    # x-23c0: a reconcile-dropped sentinel (fno backlog reconcile, for PRs merged
+    # outside the ship gate) often carries NO session scoping, unlike the
+    # .triage-pending fast-path / --session. Without resolving the PR's owning
+    # session(s) here, harvest_carveouts runs with session_ids=None and DRAINS the
+    # whole shared ledger, stamping another in-flight session's carve-outs onto
+    # this PR (cv-5e4b9f4d, recorded in #123's session, harvested by #121). Resolve
+    # the owning session(s) from the GLOBAL ledger, repo-scoped, exactly like
+    # run()'s synthetic --pr-number path; no owner resolves -> read-only (x-90b8).
+    # Plural by design (list return): a batch PR owns MULTIPLE member sessions and
+    # must harvest all of them. The synthetic path pre-sets one of these fields in
+    # the payload, so this fallback never re-runs for it.
+    if session_ids is None and not carveouts_readonly and ledger_path is not None:
+        resolved = _resolve_pr_session_ids(ledger_path, pr_number, repo_slug)
+        if resolved:
+            session_ids = resolved
+        else:
+            carveouts_readonly = True
 
     # Derive resolved/skipped finding sets from REAL PR data before harvesting
     # reviewer comments. Without this every comment becomes a candidate, so an
@@ -434,6 +453,7 @@ def process_sentinel_file(
     carveout_root: Optional[Path] = None,
     current_repo_slug: Optional[str] = None,
     node_root: Optional[Path] = None,
+    ledger_path: Optional[Path] = None,
 ) -> "tuple[TriageReport, bool]":
     """Triage one sentinel file. Returns (report, removed).
 
@@ -454,6 +474,7 @@ def process_sentinel_file(
         carveout_root=carveout_root,
         current_repo_slug=current_repo_slug,
         node_root=node_root,
+        ledger_path=ledger_path,
     )
     removed = False
     if clean:
@@ -590,6 +611,7 @@ def run(
                 carveout_root=carveout_root,
                 current_repo_slug=local_slug,
                 node_root=node_root,
+                ledger_path=ledger_json(),
             )
         except Exception as exc:  # never let one bad sentinel sink the rest
             typer.echo(f"WARN sentinel {sentinel_path.name}: {exc}", err=True)
@@ -642,6 +664,7 @@ def run(
                 comments=synthetic_comments,
                 current_repo_slug=local_slug,
                 node_root=node_root,
+                ledger_path=ledger_json(),
             )
             if not clean:
                 any_retained = True

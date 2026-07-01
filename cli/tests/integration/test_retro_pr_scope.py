@@ -511,3 +511,92 @@ def test_run_pr_unresolvable_repo_is_readonly(tmp_path, monkeypatch):
     )
     assert captured.get("carveouts_readonly") is True, captured
     assert "session_ids" not in captured, captured
+
+
+# ── x-23c0: the SENTINEL harvest path resolves owning session(s) too ──
+#
+# The synthetic --pr-number path (above) resolves + guards, but a
+# reconcile-dropped sentinel (fno backlog reconcile, for merges outside the ship
+# gate) arrives with NO session scope. Before the fix, process_sentinel_file ran
+# harvest_carveouts with session_ids=None and DRAINED the shared ledger, stamping
+# another in-flight session's carve-outs onto the merging PR (cv-5e4b9f4d,
+# recorded in #123's session, swept by #121's resume reconcile -> node x-8d19
+# mis-attributed). The fix gives the sentinel path the SAME resolve-or-readonly
+# fallback, keyed off the ledger_path threaded in from run().
+
+
+def _seed_two_session_carveouts(root: Path) -> None:
+    """Two sessions drop deferred carve-outs into ONE shared ledger."""
+    d = root / ".fno"
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [
+        {"id": "cv-A", "description": "A deferred work", "session_id": "sess-A", "kind": "deferred"},
+        {"id": "cv-B", "description": "B deferred work", "session_id": "sess-B", "kind": "deferred"},
+    ]
+    (d / "carveouts.jsonl").write_text(
+        "".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8"
+    )
+
+
+def test_sentinel_harvest_scopes_to_owning_session(tmp_path):
+    """The original repro: sentinel for PR #501 (owned by sess-A) harvests ONLY
+    A's carve-out and consumes it; B's stays in the shared ledger for its own
+    PR's harvest. Before the fix the sentinel path drained both."""
+    _seed_two_session_carveouts(tmp_path)
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"entries": [
+        {"session_id": "sess-A", "pr": 501, "pr_url": "https://github.com/o/r/pull/501"},
+    ]}), encoding="utf-8")
+    sentinel = _write_sentinel(tmp_path / "retro-pending", "ab-aaaa1111", 501)
+    rec = _Rec()
+    report, _removed = process_sentinel_file(
+        sentinel, repo_root=tmp_path, existing_nodes=[], comments=[],
+        carveout_root=tmp_path, ledger_path=led,
+        create_fn=rec.create, inbox_fn=rec.inbox_append,
+    )
+    assert report.harvested_carveout_ids == ["cv-A"], report.harvested_carveout_ids
+    assert report.readonly_carveout_count == 0
+    # B's carve-out survives untouched in the ledger; A's was consumed.
+    remaining = (tmp_path / ".fno" / "carveouts.jsonl").read_text(encoding="utf-8")
+    assert "cv-B" in remaining and "cv-A" not in remaining, remaining
+
+
+def test_sentinel_harvest_no_owner_is_readonly(tmp_path):
+    """Sentinel for a PR with NO owning session in the ledger -> carve-outs are
+    read-only: neither harvested nor consumed (x-90b8 reuse, never a 2nd guard)."""
+    _seed_two_session_carveouts(tmp_path)
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    sentinel = _write_sentinel(tmp_path / "retro-pending", "ab-bbbb2222", 777)
+    rec = _Rec()
+    report, _removed = process_sentinel_file(
+        sentinel, repo_root=tmp_path, existing_nodes=[], comments=[],
+        carveout_root=tmp_path, ledger_path=led,
+        create_fn=rec.create, inbox_fn=rec.inbox_append,
+    )
+    assert report.harvested_carveout_ids == [], report.harvested_carveout_ids
+    assert report.readonly_carveout_count == 2, report.readonly_carveout_count
+    # Nothing consumed: both carve-outs remain for their own PRs.
+    remaining = (tmp_path / ".fno" / "carveouts.jsonl").read_text(encoding="utf-8")
+    assert "cv-A" in remaining and "cv-B" in remaining, remaining
+
+
+def test_sentinel_harvest_batch_pr_owns_two_sessions(tmp_path):
+    """batch-lane contract: a batch PR's ledger entry owns MULTIPLE member
+    sessions, so its sentinel harvest must collect BOTH members' carve-outs (and
+    only them). Proves the plural resolution the fix must not collapse."""
+    _seed_two_session_carveouts(tmp_path)
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"entries": [
+        {"sessions": ["sess-A", "sess-B"], "pr": 909,
+         "pr_url": "https://github.com/o/r/pull/909"},
+    ]}), encoding="utf-8")
+    sentinel = _write_sentinel(tmp_path / "retro-pending", "ab-cccc3333", 909)
+    rec = _Rec()
+    report, _removed = process_sentinel_file(
+        sentinel, repo_root=tmp_path, existing_nodes=[], comments=[],
+        carveout_root=tmp_path, ledger_path=led,
+        create_fn=rec.create, inbox_fn=rec.inbox_append,
+    )
+    assert sorted(report.harvested_carveout_ids) == ["cv-A", "cv-B"], report.harvested_carveout_ids
+    assert report.readonly_carveout_count == 0
