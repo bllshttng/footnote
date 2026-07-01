@@ -534,3 +534,35 @@ exit 0"#,
         "ship-closeable must NOT run after a batched member failure"
     );
 }
+
+#[test]
+fn batch_drain_tick_ships_closeable_with_no_unit() {
+    // A NoWork tick (backlog drained: all batched members filtered out of `next`)
+    // must still run ship-closeable so the drain condition can open the open
+    // batch's PR. Gating ship-closeable on a DoneBatched unit would strand it.
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    let (journal, _pj) = journal_in(tmp.path());
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    let ship_marker = tmp.path().join("ship-closeable-fired");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then echo 'null'; exit 0; fi
+if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "ship-closeable" ]]; then echo fired > "{ship}"; printf '{{"shipped":[]}}\n'; exit 0; fi
+exit 0"#,
+            ship = ship_marker.display(),
+        ),
+    );
+    let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
+    cfg.batch = true;
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(out, DrainOutcome::NoWork);
+    assert!(
+        ship_marker.exists(),
+        "ship-closeable must run on a drained (NoWork) tick to close an open batch"
+    );
+}

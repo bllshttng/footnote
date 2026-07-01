@@ -427,6 +427,18 @@ def ship_batch(
             pr_number = existing[0].get("number")
 
     if pr_url is None:
+        # Push the batch branch first. `fno worktree ensure` creates only a LOCAL
+        # branch and the batched worker commits locally, so `gh pr create --head`
+        # (which does NOT push) would fail on an unpublished branch and abandon
+        # the batch (codex P1). Push explicitly, then create.
+        push = run(["git", "push", "-u", "origin", branch], cwd=worktree)
+        if push.returncode != 0:
+            _abandon_and_requeue(domain, members, root)
+            return ShipResult(
+                "abandoned", domain,
+                reason=f"git push failed: {(push.stderr or push.stdout or '').strip()[:200]}",
+                members=members,
+            )
         cr = run(
             ["gh", "pr", "create", "--title", pr_title, "--body", body,
              "--base", base, "--head", branch],
@@ -490,7 +502,9 @@ class PeekError(RuntimeError):
     """`fno backlog next` could not be read (distinct from a genuine drain)."""
 
 
-def _peek_next(project: Optional[str], run: Runner) -> Optional[dict]:
+def _peek_next(
+    project: Optional[str], run: Runner, mission: Optional[str] = None
+) -> Optional[dict]:
     """The next ready node (post batch-member exclusion), or None on genuine drain.
 
     Raises PeekError on ANY failure (non-zero exit, unparseable output). A drain
@@ -499,10 +513,16 @@ def _peek_next(project: Optional[str], run: Runner) -> Optional[dict]:
     transient `fno backlog next` hiccup to None would ship every open batch as-is
     (1-node batches included) on one bad tick. The caller skips the tick on
     PeekError instead.
+
+    `mission` scopes the peek to the same candidate set the daemon dispatches
+    (MegawalkQueue::with_mission): without it, a same-domain ready node OUTSIDE
+    the mission would keep a mission batch open forever (codex P2).
     """
     cmd = ["fno", "backlog", "next"]
     if project:
         cmd += ["--project", project]
+    if mission:
+        cmd += ["--mission", mission]
     try:
         p = run(cmd)
     except Exception as e:  # noqa: BLE001
@@ -593,7 +613,8 @@ def prepare_batch(
 
 
 def ship_closeable(
-    *, project: Optional[str], root: Path, run: Runner = _run
+    *, project: Optional[str], root: Path, run: Runner = _run,
+    mission: Optional[str] = None,
 ) -> list[ShipResult]:
     """Ship every open batch whose close condition has tripped.
 
@@ -611,7 +632,7 @@ def ship_closeable(
     stays inert (never wrongly closes) until a later wave records per-batch LOC.
     """
     try:
-        next_node = _peek_next(project, run)
+        next_node = _peek_next(project, run, mission=mission)
     except PeekError as e:
         _LOG.warning("batch ship-closeable: peek failed, skipping tick: %s", e)
         return []
@@ -875,10 +896,11 @@ def cli_prepare(
 @cli.command("ship-closeable")
 def cli_ship_closeable(
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Scope the next-node peek."),
+    mission: Optional[str] = typer.Option(None, "--mission", help="Scope the peek to a mission (match dispatch)."),
     root: Optional[str] = typer.Option(None, "--root"),
 ) -> None:
     """Ship every open batch whose close condition tripped (daemon calls per tick)."""
-    results = ship_closeable(project=project, root=_root_opt(root))
+    results = ship_closeable(project=project, root=_root_opt(root), mission=mission)
     _emit({"shipped": [r.to_dict() for r in results]})
 
 

@@ -409,6 +409,11 @@ fn ship_closeable_batches(cfg: &DrainConfig, journal: &Journal) {
     if let Some(ref p) = cfg.project {
         cmd.args(["--project", p]);
     }
+    // Scope the close-peek to the same mission the daemon dispatches (codex P2),
+    // else an out-of-mission same-domain node keeps the mission batch open.
+    if let Some(ref m) = cfg.mission {
+        cmd.args(["--mission", m]);
+    }
     cmd.current_dir(&cfg.cwd);
     match cmd.output() {
         Ok(o) if o.status.success() => {
@@ -526,27 +531,31 @@ fn run_one_node(
     };
 
     // Batch-lane close handling, gated on the member's OUTCOME (codex P1):
-    //  - DoneBatched (success): the member committed cleanly, so evaluate the
-    //    close condition and ship any batch that should close.
-    //  - a batched member that did NOT reach DoneBatched (NoProgress/Budget/
-    //    Aborted/etc.): abandon its batch + requeue members (v1 failure policy),
-    //    so ship-closeable can never open a PR over a failed member's partial
-    //    commits. A solo dispatch recorded nothing, so it is untouched here.
+    //  - a batched member that FAILED (did not reach DoneBatched): abandon its
+    //    batch + requeue members (v1 policy), so ship-closeable can never open a
+    //    PR over a failed member's partial commits.
+    //  - EVERY other path (DoneBatched success, a solo dispatch, OR a NoWork/
+    //    no-unit drain): run ship-closeable, which evaluates should_close per
+    //    open batch. This is what closes a drained backlog's open batch: when
+    //    batched members are filtered out of `next`, a later tick returns NoWork
+    //    (no last unit) and the drain condition must still open the batch PR
+    //    (codex P1) - so it cannot be gated on a DoneBatched unit being present.
     if cfg.batch {
         let last = outcome.units.last();
-        let done_batched =
-            last.is_some_and(|u| matches!(u.evidence.reason, TerminationReason::DoneBatched));
-        if done_batched {
-            ship_closeable_batches(cfg, journal);
-        } else if let Some(u) = last {
-            let batched_domain = batch_dispatcher
-                .as_ref()
-                .and_then(|b| b.last_batched.lock().ok().and_then(|s| s.clone()))
-                .filter(|(nid, _)| nid == &u.unit_id)
-                .map(|(_, domain)| domain);
-            if let Some(domain) = batched_domain {
-                abandon_batch_for(cfg, journal, &domain);
+        let failed_batched_domain = last.and_then(|u| {
+            if matches!(u.evidence.reason, TerminationReason::DoneBatched) {
+                None
+            } else {
+                batch_dispatcher
+                    .as_ref()
+                    .and_then(|b| b.last_batched.lock().ok().and_then(|s| s.clone()))
+                    .filter(|(nid, _)| nid == &u.unit_id)
+                    .map(|(_, domain)| domain)
             }
+        });
+        match failed_batched_domain {
+            Some(domain) => abandon_batch_for(cfg, journal, &domain),
+            None => ship_closeable_batches(cfg, journal),
         }
     }
 

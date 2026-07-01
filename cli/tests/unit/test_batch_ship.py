@@ -286,6 +286,41 @@ def test_ship_closeable_skips_tick_on_peek_error(tmp_path, graph, batching_on):
     assert B.read_batch("code", tmp_path)["status"] == "open"
 
 
+class PushFailGh(FakeGh):
+    """FakeGh whose `git push` fails - the branch could not be published."""
+
+    def __call__(self, cmd, *, cwd=None):
+        self.calls.append(cmd)
+        if cmd[:2] == ["git", "push"]:
+            return _cp(1, "", "remote rejected")
+        if cmd[:3] == ["gh", "pr", "create"]:
+            raise AssertionError("must not create a PR when push failed")
+        if cmd[:3] == ["gh", "pr", "list"]:
+            return _cp(0, "[]")
+        return _cp(0, "")
+
+
+def test_ship_batch_push_failure_abandons(tmp_path, graph):
+    graph([_member_node("x-1")])
+    _open(tmp_path, worktree=str(tmp_path / "wt"))
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    r = B.ship_batch(domain="code", root=tmp_path, run=PushFailGh())
+    assert r.action == "abandoned"
+    assert "git push failed" in r.reason
+    assert B.read_batch("code", tmp_path)["status"] == "abandoned"
+
+
+def test_ship_closeable_scopes_peek_to_mission(tmp_path, graph, batching_on):
+    graph([_member_node("x-1")])
+    _open(tmp_path, worktree=str(tmp_path / "wt"))
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    r = CloseableRunner(next_node=None)
+    B.ship_closeable(project="fno", root=tmp_path, run=r, mission="m-42")
+    next_calls = [c for c in r.calls if c[:3] == ["fno", "backlog", "next"]]
+    assert next_calls, "expected a next peek"
+    assert "--mission" in next_calls[0] and "m-42" in next_calls[0]
+
+
 def test_pr_body_lists_members():
     batch = {
         "batch_id": "batch-abcd", "domain": "code",
