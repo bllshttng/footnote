@@ -402,7 +402,40 @@ def init(
     if result.returncode == 0:
         _print_orientation_report()
         _maybe_dispatch_work_start()
+        _maybe_reconcile_lane_slot()
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def _maybe_reconcile_lane_slot() -> None:
+    """Bind a parallel-mode lane slot to THIS worker's lifecycle (LD#8).
+
+    Runs right after the init script claims ``node:<id>``. A parallel-mode
+    dispatcher (``fno backlog dispatch-lanes``) holds a lane slot
+    (``parallel-lane:<node>``) across the spawn->init window, TTL-anchored to
+    itself; now that this worker owns the node, re-anchor that slot to the
+    worker's durable session pid so ``active_lane_count`` tracks the real lane
+    and frees the slot when the worker ends. A no-op for every non-parallel run
+    (this node holds no lane slot) and for a missing pid. Strictly non-fatal:
+    never affects the init exit code the caller propagates.
+    """
+    try:
+        from fno.paths import resolve_repo_root
+
+        repo_root = resolve_repo_root()
+        manifest = repo_root / ".fno" / "target-state.md"
+        text = manifest.read_text(encoding="utf-8")
+        m = re.search(r"^graph_node_id\s*:\s*(.+)$", text, re.MULTILINE)
+        if not m:
+            return
+        node_id = m.group(1).strip().strip("\"'")
+        if not node_id or node_id == "null":
+            return
+        from fno.claims.lanes import reconcile_lane_slot
+        from fno.claims.session_pid import resolve_session_pid
+
+        reconcile_lane_slot(node_id, pid=resolve_session_pid())
+    except Exception:  # noqa: BLE001 - additive; never affect the init exit code
+        pass
 
 
 def _print_orientation_report() -> None:

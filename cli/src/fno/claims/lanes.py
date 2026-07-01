@@ -157,6 +157,64 @@ def release_lane_slot(lane_id: str, *, root: Optional[Path] = None) -> None:
     release_claim(key=slot, holder=_lane_holder(lane_id), root=root)
 
 
+def reconcile_lane_slot(
+    lane_id: str,
+    *,
+    pid: Optional[int],
+    root: Optional[Path] = None,
+) -> Optional[Claim]:
+    """Re-anchor this lane's EXISTING slot to the worker's lifecycle (LD#8).
+
+    The parallel-mode dispatcher acquires the slot TTL-anchored to *itself* and
+    fire-and-forgets. Nothing then tracks the actual lane worker, so a
+    TTL-anchored slot over-counts a lane that finishes early (the slot lingers to
+    TTL) and under-counts one that runs past the TTL (the slot expires while the
+    lane is live) - the cap is wrong in both directions. The worker calls this
+    from ``fno target init``, once it owns the node, to re-take its OWN slot
+    anchored to the durable session ``pid`` (the nearest ``claude`` ancestor -
+    the same anchor ``node:<id>`` uses).
+
+    The re-acquire is PURE pid-liveness (``ttl_ms=None``): a pid-liveness claim
+    is ``LIVE`` exactly while the process is alive and flips ``STALE`` the instant
+    it dies (``staleness.classify``), so the slot frees promptly on lane exit and
+    never expires under a still-running lane. A non-expiring TTL cannot do this -
+    a non-expired TTL claim classifies ``LIVE`` regardless of pid, so death
+    cleanup would lag to the TTL.
+
+    ``pid is None`` (no resolvable ``claude`` ancestor - the rare degrade) is a
+    no-op: reconciling to pure pid-liveness with an unknown pid would instantly
+    stale the slot and free the cap under a live lane, so the dispatcher's TTL
+    slot is left untouched as the backstop (byte-for-byte today's behavior).
+
+    Returns the refreshed :class:`Claim`, or ``None`` when this lane holds no
+    slot (every non-parallel run) or ``pid`` is ``None``. Preserves the slot's
+    stored metadata (esp. ``domain``, read by later lane-fill ticks for
+    distinct-domain seeding) - only the liveness anchor changes.
+    """
+    if not lane_id:
+        raise ClaimValidationError("lane_id must be non-empty")
+    if pid is None:
+        return None
+    holder = _lane_holder(lane_id)
+    existing = None
+    for claim in list_claims(prefix=LANE_SLOT_PREFIX, root=root):
+        if claim.get("holder") == holder:
+            existing = claim
+            break
+    if existing is None:
+        return None
+    metadata = dict(existing.get("metadata") or {})
+    metadata["lane_id"] = lane_id
+    return acquire_claim(
+        key=existing["key"],
+        holder=holder,
+        ttl_ms=None,  # pure pid-liveness: frees the instant the worker dies
+        pid=pid,
+        metadata=metadata,
+        root=root,
+    )
+
+
 def active_lane_count(*, root: Optional[Path] = None) -> int:
     """Count live lane slots. DERIVED observability value, never the cap gate.
 
@@ -172,6 +230,7 @@ __all__ = [
     "DEFAULT_LANE_TTL_MS",
     "acquire_lane_slot",
     "release_lane_slot",
+    "reconcile_lane_slot",
     "active_lane_count",
     "find_lane_slot",
 ]
