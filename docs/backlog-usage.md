@@ -145,6 +145,19 @@ fno backlog maintain --apply       # recurring sweep: re-scope, prune, auto-defe
 fno backlog reconcile              # close nodes whose PR merged outside the gate
 ```
 
+## Parallel lanes
+
+With `config.parallel.max_lanes >= 2`, the active-backlog daemon dispatches up
+to that many ready nodes from distinct domains concurrently, each as an
+isolated bg worktree lane. Merges stay serialized (`fno pr merge` takes a
+repo-wide lock, and holds a stale-base PR for `fno pr rebase` while lanes run).
+
+```bash
+fno backlog lane-fill --max 3      # preview which nodes would dispatch as lanes
+fno backlog dispatch-lanes         # manually fire one lane-fill round
+fno backlog lanes                  # rollup: live lanes vs the cap, per-node status
+```
+
 ## Public roadmap
 
 A curated, leak-free view for advertising an OSS project's roadmap. Opt in
