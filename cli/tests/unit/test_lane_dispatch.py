@@ -27,6 +27,10 @@ def _nodes(*specs):
 
 def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     """Mock the dispatch seams. Returns a dict recording calls."""
+    # The dispatch:<id> boot-window reservation is GLOBAL-rooted; pin the global
+    # claims root into tmp so it lands in the same isolated dir as the explicit
+    # lane-slot root (claims_root=tmp_path/"claims") and never touches ~/.fno.
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
     monkeypatch.setattr(advance, "_canonical_root", lambda: tmp_path / "canonical")
     monkeypatch.setattr(advance, "_base_project_id", lambda root: "fno")
@@ -144,3 +148,43 @@ def test_below_two_lanes_dispatches_nothing(tmp_path, monkeypatch):
 def test_empty_ready_dispatches_nothing(tmp_path, monkeypatch):
     _wire(monkeypatch, tmp_path, [])
     assert advance.dispatch_lanes(3, claims_root=tmp_path / "claims") == []
+
+
+def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monkeypatch):
+    """A concurrent sequential advance holds dispatch:<id>; the lane path (which
+    the sequential path can't see via node:/dispatch:) must not double-launch."""
+    from fno.claims.core import acquire_claim
+
+    ready = _nodes(("n-a", "code"), ("n-c", "docs"))
+    _wire(monkeypatch, tmp_path, ready)
+    dkey = "dispatch:n-a"
+    acquire_claim(dkey, "advance:other", ttl_ms=180_000, root=advance._claims_root_for(dkey))
+
+    receipts = advance.dispatch_lanes(
+        3, project_root=tmp_path, claims_root=tmp_path / "claims"
+    )
+
+    by_id = {r["node_id"]: r for r in receipts}
+    assert by_id["n-a"]["status"] == "skipped"
+    assert "already-claimed" in by_id["n-a"]["error"]
+    assert by_id["n-c"]["status"] == "dispatched"
+    # n-a's lane slot returned to the pool; only the good lane keeps one.
+    assert find_lane_slot("n-a", root=tmp_path / "claims") is None
+    assert active_lane_count(root=tmp_path / "claims") == 1
+
+
+def test_seed_heals_symlinked_fno_before_writing(tmp_path):
+    """A reused worktree's whole-dir `.fno` symlink must not route the seed into
+    the canonical file (which would make every lane share one parking_lot_path)."""
+    canonical = tmp_path / "canonical"
+    (canonical / ".fno").mkdir(parents=True)
+    (canonical / ".fno" / "settings.local.yaml").write_text("canonical: sentinel\n")
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".fno").symlink_to(canonical / ".fno")
+
+    advance._seed_lane_local_settings(wt, "n-a", "fno")
+
+    assert (canonical / ".fno" / "settings.local.yaml").read_text() == "canonical: sentinel\n"
+    assert not (wt / ".fno").is_symlink()
+    assert "fno-n-a" in (wt / ".fno" / "settings.local.yaml").read_text()

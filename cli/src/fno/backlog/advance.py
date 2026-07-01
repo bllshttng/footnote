@@ -585,19 +585,31 @@ def _seed_lane_local_settings(
     unconditionally: a lane worktree is machine-owned and the content is
     deterministic, so a re-dispatch re-seeds identically (idempotent).
     """
-    parking = worktree / ".fno" / "parking-lot.md"
-    local = worktree / ".fno" / "settings.local.yaml"
-    local.parent.mkdir(parents=True, exist_ok=True)
-    local.write_text(
+    fno_dir = worktree / ".fno"
+    # A reused worktree may carry `.fno` as a WHOLE-DIR symlink to canonical (the
+    # bg-worktree footgun `fno target start` already heals). Writing through it
+    # would create/overwrite the CANONICAL settings.local.yaml, so every lane
+    # would then share one parking_lot_path/project.id - the exact collision this
+    # seed prevents. Unlink and recreate a real per-worktree dir first.
+    if fno_dir.is_symlink():
+        fno_dir.unlink()
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    parking = fno_dir / "parking-lot.md"
+    # Single-quote the scalar values: a path/id containing a space, ':' or (on
+    # Windows) a backslash would otherwise mis-parse. Single quotes take the
+    # bytes literally; an embedded single quote is YAML-escaped by doubling.
+    id_val = f"{base_project_id}-{node_id}".replace("'", "''")
+    parking_val = str(parking).replace("'", "''")
+    (fno_dir / "settings.local.yaml").write_text(
         "# Auto-seeded per-lane isolation (parallel mode, epic x-42d5 G3).\n"
         "# Only x-cbce's per-worktree override allowlist {parking_lot_path,\n"
         "# project.id}; overrides the shared settings.yaml so concurrent lanes\n"
         "# never collide on post-merge writeback or node attribution.\n"
         "config:\n"
         "  project:\n"
-        f"    id: {base_project_id}-{node_id}\n"
+        f"    id: '{id_val}'\n"
         "  post_merge:\n"
-        f"    parking_lot_path: {parking}\n"
+        f"    parking_lot_path: '{parking_val}'\n"
     )
 
 
@@ -627,6 +639,7 @@ def dispatch_lanes(
     lanes are unaffected (Failure Modes: Errors). Returns one receipt dict per
     selected lane (``status`` ``dispatched`` | ``skipped``).
     """
+    from fno.claims.core import ClaimHeldByOther, acquire_claim
     from fno.claims.lanes import release_lane_slot
 
     selected = select_lane_fill(max_lanes, project, claim=True, claims_root=claims_root)
@@ -641,23 +654,59 @@ def dispatch_lanes(
     for node in selected:
         node_id = node["id"]
         slug = node.get("slug") or node.get("title")
+
+        def _skip(reason: str, _nid: str = node_id) -> None:
+            # A pick we will not spawn must return its dispatch-time lane slot,
+            # or the cap stays wrong until TTL. Non-raising cleanup. _nid is bound
+            # per-iteration (default arg) so the closure never captures a later
+            # loop value.
+            try:
+                release_lane_slot(_nid, root=claims_root)
+            except Exception:  # noqa: BLE001
+                pass
+            receipts.append({"node_id": _nid, "status": "skipped", "error": reason})
+
+        # The lane slot (parallel-lane:<id>) is invisible to the sequential
+        # advance()/dispatch-node.sh path, which dedups on node:<id> + dispatch:<id>.
+        # During the boot window before this lane's worker owns node:<id>, that
+        # path would see the node as ready+unclaimed and double-launch it. Guard
+        # with the SAME dispatch:<id> reservation advance() uses (global-rooted,
+        # TTL bridge) so the two dispatchers dedup against each other.
+        if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+            _skip("already-claimed")
+            continue
+        dispatch_key = f"dispatch:{node_id}"
+        dispatch_holder = f"advance:{os.getpid()}"
+        dispatch_root = _claims_root_for(dispatch_key)
+        try:
+            acquire_claim(
+                dispatch_key,
+                dispatch_holder,
+                ttl_ms=_DISPATCH_TTL_MS,
+                reason=f"parallel lane dispatch for {node_id}",
+                root=dispatch_root,
+            )
+        except ClaimHeldByOther:
+            _skip("already-claimed")
+            continue
+        except Exception as exc:  # noqa: BLE001
+            _skip(f"claim-error: {str(exc)[:120]}")
+            continue
+
         try:
             worktree = _ensure_lane_worktree(node_id, canonical_root=canonical)
             _seed_lane_local_settings(worktree, node_id, base_pid)
             short_id = _spawn_worker(node_id, str(worktree), slug)
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
-            # Release the dispatch-time slot select_lane_fill acquired so the node
-            # returns to the pool (a later tick / reconcile re-dispatches it).
-            try:
-                release_lane_slot(node_id, root=claims_root)
-            except Exception:  # noqa: BLE001 - best-effort; never mask the original
-                pass
+            # Release BOTH the boot-window reservation and the dispatch-time lane
+            # slot so the node returns to the pool (a later tick re-dispatches it).
+            _safe_release(dispatch_key, dispatch_holder, dispatch_root)
             _LOG.warning("dispatch_lanes: lane %s skipped: %s", node_id, exc)
-            receipts.append(
-                {"node_id": node_id, "status": "skipped", "error": str(exc)[:200]}
-            )
+            _skip(str(exc)[:200])
             continue
 
+        # Dispatched. Leave dispatch:<id> to expire by TTL: the worker now owns
+        # (or is acquiring) node:<id> and reconciles its lane slot at target init.
         _emit(
             EVENT_DISPATCHED,
             {
