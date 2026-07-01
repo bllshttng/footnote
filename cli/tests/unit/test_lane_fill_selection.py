@@ -113,6 +113,33 @@ def test_empty_ready_selects_nothing(tmp_path, monkeypatch):
     assert advance.select_lane_fill(3, claims_root=tmp_path) == []
 
 
+def test_midloop_raise_releases_already_acquired_slots(tmp_path, monkeypatch):
+    """A raise on a LATER pick must not orphan slots from earlier picks.
+
+    Pass 1 acquires n-a's slot; pass 2's ready query raises (a garbled
+    `fno backlog ready`). The caller never receives `selected`, so select_lane_fill
+    must release n-a's slot before re-raising (else it sits held until TTL).
+    """
+    import pytest
+
+    from fno.claims.lanes import active_lane_count
+
+    calls = {"n": 0}
+
+    def flaky_ready(project=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _nodes(("n-a", "code"), ("n-b", "docs"))
+        raise RuntimeError("fno backlog ready exited 1: boom")
+
+    monkeypatch.setattr(advance, "_ready_nodes", flaky_ready)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert active_lane_count(root=tmp_path) == 0, "acquired slot must be released on raise"
+
+
 # -- CLI seam: `fno backlog lane-fill` --
 
 def test_cli_lane_fill_echoes_selection_json(monkeypatch):

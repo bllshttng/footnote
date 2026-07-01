@@ -258,8 +258,16 @@ def select_lane_fill(
     ``claim=False`` previews the selection (which nodes WOULD dispatch) without
     holding any slot - the read-only mode, mirroring ``fno backlog next`` sans
     ``--claim``.
+
+    ``claim=True`` assumes the caller runs under the singleton ``walker:<root>``
+    claim (the dispatch context does): that serialization is what prevents two
+    concurrent callers from both selecting the SAME node and each grabbing a
+    distinct slot for it (which would inflate the cap - the group-1 primitive is
+    idempotent only for a single caller's retries). It is NOT a standalone
+    distributed lock; do not run two ``--claim`` selectors concurrently outside
+    the walker.
     """
-    from fno.claims.lanes import acquire_lane_slot, find_lane_slot
+    from fno.claims.lanes import acquire_lane_slot, find_lane_slot, release_lane_slot
 
     if max_lanes < 2:
         return []
@@ -268,35 +276,47 @@ def select_lane_fill(
     used_domains: set[str] = set()
     picked_ids: set[str] = set()
 
-    while len(selected) < max_lanes:
-        # ponytail: fresh ready-list per pick is O(max_lanes * ready_count).
-        # max_lanes is small (2-3) and the ready-list is short, so this is
-        # cheap; if a huge backlog makes the re-query hurt, cache the list and
-        # refresh only the claim-state. The fresh query is what makes
-        # distinctness "recomputed after each claim" rather than snapshot-stale.
-        candidate = None
-        for node in _ready_nodes(project):
-            nid = node["id"]
-            if nid in picked_ids:
-                continue
-            domain = node.get("domain") or _DOMAIN_UNSET
-            if domain in used_domains:
-                continue
-            if find_lane_slot(nid, root=claims_root) is not None:
-                continue  # a live peer lane already owns this node
-            candidate = (node, domain)
-            break
-        if candidate is None:
-            break  # no distinct-domain, unclaimed node left
+    try:
+        while len(selected) < max_lanes:
+            # ponytail: fresh ready-list per pick is O(max_lanes * ready_count).
+            # max_lanes is small (2-3) and the ready-list is short, so this is
+            # cheap; if a huge backlog makes the re-query hurt, cache the list
+            # and refresh only the claim-state. The fresh query is what makes
+            # distinctness "recomputed after each claim" not snapshot-stale.
+            candidate = None
+            for node in _ready_nodes(project):
+                nid = node["id"]
+                if nid in picked_ids:
+                    continue
+                domain = node.get("domain") or _DOMAIN_UNSET
+                if domain in used_domains:
+                    continue
+                if find_lane_slot(nid, root=claims_root) is not None:
+                    continue  # a live peer lane already owns this node
+                candidate = (node, domain)
+                break
+            if candidate is None:
+                break  # no distinct-domain, unclaimed node left
 
-        node, domain = candidate
+            node, domain = candidate
+            if claim:
+                slot = acquire_lane_slot(max_lanes, node["id"], root=claims_root)
+                if slot is None:
+                    break  # cap full: every slot held by a live peer lane
+            selected.append(node)
+            used_domains.add(domain)
+            picked_ids.add(node["id"])
+    except BaseException:
+        # A mid-loop raise (a garbled `fno backlog ready` on a LATER pick, or a
+        # filesystem error during a claim probe) must not orphan the slots
+        # already acquired: the caller never receives `selected`, so it cannot
+        # release them, and they would sit held until TTL. Release what we hold,
+        # then re-raise unchanged. Preview mode holds no slot, so this is a
+        # no-op there.
         if claim:
-            slot = acquire_lane_slot(max_lanes, node["id"], root=claims_root)
-            if slot is None:
-                break  # cap full: every slot held by a live peer lane
-        selected.append(node)
-        used_domains.add(domain)
-        picked_ids.add(node["id"])
+            for held in selected:
+                release_lane_slot(held["id"], root=claims_root)
+        raise
 
     return selected
 
