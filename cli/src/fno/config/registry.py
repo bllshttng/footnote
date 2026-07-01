@@ -168,6 +168,11 @@ FIELD_META: dict[str, Meta] = {
     "config.active_backlog.mission": Meta(
         "never", "Scope the drain daemon to a single mission's nodes."
     ),
+    # --- config.parallel.* ---
+    "config.parallel.max_lanes": Meta(
+        "advanced",
+        "Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in).",
+    ),
     # --- config.auto_merge.* ---
     "config.auto_merge.enabled": Meta(
         "always", "Auto-merge a PR once external review passes.",

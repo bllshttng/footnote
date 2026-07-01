@@ -69,6 +69,7 @@
 | `config.active_backlog.failure_limit` | int | `3` | advanced | Consecutive dispatch failures before a node is parked. |
 | `config.active_backlog.max_concurrent` | int | `1` | never | In-flight nodes per project per tick (v1 == 1). |
 | `config.active_backlog.mission` | str (optional) | _(none)_ | never | Scope the drain daemon to a single mission's nodes. |
+| `config.parallel.max_lanes` | int | `1` | advanced | Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in). |
 | `config.auto_merge.enabled` | bool | `false` | always | Auto-merge a PR once external review passes. |
 | `config.auto_merge.merge_strategy` | str | `merge` | advanced | Merge strategy: merge | squash | rebase. |
 | `config.auto_merge.delete_branch_on_merge` | bool | `true` | advanced | Delete the branch after an auto-merge. |
