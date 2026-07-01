@@ -2148,6 +2148,7 @@ fn create(
         log_path: Some(log_path.to_string_lossy().to_string()),
         last_reconciled_at: None,
         inside_leg: None,
+        exited_at: None,
     };
 
     // Re-check the name UNDER the registry lock before appending. The per-agent

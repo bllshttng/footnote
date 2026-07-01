@@ -72,6 +72,10 @@ RUST_CLIENT_VERBS = frozenset(
         # SIGTERMs a stale daemon and lazy-starts a fresh one from the current
         # binary; PTY workers survive (Outcome B).
         "restart",
+        # Manual dead-row GC (x-b1aa): the same sweep the daemon runs on its idle
+        # tick, on demand. Dispatched directly in client.rs before build_request
+        # (operates on the registry under the shared flock; no daemon RPC).
+        "reap",
         "drive",
         # Client-side TUI compositor (ab-3c063856). Like ``drive``, it owns
         # the terminal and does not fit the one-shot RPC path; the verb is
@@ -219,6 +223,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     # enforces the invariant).
     "status": "Report daemon liveness and per-agent state.",
     "restart": "Restart a stale daemon (pick up a new build; PTY workers survive).",
+    "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output.",
     "drive": "Drive a spawned agent's TUI (--watch / --step / --paranoid).",
     "grid": "Compose several agents into one multi-panel terminal view.",
     "host": "Host a fresh interactive codex/gemini TUI in a drivable worker, or an interactive claude pane (--provider claude --mode interactive).",

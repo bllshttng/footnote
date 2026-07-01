@@ -1652,6 +1652,7 @@ cat >/dev/null
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();

@@ -1144,6 +1144,7 @@ fn dispatch_create(
         log_path: Some(output_path.to_string_lossy().to_string()),
         last_reconciled_at: None,
         inside_leg: None,
+        exited_at: None,
     };
 
     match update_registry(registry_path, |reg| {

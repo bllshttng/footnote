@@ -776,8 +776,25 @@ class AgentsBlock(BaseModel):
 
     a2a: A2aBlock = Field(default_factory=A2aBlock)
     confirm: str = "auto"
+    # Dead-row GC grace window in SECONDS (x-b1aa). A finished agent-view row
+    # stays visible this long after the daemon GC first observes its process gone,
+    # before it is reaped. Default 3600 (1h). The Rust daemon + `fno agents reap`
+    # read the same `config.agents.dead_row_grace` key (agents_config.rs), so a
+    # non-default here changes both the automatic sweep and the manual verb.
+    dead_row_grace: int = 3600
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
+
+    @field_validator("dead_row_grace")
+    @classmethod
+    def dead_row_grace_nonneg(cls, v: int) -> int:
+        """Grace is a duration; a negative value is a config error (would reap
+        instantly, defeating the visibility window)."""
+        if v < 0:
+            raise ValueError(
+                f"config.agents.dead_row_grace must be >= 0 seconds; got {v}"
+            )
+        return v
 
     @field_validator("confirm")
     @classmethod
