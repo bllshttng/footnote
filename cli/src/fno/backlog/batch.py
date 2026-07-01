@@ -21,6 +21,7 @@ import json
 import os
 import secrets
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
@@ -242,6 +243,82 @@ def abandon_batch(*, domain: str, root: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Policy engine (Wave 2): join-or-start + close-condition, pure over inputs
+# ---------------------------------------------------------------------------
+
+# A node ships alone (never batched) when it is large or drop-everything: a big
+# or urgent change deserves its own reviewable PR (Locked Decision, plan §close).
+SOLO_SIZES = {"L"}
+SOLO_PRIORITIES = {"p0"}
+
+
+@dataclass
+class BatchDecision:
+    """What to do with a candidate node at selection time."""
+
+    action: str  # "ship_solo" | "start" | "join"
+    domain: str
+    reason: str
+
+    def to_dict(self) -> dict:
+        return {"action": self.action, "domain": self.domain, "reason": self.reason}
+
+
+def _ships_alone(node: dict) -> Optional[str]:
+    if (node.get("size") or "").upper() in SOLO_SIZES:
+        return "size:L ships alone"
+    if (node.get("priority") or "").lower() in SOLO_PRIORITIES:
+        return "p0 ships alone"
+    return None
+
+
+def decide_batch_action(node: dict, *, enabled: bool, root: Path) -> BatchDecision:
+    """Decide whether a candidate node ships solo, joins, or starts a batch.
+
+    `enabled=False` always returns ship_solo → byte-for-byte today's
+    one-PR-per-node behavior when config.batch.enabled is off (Locked Decision 3).
+    """
+    domain = node.get("domain") or "code"
+    if not enabled:
+        return BatchDecision("ship_solo", domain, "batching disabled")
+    solo = _ships_alone(node)
+    if solo:
+        return BatchDecision("ship_solo", domain, solo)
+    b = read_batch(domain, root)
+    if b and b.get("status") == "open" and not is_full(b):
+        return BatchDecision("join", domain, f"join open batch {b['batch_id']}")
+    return BatchDecision("start", domain, "no joinable open batch")
+
+
+def should_close(
+    batch: Optional[dict],
+    next_node: Optional[dict],
+    *,
+    max_loc: Optional[int] = None,
+    cum_loc: int = 0,
+) -> tuple[bool, str]:
+    """Close the open batch when the first close condition trips (plan §close).
+
+    Domain boundary is the important one — it caps blast radius and keeps the
+    review panel looking at a coherent diff.
+    """
+    if batch is None or batch.get("status") != "open":
+        return (False, "no open batch")
+    if is_full(batch):
+        return (True, "max_nodes reached")
+    if next_node is None:
+        return (True, "no more ready nodes (drain)")
+    if (next_node.get("domain") or "code") != batch.get("domain"):
+        return (True, "next node is a different domain")
+    solo = _ships_alone(next_node)
+    if solo:
+        return (True, f"next node {solo}")
+    if max_loc and cum_loc > int(max_loc):
+        return (True, "max_loc exceeded")
+    return (False, "batch stays open")
+
+
+# ---------------------------------------------------------------------------
 # CLI: `fno backlog batch <verb>`
 # ---------------------------------------------------------------------------
 
@@ -346,3 +423,38 @@ def cli_status(
         _emit(b or {"domain": domain, "status": "none"})
     else:
         _emit({"batches": list_batches(r)})
+
+
+def _load_batch_enabled() -> bool:
+    """config.batch.enabled, defaulting False if settings can't be loaded."""
+    try:
+        from fno.config import load_settings
+
+        return bool(load_settings().config.batch.enabled)
+    except Exception:  # noqa: BLE001 - a bad/absent settings file must not enable
+        return False
+
+
+@cli.command("policy")
+def cli_policy(
+    node: str = typer.Option(..., "--node", "-n", help="Candidate node id."),
+    root: Optional[str] = typer.Option(None, "--root"),
+) -> None:
+    """Emit the batch decision (ship_solo|start|join) for a candidate node.
+
+    Reads config.batch.enabled and the node via `fno backlog get`, then applies
+    the pure policy. The selection path (Wave 2 wiring) shells to this verb.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["fno", "backlog", "get", node], capture_output=True, text=True, timeout=30
+        )
+        node_dict = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else {"id": node}
+    except Exception:  # noqa: BLE001 - degrade to a bare id; policy tolerates missing fields
+        node_dict = {"id": node}
+    decision = decide_batch_action(
+        node_dict, enabled=_load_batch_enabled(), root=_root_opt(root)
+    )
+    _emit(decision.to_dict())
