@@ -151,6 +151,27 @@ def test_production_anchor_via_repo_root(tmp_path, monkeypatch):
         paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
 
+def test_non_string_top_level_key_does_not_crash(tmp_path, monkeypatch, caplog):
+    # YAML permits non-string keys (`1: x`, `true: y`). They can never be
+    # allowlisted, so they land in the ignored list; the warning path must
+    # str-coerce them rather than TypeError on sorted()/join() (Gemini review,
+    # PR #128). The allowlisted key still applies.
+    local = (
+        "1: bare-int-key\n"
+        "3.14: bare-float-key\n"
+        "config:\n"
+        "  project:\n"
+        "    id: still-works\n"
+    )
+    with caplog.at_level(logging.WARNING, logger="fno.config"):
+        s = _load(tmp_path, monkeypatch, SHARED, local)
+    assert s.config.project.id == "still-works"
+    warnings = [r for r in caplog.records if "settings.local.yaml" in r.getMessage()]
+    assert len(warnings) == 1
+    # Non-string keys are reported as their str() forms (no TypeError crash).
+    assert "1" in warnings[0].getMessage() and "3.14" in warnings[0].getMessage()
+
+
 def test_allowlist_is_exactly_the_two_collision_keys():
     from fno.config import WORKTREE_LOCAL_KEYS
 

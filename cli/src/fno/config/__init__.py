@@ -2050,7 +2050,11 @@ def _flatten_leaf_paths(
     """Yield (dotted_path, value) for every leaf (non-dict) in a nested dict."""
     out: list[tuple[str, object]] = []
     for key, value in data.items():
-        path = f"{prefix}.{key}" if prefix else key
+        # Coerce non-string keys (YAML allows int/bool/None keys, e.g. `1: x`)
+        # so the dotted path is always a str - otherwise sorted()/join() over the
+        # ignored-keys warning list would TypeError and crash config loading.
+        key_str = str(key)
+        path = f"{prefix}.{key_str}" if prefix else key_str
         if isinstance(value, dict):
             out.extend(_flatten_leaf_paths(value, path))
         else:
