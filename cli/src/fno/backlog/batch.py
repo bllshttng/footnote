@@ -713,7 +713,25 @@ cli = typer.Typer(
 
 
 def _root_opt(root: Optional[str]) -> Path:
-    return Path(root) if root else Path.cwd()
+    """Resolve the batch-state root: explicit --root, else the CANONICAL repo root.
+
+    Batch state (`.fno/batches/`) is cross-worktree coordination state, like
+    `fno.claims`: the daemon (dispatch cwd), the batched worker (a linked batch
+    worktree), and `ship-closeable` must all see the SAME open batch for
+    "one open batch per domain" to hold. `setup-worktree.sh` does NOT link
+    `.fno/batches/`, so a raw `Path.cwd()` default would fragment state across
+    worktrees. resolve_canonical_repo_root() returns the main checkout from any
+    linked worktree (the same category claims_dir() resolves to), so every
+    participant converges on `<canonical>/.fno/batches/` (x-6cdf prerequisite).
+    """
+    if root:
+        return Path(root)
+    try:
+        from fno.paths import resolve_canonical_repo_root
+
+        return resolve_canonical_repo_root()
+    except Exception:  # noqa: BLE001 - outside a git repo, fall back to cwd
+        return Path.cwd()
 
 
 def _emit(obj: dict) -> None:

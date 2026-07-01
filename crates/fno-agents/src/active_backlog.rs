@@ -338,6 +338,11 @@ impl Dispatcher for BatchDispatcher {
                 "--repo",
                 &self.repo.to_string_lossy(),
             ])
+            // Run from the target repo so the batch-state root resolves to this
+            // project's canonical checkout (matches ship_closeable_batches), not
+            // the daemon's launch cwd. Without this, prepare and ship-closeable
+            // could resolve different `.fno/batches/` roots.
+            .current_dir(&self.repo)
             .output()
             .ok()
             .filter(|o| o.status.success())
