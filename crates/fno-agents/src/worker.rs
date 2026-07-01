@@ -885,6 +885,17 @@ mod tests {
         // markers wrap it -- proves submit_keys ran the text through
         // bracketed_paste (node x-849b), which a raw-write regression would drop
         // while the bare "submit-me" substring still matched (integration-test Gap 1).
+        //
+        // Poll for the RAW paste marker, NOT for "submit-me": the two arrive from
+        // different output sources with different timing. "submit-me" first shows
+        // up in the PTY line-discipline ECHO during the settle window, where a
+        // control byte may be echoed in caret notation (ESC -> "^[" under ECHOCTL,
+        // the Linux default) -- so the bare substring matches while the raw ESC
+        // does not. The raw "\x1b[200~" only lands once `cat` writes the line back
+        // to stdout after the CR. Breaking on "submit-me" therefore raced the
+        // marker and flaked under CI load (passed on macOS, panicked on Linux).
+        // Waiting for the marker itself makes the assertion deterministic.
+        let paste_start = "\u{1b}[200~";
         let mut snap = String::new();
         for i in 0..50 {
             write_request(
@@ -895,7 +906,7 @@ mod tests {
             .unwrap();
             let r = read_response(&mut conn).await.unwrap();
             snap = r.result().unwrap()["text"].as_str().unwrap().to_string();
-            if snap.contains("submit-me") {
+            if snap.contains("submit-me") && snap.contains(paste_start) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
