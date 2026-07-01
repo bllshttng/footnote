@@ -1008,6 +1008,21 @@ def cmd_health(
             }
         )
 
+    # 8. Batch-lane verdict (advisory, best-effort): surfaced only when batch
+    # ship/abandon events exist and the measured verdict says act. Never gates
+    # the health exit code.
+    batch_verdict: str | None = None
+    try:
+        from fno.backlog.batch import _root_opt, compute_metrics, read_batch_events
+
+        _batch_events = read_batch_events(_root_opt(None) / ".fno" / "events.jsonl")
+        if _batch_events:
+            _bv = compute_metrics(_batch_events)["verdict"]
+            if _bv in ("build-wave4", "disable-batching"):
+                batch_verdict = _bv
+    except Exception:  # noqa: BLE001 - advisory only; health must not break
+        pass
+
     report = {
         "scope": _resolve_scope(project, all_projects, entries),
         "idea_pile_depth": idea_count,
@@ -1018,6 +1033,7 @@ def cmd_health(
         "project_cwd_mismatch": len(mismatch_ids),
         "project_cwd_mismatch_nodes": mismatch_ids,
         "stranded_by_failed_blocker": stranded_payload,
+        **({"batch_verdict": batch_verdict} if batch_verdict else {}),
         "totals": {
             "pending": len(pending_active),
             "ideas": idea_count,
@@ -1120,6 +1136,17 @@ def cmd_health(
         f"  stranded by failed blocker: "
         f"{report['totals']['stranded_by_failed_blocker']}"
     )
+    if batch_verdict == "build-wave4":
+        typer.echo(
+            "  batch-lane verdict: build-wave4 - abandonment waste exceeds savings; "
+            "consider building batch-lane Wave 4 (surgical isolation). "
+            "See `fno backlog batch metrics`."
+        )
+    elif batch_verdict == "disable-batching":
+        typer.echo(
+            "  batch-lane verdict: disable-batching - batching costs more CI than it "
+            "saves; consider config.batch.enabled: false. See `fno backlog batch metrics`."
+        )
     if collisions:
         typer.echo("")
         typer.echo("Plans stepping on each other:")
