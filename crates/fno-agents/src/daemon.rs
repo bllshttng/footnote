@@ -418,9 +418,18 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
     let now = now_epoch_secs();
     let grace_secs = grace.as_secs() as i64;
 
-    let mut to_reap: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut to_stamp: Vec<String> = Vec::new();
-    let mut to_clear: Vec<String> = Vec::new();
+    // Keyed by row name -> the `created_at` we evaluated. Applied under the lock
+    // ONLY when the row's current `created_at` still matches, so a same-name
+    // session reaped-and-recreated (or resurrected) between this unlocked snapshot
+    // + the slow git probes and the exclusive write is never clobbered by a
+    // stale name-only decision (TOCTOU; gemini HIGH / codex P2 on PR #126).
+    // `created_at` is the spawn-stamped identity discriminant: a replacement
+    // session carries a fresh one.
+    let mut to_reap: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut to_stamp: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut to_clear: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
 
     for e in &registry.entries {
         let is_live = live_workers.contains(&e.short_id)
@@ -466,14 +475,16 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         };
         match crate::gc::gc_action(&row, now, grace_secs) {
             crate::gc::GcAction::Reap => {
-                to_reap.insert(e.name.clone());
+                to_reap.insert(e.name.clone(), e.created_at.clone());
             }
-            crate::gc::GcAction::StampExit => to_stamp.push(e.name.clone()),
+            crate::gc::GcAction::StampExit => {
+                to_stamp.insert(e.name.clone(), e.created_at.clone());
+            }
             crate::gc::GcAction::Keep => {
                 if is_live && e.exited_at.is_some() {
                     // Resurrected: drop the stale exit stamp so a later death
                     // starts a fresh grace clock.
-                    to_clear.push(e.name.clone());
+                    to_clear.insert(e.name.clone(), e.created_at.clone());
                 } else if needs_probe && matches!(worktree_clean, Some(false) | None) {
                     // Past grace but held back by a dirty/undeterminable worktree.
                     summary.kept_dirty.push((id, e.cwd.clone()));
@@ -487,23 +498,39 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
     }
 
     let now_stamp = now_rfc3339_like();
+    // Names actually removed under the lock (identity still matched), so the emit
+    // + summary report only what really happened (AC1-ERR / no phantom reaps).
+    let mut reaped_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let write = state::update_registry(&home.registry_json(), |r| {
+        // `created_at` guard: apply each mutation only if the row under the lock is
+        // still the SAME session we evaluated. A stale name whose row was
+        // recreated with a fresh `created_at` is skipped (never clobbers the new
+        // session); this preserves the liveness re-check guarantee across the
+        // unlocked-snapshot window.
         for e in r.entries.iter_mut() {
-            if to_stamp.contains(&e.name) {
+            if to_stamp.get(&e.name) == Some(&e.created_at) {
                 e.exited_at = Some(now_stamp.clone());
             }
-            if to_clear.contains(&e.name) {
+            if to_clear.get(&e.name) == Some(&e.created_at) {
                 e.exited_at = None;
             }
         }
-        r.entries.retain(|e| !to_reap.contains(&e.name));
+        r.entries.retain(|e| {
+            if to_reap.get(&e.name) == Some(&e.created_at) {
+                reaped_names.insert(e.name.clone());
+                false
+            } else {
+                true
+            }
+        });
     });
     match write {
         Ok(()) => {
             // Emit only AFTER a successful write so the event log never diverges
-            // from disk (AC1-ERR).
+            // from disk (AC1-ERR), and only for rows actually removed under the
+            // lock (a stale candidate whose identity changed is not a reap).
             for e in &registry.entries {
-                if to_reap.contains(&e.name) {
+                if reaped_names.contains(&e.name) {
                     let _ = emitter.emit_fields(
                         "agent_row_reaped",
                         json_obj(&[
