@@ -619,3 +619,31 @@ def test_sentinel_harvest_no_ledger_is_readonly_not_drain(tmp_path):
     assert report.readonly_carveout_count == 2, report.readonly_carveout_count
     remaining = (tmp_path / ".fno" / "carveouts.jsonl").read_text(encoding="utf-8")
     assert "cv-A" in remaining and "cv-B" in remaining, remaining
+
+
+def test_sentinel_harvest_pr_number_zero_is_readonly(tmp_path):
+    """gemini medium (PR #124): a sentinel with a missing/0 pr_number must NOT
+    scan the ledger - a 0 could match a placeholder `pr: 0` row and wrongly
+    scope. No resolvable PR -> read-only, nothing consumed."""
+    _seed_two_session_carveouts(tmp_path)
+    led = tmp_path / "ledger.json"
+    # A hostile placeholder row that a `pr: 0` scan would otherwise match.
+    led.write_text(json.dumps({"entries": [
+        {"session_id": "sess-A", "pr": 0, "pr_url": "https://github.com/o/r/pull/0"},
+    ]}), encoding="utf-8")
+    sd = tmp_path / "retro-pending"
+    sd.mkdir(parents=True, exist_ok=True)
+    sentinel = sd / "ab-eeee5555.json"
+    # pr_number deliberately omitted -> int(... or 0) == 0.
+    sentinel.write_text(json.dumps({
+        "node_id": "ab-eeee5555",
+        "pr_url": "https://github.com/o/r/pull/0",
+    }), encoding="utf-8")
+    rec = _Rec()
+    report, _removed = process_sentinel_file(
+        sentinel, repo_root=tmp_path, existing_nodes=[], comments=[],
+        carveout_root=tmp_path, ledger_path=led,
+        create_fn=rec.create, inbox_fn=rec.inbox_append,
+    )
+    assert report.harvested_carveout_ids == [], report.harvested_carveout_ids
+    assert report.readonly_carveout_count == 2, report.readonly_carveout_count

@@ -296,10 +296,14 @@ def _process_payload(
     # unreachable from here. A missing ledger_path (an internal caller that did
     # not thread it) resolves to no owner -> read-only, NOT to the old drain -
     # the guard must never fail open on the very footgun it exists to close.
+    # `pr_number` is already `int(... or 0)` (top of this fn), so a missing/invalid
+    # PR resolves to 0. Guard `> 0` before the ledger scan: a 0 would match a
+    # placeholder/unassigned ledger row (`pr: 0`) and wrongly scope to it; with no
+    # resolvable PR the safe answer is read-only, not a guessed owner (gemini).
     if session_ids is None and not carveouts_readonly:
         resolved = (
             _resolve_pr_session_ids(ledger_path, pr_number, repo_slug)
-            if ledger_path is not None
+            if ledger_path is not None and pr_number > 0
             else []
         )
         if resolved:
