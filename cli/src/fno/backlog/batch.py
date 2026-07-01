@@ -753,6 +753,145 @@ def should_close(
 
 
 # ---------------------------------------------------------------------------
+# Wave-4-trigger metrics: measure abandonment waste
+# ---------------------------------------------------------------------------
+#
+# Turns the plan's qualitative "build Wave 4 only if abandonment proves
+# wasteful" into a measured verdict. Deterministic rollup over the daemon's
+# journal events (NOT a learning loop):
+#
+#   runs_saved  = Σ over shipped batches (members - 1): CI runs batching earned
+#   runs_wasted = Σ over abandoned batches (clean members requeued):
+#                 the runs Wave 4 would keep
+#
+# The failed member's re-run is NOT waste (it re-runs regardless); a v1 abandon's
+# batch members are exactly the clean siblings (a FAILED member never joined).
+
+VERDICT_WASTE_RATIO = 0.4  # build-wave4 when runs_wasted / runs_saved exceeds this
+VERDICT_ABANDON_RATE_HIGH = 0.5  # disable-batching needs abandon_rate above this
+
+BATCH_EVENT_KINDS = ("active_backlog_batch_ship", "active_backlog_batch_abandon")
+
+
+def read_batch_events(events_path: Path, *, since: Optional[str] = None) -> list[dict]:
+    """Parse batch ship/abandon envelopes from an events.jsonl file.
+
+    Skips unparseable lines (append-only journals accumulate junk). `since` is
+    an ISO-8601 UTC lower bound compared lexically - safe because the journal's
+    `ts` is always `YYYY-MM-DDTHH:MM:SSZ`.
+    """
+    p = Path(events_path)
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict) or ev.get("type") not in BATCH_EVENT_KINDS:
+            continue
+        if since and str(ev.get("ts") or "") < since:
+            continue
+        out.append(ev)
+    return out
+
+
+def _empty_stats() -> dict:
+    return {
+        "batches_shipped": 0,
+        "batches_abandoned": 0,
+        "runs_saved": 0,
+        "runs_wasted": 0,
+    }
+
+
+def _verdict(stats: dict) -> str:
+    """The binary economic comparison: does batching save CI runs net of waste?"""
+    opened = stats["batches_shipped"] + stats["batches_abandoned"]
+    if opened == 0:
+        return "no-data"
+    net = stats["runs_saved"] - stats["runs_wasted"]
+    abandon_rate = stats["batches_abandoned"] / opened
+    if net < 0 and abandon_rate > VERDICT_ABANDON_RATE_HIGH:
+        return "disable-batching"
+    if stats["runs_wasted"] > 0 and (
+        net <= 0 or stats["runs_wasted"] > VERDICT_WASTE_RATIO * stats["runs_saved"]
+    ):
+        return "build-wave4"
+    return "keep-v1"
+
+
+def _finish_stats(stats: dict) -> dict:
+    opened = stats["batches_shipped"] + stats["batches_abandoned"]
+    stats["net"] = stats["runs_saved"] - stats["runs_wasted"]
+    stats["abandon_rate"] = round(stats["batches_abandoned"] / opened, 3) if opened else 0.0
+    stats["verdict"] = _verdict(stats)
+    return stats
+
+
+def compute_metrics(events: list[dict]) -> dict:
+    """Pure rollup of batch ship/abandon events into per-domain stats + verdict.
+
+    Pure over inputs (mirrors `should_close`) so tests feed synthetic event
+    dicts - no real journal, no gh. Event shapes handled:
+
+    - active_backlog_batch_ship: data.stdout is the `ship-closeable` JSON
+      (`{"shipped": [ShipResult...]}`). action=shipped earns members-1 saved
+      runs; action=abandoned (PR-open failure) wastes all members (all clean).
+    - active_backlog_batch_abandon: data carries member_count (the requeued
+      clean members) - counted only when detail == "ok" (a failed abandon call
+      abandoned nothing).
+    """
+    domains: dict[str, dict] = {}
+
+    def stats_for(domain: str) -> dict:
+        return domains.setdefault(domain or "code", _empty_stats())
+
+    for ev in events:
+        data = ev.get("data") or {}
+        kind = ev.get("type")
+        if kind == "active_backlog_batch_ship":
+            try:
+                shipped = json.loads(data.get("stdout") or "{}").get("shipped") or []
+            except json.JSONDecodeError:
+                continue
+            for r in shipped:
+                if not isinstance(r, dict):
+                    continue
+                members = r.get("members") or []
+                s = stats_for(r.get("domain") or "code")
+                if r.get("action") == "shipped":
+                    s["batches_shipped"] += 1
+                    s["runs_saved"] += max(0, len(members) - 1)
+                elif r.get("action") == "abandoned":
+                    s["batches_abandoned"] += 1
+                    s["runs_wasted"] += len(members)
+        elif kind == "active_backlog_batch_abandon":
+            if data.get("detail") != "ok":
+                continue  # the abandon call failed; nothing was abandoned
+            s = stats_for(data.get("domain") or "code")
+            s["batches_abandoned"] += 1
+            try:
+                s["runs_wasted"] += max(0, int(data.get("member_count") or 0))
+            except (TypeError, ValueError):
+                pass
+
+    totals = _empty_stats()
+    for s in domains.values():
+        for k in totals:
+            totals[k] += s[k]
+    return {
+        "domains": {d: _finish_stats(s) for d, s in sorted(domains.items())},
+        "totals": _finish_stats(totals),
+        "verdict": _verdict(totals),
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI: `fno backlog batch <verb>`
 # ---------------------------------------------------------------------------
 
@@ -866,8 +1005,12 @@ def cli_abandon(
     except (BatchError, BatchValidationError) as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1)
-    _clear_member_batch_marks(member_ids(batch), root=r)
-    _emit(batch)
+    requeued = member_ids(batch)
+    _clear_member_batch_marks(requeued, root=r)
+    # `member_count`/`requeued` feed the Wave-4-trigger metric: the daemon
+    # journals them on the abandon event so `batch metrics` can count the clean
+    # members a v1 abandon dragged into a requeue (runs_wasted). Additive.
+    _emit({**batch, "member_count": len(requeued), "requeued": requeued})
 
 
 @cli.command("ship")
@@ -928,6 +1071,46 @@ def cli_status(
         _emit(b or {"domain": domain, "status": "none"})
     else:
         _emit({"batches": list_batches(r)})
+
+
+@cli.command("metrics")
+def cli_metrics(
+    since: Optional[str] = typer.Option(
+        None, "--since", help="ISO-8601 UTC lower bound on event ts (e.g. 2026-07-01T00:00:00Z)."
+    ),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+    root: Optional[str] = typer.Option(None, "--root"),
+) -> None:
+    """Wave-4-trigger rollup: does batching save CI runs net of abandonment waste?
+
+    Reads the canonical journal's batch ship/abandon events and prints per-domain
+    runs_saved / runs_wasted / net / abandon_rate plus a verdict:
+    keep-v1 | build-wave4 | disable-batching | no-data. The verdict is the
+    go/no-go for building batch-lane Wave 4 (surgical isolation).
+    """
+    r = _root_opt(root)
+    events = read_batch_events(r / ".fno" / "events.jsonl", since=since)
+    m = compute_metrics(events)
+    if json_output:
+        _emit(m)
+        return
+    if m["verdict"] == "no-data":
+        typer.echo("batch metrics: no batch events yet (batching off or never ran)")
+        typer.echo("verdict: no-data")
+        return
+    for d, s in m["domains"].items():
+        typer.echo(
+            f"{d}: shipped={s['batches_shipped']} abandoned={s['batches_abandoned']} "
+            f"runs_saved={s['runs_saved']} runs_wasted={s['runs_wasted']} "
+            f"net={s['net']} abandon_rate={s['abandon_rate']} -> {s['verdict']}"
+        )
+    t = m["totals"]
+    typer.echo(
+        f"totals: shipped={t['batches_shipped']} abandoned={t['batches_abandoned']} "
+        f"runs_saved={t['runs_saved']} runs_wasted={t['runs_wasted']} "
+        f"net={t['net']} abandon_rate={t['abandon_rate']}"
+    )
+    typer.echo(f"verdict: {m['verdict']}")
 
 
 def _load_batch_enabled(root: Optional[Path] = None) -> bool:

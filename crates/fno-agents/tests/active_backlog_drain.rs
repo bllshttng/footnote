@@ -488,7 +488,7 @@ fn batched_member_failure_abandons_batch_and_does_not_ship() {
     // batch (v1 policy), never run ship-closeable over its partial commits.
     let tmp = TempDir::new().unwrap();
     let bin = tmp.path().join("bin");
-    let (journal, _project_journal) = journal_in(tmp.path());
+    let (journal, project_journal) = journal_in(tmp.path());
     // noop driver: never emits a termination -> run_loop synthesizes NoProgress.
     let lib = driver_lib_noop(&tmp.path().join("lib"));
     let wt = tmp.path().join("batch-wt");
@@ -509,7 +509,7 @@ if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "prepare" ]]; then
   printf '{{"mode":"batched","domain":"code","worktree":"{wt}","branch":"feature/batch-code-aa11bb","batch_id":"batch-bbbb"}}\n'
   exit 0
 fi
-if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "abandon" ]]; then echo abandoned > "{ab}"; printf '{{}}\n'; exit 0; fi
+if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "abandon" ]]; then echo abandoned > "{ab}"; printf '{{"member_count":3,"requeued":["ab-m1","ab-m2","ab-m3"]}}\n'; exit 0; fi
 if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "ship-closeable" ]]; then echo fired > "{ship}"; exit 0; fi
 exit 0"#,
             cnt = tmp.path().join("cnt.txt").display(),
@@ -532,6 +532,20 @@ exit 0"#,
     assert!(
         !ship_marker.exists(),
         "ship-closeable must NOT run after a batched member failure"
+    );
+    // The abandon event must carry the requeued clean-member count (the
+    // runs_wasted term for `fno backlog batch metrics`, the Wave-4 trigger).
+    let abandon_line = journal_events(&project_journal)
+        .into_iter()
+        .find(|l| l.contains("active_backlog_batch_abandon"))
+        .expect("an active_backlog_batch_abandon event must be journaled");
+    assert!(
+        abandon_line.contains("\"member_count\":3"),
+        "abandon event must carry member_count from the CLI JSON: {abandon_line}"
+    );
+    assert!(
+        abandon_line.contains("ab-m2"),
+        "abandon event must carry the requeued member ids: {abandon_line}"
     );
 }
 
