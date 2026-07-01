@@ -271,6 +271,11 @@ esac
 no_external=$( [[ -n "${TARGET_NO_EXTERNAL:-}" ]] && _bool "$TARGET_NO_EXTERNAL" || printf '%s' "$no_external_default" )
 no_docs=$(     [[ -n "${TARGET_NO_DOCS:-}"     ]] && _bool "$TARGET_NO_DOCS"     || printf '%s' "$no_docs_default" )
 no_ship=$(     [[ -n "${TARGET_NO_SHIP:-}"     ]] && _bool "$TARGET_NO_SHIP"     || printf '%s' "$no_ship_default" )
+# batch-lane Wave 2/3 (x-6cdf): a batched member commits to a shared batch branch
+# and ships via the batch PR, not its own. loop-check reads this flag to
+# terminate as DoneBatched (not a hang) on the member's promise. Set by the
+# active-backlog daemon's batched dispatch (TARGET_BATCHED=1); default false.
+batched=$(     [[ -n "${TARGET_BATCHED:-}"     ]] && _bool "$TARGET_BATCHED"     || printf '%s' "false" )
 no_verify=$(   [[ -n "${TARGET_NO_VERIFY:-}"   ]] && _bool "$TARGET_NO_VERIFY"   || printf '%s' "$no_verify_default" )
 no_goals=$(    [[ -n "${TARGET_NO_GOALS:-}"    ]] && _bool "$TARGET_NO_GOALS"    || printf '%s' "$no_goals_default" )
 no_browser=$(  [[ -n "${TARGET_NO_BROWSER:-}"  ]] && _bool "$TARGET_NO_BROWSER"  || printf '%s' "$no_browser_default" )
@@ -680,6 +685,7 @@ target_size: ${TARGET_SIZE:-}
 no_external: $no_external
 no_docs: $no_docs
 no_ship: $no_ship
+batched: $batched
 no_verify: $no_verify
 no_goals: $no_goals
 no_browser: $no_browser

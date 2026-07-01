@@ -53,9 +53,11 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::events::EventEmitter;
+use crate::loop_dispatch::ShelloutDispatcher;
 use crate::loop_megawalk::{abi_cmd, MegawalkDispatcher, MegawalkQueue};
 use crate::loop_runtime::{
-    run_loop, CloseOutcome, GlobalJournalPath, Journal, LoopBudget, ProjectJournalPath,
+    run_loop, CloseOutcome, DispatchCtx, Dispatcher, GlobalJournalPath, Journal, LoopBudget,
+    LoopError, ProjectJournalPath, Session, Unit,
 };
 use crate::loopcheck::TerminationReason;
 
@@ -139,6 +141,9 @@ pub struct DrainConfig {
     pub per_unit_max_dispatches: u64,
     /// Cross-tick consecutive-failure limit (the circuit breaker).
     pub failure_limit: u32,
+    /// Batch-lane opt-in (config.batch.enabled, x-6cdf). When false the dispatch
+    /// path is byte-for-byte today's one-PR-per-node behavior.
+    pub batch: bool,
 }
 
 /// What one [`drain_tick`] did, for the scheduler and tests.
@@ -304,6 +309,153 @@ fn build_env(cfg: &DrainConfig) -> Vec<(String, String)> {
     env
 }
 
+/// Batch-lane dispatch wrapper (x-6cdf). Consults `fno backlog batch prepare`
+/// before each dispatch: on `batched` it dispatches `/target batched <id>` in
+/// the shared batch worktree (env TARGET_BATCHED/TARGET_BATCH_WORKTREE/BRANCH);
+/// on `solo` (or ANY failure - prepare is fail-safe) it delegates to the inner
+/// [`MegawalkDispatcher`] for today's `/target no-merge <id>` behavior.
+///
+/// All the batch policy lives in Python (`batch prepare`); this wrapper only
+/// rewrites the prompt + env when told to, so the Rust surface stays thin.
+struct BatchDispatcher {
+    inner: MegawalkDispatcher,
+    driver_lib: PathBuf,
+    static_env: Vec<(String, String)>,
+    abi_bin: String,
+    /// Canonical repo root, passed to `fno worktree ensure --repo`.
+    repo: PathBuf,
+    /// (node_id, domain) of the last node actually dispatched batched this tick.
+    /// run_one_node reads it to abandon the batch if the member then FAILED
+    /// (a solo dispatch never records here). Mutex because `Dispatcher::run`
+    /// takes `&self`; the daemon dispatches one node per tick so contention is nil.
+    last_batched: std::sync::Mutex<Option<(String, String)>>,
+}
+
+impl Dispatcher for BatchDispatcher {
+    fn run(&self, unit: &Unit, ctx: &DispatchCtx) -> Result<Box<dyn Session>, LoopError> {
+        let prep = abi_cmd(&self.abi_bin)
+            .args([
+                "backlog",
+                "batch",
+                "prepare",
+                "--node",
+                &unit.id,
+                "--repo",
+                &self.repo.to_string_lossy(),
+            ])
+            // Run from the target repo so the batch-state root resolves to this
+            // project's canonical checkout (matches ship_closeable_batches), not
+            // the daemon's launch cwd. Without this, prepare and ship-closeable
+            // could resolve different `.fno/batches/` roots.
+            .current_dir(&self.repo)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok());
+
+        let batched = prep
+            .as_ref()
+            .and_then(|v| v.get("worktree").and_then(|w| w.as_str()));
+        let (Some(prep), Some(worktree)) = (prep.as_ref(), batched) else {
+            // solo, or prepare unavailable/failed -> today's behavior.
+            return self.inner.run(unit, ctx);
+        };
+        if prep.get("mode").and_then(|m| m.as_str()) != Some("batched") {
+            return self.inner.run(unit, ctx);
+        }
+        let branch = prep
+            .get("branch")
+            .and_then(|b| b.as_str())
+            .unwrap_or_default();
+        if worktree.is_empty() || branch.is_empty() {
+            return self.inner.run(unit, ctx); // fail-safe: never dispatch batched without a worktree
+        }
+        // Record (node, domain) so run_one_node can abandon this batch if the
+        // member then fails (a solo dispatch never reaches here).
+        let domain = prep
+            .get("domain")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Ok(mut slot) = self.last_batched.lock() {
+            *slot = Some((unit.id.clone(), domain));
+        }
+
+        // Batched dispatch: run `/target batched <id>` in the shared worktree.
+        let mut env = self.static_env.clone();
+        env.retain(|(k, _)| k != "CONTINUE_PROMPT" && k != "TARGET_SESSION_ID");
+        env.push((
+            "CONTINUE_PROMPT".to_string(),
+            format!("/target batched {}", unit.id),
+        ));
+        env.push(("TARGET_SESSION_ID".to_string(), unit.session_key.clone()));
+        env.push(("TARGET_BATCHED".to_string(), "1".to_string()));
+        env.push(("TARGET_BATCH_WORKTREE".to_string(), worktree.to_string()));
+        env.push(("TARGET_BATCH_BRANCH".to_string(), branch.to_string()));
+        env.extend(unit.extra_env.iter().cloned());
+
+        let dispatcher =
+            ShelloutDispatcher::new(self.driver_lib.clone(), env, PathBuf::from(worktree));
+        dispatcher.run(unit, ctx)
+    }
+}
+
+/// After a batched tick, ship any open batch whose close condition tripped.
+/// Best-effort: a failure here never wedges the daemon (the batch stays open
+/// and a later tick / drain ships it).
+fn ship_closeable_batches(cfg: &DrainConfig, journal: &Journal) {
+    let mut cmd = abi_cmd(&cfg.abi_bin);
+    cmd.args(["backlog", "batch", "ship-closeable"]);
+    if let Some(ref p) = cfg.project {
+        cmd.args(["--project", p]);
+    }
+    // Scope the close-peek to the same mission the daemon dispatches (codex P2),
+    // else an out-of-mission same-domain node keeps the mission batch open.
+    if let Some(ref m) = cfg.mission {
+        cmd.args(["--mission", m]);
+    }
+    cmd.current_dir(&cfg.cwd);
+    match cmd.output() {
+        Ok(o) if o.status.success() => {
+            let _ = journal.append(
+                "active_backlog_batch_ship",
+                json!({"stdout": String::from_utf8_lossy(&o.stdout).trim()}),
+            );
+        }
+        Ok(o) => {
+            let _ = journal.append(
+                "active_backlog_batch_ship",
+                json!({"error": String::from_utf8_lossy(&o.stderr).trim()}),
+            );
+        }
+        Err(e) => {
+            let _ = journal.append(
+                "active_backlog_batch_ship",
+                json!({"error": format!("{e}")}),
+            );
+        }
+    }
+}
+
+/// Abandon a domain's open batch and requeue its members as individual PRs (v1
+/// failure policy). Called when a batched member failed. Best-effort: a failure
+/// here never wedges the daemon.
+fn abandon_batch_for(cfg: &DrainConfig, journal: &Journal, domain: &str) {
+    let out = abi_cmd(&cfg.abi_bin)
+        .args(["backlog", "batch", "abandon", "--domain", domain])
+        .current_dir(&cfg.cwd)
+        .output();
+    let detail = match out {
+        Ok(o) if o.status.success() => "ok".to_string(),
+        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        Err(e) => format!("{e}"),
+    };
+    let _ = journal.append(
+        "active_backlog_batch_abandon",
+        json!({"domain": domain, "detail": detail}),
+    );
+}
+
 fn run_one_node(
     cfg: &DrainConfig,
     breaker: &mut CircuitBreaker,
@@ -312,13 +464,33 @@ fn run_one_node(
     let mut queue =
         MegawalkQueue::new_with_max_units(cfg.abi_bin.clone(), cfg.project.clone(), false, Some(1))
             .with_mission(cfg.mission.clone());
-    let dispatcher = MegawalkDispatcher::new(
+    let inner = MegawalkDispatcher::new(
         cfg.lib_path.clone(),
         build_env(cfg),
         cfg.cwd.clone(),
         cfg.abi_bin.clone(),
         cfg.allow_merge,
     );
+    // When batch-lane is on, wrap the dispatcher so a candidate node can be
+    // coalesced onto a shared batch branch; otherwise dispatch as today.
+    let batch_dispatcher = cfg.batch.then(|| BatchDispatcher {
+        inner: MegawalkDispatcher::new(
+            cfg.lib_path.clone(),
+            build_env(cfg),
+            cfg.cwd.clone(),
+            cfg.abi_bin.clone(),
+            cfg.allow_merge,
+        ),
+        driver_lib: cfg.lib_path.clone(),
+        static_env: build_env(cfg),
+        abi_bin: cfg.abi_bin.clone(),
+        repo: crate::paths::canonical_repo_root(&cfg.cwd).unwrap_or_else(|| cfg.cwd.clone()),
+        last_batched: std::sync::Mutex::new(None),
+    });
+    let dispatcher: &dyn Dispatcher = match &batch_dispatcher {
+        Some(b) => b,
+        None => &inner,
+    };
 
     let budget = match LoopBudget::new(cfg.max_iterations.max(1)) {
         Ok(b) => b,
@@ -340,7 +512,7 @@ fn run_one_node(
 
     let outcome = match run_loop(
         &mut queue,
-        &dispatcher,
+        dispatcher,
         &budget,
         journal,
         &cancel,
@@ -357,6 +529,35 @@ fn run_one_node(
             };
         }
     };
+
+    // Batch-lane close handling, gated on the member's OUTCOME (codex P1):
+    //  - a batched member that FAILED (did not reach DoneBatched): abandon its
+    //    batch + requeue members (v1 policy), so ship-closeable can never open a
+    //    PR over a failed member's partial commits.
+    //  - EVERY other path (DoneBatched success, a solo dispatch, OR a NoWork/
+    //    no-unit drain): run ship-closeable, which evaluates should_close per
+    //    open batch. This is what closes a drained backlog's open batch: when
+    //    batched members are filtered out of `next`, a later tick returns NoWork
+    //    (no last unit) and the drain condition must still open the batch PR
+    //    (codex P1) - so it cannot be gated on a DoneBatched unit being present.
+    if cfg.batch {
+        let last = outcome.units.last();
+        let failed_batched_domain = last.and_then(|u| {
+            if matches!(u.evidence.reason, TerminationReason::DoneBatched) {
+                None
+            } else {
+                batch_dispatcher
+                    .as_ref()
+                    .and_then(|b| b.last_batched.lock().ok().and_then(|s| s.clone()))
+                    .filter(|(nid, _)| nid == &u.unit_id)
+                    .map(|(_, domain)| domain)
+            }
+        });
+        match failed_batched_domain {
+            Some(domain) => abandon_batch_for(cfg, journal, &domain),
+            None => ship_closeable_batches(cfg, journal),
+        }
+    }
 
     map_outcome(cfg, breaker, journal, &outcome.reason, outcome.units.last())
 }
@@ -388,6 +589,24 @@ fn map_outcome(
     };
 
     let node = last.unit_id.clone();
+
+    // Batch-lane (x-6cdf): a member that terminated DoneBatched succeeded - its
+    // commits are on the shared batch branch and it ships via the batch PR (the
+    // node is closed at merge by `fno backlog reconcile`, not here). MegawalkQueue
+    // Parks it because the node is not `done`, but for the daemon that is a
+    // SUCCESSFUL dispatch, not a failure. Recognize it here (in the keep-set,
+    // never by deepening loop_megawalk.rs) so a batched member never trips the
+    // cross-tick circuit breaker. ship-closeable (called by run_one_node) opens
+    // the batch PR once the close condition trips.
+    if matches!(last.evidence.reason, TerminationReason::DoneBatched) {
+        breaker.record_success(&node);
+        let _ = journal.append(
+            "active_backlog_dispatched",
+            json!({"node_id": node, "termination": "DoneBatched", "batched": true}),
+        );
+        return DrainOutcome::Dispatched { node };
+    }
+
     match &last.close {
         CloseOutcome::Closed => {
             breaker.record_success(&node);
@@ -447,6 +666,10 @@ pub struct ResolvedTarget {
     pub failure_limit: u32,
     #[serde(default)]
     pub mission: Option<String>,
+    /// config.batch.enabled for this repo (x-6cdf). Absent in an older emitter
+    /// -> false, so a stale `fno` never accidentally enables batched dispatch.
+    #[serde(default)]
+    pub batch: bool,
 }
 
 /// Per-worker turn cap for daemon-dispatched drains (overridable via env). The
@@ -517,6 +740,7 @@ fn drain_config_for(target: &ResolvedTarget, abi_bin: &str) -> Option<DrainConfi
         max_iterations,
         per_unit_max_dispatches: PER_UNIT_MAX_DISPATCHES,
         failure_limit: target.failure_limit,
+        batch: target.batch,
     })
 }
 

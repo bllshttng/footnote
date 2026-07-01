@@ -20,12 +20,14 @@ import fcntl
 import json
 import logging
 import os
+import re
 import secrets
+import subprocess
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Literal, Optional
+from typing import Callable, Iterator, Literal, Optional
 
 import typer
 
@@ -257,6 +259,415 @@ def abandon_batch(*, domain: str, root: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Per-batch ship (Wave 3): one PR for the whole batch, on close
+# ---------------------------------------------------------------------------
+#
+# The daemon (active_backlog.rs) calls `fno backlog batch ship --domain <d>` when
+# `should_close` trips (batch full / next node is a different domain / drain).
+# ship_batch opens ONE PR for the shared batch branch and records the shared PR
+# ref (pr_number/pr_url) on every member node. It does NOT mark members `done`:
+# the PR is only just created (CI pending), so completion happens at merge, when
+# `fno backlog reconcile` closes each member independently by its own pr_number
+# (Locked Decision 5 - a shared URL is just N identical pr_url values, which the
+# existing per-node close already handles).
+#
+# v1 failure policy (Locked Decision 2): any failure to open the PR abandons the
+# batch and clears every member's `batch` mark, so they resurface in `next` and
+# ship as individual PRs (today's behavior) - never worse than no batching.
+
+
+# subprocess seam: tests inject a fake to avoid real git/gh calls.
+Runner = Callable[..., "subprocess.CompletedProcess"]
+
+
+def _run(cmd: list[str], *, cwd: Optional[str] = None) -> "subprocess.CompletedProcess":
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=600)
+
+
+def _extract_pr_number(url_or_output: str) -> Optional[int]:
+    """PR number from a GitHub URL (or a bare number). Mirrors worker/ship.py."""
+    m = re.search(r"/pull/(\d+)", url_or_output or "")
+    if m:
+        return int(m.group(1))
+    s = (url_or_output or "").strip()
+    return int(s) if s.isdigit() else None
+
+
+ShipAction = Literal["shipped", "abandoned", "noop"]
+
+
+@dataclass
+class ShipResult:
+    action: ShipAction
+    domain: str
+    reason: str = ""
+    pr_url: Optional[str] = None
+    pr_number: Optional[int] = None
+    members: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action,
+            "domain": self.domain,
+            "reason": self.reason,
+            "pr_url": self.pr_url,
+            "pr_number": self.pr_number,
+            "members": self.members,
+        }
+
+
+def _batch_pr_body(batch: dict) -> str:
+    """PR body listing the batch members + their one-line summaries.
+
+    Keeps the reviewer oriented on a multi-node diff. The domain boundary
+    (Locked Decision 4) already caps this to same-domain work.
+    """
+    lines = [
+        f"Batch **{batch.get('batch_id', '?')}** (domain `{batch.get('domain', '?')}`) "
+        f"coalesces {len(batch.get('members', []))} node(s) into one PR to cut CI runs.",
+        "",
+        "## Members",
+    ]
+    for m in batch.get("members", []):
+        summary = (m.get("summary") or "").strip()
+        lines.append(f"- `{m['node_id']}`" + (f" - {summary}" if summary else ""))
+    return "\n".join(lines) + "\n"
+
+
+def _set_member_pr_refs(
+    member_ids: list[str], *, pr_url: str, pr_number: Optional[int], root: Path
+) -> None:
+    """Record the shared batch PR ref on every member, in one locked mutation.
+
+    Members are NOT closed here (the PR is not merged yet); the ref lets
+    merge-time `fno backlog reconcile` close each member by its own pr_number.
+    """
+    from fno.graph._intake import _find_node
+    from fno.graph.store import locked_mutate_graph
+    from fno.paths import graph_json
+
+    ids = set(member_ids)
+
+    def mutator(entries):
+        for nid in ids:
+            node = _find_node(entries, nid)
+            if node is None:
+                continue
+            node["pr_url"] = pr_url
+            if pr_number is not None:
+                node["pr_number"] = pr_number
+        return entries
+
+    locked_mutate_graph(graph_json(), mutator)
+
+
+def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
+    """Clear the `batch` mark on every member so they requeue as individual PRs.
+
+    Deliberately does NOT release the members' `node:<id>` claims. codex flagged
+    (P2) that a DoneBatched member's claim is TTL-held (2h) by MegawalkQueue's
+    park path, so a member requeued after a ship abandon stays filtered from
+    `fno backlog next` until that TTL expires - delaying the individual-PR
+    requeue by up to 2h on the rare abandon-after-success path. Force-releasing
+    it here is the obvious fix, but it violates the node-claim-release-authority
+    invariant (ab-588326a7: only the walker/handoff may release a node claim,
+    never a helper subprocess). The invariant outranks the P2; the requeue is
+    correct (eventual), only latency-bound. Aligning the batch-claim lifecycle is
+    deferred to cv-30d898f0 (the same 2h-TTL follow-up).
+    """
+    from fno.graph._intake import _find_node
+    from fno.graph.store import locked_mutate_graph
+    from fno.paths import graph_json
+
+    ids = set(member_ids)
+
+    def mutator(entries):
+        for nid in ids:
+            node = _find_node(entries, nid)
+            if node is not None:
+                node["batch"] = None
+        return entries
+
+    locked_mutate_graph(graph_json(), mutator)
+
+
+def ship_batch(
+    *,
+    domain: str,
+    root: Path,
+    base: str = "main",
+    title: Optional[str] = None,
+    run: Runner = _run,
+) -> ShipResult:
+    """Open ONE PR for the open batch, record the shared ref on members.
+
+    Idempotent on the PR: an existing PR for the batch branch is reused rather
+    than duplicated. Any failure to open the PR abandons the batch and requeues
+    its members as individual PRs (v1 failure policy).
+    """
+    _safe(domain)
+    batch = read_batch(domain, root)
+    if not _is_open(batch):
+        return ShipResult("noop", domain, reason="no open batch")
+    assert batch is not None
+    members = member_ids(batch)
+    worktree = batch.get("worktree")
+    branch = batch.get("branch")
+    if not members:
+        # An empty open batch has nothing to ship; abandon it so it does not
+        # linger and block a fresh batch for the domain.
+        abandon_batch(domain=domain, root=root)
+        return ShipResult("abandoned", domain, reason="empty batch")
+    if not worktree or not branch:
+        _abandon_and_requeue(domain, members, root)
+        return ShipResult("abandoned", domain, reason="batch missing worktree/branch", members=members)
+
+    pr_title = title or f"batch({domain}): {len(members)} nodes"
+    body = _batch_pr_body(batch)
+
+    # Idempotency: reuse an existing PR for the branch before creating one.
+    pr_url: Optional[str] = None
+    pr_number: Optional[int] = None
+    lst = run(["gh", "pr", "list", "--head", branch, "--json", "number,url"], cwd=worktree)
+    if lst.returncode == 0 and (lst.stdout or "").strip():
+        try:
+            existing = json.loads(lst.stdout)
+        except json.JSONDecodeError:
+            existing = []
+        if existing:
+            pr_url = existing[0].get("url")
+            pr_number = existing[0].get("number")
+
+    if pr_url is None:
+        # Push the batch branch first. `fno worktree ensure` creates only a LOCAL
+        # branch and the batched worker commits locally, so `gh pr create --head`
+        # (which does NOT push) would fail on an unpublished branch and abandon
+        # the batch (codex P1). Push explicitly, then create.
+        push = run(["git", "push", "-u", "origin", branch], cwd=worktree)
+        if push.returncode != 0:
+            _abandon_and_requeue(domain, members, root)
+            return ShipResult(
+                "abandoned", domain,
+                reason=f"git push failed: {(push.stderr or push.stdout or '').strip()[:200]}",
+                members=members,
+            )
+        cr = run(
+            ["gh", "pr", "create", "--title", pr_title, "--body", body,
+             "--base", base, "--head", branch],
+            cwd=worktree,
+        )
+        if cr.returncode != 0:
+            _abandon_and_requeue(domain, members, root)
+            return ShipResult(
+                "abandoned", domain,
+                reason=f"gh pr create failed: {(cr.stderr or cr.stdout or '').strip()[:200]}",
+                members=members,
+            )
+        pr_url = (cr.stdout or "").strip()
+        pr_number = _extract_pr_number(pr_url)
+
+    if not pr_url:
+        _abandon_and_requeue(domain, members, root)
+        return ShipResult("abandoned", domain, reason="no PR url from gh", members=members)
+
+    # Record the shared ref on members BEFORE marking the batch closed. If the
+    # graph write fails, the batch stays `open`, so a later ship-closeable tick
+    # re-runs: `gh pr list --head` reuses the existing PR (idempotent) and retries
+    # the ref write + close. Closing first would strand members `batch`-marked
+    # with no pr_number (excluded from next forever, unclosable by reconcile).
+    _set_member_pr_refs(members, pr_url=pr_url, pr_number=pr_number, root=root)
+    close_batch(domain=domain, pr_url=pr_url, root=root)
+    return ShipResult("shipped", domain, pr_url=pr_url, pr_number=pr_number, members=members)
+
+
+def _abandon_and_requeue(domain: str, members: list[str], root: Path) -> None:
+    """v1 failure path: abandon the batch and clear member marks (individual ship)."""
+    try:
+        abandon_batch(domain=domain, root=root)
+    except NoOpenBatch:
+        pass
+    _clear_member_batch_marks(members, root=root)
+
+
+# ---------------------------------------------------------------------------
+# Daemon-facing verbs (Wave 2 wiring): prepare (launch) + ship-closeable (close)
+# ---------------------------------------------------------------------------
+#
+# The active-backlog daemon (active_backlog.rs) is thin: it shells `batch
+# prepare` before dispatch (to learn solo-vs-batched + the shared worktree) and
+# `batch ship-closeable` after each tick (to ship any batch whose close
+# condition tripped). All the policy lives here in Python where it is testable.
+
+
+def _get_node(node_id: str, run: Runner) -> Optional[dict]:
+    """Fetch a node dict via `fno backlog get`, or None on any failure."""
+    try:
+        p = run(["fno", "backlog", "get", node_id])
+        if p.returncode == 0 and (p.stdout or "").strip():
+            return json.loads(p.stdout)
+    except Exception as e:  # noqa: BLE001
+        _LOG.warning("batch prepare: fno backlog get %s failed: %s", node_id, e)
+    return None
+
+
+class PeekError(RuntimeError):
+    """`fno backlog next` could not be read (distinct from a genuine drain)."""
+
+
+def _peek_next(
+    project: Optional[str], run: Runner, mission: Optional[str] = None
+) -> Optional[dict]:
+    """The next ready node (post batch-member exclusion), or None on genuine drain.
+
+    Raises PeekError on ANY failure (non-zero exit, unparseable output). A drain
+    (exit 0 + `null`/empty) MUST stay distinct from an error: `should_close`
+    treats next=None as "drain -> close every open batch", so silently mapping a
+    transient `fno backlog next` hiccup to None would ship every open batch as-is
+    (1-node batches included) on one bad tick. The caller skips the tick on
+    PeekError instead.
+
+    `mission` scopes the peek to the same candidate set the daemon dispatches
+    (MegawalkQueue::with_mission): without it, a same-domain ready node OUTSIDE
+    the mission would keep a mission batch open forever (codex P2).
+    """
+    cmd = ["fno", "backlog", "next"]
+    if project:
+        cmd += ["--project", project]
+    if mission:
+        cmd += ["--mission", mission]
+    try:
+        p = run(cmd)
+    except Exception as e:  # noqa: BLE001
+        raise PeekError(f"fno backlog next spawn failed: {e}") from e
+    if p.returncode != 0:
+        raise PeekError(f"fno backlog next exited {p.returncode}: {(p.stderr or '').strip()[:160]}")
+    out = (p.stdout or "").strip()
+    if not out or out == "null":
+        return None  # genuine drain
+    try:
+        node = json.loads(out)
+    except json.JSONDecodeError as e:
+        raise PeekError(f"fno backlog next returned non-JSON: {e}") from e
+    return node if isinstance(node, dict) else None
+
+
+def prepare_batch(
+    *, node_id: str, repo: str, root: Path, run: Runner = _run
+) -> dict:
+    """Decide solo-vs-batched for a candidate node and (on batch) resolve the
+    shared worktree, opening a new batch if needed.
+
+    Returns one of:
+      {"mode": "solo", "reason": ...}                          -> dispatch /target no-merge
+      {"mode": "batched", "domain", "worktree", "branch", "batch_id"}
+
+    Fail-safe: ANY error (node lookup, worktree ensure, disabled) degrades to
+    solo, so a broken batch setup never blocks or mis-dispatches a node.
+    """
+    node = _get_node(node_id, run)
+    if node is None:
+        return {"mode": "solo", "reason": "node lookup failed"}
+    decision = decide_batch_action(node, enabled=_load_batch_enabled(root), root=root)
+    if decision.action == "ship_solo":
+        return {"mode": "solo", "reason": decision.reason}
+
+    domain = decision.domain
+    if decision.action == "start":
+        # Unique branch/worktree per batch: a fixed per-domain name would let a
+        # NEW same-domain batch, started after the previous batch opened its PR
+        # but before it merged, reuse the branch - `gh pr list --head` would then
+        # fold the new members into the stale PR and blow past max_nodes. The
+        # random suffix guarantees one branch per batch (codex P2).
+        name = f"batch-{_safe(domain)}-{secrets.token_hex(3)}"
+        branch = f"feature/{name}"
+        we = run(["fno", "worktree", "ensure", "--repo", repo, "--name", name, "--branch", branch])
+        worktree = (we.stdout or "").strip()
+        if we.returncode != 0 or not worktree:
+            return {"mode": "solo", "reason": f"worktree ensure failed: {(we.stderr or '').strip()[:160]}"}
+        # `fno worktree ensure` is mechanism-only: it does NOT link the shared
+        # `.fno/` state a worktree needs. Without setup, the batched worker's
+        # session state + events would live in an unlinked worktree-local `.fno`
+        # while the daemon polls the canonical journal, so the member reads as
+        # no-progress and state fragments (codex P1). Link it before dispatch;
+        # if setup fails, degrade to solo rather than batch into a broken tree.
+        setup = Path(repo) / "scripts" / "setup" / "setup-worktree.sh"
+        if setup.exists():
+            sr = run(["bash", str(setup)], cwd=worktree)
+            if sr.returncode != 0:
+                return {"mode": "solo", "reason": f"setup-worktree failed: {(sr.stderr or '').strip()[:160]}"}
+        try:
+            b = open_batch(
+                domain=domain, branch=branch, worktree=worktree,
+                max_nodes=_config_max_nodes(root), root=root,
+            )
+        except BatchExists:
+            # A peer opened the batch between decide and open; join it instead
+            # (its recorded worktree/branch win; this call's fresh worktree is
+            # left unused - a rare single-dispatcher race, minor disk).
+            b = read_batch(domain, root)
+            if not _is_open(b):
+                return {"mode": "solo", "reason": "batch vanished after race"}
+        assert b is not None
+        return {
+            "mode": "batched", "domain": domain,
+            "worktree": b["worktree"], "branch": b["branch"], "batch_id": b["batch_id"],
+        }
+
+    # join: reuse the open batch's recorded worktree/branch.
+    b = read_batch(domain, root)
+    if not _is_open(b):
+        return {"mode": "solo", "reason": "no open batch to join"}
+    assert b is not None
+    return {
+        "mode": "batched", "domain": domain,
+        "worktree": b["worktree"], "branch": b["branch"], "batch_id": b["batch_id"],
+    }
+
+
+def ship_closeable(
+    *, project: Optional[str], root: Path, run: Runner = _run,
+    mission: Optional[str] = None,
+) -> list[ShipResult]:
+    """Ship every open batch whose close condition has tripped.
+
+    Called by the daemon after each tick. Peeks the next ready node once and
+    evaluates `should_close` per open batch: a batch closes when it is full, the
+    next ready node is a different domain (or size:L/p0), or the backlog drained
+    (next is None -> close whatever is open).
+
+    A peek FAILURE (distinct from a drain) skips the whole tick and ships nothing:
+    treating a transient `fno backlog next` error as a drain would prematurely
+    ship every open batch. The next healthy tick retries.
+
+    Note: `config.batch.max_loc` is NOT enforced here in v1 - the batch state does
+    not track cumulative diff LOC, so there is no `cum_loc` to compare. The knob
+    stays inert (never wrongly closes) until a later wave records per-batch LOC.
+    """
+    try:
+        next_node = _peek_next(project, run, mission=mission)
+    except PeekError as e:
+        _LOG.warning("batch ship-closeable: peek failed, skipping tick: %s", e)
+        return []
+    results: list[ShipResult] = []
+    for b in list_batches(root):
+        if b.get("status") != "open":
+            continue
+        close, _reason = should_close(b, next_node)
+        if close:
+            results.append(ship_batch(domain=b["domain"], root=root, run=run))
+    return results
+
+
+def _config_max_nodes(root: Path) -> int:
+    try:
+        from fno.config import load_settings_for_repo
+
+        return int(load_settings_for_repo(Path(root)).config.batch.max_nodes)
+    except Exception:  # noqa: BLE001 - default matches config coercion
+        return 3
+
+
+# ---------------------------------------------------------------------------
 # Policy engine (Wave 2): join-or-start + close-condition, pure over inputs
 # ---------------------------------------------------------------------------
 
@@ -353,7 +764,25 @@ cli = typer.Typer(
 
 
 def _root_opt(root: Optional[str]) -> Path:
-    return Path(root) if root else Path.cwd()
+    """Resolve the batch-state root: explicit --root, else the CANONICAL repo root.
+
+    Batch state (`.fno/batches/`) is cross-worktree coordination state, like
+    `fno.claims`: the daemon (dispatch cwd), the batched worker (a linked batch
+    worktree), and `ship-closeable` must all see the SAME open batch for
+    "one open batch per domain" to hold. `setup-worktree.sh` does NOT link
+    `.fno/batches/`, so a raw `Path.cwd()` default would fragment state across
+    worktrees. resolve_canonical_repo_root() returns the main checkout from any
+    linked worktree (the same category claims_dir() resolves to), so every
+    participant converges on `<canonical>/.fno/batches/` (x-6cdf prerequisite).
+    """
+    if root:
+        return Path(root)
+    try:
+        from fno.paths import resolve_canonical_repo_root
+
+        return resolve_canonical_repo_root()
+    except Exception:  # noqa: BLE001 - outside a git repo, fall back to cwd
+        return Path.cwd()
 
 
 def _emit(obj: dict) -> None:
@@ -423,15 +852,68 @@ def cli_abandon(
     domain: str = typer.Option(..., "--domain", "-d"),
     root: Optional[str] = typer.Option(None, "--root"),
 ) -> None:
-    """Abandon the open batch; print members to requeue as individual PRs."""
+    """Abandon the open batch AND requeue its members as individual PRs.
+
+    v1 failure policy: clears every member's graph `batch` mark so they resurface
+    in `fno backlog next`. The daemon calls this when a batched member fails.
+    """
+    r = _root_opt(root)
     try:
-        _emit(abandon_batch(domain=domain, root=_root_opt(root)))
+        batch = abandon_batch(domain=domain, root=r)
     except NoOpenBatch as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(2)
     except (BatchError, BatchValidationError) as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1)
+    _clear_member_batch_marks(member_ids(batch), root=r)
+    _emit(batch)
+
+
+@cli.command("ship")
+def cli_ship(
+    domain: str = typer.Option(..., "--domain", "-d"),
+    base: str = typer.Option("main", "--base", help="Base branch for the PR."),
+    title: Optional[str] = typer.Option(None, "--title", help="Override the PR title."),
+    root: Optional[str] = typer.Option(None, "--root"),
+) -> None:
+    """Open ONE PR for the open batch and record the shared ref on members.
+
+    The daemon calls this when `should_close` trips. On failure the batch is
+    abandoned and its members requeue as individual PRs (v1 policy). Exit 0 on
+    ship, 2 on abandon (members requeued), 3 on no-op (no open batch).
+    """
+    result = ship_batch(domain=domain, root=_root_opt(root), base=base, title=title)
+    _emit(result.to_dict())
+    if result.action == "abandoned":
+        raise typer.Exit(2)
+    if result.action == "noop":
+        raise typer.Exit(3)
+
+
+@cli.command("prepare")
+def cli_prepare(
+    node: str = typer.Option(..., "--node", "-n", help="Candidate node id."),
+    repo: str = typer.Option(..., "--repo", help="Repo MAIN checkout (for worktree ensure)."),
+    root: Optional[str] = typer.Option(None, "--root"),
+) -> None:
+    """Decide solo-vs-batched for a node; on batch, resolve the shared worktree.
+
+    The daemon shells this before dispatch. Emits {mode: solo|batched, ...}.
+    Always exit 0 (fail-safe degrades to solo); the daemon reads `mode`.
+    """
+    _emit(prepare_batch(node_id=node, repo=repo, root=_root_opt(root)))
+
+
+@cli.command("ship-closeable")
+def cli_ship_closeable(
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Scope the next-node peek."),
+    mission: Optional[str] = typer.Option(None, "--mission", help="Scope the peek to a mission (match dispatch)."),
+    root: Optional[str] = typer.Option(None, "--root"),
+) -> None:
+    """Ship every open batch whose close condition tripped (daemon calls per tick)."""
+    results = ship_closeable(project=project, root=_root_opt(root), mission=mission)
+    _emit({"shipped": [r.to_dict() for r in results]})
 
 
 @cli.command("status")

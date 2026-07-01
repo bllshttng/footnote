@@ -206,6 +206,17 @@ Multi-CLI: `bg` requires `claude --bg` + `fno agents`; on a CLI without them the
 
 If ARGUMENTS carry a `--reconcile <manifest-path>` token, this is a **G4 de-stub pass** for a `contract` dependent whose blocker just merged (spawned by `fno backlog advance` / `backlog.reconcile_dispatch`). It is a constrained `/target`: pull main, run the executable drift gate (`fno stub-manifest reconcile-validate`), de-stub + finalize + flip the EXISTING draft PR ready on authorize, or refuse (carveout + draft-held PR comment) on drift/missing-manifest. It never creates a new PR and never merges. Load [references/reconcile-mode.md](references/reconcile-mode.md) for the full contract before proceeding.
 
+### 0c. Batched mode (`batched <node>`)
+
+If ARGUMENTS lead with `batched <node>` (dispatched by the active-backlog daemon when `config.batch.enabled` is on and the batch policy says join-or-start), this is a **batch-lane member run** (x-6cdf). The member's commits land on a **shared batch branch** and ship via ONE batch PR, not a per-node PR. It is a constrained `/target`:
+
+1. **Skip cold-start.** The daemon already created/selected the batch worktree and passed `TARGET_BATCH_WORKTREE` + `TARGET_BATCH_BRANCH`. Do NOT run `fno target start` (that would mint a second worktree). Instead `cd "$TARGET_BATCH_WORKTREE"` and run `TARGET_BATCHED=1 fno target init --input <node>` so the manifest carries `batched: true` (loop-check reads it to terminate as `DoneBatched`, not a hang). Do NOT set `no_ship`/advisory - a batched unit is neither.
+2. **Implement + commit atomically to the shared branch.** Same per-task commit discipline as a normal run; the commits accumulate on `$TARGET_BATCH_BRANCH` alongside the batch's other members. Run `/review` + `fno test` as usual.
+3. **Join the batch + mark the node.** After the work is committed: `fno backlog batch join --domain <domain> --node <node> --summary "<one-line>"` (adds the member to the batch state), then read the batch id (`fno backlog batch status --domain <domain>` -> `batch_id`) and `fno backlog update <node> --batch <batch_id>` (marks the graph node so `next`/`ready` stop selecting it). Mark the node **before** promising.
+4. **Do NOT create a PR.** Batched mode skips the ship phase entirely - the batch's single `/pr create` (driven by `fno backlog batch ship` when the batch closes) opens one PR for all members. Emit `<promise>MISSION COMPLETE: batched member committed to <branch></promise>`; loop-check sees `batched: true` + the promise and terminates the member as `DoneBatched`.
+
+The daemon consults `should_close` after the member returns and, when the batch closes (full / next node is a different domain / drain), runs `fno backlog batch ship` to open the batch PR and record the shared PR ref on every member. On merge, `fno backlog reconcile` closes each member by that shared pr_number. If a batched member FAILS/BLOCKS, the daemon abandons the batch (`fno backlog batch ship` requeues members as individual PRs). v1 has no revert surgery - a bad batch costs at most the same CI as no batching.
+
 ### 1-3f. Initialization
 
 The full initialization sequence (load workspace config, codemap, project config, size profile, init state, detect input type, cross-project, Linear, plan validation, domain resolution, discovery gate, checkpoint, kill criteria) lives in [references/init-state.md](references/init-state.md).

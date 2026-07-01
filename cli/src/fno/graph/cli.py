@@ -95,6 +95,20 @@ def _has_unmerged_open_pr(e: dict) -> bool:
     return bool(e.get("pr_number"))
 
 
+def _is_batched_member(e: dict) -> bool:
+    """True when a node is already committed to an open batch (batch-lane Wave 2).
+
+    A batched member has its atomic commits on a shared batch branch and ships as
+    part of the batch PR, not its own. It must NOT be re-selected for dispatch
+    (else the daemon would spawn a second worker for work already on the branch).
+    The mark is the graph `batch` field, set by `/target batched` via
+    `fno backlog update --batch <id>` and cleared (`--batch null`) on abandon so
+    the node resurfaces for an individual ship. Mirrors `_has_unmerged_open_pr`:
+    an in-flight signal that survives the builder session's PID-claim dying.
+    """
+    return bool(e.get("batch"))
+
+
 def _container_ids(entries: list[dict]) -> set[str]:
     """Ids of nodes that are some other node's ``parent`` - i.e. epics/containers.
 
@@ -1263,6 +1277,11 @@ def cmd_update(
     ),
     domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
     size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
+    batch: Optional[str] = typer.Option(
+        None,
+        "--batch",
+        help="Set the batch id this node is a member of (marks node.batch, batch-lane Wave 2). Pass 'null' to clear (requeue for individual ship on abandon).",
+    ),
     type_: Optional[str] = typer.Option(None, "--type", help="Update node type (feature|epic|bug)"),
     public: Optional[bool] = typer.Option(None, "--public/--no-public", help="Mark node for the public roadmap (fno backlog roadmap)"),
     project: Optional[str] = typer.Option(None, "--project", help="Reproject this node (use for migrating wrong-scope nodes)"),
@@ -1418,6 +1437,10 @@ def cmd_update(
             node["pr_url"] = pr_url
         if merge_status is not None:
             node["merge_status"] = merge_status
+        if batch is not None:
+            # 'null' clears the mark (requeue as individual ship on abandon); any
+            # other value records the batch id this node is a member of.
+            node["batch"] = None if batch.lower() == "null" else batch
         if priority is not None:
             node["priority"] = priority
         if project is not None:
@@ -1773,6 +1796,11 @@ def cmd_next(
         # correctly. Shared with cmd_ready.
         container_ids = _container_ids(entries)
         candidates = [e for e in candidates if e.get("id") not in container_ids]
+        # Batch-lane Wave 2: a node already committed to an open batch ships via
+        # the batch PR, so drop it from the dispatch pool (else a second worker
+        # rebuilds work already on the shared branch). Cleared on abandon so a
+        # requeued member resurfaces. Shared with cmd_ready.
+        candidates = [e for e in candidates if not _is_batched_member(e)]
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.
@@ -1900,6 +1928,10 @@ def cmd_ready(
     # _pick_ready so the surfaces cannot drift.
     container_ids = _container_ids(entries)
     ready = [e for e in ready if e.get("id") not in container_ids]
+    # Batch-lane Wave 2: hide open-batch members (they ship via the batch PR, not
+    # as individual ready work). Shares _is_batched_member with `next`'s
+    # _pick_ready so the surfaces cannot drift.
+    ready = [e for e in ready if not _is_batched_member(e)]
     # Epics-first, then flat priority (C3, Locked Decision 7); key built
     # from the full graph so epic parents always resolve.
     ready.sort(key=make_selection_sort_key(entries))

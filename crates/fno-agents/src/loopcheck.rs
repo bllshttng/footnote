@@ -22,6 +22,11 @@ use std::process::Command;
 pub enum TerminationReason {
     DonePRGreen,
     DoneAdvisory,
+    /// A batch-lane member (batch-lane Wave 2/3): its commits live on a shared
+    /// batch branch and ship via the batch PR, not its own, so there is no
+    /// per-node PR to go green. Terminal, but NOT a ship reason - the batch's
+    /// own `/pr create` graduates the plan; a member must not.
+    DoneBatched,
     NoWork,
     Budget,
     NoProgress,
@@ -50,6 +55,8 @@ struct Manifest {
     advisory: bool,
     no_ship: bool,
     no_external: bool,
+    /// batch-lane member: commits ship via the batch PR, not a per-node PR.
+    batched: bool,
     legacy_status: Option<String>, // COMPLETE | BLOCKED | ABORTED
     /// None = absent (unlimited). Some(Ok(v)) = valid cap. Some(Err(s)) = malformed raw value.
     budget_wall_clock_cap_minutes: Option<Result<u64, String>>,
@@ -66,6 +73,7 @@ impl Default for Manifest {
             advisory: false,
             no_ship: false,
             no_external: false,
+            batched: false,
             legacy_status: None,
             budget_wall_clock_cap_minutes: None, // None = absent = unlimited
             budget_cost_cap_usd: None,           // None = absent = unlimited
@@ -108,6 +116,7 @@ fn parse_manifest(content: &str) -> Option<Manifest> {
                 "advisory" => m.advisory = v == "true",
                 "no_ship" => m.no_ship = v == "true",
                 "no_external" => m.no_external = v == "true",
+                "batched" => m.batched = v == "true",
                 "status" => {
                     let upper = v.to_uppercase();
                     if matches!(upper.as_str(), "COMPLETE" | "BLOCKED" | "ABORTED") {
@@ -2194,6 +2203,53 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     "allow",
                     Some(TerminationReason::DoneAdvisory),
                     "promise + advisory unit; done",
+                    this_fire,
+                    Some(fingerprint),
+                ),
+            );
+        }
+
+        // Batched unit (batch-lane Wave 2/3): the node's commits live on a
+        // shared batch branch and ship via the batch PR, not its own, so
+        // run_done() below would block forever waiting for a per-node PR that
+        // never comes. The daemon set `batched: true` at dispatch; a promise
+        // here means the member finished committing to the shared branch.
+        // Terminal as DoneBatched - deliberately NOT a ship reason, so finalize
+        // records the ledger entry but does NOT stamp/graduate the plan (the
+        // batch's own `/pr create` graduates it once, for all members). Comes
+        // AFTER the advisory arm (a batched unit is not advisory: it sets
+        // neither no_ship nor advisory) and BEFORE run_done so no PR is polled.
+        if manifest.batched && intent == Intent::Promise {
+            emit(
+                "termination",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "reason": "DoneBatched",
+                    "message": "promise in batched unit; commit landed on shared branch"
+                }),
+            );
+            emit(
+                "loop_check",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "fingerprint": fingerprint,
+                    "fires": this_fire,
+                    "consecutive_unchanged": consecutive_after,
+                    "decision": "allow",
+                    "intent": "promise",
+                    "intent_source": intent_source,
+                    "pr_state": fp_pr_state.as_str(),
+                    "ci": fp_ci.render(),
+                    "reviewed": true,
+                    "fp_read_failed": fp_read_failed
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "allow",
+                    Some(TerminationReason::DoneBatched),
+                    "promise + batched unit; commit on shared branch, batch PR ships it",
                     this_fire,
                     Some(fingerprint),
                 ),
