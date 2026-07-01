@@ -781,10 +781,17 @@ def read_batch_events(events_path: Path, *, since: Optional[str] = None) -> list
     `ts` is always `YYYY-MM-DDTHH:MM:SSZ`.
     """
     p = Path(events_path)
-    if not p.exists():
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as e:
+        # A corrupt/unreadable journal must not crash the metrics rollup
+        # (mirrors list_batches on unreadable batch files).
+        _LOG.warning("skipping unreadable events file %s: %s", p, e)
         return []
     out: list[dict] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -852,7 +859,11 @@ def compute_metrics(events: list[dict]) -> dict:
         return domains.setdefault(domain or "code", _empty_stats())
 
     for ev in events:
+        if not isinstance(ev, dict):
+            continue
         data = ev.get("data") or {}
+        if not isinstance(data, dict):
+            continue
         kind = ev.get("type")
         if kind == "active_backlog_batch_ship":
             try:

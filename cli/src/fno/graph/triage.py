@@ -1013,9 +1013,18 @@ def cmd_health(
     # the health exit code.
     batch_verdict: str | None = None
     try:
-        from fno.backlog.batch import _root_opt, compute_metrics, read_batch_events
+        from fno.backlog.batch import compute_metrics, read_batch_events
 
-        _batch_events = read_batch_events(_root_opt(None) / ".fno" / "events.jsonl")
+        # Batch state (and its journal) is canonical-rooted, like fno.claims;
+        # the collision repo_root above is the working checkout, which differs
+        # inside a linked worktree.
+        try:
+            from fno.paths import resolve_canonical_repo_root
+
+            _events_root = resolve_canonical_repo_root()
+        except Exception:  # noqa: BLE001 - outside a git repo, fall back to cwd
+            _events_root = _Path.cwd()
+        _batch_events = read_batch_events(_events_root / ".fno" / "events.jsonl")
         if _batch_events:
             _bv = compute_metrics(_batch_events)["verdict"]
             if _bv in ("build-wave4", "disable-batching"):

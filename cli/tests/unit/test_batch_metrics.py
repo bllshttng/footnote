@@ -133,3 +133,6 @@ def test_read_batch_events_filters_kind_since_and_junk(tmp_path):
     assert len(evs) == 1
     assert evs[0]["data"]["member_count"] == 1
     assert read_batch_events(tmp_path / "missing.jsonl") == []
+    bad = tmp_path / "bad.jsonl"
+    bad.write_bytes(b"\xff\xfe not utf8")
+    assert read_batch_events(bad) == []  # unreadable journal never crashes
