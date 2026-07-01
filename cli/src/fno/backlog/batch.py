@@ -20,12 +20,14 @@ import fcntl
 import json
 import logging
 import os
+import re
 import secrets
+import subprocess
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Literal, Optional
+from typing import Callable, Iterator, Literal, Optional
 
 import typer
 
@@ -257,6 +259,208 @@ def abandon_batch(*, domain: str, root: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Per-batch ship (Wave 3): one PR for the whole batch, on close
+# ---------------------------------------------------------------------------
+#
+# The daemon (active_backlog.rs) calls `fno backlog batch ship --domain <d>` when
+# `should_close` trips (batch full / next node is a different domain / drain).
+# ship_batch opens ONE PR for the shared batch branch and records the shared PR
+# ref (pr_number/pr_url) on every member node. It does NOT mark members `done`:
+# the PR is only just created (CI pending), so completion happens at merge, when
+# `fno backlog reconcile` closes each member independently by its own pr_number
+# (Locked Decision 5 - a shared URL is just N identical pr_url values, which the
+# existing per-node close already handles).
+#
+# v1 failure policy (Locked Decision 2): any failure to open the PR abandons the
+# batch and clears every member's `batch` mark, so they resurface in `next` and
+# ship as individual PRs (today's behavior) - never worse than no batching.
+
+
+# subprocess seam: tests inject a fake to avoid real git/gh calls.
+Runner = Callable[..., "subprocess.CompletedProcess"]
+
+
+def _run(cmd: list[str], *, cwd: Optional[str] = None) -> "subprocess.CompletedProcess":
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=600)
+
+
+def _extract_pr_number(url_or_output: str) -> Optional[int]:
+    """PR number from a GitHub URL (or a bare number). Mirrors worker/ship.py."""
+    m = re.search(r"/pull/(\d+)", url_or_output or "")
+    if m:
+        return int(m.group(1))
+    s = (url_or_output or "").strip()
+    return int(s) if s.isdigit() else None
+
+
+ShipAction = Literal["shipped", "abandoned", "noop"]
+
+
+@dataclass
+class ShipResult:
+    action: ShipAction
+    domain: str
+    reason: str = ""
+    pr_url: Optional[str] = None
+    pr_number: Optional[int] = None
+    members: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action,
+            "domain": self.domain,
+            "reason": self.reason,
+            "pr_url": self.pr_url,
+            "pr_number": self.pr_number,
+            "members": self.members,
+        }
+
+
+def _batch_pr_body(batch: dict) -> str:
+    """PR body listing the batch members + their one-line summaries.
+
+    Keeps the reviewer oriented on a multi-node diff. The domain boundary
+    (Locked Decision 4) already caps this to same-domain work.
+    """
+    lines = [
+        f"Batch **{batch.get('batch_id', '?')}** (domain `{batch.get('domain', '?')}`) "
+        f"coalesces {len(batch.get('members', []))} node(s) into one PR to cut CI runs.",
+        "",
+        "## Members",
+    ]
+    for m in batch.get("members", []):
+        summary = (m.get("summary") or "").strip()
+        lines.append(f"- `{m['node_id']}`" + (f" - {summary}" if summary else ""))
+    return "\n".join(lines) + "\n"
+
+
+def _set_member_pr_refs(
+    member_ids: list[str], *, pr_url: str, pr_number: Optional[int], root: Path
+) -> None:
+    """Record the shared batch PR ref on every member, in one locked mutation.
+
+    Members are NOT closed here (the PR is not merged yet); the ref lets
+    merge-time `fno backlog reconcile` close each member by its own pr_number.
+    """
+    from fno.graph._intake import _find_node
+    from fno.graph.store import locked_mutate_graph
+    from fno.paths import graph_json
+
+    ids = set(member_ids)
+
+    def mutator(entries):
+        for nid in ids:
+            node = _find_node(entries, nid)
+            if node is None:
+                continue
+            node["pr_url"] = pr_url
+            if pr_number is not None:
+                node["pr_number"] = pr_number
+        return entries
+
+    locked_mutate_graph(graph_json(), mutator)
+
+
+def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
+    """Clear the `batch` mark on every member so they requeue as individual PRs."""
+    from fno.graph._intake import _find_node
+    from fno.graph.store import locked_mutate_graph
+    from fno.paths import graph_json
+
+    ids = set(member_ids)
+
+    def mutator(entries):
+        for nid in ids:
+            node = _find_node(entries, nid)
+            if node is not None:
+                node["batch"] = None
+        return entries
+
+    locked_mutate_graph(graph_json(), mutator)
+
+
+def ship_batch(
+    *,
+    domain: str,
+    root: Path,
+    base: str = "main",
+    title: Optional[str] = None,
+    run: Runner = _run,
+) -> ShipResult:
+    """Open ONE PR for the open batch, record the shared ref on members.
+
+    Idempotent on the PR: an existing PR for the batch branch is reused rather
+    than duplicated. Any failure to open the PR abandons the batch and requeues
+    its members as individual PRs (v1 failure policy).
+    """
+    _safe(domain)
+    batch = read_batch(domain, root)
+    if not _is_open(batch):
+        return ShipResult("noop", domain, reason="no open batch")
+    assert batch is not None
+    members = member_ids(batch)
+    worktree = batch.get("worktree")
+    branch = batch.get("branch")
+    if not members:
+        # An empty open batch has nothing to ship; abandon it so it does not
+        # linger and block a fresh batch for the domain.
+        abandon_batch(domain=domain, root=root)
+        return ShipResult("abandoned", domain, reason="empty batch")
+    if not worktree or not branch:
+        _abandon_and_requeue(domain, members, root)
+        return ShipResult("abandoned", domain, reason="batch missing worktree/branch", members=members)
+
+    pr_title = title or f"batch({domain}): {len(members)} nodes"
+    body = _batch_pr_body(batch)
+
+    # Idempotency: reuse an existing PR for the branch before creating one.
+    pr_url: Optional[str] = None
+    pr_number: Optional[int] = None
+    lst = run(["gh", "pr", "list", "--head", branch, "--json", "number,url"], cwd=worktree)
+    if lst.returncode == 0 and (lst.stdout or "").strip():
+        try:
+            existing = json.loads(lst.stdout)
+        except json.JSONDecodeError:
+            existing = []
+        if existing:
+            pr_url = existing[0].get("url")
+            pr_number = existing[0].get("number")
+
+    if pr_url is None:
+        cr = run(
+            ["gh", "pr", "create", "--title", pr_title, "--body", body,
+             "--base", base, "--head", branch],
+            cwd=worktree,
+        )
+        if cr.returncode != 0:
+            _abandon_and_requeue(domain, members, root)
+            return ShipResult(
+                "abandoned", domain,
+                reason=f"gh pr create failed: {(cr.stderr or cr.stdout or '').strip()[:200]}",
+                members=members,
+            )
+        pr_url = (cr.stdout or "").strip()
+        pr_number = _extract_pr_number(pr_url)
+
+    if not pr_url:
+        _abandon_and_requeue(domain, members, root)
+        return ShipResult("abandoned", domain, reason="no PR url from gh", members=members)
+
+    close_batch(domain=domain, pr_url=pr_url, root=root)
+    _set_member_pr_refs(members, pr_url=pr_url, pr_number=pr_number, root=root)
+    return ShipResult("shipped", domain, pr_url=pr_url, pr_number=pr_number, members=members)
+
+
+def _abandon_and_requeue(domain: str, members: list[str], root: Path) -> None:
+    """v1 failure path: abandon the batch and clear member marks (individual ship)."""
+    try:
+        abandon_batch(domain=domain, root=root)
+    except NoOpenBatch:
+        pass
+    _clear_member_batch_marks(members, root=root)
+
+
+# ---------------------------------------------------------------------------
 # Policy engine (Wave 2): join-or-start + close-condition, pure over inputs
 # ---------------------------------------------------------------------------
 
@@ -432,6 +636,27 @@ def cli_abandon(
     except (BatchError, BatchValidationError) as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1)
+
+
+@cli.command("ship")
+def cli_ship(
+    domain: str = typer.Option(..., "--domain", "-d"),
+    base: str = typer.Option("main", "--base", help="Base branch for the PR."),
+    title: Optional[str] = typer.Option(None, "--title", help="Override the PR title."),
+    root: Optional[str] = typer.Option(None, "--root"),
+) -> None:
+    """Open ONE PR for the open batch and record the shared ref on members.
+
+    The daemon calls this when `should_close` trips. On failure the batch is
+    abandoned and its members requeue as individual PRs (v1 policy). Exit 0 on
+    ship, 2 on abandon (members requeued), 3 on no-op (no open batch).
+    """
+    result = ship_batch(domain=domain, root=_root_opt(root), base=base, title=title)
+    _emit(result.to_dict())
+    if result.action == "abandoned":
+        raise typer.Exit(2)
+    if result.action == "noop":
+        raise typer.Exit(3)
 
 
 @cli.command("status")
