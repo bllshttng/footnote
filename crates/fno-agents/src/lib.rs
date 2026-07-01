@@ -57,6 +57,7 @@ pub mod drive_client;
 pub mod envelope;
 pub mod events;
 pub mod finalize;
+pub mod gc;
 pub mod gemini_ask;
 pub mod grid;
 pub mod kill_criteria;
@@ -642,6 +643,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_create_no_session",
     "agent_orphan_reaped",
     "agent_orphan_state_archived",
+    // Dead-row GC (daemon/reap-verb-emitted, x-b1aa): a terminal, past-grace,
+    // clean agent-view row was removed from the registry by the GC sweep or
+    // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
+    // live-but-unowned PID to exited); this REMOVES the row entirely.
+    "agent_row_reaped",
     "agent_spawn_failed",
     "agent_stop_error",
     "agent_spawn_cwd_fallback",

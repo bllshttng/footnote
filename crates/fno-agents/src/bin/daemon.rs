@@ -34,6 +34,13 @@ fn main() {
             opts.idle_exit = Duration::from_secs(secs);
         }
     }
+    // Dead-row GC grace window (x-b1aa): resolve config.agents.dead_row_grace
+    // (env FNO_AGENTS_DEAD_ROW_GRACE_SECS > FNO_CONFIG > project > global >
+    // default 1h). The daemon's cwd is where it was lazy-started; a global
+    // ~/.fno knob is read via the global fallback regardless.
+    let grace_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    opts.dead_row_grace =
+        Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(&grace_cwd));
     // Opt out of the startup reconcile sweep for the fastest cold start
     // (Architecture B, plan ab-70faa65b). Any non-empty value disables it.
     if std::env::var("FNO_AGENTS_NO_STARTUP_RECONCILE")

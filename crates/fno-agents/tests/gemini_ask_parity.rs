@@ -564,6 +564,7 @@ fn gemini_registry_entry(name: &str, cwd: &str, sid: &str, log_path: &str) -> Re
         log_path: Some(log_path.to_string()),
         last_reconciled_at: None,
         inside_leg: None,
+        exited_at: None,
     }
 }
 

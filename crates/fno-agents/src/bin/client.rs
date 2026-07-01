@@ -206,6 +206,14 @@ async fn run(args: Vec<String>) -> i32 {
         return run_restart().await;
     }
 
+    // `reap` is the manual dead-row GC (x-b1aa): the SAME sweep the daemon runs
+    // on its idle tick, on demand. It operates on the registry directly under the
+    // shared flock, so it needs no running daemon and dispatches here before
+    // build_request.
+    if verb == "reap" {
+        return run_reap(&args[1..]);
+    }
+
     // Capture the verb name so format_success can use it at the print site
     // without threading it through the protocol layer.
     let verb_owned = verb.to_string();
@@ -827,6 +835,54 @@ async fn run_status() -> i32 {
             1
         }
     }
+}
+
+/// `fno agents reap`: manual dead-row garbage collection (x-b1aa). Runs the same
+/// `gc_sweep` the daemon runs on its idle tick, operating on the registry
+/// directly under the shared flock (no daemon required), and reports what it did:
+/// the count removed and, for each row KEPT because its worktree is dirty, the
+/// worktree path so the operator can commit/clean it (AC1-UI). The grace window
+/// is resolved from `config.agents.dead_row_grace` exactly as the daemon does.
+fn run_reap(rest: &[String]) -> i32 {
+    let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
+    let extras: Vec<&str> = rest
+        .iter()
+        .map(String::as_str)
+        .filter(|a| *a != "--json" && *a != "-J")
+        .collect();
+    if !extras.is_empty() {
+        eprintln!(
+            "fno-agents: reap takes no arguments (got: {})",
+            extras.join(" ")
+        );
+        return 2;
+    }
+    let home = AgentsHome::from_env();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let grace =
+        std::time::Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(&cwd));
+    // Source "daemon" matches the event schema's declared source for
+    // agent_row_reaped; the manual verb is the same operation as the tick.
+    let emitter = fno_agents::events::EventEmitter::new(home.events_jsonl(), "daemon");
+    let summary = fno_agents::daemon::gc_sweep(&home, &emitter, grace);
+
+    if json_out {
+        let kept: Vec<Value> = summary
+            .kept_dirty
+            .iter()
+            .map(|(id, path)| json!({"id": id, "worktree": path}))
+            .collect();
+        println!("{}", json!({"reaped": summary.reaped, "kept_dirty": kept}));
+    } else {
+        println!("reaped {} row(s)", summary.reaped.len());
+        for id in &summary.reaped {
+            println!("  reaped {id}");
+        }
+        for (id, path) in &summary.kept_dirty {
+            println!("  kept {id} (dirty worktree: {path})");
+        }
+    }
+    0
 }
 
 /// Render a restart outcome into (stdout line, optional stderr line, exit code).
@@ -1801,6 +1857,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "list [--all]",
     "status",
     "restart",
+    "reap [--json]",
     "stop <name> [--force]",
     "rm <name> [--force]",
     "drive <name> [--watch|--step|--paranoid]",
@@ -1935,6 +1992,7 @@ mod tests {
             "list",
             "status",
             "restart",
+            "reap",
             "stop",
             "rm",
             "reconcile",

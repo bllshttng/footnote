@@ -53,6 +53,7 @@
 | `config.agents.a2a.auto` | bool | `true` | advanced | Allow agents to auto-open agent-to-agent threads. |
 | `config.agents.a2a.turn_ceiling` | int | `6` | advanced | Max turns in an agent-to-agent thread. |
 | `config.agents.confirm` | str | `auto` | never | Agent-launch confirmation policy (auto/always/never). |
+| `config.agents.dead_row_grace` | int | `3600` | advanced | Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600). |
 | `config.agents.codex.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless codex workers. |
 | `config.agents.gemini.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless gemini workers. |
 | `config.auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |

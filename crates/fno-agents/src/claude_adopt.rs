@@ -70,6 +70,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         log_path: None,
         last_reconciled_at: None,
         inside_leg: None,
+        exited_at: None,
     }
 }
 

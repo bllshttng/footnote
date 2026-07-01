@@ -124,6 +124,7 @@ FIELD_META: dict[str, Meta] = {
     "config.agents.a2a.auto": Meta("advanced", "Allow agents to auto-open agent-to-agent threads."),
     "config.agents.a2a.turn_ceiling": Meta("advanced", "Max turns in an agent-to-agent thread."),
     "config.agents.confirm": Meta("never", "Agent-launch confirmation policy (auto/always/never)."),
+    "config.agents.dead_row_grace": Meta("advanced", "Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600).", default_source="default"),
     "config.agents.codex.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless codex workers."),
     "config.agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
     # --- config.auto_continue.* ---

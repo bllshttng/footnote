@@ -69,6 +69,96 @@ fn read_file(path: &Path, provider: &str) -> Option<bool> {
     read_headless_yolo(&content, provider)
 }
 
+/// Default dead-row grace window: 1h (matches `config.agents.dead_row_grace`'s
+/// Pydantic default). A finished agent-view row stays visible this long after the
+/// GC first observes its process gone, before it is reaped (x-b1aa).
+pub const DEFAULT_DEAD_ROW_GRACE_SECS: u64 = 3600;
+
+/// Resolve `config.agents.dead_row_grace` (seconds) for the daemon GC sweep and
+/// `fno agents reap`. Precedence, degrading to [`DEFAULT_DEAD_ROW_GRACE_SECS`]:
+///   1. `$FNO_AGENTS_DEAD_ROW_GRACE_SECS` - test/tuning override (mirrors
+///      `FNO_AGENTS_IDLE_EXIT_SECS`); an unparseable value is ignored.
+///   2. `$FNO_CONFIG` - explicit settings path, the SOLE file source when set
+///      (mirrors the Python loader and `headless_yolo_enabled`).
+///   3. `<cwd>/.fno/settings.yaml` - project-local.
+///   4. global: `$FNO_GLOBAL_SETTINGS_PATH` else `$HOME/.fno/settings.yaml`.
+pub fn dead_row_grace_secs(cwd: &Path) -> u64 {
+    if let Some(v) = non_empty_env("FNO_AGENTS_DEAD_ROW_GRACE_SECS")
+        .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u64>().ok()))
+    {
+        return v;
+    }
+    if let Some(explicit) = non_empty_env("FNO_CONFIG") {
+        return read_grace_file(Path::new(&explicit)).unwrap_or(DEFAULT_DEAD_ROW_GRACE_SECS);
+    }
+    if let Some(v) = read_grace_file(&cwd.join(".fno/settings.yaml")) {
+        return v;
+    }
+    let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/settings.yaml")));
+    if let Some(g) = global {
+        if let Some(v) = read_grace_file(&g) {
+            return v;
+        }
+    }
+    DEFAULT_DEAD_ROW_GRACE_SECS
+}
+
+fn read_grace_file(path: &Path) -> Option<u64> {
+    let content = std::fs::read_to_string(path).ok()?;
+    read_dead_row_grace(&content)
+}
+
+/// Scan a settings.yaml body for `config: > agents: > dead_row_grace:` (a direct
+/// child of `agents:`, like `confirm`). Indent-unit-agnostic, mirroring
+/// [`read_headless_yolo`]. `None` when absent or unparseable so the caller falls
+/// through to the next file (and ultimately the default).
+pub(crate) fn read_dead_row_grace(content: &str) -> Option<u64> {
+    let unit = content
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|l| l.len() - l.trim_start().len())
+        .find(|&i| i > 0)
+        .unwrap_or(2);
+    let level = |line: &str| -> usize { (line.len() - line.trim_start().len()) / unit };
+
+    let mut in_config = false;
+    let mut in_agents = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        match level(line) {
+            0 => {
+                in_config = trimmed.starts_with("config:");
+                in_agents = false;
+            }
+            1 if in_config => {
+                in_agents = trimmed.starts_with("agents:");
+            }
+            2 if in_agents => {
+                if let Some(rest) = trimmed.strip_prefix("dead_row_grace:") {
+                    return parse_u64(rest);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_u64(rest: &str) -> Option<u64> {
+    rest.split('#')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .parse::<u64>()
+        .ok()
+}
+
 /// Scan a settings.yaml body for `config: > agents: > <provider>: > headless_yolo:`.
 /// Indent-unit-agnostic (2- or 4-space), mirroring `loopcheck`'s parser. Returns
 /// `None` when the key is absent or malformed so the caller falls through to the
@@ -147,6 +237,31 @@ mod tests {
         assert_eq!(read_headless_yolo(yaml, "gemini"), Some(false));
         // codex untouched -> absent -> falls through to default.
         assert_eq!(read_headless_yolo(yaml, "codex"), None);
+    }
+
+    #[test]
+    fn dead_row_grace_reads_agents_child_key() {
+        let yaml = "config:\n  agents:\n    confirm: auto\n    dead_row_grace: 7200\n";
+        assert_eq!(read_dead_row_grace(yaml), Some(7200));
+    }
+
+    #[test]
+    fn dead_row_grace_absent_is_none() {
+        assert_eq!(
+            read_dead_row_grace("config:\n  agents:\n    confirm: auto\n"),
+            None
+        );
+        assert_eq!(read_dead_row_grace("schema_version: 1\n"), None);
+    }
+
+    #[test]
+    fn dead_row_grace_ignores_provider_nested_and_bad_values() {
+        // A key at provider depth (level 3) must NOT be read as the agents-child.
+        let nested = "config:\n  agents:\n    codex:\n      dead_row_grace: 5\n";
+        assert_eq!(read_dead_row_grace(nested), None);
+        // Non-integer value -> None (falls through to default).
+        let bad = "config:\n  agents:\n    dead_row_grace: banana\n";
+        assert_eq!(read_dead_row_grace(bad), None);
     }
 
     #[test]

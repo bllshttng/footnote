@@ -64,6 +64,10 @@ pub struct DaemonOptions {
     /// (env `FNO_AGENTS_NO_STARTUP_RECONCILE=1`, Claude's discretion #5) trades a
     /// truthful first `list` for the fastest possible cold start.
     pub reconcile_on_start: bool,
+    /// Grace window before the dead-row GC reaps a finished agent-view row
+    /// (x-b1aa). Default 1h; the daemon entrypoint overrides it from
+    /// `config.agents.dead_row_grace` (via `agents_config::dead_row_grace_secs`).
+    pub dead_row_grace: Duration,
 }
 
 impl Default for DaemonOptions {
@@ -72,6 +76,7 @@ impl Default for DaemonOptions {
             idle_exit: Duration::from_secs(1800),
             worker_bin: resolve_worker_bin(),
             reconcile_on_start: true,
+            dead_row_grace: Duration::from_secs(crate::agents_config::DEFAULT_DEAD_ROW_GRACE_SECS),
         }
     }
 }
@@ -355,6 +360,177 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
+/// Outcome of one dead-row GC pass (x-b1aa), for the `fno agents reap` report
+/// and tests. `reaped` lists the rows actually removed (by short_id, else name);
+/// `kept_dirty` is `(id, worktree_path)` for each row kept because its worktree
+/// has uncommitted changes (or the cleanliness probe failed), so the verb can
+/// surface the path for the operator to clean up.
+#[derive(Debug, Default, PartialEq)]
+pub struct GcSummary {
+    pub reaped: Vec<String>,
+    pub kept_dirty: Vec<(String, String)>,
+}
+
+/// `git status --porcelain` cleanliness of a worktree-owning row's `cwd`.
+/// `Some(true)` clean, `Some(false)` dirty (uncommitted changes), `None` the
+/// probe could not determine it (git errored / not a repo) -> the caller fails
+/// closed and keeps the row.
+fn worktree_clean_probe(cwd: &str) -> Option<bool> {
+    let out = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(out.stdout.iter().all(u8::is_ascii_whitespace))
+}
+
+/// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
+/// makes every stamped row look in-grace -> nothing reaped, the safe direction).
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Dead-row garbage collection sweep (x-b1aa). Removes terminal, past-grace,
+/// clean agent-view rows from the registry so finished rows stop accumulating
+/// "like browser tabs." Shared by the daemon idle tick (the automatic path) and
+/// `fno agents reap` (the manual escape hatch) -- ONE decision (`gc::gc_action`),
+/// two triggers (Locked Decision #2). Idempotent and safe against a concurrent
+/// sweep via the atomic reap-write: a row already gone is a no-op.
+///
+/// Liveness is RE-CHECKED here (AC1-FR): a row that re-registered live during the
+/// grace window is never swept on a stale `exited`, and its stale `exited_at` is
+/// cleared. A registry-write failure is surfaced as `daemon_recovery_error` and
+/// reported as zero reaps, so the event log never claims a removal the disk did
+/// not get (AC1-ERR).
+pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> GcSummary {
+    let mut summary = GcSummary::default();
+    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    if registry.entries.is_empty() {
+        return summary; // empty registry -> nothing to sweep (Boundary)
+    }
+    let live_workers = home.scan_worker_sockets();
+    let now = now_epoch_secs();
+    let grace_secs = grace.as_secs() as i64;
+
+    let mut to_reap: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut to_stamp: Vec<String> = Vec::new();
+    let mut to_clear: Vec<String> = Vec::new();
+
+    for e in &registry.entries {
+        let is_live = live_workers.contains(&e.short_id)
+            || e.pid
+                .map(|p| pid_is_ours(p, e.pid_start_time))
+                .unwrap_or(false);
+        let pid_confirmed_dead = e
+            .pid
+            .map(|p| !pid_is_ours(p, e.pid_start_time))
+            .unwrap_or(false);
+        let is_ask = e.is_one_shot_ask();
+        let exited_at = e
+            .exited_at
+            .as_deref()
+            .and_then(state::rfc3339_like_to_secs)
+            .map(|s| s as i64);
+
+        // Probe the worktree only for a row that could actually be reaped this
+        // pass (dead + terminal + past grace + owns a worktree). Keeps git off the
+        // hot path: steady state has no such rows, so no subprocess runs.
+        let terminal_or_dead = matches!(e.status, AgentStatus::Exited | AgentStatus::PermanentDead)
+            || pid_confirmed_dead;
+        let past_grace = matches!(exited_at, Some(t) if now.saturating_sub(t) > grace_secs);
+        let needs_probe = !is_live && terminal_or_dead && past_grace && !is_ask;
+        let worktree_clean = if needs_probe {
+            worktree_clean_probe(&e.cwd)
+        } else {
+            None
+        };
+
+        let row = crate::gc::GcRow {
+            status: e.status,
+            is_live,
+            pid_confirmed_dead,
+            is_ask,
+            exited_at,
+            worktree_clean,
+        };
+        let id = if e.short_id.is_empty() {
+            e.name.clone()
+        } else {
+            e.short_id.clone()
+        };
+        match crate::gc::gc_action(&row, now, grace_secs) {
+            crate::gc::GcAction::Reap => {
+                to_reap.insert(e.name.clone());
+            }
+            crate::gc::GcAction::StampExit => to_stamp.push(e.name.clone()),
+            crate::gc::GcAction::Keep => {
+                if is_live && e.exited_at.is_some() {
+                    // Resurrected: drop the stale exit stamp so a later death
+                    // starts a fresh grace clock.
+                    to_clear.push(e.name.clone());
+                } else if needs_probe && matches!(worktree_clean, Some(false) | None) {
+                    // Past grace but held back by a dirty/undeterminable worktree.
+                    summary.kept_dirty.push((id, e.cwd.clone()));
+                }
+            }
+        }
+    }
+
+    if to_reap.is_empty() && to_stamp.is_empty() && to_clear.is_empty() {
+        return summary;
+    }
+
+    let now_stamp = now_rfc3339_like();
+    let write = state::update_registry(&home.registry_json(), |r| {
+        for e in r.entries.iter_mut() {
+            if to_stamp.contains(&e.name) {
+                e.exited_at = Some(now_stamp.clone());
+            }
+            if to_clear.contains(&e.name) {
+                e.exited_at = None;
+            }
+        }
+        r.entries.retain(|e| !to_reap.contains(&e.name));
+    });
+    match write {
+        Ok(()) => {
+            // Emit only AFTER a successful write so the event log never diverges
+            // from disk (AC1-ERR).
+            for e in &registry.entries {
+                if to_reap.contains(&e.name) {
+                    let _ = emitter.emit_fields(
+                        "agent_row_reaped",
+                        json_obj(&[
+                            ("short_id", Value::String(e.short_id.clone())),
+                            ("name", Value::String(e.name.clone())),
+                        ]),
+                    );
+                    summary.reaped.push(if e.short_id.is_empty() {
+                        e.name.clone()
+                    } else {
+                        e.short_id.clone()
+                    });
+                }
+            }
+        }
+        Err(err) => {
+            let _ = emitter.emit(
+                "daemon_recovery_error",
+                &json!({"op": "gc_sweep", "error": err.to_string()}),
+            );
+            // Nothing was removed; report no reaps (no event/disk divergence).
+            summary.reaped.clear();
+        }
+    }
+    summary
+}
+
 /// Is `pid` still OUR worker, not a recycled PID? True iff the process exists,
 /// we may signal it, AND its current start time matches `recorded`
 /// (ab-d19e6458). If a start time is unavailable on either side (`None` — lookup
@@ -626,6 +802,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // Reap any worker that exited since the last tick so it never
                 // lingers as a zombie under the long-lived daemon.
                 reap_zombies();
+                // Dead-row GC (x-b1aa): remove terminal, past-grace, clean
+                // agent-view rows so finished rows self-clean without the merge
+                // ritual. Cheap in steady state (no candidates -> no git, no
+                // registry write); the grace window makes exact cadence
+                // non-critical, so running it on the idle tick is fine.
+                let _ = gc_sweep(&ctx.home, &ctx.emitter, ctx.opts.dead_row_grace);
                 let empty = state::load_registry(&ctx.home.registry_json())
                     .map(|r| r.entries.is_empty())
                     .unwrap_or(true);
@@ -1520,6 +1702,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         ),
         last_reconciled_at: None,
         inside_leg: None,
+        exited_at: None,
     };
     // Reserve the name atomically UNDER the exclusive registry lock. The
     // lock-free collision check above can be passed by two concurrent
@@ -1829,6 +2012,7 @@ fn build_claude_stream_entry(
         log_path: Some(log_path.to_string_lossy().into_owned()),
         last_reconciled_at: None,
         inside_leg: None,
+        exited_at: None,
     }
 }
 
@@ -5197,6 +5381,103 @@ mod tests {
             .collect()
     }
 
+    // One-shot ask row (empty short_id + no pid): terminal, reapable on grace
+    // alone (owns no worktree). `exited_at` controls the grace clock.
+    fn ask_row(name: &str, exited_at: Option<&str>) -> RegistryEntry {
+        RegistryEntry {
+            name: name.into(),
+            short_id: String::new(),
+            provider: "claude".into(),
+            cwd: "/tmp".into(),
+            project_root: String::new(),
+            session_id: None,
+            claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            cc_session_id: None,
+            host_mode: None,
+            status: AgentStatus::Exited,
+            last_message_at: None,
+            created_at: "2020-01-01T00:00:00Z".into(),
+            pid: None,
+            pid_start_time: None,
+            log_path: None,
+            last_reconciled_at: None,
+            inside_leg: None,
+            exited_at: exited_at.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn gc_sweep_reaps_stamped_stamps_unstamped_keeps_live() {
+        let home = tmp_home("gc-sweep");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+        state::update_registry(&home.registry_json(), |r| {
+            // Stamped long ago -> past grace -> reaped (AC1-HP; ask row skips the
+            // worktree probe).
+            r.entries
+                .push(ask_row("ask-old", Some("2020-01-01T00:00:00Z")));
+            // Terminal but never observed dead before -> stamped, not reaped.
+            r.entries.push(ask_row("ask-new", None));
+            // A live worker (our own pid, no start time -> bare-existence live) is
+            // never touched (AC1-FR).
+            let mut live = ask_row("live", None);
+            live.name = "live".into();
+            live.short_id = "wkL".into();
+            live.status = AgentStatus::Live;
+            live.pid = Some(std::process::id());
+            r.entries.push(live);
+        })
+        .unwrap();
+
+        let summary = gc_sweep(&home, &emitter, Duration::from_secs(3600));
+
+        assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let names: Vec<&str> = reg.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&"ask-old"), "ask-old should be reaped");
+        assert!(
+            names.contains(&"ask-new"),
+            "ask-new should be kept (in grace)"
+        );
+        assert!(names.contains(&"live"), "live row must never be reaped");
+
+        // ask-new got its exit stamp; the live row stayed unstamped.
+        let new = reg.entries.iter().find(|e| e.name == "ask-new").unwrap();
+        assert!(
+            new.exited_at.is_some(),
+            "ask-new should be stamped this pass"
+        );
+        let live = reg.entries.iter().find(|e| e.name == "live").unwrap();
+        assert!(live.exited_at.is_none());
+
+        // The removal emitted exactly one agent_row_reaped for ask-old.
+        let events = read_events(&home);
+        let reaped: Vec<&Value> = events
+            .iter()
+            .filter(|e| e.get("kind").and_then(Value::as_str) == Some("agent_row_reaped"))
+            .collect();
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(
+            reaped[0].get("name").and_then(Value::as_str),
+            Some("ask-old")
+        );
+    }
+
+    #[test]
+    fn gc_sweep_empty_registry_is_noop() {
+        let home = tmp_home("gc-empty");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let summary = gc_sweep(&home, &emitter, Duration::from_secs(3600));
+        assert!(summary.reaped.is_empty());
+        assert!(summary.kept_dirty.is_empty());
+    }
+
     #[test]
     fn recovery_emits_drive_crashed_before_clearing_window() {
         let home = tmp_home("recover-drive");
@@ -5227,6 +5508,7 @@ mod tests {
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -5289,6 +5571,7 @@ mod tests {
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -5334,6 +5617,7 @@ mod tests {
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -5445,6 +5729,7 @@ mod tests {
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -5527,6 +5812,7 @@ mod tests {
             log_path: None,
             last_reconciled_at: None,
             inside_leg: None,
+            exited_at: None,
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -5557,6 +5843,7 @@ mod tests {
             log_path: None,
             last_reconciled_at: last_reconciled.map(String::from),
             inside_leg: None,
+            exited_at: None,
         }
     }
 
@@ -6342,6 +6629,7 @@ mod tests {
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
+                dead_row_grace: Duration::from_secs(3600),
             },
             started_at: std::time::Instant::now(),
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
@@ -6362,6 +6650,7 @@ mod tests {
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
+                dead_row_grace: Duration::from_secs(3600),
             },
             started_at: std::time::Instant::now(),
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
@@ -6427,6 +6716,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -7086,6 +7376,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -7448,6 +7739,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -7507,6 +7799,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -7558,6 +7851,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -7619,6 +7913,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -7731,6 +8026,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -7892,6 +8188,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -8010,6 +8307,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
@@ -8119,6 +8417,7 @@ done
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
+                exited_at: None,
             });
         })
         .unwrap();
