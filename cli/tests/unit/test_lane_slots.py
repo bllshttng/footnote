@@ -15,6 +15,7 @@ from fno.claims.lanes import (
     acquire_lane_slot,
     active_lane_count,
     find_lane_slot,
+    reconcile_lane_slot,
     release_lane_slot,
 )
 
@@ -195,3 +196,47 @@ def test_cli_acquire_cap_release_flow(cli_claims_root):
 def test_cli_acquire_rejects_bad_max_lanes(cli_claims_root):
     r = _runner.invoke(cli, ["lane-acquire", "--lane-id", "node-a", "--max-lanes", "0"])
     assert r.exit_code == 2, r.output
+
+
+# --- reconcile_lane_slot: bind a dispatched slot to the worker lifecycle (LD#8) ---
+
+
+def test_reconcile_reanchors_slot_to_worker_pid_and_keeps_domain(tmp_path):
+    """The worker re-owns its slot as pure pid-liveness (expires_at cleared),
+    preserving the `domain` metadata later ticks read for distinct-domain seeding."""
+    import os
+
+    from fno.claims.core import list_claims
+
+    acquire_lane_slot(2, "node-a", extra_metadata={"domain": "code"}, root=tmp_path)
+    claim = reconcile_lane_slot("node-a", pid=os.getpid(), root=tmp_path)
+
+    assert claim is not None
+    assert find_lane_slot("node-a", root=tmp_path) is not None
+    slots = list_claims(prefix=LANE_SLOT_PREFIX, root=tmp_path)
+    assert len(slots) == 1
+    # pure pid-liveness: no TTL clock (frees the instant the worker pid dies).
+    assert slots[0].get("expires_at") is None
+    # domain preserved so a later lane-fill still blocks a same-domain co-schedule.
+    assert (slots[0].get("metadata") or {}).get("domain") == "code"
+
+
+def test_reconcile_is_noop_without_a_durable_pid(tmp_path):
+    """No resolvable claude ancestor -> leave the dispatcher's TTL slot untouched
+    (reconciling to pure pid-liveness with an unknown pid would instantly stale it)."""
+    from fno.claims.core import list_claims
+
+    acquire_lane_slot(2, "node-a", root=tmp_path)
+    assert reconcile_lane_slot("node-a", pid=None, root=tmp_path) is None
+    # slot still held, still TTL-anchored (unchanged).
+    slots = list_claims(prefix=LANE_SLOT_PREFIX, root=tmp_path)
+    assert len(slots) == 1
+    assert slots[0].get("expires_at") is not None
+
+
+def test_reconcile_is_noop_when_lane_holds_no_slot(tmp_path):
+    """Every non-parallel target run: no slot to reconcile -> clean no-op."""
+    import os
+
+    assert reconcile_lane_slot("node-x", pid=os.getpid(), root=tmp_path) is None
+    assert active_lane_count(root=tmp_path) == 0

@@ -466,6 +466,291 @@ def _spawn_worker(
 
 
 # ---------------------------------------------------------------------------
+# Lane dispatch (parallel mode, epic x-42d5 group 3): spawn + per-lane isolation
+# ---------------------------------------------------------------------------
+#
+# G1 shipped the atomic lane-slot cap (claims/lanes.py); G2 the distinct-domain
+# selector (select_lane_fill above) + the `fno backlog lane-fill` preview CLI.
+# G3 is the SPAWN layer: it takes G2's selection (which already holds a
+# dispatch-time lane slot per node, LD#8) and launches each pick as an ISOLATED
+# background lane - one worktree off origin/main, one branch, one PR stream.
+#
+# The isolation is the whole point (why x-cbce is a hard dep). Every worktree
+# shares the canonical settings.yaml (symlinked by setup-worktree.sh), so its
+# `parking_lot_path` (`internal/fno/backlog/parking-lot.md`) resolves THROUGH
+# the `internal/` symlink to the SAME canonical file in every lane - concurrent
+# post-merge writeback would clobber. G3 seeds each lane a `.fno/settings.local.yaml`
+# (x-cbce's per-worktree override, allowlist {parking_lot_path, project.id})
+# pointing parking_lot_path at the lane's own `.fno/parking-lot.md` and giving
+# project.id a per-lane value (AC2-HP). The per-lane project.id also neuters the
+# lane's own nested auto-continue: its post-merge `advance(project=<lane-id>)`
+# finds no same-project `next`, so the top-level parallel dispatcher stays the
+# single lane authority instead of each lane fanning out past `max_lanes`.
+#
+# NOT here (deferred to G4): merge serialization (LD#9 - lanes must rebase +
+# merge one at a time), full failure isolation via _redispatch (x-370f), and the
+# grid status rollup. G3 releases a lane slot on spawn failure so the node stays
+# re-dispatchable, but the richer dead-lane recovery is G4's. Live wiring into
+# the auto-continue drain is likewise deferred until merge-serialization lands,
+# so this stays a callable, independently-tested primitive (`fno backlog
+# dispatch-lanes`), mirroring how G1/G2 shipped runnable layers without flipping
+# the global live switch.
+
+
+class WorktreeEnsureError(RuntimeError):
+    """`fno worktree ensure` failed; the lane cannot be isolated, so it is skipped."""
+
+
+def _canonical_root() -> Path:
+    """The canonical (main-checkout) repo root a lane worktree spawns from."""
+    from fno.paths import resolve_canonical_repo_root
+
+    return resolve_canonical_repo_root()
+
+
+def _base_project_id(canonical_root: Path) -> str:
+    """The shared project.id lane ids are derived from (fallback: repo basename)."""
+    try:
+        from fno.config import load_settings
+
+        pid = load_settings().config.project.id
+        if pid:
+            return pid
+    except Exception:  # noqa: BLE001 - a settings read error must not crash dispatch
+        pass
+    return canonical_root.name
+
+
+def _run_setup_worktree(worktree: Path, canonical_root: Path) -> None:
+    """Link shared `.fno`/`internal`/`.claude` state into a fresh lane worktree.
+
+    `fno worktree ensure` is git-mechanism-only (x-73ca) and deliberately leaves
+    this to the caller; without it the lane has no symlinked settings.yaml and
+    falls through to global config. Best-effort: a bare `pip install fno` ships
+    no repo scripts, and a link failure must not abort an otherwise-launchable
+    lane, so any non-zero / missing-script outcome is swallowed (the worker's
+    own `fno target start` re-heals what it can).
+    """
+    script = canonical_root / "scripts" / "setup" / "setup-worktree.sh"
+    if not script.exists():
+        return
+    try:
+        subprocess.run(
+            ["bash", str(script)],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except Exception as exc:  # noqa: BLE001 - non-fatal state linking
+        _LOG.debug("dispatch_lanes: setup-worktree.sh failed for %s: %s", worktree, exc)
+
+
+def _ensure_lane_worktree(node_id: str, *, canonical_root: Path) -> Path:
+    """Idempotently isolate a lane worktree off origin/main; return its path.
+
+    Delegates to `fno worktree ensure` (x-73ca): a git-only, idempotent verb
+    that creates `<worktrees_base>/<repo>/<node_id>` on branch `feature/<node_id>`
+    (base origin/main), or reuses it. Raises WorktreeEnsureError on failure (empty
+    stdout / non-zero) so the caller releases the lane slot and skips this lane
+    without touching the others (Failure Modes: Errors).
+    """
+    proc = subprocess.run(
+        ["fno", "worktree", "ensure", "--repo", str(canonical_root), "--name", node_id],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    path = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not path:
+        raise WorktreeEnsureError(
+            f"fno worktree ensure failed for {node_id}: "
+            f"{(proc.stderr or proc.stdout or '').strip()[:200]}"
+        )
+    worktree = Path(path)
+    # Heal a whole-dir `.fno` symlink (a REUSED worktree can carry one) BEFORE
+    # setup-worktree.sh runs: setup links shared state into `.fno/*`, and through
+    # the symlink those links would land in the CANONICAL checkout; the later
+    # seed would then replace `.fno` with a bare real dir, stranding the lane
+    # without its settings.yaml/state links. Heal first so setup populates the
+    # REAL per-worktree dir (mirrors the heal `fno target start` does before its
+    # setup hook). A fresh worktree has no `.fno` yet, so this is a no-op there.
+    fno_dir = worktree / ".fno"
+    if fno_dir.is_symlink():
+        fno_dir.unlink()
+        fno_dir.mkdir()
+    _run_setup_worktree(worktree, canonical_root)
+    return worktree
+
+
+def _seed_lane_local_settings(
+    worktree: Path, node_id: str, base_project_id: str
+) -> None:
+    """Write the lane's `.fno/settings.local.yaml` per-worktree isolation seed.
+
+    Overrides ONLY x-cbce's allowlisted keys on top of the shared (symlinked)
+    settings.yaml: `parking_lot_path` -> the lane's own `.fno/parking-lot.md`
+    (an absolute path that does NOT route through the `internal/` symlink, so two
+    lanes never share one file - AC2-HP), and `project.id` -> a per-lane value so
+    the lane's post-merge writeback / auto-continue is scoped to itself. Written
+    unconditionally: a lane worktree is machine-owned and the content is
+    deterministic, so a re-dispatch re-seeds identically (idempotent).
+    """
+    fno_dir = worktree / ".fno"
+    # A reused worktree may carry `.fno` as a WHOLE-DIR symlink to canonical (the
+    # bg-worktree footgun `fno target start` already heals). Writing through it
+    # would create/overwrite the CANONICAL settings.local.yaml, so every lane
+    # would then share one parking_lot_path/project.id - the exact collision this
+    # seed prevents. Unlink and recreate a real per-worktree dir first.
+    if fno_dir.is_symlink():
+        fno_dir.unlink()
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    # parking_lot_path MUST be repo-relative: PostMergeBlock.validate_parking_lot_path
+    # rejects an absolute / '~' / '..' value, so an absolute path would fail the
+    # spawned worker's load_settings() and break the lane before it starts (codex
+    # P2). `.fno/parking-lot.md` still isolates per lane: it resolves against
+    # resolve_repo_root() (THIS worktree, not canonical) and `.fno` is a real
+    # per-worktree dir - NOT the shared `internal/` symlink the canonical default
+    # (`internal/fno/backlog/parking-lot.md`) rides. The isolation comes from
+    # per-worktree resolution, not a distinct string.
+    # Single-quote the id value: it can carry chars a bare YAML scalar mis-parses;
+    # an embedded quote is escaped by doubling.
+    id_val = f"{base_project_id}-{node_id}".replace("'", "''")
+    (fno_dir / "settings.local.yaml").write_text(
+        "# Auto-seeded per-lane isolation (parallel mode, epic x-42d5 G3).\n"
+        "# Only x-cbce's per-worktree override allowlist {parking_lot_path,\n"
+        "# project.id}; overrides the shared settings.yaml so concurrent lanes\n"
+        "# never collide on post-merge writeback or node attribution.\n"
+        "config:\n"
+        "  project:\n"
+        f"    id: '{id_val}'\n"
+        "  post_merge:\n"
+        "    parking_lot_path: '.fno/parking-lot.md'\n"
+    )
+
+
+def dispatch_lanes(
+    max_lanes: int,
+    project: Optional[str] = None,
+    *,
+    project_root: Optional[Path] = None,
+    events_path: Optional[Path] = None,
+    claims_root: Optional[Path] = None,
+) -> list[dict]:
+    """Select and spawn up to ``max_lanes`` isolated background lanes.
+
+    The parallel-mode dispatcher (epic x-42d5, group 3). Selects distinct-domain
+    ready nodes via :func:`select_lane_fill` (which atomically holds a lane slot
+    per pick, LD#8), then for each pick: isolates a worktree off origin/main,
+    seeds its per-lane `.fno/settings.local.yaml` (x-cbce), and spawns a detached
+    `claude --bg` `/target no-merge` worker rooted in that worktree. The worker's
+    `fno target init` reconciles the already-held slot rather than acquiring a
+    fresh one.
+
+    ``max_lanes < 2`` selects nothing (byte-identical to today's sequential path;
+    the caller uses single-node dispatch), so this returns ``[]``.
+
+    Per-lane spawn/isolation failure is contained: the lane's slot is released so
+    the node stays re-dispatchable and its receipt records ``skipped``; peer
+    lanes are unaffected (Failure Modes: Errors). Returns one receipt dict per
+    selected lane (``status`` ``dispatched`` | ``skipped``).
+    """
+    from fno.claims.core import ClaimHeldByOther, acquire_claim
+    from fno.claims.lanes import release_lane_slot
+
+    selected = select_lane_fill(max_lanes, project, claim=True, claims_root=claims_root)
+    if not selected:
+        return []
+
+    canonical = _canonical_root()
+    base_pid = _base_project_id(canonical)
+    ev_path = events_path or _events_path(project_root)
+
+    receipts: list[dict] = []
+    for node in selected:
+        node_id = node["id"]
+        slug = node.get("slug") or node.get("title")
+
+        def _skip(reason: str, _nid: str = node_id) -> None:
+            # A pick we will not spawn must return its dispatch-time lane slot,
+            # or the cap stays wrong until TTL. Non-raising cleanup. _nid is bound
+            # per-iteration (default arg) so the closure never captures a later
+            # loop value.
+            try:
+                release_lane_slot(_nid, root=claims_root)
+            except Exception:  # noqa: BLE001
+                pass
+            receipts.append({"node_id": _nid, "status": "skipped", "error": reason})
+
+        # The lane slot (parallel-lane:<id>) is invisible to the sequential
+        # advance()/dispatch-node.sh path, which dedups on node:<id> + dispatch:<id>.
+        # During the boot window before this lane's worker owns node:<id>, that
+        # path would see the node as ready+unclaimed and double-launch it. Guard
+        # with the SAME dispatch:<id> reservation advance() uses (global-rooted,
+        # TTL bridge) so the two dispatchers dedup against each other.
+        if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+            _skip("already-claimed")
+            continue
+        dispatch_key = f"dispatch:{node_id}"
+        dispatch_holder = f"advance:{os.getpid()}"
+        dispatch_root = _claims_root_for(dispatch_key)
+        try:
+            acquire_claim(
+                dispatch_key,
+                dispatch_holder,
+                ttl_ms=_DISPATCH_TTL_MS,
+                reason=f"parallel lane dispatch for {node_id}",
+                root=dispatch_root,
+            )
+        except ClaimHeldByOther:
+            _skip("already-claimed")
+            continue
+        except Exception as exc:  # noqa: BLE001
+            _skip(f"claim-error: {str(exc)[:120]}")
+            continue
+
+        # dispatch:<id> is reserved just above (bridges the boot window until the
+        # worker owns node:<id>); the lane slot select_lane_fill acquired is
+        # re-anchored to the worker's lifecycle in target_cli._maybe_reconcile_lane_slot
+        # (LD#8) once its target-init claims the node. Both are released on the
+        # failure path below.
+        try:
+            worktree = _ensure_lane_worktree(node_id, canonical_root=canonical)
+            _seed_lane_local_settings(worktree, node_id, base_pid)
+            short_id = _spawn_worker(node_id, str(worktree), slug)
+        except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
+            # Release BOTH the boot-window reservation and the dispatch-time lane
+            # slot so the node returns to the pool (a later tick re-dispatches it).
+            _safe_release(dispatch_key, dispatch_holder, dispatch_root)
+            _LOG.warning("dispatch_lanes: lane %s skipped: %s", node_id, exc)
+            _skip(str(exc)[:200])
+            continue
+
+        # Dispatched. Leave dispatch:<id> to expire by TTL: the worker now owns
+        # (or is acquiring) node:<id> and reconciles its lane slot at target init.
+        _emit(
+            EVENT_DISPATCHED,
+            {
+                "node_id": node_id,
+                "short_id": short_id,
+                "agent_name": _worker_agent_name(node_id, slug),
+                "lane": True,
+                "worktree": str(worktree),
+            },
+            ev_path,
+        )
+        receipts.append(
+            {
+                "node_id": node_id,
+                "status": "dispatched",
+                "short_id": short_id,
+                "worktree": str(worktree),
+            }
+        )
+    return receipts
+
+
+# ---------------------------------------------------------------------------
 # Claim helpers (route each key like the `fno claim` CLI's _node_aware_root)
 # ---------------------------------------------------------------------------
 

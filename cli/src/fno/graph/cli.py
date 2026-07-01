@@ -1949,6 +1949,36 @@ def cmd_lane_fill(
     typer.echo(json.dumps(selected, indent=2))
 
 
+# -- dispatch-lanes --
+
+@cli.command("dispatch-lanes")
+def cmd_dispatch_lanes(
+    max_lanes: Optional[int] = typer.Option(
+        None, "--max", help="Max lanes (default: config.parallel.max_lanes)."
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Filter by project name"
+    ),
+) -> None:
+    """Spawn up to max_lanes isolated background lanes (parallel mode, group 3).
+
+    Selects distinct-domain ready nodes (like ``lane-fill``), then for each one
+    isolates a worktree off origin/main, seeds its per-lane
+    ``.fno/settings.local.yaml`` (x-cbce: own parking_lot_path + project.id), and
+    spawns a detached ``/target no-merge`` worker rooted there. Prints one JSON
+    receipt per lane (``status`` dispatched | skipped). ``max_lanes < 2`` spawns
+    nothing (sequential: use ``fno backlog advance`` / ``next``).
+    """
+    from fno.backlog.advance import dispatch_lanes
+
+    if max_lanes is None:
+        from fno.config import load_settings
+        max_lanes = load_settings().config.parallel.max_lanes
+
+    receipts = dispatch_lanes(max_lanes, project)
+    typer.echo(json.dumps(receipts, indent=2))
+
+
 # -- get --
 
 @cli.command("get")
