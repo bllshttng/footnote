@@ -30,6 +30,9 @@
 | `config.backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |
 | `config.backlog.id_prefix` | str (optional) | _(none)_ | always | Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-). |
 | `config.backlog.id_hex_width` | int | `8` | advanced | Hex width of minted node IDs (4-8). |
+| `config.batch.enabled` | bool | `false` | advanced | Coalesce same-domain nodes into one batch PR (opt-in). |
+| `config.batch.max_nodes` | int | `3` | advanced | Nodes per batch before it closes (default 3). |
+| `config.batch.max_loc` | int (optional) | _(none)_ | advanced | Optional cumulative-diff LOC ceiling for a batch (off by default). |
 | `config.post_merge.parking_lot_path` | str (optional) | _(none)_ | advanced | Per-repo vault parking-lot path for the post-merge ritual (repo-relative). |
 | `config.post_merge.enabled` | bool | `true` | advanced | Whether the post-merge ritual runs. |
 | `config.post_merge.self_reap` | bool | `false` | never | Whether a post-merge watcher self-reaps. |
