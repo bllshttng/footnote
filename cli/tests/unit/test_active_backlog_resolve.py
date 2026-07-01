@@ -113,5 +113,8 @@ def test_as_dicts_shape(monkeypatch):
             # batch-lane (x-6cdf): per-repo config.batch.enabled; False for a
             # repo with no batch config (fail-safe default).
             "batch": False,
+            # parallel mode (x-42d5 G4): per-repo config.parallel.max_lanes;
+            # 1 (sequential) for a repo with no parallel config (fail-safe).
+            "max_lanes": 1,
         }
     ]
