@@ -115,6 +115,7 @@ fn base_cfg(tmp: &Path, abi_bin: PathBuf, lib_path: PathBuf, failure_limit: u32)
         max_iterations: 10,
         per_unit_max_dispatches: 1,
         failure_limit,
+        batch: false,
     }
 }
 
@@ -309,5 +310,174 @@ exit 0"#,
             .iter()
             .any(|e| e.contains("active_backlog_parked") && e.contains("ab-park0001")),
         "expected active_backlog_parked event"
+    );
+}
+
+// ── batch-lane (x-6cdf): batched dispatch when config.batch is on ────────────────
+
+/// A driver that records CONTINUE_PROMPT + its cwd + batch env to a file, then
+/// emits a `reason` termination so run_loop closes the unit. `reason` lets the
+/// batched path emit DoneBatched and the non-batched path emit DonePRGreen.
+fn driver_lib_record_reason(dir: &Path, journal: &Path, record: &Path, reason: &str) -> PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    let body = format!(
+        r#"#!/usr/bin/env bash
+driver_default_max() {{ echo 10; }}
+driver_invoke() {{
+  local sid="${{TARGET_SESSION_ID:-}}"
+  printf 'prompt=%s\ncwd=%s\nbatched=%s\nworktree=%s\n' \
+    "${{CONTINUE_PROMPT:-}}" "$PWD" "${{TARGET_BATCHED:-}}" "${{TARGET_BATCH_WORKTREE:-}}" > "{rec}"
+  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{{"ts":"%s","type":"termination","source":"hook","data":{{"session_id":"%s","reason":"{reason}","message":"m"}}}}\n' "$ts" "$sid" >> "{j}"
+}}
+"#,
+        rec = record.display(),
+        j = journal.display(),
+        reason = reason,
+    );
+    let p = dir.join("driver-claude-code.sh");
+    fs::write(&p, body.as_bytes()).unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[test]
+fn batch_enabled_dispatches_batched_worker_and_ships_closeable() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    let (journal, project_journal) = journal_in(tmp.path());
+    let record = tmp.path().join("driver-record.txt");
+    let lib = driver_lib_record_reason(
+        &tmp.path().join("lib"),
+        &project_journal,
+        &record,
+        "DoneBatched",
+    );
+
+    // The shared batch worktree must exist (ShelloutDispatcher runs cwd there).
+    let wt = tmp.path().join("batch-wt");
+    fs::create_dir_all(&wt).unwrap();
+
+    // fno stub: backlog next -> node A then null; `batch prepare` -> batched with
+    // the temp worktree; `batch ship-closeable` -> records it fired; else ok.
+    let ship_marker = tmp.path().join("ship-closeable-fired");
+    let node_a = node_json("ab-batch001");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then
+  c="$(cat "{cnt}" 2>/dev/null || echo 0)"; c=$((c+1)); echo "$c" > "{cnt}"
+  if [[ "$c" -eq 1 ]]; then echo '{node_a}'; else echo 'null'; fi
+  exit 0
+fi
+if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "prepare" ]]; then
+  printf '{{"mode":"batched","domain":"code","worktree":"{wt}","branch":"feature/batch-code","batch_id":"batch-aaaa"}}\n'
+  exit 0
+fi
+if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "ship-closeable" ]]; then
+  echo fired > "{ship}"; printf '{{"shipped":[]}}\n'; exit 0
+fi
+exit 0"#,
+            cnt = tmp.path().join("cnt.txt").display(),
+            node_a = node_a,
+            wt = wt.display(),
+            ship = ship_marker.display(),
+        ),
+    );
+    fs::write(tmp.path().join("cnt.txt"), "0").unwrap();
+
+    let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
+    cfg.batch = true;
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(
+        out,
+        DrainOutcome::Dispatched {
+            node: "ab-batch001".to_string()
+        },
+        "got {out:?}"
+    );
+
+    // The worker was dispatched as a batched /target in the shared worktree.
+    let rec = fs::read_to_string(&record).unwrap();
+    assert!(
+        rec.contains("prompt=/target batched ab-batch001"),
+        "record: {rec}"
+    );
+    assert!(
+        rec.contains("batched=1"),
+        "TARGET_BATCHED must be set: {rec}"
+    );
+    assert!(
+        rec.contains(&format!("worktree={}", wt.display())),
+        "record: {rec}"
+    );
+    // cwd ends with the batch worktree dir (macOS /var -> /private/var symlink
+    // normalization means an exact prefix match is brittle).
+    assert!(
+        rec.lines()
+            .any(|l| l.starts_with("cwd=") && l.ends_with("batch-wt")),
+        "driver must run in batch worktree: {rec}"
+    );
+
+    // ship-closeable fired after the tick.
+    assert!(
+        ship_marker.exists(),
+        "ship-closeable must be invoked when batch is on"
+    );
+}
+
+#[test]
+fn batch_disabled_dispatches_normal_worker() {
+    // With cfg.batch=false the dispatch is byte-for-byte today's path: no
+    // `batch prepare` consult, prompt is `/target no-merge <id>`.
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    let (journal, project_journal) = journal_in(tmp.path());
+    let record = tmp.path().join("driver-record.txt");
+    let lib = driver_lib_record_reason(
+        &tmp.path().join("lib"),
+        &project_journal,
+        &record,
+        "DonePRGreen",
+    );
+    let node_a = node_json("ab-nobatch1");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then
+  c="$(cat "{cnt}" 2>/dev/null || echo 0)"; c=$((c+1)); echo "$c" > "{cnt}"
+  if [[ "$c" -eq 1 ]]; then echo '{node_a}'; else echo 'null'; fi
+  exit 0
+fi
+if [[ "$1" == "backlog" && "$2" == "batch" ]]; then echo 'UNEXPECTED batch call' >&2; exit 99; fi
+exit 0"#,
+            cnt = tmp.path().join("cnt.txt").display(),
+            node_a = node_a,
+        ),
+    );
+    fs::write(tmp.path().join("cnt.txt"), "0").unwrap();
+    let cfg = base_cfg(tmp.path(), fno, lib, 3); // batch defaults false
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(
+        out,
+        DrainOutcome::Dispatched {
+            node: "ab-nobatch1".to_string()
+        },
+        "got {out:?}"
+    );
+    let rec = fs::read_to_string(&record).unwrap();
+    assert!(
+        rec.contains("prompt=/target no-merge ab-nobatch1"),
+        "record: {rec}"
+    );
+    assert!(
+        rec.contains("batched=\n") || !rec.contains("batched=1"),
+        "TARGET_BATCHED unset: {rec}"
     );
 }

@@ -123,6 +123,22 @@ def resolve_drain_targets() -> list[DrainTarget]:
     return targets
 
 
+def _batch_enabled_for(cwd: str) -> bool:
+    """config.batch.enabled for a target repo (batch-lane Wave 2, x-6cdf).
+
+    Read per-repo so a project opts into batched dispatch independently. Fail-
+    safe to False (the daemon then dispatches normal /target no-merge workers).
+    """
+    try:
+        from pathlib import Path as _P
+
+        from fno.config import load_settings_for_repo
+
+        return bool(load_settings_for_repo(_P(cwd)).config.batch.enabled)
+    except Exception:  # noqa: BLE001 - a bad/absent settings must not enable
+        return False
+
+
 def drain_targets_as_dicts() -> list[dict]:
     """JSON-serializable form of :func:`resolve_drain_targets` for the daemon."""
     return [
@@ -132,6 +148,7 @@ def drain_targets_as_dicts() -> list[dict]:
             "interval_seconds": t.interval_seconds,
             "failure_limit": t.failure_limit,
             "mission": t.mission,
+            "batch": _batch_enabled_for(t.cwd),
         }
         for t in resolve_drain_targets()
     ]
