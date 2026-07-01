@@ -4,3 +4,6 @@
 
 pub mod bootstrap;
 pub mod proto;
+pub mod pty;
+pub mod server;
+pub mod vt;

@@ -122,6 +122,9 @@ pub mod cell_flags {
     pub const UNDERLINE: u8 = 1 << 2;
     pub const INVERSE: u8 = 1 << 3;
     pub const DIM: u8 = 1 << 4;
+    /// The second cell of a wide (CJK/emoji) glyph. Compositors skip it so
+    /// the glyph's right half is never overdrawn.
+    pub const WIDE_SPACER: u8 = 1 << 5;
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

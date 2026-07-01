@@ -102,10 +102,8 @@ fn run_client(_session: &str) {
     std::process::exit(1);
 }
 
-fn run_server(_socket: PathBuf) {
-    // Task 1.2 wires the server spine.
-    eprintln!("fno mux: server not implemented yet");
-    std::process::exit(1);
+fn run_server(socket: PathBuf) {
+    std::process::exit(fno::server::run(socket));
 }
 
 #[cfg(test)]
