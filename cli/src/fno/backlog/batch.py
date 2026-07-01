@@ -446,8 +446,13 @@ def ship_batch(
         _abandon_and_requeue(domain, members, root)
         return ShipResult("abandoned", domain, reason="no PR url from gh", members=members)
 
-    close_batch(domain=domain, pr_url=pr_url, root=root)
+    # Record the shared ref on members BEFORE marking the batch closed. If the
+    # graph write fails, the batch stays `open`, so a later ship-closeable tick
+    # re-runs: `gh pr list --head` reuses the existing PR (idempotent) and retries
+    # the ref write + close. Closing first would strand members `batch`-marked
+    # with no pr_number (excluded from next forever, unclosable by reconcile).
     _set_member_pr_refs(members, pr_url=pr_url, pr_number=pr_number, root=root)
+    close_batch(domain=domain, pr_url=pr_url, root=root)
     return ShipResult("shipped", domain, pr_url=pr_url, pr_number=pr_number, members=members)
 
 
@@ -481,20 +486,37 @@ def _get_node(node_id: str, run: Runner) -> Optional[dict]:
     return None
 
 
+class PeekError(RuntimeError):
+    """`fno backlog next` could not be read (distinct from a genuine drain)."""
+
+
 def _peek_next(project: Optional[str], run: Runner) -> Optional[dict]:
-    """The next ready node (post batch-member exclusion), or None on drain/error."""
+    """The next ready node (post batch-member exclusion), or None on genuine drain.
+
+    Raises PeekError on ANY failure (non-zero exit, unparseable output). A drain
+    (exit 0 + `null`/empty) MUST stay distinct from an error: `should_close`
+    treats next=None as "drain -> close every open batch", so silently mapping a
+    transient `fno backlog next` hiccup to None would ship every open batch as-is
+    (1-node batches included) on one bad tick. The caller skips the tick on
+    PeekError instead.
+    """
     cmd = ["fno", "backlog", "next"]
     if project:
         cmd += ["--project", project]
     try:
         p = run(cmd)
-        out = (p.stdout or "").strip()
-        if p.returncode == 0 and out and out != "null":
-            node = json.loads(out)
-            return node if isinstance(node, dict) else None
     except Exception as e:  # noqa: BLE001
-        _LOG.warning("batch: fno backlog next peek failed: %s", e)
-    return None
+        raise PeekError(f"fno backlog next spawn failed: {e}") from e
+    if p.returncode != 0:
+        raise PeekError(f"fno backlog next exited {p.returncode}: {(p.stderr or '').strip()[:160]}")
+    out = (p.stdout or "").strip()
+    if not out or out == "null":
+        return None  # genuine drain
+    try:
+        node = json.loads(out)
+    except json.JSONDecodeError as e:
+        raise PeekError(f"fno backlog next returned non-JSON: {e}") from e
+    return node if isinstance(node, dict) else None
 
 
 def prepare_batch(
@@ -559,16 +581,27 @@ def ship_closeable(
 
     Called by the daemon after each tick. Peeks the next ready node once and
     evaluates `should_close` per open batch: a batch closes when it is full, the
-    next ready node is a different domain (or size:L/p0), max_loc is exceeded, or
-    the backlog drained (next is None -> close whatever is open).
+    next ready node is a different domain (or size:L/p0), or the backlog drained
+    (next is None -> close whatever is open).
+
+    A peek FAILURE (distinct from a drain) skips the whole tick and ships nothing:
+    treating a transient `fno backlog next` error as a drain would prematurely
+    ship every open batch. The next healthy tick retries.
+
+    Note: `config.batch.max_loc` is NOT enforced here in v1 - the batch state does
+    not track cumulative diff LOC, so there is no `cum_loc` to compare. The knob
+    stays inert (never wrongly closes) until a later wave records per-batch LOC.
     """
-    next_node = _peek_next(project, run)
-    max_loc = _config_max_loc(root)
+    try:
+        next_node = _peek_next(project, run)
+    except PeekError as e:
+        _LOG.warning("batch ship-closeable: peek failed, skipping tick: %s", e)
+        return []
     results: list[ShipResult] = []
     for b in list_batches(root):
         if b.get("status") != "open":
             continue
-        close, _reason = should_close(b, next_node, max_loc=max_loc)
+        close, _reason = should_close(b, next_node)
         if close:
             results.append(ship_batch(domain=b["domain"], root=root, run=run))
     return results
@@ -581,15 +614,6 @@ def _config_max_nodes(root: Path) -> int:
         return int(load_settings_for_repo(Path(root)).config.batch.max_nodes)
     except Exception:  # noqa: BLE001 - default matches config coercion
         return 3
-
-
-def _config_max_loc(root: Path) -> Optional[int]:
-    try:
-        from fno.config import load_settings_for_repo
-
-        return load_settings_for_repo(Path(root)).config.batch.max_loc
-    except Exception:  # noqa: BLE001 - off by default
-        return None
 
 
 # ---------------------------------------------------------------------------

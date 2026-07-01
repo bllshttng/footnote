@@ -164,7 +164,6 @@ def batching_on(monkeypatch):
     """Force config.batch.enabled True + max_nodes 3 for prepare/ship-closeable."""
     monkeypatch.setattr(B, "_load_batch_enabled", lambda root=None: True)
     monkeypatch.setattr(B, "_config_max_nodes", lambda root: 3)
-    monkeypatch.setattr(B, "_config_max_loc", lambda root: None)
 
 
 def test_prepare_solo_when_disabled(tmp_path, monkeypatch):
@@ -263,6 +262,28 @@ def test_ship_closeable_ships_on_drain(tmp_path, graph, batching_on):
     r = CloseableRunner(next_node=None)
     results = B.ship_closeable(project="fno", root=tmp_path, run=r)
     assert len(results) == 1 and results[0].action == "shipped"
+
+
+class PeekFailRunner:
+    """Runner whose `fno backlog next` fails (rc!=0) - a transient peek error."""
+
+    def __call__(self, cmd, *, cwd=None):
+        if cmd[:3] == ["fno", "backlog", "next"]:
+            return _cp(1, "", "graph locked")
+        if cmd[:3] == ["gh", "pr", "create"]:
+            raise AssertionError("must not ship on a peek error")
+        return _cp(0, "")
+
+
+def test_ship_closeable_skips_tick_on_peek_error(tmp_path, graph, batching_on):
+    graph([_member_node("x-1")])
+    _open(tmp_path, worktree=str(tmp_path / "wt"))
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    # A transient `fno backlog next` failure must NOT be treated as a drain: the
+    # open batch stays open and nothing ships.
+    results = B.ship_closeable(project="fno", root=tmp_path, run=PeekFailRunner())
+    assert results == []
+    assert B.read_batch("code", tmp_path)["status"] == "open"
 
 
 def test_pr_body_lists_members():
