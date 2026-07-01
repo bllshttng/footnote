@@ -37,6 +37,7 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -85,6 +86,14 @@ pub const INITIAL_RESIZE_TIMEOUT: Duration = Duration::from_secs(2);
 /// `agent.drive` ack. A client that never finishes the upgrade must not pin the
 /// controlling slot + authority window; on timeout the attach is abandoned.
 pub const UPGRADE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling on the cross-process claim probe in [`external_claude_writer`], which
+/// shells the `fno` (Python) CLI on the interactive-claude drive-OPEN path. On a
+/// loaded box (a grid of many agents) that spawn can outrun the client's 3s
+/// drive-open budget, so every interactive-claude refocus fails to open and the
+/// grid appears frozen. The in-process single-controller `table` slot is the
+/// primary writer guard; this probe only backstops an external relay, so it fails
+/// OPEN when it outruns this budget. Well under the client's `DRIVE_OPEN_TIMEOUT`.
+const CLAIM_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 /// PTY output poll cadence for the drive output pump.
 const OUTPUT_POLL_INTERVAL: Duration = Duration::from_millis(30);
 
@@ -337,29 +346,133 @@ fn external_session_writer(state: &SessionClaimState, self_holder: &str) -> Opti
     }
 }
 
+/// The GLOBAL claims dir for `session:` keys, mirroring `fno.claims.io`: a session
+/// claim is durable + cross-checkout, so it is rooted at `$FNO_CLAIMS_ROOT` (else
+/// `$HOME`) under `.fno/claims`, NOT the cwd-local repo dir. `None` when no root
+/// resolves (then the gate can't derive a path and falls through to the CLI).
+fn global_claims_dir() -> Option<PathBuf> {
+    // Match the Python source of truth (`fno.claims.io.global_claims_root`): an
+    // EMPTY `FNO_CLAIMS_ROOT` is treated as UNSET (falls back to `$HOME`). A
+    // set-but-empty value must NOT resolve the claims dir to a cwd-relative
+    // `.fno/claims` - that would let the gate miss a real `~/.fno/claims/...`
+    // lock and fail the interlock open (gemini HIGH / codex P2). Not filtered:
+    // the literal `"null"`, because Python treats it as a real path - filtering
+    // it would re-introduce the very divergence this closes.
+    global_claims_dir_from(
+        std::env::var_os("FNO_CLAIMS_ROOT"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// Testable core of [`global_claims_dir`]: the two env values are explicit so the
+/// empty-is-unset contract is exercised without mutating process-global env.
+fn global_claims_dir_from(
+    claims_root: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let non_empty = |v: std::ffi::OsString| (!v.is_empty()).then_some(v);
+    claims_root
+        .and_then(non_empty)
+        .or_else(|| home.and_then(non_empty))
+        .map(PathBuf::from)
+        .map(|r| r.join(".fno/claims"))
+}
+
+/// The claim lockfile path for `session:<uuid>` under `dir`, mirroring the Python
+/// filename layout `<url-encoded-key>.lock`. `fno`'s `quote(key, safe="")` escapes
+/// every byte that is NOT url-unreserved, so for a `session:<uuid>` key the only
+/// escaped byte is the `:` (`%3A`) as long as the uuid is unreserved-only. If the
+/// uuid carries a byte that WOULD escape, return `None` so a derived path can never
+/// silently disagree with the CLI's encoding - the caller then falls through to the
+/// authoritative CLI probe (which does its own encoding).
+fn session_claim_lock_path_in(dir: &Path, uuid: &str) -> Option<PathBuf> {
+    let unreserved = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+    if uuid.is_empty() || !uuid.bytes().all(unreserved) {
+        return None;
+    }
+    Some(dir.join(format!("session%3A{uuid}.lock")))
+}
+
 /// Read the cross-process `session:<uuid>` claim and return an EXTERNAL writer's
-/// holder if one is live (X1 / AC3-EDGE). Shells `fno claim status` on a blocking
-/// thread; any spawn / non-zero exit / parse failure reads as no external writer
-/// (fail-open).
+/// holder if one is live (X1 / AC3-EDGE), WITHOUT paying for the `fno` Python CLI
+/// in the common case. The claim is only ever a lockfile, so if none exists there
+/// is no writer - see [`external_claude_writer_gated`].
 async fn external_claude_writer(uuid: &str, self_holder: &str) -> Option<String> {
+    // Honor FNO_BIN (test/custom environments); fall back to PATH `fno`. var_os
+    // avoids silently dropping a non-UTF-8 path; a set-but-EMPTY value is treated
+    // as unset (else `Command::new("")` just fails to spawn) (gemini HIGH).
+    let fno_bin = std::env::var_os("FNO_BIN")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "fno".into());
+    external_claude_writer_gated(
+        uuid,
+        self_holder,
+        global_claims_dir(),
+        fno_bin,
+        CLAIM_PROBE_TIMEOUT,
+    )
+    .await
+}
+
+/// Gate the CLI probe on the claim lockfile's EXISTENCE (herdr-informed): the
+/// cross-process claim is only ever a lockfile, so if none exists there is no
+/// external writer and we short-circuit WITHOUT shelling the `fno` Python CLI -
+/// whose cold start on a loaded box is what froze the grid on every interactive-
+/// claude refocus. Only a PRESENT lockfile pays for the authoritative (bounded)
+/// [`external_claude_writer_bin`] probe. A path we cannot confidently derive
+/// (`claims_dir` None, or a uuid that would url-encode) falls through to the CLI.
+///
+/// Semantics are unchanged: an absent lockfile and a derive-miss both match the
+/// CLI's `free -> no external writer` verdict; the only difference is skipping a
+/// subprocess when the answer (no claim -> no writer) is already knowable from the
+/// filesystem. A wrong `claims_dir` can only degrade to today's timeout fail-open,
+/// never to a silently-broken interlock.
+async fn external_claude_writer_gated(
+    uuid: &str,
+    self_holder: &str,
+    claims_dir: Option<PathBuf>,
+    fno_bin: std::ffi::OsString,
+    budget: Duration,
+) -> Option<String> {
+    if let Some(dir) = claims_dir {
+        if let Some(path) = session_claim_lock_path_in(&dir, uuid) {
+            if !path.exists() {
+                return None;
+            }
+        }
+    }
+    external_claude_writer_bin(uuid, self_holder, fno_bin, budget).await
+}
+
+/// Testable core of [`external_claude_writer`]: the `fno` binary and the probe
+/// budget are explicit so a slow-probe (fail-open) regression can be exercised
+/// without mutating the process-global `FNO_BIN` env.
+async fn external_claude_writer_bin(
+    uuid: &str,
+    self_holder: &str,
+    fno_bin: std::ffi::OsString,
+    budget: Duration,
+) -> Option<String> {
     if uuid.is_empty() {
         return None;
     }
     let key = format!("session:{uuid}");
-    // Honor FNO_BIN (test/custom environments); fall back to PATH `fno`. var_os
-    // avoids silently dropping a non-UTF-8 path.
-    let fno_bin = std::env::var_os("FNO_BIN").unwrap_or_else(|| "fno".into());
-    let out = tokio::task::spawn_blocking(move || {
+    let probe = tokio::task::spawn_blocking(move || {
         std::process::Command::new(fno_bin)
             .args(["claim", "status", &key, "-J"])
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .output()
             .ok()
-    })
-    .await
-    .ok()
-    .flatten()?;
+    });
+    // Bound the probe: `fno` is a Python CLI, and on a busy machine its cold
+    // start can exceed the client's drive-open budget, stalling the grid on every
+    // interactive-claude refocus. On timeout, fail OPEN (drop the handle; the
+    // orphaned `output()` finishes and reaps itself on the blocking pool).
+    let out = match tokio::time::timeout(budget, probe).await {
+        Ok(Ok(Some(o))) => o,
+        _ => return None,
+    };
     if !out.status.success() {
         return None;
     }
@@ -1219,6 +1332,152 @@ mod tests {
                 self_holder
             ),
             Some("relay:abc".to_string())
+        );
+    }
+
+    /// Regression (rail -> drive freeze): the cross-process claim probe shells
+    /// the `fno` Python CLI on the interactive-claude drive-open path. A slow
+    /// probe must fail OPEN within `budget` rather than stall the drive open
+    /// (which, unbounded, exceeds the client's 3s budget and freezes the grid on
+    /// every refocus).
+    #[tokio::test]
+    async fn external_claude_writer_fails_open_when_probe_is_slow() {
+        let script = std::env::temp_dir().join(format!("slowfno_{}.sh", std::process::id()));
+        std::fs::write(&script, "#!/bin/sh\nsleep 5\necho '{}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let start = std::time::Instant::now();
+        let holder = external_claude_writer_bin(
+            "some-uuid",
+            "pty:x",
+            script.clone().into_os_string(),
+            Duration::from_millis(300),
+        )
+        .await;
+        let elapsed = std::time::Instant::now().saturating_duration_since(start);
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(
+            holder, None,
+            "a slow probe must fail open (no external writer)"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "probe was not bounded: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn session_claim_lock_path_mirrors_fno_encoding() {
+        let dir = Path::new("/tmp/claims");
+        // A standard uuid is url-unreserved, so only the key's ':' escapes.
+        assert_eq!(
+            session_claim_lock_path_in(dir, "9f1c-abcd"),
+            Some(dir.join("session%3A9f1c-abcd.lock"))
+        );
+        // A uuid carrying a byte that WOULD url-encode -> None (fall through to the
+        // CLI, never a path that silently disagrees with `fno`'s encoding).
+        assert_eq!(session_claim_lock_path_in(dir, "a/b"), None);
+        assert_eq!(session_claim_lock_path_in(dir, "a b"), None);
+        assert_eq!(session_claim_lock_path_in(dir, ""), None);
+    }
+
+    #[test]
+    fn global_claims_dir_treats_empty_env_as_unset() {
+        use std::ffi::OsString;
+        let os = |s: &str| OsString::from(s);
+        // A set root wins.
+        assert_eq!(
+            global_claims_dir_from(Some(os("/root")), Some(os("/home"))),
+            Some(PathBuf::from("/root/.fno/claims"))
+        );
+        // EMPTY root falls back to home (Python's empty-is-unset), NOT a
+        // cwd-relative `.fno/claims` that would blind the interlock.
+        assert_eq!(
+            global_claims_dir_from(Some(os("")), Some(os("/home"))),
+            Some(PathBuf::from("/home/.fno/claims"))
+        );
+        // Empty/absent both -> None; the gate then falls through to the CLI.
+        assert_eq!(global_claims_dir_from(Some(os("")), Some(os(""))), None);
+        assert_eq!(global_claims_dir_from(None, None), None);
+    }
+
+    /// The gate must SKIP the CLI entirely when no claim lockfile exists (the
+    /// common case: nothing else co-writing). Point it at an `fno` that would sleep
+    /// past the budget; short-circuiting returns fast without ever running it.
+    #[tokio::test]
+    async fn gate_skips_probe_when_no_lockfile() {
+        let dir = std::env::temp_dir().join(format!("noclaims_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir); // empty: no lockfile for our uuid
+        let slow = std::env::temp_dir().join(format!("slowfno_g_{}.sh", std::process::id()));
+        std::fs::write(&slow, "#!/bin/sh\nsleep 5\necho '{}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let start = std::time::Instant::now();
+        let holder = external_claude_writer_gated(
+            "gate-uuid",
+            "pty:x",
+            Some(dir.clone()),
+            slow.clone().into_os_string(),
+            Duration::from_secs(5),
+        )
+        .await;
+        let elapsed = std::time::Instant::now().saturating_duration_since(start);
+        let _ = std::fs::remove_file(&slow);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(holder, None, "no lockfile -> no external writer");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "gate did not skip the probe (would have blocked on the slow fno): {elapsed:?}"
+        );
+    }
+
+    /// When a lockfile IS present the gate falls through to the authoritative probe
+    /// (a slow stub here -> bounded fail-open), proving the gate never blinds the
+    /// interlock when a claim actually exists.
+    #[tokio::test]
+    async fn gate_runs_probe_when_lockfile_present() {
+        let dir = std::env::temp_dir().join(format!("hasclaim_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session%3Ahas-uuid.lock"),
+            "holder: other\npid: 1\n",
+        )
+        .unwrap();
+        let slow = std::env::temp_dir().join(format!("slowfno_h_{}.sh", std::process::id()));
+        std::fs::write(&slow, "#!/bin/sh\nsleep 5\necho '{}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let start = std::time::Instant::now();
+        let holder = external_claude_writer_gated(
+            "has-uuid",
+            "pty:x",
+            Some(dir.clone()),
+            slow.clone().into_os_string(),
+            Duration::from_millis(300),
+        )
+        .await;
+        let elapsed = std::time::Instant::now().saturating_duration_since(start);
+        let _ = std::fs::remove_file(&slow);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(holder, None, "slow probe fails open");
+        // It WAITED on the probe (~budget) rather than short-circuiting instantly,
+        // which is how we know the present lockfile routed through the CLI.
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "gate short-circuited despite a present lockfile: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "probe not bounded: {elapsed:?}"
         );
     }
 
