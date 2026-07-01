@@ -110,5 +110,8 @@ def test_as_dicts_shape(monkeypatch):
             "interval_seconds": 300,
             "failure_limit": 3,
             "mission": None,
+            # batch-lane (x-6cdf): per-repo config.batch.enabled; False for a
+            # repo with no batch config (fail-safe default).
+            "batch": False,
         }
     ]
