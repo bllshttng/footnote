@@ -110,6 +110,19 @@ def test_empty_lane_id_rejected(tmp_path):
         acquire_lane_slot(max_lanes=2, lane_id="", root=tmp_path)
 
 
+def test_ttl_none_coerces_to_default_not_pid_liveness(tmp_path):
+    """A lane slot is always TTL-anchored: ttl_ms=None must NOT create a
+    PID-liveness claim (which would die with the transient acquirer and defeat
+    the cap). expires_at must be set to the lane default window."""
+    from fno.claims.lanes import DEFAULT_LANE_TTL_MS
+
+    claim = acquire_lane_slot(max_lanes=2, lane_id="node-a", ttl_ms=None, root=tmp_path)
+    assert claim is not None
+    assert claim.expires_at is not None, "ttl_ms=None must not yield a PID-liveness slot"
+    # Window is roughly the lane default (acquired_at + DEFAULT_LANE_TTL_MS).
+    assert claim.expires_at - claim.acquired_at == DEFAULT_LANE_TTL_MS
+
+
 def test_count_ignores_other_claim_kinds(tmp_path):
     """active_lane_count filters by the lane-slot prefix, not all claims."""
     from fno.claims import acquire_claim
