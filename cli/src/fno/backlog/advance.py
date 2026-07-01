@@ -195,6 +195,112 @@ def _next_node(project: Optional[str]) -> Optional[dict]:
     return node
 
 
+# A node with no `domain` set collapses into ONE lane bucket (not one lane
+# each), so a domain-less backlog never fans out into undifferentiated lanes.
+_DOMAIN_UNSET = ""
+
+
+def _ready_nodes(project: Optional[str]) -> list[dict]:
+    """Ordered ready-node summaries via ``fno backlog ready`` (JSON list).
+
+    Reuses the SAME selection surface as ``fno backlog next``: claim-filtered,
+    open-PR-filtered, container-filtered, and rank-sorted. Lane-fill therefore
+    never diverges from the single-node dispatch path. Raises on a garbled
+    response so the caller skips rather than guessing (Failure Modes: Errors).
+    """
+    cmd = ["fno", "backlog", "ready"]
+    if project:
+        cmd += ["--project", project]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"fno backlog ready exited {proc.returncode}: {proc.stderr.strip()[:200]}"
+        )
+    out = (proc.stdout or "").strip()
+    if not out or out == "null":
+        return []
+    nodes = json.loads(out)
+    if not isinstance(nodes, list):
+        raise RuntimeError(f"fno backlog ready returned an unexpected shape: {out[:200]}")
+    return [n for n in nodes if isinstance(n, dict) and n.get("id")]
+
+
+def select_lane_fill(
+    max_lanes: int,
+    project: Optional[str] = None,
+    *,
+    claim: bool = True,
+    claims_root: Optional[Path] = None,
+) -> list[dict]:
+    """Select up to ``max_lanes`` ready nodes from DISTINCT domains, one lane each.
+
+    The parallel-mode (epic x-42d5, group 2) lane-fill selector. With
+    ``claim=True`` each pick atomically acquires a dispatch-time lane slot (the
+    group-1 primitive ``acquire_lane_slot``), so the concurrency cap is enforced
+    by claim atomicity, never a counted snapshot (Locked Decision #7). Each
+    returned node already holds a slot keyed ``parallel-lane:<id>``; the caller
+    spawns one worker per node and the worker's ``target init`` reconciles that
+    same slot (Locked Decision #8) rather than acquiring a fresh one.
+
+    Distinctness is recomputed AFTER each claim from a FRESH ready-list, never a
+    pre-claim snapshot: between two picks a peer may claim a node or a lane may
+    finish, and re-querying reflects that. This is the x-7441 "stops at a
+    claimed head" hazard - selection must skip claimed heads across every domain.
+    A node a live peer lane already holds is skipped so a not-yet-node-claimed
+    lane is never double-dispatched. (Two dispatchers racing the SAME node are
+    prevented upstream by the singleton ``walker:<root>`` claim, so this stays a
+    single-dispatcher selector, not a distributed lock.)
+
+    ``max_lanes < 2`` returns ``[]`` with no side effects: below two lanes there
+    is nothing to parallelize, so the caller falls back to the single-node
+    ``next`` path for byte-identical sequential behavior (AC1-EDGE).
+
+    ``claim=False`` previews the selection (which nodes WOULD dispatch) without
+    holding any slot - the read-only mode, mirroring ``fno backlog next`` sans
+    ``--claim``.
+    """
+    from fno.claims.lanes import acquire_lane_slot, find_lane_slot
+
+    if max_lanes < 2:
+        return []
+
+    selected: list[dict] = []
+    used_domains: set[str] = set()
+    picked_ids: set[str] = set()
+
+    while len(selected) < max_lanes:
+        # ponytail: fresh ready-list per pick is O(max_lanes * ready_count).
+        # max_lanes is small (2-3) and the ready-list is short, so this is
+        # cheap; if a huge backlog makes the re-query hurt, cache the list and
+        # refresh only the claim-state. The fresh query is what makes
+        # distinctness "recomputed after each claim" rather than snapshot-stale.
+        candidate = None
+        for node in _ready_nodes(project):
+            nid = node["id"]
+            if nid in picked_ids:
+                continue
+            domain = node.get("domain") or _DOMAIN_UNSET
+            if domain in used_domains:
+                continue
+            if find_lane_slot(nid, root=claims_root) is not None:
+                continue  # a live peer lane already owns this node
+            candidate = (node, domain)
+            break
+        if candidate is None:
+            break  # no distinct-domain, unclaimed node left
+
+        node, domain = candidate
+        if claim:
+            slot = acquire_lane_slot(max_lanes, node["id"], root=claims_root)
+            if slot is None:
+                break  # cap full: every slot held by a live peer lane
+        selected.append(node)
+        used_domains.add(domain)
+        picked_ids.add(node["id"])
+
+    return selected
+
+
 def _name_slug(raw: Optional[str]) -> str:
     """Normalize a slug/title tail to match the shell dispatchers byte-for-byte.
 
