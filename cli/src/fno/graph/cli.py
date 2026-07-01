@@ -1915,6 +1915,40 @@ def cmd_ready(
     typer.echo(json.dumps(output, indent=2))
 
 
+# -- lane-fill --
+
+@cli.command("lane-fill")
+def cmd_lane_fill(
+    max_lanes: Optional[int] = typer.Option(
+        None, "--max", help="Max lanes (default: config.parallel.max_lanes)."
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Filter by project name"
+    ),
+    claim: bool = typer.Option(
+        False,
+        "--claim",
+        help="Atomically hold a lane slot per selected node (default: preview only).",
+    ),
+) -> None:
+    """Select up to max_lanes ready nodes from DISTINCT domains (parallel mode).
+
+    Prints the JSON list of nodes that would dispatch as concurrent lanes, one
+    per distinct domain (epic x-42d5, group 2). Read-only by default; ``--claim``
+    atomically holds a dispatch-time lane slot per node - what the dispatcher
+    does before spawn (Locked Decision #8). ``max_lanes < 2`` prints ``[]``
+    (sequential: use ``fno backlog next``).
+    """
+    from fno.backlog.advance import select_lane_fill
+
+    if max_lanes is None:
+        from fno.config import load_settings
+        max_lanes = load_settings().config.parallel.max_lanes
+
+    selected = select_lane_fill(max_lanes, project, claim=claim)
+    typer.echo(json.dumps(selected, indent=2))
+
+
 # -- get --
 
 @cli.command("get")

@@ -1,0 +1,215 @@
+"""Unit tests for parallel-mode lane-fill selection (x-eb82, group 2).
+
+Covers `advance.select_lane_fill`: distinct-domain selection, the cap, the
+sequential-degrade edge, the recompute-after-each-claim contract (x-7441), the
+skip-peer-held-lane guard, the domain-unset collapse, and the read-only preview
+mode. `_ready_nodes` is monkeypatched so the selector's logic is tested without
+shelling `fno backlog ready`; the claims root is isolated to `tmp_path`.
+"""
+from __future__ import annotations
+
+from fno.backlog import advance
+from fno.claims.lanes import acquire_lane_slot, active_lane_count, find_lane_slot
+
+
+def _nodes(*specs):
+    """Build ready-node summaries from (id, domain) pairs, in order."""
+    return [{"id": i, "domain": d, "title": i} for i, d in specs]
+
+
+def test_selects_first_of_each_distinct_domain_up_to_cap(tmp_path, monkeypatch):
+    ready = _nodes(("n-a", "code"), ("n-b", "code"), ("n-c", "docs"), ("n-d", "infra"))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-c", "n-d"]
+    assert active_lane_count(root=tmp_path) == 3
+    for n in sel:
+        assert find_lane_slot(n["id"], root=tmp_path) is not None
+
+
+def test_cap_limits_selection(tmp_path, monkeypatch):
+    ready = _nodes(("n-a", "code"), ("n-c", "docs"), ("n-d", "infra"))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+
+    sel = advance.select_lane_fill(2, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-c"]
+    assert active_lane_count(root=tmp_path) == 2
+
+
+def test_max_lanes_below_two_is_sequential_noop(tmp_path, monkeypatch):
+    """AC1-EDGE: <2 lanes selects nothing and holds no slot (caller uses `next`)."""
+    ready = _nodes(("n-a", "code"), ("n-c", "docs"))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+
+    assert advance.select_lane_fill(1, claims_root=tmp_path) == []
+    assert advance.select_lane_fill(0, claims_root=tmp_path) == []
+    assert active_lane_count(root=tmp_path) == 0
+
+
+def test_recomputes_distinctness_after_each_claim(tmp_path, monkeypatch):
+    """x-7441: a fresh ready-list per pick, not a pre-claim snapshot.
+
+    Pass 1 sees n-b(docs); before pass 2 a peer removes n-b from ready and n-c
+    appears. The selector must pick n-c, never the stale n-b.
+    """
+    calls = {"n": 0}
+
+    def fake_ready(project=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _nodes(("n-a", "code"), ("n-b", "docs"))
+        return _nodes(("n-a", "code"), ("n-c", "infra"))
+
+    monkeypatch.setattr(advance, "_ready_nodes", fake_ready)
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-c"]
+    assert calls["n"] >= 2, "must re-query ready between picks"
+
+
+def test_seeds_used_domains_from_live_peer_lane_domains(tmp_path, monkeypatch):
+    """codex P2: a live lane working `code` blocks selecting another `code` node.
+
+    used_domains is seeded from the domains of live lane holders, so the
+    distinct-domain guarantee holds across ticks (the fill-vacant-lanes case),
+    not just within one call.
+    """
+    from fno.claims.lanes import acquire_lane_slot
+
+    ready = _nodes(("n-b", "code"), ("n-c", "docs"))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    # A live peer lane already works a `code` node (records its domain).
+    acquire_lane_slot(
+        max_lanes=3, lane_id="n-a", extra_metadata={"domain": "code"}, root=tmp_path
+    )
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    # `code` is covered by the live peer lane -> only `docs` is selectable.
+    assert [n["id"] for n in sel] == ["n-c"]
+
+
+def test_skips_node_a_peer_lane_already_holds(tmp_path, monkeypatch):
+    """A node with a live lane slot is skipped so it is never double-dispatched."""
+    ready = _nodes(("n-a", "code"), ("n-b", "docs"))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    # A peer lane already owns n-a (different domain would otherwise be picked).
+    acquire_lane_slot(max_lanes=3, lane_id="n-a", root=tmp_path)
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-b"]
+
+
+def test_domain_unset_collapses_to_one_lane(tmp_path, monkeypatch):
+    """Domain-less nodes share ONE bucket, never one lane each."""
+    ready = [
+        {"id": "n-a", "title": "n-a"},  # no domain
+        {"id": "n-b", "domain": None, "title": "n-b"},  # explicit None
+        {"id": "n-c", "domain": "docs", "title": "n-c"},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-c"]
+
+
+def test_preview_mode_holds_no_slots(tmp_path, monkeypatch):
+    """claim=False returns the would-dispatch set without acquiring any slot."""
+    ready = _nodes(("n-a", "code"), ("n-c", "docs"))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+
+    sel = advance.select_lane_fill(3, claim=False, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-c"]
+    assert active_lane_count(root=tmp_path) == 0
+
+
+def test_empty_ready_selects_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: [])
+    assert advance.select_lane_fill(3, claims_root=tmp_path) == []
+
+
+def test_midloop_raise_releases_already_acquired_slots(tmp_path, monkeypatch):
+    """A raise on a LATER pick must not orphan slots from earlier picks.
+
+    Pass 1 acquires n-a's slot; pass 2's ready query raises (a garbled
+    `fno backlog ready`). The caller never receives `selected`, so select_lane_fill
+    must release n-a's slot before re-raising (else it sits held until TTL).
+    """
+    import pytest
+
+    from fno.claims.lanes import active_lane_count
+
+    calls = {"n": 0}
+
+    def flaky_ready(project=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _nodes(("n-a", "code"), ("n-b", "docs"))
+        raise RuntimeError("fno backlog ready exited 1: boom")
+
+    monkeypatch.setattr(advance, "_ready_nodes", flaky_ready)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert active_lane_count(root=tmp_path) == 0, "acquired slot must be released on raise"
+
+
+# -- CLI seam: `fno backlog lane-fill` --
+
+def test_cli_lane_fill_echoes_selection_json(monkeypatch):
+    """The command echoes select_lane_fill's result as JSON and passes --claim."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as gcli
+
+    seen = {}
+
+    def fake_select(max_lanes, project=None, *, claim=False):
+        seen.update(max_lanes=max_lanes, project=project, claim=claim)
+        return [{"id": "n-a", "domain": "code"}]
+
+    monkeypatch.setattr(advance, "select_lane_fill", fake_select)
+
+    res = CliRunner().invoke(
+        gcli.cli, ["lane-fill", "--max", "3", "--project", "fno", "--claim"]
+    )
+
+    assert res.exit_code == 0, res.stdout
+    assert json.loads(res.stdout) == [{"id": "n-a", "domain": "code"}]
+    assert seen == {"max_lanes": 3, "project": "fno", "claim": True}
+
+
+def test_cli_lane_fill_defaults_max_from_config(monkeypatch):
+    """With no --max, the command reads config.parallel.max_lanes."""
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as gcli
+
+    seen = {}
+
+    def fake_select(max_lanes, project=None, *, claim=False):
+        seen["max_lanes"] = max_lanes
+        return []
+
+    monkeypatch.setattr(advance, "select_lane_fill", fake_select)
+    fake_settings = SimpleNamespace(
+        config=SimpleNamespace(parallel=SimpleNamespace(max_lanes=2))
+    )
+    monkeypatch.setattr("fno.config.load_settings", lambda: fake_settings)
+
+    res = CliRunner().invoke(gcli.cli, ["lane-fill"])
+
+    assert res.exit_code == 0, res.stdout
+    assert seen["max_lanes"] == 2

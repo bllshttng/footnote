@@ -1595,6 +1595,58 @@ class ActiveBacklogConfig(BaseModel):
         return bool(self.enabled)
 
 
+class ParallelBlock(BaseModel):
+    """Parallel-mode dispatch settings (nested under 'config.parallel').
+
+    Parallel mode (epic x-42d5) runs up to ``max_lanes`` independent bg
+    worktree lanes concurrently, one per distinct backlog domain, to compress
+    wall-clock time. The cap is the sole cost-bound lever (design Locked
+    Decision #3): it trades CI minutes for throughput, never the reverse.
+
+    ``max_lanes`` is deliberately SHARED config, NOT in the per-worktree
+    ``settings.local.yaml`` override allowlist (:data:`WORKTREE_LOCAL_KEYS`,
+    Locked Decision #10): a per-lane cap is meaningless - every lane must see
+    one global ceiling or the cap does not bound anything. The allowlist is an
+    exact-match frozenset of ``{parking_lot_path, project.id}``, so this key is
+    excluded by construction; do NOT add ``config.parallel.max_lanes`` to it.
+
+    Fields
+    ------
+    max_lanes:
+        Max concurrent lanes. ``0`` disables parallel (sequential); ``1`` is
+        today's single-lane path; ``>=2`` opts into parallelism. Default ``1``
+        (footnote convention: a new feature is OFF until the operator turns it
+        up; the wiring that consumes this lands in later groups). Negative
+        values fail safe to the default rather than raising.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    max_lanes: int = Field(default=1, ge=0)
+
+    @field_validator("max_lanes", mode="before")
+    @classmethod
+    def _coerce_max_lanes(cls, v: object) -> object:
+        """Drop a negative / non-int max_lanes to the default (1); never raise.
+
+        0 (sequential) and 1 (today) are both valid and preserved; only a
+        negative or unparseable value fails safe to 1 (the dangerous direction
+        for a cost-bound cap is an accidental huge fan-out, so an ambiguous
+        value collapses to the conservative single lane).
+        """
+        if isinstance(v, bool):
+            return 1
+        if isinstance(v, int):
+            return v if v >= 0 else 1
+        if isinstance(v, str):
+            try:
+                n = int(v.strip())
+            except ValueError:
+                return 1
+            return n if n >= 0 else 1
+        return 1
+
+
 class ModelProvider(BaseModel):
     """One secondary model provider for role-based routing (z.ai, DeepSeek, ...).
 
@@ -1737,6 +1789,7 @@ class ConfigBlock(BaseModel):
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     think_spawn: ThinkSpawnBlock = Field(default_factory=ThinkSpawnBlock)
     active_backlog: ActiveBacklogConfig = Field(default_factory=ActiveBacklogConfig)
+    parallel: ParallelBlock = Field(default_factory=ParallelBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
     logs: LogsBlock = Field(default_factory=LogsBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
@@ -1892,6 +1945,20 @@ class ConfigBlock(BaseModel):
         through so the inner field coercers still run.
         """
         if isinstance(v, (dict, ActiveBacklogConfig)):
+            return v
+        return {}
+
+    @field_validator("parallel", mode="before")
+    @classmethod
+    def _coerce_parallel(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``parallel:`` degrades to defaults (max_lanes=1).
+
+        Mirrors ``_coerce_active_backlog``: a scalar/list/null cannot build the
+        block; fall back to the default (sequential) rather than raising out of
+        the whole settings load. A dict passes through so ``_coerce_max_lanes``
+        still runs.
+        """
+        if isinstance(v, (dict, ParallelBlock)):
             return v
         return {}
 

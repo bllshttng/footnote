@@ -195,6 +195,170 @@ def _next_node(project: Optional[str]) -> Optional[dict]:
     return node
 
 
+# A node with no `domain` set collapses into ONE lane bucket (not one lane
+# each), so a domain-less backlog never fans out into undifferentiated lanes.
+_DOMAIN_UNSET = ""
+
+
+def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
+    """Domains currently held by live lane slots, for distinct-domain seeding.
+
+    LD#8 recomputes distinctness against the live-claim world, not just this
+    call's picks: a lane already working a ``code`` node must stop a fill from
+    selecting another ``code`` node (else two same-domain lanes run concurrently,
+    the exact collision domain-lane parallelism exists to prevent). Each lane
+    records its ``domain`` in slot metadata at acquire time, so peer-lane domains
+    are readable here without a per-node lookup. A slot with no recorded domain
+    (e.g. one taken via the bare ``fno claim lane-acquire`` CLI) collapses to the
+    ``_DOMAIN_UNSET`` bucket - conservatively blocking co-schedule with an
+    unknown-domain lane rather than guessing it is safe.
+    """
+    from fno.claims.core import list_claims
+    from fno.claims.lanes import LANE_SLOT_PREFIX
+
+    domains: set[str] = set()
+    for claim in list_claims(prefix=LANE_SLOT_PREFIX, root=claims_root):
+        meta = claim.get("metadata") or {}
+        domains.add(meta.get("domain") or _DOMAIN_UNSET)
+    return domains
+
+
+def _ready_nodes(project: Optional[str]) -> list[dict]:
+    """Ordered ready-node summaries via ``fno backlog ready`` (JSON list).
+
+    Reuses the SAME selection surface as ``fno backlog next``: claim-filtered,
+    open-PR-filtered, container-filtered, and rank-sorted. Lane-fill therefore
+    never diverges from the single-node dispatch path. Raises on a garbled
+    response so the caller skips rather than guessing (Failure Modes: Errors).
+    """
+    cmd = ["fno", "backlog", "ready"]
+    if project:
+        cmd += ["--project", project]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"fno backlog ready exited {proc.returncode}: {proc.stderr.strip()[:200]}"
+        )
+    out = (proc.stdout or "").strip()
+    if not out or out == "null":
+        return []
+    nodes = json.loads(out)
+    if not isinstance(nodes, list):
+        raise RuntimeError(f"fno backlog ready returned an unexpected shape: {out[:200]}")
+    return [n for n in nodes if isinstance(n, dict) and n.get("id")]
+
+
+def select_lane_fill(
+    max_lanes: int,
+    project: Optional[str] = None,
+    *,
+    claim: bool = True,
+    claims_root: Optional[Path] = None,
+) -> list[dict]:
+    """Select up to ``max_lanes`` ready nodes from DISTINCT domains, one lane each.
+
+    The parallel-mode (epic x-42d5, group 2) lane-fill selector. With
+    ``claim=True`` each pick atomically acquires a dispatch-time lane slot (the
+    group-1 primitive ``acquire_lane_slot``), so the concurrency cap is enforced
+    by claim atomicity, never a counted snapshot (Locked Decision #7). Each
+    returned node already holds a slot keyed ``parallel-lane:<id>``; the caller
+    spawns one worker per node and the worker's ``target init`` reconciles that
+    same slot (Locked Decision #8) rather than acquiring a fresh one.
+
+    Distinctness is recomputed AFTER each claim from a FRESH ready-list, never a
+    pre-claim snapshot: between two picks a peer may claim a node or a lane may
+    finish, and re-querying reflects that. This is the x-7441 "stops at a
+    claimed head" hazard - selection must skip claimed heads across every domain.
+    A node a live peer lane already holds is skipped so a not-yet-node-claimed
+    lane is never double-dispatched. (Two dispatchers racing the SAME node are
+    prevented upstream by the singleton ``walker:<root>`` claim, so this stays a
+    single-dispatcher selector, not a distributed lock.)
+
+    ``max_lanes < 2`` returns ``[]`` with no side effects: below two lanes there
+    is nothing to parallelize, so the caller falls back to the single-node
+    ``next`` path for byte-identical sequential behavior (AC1-EDGE).
+
+    ``claim=False`` previews the selection (which nodes WOULD dispatch) without
+    holding any slot - the read-only mode, mirroring ``fno backlog next`` sans
+    ``--claim``.
+
+    ``claim=True`` assumes the caller runs under the singleton ``walker:<root>``
+    claim (the dispatch context does): that serialization is what prevents two
+    concurrent callers from both selecting the SAME node and each grabbing a
+    distinct slot for it (which would inflate the cap - the group-1 primitive is
+    idempotent only for a single caller's retries). It is NOT a standalone
+    distributed lock; do not run two ``--claim`` selectors concurrently outside
+    the walker.
+    """
+    from fno.claims.lanes import acquire_lane_slot, find_lane_slot, release_lane_slot
+
+    if max_lanes < 2:
+        return []
+
+    selected: list[dict] = []
+    # Seed from domains already held by live lanes (peer lanes from prior ticks):
+    # LD#8 recomputes distinctness against the live-claim world, so a live `code`
+    # lane blocks this fill from selecting another `code` node (codex P2 on #130).
+    # The peer-lane set is stable within a single-dispatcher call (the singleton
+    # walker:<root> claim serializes dispatchers), so it is seeded once here; this
+    # call's own picks are added below as they are acquired.
+    used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
+    picked_ids: set[str] = set()
+
+    try:
+        while len(selected) < max_lanes:
+            # ponytail: fresh ready-list per pick is O(max_lanes * ready_count).
+            # max_lanes is small (2-3) and the ready-list is short, so this is
+            # cheap; if a huge backlog makes the re-query hurt, cache the list
+            # and refresh only the claim-state. The fresh query is what makes
+            # distinctness "recomputed after each claim" not snapshot-stale.
+            candidate = None
+            for node in _ready_nodes(project):
+                nid = node["id"]
+                if nid in picked_ids:
+                    continue
+                domain = node.get("domain") or _DOMAIN_UNSET
+                if domain in used_domains:
+                    continue
+                if find_lane_slot(nid, root=claims_root) is not None:
+                    continue  # a live peer lane already owns this node
+                candidate = (node, domain)
+                break
+            if candidate is None:
+                break  # no distinct-domain, unclaimed node left
+
+            node, domain = candidate
+            if claim:
+                slot = acquire_lane_slot(
+                    max_lanes,
+                    node["id"],
+                    extra_metadata={"domain": domain},
+                    root=claims_root,
+                )
+                if slot is None:
+                    break  # cap full: every slot held by a live peer lane
+            selected.append(node)
+            used_domains.add(domain)
+            picked_ids.add(node["id"])
+    except BaseException:
+        # A mid-loop raise (a garbled `fno backlog ready` on a LATER pick, or a
+        # filesystem error during a claim probe) must not orphan the slots
+        # already acquired: the caller never receives `selected`, so it cannot
+        # release them, and they would sit held until TTL. Release what we hold,
+        # then re-raise unchanged. Preview mode holds no slot, so this is a
+        # no-op there. Each release is guarded so a secondary error cannot mask
+        # the original exception or strand the remaining slots (gemini medium).
+        if claim:
+            for held in selected:
+                try:
+                    release_lane_slot(held["id"], root=claims_root)
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
+        raise
+
+    return selected
+
+
 def _name_slug(raw: Optional[str]) -> str:
     """Normalize a slug/title tail to match the shell dispatchers byte-for-byte.
 

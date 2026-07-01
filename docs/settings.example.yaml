@@ -171,6 +171,9 @@ config:
     max_concurrent: 1
     # Scope the drain daemon to a single mission's nodes.
     mission: null
+  parallel:
+    # Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in).
+    max_lanes: 1
   auto_merge:
     # Auto-merge a PR once external review passes.
     enabled: false

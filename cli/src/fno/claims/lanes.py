@@ -80,6 +80,7 @@ def acquire_lane_slot(
     *,
     ttl_ms: Optional[int] = DEFAULT_LANE_TTL_MS,
     reason: Optional[str] = None,
+    extra_metadata: Optional[dict] = None,
     root: Optional[Path] = None,
 ) -> Optional[Claim]:
     """Atomically acquire one of ``max_lanes`` fixed lane slots for ``lane_id``.
@@ -94,6 +95,11 @@ def acquire_lane_slot(
     Lane-level idempotency: if this lane already owns a live slot it is reused
     (refreshed) rather than a second one grabbed - so a re-dispatch of the same
     lane cannot inflate the cap even after an earlier-indexed slot has freed.
+
+    ``extra_metadata`` is merged into the slot's stored metadata (under the
+    always-present ``lane_id``, which wins on key collision), so a caller can
+    record e.g. the lane's ``domain`` for distinct-domain reasoning across live
+    lanes without a separate node lookup.
     """
     if not lane_id:
         raise ClaimValidationError("lane_id must be non-empty")
@@ -110,7 +116,8 @@ def acquire_lane_slot(
         ttl_ms = DEFAULT_LANE_TTL_MS
 
     holder = _lane_holder(lane_id)
-    metadata = {"lane_id": lane_id}
+    # lane_id is authoritative and wins any key collision from extra_metadata.
+    metadata = {**(extra_metadata or {}), "lane_id": lane_id}
 
     # Reuse this lane's existing slot if it already holds one (idempotent at
     # lane granularity). This is safe under the realistic access pattern:
