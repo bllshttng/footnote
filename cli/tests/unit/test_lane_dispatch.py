@@ -188,3 +188,34 @@ def test_seed_heals_symlinked_fno_before_writing(tmp_path):
     assert (canonical / ".fno" / "settings.local.yaml").read_text() == "canonical: sentinel\n"
     assert not (wt / ".fno").is_symlink()
     assert "fno-n-a" in (wt / ".fno" / "settings.local.yaml").read_text()
+
+
+def test_ensure_heals_symlinked_fno_BEFORE_setup_runs(tmp_path, monkeypatch):
+    """A reused worktree's `.fno` symlink must be healed before setup-worktree.sh,
+    or setup links shared state through the symlink into canonical (codex P2)."""
+    import types
+
+    canonical = tmp_path / "canonical"
+    (canonical / ".fno").mkdir(parents=True)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".fno").symlink_to(canonical / ".fno")
+
+    monkeypatch.setattr(
+        advance.subprocess,
+        "run",
+        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=f"{wt}\n", stderr=""),
+    )
+    seen = {}
+
+    def fake_setup(worktree, canonical_root):
+        # setup must see a REAL dir, never the symlink.
+        seen["is_symlink_at_setup"] = (worktree / ".fno").is_symlink()
+
+    monkeypatch.setattr(advance, "_run_setup_worktree", fake_setup)
+
+    out = advance._ensure_lane_worktree("n-a", canonical_root=canonical)
+
+    assert out == wt
+    assert seen["is_symlink_at_setup"] is False
+    assert not (wt / ".fno").is_symlink()

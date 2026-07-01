@@ -568,6 +568,17 @@ def _ensure_lane_worktree(node_id: str, *, canonical_root: Path) -> Path:
             f"{(proc.stderr or proc.stdout or '').strip()[:200]}"
         )
     worktree = Path(path)
+    # Heal a whole-dir `.fno` symlink (a REUSED worktree can carry one) BEFORE
+    # setup-worktree.sh runs: setup links shared state into `.fno/*`, and through
+    # the symlink those links would land in the CANONICAL checkout; the later
+    # seed would then replace `.fno` with a bare real dir, stranding the lane
+    # without its settings.yaml/state links. Heal first so setup populates the
+    # REAL per-worktree dir (mirrors the heal `fno target start` does before its
+    # setup hook). A fresh worktree has no `.fno` yet, so this is a no-op there.
+    fno_dir = worktree / ".fno"
+    if fno_dir.is_symlink():
+        fno_dir.unlink()
+        fno_dir.mkdir()
     _run_setup_worktree(worktree, canonical_root)
     return worktree
 
@@ -693,6 +704,11 @@ def dispatch_lanes(
             _skip(f"claim-error: {str(exc)[:120]}")
             continue
 
+        # dispatch:<id> is reserved just above (bridges the boot window until the
+        # worker owns node:<id>); the lane slot select_lane_fill acquired is
+        # re-anchored to the worker's lifecycle in target_cli._maybe_reconcile_lane_slot
+        # (LD#8) once its target-init claims the node. Both are released on the
+        # failure path below.
         try:
             worktree = _ensure_lane_worktree(node_id, canonical_root=canonical)
             _seed_lane_local_settings(worktree, node_id, base_pid)
