@@ -39,6 +39,12 @@ from fno.backlog.capture import cli as _capture_cli  # noqa: E402
 cli.add_typer(_capture_cli, name="capture")
 cli.add_typer(_capture_cli, name="inbox", hidden=True)
 
+# Nested batch sub-app: `fno backlog batch <verb>`. Batch-lane state
+# (.fno/batches/<domain>.json) — coalesce same-domain nodes into one PR.
+from fno.backlog.batch import cli as _batch_cli  # noqa: E402
+
+cli.add_typer(_batch_cli, name="batch")
+
 
 def _live_claimed_node_ids() -> set[str]:
     """Node ids that currently hold a LIVE ``node:<id>`` claim.

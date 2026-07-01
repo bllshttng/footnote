@@ -1642,6 +1642,58 @@ class ModelRoutingBlock(BaseModel):
         return {}
 
 
+class BatchBlock(BaseModel):
+    """Batch-lane settings (nested under 'config.batch', x-8cae).
+
+    The auto-target runner can coalesce N same-domain ready nodes onto one
+    branch and open ONE PR per batch instead of one-per-node, cutting GitHub
+    Actions runs ~N× (the cost driver is PR *volume*, not bad merges).
+
+    Default OFF (footnote opt-in convention): with `enabled=false` the selection
+    path is byte-for-byte today's one-PR-per-node behavior. A malformed
+    `enabled` fails safe to disabled (mirrors config.auto_merge / cross_model) —
+    false-enabled is the dangerous direction because a bad batch could pool
+    unrelated work into one PR.
+
+    Knobs:
+      enabled   - whole-feature opt-in.
+      max_nodes - nodes per batch before it closes (domain boundary + size/p0
+                  can close it sooner). Non-positive/malformed → default 3.
+      max_loc   - optional cumulative-diff LOC ceiling (None = off).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    max_nodes: int = 3
+    max_loc: Optional[int] = None
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        """Fail-safe to disabled on a non-boolean value (see cross_model)."""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):  # bool already handled above
+            return v == 1
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    @field_validator("max_nodes", mode="before")
+    @classmethod
+    def _coerce_max_nodes(cls, v: object) -> object:
+        """Degrade a non-positive / malformed ceiling to the default 3."""
+        if isinstance(v, (int, str)) and not isinstance(v, bool):
+            try:
+                if int(v) >= 1:
+                    return int(v)
+            except (TypeError, ValueError):
+                pass
+        _LOG.warning("config.batch.max_nodes=%r invalid; using default 3", v)
+        return 3
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -1654,6 +1706,7 @@ class ConfigBlock(BaseModel):
     project: ProjectBlock = Field(default_factory=ProjectBlock)
     blueprint: BlueprintBlock = Field(default_factory=BlueprintBlock)
     backlog: BacklogBlock = Field(default_factory=BacklogBlock)
+    batch: BatchBlock = Field(default_factory=BatchBlock)
     post_merge: PostMergeBlock = Field(default_factory=PostMergeBlock)
     research: ResearchBlock = Field(default_factory=ResearchBlock)
     review: ReviewBlock = Field(default_factory=ReviewBlock)

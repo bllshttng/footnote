@@ -83,6 +83,10 @@ FIELD_META: dict[str, Meta] = {
         question="Backlog node-ID prefix?", default_source="repo-slug",
     ),
     "config.backlog.id_hex_width": Meta("advanced", "Hex width of minted node IDs (4-8)."),
+    # --- config.batch.* ---
+    "config.batch.enabled": Meta("advanced", "Coalesce same-domain nodes into one batch PR (opt-in)."),
+    "config.batch.max_nodes": Meta("advanced", "Nodes per batch before it closes (default 3)."),
+    "config.batch.max_loc": Meta("advanced", "Optional cumulative-diff LOC ceiling for a batch (off by default)."),
     # --- config.post_merge.* ---
     "config.post_merge.parking_lot_path": Meta(
         "advanced", "Per-repo vault parking-lot path for the post-merge ritual (repo-relative).",
