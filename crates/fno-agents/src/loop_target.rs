@@ -198,6 +198,7 @@ pub(crate) fn exit_code_for_reason(reason: &TerminationReason) -> i32 {
     match reason {
         TerminationReason::DonePRGreen
         | TerminationReason::DoneAdvisory
+        | TerminationReason::DoneBatched
         | TerminationReason::NoWork => 0,
         TerminationReason::Budget | TerminationReason::NoProgress | TerminationReason::Aborted => 1,
         TerminationReason::Interrupted => 130,

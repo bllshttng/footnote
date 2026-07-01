@@ -397,6 +397,97 @@ fn ac1_hp_promise_green_pr_done() {
     );
 }
 
+/// batch-lane Wave 2/3 (x-6cdf): a batched unit terminates as DoneBatched on
+/// its promise even with NO PR (its commits ship via the batch PR, not its
+/// own). The no_pr mock proves the batched arm short-circuits BEFORE run_done,
+/// which would otherwise block forever waiting for a per-node PR.
+#[test]
+fn batched_unit_promise_done_batched() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    // A batched manifest: batched:true, and NOT no_ship/advisory (so it must not
+    // fall into the DoneAdvisory arm - which would wrongly graduate the plan).
+    fs::write(
+        &manifest_path,
+        "---\nsession_id: sess-batch1\ncreated_at: 2026-07-01T00:00:00Z\nattended: false\nbatched: true\n---\n",
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::no_pr();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-07-01T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(code, 0, "exit code must be 0 for allow");
+    assert_eq!(d.decision, "allow");
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DoneBatched"),
+        "expected DoneBatched (no per-node PR) but got {:?}",
+        d.termination_reason
+    );
+
+    let events_content = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    assert!(
+        events_content.contains("DoneBatched"),
+        "DoneBatched in termination event"
+    );
+}
+
+/// A batched manifest with NO promise yet must NOT terminate: the member is
+/// still working. Fail-safe - it blocks (keep looping) rather than falsely
+/// closing an unfinished batch member.
+#[test]
+fn batched_unit_without_promise_blocks() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        "---\nsession_id: sess-batch2\ncreated_at: 2026-07-01T00:00:00Z\nattended: false\nbatched: true\n---\n",
+    )
+    .unwrap();
+    // No promise in the transcript.
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+
+    let mock = MockBins::no_pr();
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-07-01T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+    assert_eq!(d.decision, "block", "no promise -> keep working");
+    assert_eq!(d.termination_reason, None);
+}
+
 /// x-8b64 (E): promise with an out-of-band MERGED PR -> DonePRGreen, even
 /// though CI is red and NO required bot reviewed. The merge is terminal; the
 /// stop-hook must stop re-poking a finished session.
