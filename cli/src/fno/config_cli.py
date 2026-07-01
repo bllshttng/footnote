@@ -83,13 +83,31 @@ def _load_repo_post_merge(repo_root: Path):
     from fno.config import PostMergeBlock, ProjectBlock
 
     settings_path = repo_root / ".fno" / "settings.yaml"
-    if not settings_path.is_file():
+    raw: dict = {}
+    if settings_path.is_file():
+        parsed = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+        if parsed is not None:
+            if not isinstance(parsed, dict):
+                raise ValueError(f"settings.yaml is not a mapping: {settings_path}")
+            raw = parsed
+
+    # Per-worktree local override (x-cbce): layer the allowlisted keys
+    # (parking_lot_path, project.id) so this oracle agrees with load_settings()
+    # and `fno config get`. Repo-local only (the local file is never symlinked
+    # to canonical), which preserves the "a global parking_lot_path must not make
+    # every repo look ready" guard above - the override is still repo-scoped.
+    local_path = repo_root / ".fno" / "settings.local.yaml"
+    if local_path.is_file() and not local_path.is_symlink():
+        from fno.config import _deep_merge, _load_raw, _worktree_local_override
+
+        local_parsed, ok = _load_raw(local_path)
+        if ok:
+            override = _worktree_local_override(local_parsed)
+            if override:
+                raw = _deep_merge(raw, override)
+
+    if not raw:
         return PostMergeBlock(), None
-    raw = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
-    if raw is None:
-        return PostMergeBlock(), None
-    if not isinstance(raw, dict):
-        raise ValueError(f"settings.yaml is not a mapping: {settings_path}")
 
     config = raw.get("config")
     config = config if isinstance(config, dict) else {}
