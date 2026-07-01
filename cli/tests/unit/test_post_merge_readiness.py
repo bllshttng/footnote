@@ -118,6 +118,27 @@ def test_ready_when_active_and_configured(tmp_path: Path) -> None:
     assert verdict.note is None  # project.id set -> no soft note
 
 
+def test_ready_via_worktree_local_override(tmp_path: Path) -> None:
+    # x-cbce / codex PR #128: a worktree may set parking_lot_path ONLY in the
+    # per-worktree settings.local.yaml (shared settings.yaml has post_merge
+    # enabled but no path). The oracle must apply the same override layer as
+    # load_settings() and report ready, not unconfigured.
+    repo = _repo(tmp_path, "config:\n  post_merge:\n    enabled: true\n")
+    (repo / ".fno" / "settings.local.yaml").write_text(
+        "config:\n"
+        "  post_merge:\n"
+        "    parking_lot_path: worktree/parking-lot.md\n"
+        "  project:\n"
+        "    id: this-worktree\n",
+        encoding="utf-8",
+    )
+    _mark_active(repo)
+    verdict = post_merge_readiness(repo)
+    assert verdict.status == "ready"
+    assert verdict.parking_lot_path == "worktree/parking-lot.md"
+    assert verdict.project_id == "this-worktree"
+
+
 def test_ready_carries_soft_note_when_project_id_unset(tmp_path: Path) -> None:
     repo = _repo(
         tmp_path,
