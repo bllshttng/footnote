@@ -93,9 +93,17 @@ def test_seed_writes_only_allowlist_keys_distinct_per_lane(tmp_path):
 
     park_a = ov_a["config"]["post_merge"]["parking_lot_path"]
     park_b = ov_b["config"]["post_merge"]["parking_lot_path"]
-    assert park_a == str(wt_a / ".fno" / "parking-lot.md")
-    assert park_b == str(wt_b / ".fno" / "parking-lot.md")
-    assert park_a != park_b  # the collision AC2-HP guards against
+    # Repo-relative (same string) but resolves per-worktree: `.fno` is a real
+    # per-worktree dir, so each lane gets its OWN file - isolation from
+    # resolution, not a distinct string (AC2-HP), and the value must be
+    # repo-relative or the worker's load_settings() rejects it.
+    assert park_a == ".fno/parking-lot.md"
+    assert park_b == ".fno/parking-lot.md"
+    # The crux of the fix: the seeded value passes the parking_lot_path validator
+    # (an absolute value would raise here and break every lane worker).
+    from fno.config import PostMergeBlock
+
+    PostMergeBlock(parking_lot_path=park_a)  # must not raise
 
     # project.id is per-lane too (neuters nested auto-continue).
     assert ov_a["config"]["project"]["id"] == "fno-n-a"

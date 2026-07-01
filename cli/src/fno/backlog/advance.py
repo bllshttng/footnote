@@ -605,12 +605,17 @@ def _seed_lane_local_settings(
     if fno_dir.is_symlink():
         fno_dir.unlink()
     fno_dir.mkdir(parents=True, exist_ok=True)
-    parking = fno_dir / "parking-lot.md"
-    # Single-quote the scalar values: a path/id containing a space, ':' or (on
-    # Windows) a backslash would otherwise mis-parse. Single quotes take the
-    # bytes literally; an embedded single quote is YAML-escaped by doubling.
+    # parking_lot_path MUST be repo-relative: PostMergeBlock.validate_parking_lot_path
+    # rejects an absolute / '~' / '..' value, so an absolute path would fail the
+    # spawned worker's load_settings() and break the lane before it starts (codex
+    # P2). `.fno/parking-lot.md` still isolates per lane: it resolves against
+    # resolve_repo_root() (THIS worktree, not canonical) and `.fno` is a real
+    # per-worktree dir - NOT the shared `internal/` symlink the canonical default
+    # (`internal/fno/backlog/parking-lot.md`) rides. The isolation comes from
+    # per-worktree resolution, not a distinct string.
+    # Single-quote the id value: it can carry chars a bare YAML scalar mis-parses;
+    # an embedded quote is escaped by doubling.
     id_val = f"{base_project_id}-{node_id}".replace("'", "''")
-    parking_val = str(parking).replace("'", "''")
     (fno_dir / "settings.local.yaml").write_text(
         "# Auto-seeded per-lane isolation (parallel mode, epic x-42d5 G3).\n"
         "# Only x-cbce's per-worktree override allowlist {parking_lot_path,\n"
@@ -620,7 +625,7 @@ def _seed_lane_local_settings(
         "  project:\n"
         f"    id: '{id_val}'\n"
         "  post_merge:\n"
-        f"    parking_lot_path: '{parking_val}'\n"
+        "    parking_lot_path: '.fno/parking-lot.md'\n"
     )
 
 
