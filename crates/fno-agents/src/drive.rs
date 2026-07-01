@@ -351,9 +351,30 @@ fn external_session_writer(state: &SessionClaimState, self_holder: &str) -> Opti
 /// `$HOME`) under `.fno/claims`, NOT the cwd-local repo dir. `None` when no root
 /// resolves (then the gate can't derive a path and falls through to the CLI).
 fn global_claims_dir() -> Option<PathBuf> {
-    std::env::var_os("FNO_CLAIMS_ROOT")
+    // Match the Python source of truth (`fno.claims.io.global_claims_root`): an
+    // EMPTY `FNO_CLAIMS_ROOT` is treated as UNSET (falls back to `$HOME`). A
+    // set-but-empty value must NOT resolve the claims dir to a cwd-relative
+    // `.fno/claims` - that would let the gate miss a real `~/.fno/claims/...`
+    // lock and fail the interlock open (gemini HIGH / codex P2). Not filtered:
+    // the literal `"null"`, because Python treats it as a real path - filtering
+    // it would re-introduce the very divergence this closes.
+    global_claims_dir_from(
+        std::env::var_os("FNO_CLAIMS_ROOT"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// Testable core of [`global_claims_dir`]: the two env values are explicit so the
+/// empty-is-unset contract is exercised without mutating process-global env.
+fn global_claims_dir_from(
+    claims_root: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let non_empty = |v: std::ffi::OsString| (!v.is_empty()).then_some(v);
+    claims_root
+        .and_then(non_empty)
+        .or_else(|| home.and_then(non_empty))
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .map(|r| r.join(".fno/claims"))
 }
 
@@ -378,8 +399,11 @@ fn session_claim_lock_path_in(dir: &Path, uuid: &str) -> Option<PathBuf> {
 /// is no writer - see [`external_claude_writer_gated`].
 async fn external_claude_writer(uuid: &str, self_holder: &str) -> Option<String> {
     // Honor FNO_BIN (test/custom environments); fall back to PATH `fno`. var_os
-    // avoids silently dropping a non-UTF-8 path.
-    let fno_bin = std::env::var_os("FNO_BIN").unwrap_or_else(|| "fno".into());
+    // avoids silently dropping a non-UTF-8 path; a set-but-EMPTY value is treated
+    // as unset (else `Command::new("")` just fails to spawn) (gemini HIGH).
+    let fno_bin = std::env::var_os("FNO_BIN")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "fno".into());
     external_claude_writer_gated(
         uuid,
         self_holder,
@@ -1333,7 +1357,7 @@ mod tests {
             Duration::from_millis(300),
         )
         .await;
-        let elapsed = start.elapsed();
+        let elapsed = std::time::Instant::now().saturating_duration_since(start);
         let _ = std::fs::remove_file(&script);
         assert_eq!(
             holder, None,
@@ -1360,6 +1384,26 @@ mod tests {
         assert_eq!(session_claim_lock_path_in(dir, ""), None);
     }
 
+    #[test]
+    fn global_claims_dir_treats_empty_env_as_unset() {
+        use std::ffi::OsString;
+        let os = |s: &str| OsString::from(s);
+        // A set root wins.
+        assert_eq!(
+            global_claims_dir_from(Some(os("/root")), Some(os("/home"))),
+            Some(PathBuf::from("/root/.fno/claims"))
+        );
+        // EMPTY root falls back to home (Python's empty-is-unset), NOT a
+        // cwd-relative `.fno/claims` that would blind the interlock.
+        assert_eq!(
+            global_claims_dir_from(Some(os("")), Some(os("/home"))),
+            Some(PathBuf::from("/home/.fno/claims"))
+        );
+        // Empty/absent both -> None; the gate then falls through to the CLI.
+        assert_eq!(global_claims_dir_from(Some(os("")), Some(os(""))), None);
+        assert_eq!(global_claims_dir_from(None, None), None);
+    }
+
     /// The gate must SKIP the CLI entirely when no claim lockfile exists (the
     /// common case: nothing else co-writing). Point it at an `fno` that would sleep
     /// past the budget; short-circuiting returns fast without ever running it.
@@ -1383,7 +1427,7 @@ mod tests {
             Duration::from_secs(5),
         )
         .await;
-        let elapsed = start.elapsed();
+        let elapsed = std::time::Instant::now().saturating_duration_since(start);
         let _ = std::fs::remove_file(&slow);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(holder, None, "no lockfile -> no external writer");
@@ -1421,7 +1465,7 @@ mod tests {
             Duration::from_millis(300),
         )
         .await;
-        let elapsed = start.elapsed();
+        let elapsed = std::time::Instant::now().saturating_duration_since(start);
         let _ = std::fs::remove_file(&slow);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(holder, None, "slow probe fails open");
