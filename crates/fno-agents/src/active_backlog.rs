@@ -144,6 +144,11 @@ pub struct DrainConfig {
     /// Batch-lane opt-in (config.batch.enabled, x-6cdf). When false the dispatch
     /// path is byte-for-byte today's one-PR-per-node behavior.
     pub batch: bool,
+    /// Parallel-mode lane cap (config.parallel.max_lanes, x-42d5 G4). `>= 2`
+    /// switches the tick to fire-and-forget lane-fill (`fno backlog
+    /// dispatch-lanes`); anything below is today's sequential in-tick drain
+    /// with no special-case code (AC1-EDGE).
+    pub max_lanes: u64,
 }
 
 /// What one [`drain_tick`] did, for the scheduler and tests.
@@ -156,6 +161,10 @@ pub enum DrainOutcome {
     /// The walker singleton is held by another walker (manual /megawalk); the
     /// tick yielded without dispatching.
     Yielded,
+    /// Parallel mode (x-42d5 G4): the tick fire-and-forgot `dispatched` bg
+    /// lanes (and `skipped` selected-but-unlaunched ones). Lanes run detached;
+    /// their nodes close at merge via `fno backlog reconcile`, not in-tick.
+    LanesDispatched { dispatched: usize, skipped: usize },
     /// No ready node in scope; the board (or mission) is drained.
     NoWork,
     /// The tick could not run to a node close (selection/loop error, or a node
@@ -266,12 +275,107 @@ pub fn drain_tick(
         }
     }
 
-    let outcome = run_one_node(cfg, breaker, journal);
+    // Parallel mode (x-42d5 G4): with a lane cap >= 2, the tick fills lanes
+    // instead of draining one node in-tick. Running under the walker singleton
+    // is what makes the selection atomic (select_lane_fill's single-dispatcher
+    // contract) - the design's discretion point resolved to "lane-fill on the
+    // existing auto-continue tick". Below 2 the sequential path is untouched.
+    // Lane-fill takes precedence over batch: lane workers are plain
+    // `/target no-merge` runs; batching WITHIN a lane is future composition
+    // (design LD#5), never batching across lanes.
+    let outcome = if cfg.max_lanes >= 2 {
+        lane_fill_tick(cfg, journal)
+    } else {
+        run_one_node(cfg, breaker, journal)
+    };
 
     // Release the singleton on every exit path so a manual /megawalk can take
     // over before the next tick (AC1-FR).
     release_claim(&cfg.abi_bin, &cfg.cwd, &walker_key, &walker_holder);
     outcome
+}
+
+/// Count lane receipts by status from `fno backlog dispatch-lanes` JSON output
+/// (a list of `{node_id, status: dispatched|skipped, ...}` objects). Pure so the
+/// receipt contract is unit-testable without spawning workers.
+fn count_lane_receipts(stdout: &[u8]) -> Result<(usize, usize), String> {
+    let receipts: Vec<serde_json::Value> =
+        serde_json::from_slice(stdout).map_err(|e| format!("unparseable receipts: {e}"))?;
+    let dispatched = receipts
+        .iter()
+        .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("dispatched"))
+        .count();
+    Ok((dispatched, receipts.len() - dispatched))
+}
+
+/// One parallel-mode tick: fire-and-forget up to `max_lanes` isolated bg lanes
+/// via the Python dispatcher (`fno backlog dispatch-lanes`, which owns slot
+/// claims, worktree isolation, and spawn - G1-G3). The tick does NOT wait on
+/// lanes: they are detached `claude --bg` workers whose nodes close at merge
+/// (`fno backlog reconcile`), and later ticks fill freed slots. Per-lane
+/// failures are already contained inside dispatch_lanes (skip-and-log, slot
+/// released); a whole-command failure is journaled and skips the tick.
+fn lane_fill_tick(cfg: &DrainConfig, journal: &Journal) -> DrainOutcome {
+    let mut cmd = abi_cmd(&cfg.abi_bin);
+    cmd.args([
+        "backlog",
+        "dispatch-lanes",
+        "--max",
+        &cfg.max_lanes.to_string(),
+    ]);
+    if let Some(ref p) = cfg.project {
+        cmd.args(["--project", p]);
+    }
+    cmd.current_dir(&cfg.cwd);
+    let out = match cmd.output() {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            let _ = journal.append(
+                "active_backlog_skip",
+                json!({"reason": "dispatch-lanes-failed", "detail": detail}),
+            );
+            return DrainOutcome::Skipped {
+                reason: format!("dispatch-lanes-failed: {detail}"),
+            };
+        }
+        Err(e) => {
+            let _ = journal.append(
+                "active_backlog_skip",
+                json!({"reason": "dispatch-lanes-failed", "detail": format!("{e}")}),
+            );
+            return DrainOutcome::Skipped {
+                reason: format!("dispatch-lanes-failed: {e}"),
+            };
+        }
+    };
+    match count_lane_receipts(&out.stdout) {
+        Ok((0, 0)) => DrainOutcome::NoWork,
+        Ok((dispatched, skipped)) => {
+            let _ = journal.append(
+                "active_backlog_dispatched",
+                json!({
+                    "lanes": true,
+                    "dispatched": dispatched,
+                    "skipped": skipped,
+                    "max_lanes": cfg.max_lanes,
+                }),
+            );
+            DrainOutcome::LanesDispatched {
+                dispatched,
+                skipped,
+            }
+        }
+        Err(detail) => {
+            let _ = journal.append(
+                "active_backlog_skip",
+                json!({"reason": "dispatch-lanes-unparseable", "detail": detail}),
+            );
+            DrainOutcome::Skipped {
+                reason: format!("dispatch-lanes-unparseable: {detail}"),
+            }
+        }
+    }
 }
 
 fn build_env(cfg: &DrainConfig) -> Vec<(String, String)> {
@@ -670,6 +774,14 @@ pub struct ResolvedTarget {
     /// -> false, so a stale `fno` never accidentally enables batched dispatch.
     #[serde(default)]
     pub batch: bool,
+    /// config.parallel.max_lanes for this repo (x-42d5 G4). Absent in an older
+    /// emitter -> 1 (sequential), so a stale `fno` never fans out into lanes.
+    #[serde(default = "default_max_lanes")]
+    pub max_lanes: u64,
+}
+
+fn default_max_lanes() -> u64 {
+    1
 }
 
 /// Per-worker turn cap for daemon-dispatched drains (overridable via env). The
@@ -741,6 +853,7 @@ fn drain_config_for(target: &ResolvedTarget, abi_bin: &str) -> Option<DrainConfi
         per_unit_max_dispatches: PER_UNIT_MAX_DISPATCHES,
         failure_limit: target.failure_limit,
         batch: target.batch,
+        max_lanes: target.max_lanes,
     })
 }
 
@@ -936,6 +1049,37 @@ async fn per_project_drain_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lane_receipts_counts_by_status() {
+        let out = br#"[
+            {"node_id": "x-a", "status": "dispatched", "short_id": "s1"},
+            {"node_id": "x-b", "status": "skipped", "error": "spawn rc=127"},
+            {"node_id": "x-c", "status": "dispatched", "short_id": "s2"}
+        ]"#;
+        assert_eq!(count_lane_receipts(out), Ok((2, 1)));
+    }
+
+    #[test]
+    fn lane_receipts_empty_list() {
+        assert_eq!(count_lane_receipts(b"[]"), Ok((0, 0)));
+    }
+
+    #[test]
+    fn lane_receipts_garbage_is_error() {
+        assert!(count_lane_receipts(b"wedged traceback").is_err());
+    }
+
+    #[test]
+    fn resolved_target_max_lanes_defaults_to_sequential() {
+        // A stale emitter (no max_lanes field) must never fan out into lanes.
+        let t: ResolvedTarget = serde_json::from_str(
+            r#"{"project":"p","cwd":"/x","interval_seconds":60,"failure_limit":3}"#,
+        )
+        .unwrap();
+        assert_eq!(t.max_lanes, 1);
+        assert!(!t.batch);
+    }
 
     #[test]
     fn breaker_trips_at_limit() {
