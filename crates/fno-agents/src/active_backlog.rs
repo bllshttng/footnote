@@ -324,6 +324,11 @@ struct BatchDispatcher {
     abi_bin: String,
     /// Canonical repo root, passed to `fno worktree ensure --repo`.
     repo: PathBuf,
+    /// (node_id, domain) of the last node actually dispatched batched this tick.
+    /// run_one_node reads it to abandon the batch if the member then FAILED
+    /// (a solo dispatch never records here). Mutex because `Dispatcher::run`
+    /// takes `&self`; the daemon dispatches one node per tick so contention is nil.
+    last_batched: std::sync::Mutex<Option<(String, String)>>,
 }
 
 impl Dispatcher for BatchDispatcher {
@@ -364,6 +369,16 @@ impl Dispatcher for BatchDispatcher {
             .unwrap_or_default();
         if worktree.is_empty() || branch.is_empty() {
             return self.inner.run(unit, ctx); // fail-safe: never dispatch batched without a worktree
+        }
+        // Record (node, domain) so run_one_node can abandon this batch if the
+        // member then fails (a solo dispatch never reaches here).
+        let domain = prep
+            .get("domain")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Ok(mut slot) = self.last_batched.lock() {
+            *slot = Some((unit.id.clone(), domain));
         }
 
         // Batched dispatch: run `/target batched <id>` in the shared worktree.
@@ -417,6 +432,25 @@ fn ship_closeable_batches(cfg: &DrainConfig, journal: &Journal) {
     }
 }
 
+/// Abandon a domain's open batch and requeue its members as individual PRs (v1
+/// failure policy). Called when a batched member failed. Best-effort: a failure
+/// here never wedges the daemon.
+fn abandon_batch_for(cfg: &DrainConfig, journal: &Journal, domain: &str) {
+    let out = abi_cmd(&cfg.abi_bin)
+        .args(["backlog", "batch", "abandon", "--domain", domain])
+        .current_dir(&cfg.cwd)
+        .output();
+    let detail = match out {
+        Ok(o) if o.status.success() => "ok".to_string(),
+        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        Err(e) => format!("{e}"),
+    };
+    let _ = journal.append(
+        "active_backlog_batch_abandon",
+        json!({"domain": domain, "detail": detail}),
+    );
+}
+
 fn run_one_node(
     cfg: &DrainConfig,
     breaker: &mut CircuitBreaker,
@@ -446,6 +480,7 @@ fn run_one_node(
         static_env: build_env(cfg),
         abi_bin: cfg.abi_bin.clone(),
         repo: crate::paths::canonical_repo_root(&cfg.cwd).unwrap_or_else(|| cfg.cwd.clone()),
+        last_batched: std::sync::Mutex::new(None),
     });
     let dispatcher: &dyn Dispatcher = match &batch_dispatcher {
         Some(b) => b,
@@ -490,11 +525,29 @@ fn run_one_node(
         }
     };
 
-    // Batch-lane: after this tick's worker returned, ship any open batch whose
-    // close condition tripped (full / next node a different domain / drain). The
-    // Python verb owns the should_close decision and the abandon-on-fail policy.
+    // Batch-lane close handling, gated on the member's OUTCOME (codex P1):
+    //  - DoneBatched (success): the member committed cleanly, so evaluate the
+    //    close condition and ship any batch that should close.
+    //  - a batched member that did NOT reach DoneBatched (NoProgress/Budget/
+    //    Aborted/etc.): abandon its batch + requeue members (v1 failure policy),
+    //    so ship-closeable can never open a PR over a failed member's partial
+    //    commits. A solo dispatch recorded nothing, so it is untouched here.
     if cfg.batch {
-        ship_closeable_batches(cfg, journal);
+        let last = outcome.units.last();
+        let done_batched =
+            last.is_some_and(|u| matches!(u.evidence.reason, TerminationReason::DoneBatched));
+        if done_batched {
+            ship_closeable_batches(cfg, journal);
+        } else if let Some(u) = last {
+            let batched_domain = batch_dispatcher
+                .as_ref()
+                .and_then(|b| b.last_batched.lock().ok().and_then(|s| s.clone()))
+                .filter(|(nid, _)| nid == &u.unit_id)
+                .map(|(_, domain)| domain);
+            if let Some(domain) = batched_domain {
+                abandon_batch_for(cfg, journal, &domain);
+            }
+        }
     }
 
     map_outcome(cfg, breaker, journal, &outcome.reason, outcome.units.last())

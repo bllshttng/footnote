@@ -481,3 +481,56 @@ exit 0"#,
         "TARGET_BATCHED unset: {rec}"
     );
 }
+
+#[test]
+fn batched_member_failure_abandons_batch_and_does_not_ship() {
+    // A batched member that fails (no termination -> NoProgress) must ABANDON its
+    // batch (v1 policy), never run ship-closeable over its partial commits.
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    let (journal, _project_journal) = journal_in(tmp.path());
+    // noop driver: never emits a termination -> run_loop synthesizes NoProgress.
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    let wt = tmp.path().join("batch-wt");
+    fs::create_dir_all(&wt).unwrap();
+    let abandon_marker = tmp.path().join("abandon-fired");
+    let ship_marker = tmp.path().join("ship-closeable-fired");
+    let node_a = node_json("ab-batchfail");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then
+  c="$(cat "{cnt}" 2>/dev/null || echo 0)"; c=$((c+1)); echo "$c" > "{cnt}"
+  if [[ "$c" -eq 1 ]]; then echo '{node_a}'; else echo 'null'; fi
+  exit 0
+fi
+if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "prepare" ]]; then
+  printf '{{"mode":"batched","domain":"code","worktree":"{wt}","branch":"feature/batch-code-aa11bb","batch_id":"batch-bbbb"}}\n'
+  exit 0
+fi
+if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "abandon" ]]; then echo abandoned > "{ab}"; printf '{{}}\n'; exit 0; fi
+if [[ "$1" == "backlog" && "$2" == "batch" && "$3" == "ship-closeable" ]]; then echo fired > "{ship}"; exit 0; fi
+exit 0"#,
+            cnt = tmp.path().join("cnt.txt").display(),
+            node_a = node_a,
+            wt = wt.display(),
+            ab = abandon_marker.display(),
+            ship = ship_marker.display(),
+        ),
+    );
+    fs::write(tmp.path().join("cnt.txt"), "0").unwrap();
+    let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
+    cfg.batch = true;
+    let mut breaker = CircuitBreaker::new(3);
+
+    let _out = drain_tick(&cfg, &mut breaker, &journal);
+    assert!(
+        abandon_marker.exists(),
+        "a failed batched member must abandon its batch"
+    );
+    assert!(
+        !ship_marker.exists(),
+        "ship-closeable must NOT run after a batched member failure"
+    );
+}

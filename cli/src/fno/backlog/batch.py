@@ -541,19 +541,37 @@ def prepare_batch(
 
     domain = decision.domain
     if decision.action == "start":
-        name = f"batch-{_safe(domain)}"
+        # Unique branch/worktree per batch: a fixed per-domain name would let a
+        # NEW same-domain batch, started after the previous batch opened its PR
+        # but before it merged, reuse the branch - `gh pr list --head` would then
+        # fold the new members into the stale PR and blow past max_nodes. The
+        # random suffix guarantees one branch per batch (codex P2).
+        name = f"batch-{_safe(domain)}-{secrets.token_hex(3)}"
         branch = f"feature/{name}"
         we = run(["fno", "worktree", "ensure", "--repo", repo, "--name", name, "--branch", branch])
         worktree = (we.stdout or "").strip()
         if we.returncode != 0 or not worktree:
             return {"mode": "solo", "reason": f"worktree ensure failed: {(we.stderr or '').strip()[:160]}"}
+        # `fno worktree ensure` is mechanism-only: it does NOT link the shared
+        # `.fno/` state a worktree needs. Without setup, the batched worker's
+        # session state + events would live in an unlinked worktree-local `.fno`
+        # while the daemon polls the canonical journal, so the member reads as
+        # no-progress and state fragments (codex P1). Link it before dispatch;
+        # if setup fails, degrade to solo rather than batch into a broken tree.
+        setup = Path(repo) / "scripts" / "setup" / "setup-worktree.sh"
+        if setup.exists():
+            sr = run(["bash", str(setup)], cwd=worktree)
+            if sr.returncode != 0:
+                return {"mode": "solo", "reason": f"setup-worktree failed: {(sr.stderr or '').strip()[:160]}"}
         try:
             b = open_batch(
                 domain=domain, branch=branch, worktree=worktree,
                 max_nodes=_config_max_nodes(root), root=root,
             )
         except BatchExists:
-            # A peer opened the batch between decide and open; join it instead.
+            # A peer opened the batch between decide and open; join it instead
+            # (its recorded worktree/branch win; this call's fresh worktree is
+            # left unused - a rare single-dispatcher race, minor disk).
             b = read_batch(domain, root)
             if not _is_open(b):
                 return {"mode": "solo", "reason": "batch vanished after race"}
@@ -801,15 +819,22 @@ def cli_abandon(
     domain: str = typer.Option(..., "--domain", "-d"),
     root: Optional[str] = typer.Option(None, "--root"),
 ) -> None:
-    """Abandon the open batch; print members to requeue as individual PRs."""
+    """Abandon the open batch AND requeue its members as individual PRs.
+
+    v1 failure policy: clears every member's graph `batch` mark so they resurface
+    in `fno backlog next`. The daemon calls this when a batched member fails.
+    """
+    r = _root_opt(root)
     try:
-        _emit(abandon_batch(domain=domain, root=_root_opt(root)))
+        batch = abandon_batch(domain=domain, root=r)
     except NoOpenBatch as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(2)
     except (BatchError, BatchValidationError) as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1)
+    _clear_member_batch_marks(member_ids(batch), root=r)
+    _emit(batch)
 
 
 @cli.command("ship")
