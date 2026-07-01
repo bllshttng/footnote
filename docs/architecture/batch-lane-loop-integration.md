@@ -1,6 +1,6 @@
 # Batch-lane loop integration (Wave 2/3)
 
-**Opt-in** (`config.batch.enabled`, default false). When off, the auto-continue daemon behaves byte-for-byte as today (one PR per node). This doc covers how batched mode runs in the live loop; the design-of-record is `internal/fno/plans/batch-lane.md`.
+**Opt-in** (`config.batch.enabled`, default false). When off, the auto-continue daemon behaves byte-for-byte as today (one PR per node). This doc covers how batched mode runs in the live loop.
 
 ## Why
 
