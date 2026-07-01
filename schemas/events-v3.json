@@ -53,6 +53,7 @@
             "agent_create_no_session",
             "agent_orphan_reaped",
             "agent_orphan_state_archived",
+            "agent_row_reaped",
             "agent_spawn_failed",
             "agent_stop_error",
             "agent_spawn_cwd_fallback",
