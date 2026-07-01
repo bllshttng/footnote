@@ -200,6 +200,29 @@ def _next_node(project: Optional[str]) -> Optional[dict]:
 _DOMAIN_UNSET = ""
 
 
+def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
+    """Domains currently held by live lane slots, for distinct-domain seeding.
+
+    LD#8 recomputes distinctness against the live-claim world, not just this
+    call's picks: a lane already working a ``code`` node must stop a fill from
+    selecting another ``code`` node (else two same-domain lanes run concurrently,
+    the exact collision domain-lane parallelism exists to prevent). Each lane
+    records its ``domain`` in slot metadata at acquire time, so peer-lane domains
+    are readable here without a per-node lookup. A slot with no recorded domain
+    (e.g. one taken via the bare ``fno claim lane-acquire`` CLI) collapses to the
+    ``_DOMAIN_UNSET`` bucket - conservatively blocking co-schedule with an
+    unknown-domain lane rather than guessing it is safe.
+    """
+    from fno.claims.core import list_claims
+    from fno.claims.lanes import LANE_SLOT_PREFIX
+
+    domains: set[str] = set()
+    for claim in list_claims(prefix=LANE_SLOT_PREFIX, root=claims_root):
+        meta = claim.get("metadata") or {}
+        domains.add(meta.get("domain") or _DOMAIN_UNSET)
+    return domains
+
+
 def _ready_nodes(project: Optional[str]) -> list[dict]:
     """Ordered ready-node summaries via ``fno backlog ready`` (JSON list).
 
@@ -273,7 +296,13 @@ def select_lane_fill(
         return []
 
     selected: list[dict] = []
-    used_domains: set[str] = set()
+    # Seed from domains already held by live lanes (peer lanes from prior ticks):
+    # LD#8 recomputes distinctness against the live-claim world, so a live `code`
+    # lane blocks this fill from selecting another `code` node (codex P2 on #130).
+    # The peer-lane set is stable within a single-dispatcher call (the singleton
+    # walker:<root> claim serializes dispatchers), so it is seeded once here; this
+    # call's own picks are added below as they are acquired.
+    used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
     picked_ids: set[str] = set()
 
     try:
@@ -300,7 +329,12 @@ def select_lane_fill(
 
             node, domain = candidate
             if claim:
-                slot = acquire_lane_slot(max_lanes, node["id"], root=claims_root)
+                slot = acquire_lane_slot(
+                    max_lanes,
+                    node["id"],
+                    extra_metadata={"domain": domain},
+                    root=claims_root,
+                )
                 if slot is None:
                     break  # cap full: every slot held by a live peer lane
             selected.append(node)
@@ -312,10 +346,14 @@ def select_lane_fill(
         # already acquired: the caller never receives `selected`, so it cannot
         # release them, and they would sit held until TTL. Release what we hold,
         # then re-raise unchanged. Preview mode holds no slot, so this is a
-        # no-op there.
+        # no-op there. Each release is guarded so a secondary error cannot mask
+        # the original exception or strand the remaining slots (gemini medium).
         if claim:
             for held in selected:
-                release_lane_slot(held["id"], root=claims_root)
+                try:
+                    release_lane_slot(held["id"], root=claims_root)
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
         raise
 
     return selected

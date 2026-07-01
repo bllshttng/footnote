@@ -46,6 +46,21 @@ def test_max_lanes_one_is_sequential(tmp_path):
     assert active_lane_count(root=tmp_path) == 1
 
 
+def test_extra_metadata_is_stored_alongside_lane_id(tmp_path):
+    """extra_metadata merges into slot metadata; lane_id stays authoritative."""
+    from fno.claims.core import list_claims
+
+    acquire_lane_slot(
+        max_lanes=2,
+        lane_id="node-a",
+        extra_metadata={"domain": "code", "lane_id": "spoofed"},
+        root=tmp_path,
+    )
+    meta = list_claims(prefix=LANE_SLOT_PREFIX, root=tmp_path)[0]["metadata"]
+    assert meta["domain"] == "code"
+    assert meta["lane_id"] == "node-a", "lane_id must win a key collision"
+
+
 def test_release_frees_a_slot(tmp_path):
     acquire_lane_slot(max_lanes=1, lane_id="node-a", root=tmp_path)
     assert acquire_lane_slot(max_lanes=1, lane_id="node-b", root=tmp_path) is None

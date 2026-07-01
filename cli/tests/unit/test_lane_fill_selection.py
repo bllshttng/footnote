@@ -71,6 +71,28 @@ def test_recomputes_distinctness_after_each_claim(tmp_path, monkeypatch):
     assert calls["n"] >= 2, "must re-query ready between picks"
 
 
+def test_seeds_used_domains_from_live_peer_lane_domains(tmp_path, monkeypatch):
+    """codex P2: a live lane working `code` blocks selecting another `code` node.
+
+    used_domains is seeded from the domains of live lane holders, so the
+    distinct-domain guarantee holds across ticks (the fill-vacant-lanes case),
+    not just within one call.
+    """
+    from fno.claims.lanes import acquire_lane_slot
+
+    ready = _nodes(("n-b", "code"), ("n-c", "docs"))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    # A live peer lane already works a `code` node (records its domain).
+    acquire_lane_slot(
+        max_lanes=3, lane_id="n-a", extra_metadata={"domain": "code"}, root=tmp_path
+    )
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    # `code` is covered by the live peer lane -> only `docs` is selectable.
+    assert [n["id"] for n in sel] == ["n-c"]
+
+
 def test_skips_node_a_peer_lane_already_holds(tmp_path, monkeypatch):
     """A node with a live lane slot is skipped so it is never double-dispatched."""
     ready = _nodes(("n-a", "code"), ("n-b", "docs"))
