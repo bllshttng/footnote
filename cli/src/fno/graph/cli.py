@@ -2011,6 +2011,72 @@ def cmd_dispatch_lanes(
     typer.echo(json.dumps(receipts, indent=2))
 
 
+# -- lanes --
+
+@cli.command("lanes")
+def cmd_lanes(
+    json_output: bool = typer.Option(False, "--json", "-J", help="JSON rollup."),
+) -> None:
+    """One-read parallel-lane rollup (US5): live lanes vs the cap.
+
+    Joins each live lane-slot claim with its graph node (slug, status, PR) so
+    the operator reviews the fleet's shape - which nodes hold lanes, in which
+    domains - without stitching ``fno claim list`` to the board by hand. The
+    grid's BgRoster tiles show the workers themselves; this is the aggregated
+    outcome view. Read-only.
+    """
+    from fno.claims.core import list_claims
+    from fno.claims.lanes import LANE_SLOT_PREFIX
+
+    try:
+        from fno.config import load_settings
+
+        max_lanes = load_settings().config.parallel.max_lanes
+    except Exception:  # noqa: BLE001 - a config miss must not hide live lanes
+        max_lanes = 1
+
+    nodes: dict = {}
+    try:
+        from fno.graph.store import read_graph
+
+        nodes = {
+            e["id"]: e
+            for e in read_graph(_graph_path())
+            if isinstance(e, dict) and e.get("id")
+        }
+    except Exception:  # noqa: BLE001 - rollup degrades to claims-only rows
+        pass
+
+    lanes = []
+    for s in sorted(list_claims(prefix=LANE_SLOT_PREFIX), key=lambda c: c.get("key", "")):
+        meta = s.get("metadata") or {}
+        lane_id = meta.get("lane_id") or ""
+        node = nodes.get(lane_id) or {}
+        lanes.append(
+            {
+                "slot": s.get("key"),
+                "lane_id": lane_id,
+                "domain": meta.get("domain"),
+                "slug": node.get("slug"),
+                "status": node.get("_status"),
+                "pr_number": node.get("pr_number"),
+                "holder": s.get("holder"),
+            }
+        )
+
+    if json_output:
+        typer.echo(json.dumps({"max_lanes": max_lanes, "active": len(lanes), "lanes": lanes}))
+        return
+    typer.echo(f"lanes: {len(lanes)}/{max_lanes} active")
+    for ln in lanes:
+        slug = f"  {ln['slug']}" if ln.get("slug") else ""
+        pr = f"  pr#{ln['pr_number']}" if ln.get("pr_number") else ""
+        typer.echo(
+            f"{ln['slot']}  {ln['lane_id']}{slug}  "
+            f"domain={ln.get('domain') or '-'}  {ln.get('status') or '-'}{pr}"
+        )
+
+
 # -- get --
 
 @cli.command("get")
