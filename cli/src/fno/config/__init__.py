@@ -1862,6 +1862,21 @@ class SettingsModel(BaseModel):
     config: ConfigBlock = Field(default_factory=ConfigBlock)
 
 
+# Keys a per-worktree `.fno/settings.local.yaml` may override on top of the
+# shared (symlinked) settings.yaml. setup-worktree.sh symlinks settings.yaml
+# from canonical into every worktree so backlog/ledger config stays coherent,
+# which also forces these collision-prone keys to be shared. The local file is
+# the one file kept per-worktree; it may diverge ONLY on this allowlist. A key
+# outside it in the local file is ignored (with a warning) so a local file can
+# never silently fork shared config. Dotted, canonical (post-alias) paths.
+WORKTREE_LOCAL_KEYS: frozenset[str] = frozenset(
+    {
+        "config.post_merge.parking_lot_path",
+        "config.project.id",
+    }
+)
+
+
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
@@ -2029,6 +2044,53 @@ def _deep_merge(
     return result
 
 
+def _flatten_leaf_paths(
+    data: dict[str, object], prefix: str = ""
+) -> list[tuple[str, object]]:
+    """Yield (dotted_path, value) for every leaf (non-dict) in a nested dict."""
+    out: list[tuple[str, object]] = []
+    for key, value in data.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            out.extend(_flatten_leaf_paths(value, path))
+        else:
+            out.append((path, value))
+    return out
+
+
+def _worktree_local_override(local_raw: dict[str, object]) -> dict[str, object]:
+    """Filter a settings.local.yaml dict down to the WORKTREE_LOCAL_KEYS allowlist.
+
+    Returns a nested override dict containing ONLY allowlisted leaf paths, to be
+    deep-merged on top of the shared settings. Any non-allowlisted leaf is
+    dropped and reported in one WARNING (stderr), so a per-worktree local file
+    can never silently fork a shared key (backlog graph, ledger, reviewers).
+    """
+    override: dict[str, object] = {}
+    ignored: list[str] = []
+    for path, value in _flatten_leaf_paths(local_raw):
+        if path in WORKTREE_LOCAL_KEYS:
+            *parents, leaf = path.split(".")
+            cursor = override
+            for parent in parents:
+                nxt = cursor.get(parent)
+                if not isinstance(nxt, dict):
+                    nxt = {}
+                    cursor[parent] = nxt
+                cursor = nxt
+            cursor[leaf] = value
+        else:
+            ignored.append(path)
+    if ignored:
+        _LOG.warning(
+            "settings.local.yaml: ignoring non-worktree-local key(s): %s. "
+            "Only %s may be overridden per-worktree; other keys stay shared.",
+            ", ".join(sorted(ignored)),
+            ", ".join(sorted(WORKTREE_LOCAL_KEYS)),
+        )
+    return override
+
+
 def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
     """Bridge legacy key locations onto their canonical modeled paths (US3).
 
@@ -2154,6 +2216,24 @@ def load_settings() -> SettingsModel:
     raw: dict[str, object] = {}
     for _path, parsed in reversed(layers):
         raw = _deep_merge(raw, _alias_legacy_keys(parsed))
+
+    # Per-worktree local override (x-cbce). Layer an optional real (non-symlinked)
+    # settings.local.yaml, sitting in the same .fno/ as the primary settings.yaml,
+    # on top of the merged config - but ONLY for WORKTREE_LOCAL_KEYS. This is the
+    # one file setup-worktree.sh never symlinks, so sibling worktrees can diverge
+    # on parking_lot_path / project.id while everything else stays shared via the
+    # symlinked settings.yaml. Absent (or symlinked) file => no-op, behavior
+    # unchanged. A symlinked local file is skipped: it would defeat the whole
+    # point (re-sharing the collision-prone keys across worktrees).
+    candidates = _candidate_paths()
+    if candidates:
+        local_path = candidates[0].parent / "settings.local.yaml"
+        if local_path.is_file() and not local_path.is_symlink():
+            local_parsed, ok = _load_raw(local_path)
+            if ok:
+                override = _worktree_local_override(local_parsed)
+                if override:
+                    raw = _deep_merge(raw, override)
 
     # _loaded_from records the PRIMARY (highest-priority) file present, for
     # `fno config doctor` and paths.config_file(). With layering there is no
