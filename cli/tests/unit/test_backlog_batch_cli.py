@@ -121,3 +121,41 @@ def test_config_block_scalar_batch_degrades_not_raises() -> None:
     """A scalar `config.batch: 42` must NOT crash the whole settings load."""
     block = ConfigBlock(batch=42)
     assert block.batch.enabled is False  # degraded to default disabled block
+
+
+# --- external review fixes (PR #129) ---------------------------------------
+
+
+def test_open_rejects_max_nodes_below_1(tmp_path: Path) -> None:
+    """max_nodes < 1 makes is_full() true from the start -> reject (gemini)."""
+    for bad in (0, -3):
+        with pytest.raises(B.BatchValidationError):
+            B.open_batch(domain="code", branch="f", worktree="w", max_nodes=bad, root=tmp_path)
+
+
+def test_list_batches_skips_invalid_utf8(tmp_path: Path) -> None:
+    """A non-UTF-8 batch file must not crash the status view (gemini)."""
+    B.batches_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    # UnicodeDecodeError subclasses ValueError, not OSError/JSONDecodeError.
+    B.batch_path("bad", tmp_path).write_bytes(b"\xff\xfe not utf-8")
+    B.open_batch(domain="code", branch="f", worktree="w", root=tmp_path)
+    domains = {b["domain"] for b in B.list_batches(tmp_path)}  # must not raise
+    assert domains == {"code"}
+
+
+def test_decide_ships_solo_on_corrupt_batch_file(tmp_path: Path) -> None:
+    """A corrupt batch file must fail the selection safe to ship_solo (gemini)."""
+    B.batches_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    B.batch_path("code", tmp_path).write_text("{ not json")
+    d = B.decide_batch_action({"id": "x-1", "domain": "code"}, enabled=True, root=tmp_path)
+    assert d.action == "ship_solo"
+
+
+def test_load_batch_enabled_honors_root(tmp_path: Path) -> None:
+    """--root must read config.batch.enabled from THAT repo, not cwd (codex)."""
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    (fno_dir / "settings.yaml").write_text("config:\n  batch:\n    enabled: true\n")
+    assert B._load_batch_enabled(tmp_path) is True
+    # a root with no settings falls back to the default (disabled)
+    assert B._load_batch_enabled(tmp_path / "nonexistent") is False

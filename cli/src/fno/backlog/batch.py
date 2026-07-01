@@ -126,9 +126,11 @@ def list_batches(root: Path) -> list[dict]:
     for p in sorted(d.glob("*.json")):
         try:
             out.append(json.loads(p.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
             # Name the corrupt file rather than silently hiding it from the
             # status view (the mutation path errors on it; status must not lie).
+            # UnicodeDecodeError (invalid UTF-8) subclasses ValueError, not
+            # OSError, so it must be listed explicitly (gemini).
             _LOG.warning("skipping unreadable batch file %s: %s", p, e)
             continue
     return out
@@ -169,6 +171,12 @@ def open_batch(
     A closed/abandoned batch file for the same domain is replaced (start fresh).
     """
     _safe(domain)
+    # A max_nodes < 1 makes is_full() true from the start, so no node could ever
+    # join — reject it at the primitive rather than silently create a dead batch
+    # (config.batch.max_nodes is already coerced >=1, but open_batch is callable
+    # directly via `--max-nodes`) (gemini).
+    if int(max_nodes) < 1:
+        raise BatchValidationError(f"max_nodes must be >= 1, got {max_nodes}")
     with _locked(domain, root):
         existing = read_batch(domain, root)
         if _is_open(existing):
@@ -293,7 +301,13 @@ def decide_batch_action(node: dict, *, enabled: bool, root: Path) -> BatchDecisi
     solo = _ships_alone(node)
     if solo:
         return BatchDecision("ship_solo", domain, solo)
-    b = read_batch(domain, root)
+    try:
+        b = read_batch(domain, root)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        # A corrupt batch file must not crash the live selection loop. Ship solo
+        # (conservative): never pool a node into a batch we can't read (gemini).
+        _LOG.warning("failed to read batch for domain %s: %s; shipping solo", domain, e)
+        return BatchDecision("ship_solo", domain, f"error reading batch: {e}")
     if b and b.get("status") == "open" and not is_full(b):
         return BatchDecision("join", domain, f"join open batch {b['batch_id']}")
     return BatchDecision("start", domain, "no joinable open batch")
@@ -434,9 +448,20 @@ def cli_status(
         _emit({"batches": list_batches(r)})
 
 
-def _load_batch_enabled() -> bool:
-    """config.batch.enabled, defaulting False if settings can't be loaded."""
+def _load_batch_enabled(root: Optional[Path] = None) -> bool:
+    """config.batch.enabled, defaulting False if settings can't be loaded.
+
+    When a `root` is given (the policy verb's `--root`), read that repo's config
+    via the repo-scoped loader rather than the cwd-cached `load_settings()`.
+    Otherwise the decision and the batch STATE would read from different repos:
+    an opted-in repo forced to ship_solo because the caller's cwd is disabled,
+    or a non-opted repo batching because the cwd is enabled (codex P2).
+    """
     try:
+        if root is not None:
+            from fno.config import load_settings_for_repo
+
+            return bool(load_settings_for_repo(Path(root)).config.batch.enabled)
         from fno.config import load_settings
 
         return bool(load_settings().config.batch.enabled)
@@ -483,7 +508,8 @@ def cli_policy(
         _emit(BatchDecision("ship_solo", "", "node lookup failed; shipping solo").to_dict())
         return
 
+    resolved_root = _root_opt(root)
     decision = decide_batch_action(
-        node_dict, enabled=_load_batch_enabled(), root=_root_opt(root)
+        node_dict, enabled=_load_batch_enabled(resolved_root), root=resolved_root
     )
     _emit(decision.to_dict())
