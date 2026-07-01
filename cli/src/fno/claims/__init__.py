@@ -43,6 +43,15 @@ from .core import (
     refresh_claim,
     release_claim,
 )
+from .lanes import (
+    DEFAULT_LANE_TTL_MS,
+    LANE_HOLDER_PREFIX,
+    LANE_SLOT_PREFIX,
+    acquire_lane_slot,
+    active_lane_count,
+    find_lane_slot,
+    release_lane_slot,
+)
 from .types import Claim, ClaimState
 
 __all__ = [
@@ -53,11 +62,18 @@ __all__ = [
     "ClaimHeldByOther",
     "ClaimState",
     "ClaimValidationError",
+    "DEFAULT_LANE_TTL_MS",
     "HolderMismatch",
+    "LANE_HOLDER_PREFIX",
+    "LANE_SLOT_PREFIX",
     "acquire_claim",
+    "acquire_lane_slot",
+    "active_lane_count",
     "claim_status",
+    "find_lane_slot",
     "force_release_claim",
     "list_claims",
     "refresh_claim",
     "release_claim",
+    "release_lane_slot",
 ]
