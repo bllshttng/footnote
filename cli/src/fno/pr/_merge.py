@@ -253,7 +253,11 @@ def _merge_lock() -> Iterator[str]:
     proceeds unserialized: the lock is coordination, GitHub stays the merge
     authority, and our own tooling failing must never block a merge.
     """
-    key = holder = None
+    state = "acquired"
+    key = holder = release = None
+    # Acquisition happens fully BEFORE the yield: an exception the consumer
+    # body throws into the generator must reach the finally-release, never an
+    # except-then-yield-again (which would RuntimeError inside contextmanager).
     try:
         from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim
         from fno.paths import resolve_canonical_repo_root
@@ -264,23 +268,24 @@ def _merge_lock() -> Iterator[str]:
         while True:
             try:
                 acquire_claim(key, holder, reason="serialized PR merge (LD#9)")
+                release = release_claim
                 break
             except ClaimHeldByOther:
                 if time.monotonic() >= deadline:
-                    yield "held"
-                    return
+                    state = "held"
+                    break
                 time.sleep(_MERGE_LOCK_POLL_S)
     except Exception as exc:  # noqa: BLE001 - fail-open: lock is best-effort
         sys.stderr.write(f"pr-merge: merge lock unavailable ({exc}); proceeding\n")
-        yield "unavailable"
-        return
+        state = "unavailable"
     try:
-        yield "acquired"
+        yield state
     finally:
-        try:
-            release_claim(key, holder)
-        except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
-            pass
+        if release is not None and state == "acquired":
+            try:
+                release(key, holder)
+            except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
+                pass
 
 
 def _live_lane_count() -> int:
