@@ -362,7 +362,16 @@ def _set_member_pr_refs(
 
 
 def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
-    """Clear the `batch` mark on every member so they requeue as individual PRs."""
+    """Requeue every member as an individual PR: clear the `batch` mark AND release
+    its `node:<id>` claim.
+
+    Releasing the claim is load-bearing (codex P2): a DoneBatched member's
+    `node:<id>` claim is refreshed to a 2h TTL by MegawalkQueue's park path, so
+    clearing `batch` alone would NOT resurface it in `fno backlog next` (the live
+    claim still filters it) until the TTL expired - delaying the promised
+    individual-PR requeue by up to 2h. The batched worker has already exited when
+    an abandon runs (the daemon is sequential), so a non-strict release is safe.
+    """
     from fno.graph._intake import _find_node
     from fno.graph.store import locked_mutate_graph
     from fno.paths import graph_json
@@ -377,6 +386,22 @@ def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
         return entries
 
     locked_mutate_graph(graph_json(), mutator)
+
+    # Release each member's node claim so the requeue is immediate, not TTL-gated.
+    # force_release (not release_claim): the claim's holder is the exited worker's
+    # session key, and a non-strict release with a different holder is a no-op -
+    # only the administrative override actually drops it.
+    try:
+        from fno.claims.core import force_release_claim
+        from fno.claims.io import claims_root_for
+    except Exception:  # noqa: BLE001 - claims layer unavailable; mark-clear alone still requeues (eventually)
+        return
+    for nid in ids:
+        key = f"node:{nid}"
+        try:
+            force_release_claim(key, "batch abandoned; requeue member", root=claims_root_for(key))
+        except Exception as e:  # noqa: BLE001 - best-effort; a held claim only delays this one requeue
+            _LOG.debug("batch abandon: node claim force-release failed for %s: %s", nid, e)
 
 
 def ship_batch(

@@ -321,6 +321,21 @@ def test_ship_closeable_scopes_peek_to_mission(tmp_path, graph, batching_on):
     assert "--mission" in next_calls[0] and "m-42" in next_calls[0]
 
 
+def test_abandon_force_releases_member_node_claims(tmp_path, graph, monkeypatch):
+    """Requeue must force-release each member's node claim, not just clear the
+    batch mark: a DoneBatched member's node:<id> claim is TTL-held, so clearing
+    the mark alone would leave `next` filtering it until the TTL expired."""
+    graph([_member_node("x-1"), _member_node("x-2")])
+    released: list[str] = []
+    import fno.claims.core as _core
+    import fno.claims.io as _io
+    monkeypatch.setattr(_core, "force_release_claim", lambda key, reason, root=None: released.append(key))
+    monkeypatch.setattr(_io, "claims_root_for", lambda key: tmp_path)
+
+    B._clear_member_batch_marks(["x-1", "x-2"], root=tmp_path)
+    assert set(released) == {"node:x-1", "node:x-2"}
+
+
 def test_pr_body_lists_members():
     batch = {
         "batch_id": "batch-abcd", "domain": "code",
