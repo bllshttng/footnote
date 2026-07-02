@@ -61,7 +61,7 @@ fn persistence_reattach_restores_the_exact_screen() {
             }
         }
     };
-    h.type_bytes(&[0x1C]);
+    h.type_bytes(b"\x02d"); // leader+d detach
     assert!(h.wait_exit(10).success());
     drop(h);
 
@@ -82,7 +82,7 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
     // "open" in the foreground exactly like an editor session.
     h.type_bytes(b"printf '\\033[?1049h\\033[2J\\033[HALT-SCREEN-HELD'; cat\r");
     h.wait_screen(15, |s| s.contains("ALT-SCREEN-HELD"));
-    h.type_bytes(&[0x1C]); // detach with the alt screen active
+    h.type_bytes(b"\x02d"); // leader+d: detach with the alt screen active
     assert!(h.wait_exit(10).success());
     drop(h);
 
@@ -133,7 +133,7 @@ fn persistence_multi_pane_reattach_is_screen_exact() {
             }
         }
     };
-    h.type_bytes(&[0x1C]);
+    h.type_bytes(b"\x02d"); // leader+d detach
     assert!(h.wait_exit(10).success());
     drop(h);
 

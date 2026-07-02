@@ -329,12 +329,28 @@ impl View {
                 }
             }
         }
-        // Divider glyphs for content cells no pane covers: pick by which
-        // neighbors are panes so vertical strips read '│', horizontal '─',
-        // crossings '┼'. Dim so chrome never shouts over content.
+        // Letterbox (AC1-UI): the server tiled its rects into `Layout.area`
+        // (the view-scoped clamp); content anchors top-left and everything
+        // beyond `area` up to the local content edge is visibly-inert dim
+        // filler, never divider glyphs. `(0, 0)` is the pre-Layout
+        // placeholder: no filler until the first real Layout names a bound.
+        let (a_rows, a_cols) = self.layout.area;
+        let boxed = self.layout.area != (0, 0);
+        // Divider glyphs for in-area content cells no pane covers: pick by
+        // which neighbors are panes so vertical strips read '│', horizontal
+        // '─', crossings '┼'. Dim so chrome never shouts over content.
         for r in origin_r..rows {
             for c in origin_c..cols {
                 if covered[r * cols + c] {
+                    continue;
+                }
+                if boxed && (r - origin_r >= a_rows as usize || c - origin_c >= a_cols as usize) {
+                    cells[r * cols + c] = Cell {
+                        c: '·',
+                        fg: Color::Default,
+                        bg: Color::Default,
+                        flags: cell_flags::DIM,
+                    };
                     continue;
                 }
                 let horiz = c > origin_c && covered[r * cols + c - 1]
@@ -368,6 +384,12 @@ impl View {
                 if let Some(f) = self.frames.get(&self.layout.focus) {
                     cur_r = TAB_BAR_ROWS + rect.y + f.cursor_row.min(rect.rows.saturating_sub(1));
                     cur_c = self.panel_w() + rect.x + f.cursor_col.min(rect.cols.saturating_sub(1));
+                    if boxed {
+                        // Never in the filler (AC1-UI), even mid-race when a
+                        // stale rect exceeds the just-shrunk area.
+                        cur_r = cur_r.min(TAB_BAR_ROWS + a_rows.saturating_sub(1));
+                        cur_c = cur_c.min(self.panel_w() + a_cols.saturating_sub(1));
+                    }
                     cur_vis = f.cursor_visible;
                 }
             }
@@ -883,15 +905,13 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
 /// Selector-mode keys: j/k (and arrows) move, h/l (and left/right) collapse/
 /// expand, Enter selects (squad or tab), Esc/q closes. Rows and cursor are
 /// re-read per key so a close mid-chunk swallows the remainder instead of
-/// resurrecting the selector. The detach byte still works from here.
+/// resurrecting the selector. Detach is leader+d from NORMAL mode only
+/// (Locked 11): close the selector first.
 async fn selector_keys(
     view: &mut View,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    if bytes.contains(&crate::keys::DETACH) {
-        return Ok(StdinFlow::Detach);
-    }
     let mut esc = std::mem::take(&mut view.sel_esc);
     let keys = fold_selector_keys(&mut esc, bytes);
     view.sel_esc = esc;
@@ -1277,6 +1297,45 @@ mod tests {
             !view.frames.contains_key(&11),
             "frames for dead panes are dropped at Layout"
         );
+    }
+
+    #[test]
+    fn client_compose_letterboxes_beyond_the_clamped_area() {
+        // AC1-UI: a 29x72 local content area showing a tab clamped to 20x50
+        // - content anchors top-left, everything beyond is dim '·' filler,
+        // and the cursor never enters the filler.
+        let mut view = View::new(
+            (30, 100),
+            LayoutView {
+                squads: vec![meta(1, "footnote", 1, 0)],
+                active_squad: 1,
+                panes: vec![(
+                    10,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 20,
+                        cols: 50,
+                    },
+                )],
+                focus: 10,
+                area: (20, 50),
+            },
+        );
+        view.frames.insert(10, text_frame(20, 50, 'a'));
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        // In-area content cell.
+        assert_eq!(frame.cells[1 * cols + 28].c, 'a');
+        // One column beyond the area: filler, dim.
+        let beyond_col = &frame.cells[1 * cols + 28 + 50];
+        assert_eq!(beyond_col.c, '·', "beyond-area column must be filler");
+        assert!(beyond_col.flags & cell_flags::DIM != 0);
+        // One row beyond the area (content row 20): filler too.
+        let beyond_row = &frame.cells[(1 + 20) * cols + 28];
+        assert_eq!(beyond_row.c, '·', "beyond-area row must be filler");
+        // Cursor confined to content even against a lying frame cursor.
+        assert!(frame.cursor_row < 1 + 20 && frame.cursor_col < 28 + 50);
     }
 
     #[test]
