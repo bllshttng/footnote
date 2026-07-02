@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -3892,6 +3893,53 @@ def _build_mail_ctx(
     )
 
 
+def _mux_pane_send(entry: "AgentEntry", text: str) -> bool:
+    """Live-inject to a mux-hosted agent via ``fno mux pane send``, holding
+    the pane's writer claim around the text-then-CR burst. The claim is
+    best-effort (an unclaimed pane refuses the acquire; send proceeds), but a
+    failed send fails closed -> the caller's durable demotion.
+    """
+    mux = entry.mux or {}
+    session = mux.get("session")
+    pane_id = mux.get("pane_id")
+    if not session or pane_id is None:
+        return False
+    fno_bin = os.environ.get("FNO_BIN") or "fno"
+    pane = str(pane_id)
+
+    def _run(args: list[str], stdin_text: Optional[str] = None) -> bool:
+        try:
+            proc = subprocess.run(
+                [fno_bin, "mux", "pane", *args, "--session", str(session)],
+                input=stdin_text,
+                capture_output=True,
+                text=True,
+                timeout=_MAIL_INJECT_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"fno mux pane {args[0]} failed: {exc}", file=sys.stderr)
+            return False
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip()
+            print(
+                f"fno mux pane {args[0]} exited {proc.returncode}: {detail}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    claimed = _run(["claim", pane, "--pid", str(os.getpid())])
+    try:
+        if not _run(["send", pane, "--stdin"], stdin_text=text):
+            return False
+        # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
+        time.sleep(0.3)
+        return _run(["send", pane, "--text", "\r"])
+    finally:
+        if claimed:
+            _run(["release", pane])
+
+
 def _mail_inject_claude(recipient: str, text: str) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
@@ -3962,6 +4010,11 @@ def _deliver_live(
             node=mail.node,
             to=mail.to,
         )
+
+    # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
+    # PaneSend; worker/bg rows keep the legacy lanes below until G4.
+    if entry.mux:
+        return _mux_pane_send(entry, wrapped)
 
     if entry.provider != "claude":
         # Route codex/gemini through the daemon deliver RPC (now <fno_mail>-wrapped).

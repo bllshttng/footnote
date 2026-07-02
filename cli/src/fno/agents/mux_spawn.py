@@ -262,11 +262,14 @@ def dispatch_spawn_pane(
                 exit_code=2,
             )
 
+        # --claim marks the pane writer-claim eligible (agent panes only);
+        # mail's live inject holds it around each burst.
         proc = _run_mux(
             [
                 "mux",
                 "pane",
                 "run",
+                "--claim",
                 "--session",
                 session,
                 "--cwd",

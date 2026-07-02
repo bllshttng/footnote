@@ -82,6 +82,7 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     # The hosting call is the G1 script API with the resolved session + cwd.
     run_call = runner.calls[0]
     assert run_call[1:4] == ["mux", "pane", "run"]
+    assert "--claim" in run_call  # agent panes opt into the writer claim
     assert run_call[run_call.index("--session") + 1] == "main"
     assert run_call[run_call.index("--cwd") + 1] == str(tmp_path)
     # Mesh identity rides the env(1) wrapper after `--`.
