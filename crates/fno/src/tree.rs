@@ -247,25 +247,23 @@ pub fn split(tab: &mut Tab, viewport: Rect, axis: Axis, new_id: PaneId) -> Resul
     let candidate = split_node(&tab.root, tab.focus, axis, new_id)
         .ok_or(SplitError::FocusNotFound(tab.focus))?;
 
-    if let Some((rows, cols)) = smallest_pane(&candidate, viewport) {
-        if rows < MIN_ROWS || cols < MIN_COLS {
-            return Err(SplitError::TooSmall {
-                min_rows: MIN_ROWS,
-                min_cols: MIN_COLS,
-            });
-        }
+    // Per-pane, PER-AXIS: a pane fails on either dimension independently. A
+    // single "smallest pane by min dimension" reduction conflates the axes -
+    // a tall-thin pane (cols below minimum) hides behind a short-wide pane
+    // whose min dimension is smaller but which passes both checks.
+    if layout(&candidate, viewport)
+        .iter()
+        .any(|(_, r)| r.rows < MIN_ROWS || r.cols < MIN_COLS)
+    {
+        return Err(SplitError::TooSmall {
+            min_rows: MIN_ROWS,
+            min_cols: MIN_COLS,
+        });
     }
 
     tab.root = candidate;
     tab.focus = new_id;
     Ok(())
-}
-
-fn smallest_pane(node: &Node, viewport: Rect) -> Option<(u16, u16)> {
-    layout(node, viewport)
-        .into_iter()
-        .map(|(_, r)| (r.rows, r.cols))
-        .min_by_key(|(rows, cols)| *rows.min(cols))
 }
 
 /// Build the post-split tree. `None` means `target` isn't in this subtree.
@@ -924,6 +922,41 @@ mod tests {
                 min_cols: MIN_COLS
             }
         );
+        assert_eq!(tab, before, "tree must be unchanged on refusal");
+    }
+
+    #[test]
+    fn tree_split_refusal_checks_each_axis_independently() {
+        // Regression (spec review): the guard must be per-pane per-axis. A
+        // short-wide pane (rows == MIN_ROWS exactly, passes both) has a
+        // SMALLER min dimension than the tall-thin panes a split would
+        // create (cols < MIN_COLS, rows huge) - a smallest-pane-by-min-dim
+        // reduction checks only the former and wrongly allows the split.
+        let mut tab = Tab {
+            root: Node::Branch {
+                axis: Axis::Vertical,
+                children: vec![
+                    (0.08, Node::Leaf(1)), // rows floor(29*.08)=2, cols 80
+                    (
+                        0.92,
+                        Node::Branch {
+                            axis: Axis::Horizontal,
+                            children: vec![(0.9, Node::Leaf(2)), (0.1, Node::Leaf(3))],
+                        },
+                    ),
+                ],
+            },
+            focus: 3, // 8 cols: exactly at minimum - any H split of it must refuse
+        };
+        let viewport = Rect {
+            x: 0,
+            y: 0,
+            rows: 30,
+            cols: 80,
+        };
+        let before = tab.clone();
+        let err = split(&mut tab, viewport, Axis::Horizontal, 4).unwrap_err();
+        assert!(matches!(err, SplitError::TooSmall { .. }), "{err:?}");
         assert_eq!(tab, before, "tree must be unchanged on refusal");
     }
 

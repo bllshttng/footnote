@@ -252,11 +252,12 @@ fn layout_e2e_flooded_pane_never_starves_its_sibling() {
 // -- item 7: multi-pane reattach restores layout + content ------------------
 
 #[test]
-fn layout_e2e_multi_pane_reattach_restores_layout_and_content() {
+fn layout_e2e_multi_pane_multi_tab_reattach_restores_all_state() {
     let scratch = Scratch::new("reattach");
     let _server = sh_server(&scratch);
     let cwd = scratch.dir("w");
     let (mut c, pane_a) = attach_settled(&scratch, &cwd);
+    // Tab 1: a split with distinct markers in both panes.
     c.cmd(Command::SplitH);
     let pane_b = c.wait_layout(10, "2 panes", |l| l.panes.len() == 2).focus;
     c.input(b"echo marker-right\r");
@@ -265,15 +266,50 @@ fn layout_e2e_multi_pane_reattach_restores_layout_and_content() {
     c.wait_layout(10, "focus A", |l| l.focus == pane_a);
     c.input(b"echo marker-left\r");
     c.wait_pane_text(10, pane_a, |t| t.contains("marker-left"));
+    // Tab 2 (active at detach), its pane holding non-default terminal modes
+    // - the focused-pane mode-restoration half of verification item 7.
+    c.cmd(Command::NewTab);
+    let l = c.wait_layout(10, "tab 2", |l| {
+        l.squads.first().map(|s| s.tabs.len()) == Some(2) && l.panes.len() == 1
+    });
+    let pane_c = l.focus;
+    c.input(b"printf '\\033[?1000h\\033[?1006h'; cat\r");
+    c.wait(10, "modes negotiated", |c| {
+        c.modesyncs
+            .iter()
+            .any(|b| String::from_utf8_lossy(b).contains("?1000h"))
+            .then_some(())
+    });
     let before = c.layout.clone().unwrap();
     c.detach();
     drop(c);
 
-    // Reattach from the same cwd: the SAME squad, panes, rects, and focus -
-    // and both panes' content is intact (AC3-HP generalized to N panes).
+    // Reattach from the same cwd: the SAME squad, ACTIVE TAB (tab 2), panes,
+    // rects, and focus (AC5-FR); tab 1's content is intact when we return to
+    // it (AC3-HP generalized); and the fresh client's terminal is synced to
+    // the focused pane's negotiated modes BEFORE it draws (item 7's modes
+    // half - a fresh terminal starts raw, so the sync must replay ?1000h).
     let mut c2 = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
-    let after = c2.wait_layout(10, "reattach layout", |l| l.panes.len() == 2);
+    let after = c2.wait_layout(10, "reattach layout", |l| !l.panes.is_empty());
     assert_eq!(after, before, "layout must survive detach exactly");
+    assert_eq!(after.focus, pane_c, "focus lands on tab 2's pane");
+    assert_eq!(
+        after.squads[0].active_tab, 1,
+        "the active tab persists across detach (AC5-FR)"
+    );
+    assert!(
+        c2.modesyncs
+            .iter()
+            .any(|b| String::from_utf8_lossy(b).contains("?1000h")),
+        "reattach must sync the focused pane's modes to the fresh terminal; got {:?}",
+        c2.modesyncs
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect::<Vec<_>>()
+    );
+    // Back to tab 1: both panes' content survived server-side.
+    c2.cmd(Command::SelectTab(0));
+    c2.wait_layout(10, "tab 1 again", |l| l.panes.len() == 2);
     c2.wait_pane_text(10, pane_a, |t| t.contains("marker-left"));
     c2.wait_pane_text(10, pane_b, |t| t.contains("marker-right"));
 }
