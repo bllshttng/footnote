@@ -957,19 +957,16 @@ def test_dispatch_send_stamp_valueerror_non_fatal(
     assert result.delivery == "durable"
 
 
-def test_cmd_gate_non_dict_gate_file_exit1(
-    tmp_path: Path, monkeypatch, runner: CliRunner
-) -> None:
-    """A gate file whose JSON root is a list exits 1, not AttributeError."""
+def test_cmd_gate_retired_prints_pointer(runner: CliRunner) -> None:
+    """`fno agents gate` was retired at G4: the injection gate gated the deleted
+    daemon PTY-inject lane. It must print a one-line pointer and exit non-zero
+    rather than hit UnknownMethod on the removed agent.gate_check handler (codex
+    P2 on PR #148)."""
     from fno.agents.cli import agents_app
 
-    home_dir = tmp_path / "agents-home"
-    home_dir.mkdir()
-    (home_dir / "injection-gate.json").write_text('["not", "a", "dict"]')
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(home_dir))
-
-    result = runner.invoke(agents_app, ["gate", "codex"])
-    assert result.exit_code == 1
+    result = runner.invoke(agents_app, ["gate", "codex", "--probe"])
+    assert result.exit_code == 2
+    assert "retired at G4" in result.output
 
 
 # ---------------------------------------------------------------------------

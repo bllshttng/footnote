@@ -1947,43 +1947,6 @@ async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
     Response::ok(req.id, json!({"reply": reply, "backend": "pty"}))
 }
 
-// ---------------------------------------------------------------------------
-// Shared PTY inject primitive (Task 2.2 / US4)
-// ---------------------------------------------------------------------------
-
-/// Per-provider injection gate decision.
-///
-/// Before live PTY injection is enabled for a provider, an empirical check must
-/// confirm the TUI queues mid-turn type+Enter without interrupting a running
-/// turn. This enum models the outcome.
-///
-/// Per-provider injection gate decision.
-///
-/// The gate file (`injection-gate.json`) is the authoritative record; the
-/// thread-local override supersedes it in tests only.
-///
-/// Conservative invariant: absent file / absent provider / malformed JSON all
-/// map to `Unverified` — NEVER default to `Passed`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InjectionGate {
-    /// Gate passed: PTY injection is safe for this provider.
-    Passed,
-    /// Empirical check ran and the provider TUI failed (interrupts mid-turn,
-    /// concatenates, or otherwise misbehaves). Demotion uses a distinct reason
-    /// so the event trail distinguishes "empirically failed" from "never checked".
-    Failed,
-    /// Gate not yet verified: demotion to durable is required.
-    Unverified,
-}
-
-// Thread-local override for tests. When set, any provider whose name appears
-// in the comma-separated string is treated as Passed.  Thread-local means
-// parallel tests cannot interfere with each other (unlike process-wide env vars).
-std::thread_local! {
-    static INJECTION_GATE_ALLOW: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 /// Maximum body size (bytes) accepted on the switchboard inject path. Mirrors
 /// `MAX_FRAME_BYTES` from the protocol layer; an oversized body would produce
 /// a worker-write frame too large for the framing layer to accept.
@@ -5770,10 +5733,4 @@ done
         }
         std::fs::remove_dir_all(home.root()).ok();
     }
-
-    // ── deliver RPC tests (Task 2.2) ─────────────────────────────────────────
-
-    // ── F3: deliver Err arm must pass through the real reason string ──────────
-
-    // ── F5: injection_gate_with_home must check doc["v"] ─────────────────────
 }
