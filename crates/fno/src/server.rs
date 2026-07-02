@@ -88,6 +88,7 @@ enum CoreMsg {
         bytes: Vec<u8>,
     },
     Resize {
+        id: u64,
         rows: u16,
         cols: u16,
     },
@@ -116,6 +117,9 @@ struct Client {
     /// on every layout push. Grids of unviewed panes are still fed; their
     /// frames never cross this client's wire (AC2-FR).
     visible: HashSet<u64>,
+    /// This client's own content-area (rows, cols) - one input to the
+    /// view-scoped smallest-client clamp (Locked 1).
+    dims: (u16, u16),
 }
 
 struct PaneEntry {
@@ -190,21 +194,40 @@ struct Core {
     /// Monotonic, never reused (Locked Decision 6).
     next_pane_id: u64,
     next_squad_id: u64,
-    /// Last-attach/resize-wins content-area geometry. 3.3 replaces this with
-    /// the view-scoped per-tab smallest-client clamp.
-    viewport: (u16, u16),
+    /// Each tab's last-applied content area (Locked 1's "no viewers -> keep
+    /// last size"). Written by the geometry pass for every viewed tab; read
+    /// as the fallback when a tab loses its last viewer. Purged when a tab
+    /// dies (ids are never reused, so stale entries would only accumulate).
+    tab_areas: HashMap<TabId, (u16, u16)>,
     shells: Vec<OsString>,
     out_tx: mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: mpsc::Sender<u64>,
 }
 
 impl Core {
-    fn viewport_rect(&self) -> Rect {
+    /// The view-scoped smallest-client clamp (Locked 1): a tab's content
+    /// area is the elementwise min over the dims of every client currently
+    /// viewing it; with no viewers it keeps its last-applied size, and a tab
+    /// that has never been sized falls back to the VT defaults.
+    fn tab_area(&self, tid: TabId) -> (u16, u16) {
+        let clamp = self
+            .clients
+            .iter()
+            .filter(|c| c.view.1 == tid)
+            .map(|c| c.dims)
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)));
+        clamp
+            .or_else(|| self.tab_areas.get(&tid).copied())
+            .unwrap_or((crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS))
+    }
+
+    fn tab_rect(&self, tid: TabId) -> Rect {
+        let (rows, cols) = self.tab_area(tid);
         Rect {
             x: 0,
             y: 0,
-            rows: self.viewport.0,
-            cols: self.viewport.1,
+            rows,
+            cols,
         }
     }
 
@@ -259,7 +282,6 @@ impl Core {
         dirty: DirtyMap,
         notify: Arc<Notify>,
     ) {
-        self.viewport = (rows, cols);
         let view = match self.session.find_by_cwd(&key) {
             Some(sid) => {
                 // Existing squad: the attach lands IN it (AC6-HP, worktree
@@ -314,6 +336,7 @@ impl Core {
             synced_modes: Modes::default(),
             view,
             visible: HashSet::new(),
+            dims: (rows, cols),
         });
         self.push_layout(true);
     }
@@ -396,17 +419,27 @@ impl Core {
     /// so queued frames stay valid. Unviewed tabs are untouched: grids keep
     /// feeding, geometry keeps its last size, nothing crosses the wire.
     fn push_layout(&mut self, reemit: bool) {
-        let vp = self.viewport_rect();
-        // Geometry pass: each distinct viewed tab, once. (3.3 swaps the
-        // shared viewport for the per-tab smallest-client clamp.)
+        // Geometry pass: each distinct viewed tab, once, at its view-scoped
+        // smallest-client clamp (Locked 1/5). The applied area is cached so
+        // the tab keeps it when its last viewer leaves.
         let viewed: HashSet<TabId> = self.clients.iter().map(|c| c.view.1).collect();
-        let mut tab_rects: HashMap<TabId, (Vec<(u64, Rect)>, u64)> = HashMap::new();
+        let mut tab_rects: HashMap<TabId, (Vec<(u64, Rect)>, u64, (u16, u16))> = HashMap::new();
         for tid in viewed {
             let Some((sid, idx)) = self.session.find_tab(tid) else {
                 continue; // dangling view: re-anchor missed it upstream
             };
+            let area = self.tab_area(tid);
+            self.tab_areas.insert(tid, area);
             let tab = &self.session.squad(sid).expect("find_tab hit").tabs[idx];
-            let rects = tree::layout(&tab.root, vp);
+            let rects = tree::layout(
+                &tab.root,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: area.0,
+                    cols: area.1,
+                },
+            );
             let focus = tab.focus;
             // Rect-driven pane sizing: only geometry that actually changed
             // hits the PTY, so a resize storm's no-op tail is free (AC1-FR's
@@ -422,7 +455,7 @@ impl Core {
                     }
                 }
             }
-            tab_rects.insert(tid, (rects, focus));
+            tab_rects.insert(tid, (rects, focus, area));
         }
 
         // Per-client messages, precomputed so the send loop can borrow
@@ -432,11 +465,11 @@ impl Core {
             .clients
             .iter()
             .map(|c| {
-                let (rects, focus) = tab_rects
+                let (rects, focus, area) = tab_rects
                     .get(&c.view.1)
                     .cloned()
-                    .unwrap_or_else(|| (Vec::new(), 0));
-                let msg = self.layout_msg_for(c.view, &rects, focus);
+                    .unwrap_or_else(|| (Vec::new(), 0, c.dims));
+                let msg = self.layout_msg_for(c.view, &rects, focus, area);
                 let modes = self
                     .panes
                     .get(&focus)
@@ -494,6 +527,7 @@ impl Core {
         view: (u64, TabId),
         rects: &[(u64, Rect)],
         focus: u64,
+        area: (u16, u16),
     ) -> ServerMsg {
         let cwds: Vec<String> = self
             .session
@@ -537,7 +571,7 @@ impl Core {
             active_squad: view.0,
             panes: rects.to_vec(),
             focus,
-            area: self.viewport,
+            area,
         }
     }
 
@@ -610,7 +644,13 @@ impl Core {
         if let Some(entry) = self.panes.remove(&pid) {
             entry.pty.kill();
         }
-        let vp = self.viewport_rect();
+        let tid = self
+            .session
+            .squad(sid)
+            .expect("find_pane returned a live squad id")
+            .tabs[ti]
+            .id;
+        let vp = self.tab_rect(tid);
         let squad = self
             .session
             .squad_mut(sid)
@@ -627,6 +667,7 @@ impl Core {
                 // view named it re-anchors in this same mutation, then the
                 // push delivers ModeSync -> Layout -> frames in order
                 // (AC2-ERR).
+                self.tab_areas.remove(&tid);
                 self.reanchor_views();
                 self.push_layout(true);
                 Flow::Continue
@@ -649,12 +690,13 @@ impl Core {
     }
 
     fn command(&mut self, client_id: u64, cmd: Command) -> Flow {
-        let vp = self.viewport_rect();
         // Commands act on the SENDER's view (Locked 3/4). A command from a
         // just-deregistered client has nothing to act on: drop fail-closed.
         let Some(view) = self.client_view(client_id) else {
             return Flow::Continue;
         };
+        // Tree mutations tile against the viewed tab's CLAMPED area.
+        let vp = self.tab_rect(view.1);
         match cmd {
             Command::SplitH | Command::SplitV => {
                 let axis = if matches!(cmd, Command::SplitH) {
@@ -672,7 +714,7 @@ impl Core {
                     .panes
                     .get(&tab.focus)
                     .map(|e| e.vt.size())
-                    .unwrap_or(self.viewport);
+                    .unwrap_or((vp.rows, vp.cols));
                 let squad_cwd = self
                     .session
                     .squad(view.0)
@@ -736,7 +778,15 @@ impl Core {
                 Flow::Continue
             }
             Command::NewTab => {
-                let (rows, cols) = self.viewport;
+                // The new tab's first (and so far only) viewer is the
+                // sender: spawn at the sender's own content area (Locked 5's
+                // NewTab event; the push below applies the same clamp).
+                let (rows, cols) = self
+                    .clients
+                    .iter()
+                    .find(|c| c.id == client_id)
+                    .map(|c| c.dims)
+                    .unwrap_or((vp.rows, vp.cols));
                 let squad_cwd = self
                     .session
                     .squad(view.0)
@@ -817,6 +867,7 @@ impl Core {
                     _ => {
                         // Everyone who viewed the dead tab (sender included)
                         // re-anchors in this same mutation (AC2-ERR).
+                        self.tab_areas.remove(&view.1);
                         self.reanchor_views();
                         self.push_layout(true);
                         Flow::Continue
@@ -876,14 +927,24 @@ impl Core {
                 }
                 Flow::Continue
             }
-            CoreMsg::Resize { rows, cols } => {
-                self.viewport = (rows, cols);
+            CoreMsg::Resize { id, rows, cols } => {
+                // One client's terminal changed size: update ITS dims; the
+                // push recomputes every viewed tab's clamp (Locked 5's
+                // Resize event).
+                if let Some(c) = self.clients.iter_mut().find(|c| c.id == id) {
+                    c.dims = (rows, cols);
+                }
                 self.push_layout(true);
                 Flow::Continue
             }
             CoreMsg::Command { id, cmd } => self.command(id, cmd),
             CoreMsg::Gone(id) => {
+                // Gone is a geometry event (Locked 5, AC1-ERR): a vanished
+                // constraining client releases its clamp, so the tab regrows
+                // for the survivors in this same pass - Detach and an abrupt
+                // socket death take the identical path.
                 self.clients.retain(|c| c.id != id);
+                self.push_layout(true);
                 Flow::Continue
             }
         }
@@ -925,7 +986,7 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
         clients: Vec::new(),
         next_pane_id: 1,
         next_squad_id: 1,
-        viewport: (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS),
+        tab_areas: HashMap::new(),
         shells: shell_candidates(std::env::var_os("SHELL").as_deref()),
         out_tx,
         exit_tx,
@@ -998,18 +1059,30 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
             msg = core_rx.recv() => {
                 // core_tx lives in the accept loop, so recv never yields None.
                 let Some(msg) = msg else { break Flow::Shutdown };
-                // Coalesce resize storms: only the final geometry hits the
-                // PTYs (AC3-FR). Other messages drained here run after, in
-                // arrival order.
-                if let CoreMsg::Resize { mut rows, mut cols } = msg {
+                // Coalesce resize storms PER CLIENT: only each client's
+                // final geometry hits its viewed tab's clamp (AC1-FR). Other
+                // messages drained here run after, in arrival order.
+                if let CoreMsg::Resize { id, rows, cols } = msg {
+                    let mut last: HashMap<u64, (u16, u16)> = HashMap::new();
+                    last.insert(id, (rows, cols));
+                    let mut order = vec![id];
                     let mut pending = Vec::new();
                     while let Ok(m) = core_rx.try_recv() {
                         match m {
-                            CoreMsg::Resize { rows: r, cols: c } => { rows = r; cols = c; }
+                            CoreMsg::Resize { id, rows, cols } => {
+                                if last.insert(id, (rows, cols)).is_none() {
+                                    order.push(id);
+                                }
+                            }
                             other => pending.push(other),
                         }
                     }
-                    let mut flow = core.handle(CoreMsg::Resize { rows, cols });
+                    let mut flow = Flow::Continue;
+                    for id in order {
+                        let (rows, cols) = last[&id];
+                        flow = core.handle(CoreMsg::Resize { id, rows, cols });
+                        if flow == Flow::Shutdown { break; }
+                    }
                     for m in pending {
                         if flow == Flow::Shutdown { break; }
                         flow = core.handle(m);
@@ -1124,7 +1197,11 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                 }
             }
             Ok(ClientMsg::Resize { rows, cols }) => {
-                if core_tx.send(CoreMsg::Resize { rows, cols }).await.is_err() {
+                if core_tx
+                    .send(CoreMsg::Resize { id, rows, cols })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
