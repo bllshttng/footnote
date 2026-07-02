@@ -692,7 +692,8 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         .get("yolo")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    // agy honors an optional --model (exact agy model name); other providers ignore it.
+    // claude --bg (x-571f per-node pin) and agy honor an optional --model
+    // (appended to the worker argv); codex/gemini and claude --headless ignore it.
     let model = params.get("model").and_then(|v| v.as_str());
 
     // Validate the provider FIRST so an unknown provider is a client-side
@@ -741,6 +742,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 yolo,
                 timeout,
                 &[],
+                model,
             ))
         }
         // claude headless: a truly headless `claude -p` one-shot (no thread, no
@@ -1171,9 +1173,11 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("force".into(), Value::Bool(true));
             }
             "--model" => {
-                // agy honors an exact model name (`agy models`); other providers
-                // ignore the param. Forwarded so `spawn --provider agy --once
-                // --model <name>` reaches dispatch_agy_once (codex P2).
+                // claude --bg (x-571f per-node pin) and agy honor an exact model
+                // name; codex/gemini and claude --headless ignore the param.
+                // Forwarded so `spawn --substrate bg --model <m>` reaches
+                // dispatch_claude_spawn and `--provider agy --once --model <name>`
+                // reaches dispatch_agy_once (codex P2).
                 params.insert("model".into(), str_arg(&mut it, "--model")?);
             }
             "--from-name" => {
