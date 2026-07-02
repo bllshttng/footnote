@@ -207,17 +207,18 @@ fn multiclient_independent_views_frames_for_viewers_only_and_reanchor() {
         "frames after the new Layout must be the new view's panes only; got {tail_frames:?}"
     );
 
-    // AC2-ERR: B's viewed pane holds negotiated modes (mouse on); A closes
-    // the shared tab 2. Both re-anchor to tab 1; B's reliable stream must
-    // read ModeSync (mode reset) -> Layout -> frames, in that order, and
-    // B's next keystroke lands in the re-anchored tab's focused pane.
+    // AC2-ERR: B's viewed pane holds a negotiated mode (bracketed paste; mouse
+    // modes are no longer synced in Phase 5, so paste is the probe that DOES
+    // sync). A closes the shared tab 2. Both re-anchor to tab 1; B's reliable
+    // stream must read ModeSync (mode reset) -> Layout -> frames, in that order,
+    // and B's next keystroke lands in the re-anchored tab's focused pane.
     b.input(b"\x03");
     std::thread::sleep(Duration::from_millis(300));
-    b.input(b"printf '\\033[?1000h\\033[?1006h'; cat\r");
+    b.input(b"printf '\\033[?2004h'; cat\r");
     b.wait(10, "modes negotiated", |c| {
         c.modesyncs
             .iter()
-            .any(|m| String::from_utf8_lossy(m).contains("?1000h"))
+            .any(|m| String::from_utf8_lossy(m).contains("?2004h"))
             .then_some(())
     });
     let start = {

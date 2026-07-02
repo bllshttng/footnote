@@ -897,9 +897,17 @@ async fn attach_and_run(
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback
                     // (Locked 5). The status flash makes the auto-copy observable
-                    // (AC2-HP); a hard failure sounds BEL (AC2-ERR).
+                    // (AC2-HP); a hard failure sounds BEL (AC2-ERR). The exec chain
+                    // spawns and waits on a clipboard tool (xclip can hang on a slow
+                    // X11 connection), so it runs on a blocking thread rather than
+                    // freezing the event loop.
                     let chars = text.chars().count();
-                    let notice = match crate::clipboard::deliver(&text, raw_out) {
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        crate::clipboard::deliver(&text, raw_out)
+                    })
+                    .await
+                    .unwrap_or(crate::clipboard::CopyOutcome::Failed);
+                    let notice = match outcome {
                         crate::clipboard::CopyOutcome::Local(_) => format!("copied {chars} chars"),
                         crate::clipboard::CopyOutcome::Osc52 { truncated: false } => {
                             format!("copied {chars} chars")

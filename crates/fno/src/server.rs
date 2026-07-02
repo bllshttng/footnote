@@ -93,15 +93,32 @@ enum MouseAction {
     Ignore,
 }
 
-/// Route by the pane's mode (brief Locked 2): a pane that negotiated SGR mouse
-/// reporting gets passthrough; otherwise the mux interprets the gesture. Only
-/// SGR is honored for passthrough - a mouse app that never negotiated SGR falls
-/// through to interpretation rather than receiving garbage (Domain: legacy X10
-/// truncates at column 223).
+/// Route by the pane's mode (brief Locked 2). A pane that negotiated SGR mouse
+/// reporting gets passthrough, but only for the event kinds its mode actually
+/// asked for: a click-only app (`?1000`) must not receive drag reports it never
+/// requested, so a drag over such a pane is ignored (not mux-interpreted -
+/// mux-interpreting a mouse app's pane would fight its own click handling). Only
+/// SGR is honored - a mouse app that never negotiated SGR falls through to
+/// interpretation rather than receiving garbage (Domain: legacy X10 truncates at
+/// column 223). Known v1 limit: the client captures `?1002` (button + drag)
+/// only, so a `?1003` all-motion app never sees hover motion.
 fn route_mouse(modes: Modes, kind: MouseKind) -> MouseAction {
     let reports_mouse = modes.mouse_click || modes.mouse_drag || modes.mouse_motion;
     if reports_mouse && modes.sgr_mouse {
-        return MouseAction::Passthrough;
+        let wants = match kind {
+            // Wheel, press, and release are reported by every mouse mode.
+            MouseKind::WheelUp
+            | MouseKind::WheelDown
+            | MouseKind::Press(_)
+            | MouseKind::Release(_) => true,
+            // Motion-while-held is only wanted by ?1002 (drag) / ?1003 (motion).
+            MouseKind::Drag(_) => modes.mouse_drag || modes.mouse_motion,
+        };
+        return if wants {
+            MouseAction::Passthrough
+        } else {
+            MouseAction::Ignore
+        };
     }
     match kind {
         MouseKind::WheelUp => MouseAction::Scroll(MOUSE_WHEEL_LINES),
@@ -1081,11 +1098,19 @@ impl Core {
     }
 
     /// Ship extracted selection text to one client's clipboard chain (Locked 5).
-    /// Reliable: a dropped copy is silent data loss. A wedged channel means the
-    /// client is already dead (same policy as [`Core::notice`]).
-    fn send_copy(&self, client_id: u64, text: String) {
-        if let Some(c) = self.clients.iter().find(|c| c.id == client_id) {
-            let _ = c.reliable_tx.try_send(ServerMsg::Copy { text });
+    /// Reliable: a dropped copy is silent data loss, and the copy is the only
+    /// feedback that release-to-copy worked. A wedged reliable channel is a dead
+    /// client (same policy as [`Core::push_layout`] / [`Core::sync_focused_modes`]):
+    /// tear it down rather than lose the copy silently. A live client drains its
+    /// reliable channel fast and never hits this.
+    fn send_copy(&mut self, client_id: u64, text: String) {
+        let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {
+            return;
+        };
+        if c.reliable_tx.try_send(ServerMsg::Copy { text }).is_err() {
+            eprintln!("fno mux: client {client_id} reliable channel wedged on Copy; dropping it");
+            self.clients.retain(|c| c.id != client_id);
+            self.push_layout(true);
         }
     }
 
@@ -1435,15 +1460,16 @@ impl Core {
                     }
                     // A keystroke that will be delivered returns a scrolled pane
                     // to the live bottom, so input always lands on the visible
-                    // line (AC1-ERR, Invariant). No-op when already live.
-                    if self
-                        .panes
-                        .get(&focus)
-                        .is_some_and(|e| e.vt.display_offset() != 0)
-                    {
-                        if let Some(e) = self.panes.get_mut(&focus) {
+                    // line (AC1-ERR, Invariant). No-op when already live. One
+                    // lookup: broadcast after the mutable borrow ends.
+                    let mut scrolled = false;
+                    if let Some(e) = self.panes.get_mut(&focus) {
+                        if e.vt.display_offset() != 0 {
                             e.vt.scroll_to_bottom();
+                            scrolled = true;
                         }
+                    }
+                    if scrolled {
                         self.broadcast_pane(focus);
                     }
                     if let Some(entry) = self.panes.get(&focus) {
@@ -2436,16 +2462,32 @@ mod tests {
     }
 
     #[test]
-    fn route_mouse_passes_through_when_app_owns_mouse() {
-        // AC3-HP: a pane in SGR mouse mode consumes nothing mux-side.
+    fn route_mouse_passes_through_kinds_the_app_requested() {
+        // AC3-HP: a click-mode app (?1000) gets wheel/press/release passthrough
+        // and consumes nothing mux-side...
         for kind in [
             MouseKind::WheelUp,
             MouseKind::Press(MouseButton::Left),
-            MouseKind::Drag(MouseButton::Left),
             MouseKind::Release(MouseButton::Left),
         ] {
             assert_eq!(route_mouse(mouse_mode(), kind), MouseAction::Passthrough);
         }
+        // ...but a drag it never requested is ignored, not forwarded and not
+        // mux-interpreted (fighting the app's own handling).
+        assert_eq!(
+            route_mouse(mouse_mode(), MouseKind::Drag(MouseButton::Left)),
+            MouseAction::Ignore
+        );
+        // A drag-mode app (?1002) does get the drag.
+        let drag_mode = Modes {
+            mouse_drag: true,
+            sgr_mouse: true,
+            ..Modes::default()
+        };
+        assert_eq!(
+            route_mouse(drag_mode, MouseKind::Drag(MouseButton::Left)),
+            MouseAction::Passthrough
+        );
     }
 
     #[test]
