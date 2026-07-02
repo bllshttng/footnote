@@ -39,6 +39,10 @@ enum Role {
     MuxLs,
     /// `mux kill-server [<name>]`: shut a session down (no TTY needed).
     MuxKill(Option<String>),
+    /// `mux pane <verb> ...`: the v4 script API. Carries the tokens after
+    /// `mux pane` verbatim; `mux_cli::pane` parses the verb + flags. No TTY
+    /// needed (control verbs are scriptable one-shots).
+    MuxPane(Vec<OsString>),
     /// A malformed mux/server invocation: print usage, exit 2.
     MuxUsage,
     /// Any other args: the Python-CLI forwarding path.
@@ -86,6 +90,10 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 }
                 Role::ServerSession(session)
             }
+            // `mux pane <verb> ...`: hand the rest to the pane verb family;
+            // a bare `mux pane` (no verb) falls through to MuxUsage. Nothing
+            // under `mux pane` ever forwards to Python (AC).
+            Some("pane") if args.len() > 2 => Role::MuxPane(args[2..].to_vec()),
             Some("ls") if args.len() == 2 => Role::MuxLs,
             Some("attach") => match args.get(2).and_then(|a| a.to_str()) {
                 Some(name) if args.len() == 3 => {
@@ -130,7 +138,8 @@ fn main() {
         Role::MuxUsage => {
             eprintln!(
                 "usage: fno [--session <name>] | fno mux server [--session <name>] \
-                 | fno mux ls | fno mux attach <name> | fno mux kill-server [<name>]"
+                 | fno mux ls | fno mux attach <name> | fno mux kill-server [<name>] \
+                 | fno mux pane ls|read|run|send|wait|kill ..."
             );
             std::process::exit(2);
         }
@@ -139,6 +148,7 @@ fn main() {
             let session = mux_cli::resolve_session(name.as_deref(), env_session.as_deref());
             std::process::exit(mux_cli::kill_server(&session));
         }
+        Role::MuxPane(rest) => std::process::exit(mux_cli::pane(&rest, env_session.as_deref())),
         Role::Client(flag) => {
             let session = mux_cli::resolve_session(flag.as_deref(), env_session.as_deref());
             run_client(&session);
@@ -253,6 +263,24 @@ mod tests {
             Role::ServerSocket(OsString::from("/tmp/s.sock"))
         );
         assert_eq!(decide_role(&os(&["--server"]), false), Role::MuxUsage);
+    }
+
+    #[test]
+    fn proto_role_mux_pane_routes_to_the_verb_family() {
+        // A verb after `mux pane` routes to MuxPane carrying the rest; a bare
+        // `mux pane` is usage; nothing under `mux pane` forwards to Python.
+        assert_eq!(
+            decide_role(&os(&["mux", "pane", "ls"]), false),
+            Role::MuxPane(os(&["ls"]))
+        );
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "pane", "run", "--cwd", "/x", "--", "claude"]),
+                true
+            ),
+            Role::MuxPane(os(&["run", "--cwd", "/x", "--", "claude"]))
+        );
+        assert_eq!(decide_role(&os(&["mux", "pane"]), false), Role::MuxUsage);
     }
 
     #[test]

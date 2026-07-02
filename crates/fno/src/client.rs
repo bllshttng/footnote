@@ -79,8 +79,10 @@ fn run_inner(session: &str) -> Result<i32, String> {
 
 /// Connect to a live server, or spawn one and connect. AC3-ERR: a dead
 /// server's stale socket gets a one-line notice and a fresh server - never a
-/// hang on a dead socket (the spawned server's bind unlinks it).
-fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixStream, String> {
+/// hang on a dead socket (the spawned server's bind unlinks it). Shared with
+/// `mux_cli::pane run`, which must self-spawn a server for a script-only
+/// session (AC1-EDGE).
+pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixStream, String> {
     if let Ok(s) = std::os::unix::net::UnixStream::connect(path) {
         return Ok(s);
     }

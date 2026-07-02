@@ -1282,7 +1282,7 @@ impl Core {
                 timeout_ms,
                 reply,
             } => {
-                let Some(tx) = self.pane_watch.get(&pane) else {
+                let Some(entry) = self.panes.get(&pane) else {
                     let _ = reply.send(dead_pane(pane));
                     return Flow::Continue;
                 };
@@ -1296,11 +1296,19 @@ impl Core {
                         return Flow::Continue;
                     }
                 };
-                // Subscribe + seed the current text on the core loop, then
-                // hand the whole wait to an off-loop task: nothing blocking
-                // (a deadline, a settle timer) ever runs on the core loop.
-                let rx = tx.subscribe();
-                let initial = tx.borrow().text.clone();
+                // Seed `initial` from the pane's REAL current grid, not the
+                // watch value: the watch text is refreshed only while a
+                // watcher is subscribed, so output that landed before this
+                // wait started lives only in the grid. Reading it and
+                // subscribing are atomic on the single-threaded core loop, so
+                // there is no missed-output gap; the wait itself then runs
+                // entirely off-loop.
+                let initial: Arc<str> = Arc::from(frame_text(&entry.vt.frame()));
+                let rx = self
+                    .pane_watch
+                    .get(&pane)
+                    .expect("pane_watch is in lockstep with panes")
+                    .subscribe();
                 tokio::spawn(run_wait(rx, quiet_ms, regex, timeout_ms, initial, reply));
                 Flow::Continue
             }
