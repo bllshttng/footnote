@@ -325,6 +325,86 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter) {
     }
 }
 
+/// The hidden `fno-agents detect` debug verb (precedent: the hidden `claim`
+/// verb - matched with `matches!` in bin/client.rs, out of CLIENT_VERB_USAGE
+/// and the routable-verb parity guard). `detect explain <agent>` prints which
+/// authority currently badges the agent and, for screen-manifest, the matched
+/// rule + stored verdict + age. Read-only over the registry; no live
+/// re-evaluation in v1.
+pub fn run_detect(args: &[String]) -> i32 {
+    let (Some("explain"), Some(name)) = (args.first().map(String::as_str), args.get(1)) else {
+        eprintln!("usage: fno-agents detect explain <agent>");
+        return 2;
+    };
+    let home = AgentsHome::from_env();
+    let reg = match state::load_registry(&home.registry_json()) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("fno-agents: detect: registry read failed: {e}");
+            return 1;
+        }
+    };
+    let Some(entry) = reg.find(name) else {
+        eprintln!("fno-agents: detect: no such agent: {name}");
+        return 1;
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let age = |stamp: &str| -> String {
+        match state::rfc3339_like_to_secs(stamp) {
+            Some(at) => format!("{}s", now_secs.saturating_sub(at)),
+            None => format!("unparseable stamp {stamp:?}"),
+        }
+    };
+    println!("agent: {} (provider {})", entry.name, entry.provider);
+    // Mirrors the reader lattice: pane-exit > hook (capability) >
+    // screen-manifest > liveness.
+    if matches!(
+        entry.status,
+        AgentStatus::Exited | AgentStatus::PermanentDead
+    ) {
+        println!("authority: pane-exit (status {:?})", entry.status);
+    } else if let Some(leg) = &entry.inside_leg {
+        if leg.is_live_at(now_secs) {
+            println!(
+                "authority: hook (inside-leg report: state {:?}, seq {}, age {})",
+                leg.state,
+                leg.seq,
+                age(&leg.received_at)
+            );
+        } else {
+            println!(
+                "authority: liveness (hook report lapsed: seq {}, age {}; \
+                 row is hook-capable so the screen-manifest rung stays off)",
+                leg.seq,
+                age(&leg.received_at)
+            );
+        }
+    } else if let Some(ss) = &entry.screen_state {
+        if ss.is_live_at(now_secs) {
+            println!(
+                "authority: screen-manifest (rule {:?} -> state {:?}, seq {}, age {}, ttl {:?}ms)",
+                ss.rule,
+                ss.state,
+                ss.seq,
+                age(&ss.at),
+                ss.ttl_ms
+            );
+        } else {
+            println!(
+                "authority: liveness (scrape verdict lapsed: rule {:?}, age {})",
+                ss.rule,
+                age(&ss.at)
+            );
+        }
+    } else {
+        println!("authority: liveness (no hook report, no scrape verdict)");
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +593,35 @@ mod tests {
             decide(None, verdict_from(&m, "nothing here"), now_secs(), NOW_STAMP),
             Decision::Hold
         );
+    }
+
+    // -- detect explain (hidden debug verb) --------------------------------
+
+    /// AC: bad usage exits 2; an unknown agent exits 1 with a one-line error;
+    /// a known agent explains and exits 0. Takes the crate-wide env lock
+    /// (FNO_AGENTS_HOME mutation).
+    #[test]
+    fn run_detect_explain_exit_codes() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
+        let home = AgentsHome::from_env();
+        let mut scraped = entry("scrapee", "codex");
+        scraped.screen_state = Some(rep("idle", "2026-07-02T00:00:00Z", 1));
+        state::update_registry(&home.registry_json(), |r| r.entries.push(scraped)).unwrap();
+
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(run_detect(&s(&[])), 2, "missing op is a usage error");
+        assert_eq!(run_detect(&s(&["explain"])), 2, "missing agent name");
+        assert_eq!(run_detect(&s(&["explain", "ghost"])), 1, "unknown agent");
+        assert_eq!(run_detect(&s(&["explain", "scrapee"])), 0);
+
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -- sweep end-to-end over a stubbed mux CLI ---------------------------
