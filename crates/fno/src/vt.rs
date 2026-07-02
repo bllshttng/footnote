@@ -86,14 +86,26 @@ pub struct Pane {
     /// reads as ONE implicit block (whole output); one that did but has none
     /// retained reads `BLOCK_UNAVAILABLE`.
     saw_marker: bool,
+    /// The resolved scrollback cap (from [`scrollback_lines`]). A block whose
+    /// text is captured while history is at this cap may have lost its top to
+    /// eviction, so it is flagged `truncated` (honest, conservative).
+    scrollback: usize,
 }
 
 impl Pane {
     pub fn new(rows: u16, cols: u16) -> Self {
+        Pane::with_scrollback(rows, cols, scrollback_lines())
+    }
+
+    /// Construct with an explicit scrollback cap (the [`Pane::new`] path resolves
+    /// it from config). Lets tests exercise the at-cap `truncated` flag without
+    /// touching a process-global env var.
+    fn with_scrollback(rows: u16, cols: u16, scrollback: usize) -> Self {
         let rows = rows.max(1);
         let cols = cols.max(1);
+        let scrollback = scrollback.max(1);
         let config = Config {
-            scrolling_history: scrollback_lines(),
+            scrolling_history: scrollback,
             ..Config::default()
         };
         Pane {
@@ -113,6 +125,7 @@ impl Pane {
             open: None,
             next_seq: 0,
             saw_marker: false,
+            scrollback,
         }
     }
 
@@ -230,22 +243,21 @@ impl Pane {
     }
 
     /// Text from absolute row `anchor` down to the current output bottom (cursor
-    /// line). `truncated` = the span's top had scrolled out of the window.
+    /// line), plus whether the span is possibly `truncated` at its top.
     ///
-    // ponytail: exact while the pane is below its scrollback cap (the common
-    // case - a command's own output). A single command emitting more than
-    // `scrollback_lines` lines WHILE streaming may under-report its top, since
-    // alacritty exposes no post-cap scroll counter to anchor against. Completed
-    // blocks are always exact (captured at D, before further scroll). Upgrade
-    // path if it ever matters: a self-maintained scrolled-off counter fed from
-    // a real EventListener instead of VoidListener.
+    // ponytail: `history_size()` saturates at the scrollback cap and alacritty
+    // exposes no post-cap scroll counter (VoidListener), so once the pane fills
+    // its scrollback we cannot prove a block's top survived - `truncated` is
+    // then conservatively true (older rows of a large block MAY have evicted).
+    // Below the cap it is exact-false: nothing has scrolled off, so the whole
+    // span is present. Upgrade path for a precise flag: a self-maintained
+    // scrolled-off counter fed from a real EventListener.
     fn extract_from(&self, anchor: u64) -> (String, bool) {
         let grid = self.term.grid();
-        let hist = grid.history_size() as i64;
-        let top = grid.topmost_line().0 as i64; // == -hist
-        let raw_start = anchor as i64 - hist;
-        let start = raw_start.max(top);
-        let truncated = raw_start < top;
+        let hist = grid.history_size();
+        let top = grid.topmost_line().0 as i64; // == -(hist as i64)
+        let start = (anchor as i64 - hist as i64).max(top);
+        let truncated = hist >= self.scrollback;
         let end = grid.cursor.point.line.0 as i64;
         (self.rows_text(start, end), truncated)
     }
@@ -1142,6 +1154,28 @@ mod tests {
         assert!(pane.read_block(BlockSel::Seq(0)).is_err(), "oldest evicted");
         let last = (MAX_BLOCKS + 3 - 1) as u64;
         assert!(pane.read_block(BlockSel::Seq(last)).is_ok(), "newest kept");
+    }
+
+    #[test]
+    fn block_truncated_flag_fires_only_at_scrollback_cap() {
+        // Below the cap a completed block is exact (nothing evicted) - not
+        // truncated. Once the pane fills its (tiny) scrollback, a block's top
+        // may have scrolled off, so the flag conservatively fires.
+        let mut pane = Pane::with_scrollback(4, 20, 8);
+        run_command(&mut pane, "small", 0);
+        assert!(
+            !pane.read_block(BlockSel::Seq(0)).unwrap().truncated,
+            "below-cap block is exact"
+        );
+        // Push enough rows to fill the 8-line scrollback, then capture a block.
+        for i in 0..40 {
+            pane.feed(format!("filler{i}\r\n").as_bytes());
+        }
+        run_command(&mut pane, "big", 0);
+        assert!(
+            pane.read_block(BlockSel::Last).unwrap().truncated,
+            "at-cap block is flagged possibly-truncated"
+        );
     }
 
     #[test]

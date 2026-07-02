@@ -104,26 +104,31 @@ const ZSH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
 fi
 "#;
 
-/// The bash OSC 133 snippet: `PROMPT_COMMAND` emits `D;<exit>`/`A`; a `DEBUG`
-/// trap emits `C` once per command line (gated by a per-prompt flag so a
-/// pipeline does not emit it per stage). Idempotent, no absolute paths.
+/// The bash OSC 133 snippet: `_fno_osc133_prompt` (LAST in `PROMPT_COMMAND`)
+/// emits `D;<exit>`/`A` and arms; the `DEBUG` trap emits `B`/`C` on the FIRST
+/// command after the prompt, then disarms - so a pipeline emits it once, and
+/// the commands inside `PROMPT_COMMAND` (and a bare Enter) do not trip it. The
+/// `_fno_osc133_prompt` guard skips the trap firing on the hook itself.
+/// Idempotent, no absolute paths. (A pre-existing `PROMPT_COMMAND` entry plus a
+/// bare Enter is the one residual edge - a rare phantom block; zsh has none.)
 const BASH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
   _FNO_OSC133=1
-  _fno_osc133_ran=""
+  _fno_osc133_armed=""
   _fno_osc133_prompt() {
     local e=$?
     printf '\033]133;D;%s\a\033]133;A\a' "$e"
-    _fno_osc133_ran=""
+    _fno_osc133_armed=1
   }
   _fno_osc133_preexec() {
+    [ -z "$_fno_osc133_armed" ] && return
     [ -n "$COMP_LINE" ] && return
-    [ -n "$_fno_osc133_ran" ] && return
-    _fno_osc133_ran=1
+    case "$BASH_COMMAND" in _fno_osc133_prompt) return ;; esac
+    _fno_osc133_armed=""
     printf '\033]133;B\a\033]133;C\a'
   }
   case "$PROMPT_COMMAND" in
     *_fno_osc133_prompt*) ;;
-    *) PROMPT_COMMAND="_fno_osc133_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+    *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_fno_osc133_prompt" ;;
   esac
   trap '_fno_osc133_preexec' DEBUG
 fi
