@@ -24,10 +24,15 @@ from typing import List, Optional
 _INDEX_NAME = "RULES.md"
 
 
-def _package_rules_dir() -> Optional[Path]:
-    """The pack bundled inside the wheel at ``fno/recommended_rules/`` (see the
-    wheel force-include in cli/pyproject.toml). Present in an installed wheel,
-    absent in a bare source/editable checkout (where it lives at the repo root)."""
+def default_rules_source() -> Optional[Path]:
+    """Resolve the shipped rules pack: ordinary package data colocated under the
+    ``fno`` package at ``fno/recommended_rules/``.
+
+    Colocation (the same pattern ``fno/events/schema.yaml`` uses) ships it in the
+    wheel, the sdist, and editable installs with no force-include - so ``fno
+    setup wizard`` finds it in every install path, including the fresh
+    plugin-install path where the plugin-root pointer is not primed yet (PR #146
+    codex P2). ``None`` only if the package data is somehow absent."""
     try:
         from importlib.resources import files
 
@@ -35,22 +40,6 @@ def _package_rules_dir() -> Optional[Path]:
         return p if p.is_dir() else None
     except (ImportError, ModuleNotFoundError, TypeError, ValueError, OSError):
         return None
-
-
-def default_rules_source() -> Optional[Path]:
-    """Resolve the shipped rules pack, robust to install path.
-
-    Package data first (always present after ``pip install fno``, so the
-    plugin-install ``fno setup wizard`` path never silently skips), then the
-    repo/plugin ``rules/`` checkout for dev + OSS clones. ``None`` when neither
-    exists (nothing to offer)."""
-    pkg = _package_rules_dir()
-    if pkg is not None:
-        return pkg
-    from fno import paths as _paths
-
-    repo = Path(_paths.resolve_plugin_script("rules"))
-    return repo if repo.is_dir() else None
 
 
 @dataclass

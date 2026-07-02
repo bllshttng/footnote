@@ -71,27 +71,14 @@ def test_missing_source_installs_nothing(tmp_path: Path) -> None:
     assert install_recommended_rules(empty, tmp_path / "t") == []
 
 
-def test_default_source_prefers_package_data(tmp_path: Path, monkeypatch) -> None:
-    """codex P2: bundled package data must win so the plugin-install `fno setup
-    wizard` path (no primed plugin-root) resolves the pack instead of skipping."""
-    import fno.setup.recommended_rules as rr
+def test_default_source_resolves_colocated_pack() -> None:
+    """codex P2: the pack ships as package data under fno/, so it resolves in
+    every install path (no dependence on a primed plugin-root pointer)."""
+    from fno.setup.recommended_rules import default_rules_source
 
-    pkg = tmp_path / "pkg"
-    pkg.mkdir()
-    monkeypatch.setattr(rr, "_package_rules_dir", lambda: pkg)
-    assert rr.default_rules_source() == pkg
-
-
-def test_default_source_falls_back_to_checkout(tmp_path: Path, monkeypatch) -> None:
-    """No wheel package data (dev / OSS clone) -> repo/plugin rules/ checkout."""
-    import fno.paths as paths
-    import fno.setup.recommended_rules as rr
-
-    monkeypatch.setattr(rr, "_package_rules_dir", lambda: None)
-    repo = tmp_path / "rules"
-    repo.mkdir()
-    monkeypatch.setattr(paths, "resolve_plugin_script", lambda _rel: repo)
-    assert rr.default_rules_source() == repo
+    src = default_rules_source()
+    assert src is not None and src.is_dir()
+    assert (src / "pr-ready.md").is_file()
 
 
 def test_wizard_capstone_opt_in(tmp_path: Path) -> None:
