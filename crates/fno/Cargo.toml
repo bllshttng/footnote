@@ -1,0 +1,40 @@
+[package]
+name = "fno"
+version = "0.3.0"
+edition = "2021"
+# The mux pulls in tokio + alacritty_terminal + portable-pty, so this crate no
+# longer targets the old pure-std 1.74 floor. 1.89 matches fno-agents (the
+# in-tree floor these same dependencies already build on).
+rust-version = "1.89"
+description = "The fno terminal front door: a native terminal multiplexer (persistent server-owned PTYs, detach/reattach) plus the lazy bootstrapper that provisions and forwards to the fno Python CLI via uv."
+license = "Apache-2.0"
+repository = "https://github.com/bllshttng/footnote"
+homepage = "https://github.com/bllshttng/footnote"
+readme = "README.md"
+keywords = ["fno", "multiplexer", "terminal", "pty", "mux"]
+categories = ["command-line-utilities", "development-tools"]
+publish = true
+
+# The published binary is named `fno`: `cargo install fno` lands `~/.cargo/bin/fno`.
+[[bin]]
+name = "fno"
+path = "src/main.rs"
+
+[dependencies]
+# Same major versions as crates/fno-agents, which already builds this stack.
+alacritty_terminal = "0.26"
+crossterm = { version = "0.29", features = ["event-stream"] }
+libc = "0.2"
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "macros",
+    "signal",
+] }

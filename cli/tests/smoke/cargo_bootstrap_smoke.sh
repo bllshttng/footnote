@@ -4,7 +4,7 @@
 # Given a built, binary-complete platform wheel, exercise the cargo front door
 # end to end:
 #
-#   1. `cargo install --path crates/fno-bootstrap` lands the `fno` shim.
+#   1. `cargo install --path crates/fno` lands the `fno` shim.
 #   2. The first `fno` run self-bootstraps: it provisions the wheel via uv
 #      (from FNO_BOOTSTRAP_WHEEL - the local wheel, since the by-name PyPI
 #      publish is the launch gate, Open Q3) and runs the command (AC6-HP).
@@ -32,7 +32,7 @@ WHEEL="$(cd "$(dirname "$WHEEL")" && pwd)/$(basename "$WHEEL")"
 # Repo root from this script's location (cli/tests/smoke/ -> repo root).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-CRATE_DIR="$REPO_ROOT/crates/fno-bootstrap"
+CRATE_DIR="$REPO_ROOT/crates/fno"
 [ -f "$CRATE_DIR/Cargo.toml" ] || { echo "FAIL[input] bootstrapper crate not found at $CRATE_DIR"; exit 1; }
 
 command -v cargo >/dev/null 2>&1 || { echo "FAIL[env] cargo not on PATH (the cargo channel needs a Rust toolchain)"; exit 1; }
@@ -55,7 +55,7 @@ mkdir -p "$CARGO_ROOT" "$UV_TOOLS" "$UV_BIN" "$CACHE" "$WORK"
 
 # --- install the shim via the cargo front door ---
 if ! cargo install --path "$CRATE_DIR" --root "$CARGO_ROOT" --quiet 2>&1; then
-  echo "FAIL[install] cargo install --path crates/fno-bootstrap failed"
+  echo "FAIL[install] cargo install --path crates/fno failed"
   exit 1
 fi
 SHIM="$CARGO_ROOT/bin/fno"
