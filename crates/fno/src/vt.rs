@@ -32,6 +32,18 @@ pub const DEFAULT_COLS: u16 = 80;
 /// block can reach into history (4b).
 const SCROLLBACK_LINES: usize = 100_000;
 
+/// Resolve the per-pane scrollback cap. `config.mux.scrollback_lines` is
+/// exported by the launcher as `FNO_MUX_SCROLLBACK_LINES` (the crate reads env,
+/// not settings.yaml - same pattern as `FNO_SESSION`/`FNO_MUX_DIR`); a
+/// memory-constrained deployment lowers it. Falls back to the 100k default.
+fn scrollback_lines() -> usize {
+    std::env::var("FNO_MUX_SCROLLBACK_LINES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(SCROLLBACK_LINES)
+}
+
 /// `Dimensions` impl for constructing/resizing the headless [`Term`].
 #[derive(Debug, Clone, Copy)]
 struct GridSize {
@@ -81,7 +93,7 @@ impl Pane {
         let rows = rows.max(1);
         let cols = cols.max(1);
         let config = Config {
-            scrolling_history: SCROLLBACK_LINES,
+            scrolling_history: scrollback_lines(),
             ..Config::default()
         };
         Pane {
@@ -331,12 +343,6 @@ impl Pane {
             implicit: false,
             text,
         }
-    }
-
-    /// Whether this pane ever emitted an OSC 133 marker. A markerless pane's
-    /// `--command-done` wait degrades to quiet semantics (the server decides).
-    pub fn saw_marker(&self) -> bool {
-        self.saw_marker
     }
 
     /// The most recently completed block's `(seq, exit)`, or `None`. Feeds the

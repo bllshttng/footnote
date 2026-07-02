@@ -105,6 +105,17 @@ fn script_api_full_lifecycle_run_wait_read_kill_ls() {
         stdout(&read)
     );
 
+    // This pane emitted no OSC 133 markers, so `--block last` degrades to ONE
+    // implicit whole-output block, flagged (v6, AC2-ERR).
+    let block = pane(&scratch, &["read", &id, "--block", "last", "--json"]);
+    assert!(block.status.success());
+    let bj = stdout(&block);
+    assert!(
+        bj.contains("SCRIPT-MARKER-42"),
+        "implicit block text: {bj:?}"
+    );
+    assert!(bj.contains("\"implicit\":true"), "flagged implicit: {bj:?}");
+
     // Kill the only pane: the session ends and ls goes empty.
     let kill = pane(&scratch, &["kill", &id]);
     assert!(
@@ -112,6 +123,142 @@ fn script_api_full_lifecycle_run_wait_read_kill_ls() {
         "kill stderr: {:?}",
         String::from_utf8_lossy(&kill.stderr)
     );
+    wait_ls_empty(&scratch, 10);
+}
+
+#[test]
+fn script_api_block_read_captures_span_exit_and_unavailable() {
+    // v6 US1+US2 end to end: a pane emitting OSC 133 C/D markers captures one
+    // command block; `read --block last --json` returns its output span with
+    // seq/exit/complete, and a nonexistent seq is BLOCK_UNAVAILABLE (exit 14).
+    let scratch = Scratch::new("script_block_read");
+    let dir = scratch.0.to_str().unwrap();
+
+    // printf emits: C (output start), the output line, D;7 (done, exit 7).
+    let run = pane(
+        &scratch,
+        &[
+            "run",
+            "--cwd",
+            dir,
+            "--",
+            "/bin/sh",
+            "-c",
+            r"printf '\033]133;C\ahello-block\n\033]133;D;7\a'; sleep 30",
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "run stderr: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let id = stdout(&run);
+
+    // Let the markers settle through the server before reading.
+    let wait = pane(
+        &scratch,
+        &["wait", &id, "--quiet-ms", "300", "--timeout", "10"],
+    );
+    assert_eq!(wait.status.code(), Some(0), "quiet settle is exit 0");
+
+    let block = pane(&scratch, &["read", &id, "--block", "last", "--json"]);
+    assert!(block.status.success(), "block read must succeed");
+    let bj = stdout(&block);
+    assert!(bj.contains("hello-block"), "block output span: {bj:?}");
+    assert!(bj.contains("\"seq\":0"), "first block is seq 0: {bj:?}");
+    assert!(bj.contains("\"exit\":7"), "exit recorded: {bj:?}");
+    assert!(
+        bj.contains("\"complete\":true"),
+        "block is complete: {bj:?}"
+    );
+    assert!(bj.contains("\"implicit\":false"), "not implicit: {bj:?}");
+
+    // A block that does not exist is BLOCK_UNAVAILABLE, tellable by exit code.
+    let miss = pane(&scratch, &["read", &id, "--block", "99"]);
+    assert_eq!(
+        miss.status.code(),
+        Some(14),
+        "nonexistent block -> EXIT_BLOCK_UNAVAILABLE; stderr={:?}",
+        String::from_utf8_lossy(&miss.stderr)
+    );
+
+    let _ = pane(&scratch, &["kill", &id]);
+    wait_ls_empty(&scratch, 10);
+}
+
+#[test]
+fn script_api_wait_command_done_returns_on_d_marker() {
+    // v6 US3: `wait --command-done` resolves on the OSC 133 D marker with the
+    // dedicated CommandDone exit code. The pane delays its markers so the wait
+    // subscribes (baselining before any D) and then observes the D fire.
+    let scratch = Scratch::new("script_command_done");
+    let dir = scratch.0.to_str().unwrap();
+
+    let run = pane(
+        &scratch,
+        &[
+            "run",
+            "--cwd",
+            dir,
+            "--",
+            "/bin/sh",
+            "-c",
+            r"sleep 3; printf '\033]133;C\adone-out\n\033]133;D;0\a'; sleep 30",
+        ],
+    );
+    assert!(run.status.success());
+    let id = stdout(&run);
+
+    // Issued immediately (well before the 3s delay), so the D fires after the
+    // watcher subscribes -> CommandDone (exit 13), not a timeout.
+    let wait = pane(
+        &scratch,
+        &["wait", &id, "--command-done", "--timeout", "15"],
+    );
+    assert_eq!(
+        wait.status.code(),
+        Some(13),
+        "D marker -> EXIT_WAIT_COMMAND_DONE; stdout={:?} stderr={:?}",
+        stdout(&wait),
+        String::from_utf8_lossy(&wait.stderr)
+    );
+    assert_eq!(stdout(&wait), "command-done");
+
+    let _ = pane(&scratch, &["kill", &id]);
+    wait_ls_empty(&scratch, 10);
+}
+
+#[test]
+fn script_api_wait_command_done_markerless_times_out_flagged() {
+    // v6 AC3-FR: a markerless pane can never emit D, so --command-done resolves
+    // by timeout (bounded, never infinite) and the CLI flags the degradation.
+    let scratch = Scratch::new("script_command_done_markerless");
+    let dir = scratch.0.to_str().unwrap();
+
+    let run = pane(
+        &scratch,
+        &["run", "--cwd", dir, "--", "/bin/sh", "-c", "sleep 30"],
+    );
+    assert!(run.status.success());
+    let id = stdout(&run);
+
+    let wait = pane(
+        &scratch,
+        &["wait", &id, "--command-done", "--timeout", "2", "--json"],
+    );
+    assert_eq!(
+        wait.status.code(),
+        Some(11),
+        "markerless --command-done -> EXIT_WAIT_TIMEOUT; stdout={:?}",
+        stdout(&wait)
+    );
+    assert!(
+        stdout(&wait).contains("\"degraded\""),
+        "the degradation must be flagged in --json, got {:?}",
+        stdout(&wait)
+    );
+
+    let _ = pane(&scratch, &["kill", &id]);
     wait_ls_empty(&scratch, 10);
 }
 

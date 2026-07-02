@@ -1451,16 +1451,13 @@ impl Core {
                 // entirely off-loop.
                 let initial: Arc<str> = Arc::from(frame_text(&entry.vt.frame()));
                 // Baseline the command-done watch against blocks already done,
-                // atomically with the subscribe (same core-loop turn).
+                // atomically with the subscribe (same core-loop turn). A pane
+                // that never emits `D` (no shell-init) simply times out - always
+                // bounded, never infinite; the CLI notes the degradation. We
+                // cannot inject a quiet fallback here: a pane that WILL emit a
+                // marker after a delay looks markerless at subscribe time, so a
+                // quiet settle would fire during that delay and pre-empt the D.
                 let done_baseline = entry.vt.last_done().map(|(seq, _)| seq);
-                // A markerless pane can never emit `D`; --command-done degrades
-                // to a quiet settle (AC3-FR) instead of always timing out. The
-                // CLI notes the degradation from (asked command_done, got Quiet).
-                let quiet_ms = if command_done && quiet_ms.is_none() && !entry.vt.saw_marker() {
-                    Some(MARKERLESS_DONE_QUIET_MS)
-                } else {
-                    quiet_ms
-                };
                 let rx = self
                     .pane_watch
                     .get(&pane)
@@ -1561,11 +1558,6 @@ fn dead_pane(pane: u64) -> ServerMsg {
         msg: format!("no such pane: {pane}"),
     }
 }
-
-/// The quiet window a markerless pane's `--command-done` degrades to (AC3-FR):
-/// it can never emit `D`, so it settles when output stops instead of always
-/// running to `timeout_ms`.
-const MARKERLESS_DONE_QUIET_MS: u64 = 200;
 
 /// The `--command-done` arm of a wait: resolve when the pane's last-completed
 /// block advances past `baseline`.

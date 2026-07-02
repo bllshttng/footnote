@@ -90,6 +90,71 @@ fn probe(sock: &Path) -> Probe {
     Probe::Unqueryable
 }
 
+/// The zsh OSC 133 shell-integration snippet: `precmd` emits `D;<exit>` (the
+/// just-finished command) then `A` (new prompt); `preexec` emits `B`/`C` (the
+/// command is about to run). Idempotent (guarded + double-eval-safe), no
+/// absolute paths (AC4-UI). A pane that eval's this captures blocks (US1).
+const ZSH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
+  _FNO_OSC133=1
+  autoload -Uz add-zsh-hook
+  _fno_osc133_precmd() { local e=$?; printf '\033]133;D;%s\a\033]133;A\a' "$e" }
+  _fno_osc133_preexec() { printf '\033]133;B\a\033]133;C\a' }
+  add-zsh-hook precmd _fno_osc133_precmd
+  add-zsh-hook preexec _fno_osc133_preexec
+fi
+"#;
+
+/// The bash OSC 133 snippet: `PROMPT_COMMAND` emits `D;<exit>`/`A`; a `DEBUG`
+/// trap emits `C` once per command line (gated by a per-prompt flag so a
+/// pipeline does not emit it per stage). Idempotent, no absolute paths.
+const BASH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
+  _FNO_OSC133=1
+  _fno_osc133_ran=""
+  _fno_osc133_prompt() {
+    local e=$?
+    printf '\033]133;D;%s\a\033]133;A\a' "$e"
+    _fno_osc133_ran=""
+  }
+  _fno_osc133_preexec() {
+    [ -n "$COMP_LINE" ] && return
+    [ -n "$_fno_osc133_ran" ] && return
+    _fno_osc133_ran=1
+    printf '\033]133;B\a\033]133;C\a'
+  }
+  case "$PROMPT_COMMAND" in
+    *_fno_osc133_prompt*) ;;
+    *) PROMPT_COMMAND="_fno_osc133_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+  esac
+  trap '_fno_osc133_preexec' DEBUG
+fi
+"#;
+
+/// `fno mux shell-init <zsh|bash>`: print an eval-able OSC 133 snippet so a
+/// pane's shell emits command-block markers. A pane that never runs it still
+/// captures ONE implicit block; a terminal whose shell already emits OSC 133
+/// (Warp/iTerm) works with zero setup (AC4-EDGE) - the scanner does not care
+/// who emits. An unsupported / missing shell is a one-line error (AC4-ERR).
+pub fn shell_init(shell: Option<&str>) -> i32 {
+    match shell {
+        Some("zsh") => {
+            print!("{ZSH_SHELL_INIT}");
+            EXIT_OK
+        }
+        Some("bash") => {
+            print!("{BASH_SHELL_INIT}");
+            EXIT_OK
+        }
+        Some(other) => {
+            eprintln!("fno mux shell-init: unsupported shell {other:?}; supported: zsh, bash");
+            EXIT_USAGE
+        }
+        None => {
+            eprintln!("fno mux shell-init: needs a shell argument: zsh|bash");
+            EXIT_USAGE
+        }
+    }
+}
+
 /// `fno mux ls`: one row per `*.sock` in the mux dir. Read-only - a stale
 /// socket is REPORTED, never unlinked (kill-server owns removal). Exits 0
 /// even when every row is stale or unqueryable; only "no sessions" is
@@ -1009,22 +1074,54 @@ mod tests {
 
     #[test]
     fn mux_pane_wait_exit_codes_are_distinct() {
-        // AC4-EDGE: timeout is tellable apart from a match and a settle.
+        // AC3-UI: CommandDone is tellable apart from quiet/matched/timeout/exited.
         let codes = [
             wait_exit_code(WaitOutcome::Quiet),
             wait_exit_code(WaitOutcome::Matched),
             wait_exit_code(WaitOutcome::Timeout),
             wait_exit_code(WaitOutcome::PaneExited),
+            wait_exit_code(WaitOutcome::CommandDone { exit: Some(0) }),
         ];
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(
             sorted.len(),
-            4,
+            5,
             "every wait outcome maps to a distinct code"
         );
         assert_eq!(wait_exit_code(WaitOutcome::Quiet), EXIT_OK);
         assert_ne!(EXIT_WAIT_TIMEOUT, EXIT_WAIT_MATCHED);
+        // The exit code is independent of the reported command exit.
+        assert_eq!(
+            wait_exit_code(WaitOutcome::CommandDone { exit: None }),
+            EXIT_WAIT_COMMAND_DONE
+        );
+    }
+
+    #[test]
+    fn mux_shell_init_snippets_are_marker_emitting_and_hygienic() {
+        for snippet in [ZSH_SHELL_INIT, BASH_SHELL_INIT] {
+            // Emits all four FinalTerm markers.
+            for m in ["133;A", "133;B", "133;C", "133;D"] {
+                assert!(snippet.contains(m), "missing {m} in {snippet:?}");
+            }
+            // Idempotent: guarded so a double-eval is a no-op (AC4-UI).
+            assert!(snippet.contains("_FNO_OSC133"));
+            // No absolute paths (AC4-UI): nothing references a `/...` path.
+            assert!(
+                !snippet.lines().any(|l| l.trim_start().starts_with('/')),
+                "snippet must carry no absolute paths"
+            );
+        }
+    }
+
+    #[test]
+    fn mux_shell_init_unsupported_shell_is_a_usage_error() {
+        // AC4-ERR: an unsupported / missing shell exits non-zero.
+        assert_eq!(shell_init(Some("zsh")), EXIT_OK);
+        assert_eq!(shell_init(Some("bash")), EXIT_OK);
+        assert_eq!(shell_init(Some("fish")), EXIT_USAGE);
+        assert_eq!(shell_init(None), EXIT_USAGE);
     }
 }

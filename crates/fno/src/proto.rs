@@ -177,8 +177,9 @@ pub enum ControlVerb {
         timeout_ms: u64,
         /// (v6) Also resolve on the pane's next OSC 133 `D` (command done),
         /// yielding [`WaitOutcome::CommandDone`] with the command's exit code.
-        /// Still bounded by `timeout_ms`; on a markerless pane it degrades to
-        /// quiet semantics (AC3-FR), never an infinite wait.
+        /// Always bounded by `timeout_ms`; a markerless pane (no shell-init)
+        /// simply times out (the CLI flags the degradation in `--json`), never
+        /// an infinite wait (AC3-FR).
         #[serde(default)]
         command_done: bool,
     },

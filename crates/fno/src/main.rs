@@ -43,6 +43,9 @@ enum Role {
     /// `mux pane` verbatim; `mux_cli::pane` parses the verb + flags. No TTY
     /// needed (control verbs are scriptable one-shots).
     MuxPane(Vec<OsString>),
+    /// `mux shell-init <zsh|bash>`: print the OSC 133 shell-integration
+    /// snippet (v6). `None` / an unsupported shell is an error in the verb.
+    MuxShellInit(Option<String>),
     /// A malformed mux/server invocation: print usage, exit 2.
     MuxUsage,
     /// Any other args: the Python-CLI forwarding path.
@@ -113,6 +116,16 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 },
                 _ => Role::MuxUsage,
             },
+            // `mux shell-init [<shell>]`: the verb validates the shell (an
+            // unsupported / missing one is its own one-line error, AC4-ERR).
+            Some("shell-init") => match args.len() {
+                2 => Role::MuxShellInit(None),
+                3 => match args[2].to_str() {
+                    Some(shell) => Role::MuxShellInit(Some(shell.to_string())),
+                    None => Role::MuxUsage,
+                },
+                _ => Role::MuxUsage,
+            },
             _ => Role::MuxUsage,
         },
         // Every other invocation (including a non-UTF-8 first arg) is the
@@ -139,6 +152,7 @@ fn main() {
             eprintln!(
                 "usage: fno [--session <name>] | fno mux server [--session <name>] \
                  | fno mux ls | fno mux attach <name> | fno mux kill-server [<name>] \
+                 | fno mux shell-init <zsh|bash> \
                  | fno mux pane ls|read|run|send|wait|kill|claim|release ..."
             );
             std::process::exit(2);
@@ -148,6 +162,7 @@ fn main() {
             let session = mux_cli::resolve_session(name.as_deref(), env_session.as_deref());
             std::process::exit(mux_cli::kill_server(&session));
         }
+        Role::MuxShellInit(shell) => std::process::exit(mux_cli::shell_init(shell.as_deref())),
         Role::MuxPane(rest) => std::process::exit(mux_cli::pane(&rest, env_session.as_deref())),
         Role::Client(flag) => {
             let session = mux_cli::resolve_session(flag.as_deref(), env_session.as_deref());
@@ -230,6 +245,22 @@ mod tests {
             Role::MuxUsage
         );
         assert_eq!(decide_role(&os(&["mux", "ls", "x"]), false), Role::MuxUsage);
+    }
+
+    #[test]
+    fn proto_role_mux_shell_init_carries_optional_shell() {
+        assert_eq!(
+            decide_role(&os(&["mux", "shell-init", "zsh"]), false),
+            Role::MuxShellInit(Some("zsh".into()))
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "shell-init"]), false),
+            Role::MuxShellInit(None)
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "shell-init", "a", "b"]), false),
+            Role::MuxUsage
+        );
     }
 
     #[test]
