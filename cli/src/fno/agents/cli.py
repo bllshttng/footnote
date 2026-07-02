@@ -1301,94 +1301,22 @@ agents_app.command("resume")(_cmd_resume)
 
 @agents_app.command("gate")
 def cmd_gate(
-    provider: str = typer.Argument(..., help="Provider name: codex | gemini"),
-    probe: bool = typer.Option(
-        False, "--probe", help="Run an automated probe (may return inconclusive)."
-    ),
-    record: str | None = typer.Option(
-        None, "--record", help="Manual attestation: 'passed' or 'failed'."
-    ),
-    notes: str = typer.Option(
-        "", "--notes", help="Notes to attach to a manual record."
-    ),
+    provider: str = typer.Argument("", help="(retired at G4)"),
+    probe: bool = typer.Option(False, "--probe", hidden=True),
+    record: str | None = typer.Option(None, "--record", hidden=True),
+    notes: str = typer.Option("", "--notes", hidden=True),
 ) -> None:
-    """Read or write the per-provider injection verification gate record.
+    """(retired at G4) The injection gate gated the daemon PTY-inject lane.
 
-    Manual attestation (preferred until probe automation matures):
-
-      fno agents gate codex --record passed --notes "verified 2026-06-07"
-
-    Automated probe (returns 'inconclusive' when no reliable signal):
-
-      fno agents gate codex --probe
-
-    Uses the Python socket client (_daemon_rpc) to call agent.gate_check.
-    If the daemon is unreachable the command fails with a non-zero exit and
-    a stderr notice; the gate file is NEVER written silently on error.
-    No --probe and no --record: prints the current gate record (if any).
+    ``agent.deliver`` + the injection gate were deleted when daemon PTY hosting
+    moved to the mux, so there is no gate to probe or record. Prints a one-line
+    pointer and exits non-zero rather than hitting ``UnknownMethod`` (codex P2).
     """
-    from fno.agents.dispatch import _daemon_rpc
-    from fno import paths
-
-    if probe and record:
-        print("error: --probe and --record are mutually exclusive", file=sys.stderr)
-        raise typer.Exit(code=2)
-
-    if probe:
-        result = _daemon_rpc("agent.gate_check", {"provider": provider, "record": "probe"})
-        if result is None:
-            print("error: daemon unreachable; gate probe failed", file=sys.stderr)
-            raise typer.Exit(code=1)
-        status = result.get("status", "unknown")
-        print(f"provider={provider} probe status={status}")
-        return
-
-    if record:
-        if record not in ("passed", "failed"):
-            print("error: --record must be 'passed' or 'failed'", file=sys.stderr)
-            raise typer.Exit(code=2)
-        result = _daemon_rpc(
-            "agent.gate_check",
-            {"provider": provider, "record": "manual", "status": record, "notes": notes},
-        )
-        if result is None:
-            print("error: daemon unreachable; gate record not written", file=sys.stderr)
-            raise typer.Exit(code=1)
-        status = result.get("status", "unknown")
-        method = result.get("method", "manual")
-        print(f"provider={provider} status={status} method={method}")
-        return
-
-    # Read-only: show current gate record from the gate file.
-    import json
-    import os
-
-    agents_home_env = os.environ.get("FNO_AGENTS_HOME")
-    if agents_home_env:
-        gate_path = Path(agents_home_env) / "injection-gate.json"
-    else:
-        gate_path = Path(os.path.expanduser("~")) / ".fno" / "agents" / "injection-gate.json"
-
-    if not gate_path.exists():
-        print(f"provider={provider} status=absent (no gate file found at {gate_path})")
-        return
-
-    try:
-        doc = json.loads(gate_path.read_text(encoding="utf-8"))
-        if not isinstance(doc, dict):
-            raise ValueError("root element is not a JSON object")
-    except Exception as exc:
-        print(f"error: could not parse gate file: {exc}", file=sys.stderr)
-        raise typer.Exit(code=1) from exc
-
-    entry = doc.get("providers", {}).get(provider)
-    if entry is None:
-        print(f"provider={provider} status=absent (not in gate file)")
-        return
-
-    status = entry.get("status", "unknown")
-    checked_at = entry.get("checked_at", "unknown")
-    method = entry.get("method", "unknown")
-    notes_val = entry.get("notes", "")
-    print(f"provider={provider} status={status} method={method} checked_at={checked_at}" +
-          (f" notes={notes_val!r}" if notes_val else ""))
+    _ = (provider, probe, record, notes)
+    print(
+        "fno agents gate was retired at G4: the injection gate gated the daemon "
+        "PTY-inject lane (agent.deliver), deleted when agent panes moved to the mux. "
+        "There is no gate to probe or record.",
+        file=sys.stderr,
+    )
+    raise typer.Exit(code=2)

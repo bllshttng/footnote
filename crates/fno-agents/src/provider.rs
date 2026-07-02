@@ -115,24 +115,6 @@ pub trait Provider: Send + Sync {
     /// Argv for continuing a session.
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String>;
 
-    /// Argv for a fresh *interactive* session (`host_mode = interactive`, the
-    /// `fno agents host` verb). Default `None`: claude has no abi-hosted
-    /// interactive form (it drives via its own `--bg` surface), so `host`
-    /// rejects `provider=claude` before reaching here. codex/gemini override.
-    /// Returning `None` keeps the "not interactive-hostable" fact in the type
-    /// system rather than as a panicking no-op (the same discipline as
-    /// [`Provider::as_pty`]).
-    fn create_interactive_argv(&self, _ctx: &CreateContext) -> Option<Vec<String>> {
-        None
-    }
-
-    /// Argv for resuming an existing session *interactively* (the
-    /// `fno agents promote --from <uuid>` verb). `ctx.session_id` is the resume
-    /// target UUID. Default `None` (claude); codex/gemini override.
-    fn resume_interactive_argv(&self, _ctx: &ResumeContext) -> Option<Vec<String>> {
-        None
-    }
-
     /// Parse one unit of provider stream output into the sealed [`ParsedEvent`]
     /// vocabulary. The unit is provider-shaped: codex is fed one JSONL line at a
     /// time; gemini is fed its complete JSON blob (it emits a single document at
@@ -151,8 +133,8 @@ pub trait Provider: Send + Sync {
     ) -> Result<bool, ReachabilityProbeError>;
 
     /// Downcast to the PTY-managed extension, or `None` for shellout providers
-    /// (claude). The daemon's spawn handler matches on this to route between the
-    /// portable-pty path and the shellout path.
+    /// (claude). Marks a provider as PTY-capable; the readiness/envelope/restart
+    /// surface hangs off it.
     fn as_pty(&self) -> Option<&dyn ProviderWithPty> {
         None
     }
@@ -312,9 +294,9 @@ fn parse_claude_short_id(line: &str) -> Option<String> {
 pub struct ClaudeInteractiveProvider;
 
 impl ClaudeInteractiveProvider {
-    /// Interactive argv with the session id pinned. Shared by create and the
-    /// `create_interactive_argv` host path: a daemon-hosted claude is always
-    /// interactive, so there is no separate exec form. `claude --session-id
+    /// Interactive argv with the session id pinned, used by `create_argv`: a
+    /// daemon-hosted claude is always interactive, so there is no separate exec
+    /// form. `claude --session-id
     /// <uuid> [message]` - the relay-proven vehicle (roundtrip.py pins
     /// `--session-id` at spawn so the transcript is discoverable and the
     /// `session:<uuid>` claim keys on it).
@@ -354,10 +336,6 @@ impl Provider for ClaudeInteractiveProvider {
         Self::interactive_argv(ctx)
     }
 
-    fn create_interactive_argv(&self, ctx: &CreateContext) -> Option<Vec<String>> {
-        Some(Self::interactive_argv(ctx))
-    }
-
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
         // Interactive resume: `claude --resume <uuid>` reattaches the session's
         // TUI. The resume id IS the session, so no separate `--session-id` pin.
@@ -366,10 +344,6 @@ impl Provider for ClaudeInteractiveProvider {
             argv.push(ctx.message.clone());
         }
         argv
-    }
-
-    fn resume_interactive_argv(&self, ctx: &ResumeContext) -> Option<Vec<String>> {
-        Some(self.resume_argv(ctx))
     }
 
     fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
@@ -481,72 +455,6 @@ impl Provider for CodexProvider {
         argv.extend(Self::sandbox_resume(ctx.yolo));
         argv.push(ctx.message.clone());
         argv
-    }
-
-    fn create_interactive_argv(&self, ctx: &CreateContext) -> Option<Vec<String>> {
-        // Fresh interactive TUI. `codex [OPTIONS] [PROMPT]` with no subcommand
-        // is the interactive CLI (codex 0.133.0 top-level help: "If no
-        // subcommand is specified, options will be forwarded to the interactive
-        // CLI"). NOT `exec` (that's the one-shot --json path) and NO
-        // `--skip-git-repo-check` (exec-only). `-C` pins the working root the
-        // same way create_argv does; sandbox/yolo reuses sandbox_create so the
-        // human-driven default keeps codex's own approval UI for out-of-sandbox
-        // actions and `--yolo` maps to the bypass flag (Claude's Discretion 1,
-        // verified against codex-cli 0.133.0 global flags).
-        let mut argv = vec![
-            "codex".into(),
-            "-C".into(),
-            ctx.cwd.to_string_lossy().into_owned(),
-        ];
-        argv.extend(Self::sandbox_create(ctx.yolo));
-        // Relay reply-steering (G5 Track A): a relay-targeted spawn carries the
-        // relay sentinel prompt in `append_system_prompt`; codex honors it
-        // via `-c developer_instructions=<steer>` (an ADDITIVE developer-role
-        // message, NOT `base_instructions` which REPLACES codex's own system
-        // prompt). Passed as a single `-c key=value` argv element, never
-        // shell-interpolated, after the sandbox flags and before the positional
-        // prompt. Empty/absent -> no flag, so a non-relay/grid spawn argv stays
-        // byte-unchanged (AC2-EDGE / AC5-FR).
-        if let Some(steer) = ctx
-            .append_system_prompt
-            .as_deref()
-            .filter(|s| !s.is_empty())
-        {
-            argv.push("-c".into());
-            argv.push(format!("developer_instructions={steer}"));
-        }
-        // Empty task -> bare interactive session (codex accepts no prompt).
-        if !ctx.message.is_empty() {
-            argv.push(ctx.message.clone());
-        }
-        Some(argv)
-    }
-
-    fn resume_interactive_argv(&self, ctx: &ResumeContext) -> Option<Vec<String>> {
-        // Promote an exited exec session to a live interactive TUI.
-        // `codex resume <uuid>` (the interactive resume subcommand, NOT
-        // `codex exec resume`). EMPIRICALLY VERIFIED (AC3-FR, 2026-05-29,
-        // codex-cli 0.133.0): a session born from `codex exec --json` resumes
-        // with full conversation history via `codex resume <uuid>` (the model
-        // recalled the prior turn). `--include-non-interactive` only governs
-        // the resume PICKER and `--last` selection per `codex resume --help`; an
-        // explicit positional UUID bypasses the picker ("UUIDs take precedence
-        // if it parses"), so the flag is REDUNDANT here. Per AC3-FR's fallback
-        // we include it anyway (harmless-when-redundant, belt-and-suspenders
-        // against a future codex that consults the picker for explicit ids).
-        // No `--sandbox` on resume (inherit the session's original mode); only
-        // the yolo bypass is honored, mirroring sandbox_resume.
-        let mut argv = vec![
-            "codex".into(),
-            "resume".into(),
-            ctx.session_id.clone(),
-            "--include-non-interactive".into(),
-        ];
-        argv.extend(Self::sandbox_resume(ctx.yolo));
-        if !ctx.message.is_empty() {
-            argv.push(ctx.message.clone());
-        }
-        Some(argv)
     }
 
     fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
@@ -746,62 +654,6 @@ impl Provider for GeminiProvider {
         argv
     }
 
-    fn create_interactive_argv(&self, ctx: &CreateContext) -> Option<Vec<String>> {
-        // Relay reply-steering (G5 Track A): gemini is explicitly OUT of scope -
-        // its CLI exposes no spawn-time system-prompt flag, so a relay-targeted
-        // gemini spawn cannot be steered at spawn. The daemon now threads
-        // append_system_prompt to every interactive provider, so make gemini's
-        // drop OBSERVABLE (mirrors agy's degrade) rather than a silent no-op.
-        if ctx
-            .append_system_prompt
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .is_some()
-        {
-            eprintln!(
-                "relay_steer_unsupported{{gemini}}: append_system_prompt dropped (gemini out of scope, no steer channel); spawning unsteered"
-            );
-        }
-        // Fresh interactive gemini: `-i/--prompt-interactive` executes the
-        // prompt then stays interactive (gemini 0.42.0). NO `--output-format
-        // json` (that is the exec/parse path; interactive renders a raw TUI).
-        // `--skip-trust` avoids the workspace-trust prompt blocking the TUI, as
-        // on the exec path. sandbox/yolo reuses Self::sandbox (default keeps
-        // gemini's approval UI; --yolo bypasses it).
-        let mut argv = vec!["gemini".into(), "--skip-trust".into()];
-        // Empty task -> bare interactive session (omit `-i`, which requires a
-        // value); gemini opens interactive with no initial prompt.
-        if !ctx.message.is_empty() {
-            argv.push("-i".into());
-            argv.push(ctx.message.clone());
-        }
-        argv.extend(Self::sandbox(ctx.yolo));
-        Some(argv)
-    }
-
-    fn resume_interactive_argv(&self, ctx: &ResumeContext) -> Option<Vec<String>> {
-        // Promote: `gemini -r <uuid>` resumes a prior session into the
-        // interactive TUI. EMPIRICALLY VERIFIED (AC3-FR / Open Question 2,
-        // 2026-05-29, gemini 0.42.0): `gemini -r <full-uuid>` resumes a
-        // `-p`-created (exec) session and reports back the same session_id, so
-        // the UUID fno stores in `gemini_session_id` IS the `-r` target. (The
-        // `-r/--resume` help text only documents "latest"/index, but a full
-        // UUID resolves.) An optional `-i "<task>"` injects an initial prompt on
-        // resume; an empty task resumes with no new prompt.
-        let mut argv = vec![
-            "gemini".into(),
-            "--skip-trust".into(),
-            "-r".into(),
-            ctx.session_id.clone(),
-        ];
-        if !ctx.message.is_empty() {
-            argv.push("-i".into());
-            argv.push(ctx.message.clone());
-        }
-        argv.extend(Self::sandbox(ctx.yolo));
-        Some(argv)
-    }
-
     fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
         parse_gemini_blob(chunk)
     }
@@ -935,18 +787,7 @@ impl ProviderWithPty for GeminiProvider {
 /// pane as live-only; once it settles, dispatch a fresh `--once` instead.
 pub struct AgyProvider;
 
-impl AgyProvider {
-    /// Yolo posture: agy's never-prompt full-auto is
-    /// `--dangerously-skip-permissions`. Empty otherwise (interactive panes keep
-    /// agy's approval UI for a human).
-    fn yolo(yolo: bool) -> Vec<String> {
-        if yolo {
-            vec!["--dangerously-skip-permissions".into()]
-        } else {
-            vec![]
-        }
-    }
-}
+impl AgyProvider {}
 
 impl Provider for AgyProvider {
     fn name(&self) -> &'static str {
@@ -974,53 +815,6 @@ impl Provider for AgyProvider {
         argv.push("-p".into());
         argv.push(ctx.message.clone());
         argv
-    }
-
-    fn create_interactive_argv(&self, ctx: &CreateContext) -> Option<Vec<String>> {
-        // Relay reply-steering (G5 Track A / x-defe): agy (Antigravity CLI) has no
-        // spawn-time system-prompt FLAG - the codex/claude `--append-system-prompt`
-        // flag-steer model does not transfer (agy's base prompt is server-side; its
-        // `-c` is `--continue`; `--add-dir`/`AGENTS.md` does NOT load as rules,
-        // verified live). So agy is NOT steered at spawn here. It is steered IN-BAND
-        // by the relay: a priming user-turn (`roundtrip._prime_agy`) carrying
-        // RELAY_SYSTEM_PROMPT, which persists across the session. The spawn argv is
-        // therefore intentionally bare; the daemon-threaded `append_system_prompt`
-        // is a no-op at this layer (logged once for observability, NOT an error).
-        if ctx
-            .append_system_prompt
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .is_some()
-        {
-            eprintln!(
-                "relay_steer_via_prime{{agy}}: no spawn-time steer flag; the relay primes this worker in-band (roundtrip._prime_agy)"
-            );
-        }
-        // Fresh interactive agy. `-i/--prompt-interactive` seeds a prompt then
-        // stays interactive; an empty task opens a bare interactive session.
-        let mut argv = vec!["agy".into()];
-        if !ctx.message.is_empty() {
-            argv.push("-i".into());
-            argv.push(ctx.message.clone());
-        }
-        argv.extend(Self::yolo(ctx.yolo));
-        Some(argv)
-    }
-
-    fn resume_interactive_argv(&self, ctx: &ResumeContext) -> Option<Vec<String>> {
-        // Promote: `agy --conversation <id>` resumes a prior session into the
-        // interactive TUI; an optional `-i <task>` injects a new prompt.
-        let mut argv = vec![
-            "agy".into(),
-            "--conversation".into(),
-            ctx.session_id.clone(),
-        ];
-        if !ctx.message.is_empty() {
-            argv.push("-i".into());
-            argv.push(ctx.message.clone());
-        }
-        argv.extend(Self::yolo(ctx.yolo));
-        Some(argv)
     }
 
     fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
@@ -1334,306 +1128,6 @@ mod tests {
 
     // ---- interactive argv (host_mode=interactive): host + promote ----
 
-    #[test]
-    fn claude_has_no_interactive_argv() {
-        // Type-system guard: claude is not abi-hostable interactively, so both
-        // interactive argv builders default to None (host/promote reject claude
-        // before reaching the provider).
-        assert!(ClaudeProvider
-            .create_interactive_argv(&create_ctx())
-            .is_none());
-        let rctx = ResumeContext {
-            session_id: "7c5dcf5d".into(),
-            message: "m".into(),
-            cwd: PathBuf::from("/x"),
-            from_name: None,
-            yolo: false,
-        };
-        assert!(ClaudeProvider.resume_interactive_argv(&rctx).is_none());
-    }
-
-    #[test]
-    fn codex_create_interactive_is_bare_tui_no_exec_no_json() {
-        let argv = CodexProvider
-            .create_interactive_argv(&create_ctx())
-            .unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "codex",
-                "-C",
-                "/tmp/example-repo",
-                "--sandbox",
-                "workspace-write",
-                "build feature X"
-            ]
-        );
-        // Interactive must NOT carry the exec-only markers.
-        assert!(!argv.iter().any(|a| a == "exec"));
-        assert!(!argv.iter().any(|a| a == "--json"));
-        assert!(!argv.iter().any(|a| a == "--skip-git-repo-check"));
-    }
-
-    #[test]
-    fn codex_create_interactive_empty_task_is_bare_session() {
-        let mut ctx = create_ctx();
-        ctx.message = String::new();
-        let argv = CodexProvider.create_interactive_argv(&ctx).unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "codex",
-                "-C",
-                "/tmp/example-repo",
-                "--sandbox",
-                "workspace-write"
-            ]
-        );
-    }
-
-    #[test]
-    fn codex_create_interactive_yolo_bypasses_sandbox() {
-        let mut ctx = create_ctx();
-        ctx.yolo = true;
-        let argv = CodexProvider.create_interactive_argv(&ctx).unwrap();
-        assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
-        assert!(!argv.iter().any(|a| a == "--sandbox"));
-    }
-
-    /// Relay reply-steering (G5 Track A / AC1-HP): a relay-targeted codex spawn
-    /// carries the sentinel prompt as `-c developer_instructions=<steer>`,
-    /// inserted after the sandbox flags and before the positional prompt.
-    #[test]
-    fn codex_interactive_argv_steers_with_developer_instructions() {
-        let mut ctx = create_ctx();
-        ctx.append_system_prompt = Some("WRAP IN SENTINELS".into());
-        let argv = CodexProvider.create_interactive_argv(&ctx).unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "codex",
-                "-C",
-                "/tmp/example-repo",
-                "--sandbox",
-                "workspace-write",
-                "-c",
-                "developer_instructions=WRAP IN SENTINELS",
-                "build feature X"
-            ]
-        );
-    }
-
-    /// AC1-ERR: an empty steer adds no flag (mirrors claude's empty-prompt no-op).
-    #[test]
-    fn codex_interactive_argv_empty_steer_adds_no_flag() {
-        let mut ctx = create_ctx();
-        ctx.append_system_prompt = Some(String::new());
-        let argv = CodexProvider.create_interactive_argv(&ctx).unwrap();
-        assert!(!argv
-            .iter()
-            .any(|a| a.starts_with("developer_instructions=")));
-        assert!(!argv.iter().any(|a| a == "-c"));
-    }
-
-    /// AC2-EDGE: a steer with quotes/`=`/spaces stays ONE argv element (codex
-    /// `-c key=value`), never split or shell-interpolated.
-    #[test]
-    fn codex_interactive_argv_steer_is_single_argv_element() {
-        let mut ctx = create_ctx();
-        ctx.append_system_prompt = Some("say \"hi\"; x=1 && echo $PATH".into());
-        let argv = CodexProvider.create_interactive_argv(&ctx).unwrap();
-        let steer: Vec<&String> = argv
-            .iter()
-            .filter(|a| a.starts_with("developer_instructions="))
-            .collect();
-        assert_eq!(steer.len(), 1, "steer must be exactly one argv element");
-        assert_eq!(
-            steer[0],
-            "developer_instructions=say \"hi\"; x=1 && echo $PATH"
-        );
-    }
-
-    /// AC2-EDGE / AC5-FR: `append_system_prompt: None` yields the byte-identical
-    /// pre-G5 codex interactive argv (non-relay spawns unchanged).
-    #[test]
-    fn codex_interactive_argv_unsteered_when_none() {
-        let argv = CodexProvider
-            .create_interactive_argv(&create_ctx())
-            .unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "codex",
-                "-C",
-                "/tmp/example-repo",
-                "--sandbox",
-                "workspace-write",
-                "build feature X"
-            ]
-        );
-    }
-
-    /// agy has no spawn-time steer FLAG, so its argv is byte-identical whether or
-    /// not `append_system_prompt` is set: agy is steered IN-BAND by the relay
-    /// (a priming turn, `roundtrip._prime_agy`), not at spawn. The daemon logs
-    /// `relay_steer_via_prime{agy}` for observability; the spawn never errors and
-    /// the argv never gains a steer token.
-    #[test]
-    fn agy_interactive_argv_is_bare_regardless_of_steer() {
-        let mut ctx = create_ctx();
-        ctx.append_system_prompt = Some("WRAP IN SENTINELS".into());
-        let steered = AgyProvider.create_interactive_argv(&ctx).unwrap();
-        let unsteered = AgyProvider.create_interactive_argv(&create_ctx()).unwrap();
-        assert_eq!(
-            steered, unsteered,
-            "agy argv is bare; steering is in-band via the relay prime, not the spawn flag"
-        );
-    }
-
-    /// gemini is out of scope (no steer channel); the daemon gate-drop threads
-    /// append_system_prompt to it, so a steered gemini spawn degrades byte-
-    /// identical (the daemon logs `relay_steer_unsupported{gemini}`), never errors.
-    #[test]
-    fn gemini_interactive_argv_degrades_when_steered() {
-        let mut ctx = create_ctx();
-        ctx.append_system_prompt = Some("WRAP IN SENTINELS".into());
-        let steered = GeminiProvider.create_interactive_argv(&ctx).unwrap();
-        let unsteered = GeminiProvider
-            .create_interactive_argv(&create_ctx())
-            .unwrap();
-        assert_eq!(
-            steered, unsteered,
-            "gemini drops the steer and spawns byte-unchanged"
-        );
-    }
-
-    #[test]
-    fn codex_resume_interactive_includes_non_interactive_flag() {
-        let ctx = ResumeContext {
-            session_id: "019e7157-4236-7bb1-b274-ebbac6040ace".into(),
-            message: "continue".into(),
-            cwd: PathBuf::from("/x"),
-            from_name: None,
-            yolo: false,
-        };
-        let argv = CodexProvider.resume_interactive_argv(&ctx).unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "codex",
-                "resume",
-                "019e7157-4236-7bb1-b274-ebbac6040ace",
-                "--include-non-interactive",
-                "continue"
-            ]
-        );
-        // Interactive resume is `codex resume`, NOT `codex exec resume`.
-        assert!(!argv.iter().any(|a| a == "exec"));
-        assert!(!argv.iter().any(|a| a == "--json"));
-    }
-
-    #[test]
-    fn codex_resume_interactive_empty_task_and_yolo() {
-        let ctx = ResumeContext {
-            session_id: "uuid-x".into(),
-            message: String::new(),
-            cwd: PathBuf::from("/x"),
-            from_name: None,
-            yolo: true,
-        };
-        let argv = CodexProvider.resume_interactive_argv(&ctx).unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "codex",
-                "resume",
-                "uuid-x",
-                "--include-non-interactive",
-                "--dangerously-bypass-approvals-and-sandbox"
-            ]
-        );
-    }
-
-    #[test]
-    fn gemini_create_interactive_uses_prompt_interactive() {
-        let argv = GeminiProvider
-            .create_interactive_argv(&create_ctx())
-            .unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "gemini",
-                "--skip-trust",
-                "-i",
-                "build feature X",
-                "--approval-mode",
-                "default"
-            ]
-        );
-        // Interactive renders a raw TUI: no exec JSON path.
-        assert!(!argv.iter().any(|a| a == "--output-format"));
-        assert!(!argv.iter().any(|a| a == "-p"));
-    }
-
-    #[test]
-    fn gemini_create_interactive_empty_task_omits_dash_i() {
-        let mut ctx = create_ctx();
-        ctx.message = String::new();
-        let argv = GeminiProvider.create_interactive_argv(&ctx).unwrap();
-        assert_eq!(
-            argv,
-            vec!["gemini", "--skip-trust", "--approval-mode", "default"]
-        );
-        assert!(!argv.iter().any(|a| a == "-i"));
-    }
-
-    #[test]
-    fn gemini_resume_interactive_uses_resume_uuid() {
-        let ctx = ResumeContext {
-            session_id: "98e129f1-ba82-4aac-a6ea-ecc626ee76e3".into(),
-            message: "keep going".into(),
-            cwd: PathBuf::from("/x"),
-            from_name: None,
-            yolo: true,
-        };
-        let argv = GeminiProvider.resume_interactive_argv(&ctx).unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "gemini",
-                "--skip-trust",
-                "-r",
-                "98e129f1-ba82-4aac-a6ea-ecc626ee76e3",
-                "-i",
-                "keep going",
-                "--yolo"
-            ]
-        );
-    }
-
-    #[test]
-    fn gemini_resume_interactive_empty_task_omits_dash_i() {
-        let ctx = ResumeContext {
-            session_id: "uuid-g".into(),
-            message: String::new(),
-            cwd: PathBuf::from("/x"),
-            from_name: None,
-            yolo: false,
-        };
-        let argv = GeminiProvider.resume_interactive_argv(&ctx).unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "gemini",
-                "--skip-trust",
-                "-r",
-                "uuid-g",
-                "--approval-mode",
-                "default"
-            ]
-        );
-    }
-
     // ---- as_pty type-level routing ----
 
     #[test]
@@ -1647,112 +1141,6 @@ mod tests {
     }
 
     // ---- ClaudeInteractiveProvider (E1 keystone) ----
-
-    fn claude_ctx(message: &str, session_id: Option<&str>) -> CreateContext {
-        CreateContext {
-            name: "peer".into(),
-            message: message.into(),
-            cwd: PathBuf::from("/work"),
-            from_name: None,
-            session_id: session_id.map(String::from),
-            yolo: false,
-            append_system_prompt: None,
-        }
-    }
-
-    /// D2 assertion: the interactive claude argv pins `--session-id` and is
-    /// subscription-billed - it NEVER carries `-p`/`--print`/`--input-format`.
-    #[test]
-    fn claude_interactive_argv_is_subscription_billed_and_session_pinned() {
-        let argv = ClaudeInteractiveProvider
-            .create_interactive_argv(&claude_ctx("build it", Some("sess-uuid-1")))
-            .unwrap();
-        assert_eq!(
-            argv,
-            vec!["claude", "--session-id", "sess-uuid-1", "build it"]
-        );
-        // The billing-guard invariant (D2): no Agent-SDK flags on this path.
-        assert!(
-            !argv.iter().any(|a| a == "-p" || a == "--print"),
-            "interactive claude must never be -p/--print billed (D2)"
-        );
-        assert_eq!(ClaudeInteractiveProvider.name(), "claude");
-    }
-
-    /// Empty message -> a bare interactive session with the id still pinned; an
-    /// absent session id omits the flag (the daemon rejects that case upstream,
-    /// but the provider stays total).
-    #[test]
-    fn claude_interactive_argv_edge_cases() {
-        assert_eq!(
-            ClaudeInteractiveProvider
-                .create_interactive_argv(&claude_ctx("", Some("s1")))
-                .unwrap(),
-            vec!["claude", "--session-id", "s1"]
-        );
-        assert_eq!(
-            ClaudeInteractiveProvider
-                .create_interactive_argv(&claude_ctx("hi", None))
-                .unwrap(),
-            vec!["claude", "hi"]
-        );
-    }
-
-    /// Sentinel-prompt seam (E4.1): a relay-targeted spawn carries
-    /// `--append-system-prompt <prompt>` (pushed before the positional message,
-    /// which stays last); an absent/empty prompt leaves the pane unsteered.
-    #[test]
-    fn claude_interactive_argv_appends_system_prompt() {
-        let mut ctx = claude_ctx("hello", Some("s1"));
-        ctx.append_system_prompt = Some("relay sentinel prompt".into());
-        assert_eq!(
-            ClaudeInteractiveProvider
-                .create_interactive_argv(&ctx)
-                .unwrap(),
-            vec![
-                "claude",
-                "--session-id",
-                "s1",
-                "--append-system-prompt",
-                "relay sentinel prompt",
-                "hello"
-            ]
-        );
-        // Absent -> no flag (grid-spawned, unsteered).
-        assert!(!claude_argv_has_append_prompt(&claude_ctx(
-            "hello",
-            Some("s1")
-        )));
-        // Empty string is treated as absent (no dangling flag).
-        let mut empty = claude_ctx("hello", Some("s1"));
-        empty.append_system_prompt = Some(String::new());
-        assert!(!claude_argv_has_append_prompt(&empty));
-    }
-
-    fn claude_argv_has_append_prompt(ctx: &CreateContext) -> bool {
-        ClaudeInteractiveProvider
-            .create_interactive_argv(ctx)
-            .unwrap()
-            .iter()
-            .any(|a| a == "--append-system-prompt")
-    }
-
-    /// Interactive resume reattaches the TUI by session id, still never `-p`.
-    #[test]
-    fn claude_interactive_resume_argv() {
-        let ctx = ResumeContext {
-            session_id: "resume-uuid".into(),
-            message: "continue".into(),
-            cwd: PathBuf::from("/work"),
-            from_name: None,
-            yolo: false,
-        };
-        let argv = ClaudeInteractiveProvider
-            .resume_interactive_argv(&ctx)
-            .unwrap();
-        assert_eq!(argv, vec!["claude", "--resume", "resume-uuid", "continue"]);
-        assert!(!argv.iter().any(|a| a == "-p" || a == "--print"));
-    }
 
     #[test]
     fn for_name_round_trips_every_known_provider() {

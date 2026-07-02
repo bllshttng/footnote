@@ -1,5 +1,5 @@
 //! Per-session stream-json worker (Group 1, Outcome B) — the claude analog of
-//! the PTY [`crate::worker`].
+//! the retired PTY worker lane.
 //!
 //! claude is a shellout, not a daemon-PTY-hosted provider (unlike codex/gemini),
 //! so adopting an idle claude session into a live, drivable thread needs a NEW
@@ -53,7 +53,7 @@ pub struct SessionClaim {
 }
 
 /// How the daemon launches a stream-json worker. Mirrors
-/// [`crate::worker::WorkerConfig`] but carries the resume identity instead of a
+/// Mirrors the retired PTY worker config but carries the resume identity instead of a
 /// terminal size: `session_claim` (when present) lets the worker release the
 /// single-writer claim when the child orphans (the acquire happens before spawn,
 /// in the Python guard / front door).
