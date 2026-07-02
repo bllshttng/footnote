@@ -377,7 +377,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// reads of v1..=v4 are retained. Anything else is a hard error - which is the
 /// point of each bump: a pre-inside-leg reader pinned to {1,2,3,4} rejects a v5
 /// store instead of silently dropping the inside-leg report.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -2216,7 +2216,7 @@ mod tests {
         // v6 is the future-drift case a pre-bump reader would have on v5.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":7,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":8,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // Unknown provider -> Err.

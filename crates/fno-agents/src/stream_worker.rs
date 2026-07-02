@@ -1609,6 +1609,7 @@ cat >/dev/null
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();

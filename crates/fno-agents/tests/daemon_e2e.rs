@@ -546,6 +546,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
             inside_leg: None,
             exited_at: None,
             mux: None,
+            screen_state: None,
         });
     })
     .unwrap();
@@ -954,6 +955,7 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
             inside_leg: None,
             exited_at: None,
             mux: None,
+            screen_state: None,
         });
     })
     .unwrap();

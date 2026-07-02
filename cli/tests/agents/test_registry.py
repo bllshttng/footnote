@@ -251,8 +251,8 @@ def test_ac3_hp_flock_blocks_concurrent_write(tmp_path: Path, monkeypatch) -> No
 def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> None:
     """AC4-ERR: loading a file with a future schema_version raises RegistryVersionError.
 
-    SCHEMA_VERSION is now 6 (4a-G2 mux-ref forward-compat bump); v7 is the
-    future-drift case.
+    SCHEMA_VERSION is now 7 (screen-manifest fallback-authority bump); v8 is
+    the future-drift case.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -261,7 +261,7 @@ def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> No
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
-        json.dumps({"schema_version": 7, "agents": []}), encoding="utf-8"
+        json.dumps({"schema_version": 8, "agents": []}), encoding="utf-8"
     )
 
     with pytest.raises(RegistryVersionError) as exc_info:
@@ -601,14 +601,14 @@ def test_ac5_hp_write_registry_uses_paths_default(tmp_path: Path, monkeypatch) -
 
 
 def test_us2_schema_version_is_three() -> None:
-    """The on-disk schema version is 6 after the 4a-G2 mux-ref bump.
+    """The on-disk schema version is 7 after the screen-manifest bump.
 
     (Test name retained for greppability of the original US2 commit;
     the value tracks the latest bump.)
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
 
 
 def test_us2_agent_entry_has_status_and_last_message_at() -> None:
@@ -727,11 +727,11 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
     """The v4 host_mode forward-compat bump reads cleanly with host_mode
     preserved, and the widened accepted range still reads v1..=v4 (the bump
     must not drop back-compat reads; ab-a171ceb2). The current SCHEMA_VERSION
-    is 6 after the 4a-G2 mux-ref bump."""
+    is 7 after the screen-manifest bump."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import SCHEMA_VERSION, load_registry
 
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -845,6 +845,66 @@ def test_inside_leg_round_trips_across_registry_boundary(
     )
     assert load_registry(path=registry_path)[0].inside_leg is None
     assert AgentEntry(name="x", provider="claude", cwd="/t", log_path="/t/x.log").inside_leg is None
+
+
+def test_screen_state_round_trips_across_registry_boundary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """v7: the additive `screen_state` verdict round-trips losslessly.
+
+    Same X3 passthrough contract as inside_leg: the Rust daemon's scrape sweep
+    is the sole writer; Python custodies the opaque blob so a mixed-language
+    registry never drops it.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import (
+        AgentEntry,
+        load_registry,
+        write_registry,
+    )
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+    verdict = {
+        "state": "idle",
+        "rule": "idle_prompt",
+        "seq": 3,
+        "at": "2026-07-02T00:00:00Z",
+        "ttl_ms": 30000,
+    }
+
+    # (a) A Rust-written row carrying screen_state loads as an opaque dict.
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 7,
+                "agents": [
+                    {
+                        "name": "pane",
+                        "provider": "codex",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/pane.log",
+                        "created_at": "2026-07-02T00:00:00Z",
+                        "status": "live",
+                        "screen_state": verdict,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_registry(path=registry_path)
+    assert len(loaded) == 1
+    assert loaded[0].screen_state == verdict
+
+    # (b) write -> load preserves the blob byte-for-value.
+    write_registry(loaded, path=registry_path)
+    reloaded = load_registry(path=registry_path)
+    assert reloaded[0].screen_state == verdict
+
+    # (c) Absent defaults to None (pre-bump rows need no migration).
+    assert AgentEntry(name="x", provider="claude", cwd="/t", log_path="/t/x.log").screen_state is None
 
 
 def test_us2_v1_entries_synthesized_at_read(tmp_path: Path, monkeypatch) -> None:

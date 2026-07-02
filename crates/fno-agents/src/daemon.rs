@@ -1731,6 +1731,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         inside_leg: None,
         exited_at: None,
         mux: None,
+        screen_state: None,
     };
     // Reserve the name atomically UNDER the exclusive registry lock. The
     // lock-free collision check above can be passed by two concurrent
@@ -2025,6 +2026,7 @@ fn build_claude_stream_entry(
         inside_leg: None,
         exited_at: None,
         mux: None,
+        screen_state: None,
     }
 }
 
@@ -5400,6 +5402,7 @@ mod tests {
             inside_leg: None,
             exited_at: exited_at.map(str::to_string),
             mux: None,
+            screen_state: None,
         }
     }
 
@@ -5502,6 +5505,7 @@ mod tests {
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -5566,6 +5570,7 @@ mod tests {
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -5613,6 +5618,7 @@ mod tests {
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -5726,6 +5732,7 @@ mod tests {
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -5810,6 +5817,7 @@ mod tests {
             inside_leg: None,
             exited_at: None,
             mux: None,
+            screen_state: None,
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -5842,6 +5850,7 @@ mod tests {
             inside_leg: None,
             exited_at: None,
             mux: None,
+            screen_state: None,
         }
     }
 
@@ -6716,6 +6725,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -7401,6 +7411,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -7765,6 +7776,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -7826,6 +7838,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -7879,6 +7892,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -7942,6 +7956,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -8056,6 +8071,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -8219,6 +8235,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -8339,6 +8356,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();
@@ -8450,6 +8468,7 @@ done
                 inside_leg: None,
                 exited_at: None,
                 mux: None,
+                screen_state: None,
             });
         })
         .unwrap();

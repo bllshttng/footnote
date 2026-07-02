@@ -47,7 +47,12 @@ use std::path::{Path, PathBuf};
 /// silently drop the ref on write-back - losing it would orphan a live
 /// mux-hosted agent (badges, inject, and list all dispatch on the ref during
 /// the dual-run window). Accepted set widens to 1..=6.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 6;
+///
+/// v7 (screen-manifest fallback authority) is the same bump for the additive
+/// `screen_state` verdict: absent reads as `None`, but a pre-v7 writer would
+/// silently drop a stored verdict on write-back and blind the manifest rung
+/// of the badge lattice. Accepted set widens to 1..=7.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 7;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -138,6 +143,45 @@ pub struct InsideLegReport {
     pub received_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
+}
+
+/// The stored form of one screen-manifest verdict (the fallback rung of the
+/// badge lattice: pane-exit > hook > screen-manifest > liveness). Written only
+/// by the daemon's scrape sweep, and ONLY for rows with no `inside_leg`
+/// authority (per-capability arbitration: a hook-bearing agent is never
+/// scraped). `state` is the manifest vocabulary (`working`/`idle`/`blocked` -
+/// note `idle`, not the hook's `done`); `rule` is the matched
+/// [`crate::manifest::ManifestRule`] id, kept for the `detect explain`
+/// surface; `seq` is per-row monotonic so verdict history orders; `at` is the
+/// registry's `YYYY-MM-DDThh:mm:ssZ` stamp and `ttl_ms` bounds reader trust
+/// exactly like `inside_leg.received_at`/`ttl_ms` (the sweep refreshes `at`
+/// before it lapses, so a live daemon keeps a steady verdict fresh; a dead
+/// daemon's last verdict ages out instead of pinning a stale badge). Mirrored
+/// in Python's `AgentEntry` as `screen_state: Optional[dict]` (X3 passthrough).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScreenStateReport {
+    pub state: String,
+    pub rule: String,
+    pub seq: u64,
+    pub at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+}
+
+impl ScreenStateReport {
+    /// True while this verdict is trustworthy at `now_secs` - the same aging
+    /// discipline as [`InsideLegReport::is_live_at`]: no `ttl_ms` never
+    /// self-ages; a TTL'd verdict expires once `at + ttl_ms` passes; an
+    /// unparseable `at` fails CLOSED (expired, liveness-only).
+    pub fn is_live_at(&self, now_secs: u64) -> bool {
+        let Some(ttl_ms) = self.ttl_ms else {
+            return true;
+        };
+        match rfc3339_like_to_secs(&self.at) {
+            Some(recv) => now_secs.saturating_sub(recv).saturating_mul(1000) <= ttl_ms,
+            None => false,
+        }
+    }
 }
 
 impl InsideLegReport {
@@ -356,6 +400,17 @@ pub struct RegistryEntry {
     /// in Python's `AgentEntry` as `mux: Optional[dict]` (X3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mux: Option<MuxRef>,
+    /// Latest screen-manifest verdict for this row's mux pane (v7, the
+    /// fallback rung under the hook). Daemon-scrape-set, and mutually
+    /// exclusive with a live `inside_leg` authority BY THE WRITER (the sweep
+    /// skips hook-bearing rows; the inside-leg store clears this field on the
+    /// capability flip) - readers still treat inside_leg as unconditionally
+    /// senior, defense in depth. Skip-when-`None` so an unscraped row stays
+    /// slim and a stale reader rejects via the v7 bump rather than silently
+    /// dropping a verdict. Mirrored in Python's `AgentEntry` as
+    /// `screen_state: Optional[dict]` (X3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_state: Option<ScreenStateReport>,
 }
 
 /// The one-live-ref invariant (brief Locked 7), checked at write time by both
@@ -883,6 +938,7 @@ mod tests {
             inside_leg: None,
             exited_at: None,
             mux: None,
+            screen_state: None,
         }
     }
 
@@ -1125,6 +1181,81 @@ mod tests {
         reg.entries.push(int_entry);
         let out: serde_json::Value = serde_json::to_value(&reg).unwrap();
         assert_eq!(out["agents"][0]["host_mode"], "interactive");
+    }
+
+    #[test]
+    fn screen_state_cross_language_round_trip_parity() {
+        // v7: the additive `screen_state` verdict must round-trip both
+        // directions across the Rust<->Python registry boundary, exactly like
+        // inside_leg (v5) and mux (v6) before it.
+
+        // (a) Rust READS a row that OMITS screen_state -> None, no migration.
+        let no_key = r#"{"schema_version":6,"agents":[
+            {"name":"legacy","provider":"codex","cwd":"/p","log_path":"/l",
+             "created_at":"2026-05-26T00:00:00Z","status":"live"}]}"#;
+        let reg: Registry = serde_json::from_str(no_key).unwrap();
+        assert_eq!(reg.entries[0].screen_state, None);
+
+        // (b) Rust READS a full verdict -> Some, all fields land.
+        let with_verdict = r#"{"schema_version":7,"agents":[
+            {"name":"pane","provider":"codex","cwd":"/p","log_path":"/l",
+             "created_at":"2026-05-26T00:00:00Z","status":"live",
+             "screen_state":{"state":"idle","rule":"idle_prompt","seq":3,
+                             "at":"2026-07-02T00:00:00Z","ttl_ms":30000}}]}"#;
+        let reg: Registry = serde_json::from_str(with_verdict).unwrap();
+        let v = reg.entries[0].screen_state.as_ref().unwrap();
+        assert_eq!(v.state, "idle");
+        assert_eq!(v.rule, "idle_prompt");
+        assert_eq!(v.seq, 3);
+        assert_eq!(v.at, "2026-07-02T00:00:00Z");
+        assert_eq!(v.ttl_ms, Some(30000));
+
+        // (c) Rust WRITES a row without a verdict -> key OMITTED, so a Python
+        // AgentEntry(**row) gains no unexpected key.
+        let mut reg = Registry::default();
+        reg.entries.push(sample_entry("w"));
+        let out: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert!(
+            out["agents"][0].get("screen_state").is_none(),
+            "row without a verdict must omit screen_state (skip_serializing_if)"
+        );
+
+        // (d) Full round-trip preserves the verdict unchanged.
+        let mut scraped = sample_entry("pane");
+        scraped.screen_state = Some(ScreenStateReport {
+            state: "blocked".into(),
+            rule: "permission_prompt".into(),
+            seq: 9,
+            at: "2026-07-02T01:00:00Z".into(),
+            ttl_ms: None,
+        });
+        let mut reg = Registry::default();
+        reg.entries.push(scraped.clone());
+        let out: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert!(
+            out["agents"][0]["screen_state"].get("ttl_ms").is_none(),
+            "absent ttl_ms omitted"
+        );
+        let reg2: Registry = serde_json::from_value(out).unwrap();
+        assert_eq!(reg2.entries[0].screen_state, scraped.screen_state);
+    }
+
+    #[test]
+    fn screen_state_report_ttl_ages_and_fails_closed() {
+        let now = rfc3339_like_to_secs("2026-07-02T00:01:00Z").unwrap();
+        let mk = |at: &str, ttl_ms: Option<u64>| ScreenStateReport {
+            state: "working".into(),
+            rule: "busy".into(),
+            seq: 1,
+            at: at.into(),
+            ttl_ms,
+        };
+        // No TTL never self-ages; in-TTL live; lapsed expires; corrupt stamp
+        // fails closed (a bad `at` must not pin a forever-working badge).
+        assert!(mk("2026-07-02T00:00:00Z", None).is_live_at(now));
+        assert!(mk("2026-07-02T00:00:30Z", Some(60_000)).is_live_at(now));
+        assert!(!mk("2026-07-02T00:00:00Z", Some(5_000)).is_live_at(now));
+        assert!(!mk("garbage", Some(60_000)).is_live_at(now));
     }
 
     #[test]
@@ -1375,15 +1506,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v7, or - for an old daemon -
-        // a v6 it cannot interpret), while v1..=v6 still read.
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v8, or - for an old daemon -
+        // a v7 it cannot interpret), while v1..=v7 still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":7,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":8,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 7);
+                assert_eq!(found, 8);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
