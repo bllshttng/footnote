@@ -740,7 +740,14 @@ impl Queue for MegawalkQueue {
             // four TARGET_MISSION_* vars are required (wave + slug must be
             // present; from_msg_id maps to "" when null). Corrupted metadata
             // is a loud Queue error naming the node and missing field.
-            let extra_env = extract_mission_env(&v, &id)?;
+            let mut extra_env = extract_mission_env(&v, &id)?;
+
+            // x-571f: a per-node model pin overrides the fleet cfg.model via the
+            // same last-write-wins seam run() uses for TARGET_MISSION_* (extra_env
+            // beats static_env's MODEL_FLAG). Absent = fleet default stands.
+            if let Some(m) = v["model"].as_str().filter(|m| !m.is_empty()) {
+                extra_env.push(("MODEL_FLAG".to_string(), format!("--model {m}")));
+            }
 
             let session_key = gen_session_key();
 

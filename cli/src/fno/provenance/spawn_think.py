@@ -552,7 +552,7 @@ def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REA
     return name
 
 
-def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None) -> str:
+def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None, model: Optional[str] = None) -> str:
     """Dispatch a fire-and-forget ``/think`` claude bg worker carrying the seed.
 
     Mirrors advance._spawn_worker: ``/think`` rides as the command prompt (NOT
@@ -570,6 +570,10 @@ def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node
         cmd += ["--cwd", node_cwd]
     else:
         cmd += ["--fresh"]
+    # x-571f: a pinned node's /think worker also runs on the pin (US1 honors it
+    # on the claude/bg arm). Empty/None = provider default, unchanged.
+    if model:
+        cmd += ["--model", model]
     cmd += [agent_name, prompt]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -1079,7 +1083,7 @@ def maybe_spawn_think(
     node_cwd = node.get("_resolved_cwd") or node.get("cwd") or None
     node_slug = node.get("slug") or node.get("title")
     try:
-        short_id = _spawn_think_worker(node_id, seed.prompt, node_cwd, node_slug, reason, invocation_suffix)
+        short_id = _spawn_think_worker(node_id, seed.prompt, node_cwd, node_slug, reason, invocation_suffix, model=node.get("model"))
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder)
         return skip("already-claimed", presence=presence)

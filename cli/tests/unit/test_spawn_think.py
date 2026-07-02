@@ -70,8 +70,8 @@ def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     spawn_calls: list[tuple] = []
     stamp_calls: list[tuple] = []
 
-    def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth", invocation_suffix=None):
-        spawn_calls.append((node_id, prompt, node_cwd, node_slug, reason, invocation_suffix))
+    def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth", invocation_suffix=None, model=None):
+        spawn_calls.append((node_id, prompt, node_cwd, node_slug, reason, invocation_suffix, model))
         return "deadbeef"
 
     monkeypatch.setattr(st, "_spawn_think_worker", fake_spawn)

@@ -303,3 +303,44 @@ def test_locked_parity_vs_bash(doc: str, expected: str, parse_script) -> None:
     )
     assert py.stdout == bash_out, f"doc={doc!r} py={py.stdout!r} bash={bash_out!r}"
     assert bash_out.strip() == expected
+
+
+# ── x-571f: parse_locked_model (sibling of parse_locked_executor) ──────────────
+
+def test_parse_locked_model_extracts_from_locked_decisions() -> None:
+    doc = (
+        "# Plan\n\n## Architecture\nWe discuss the model resolver here.\n\n"
+        "## Locked Decisions\n1. **Model**: `fable` (user-confirmed)\n"
+        "2. Executor: do\n"
+    )
+    assert _locked.parse_locked_model(doc) == "fable"
+
+
+def test_parse_locked_model_ignores_prose_outside_section() -> None:
+    # A bare `model:` outside Locked Decisions is prose, not a lock.
+    doc = "## Overview\nmodel: fable\n\n## Locked Decisions\nExecutor: do\n"
+    assert _locked.parse_locked_model(doc) == ""
+
+
+def test_parse_locked_model_last_wins_and_rejects_overlong() -> None:
+    doc = "## Locked Decisions\nModel: opus\nModel: sonnet\n"
+    assert _locked.parse_locked_model(doc) == "sonnet"
+    over = "## Locked Decisions\nModel: " + "x" * 65 + "\n"
+    assert _locked.parse_locked_model(over) == ""
+
+
+def test_locked_model_cli_key_flag_and_backward_compat() -> None:
+    doc = "## Locked Decisions\nModel: fable\n"
+    model_out = subprocess.run(
+        [sys.executable, "-m", "fno.executor._locked", "--key", "model"],
+        input=doc, capture_output=True, text=True, cwd=_REPO_ROOT, env={**_module_env()},
+    )
+    assert model_out.stdout.strip() == "fable"
+    # No flag -> the executor parser (backward compatible): a Model line is
+    # invisible to it, so it emits nothing. This proves --key routes the parser
+    # rather than the default silently changing.
+    exec_out = subprocess.run(
+        [sys.executable, "-m", "fno.executor._locked"],
+        input=doc, capture_output=True, text=True, cwd=_REPO_ROOT, env={**_module_env()},
+    )
+    assert exec_out.stdout.strip() == ""

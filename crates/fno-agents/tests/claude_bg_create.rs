@@ -60,7 +60,15 @@ fn create_happy_parses_short_id() {
     install_fake_claude(&bin);
     let cwd = tmpdir("happy-cwd");
     let path = path_with(&bin);
-    let res = bg_create("alice", "hello", &cwd, None, &[("PATH", path.as_str())]).unwrap();
+    let res = bg_create(
+        "alice",
+        "hello",
+        &cwd,
+        None,
+        &[("PATH", path.as_str())],
+        None,
+    )
+    .unwrap();
     assert_eq!(res.short_id, "7c5dcf5d");
     assert_eq!(res.stdout, "backgrounded \u{b7} 7c5dcf5d \u{b7} alice\n");
 }
@@ -86,6 +94,7 @@ fn create_nonzero_exit_without_confirmation_is_subprocess_error() {
             ("FAKE_CLAUDE_EXIT", "3"),
             ("FAKE_CLAUDE_STDERR", "boom"),
         ],
+        None,
     )
     .unwrap_err();
     match err {
@@ -120,6 +129,7 @@ fn create_confirmation_wins_over_late_nonzero_exit() {
             ("FAKE_CLAUDE_EXIT", "3"),
             ("FAKE_CLAUDE_STDERR", "late-warning"),
         ],
+        None,
     )
     .expect("a printed confirmation must be a success despite a later nonzero exit");
     assert_eq!(res.short_id, "7c5dcf5d");
@@ -140,6 +150,7 @@ fn create_unparseable_stdout_is_parse_error() {
             ("PATH", path.as_str()),
             ("FAKE_CLAUDE_STDOUT", "not the contract\n"),
         ],
+        None,
     )
     .unwrap_err();
     assert!(matches!(err, AskError::Parse { .. }));
@@ -163,6 +174,7 @@ fn create_argv_overflow_sends_message_via_stdin() {
             ("PATH", path.as_str()),
             ("FAKE_CLAUDE_STDIN_DUMP", dump.to_str().unwrap()),
         ],
+        None,
     )
     .unwrap();
     assert_eq!(res.short_id, "7c5dcf5d");
@@ -183,6 +195,7 @@ fn create_missing_binary_is_127() {
         &cwd,
         Some(Duration::from_secs(5)),
         &[("PATH", path.as_str())],
+        None,
     )
     .unwrap_err();
     match err {

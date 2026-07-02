@@ -104,6 +104,13 @@ class Entry(BaseModel):
     cost_usd: Optional[float] = None
     cost_sessions: list[dict] = Field(default_factory=list)
     size: Optional[str] = None
+    # Optional per-node model pin (x-571f). A dispatcher appends `--model <m>`
+    # to the worker spawn it builds; null = provider default (no behavior
+    # change). Validated as a single non-whitespace token at write time; the
+    # no-whitespace rule protects MODEL_FLAG shell word-splitting in the loop
+    # drivers. Exact name `model` is legal on a BaseModel (only `model_*` is a
+    # protected pydantic namespace).
+    model: Optional[str] = None
     batch: Optional[str] = None
     plan_path: Optional[str] = None
     pr_number: Optional[int] = None
