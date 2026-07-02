@@ -139,7 +139,7 @@ fn main() {
             eprintln!(
                 "usage: fno [--session <name>] | fno mux server [--session <name>] \
                  | fno mux ls | fno mux attach <name> | fno mux kill-server [<name>] \
-                 | fno mux pane ls|read|run|send|wait|kill ..."
+                 | fno mux pane ls|read|run|send|wait|kill|claim|release ..."
             );
             std::process::exit(2);
         }

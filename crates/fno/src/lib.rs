@@ -2,6 +2,7 @@
 //! client-under-portable-pty e2e harness) can link the same code the binary
 //! runs. The binary (`main.rs`) is a thin role-select over these modules.
 
+pub mod agents_view;
 pub mod bootstrap;
 pub mod client;
 pub mod keys;

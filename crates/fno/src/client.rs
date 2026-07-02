@@ -27,8 +27,8 @@ use tokio::sync::mpsc;
 
 use crate::keys::{Event, Scanner};
 use crate::proto::{
-    self, cell_flags, read_msg, write_msg, Cell, ClientMsg, Color, Command, Frame, ProtoError,
-    ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
+    self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, Cell, ClientMsg, Color, Command,
+    Frame, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
 };
 use crate::tree::Rect;
 
@@ -189,6 +189,9 @@ struct LayoutView {
     /// The clamped content-area the rects were computed for; a client whose
     /// own content area is larger letterboxes (3.5).
     area: (u16, u16),
+    /// Sideline agent rows (4a-G2): registry-derived, fact-badged, rendered
+    /// under their squads (display-only; never selectable).
+    agents: Vec<AgentRow>,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -457,39 +460,117 @@ impl View {
         }
     }
 
+    /// The sideline's display order (4a-G2): each squad's selectable rows
+    /// (index-aligned with [`View::sel_rows`] so the selector highlight stays
+    /// correct), that squad's agent rows, then a catch-all section for agents
+    /// matched to no squad. Agent rows are display-only.
+    fn display_rows(&self) -> Vec<DisplayRow<'_>> {
+        let mut out = Vec::new();
+        let mut sel_idx = 0usize;
+        for s in &self.layout.squads {
+            out.push(DisplayRow::Sel {
+                idx: sel_idx,
+                row: SelRow {
+                    squad: s.id,
+                    tab: None,
+                },
+            });
+            sel_idx += 1;
+            if self.expanded.contains(&s.id) {
+                for t in 0..s.tabs.len() {
+                    out.push(DisplayRow::Sel {
+                        idx: sel_idx,
+                        row: SelRow {
+                            squad: s.id,
+                            tab: Some(t),
+                        },
+                    });
+                    sel_idx += 1;
+                }
+            }
+            out.extend(
+                self.layout
+                    .agents
+                    .iter()
+                    .filter(|a| a.squad == Some(s.id))
+                    .map(DisplayRow::Agent),
+            );
+        }
+        let orphans: Vec<&AgentRow> = self
+            .layout
+            .agents
+            .iter()
+            .filter(
+                |a| !matches!(a.squad, Some(id) if self.layout.squads.iter().any(|s| s.id == id)),
+            )
+            .collect();
+        if !orphans.is_empty() {
+            out.push(DisplayRow::Header("~ agents"));
+            out.extend(orphans.into_iter().map(DisplayRow::Agent));
+        }
+        out
+    }
+
     fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
-        let sel_rows = self.sel_rows();
         let text_w = panel_w - 1; // last column is the divider
-        for (i, row) in sel_rows.iter().enumerate() {
+        for (i, drow) in self.display_rows().into_iter().enumerate() {
             let r = TAB_BAR_ROWS as usize + i;
             if r >= rows {
                 break;
             }
-            let squad = self.layout.squads.iter().find(|s| s.id == row.squad);
-            let Some(squad) = squad else { continue };
-            let is_active_squad = squad.id == self.layout.active_squad;
-            let (text, mut flags) = match row.tab {
-                None => {
-                    let caret = if self.expanded.contains(&squad.id) {
-                        '▾'
-                    } else {
-                        '▸'
+            let (text, mut flags, selected) = match drow {
+                DisplayRow::Sel { idx, row } => {
+                    let squad = self.layout.squads.iter().find(|s| s.id == row.squad);
+                    let Some(squad) = squad else { continue };
+                    let is_active_squad = squad.id == self.layout.active_squad;
+                    let (text, flags) = match row.tab {
+                        None => {
+                            let caret = if self.expanded.contains(&squad.id) {
+                                '▾'
+                            } else {
+                                '▸'
+                            };
+                            (
+                                format!("{caret} {}", squad.name),
+                                if is_active_squad { cell_flags::BOLD } else { 0 },
+                            )
+                        }
+                        Some(t) => {
+                            let marker = if is_active_squad && t == squad.active_tab {
+                                '*'
+                            } else {
+                                ' '
+                            };
+                            (format!("  {marker}{}", t + 1), 0)
+                        }
                     };
-                    (
-                        format!("{caret} {}", squad.name),
-                        if is_active_squad { cell_flags::BOLD } else { 0 },
-                    )
+                    (text, flags, self.selector == Some(idx))
                 }
-                Some(t) => {
-                    let marker = if is_active_squad && t == squad.active_tab {
-                        '*'
+                DisplayRow::Agent(a) => {
+                    // Fact-badge lattice glyphs (brief US2 state machine):
+                    // exited beats badge beats liveness; a report reason
+                    // rides inline while width allows.
+                    let glyph = if a.exited {
+                        '✗'
                     } else {
-                        ' '
+                        match a.badge {
+                            Some(AgentBadge::Working) => '●',
+                            Some(AgentBadge::Blocked) => '▲',
+                            Some(AgentBadge::Done) => '✓',
+                            None => '·',
+                        }
                     };
-                    (format!("  {marker}{}", t + 1), 0)
+                    let mut text = format!("  {glyph} {}", a.name);
+                    if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
+                        text.push_str(": ");
+                        text.push_str(reason);
+                    }
+                    let flags = if a.exited { cell_flags::DIM } else { 0 };
+                    (text, flags, false)
                 }
+                DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM, false),
             };
-            if self.selector == Some(i) {
+            if selected {
                 flags |= cell_flags::INVERSE;
             }
             for (j, ch) in text.chars().take(text_w).enumerate() {
@@ -501,7 +582,7 @@ impl View {
                 };
             }
             // Pad the highlight across the row so the cursor reads as a bar.
-            if self.selector == Some(i) {
+            if selected {
                 for j in text.chars().count().min(text_w)..text_w {
                     cells[r * cols + j].flags |= cell_flags::INVERSE;
                 }
@@ -517,6 +598,15 @@ impl View {
             };
         }
     }
+}
+
+/// One rendered sideline line: a selectable squad/tab row (carrying its
+/// [`View::sel_rows`] index so the selector highlight follows selection), a
+/// display-only agent row, or the catch-all section header.
+enum DisplayRow<'a> {
+    Sel { idx: usize, row: SelRow },
+    Agent(&'a AgentRow),
+    Header(&'static str),
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +643,7 @@ async fn attach_and_run(
             panes: Vec::new(),
             focus: 0,
             area: (0, 0),
+            agents: Vec::new(),
         },
     );
     let (c_rows, c_cols) = view.content_dims();
@@ -589,6 +680,7 @@ async fn attach_and_run(
                 panes,
                 focus,
                 area,
+                agents,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -596,6 +688,7 @@ async fn attach_and_run(
                     panes,
                     focus,
                     area,
+                    agents,
                 });
                 break;
             }
@@ -706,8 +799,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents });
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -1192,6 +1285,7 @@ mod tests {
                 ],
                 focus: 11,
                 area: (29, 72),
+                agents: vec![],
             },
         );
         view.frames.insert(10, text_frame(29, 35, 'a'));
@@ -1223,6 +1317,80 @@ mod tests {
         assert_eq!(frame.cursor_row, 1);
         assert_eq!(frame.cursor_col, 28 + 36);
         assert!(frame.cursor_visible);
+    }
+
+    #[test]
+    fn client_compose_agent_rows_render_under_squads_with_badges() {
+        // 4a-G2 (AC1-UI/AC2 render side): agent rows appear under their
+        // squad with the fact-badge glyph; exited rows dim with the exit
+        // marker over any badge; orphans land under the catch-all header;
+        // the selector highlight still tracks SELECTABLE rows only.
+        let mut view = two_pane_view();
+        let panes = view.layout.panes.clone();
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1), meta(2, "herdr", 1, 0)],
+            active_squad: 1,
+            panes,
+            focus: 11,
+            area: (29, 72),
+            agents: vec![
+                AgentRow {
+                    squad: Some(1),
+                    name: "peer".into(),
+                    pane_id: Some(10),
+                    badge: Some(AgentBadge::Blocked),
+                    reason: Some("perm prompt".into()),
+                    exited: false,
+                },
+                AgentRow {
+                    squad: Some(1),
+                    name: "dead".into(),
+                    pane_id: Some(99),
+                    badge: None,
+                    reason: None,
+                    exited: true,
+                },
+                AgentRow {
+                    squad: None,
+                    name: "bg-watch".into(),
+                    pane_id: None,
+                    badge: Some(AgentBadge::Working),
+                    reason: None,
+                    exited: false,
+                },
+            ],
+        });
+        let frame = view.compose();
+        let text = frame_text(&frame);
+        let lines: Vec<&str> = text.lines().collect();
+        // Row order: footnote, its two agent rows, herdr, catch-all header,
+        // the orphan row.
+        assert!(lines[1].contains("\u{25b8} footnote"), "{:?}", lines[1]);
+        assert!(
+            lines[2].contains("\u{25b2} peer: perm prompt"),
+            "{:?}",
+            lines[2]
+        );
+        assert!(lines[3].contains("\u{2717} dead"), "{:?}", lines[3]);
+        assert!(lines[4].contains("\u{25b8} herdr"), "{:?}", lines[4]);
+        assert!(lines[5].contains("~ agents"), "{:?}", lines[5]);
+        assert!(lines[6].contains("\u{25cf} bg-watch"), "{:?}", lines[6]);
+        // The exited row is DIM (fact beats badge, visually too).
+        let cols = frame.cols as usize;
+        let dead_cell = frame.cells[3 * cols + 2];
+        assert_eq!(dead_cell.flags & cell_flags::DIM, cell_flags::DIM);
+        // Selector index 1 = the second SELECTABLE row (herdr), even though
+        // agent rows render between them.
+        let mut sel_view = view;
+        sel_view.selector = Some(1);
+        let sel_frame = sel_view.compose();
+        let herdr_row = 4usize;
+        let sel_cell = sel_frame.cells[herdr_row * cols + 2];
+        assert_eq!(
+            sel_cell.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "selector highlight must land on the selectable herdr row"
+        );
     }
 
     #[test]
@@ -1311,6 +1479,7 @@ mod tests {
             )],
             focus: 10,
             area: (29, 72),
+            agents: vec![],
         });
         assert!(view.frames.contains_key(&10));
         assert!(
@@ -1340,6 +1509,7 @@ mod tests {
                 )],
                 focus: 10,
                 area: (20, 50),
+                agents: vec![],
             },
         );
         view.frames.insert(10, text_frame(20, 50, 'a'));
@@ -1404,6 +1574,7 @@ mod tests {
             )],
             focus: 20,
             area: (29, 72),
+            agents: vec![],
         });
         assert_eq!(view.selector, Some(0), "cursor clamped to the live rows");
     }

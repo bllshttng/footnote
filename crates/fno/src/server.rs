@@ -32,9 +32,10 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
+use crate::agents_view::{self, RegistryAgent};
 use crate::proto::{
-    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, BindOutcome, ClientMsg,
-    Command, ControlVerb, Frame, PaneInfo, ServerMsg, SquadMeta, TabMeta, WaitOutcome,
+    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentRow, BindOutcome,
+    ClientMsg, Command, ControlVerb, Frame, PaneInfo, ServerMsg, SquadMeta, TabMeta, WaitOutcome,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, RemoveOutcome, Resolver, Session};
@@ -116,13 +117,15 @@ enum CoreMsg {
         reply: ControlReply,
     },
     /// `squad_key` was resolved OFF the core loop (like `Attach`); `cwd` is the
-    /// literal launch dir for the child shell.
+    /// literal launch dir for the child shell. `claim: true` marks the pane
+    /// writer-claim eligible (an agent pane - 4a-G2).
     PaneRun {
         squad_key: String,
         cwd: String,
         argv: Vec<String>,
         cols: Option<u16>,
         rows: Option<u16>,
+        claim: bool,
         reply: ControlReply,
     },
     PaneSend {
@@ -143,6 +146,20 @@ enum CoreMsg {
         pane: u64,
         reply: ControlReply,
     },
+    /// Acquire/release the per-pane writer claim (4a-G3, brief Locked 5).
+    PaneClaim {
+        pane: u64,
+        holder_pid: u32,
+        reply: ControlReply,
+    },
+    PaneRelease {
+        pane: u64,
+        reply: ControlReply,
+    },
+    /// A fresh registry-derived agent row set from the off-loop reader task
+    /// (4a-G2). Sent only when the set changed; the core stores it and
+    /// re-pushes layouts (rects unchanged, so no frame re-emit).
+    AgentRows(Vec<RegistryAgent>),
 }
 
 /// The per-pane signal an off-loop `PaneWait` watcher observes. The core loop
@@ -287,6 +304,28 @@ struct Core {
     shells: Vec<OsString>,
     out_tx: mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: mpsc::Sender<u64>,
+    /// Latest registry-derived agent rows (4a-G2), stored raw; the pane-exit
+    /// fact and squad assignment are joined at layout time, where the live
+    /// pane set and the squad catalog live.
+    agents: Vec<RegistryAgent>,
+    /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
+    /// general pane never appears here and never consults a claim (Locked 5).
+    claim_eligible: HashSet<u64>,
+    /// Held writer claims: pane -> holder pid. Enforced on `Input` as an
+    /// in-memory lookup + a `kill(pid, 0)` liveness probe (one syscall, never
+    /// a subprocess - the origin freeze class); a dead holder releases lazily
+    /// on the next contested keystroke, so typing resumes without a server
+    /// restart (AC3-FR) and no sweep timer exists to tune.
+    claims: HashMap<u64, u32>,
+}
+
+/// True while `pid` is alive (or unprobeable - erring toward "held" keeps a
+/// live holder's claim from being stolen by a permissions error; ESRCH is the
+/// definitive "gone").
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: kill(pid, 0) performs no signal delivery, only validation.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 impl Core {
@@ -392,6 +431,10 @@ impl Core {
         if let Some(entry) = self.panes.remove(&pid) {
             entry.pty.kill();
         }
+        // Pane exit releases the writer claim UNCONDITIONALLY (Locked 5): a
+        // held claim never blocks the close cascade.
+        self.claims.remove(&pid);
+        self.claim_eligible.remove(&pid);
         if let Some(tx) = self.pane_watch.remove(&pid) {
             // Last observable tick before the sender drops: a watcher that
             // reads it sees `exited`; one blocked in `changed()` sees the
@@ -460,8 +503,14 @@ impl Core {
         argv: Vec<String>,
         rows: u16,
         cols: u16,
+        claim: bool,
     ) -> Result<u64, String> {
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &cwd)?;
+        if claim {
+            // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
+            // The claim itself is acquired per-burst via PaneClaim.
+            self.claim_eligible.insert(pid);
+        }
         let tid = self.session.mint_tab_id();
         let tab = Tab {
             id: tid,
@@ -810,7 +859,58 @@ impl Core {
             panes: rects.to_vec(),
             focus,
             area,
+            agents: self.agent_rows(),
         }
+    }
+
+    /// Join the registry-derived agent set to this server's live state (4a-G2,
+    /// the fact-badge lattice): a mux-hosted row (this session) renders under
+    /// its pane's squad, and a missing/dead pane forces `exited` REGARDLESS of
+    /// any live-TTL badge (fact beats report - AC2-EDGE, and the reason a dead
+    /// row can never resurrect: the pane set is authoritative here, AC2-FR). A
+    /// row hosted in ANOTHER session is skipped (that session's server renders
+    /// it). Non-pane rows (bg/headless/daemon-worker) are watch-only, matched
+    /// to a squad by canonical cwd (exact or child path), else the catch-all
+    /// (`squad: None`).
+    fn agent_rows(&self) -> Vec<AgentRow> {
+        let mut out = Vec::with_capacity(self.agents.len());
+        for a in &self.agents {
+            let (squad, pane_id, exited) = match &a.mux {
+                Some((sess, pane)) => {
+                    if *sess != self.session_name {
+                        continue;
+                    }
+                    let squad = self.session.find_pane(*pane).map(|(sid, _)| sid);
+                    let pane_dead = !self.panes.contains_key(pane);
+                    (squad, Some(*pane), a.exited || pane_dead)
+                }
+                None => {
+                    let squad = self
+                        .session
+                        .squads
+                        .iter()
+                        .find(|s| {
+                            a.cwd == s.canonical_cwd
+                                || a.cwd
+                                    .strip_prefix(&s.canonical_cwd)
+                                    .is_some_and(|rest| rest.starts_with('/'))
+                        })
+                        .map(|s| s.id);
+                    (squad, None, a.exited)
+                }
+            };
+            out.push(AgentRow {
+                squad,
+                name: a.name.clone(),
+                pane_id,
+                // Exit beats badge, structurally: no path renders `working`
+                // over a dead pane.
+                badge: if exited { None } else { a.badge },
+                reason: if exited { None } else { a.reason.clone() },
+                exited,
+            });
+        }
+        out
     }
 
     /// Fan one pane's fresh frame out - but only into the dirty slots of
@@ -1157,19 +1257,33 @@ impl Core {
                 // moved the view, or the exit signal is about to. A write
                 // error means the child just exited mid-keystroke - same
                 // policy.
-                if let Some(view) = self.client_view(id) {
-                    if let Some(tab) = self.viewed_tab(view) {
-                        if let Some(entry) = self.panes.get(&tab.focus) {
-                            if let Err(crate::pty::PtyError::Write(e)) =
-                                entry.pty.write_input(&bytes)
-                            {
-                                // Disconnected = child just exited (the exit
-                                // signal follows; stay silent). Full = the
-                                // child stopped reading (^S, SIGSTOP): the
-                                // drop must not be invisible to the typist.
-                                if e.kind() == std::io::ErrorKind::WouldBlock {
-                                    self.notice(id, "pane not accepting input; keys dropped");
-                                }
+                let focus = self
+                    .client_view(id)
+                    .and_then(|view| self.viewed_tab(view))
+                    .map(|tab| tab.focus);
+                if let Some(focus) = focus {
+                    // Writer-claim interlock (4a-G3, AC3-UI): while the relay
+                    // holds an agent pane's claim, human keystrokes bounce
+                    // with a visible `busy: relay` notice (the client sounds
+                    // BEL for every Notice). In-memory lookup + one kill(0)
+                    // probe - a DEAD holder releases right here, so typing
+                    // resumes without any sweep or restart (AC3-FR). General
+                    // panes are never in `claims` (spawn-time opt-in).
+                    if let Some(&holder) = self.claims.get(&focus) {
+                        if pid_alive(holder) {
+                            self.notice(id, "busy: relay");
+                            return Flow::Continue;
+                        }
+                        self.claims.remove(&focus);
+                    }
+                    if let Some(entry) = self.panes.get(&focus) {
+                        if let Err(crate::pty::PtyError::Write(e)) = entry.pty.write_input(&bytes) {
+                            // Disconnected = child just exited (the exit
+                            // signal follows; stay silent). Full = the
+                            // child stopped reading (^S, SIGSTOP): the
+                            // drop must not be invisible to the typist.
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
+                                self.notice(id, "pane not accepting input; keys dropped");
                             }
                         }
                     }
@@ -1244,11 +1358,12 @@ impl Core {
                 argv,
                 cols,
                 rows,
+                claim,
                 reply,
             } => {
                 let rows = rows.unwrap_or(vt::DEFAULT_ROWS);
                 let cols = cols.unwrap_or(vt::DEFAULT_COLS);
-                let msg = match self.run_pane(squad_key, cwd, argv, rows, cols) {
+                let msg = match self.run_pane(squad_key, cwd, argv, rows, cols, claim) {
                     Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
                     Err(e) => ServerMsg::Err {
                         code: err_code::SPAWN_FAILED,
@@ -1313,6 +1428,55 @@ impl Core {
                 let flow = self.close_pane(pane);
                 let _ = reply.send(ServerMsg::Ok);
                 flow
+            }
+            CoreMsg::PaneClaim {
+                pane,
+                holder_pid,
+                reply,
+            } => {
+                let msg = if !self.panes.contains_key(&pane) {
+                    dead_pane(pane)
+                } else if !self.claim_eligible.contains(&pane) {
+                    // AC3-EDGE: general panes never consult a claim; refusing
+                    // the acquire keeps the opt-in boundary visible.
+                    ServerMsg::Err {
+                        code: err_code::BAD_REQUEST,
+                        msg: format!(
+                            "pane {pane} is not claim-eligible (only agent panes spawned with --claim carry the writer interlock)"
+                        ),
+                    }
+                } else {
+                    match self.claims.get(&pane) {
+                        // A live other holder refuses; a dead or same-pid
+                        // holder is replaced (re-acquire is idempotent).
+                        Some(&held) if held != holder_pid && pid_alive(held) => ServerMsg::Err {
+                            code: err_code::BAD_REQUEST,
+                            msg: format!("pane {pane} writer claim held by pid {held}"),
+                        },
+                        _ => {
+                            self.claims.insert(pane, holder_pid);
+                            ServerMsg::Ok
+                        }
+                    }
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::PaneRelease { pane, reply } => {
+                // Idempotent: releasing an unheld (or already-exited) pane is
+                // Ok - the burst may have raced the exit teardown, which
+                // releases unconditionally.
+                self.claims.remove(&pane);
+                let _ = reply.send(ServerMsg::Ok);
+                Flow::Continue
+            }
+            CoreMsg::AgentRows(rows) => {
+                self.agents = rows;
+                // Rects are unchanged; only the Layout's agent rows moved -
+                // push without re-emitting frames (AC1-UI: visible within one
+                // layout push; AC2-UI: the read happened off-loop).
+                self.push_layout(false);
+                Flow::Continue
             }
         }
     }
@@ -1441,7 +1605,60 @@ async fn serve(
         shells: shell_candidates(std::env::var_os("SHELL").as_deref()),
         out_tx,
         exit_tx,
+        agents: Vec::new(),
+        claim_eligible: HashSet::new(),
+        claims: HashMap::new(),
     };
+
+    // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
+    // the fno-agents registry on the blocking pool, re-derives the agent row
+    // set (TTL aging included), and sends it to the core only when it
+    // changed. The render path never touches the file (AC2-UI; the origin
+    // freeze class), and its staleness is bounded by this one interval.
+    {
+        let core_tx = core_tx.clone();
+        let path = agents_view::registry_path();
+        tokio::spawn(async move {
+            let mut state = agents_view::ReaderState::default();
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let stat_path = path.clone();
+                let stamp = tokio::task::spawn_blocking(move || {
+                    std::fs::metadata(&stat_path)
+                        .ok()
+                        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
+                })
+                .await
+                .ok()
+                .flatten();
+                let read_path = path.clone();
+                let changed = stamp != {
+                    // Peek: ReaderState owns the cached stamp; read the
+                    // file only when it moved (mtime+len gate).
+                    state.cached_stamp()
+                };
+                let raw = if changed {
+                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&read_path).ok())
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if let Some(rows) = state.tick(stamp, move || raw, now) {
+                    if core_tx.send(CoreMsg::AgentRows(rows)).await.is_err() {
+                        return; // core loop gone; the server is shutting down
+                    }
+                }
+            }
+        });
+    }
 
     // The squad-key cache, shared by the per-connection handshake tasks. The
     // blocking git resolution runs there (spawn_blocking), NEVER on the core
@@ -1622,6 +1839,7 @@ async fn handle_control(
             argv,
             cols,
             rows,
+            claim,
         } => {
             // Resolve the squad key off the core loop, exactly like Attach.
             let squad_key = resolve_squad_key(&resolver, &cwd).await;
@@ -1632,6 +1850,7 @@ async fn handle_control(
                     argv,
                     cols,
                     rows,
+                    claim,
                     reply: reply_tx,
                 })
                 .await
@@ -1682,6 +1901,23 @@ async fn handle_control(
         ControlVerb::PaneKill { pane } => {
             core_tx
                 .send(CoreMsg::PaneKill {
+                    pane,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::PaneClaim { pane, holder_pid } => {
+            core_tx
+                .send(CoreMsg::PaneClaim {
+                    pane,
+                    holder_pid,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::PaneRelease { pane } => {
+            core_tx
+                .send(CoreMsg::PaneRelease {
                     pane,
                     reply: reply_tx,
                 })
