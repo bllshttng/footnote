@@ -126,7 +126,8 @@ fn wait_for_raw_frame(
             | Ok(ServerMsg::PaneSpawned { .. })
             | Ok(ServerMsg::Ok)
             | Ok(ServerMsg::WaitDone { .. })
-            | Ok(ServerMsg::Err { .. }) => {}
+            | Ok(ServerMsg::Err { .. })
+            | Ok(ServerMsg::Copy { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}

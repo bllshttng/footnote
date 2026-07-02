@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use crate::keys::{Event, Scanner};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, Cell, ClientMsg, Color, Command,
-    Frame, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
+    Frame, MouseEvent, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
 };
 use crate::tree::Rect;
 
@@ -154,6 +154,12 @@ impl TerminalGuard {
         let guard = TerminalGuard;
         crossterm::execute!(out, terminal::EnterAlternateScreen)
             .map_err(|e| format!("alternate screen: {e}"))?;
+        // Mouse capture stays on for the client's whole life (US1/US2/US3): the
+        // server routes every pane-rect event by the pane's live mode. Drop's
+        // MODE_RESET (which lists 1000/1002/1006 off) turns it back off on exit.
+        out.write_all(crate::mouse::ENABLE)
+            .and_then(|_| out.flush())
+            .map_err(|e| format!("enable mouse: {e}"))?;
         Ok(guard)
     }
 }
@@ -255,6 +261,26 @@ impl View {
         )
     }
 
+    /// Map an outer-terminal cell (0-based) to `(pane, pane_row, pane_col)` when
+    /// it falls inside a pane's content rect. `None` for a chrome cell (tab bar,
+    /// sideline) or a content divider, so the caller swallows it - a mouse event
+    /// on chrome never forwards to a pane (AC3-UI). Rects are content-area
+    /// relative; the content origin is `(TAB_BAR_ROWS, panel_w)`.
+    fn hit_test(&self, row: u16, col: u16) -> Option<(u64, u16, u16)> {
+        let panel_w = self.panel_w();
+        if row < TAB_BAR_ROWS || col < panel_w {
+            return None;
+        }
+        let cr = row - TAB_BAR_ROWS;
+        let cc = col - panel_w;
+        for (pid, rect) in &self.layout.panes {
+            if cr >= rect.y && cr < rect.y + rect.rows && cc >= rect.x && cc < rect.x + rect.cols {
+                return Some((*pid, cr - rect.y, cc - rect.x));
+            }
+        }
+        None
+    }
+
     fn set_layout(&mut self, layout: LayoutView) {
         // Frames for panes unknown to the new Layout are dead - drop them
         // (Concurrency: a frame is only ever drawn against the Layout
@@ -334,6 +360,36 @@ impl View {
                 }
             }
         }
+        // Scroll indicator (US1, AC1-UI): a minimal `[+N]` at a scrolled pane's
+        // top-right, inverse-video so it reads over content. Present iff the
+        // pane's frame reports a non-zero offset (group 2's status row becomes
+        // its canonical home). A pane too narrow to fit the label skips it.
+        for (pid, rect) in &self.layout.panes {
+            let Some(f) = self.frames.get(pid) else {
+                continue;
+            };
+            if f.scroll_offset == 0 {
+                continue;
+            }
+            let label = format!("[+{}]", f.scroll_offset);
+            let w = label.chars().count();
+            let r = origin_r + rect.y as usize;
+            if (rect.cols as usize) < w || r >= rows {
+                continue;
+            }
+            let start_c = origin_c + rect.x as usize + rect.cols as usize - w;
+            for (k, ch) in label.chars().enumerate() {
+                let c = start_c + k;
+                if c < cols {
+                    cells[r * cols + c] = Cell {
+                        c: ch,
+                        fg: Color::Default,
+                        bg: Color::Default,
+                        flags: cell_flags::INVERSE,
+                    };
+                }
+            }
+        }
         // Letterbox (AC1-UI): the server tiled its rects into `Layout.area`
         // (the view-scoped clamp); content anchors top-left and everything
         // beyond `area` up to the local content edge is visibly-inert dim
@@ -406,6 +462,10 @@ impl View {
             cursor_row: cur_r,
             cursor_col: cur_c,
             cursor_visible: cur_vis,
+            // The composed full-terminal frame is not itself scrolled; the
+            // per-pane indicator is drawn INTO the cells above from each pane
+            // frame's own scroll_offset.
+            scroll_offset: 0,
         }
     }
 
@@ -720,7 +780,10 @@ async fn attach_and_run(
                 | ServerMsg::PaneSpawned { .. }
                 | ServerMsg::Ok
                 | ServerMsg::WaitDone { .. }
-                | ServerMsg::Err { .. },
+                | ServerMsg::Err { .. }
+                // Copy answers a mouse-release, which can only follow attach:
+                // stray in the preamble, ignore rather than desync.
+                | ServerMsg::Copy { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -773,6 +836,13 @@ async fn attach_and_run(
     }
     let mut compositor = Compositor::new();
     let mut scanner = Scanner::default();
+    // Carries a partial SGR mouse report split across reads (mouse.rs).
+    let mut mouse_carry: Vec<u8> = Vec::new();
+    // Clipboard delivery runs on a blocking thread and reports its outcome back
+    // here, so a hanging helper (xclip on a dead X11 link) never parks the UI
+    // select loop - the loop keeps draining stdin/frames while the copy lands.
+    let (copy_tx, mut copy_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(usize, crate::clipboard::CopyOutcome)>();
     compositor
         .draw(&view.compose())
         .map_err(|e| format!("draw: {e}"))?;
@@ -828,6 +898,21 @@ async fn attach_and_run(
                     | ServerMsg::Ok
                     | ServerMsg::WaitDone { .. }
                     | ServerMsg::Err { .. }) => {}
+                Ok(ServerMsg::Copy { text }) => {
+                    // Land the server-extracted selection on the clipboard: local
+                    // exec first, OSC 52 to the outer terminal as fallback
+                    // (Locked 5). The exec chain can hang (xclip on a slow X11
+                    // link), so delivery runs on a blocking thread and reports its
+                    // outcome back over `copy_tx` - NOT awaited here, so the select
+                    // loop keeps draining stdin/frames meanwhile. The status flash
+                    // (below, on the outcome arm) makes the copy observable.
+                    let chars = text.chars().count();
+                    let tx = copy_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let outcome = crate::clipboard::deliver(&text, raw_out);
+                        let _ = tx.send((chars, outcome));
+                    });
+                }
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
                 Err(ProtoError::Closed) => {
                     break Ok(exit_with_notice("session ended (server closed)".into()));
@@ -836,7 +921,7 @@ async fn attach_and_run(
             },
             bytes = stdin_rx.recv() => match bytes {
                 Some(bytes) => {
-                    match handle_stdin(&mut view, &mut scanner, &bytes, &mut sock_w).await {
+                    match handle_stdin(&mut view, &mut scanner, &mut mouse_carry, &bytes, &mut sock_w).await {
                         Ok(StdinFlow::Continue) => {
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
@@ -853,6 +938,27 @@ async fn attach_and_run(
                 // the time we see None we cannot tell which, so say so.
                 None => break Ok(exit_with_notice("stdin ended (closed or read error); detached".into())),
             },
+            Some((chars, outcome)) = copy_rx.recv() => {
+                // A clipboard delivery finished on its blocking thread: flash the
+                // result (AC2-HP) or sound BEL on hard failure (AC2-ERR).
+                let notice = match outcome {
+                    crate::clipboard::CopyOutcome::Local(_)
+                    | crate::clipboard::CopyOutcome::Osc52 { truncated: false } => {
+                        format!("copied {chars} chars")
+                    }
+                    crate::clipboard::CopyOutcome::Osc52 { truncated: true } => {
+                        format!("copied {chars} chars (truncated to clipboard limit)")
+                    }
+                    crate::clipboard::CopyOutcome::Failed => {
+                        let _ = raw_out(b"\x07");
+                        "copy failed: no clipboard tool and OSC 52 blocked".to_string()
+                    }
+                };
+                view.set_notice(notice);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             _ = winch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
                     view.term = (rows, cols);
@@ -904,13 +1010,42 @@ enum StdinFlow {
 async fn handle_stdin(
     view: &mut View,
     scanner: &mut Scanner,
+    mouse_carry: &mut Vec<u8>,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    if view.selector.is_some() {
-        return selector_keys(view, bytes, sock_w).await;
+    // Mouse pre-pass (US1/US2/US3): pull SGR reports out first, then feed the
+    // remaining bytes to the key scanner. A pane-rect event forwards for
+    // server-side routing; a chrome click is swallowed (nothing reaches a pane,
+    // AC3-UI); a Shift-modified event is dropped (native-selection, AC3-EDGE).
+    let (reports, passthrough) = crate::mouse::extract_mouse(mouse_carry, bytes);
+    for rep in reports {
+        if rep.shift {
+            continue;
+        }
+        if let Some((pane, prow, pcol)) = view.hit_test(rep.row, rep.col) {
+            write_msg(
+                sock_w,
+                &ClientMsg::Mouse {
+                    pane,
+                    event: MouseEvent {
+                        row: prow,
+                        col: pcol,
+                        kind: rep.kind,
+                    },
+                },
+            )
+            .await
+            .map_err(|e| format!("mouse send failed: {e}"))?;
+        }
     }
-    for event in scanner.scan(bytes) {
+    if passthrough.is_empty() {
+        return Ok(StdinFlow::Continue);
+    }
+    if view.selector.is_some() {
+        return selector_keys(view, &passthrough, sock_w).await;
+    }
+    for event in scanner.scan(&passthrough) {
         match event {
             Event::Forward(chunk) => {
                 // Reliable channel: awaited send, input is NEVER dropped.
@@ -1193,7 +1328,10 @@ fn apply_style(out: &mut impl Write, cell: &Cell) -> std::io::Result<()> {
     if cell.flags & cf::UNDERLINE != 0 {
         queue!(out, style::SetAttribute(style::Attribute::Underlined))?;
     }
-    if cell.flags & cf::INVERSE != 0 {
+    // A SELECTED cell (US2) toggles reverse-video: XOR with the cell's own
+    // inverse so the selection is always a visible delta, even over already-
+    // inverse text.
+    if (cell.flags & cf::INVERSE != 0) ^ (cell.flags & cf::SELECTED != 0) {
         queue!(out, style::SetAttribute(style::Attribute::Reverse))?;
     }
     if cell.flags & cf::DIM != 0 {
@@ -1252,6 +1390,7 @@ mod tests {
             cursor_row: 0,
             cursor_col: 0,
             cursor_visible: true,
+            scroll_offset: 0,
         }
     }
 
@@ -1317,6 +1456,73 @@ mod tests {
         assert_eq!(frame.cursor_row, 1);
         assert_eq!(frame.cursor_col, 28 + 36);
         assert!(frame.cursor_visible);
+    }
+
+    #[test]
+    fn client_hit_test_maps_pane_and_swallows_chrome() {
+        // US3 hit-test: content cells resolve to (pane, local row, local col);
+        // chrome cells (tab bar, sideline) and dividers resolve to None so the
+        // caller swallows them (AC3-UI: nothing forwards to a pane).
+        let view = two_pane_view();
+        // Inside pane 10 (content origin at outer (1, 28)).
+        assert_eq!(view.hit_test(5, 30), Some((10, 4, 2)));
+        // Inside pane 11 (content col 36 -> outer col 64), its top-left cell.
+        assert_eq!(view.hit_test(3, 64), Some((11, 2, 0)));
+        // Tab bar row is chrome.
+        assert_eq!(view.hit_test(0, 40), None);
+        // Sideline column (< panel_w 28) is chrome.
+        assert_eq!(view.hit_test(5, 10), None);
+        // The divider column between the panes covers no pane.
+        assert_eq!(view.hit_test(5, 28 + 35), None);
+    }
+
+    #[test]
+    fn client_compose_draws_scroll_indicator_when_pane_scrolled() {
+        // AC1-UI: a `[+N]` indicator appears at a scrolled pane's top-right;
+        // absent entirely when the pane is live (offset 0).
+        let mut view = two_pane_view();
+        assert!(!frame_text(&view.compose())
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains("[+"));
+        let mut f = text_frame(29, 35, 'a');
+        f.scroll_offset = 7;
+        view.frames.insert(10, f);
+        let frame = view.compose();
+        let text = frame_text(&frame);
+        let lines: Vec<&str> = text.lines().collect();
+        let row1: Vec<char> = lines[1].chars().collect();
+        // start_c = origin_c(28) + rect.x(0) + rect.cols(35) - width("[+7]"=4).
+        let seg: String = row1[59..63].iter().collect();
+        assert_eq!(seg, "[+7]");
+    }
+
+    #[test]
+    fn client_apply_style_reverses_selected_cell() {
+        // US2 render: a SELECTED cell emits reverse-video (XOR with the cell's
+        // own inverse so selection is always a visible delta).
+        let sel = Cell {
+            flags: cell_flags::SELECTED,
+            ..Cell::default()
+        };
+        let mut buf = Vec::new();
+        apply_style(&mut buf, &sel).unwrap();
+        assert!(
+            buf.windows(4).any(|w| w == b"\x1b[7m"),
+            "reverse SGR emitted"
+        );
+        // SELECTED over already-inverse text cancels back to non-reverse.
+        let both = Cell {
+            flags: cell_flags::SELECTED | cell_flags::INVERSE,
+            ..Cell::default()
+        };
+        let mut buf2 = Vec::new();
+        apply_style(&mut buf2, &both).unwrap();
+        assert!(
+            !buf2.windows(4).any(|w| w == b"\x1b[7m"),
+            "double-inverse cancels"
+        );
     }
 
     #[test]

@@ -235,6 +235,7 @@ fn persistence_malformed_frame_is_rejected_not_panicked() {
                 cursor_row: 0,
                 cursor_col: 0,
                 cursor_visible: true,
+                scroll_offset: 0,
             };
             let _ = write_msg_sync(
                 &mut conn,

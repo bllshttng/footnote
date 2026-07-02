@@ -11,10 +11,11 @@
 use std::collections::VecDeque;
 
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{viewport_to_point, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
 
 use crate::proto::{cell_flags, BlockMeta, BlockSel, Cell, Color, Frame};
@@ -198,6 +199,10 @@ impl Pane {
         });
         self.rows = rows;
         self.cols = cols;
+        // Reflow rewraps history, staling any (line, col) anchors: drop the
+        // selection rather than render a highlight over the wrong cells
+        // (AC2-UI). The display offset is clamped by alacritty's own resize.
+        self.term.selection = None;
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -209,22 +214,47 @@ impl Pane {
     /// into a self-contained [`Frame`].
     pub fn frame(&self) -> Frame {
         let grid = self.term.grid();
+        // Display offset (US1): 0 = live bottom, >0 = scrolled into history.
+        // Viewport row `r` shows grid line `r - offset` (alacritty's
+        // `viewport_to_point`), so at offset 0 this is byte-identical to the
+        // live-view render.
+        let offset = grid.display_offset() as i32;
+        // Selection (US2): resolved to a concrete grid-point range once, then
+        // each cell is tested against it so every co-viewer's frame carries the
+        // same highlight (brief Locked 4). `None` when nothing is selected.
+        let sel = self
+            .term
+            .selection
+            .as_ref()
+            .and_then(|s| s.to_range(&self.term));
         let cursor_point = grid.cursor.point;
         let mut cells = Vec::with_capacity(self.rows as usize * self.cols as usize);
         for r in 0..(self.rows as usize) {
-            let line = Line(r as i32);
+            let line = Line(r as i32 - offset);
             for c in 0..(self.cols as usize) {
                 let cell = &grid[line][Column(c)];
-                cells.push(map_cell(cell.c, cell.fg, cell.bg, cell.flags));
+                let mut mapped = map_cell(cell.c, cell.fg, cell.bg, cell.flags);
+                if sel
+                    .as_ref()
+                    .is_some_and(|range| range.contains(Point::new(line, Column(c))))
+                {
+                    mapped.flags |= cell_flags::SELECTED;
+                }
+                cells.push(mapped);
             }
         }
+        // While scrolled the live cursor sits off-screen at the bottom; hiding
+        // it (tmux copy-mode behavior) keeps a stale caret from rendering in
+        // history. At offset 0 the cursor row is unchanged.
+        let scrolled = offset != 0;
         Frame {
             rows: self.rows,
             cols: self.cols,
             cells,
-            cursor_row: cursor_point.line.0.max(0) as u16,
+            cursor_row: (cursor_point.line.0 + offset).max(0) as u16,
             cursor_col: cursor_point.column.0 as u16,
-            cursor_visible: self.term.mode().contains(TermMode::SHOW_CURSOR),
+            cursor_visible: !scrolled && self.term.mode().contains(TermMode::SHOW_CURSOR),
+            scroll_offset: offset.max(0).min(u16::MAX as i32) as u16,
         }
     }
 
@@ -234,6 +264,70 @@ impl Pane {
     pub fn text(&self) -> String {
         let frame = self.frame();
         frame_text(&frame)
+    }
+
+    // -- Scroll (US1) ----------------------------------------------------------
+
+    /// Scroll the display by `delta` lines (positive = up into history). Clamps
+    /// at the oldest history line and at the live bottom (alacritty owns the
+    /// clamp - AC1-EDGE, no panic, no wraparound). Returns the resulting offset.
+    pub fn scroll(&mut self, delta: i32) -> usize {
+        self.term.scroll_display(Scroll::Delta(delta));
+        self.display_offset()
+    }
+
+    /// Snap back to the live bottom (offset 0). A keystroke to a scrolled pane
+    /// calls this so input always lands on the visible line (Invariant).
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// Lines currently scrolled above the live bottom; 0 = live. Drives the
+    /// `[+N]` indicator and the frame's cursor-hide (AC1-UI: present iff != 0).
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    // -- Selection (US2) -------------------------------------------------------
+
+    /// Begin a selection anchored at viewport cell `(row, col)`. The point is
+    /// mapped through the CURRENT display offset to a stable grid point, so the
+    /// selection stays pinned to content even if the view later scrolls.
+    pub fn selection_start(&mut self, row: u16, col: u16) {
+        let point = self.viewport_point(row, col);
+        self.term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+    }
+
+    /// Extend the in-progress selection to viewport cell `(row, col)`.
+    pub fn selection_update(&mut self, row: u16, col: u16) {
+        let point = self.viewport_point(row, col);
+        if let Some(sel) = self.term.selection.as_mut() {
+            sel.update(point, Side::Right);
+        }
+    }
+
+    /// Drop any selection (release-with-no-drag, resize, pane close - AC2-UI).
+    pub fn selection_clear(&mut self) {
+        self.term.selection = None;
+    }
+
+    /// The selected text, joining soft-wrapped lines per alacritty's semantic
+    /// rules and reaching into scrolled-off history (AC2-EDGE). `None` when
+    /// there is no non-empty selection.
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.term.selection.is_some()
+    }
+
+    /// Map a viewport cell to a grid point through the current display offset,
+    /// clamping the column into the grid so an edge drag never indexes O.O.B.
+    fn viewport_point(&self, row: u16, col: u16) -> Point {
+        let col = (col as usize).min(self.cols.saturating_sub(1) as usize);
+        let row = (row as usize).min(self.rows.saturating_sub(1) as usize);
+        viewport_to_point(self.display_offset(), Point::new(row, Column(col)))
     }
 
     // -- OSC 133 command blocks (Task 1.2) -------------------------------------
@@ -476,6 +570,13 @@ fn kitty_bits(m: &TermMode) -> u8 {
 /// The escape bytes that move a terminal from `old` to `new` mode state.
 /// Pure and minimal: only CHANGED modes emit a sequence, so syncing a pane
 /// against itself is zero bytes (the server skips empty syncs entirely).
+///
+/// Mouse-reporting modes (1000/1002/1003/1005/1006/1007) are deliberately
+/// EXCLUDED (Phase 5, brief Locked 2): the client holds mouse capture on
+/// permanently and forwards every pane-rect event; the server routes by reading
+/// the pane's live modes directly (see `route_mouse`), never through this sync.
+/// Letting a focus change toggle the client terminal's mouse reporting would
+/// fight that capture, so it never crosses the wire.
 pub fn mode_diff(old: Modes, new: Modes) -> Vec<u8> {
     let mut out = Vec::new();
     let mut dec = |on: bool, was: bool, code: &str| {
@@ -484,13 +585,7 @@ pub fn mode_diff(old: Modes, new: Modes) -> Vec<u8> {
         }
     };
     dec(new.app_cursor, old.app_cursor, "1");
-    dec(new.mouse_click, old.mouse_click, "1000");
-    dec(new.mouse_drag, old.mouse_drag, "1002");
-    dec(new.mouse_motion, old.mouse_motion, "1003");
     dec(new.focus_in_out, old.focus_in_out, "1004");
-    dec(new.utf8_mouse, old.utf8_mouse, "1005");
-    dec(new.sgr_mouse, old.sgr_mouse, "1006");
-    dec(new.alternate_scroll, old.alternate_scroll, "1007");
     dec(new.bracketed_paste, old.bracketed_paste, "2004");
     if new.app_keypad != old.app_keypad {
         out.extend_from_slice(if new.app_keypad { b"\x1b=" } else { b"\x1b>" });
@@ -1085,14 +1180,22 @@ mod tests {
         );
         let to_vim = String::from_utf8(mode_diff(plain, vim)).unwrap();
         assert!(to_vim.contains("\x1b[?1h"), "{to_vim:?}");
-        assert!(to_vim.contains("\x1b[?1003h"), "{to_vim:?}");
-        assert!(to_vim.contains("\x1b[?1006h"), "{to_vim:?}");
         assert!(to_vim.contains("\x1b[?2004h"), "{to_vim:?}");
-        // The way back RESETS exactly what was set.
+        // Mouse-reporting modes are NOT synced to the client (Phase 5, Locked
+        // 2): the client keeps capture on permanently and the server routes.
+        assert!(
+            !to_vim.contains("\x1b[?1003h"),
+            "mouse mode must not sync: {to_vim:?}"
+        );
+        assert!(
+            !to_vim.contains("\x1b[?1006h"),
+            "mouse mode must not sync: {to_vim:?}"
+        );
+        // The way back RESETS exactly what was set (still excluding mouse).
         let to_plain = String::from_utf8(mode_diff(vim, plain)).unwrap();
         assert!(to_plain.contains("\x1b[?1l"), "{to_plain:?}");
-        assert!(to_plain.contains("\x1b[?1003l"), "{to_plain:?}");
         assert!(to_plain.contains("\x1b[?2004l"), "{to_plain:?}");
+        assert!(!to_plain.contains("\x1b[?1003l"), "{to_plain:?}");
         // Kitty flags use the stateless absolute-set form.
         let kitty = Modes {
             kitty_flags: 0b1011,
@@ -1443,5 +1546,114 @@ mod tests {
         assert!(tail.contains("row11"), "reached into history: {tail:?}");
         // AC5-UI: a viewport-sized read matches the visible grid.
         assert_eq!(pane.read_tail(4), pane.text());
+    }
+
+    // -- US1 scroll ------------------------------------------------------------
+
+    #[test]
+    fn scroll_moves_view_into_history_and_back() {
+        // AC1-HP: output taller than the viewport; scrolling up reveals history.
+        let mut pane = Pane::new(4, 20);
+        for i in 0..20 {
+            pane.feed(format!("row{i}\r\n").as_bytes());
+        }
+        assert_eq!(pane.display_offset(), 0, "starts live");
+        assert!(pane.text().contains("row19") && !pane.text().contains("row10"));
+
+        let off = pane.scroll(6);
+        assert_eq!(off, 6);
+        assert_eq!(pane.display_offset(), 6);
+        // The scrolled frame shows earlier rows and not the live bottom.
+        let scrolled = pane.text();
+        assert!(scrolled.contains("row13"), "reveals history: {scrolled:?}");
+        assert!(!scrolled.contains("row19"), "live bottom pinned away");
+
+        // AC1-ERR: back to live restores the bottom exactly once.
+        pane.scroll_to_bottom();
+        assert_eq!(pane.display_offset(), 0);
+        assert!(pane.text().contains("row19"));
+    }
+
+    #[test]
+    fn scroll_clamps_at_history_top_without_panic() {
+        // AC1-EDGE: scrolling past the oldest line clamps, never wraps/panics.
+        let mut pane = Pane::new(4, 20);
+        for i in 0..30 {
+            pane.feed(format!("row{i}\r\n").as_bytes());
+        }
+        let off = pane.scroll(1_000_000);
+        assert!(off > 0, "scrolled up");
+        // A second huge scroll is idempotent at the clamp.
+        assert_eq!(pane.scroll(1_000_000), off, "clamped at history top");
+    }
+
+    #[test]
+    fn frame_hides_cursor_and_marks_indicator_when_scrolled() {
+        // AC1-UI: the cursor is hidden off-live; offset is the indicator source.
+        let mut pane = Pane::new(4, 20);
+        for i in 0..20 {
+            pane.feed(format!("row{i}\r\n").as_bytes());
+        }
+        assert!(pane.frame().cursor_visible, "cursor visible at live");
+        pane.scroll(3);
+        assert!(!pane.frame().cursor_visible, "cursor hidden while scrolled");
+        assert_ne!(pane.display_offset(), 0);
+    }
+
+    // -- US2 selection ---------------------------------------------------------
+
+    #[test]
+    fn selection_extracts_text_and_marks_cells() {
+        // AC2-HP: a drag selects cells; the text and the SELECTED flags agree.
+        let mut pane = Pane::new(2, 20);
+        pane.feed(b"abcdefghij");
+        assert!(!pane.has_selection());
+        pane.selection_start(0, 0);
+        pane.selection_update(0, 4);
+        assert!(pane.has_selection());
+        assert_eq!(pane.selection_text().as_deref(), Some("abcde"));
+
+        // The broadcast frame carries the highlight so co-viewers see it.
+        let frame = pane.frame();
+        let selected: String = (0..5).map(|c| frame.cells[c].c).collect();
+        assert_eq!(selected, "abcde");
+        for c in 0..5 {
+            assert_eq!(
+                frame.cells[c].flags & cell_flags::SELECTED,
+                cell_flags::SELECTED
+            );
+        }
+        assert_eq!(
+            frame.cells[5].flags & cell_flags::SELECTED,
+            0,
+            "past selection"
+        );
+    }
+
+    #[test]
+    fn selection_spans_history_lines() {
+        // AC2-EDGE: a selection reaching scrolled-off rows extracts them.
+        let mut pane = Pane::new(3, 20);
+        for i in 0..10 {
+            pane.feed(format!("line{i}\r\n").as_bytes());
+        }
+        pane.scroll(5);
+        // Select the whole first visible (historical) row.
+        pane.selection_start(0, 0);
+        pane.selection_update(0, 5);
+        let text = pane.selection_text().unwrap_or_default();
+        assert!(text.starts_with("line"), "history row selected: {text:?}");
+    }
+
+    #[test]
+    fn resize_clears_selection() {
+        // AC2-UI: reflow drops a stale selection rather than mis-highlight.
+        let mut pane = Pane::new(2, 20);
+        pane.feed(b"abcdefghij");
+        pane.selection_start(0, 0);
+        pane.selection_update(0, 4);
+        assert!(pane.has_selection());
+        pane.resize(2, 10);
+        assert!(!pane.has_selection(), "selection cleared on resize");
     }
 }

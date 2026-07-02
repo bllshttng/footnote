@@ -275,11 +275,14 @@ fn layout_e2e_multi_pane_multi_tab_reattach_restores_all_state() {
         l.squads.first().map(|s| s.tabs.len()) == Some(2) && l.panes.len() == 1
     });
     let pane_c = l.focus;
-    c.input(b"printf '\\033[?1000h\\033[?1006h'; cat\r");
+    // Bracketed paste is the mode probe: mouse-reporting modes are no longer
+    // synced (Phase 5 - the client owns mouse capture, the server routes), so
+    // this exercises the focused-pane mode replay with a mode that DOES sync.
+    c.input(b"printf '\\033[?2004h'; cat\r");
     c.wait(10, "modes negotiated", |c| {
         c.modesyncs
             .iter()
-            .any(|b| String::from_utf8_lossy(b).contains("?1000h"))
+            .any(|b| String::from_utf8_lossy(b).contains("?2004h"))
             .then_some(())
     });
     let before = c.layout.clone().unwrap();
@@ -290,7 +293,7 @@ fn layout_e2e_multi_pane_multi_tab_reattach_restores_all_state() {
     // rects, and focus (AC5-FR); tab 1's content is intact when we return to
     // it (AC3-HP generalized); and the fresh client's terminal is synced to
     // the focused pane's negotiated modes BEFORE it draws (item 7's modes
-    // half - a fresh terminal starts raw, so the sync must replay ?1000h).
+    // half - a fresh terminal starts raw, so the sync must replay ?2004h).
     let mut c2 = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
     let after = c2.wait_layout(10, "reattach layout", |l| !l.panes.is_empty());
     assert_eq!(after, before, "layout must survive detach exactly");
@@ -302,7 +305,7 @@ fn layout_e2e_multi_pane_multi_tab_reattach_restores_all_state() {
     assert!(
         c2.modesyncs
             .iter()
-            .any(|b| String::from_utf8_lossy(b).contains("?1000h")),
+            .any(|b| String::from_utf8_lossy(b).contains("?2004h")),
         "reattach must sync the focused pane's modes to the fresh terminal; got {:?}",
         c2.modesyncs
             .iter()
@@ -327,38 +330,48 @@ fn layout_e2e_modesync_flips_with_focus_between_divergent_panes() {
     c.cmd(Command::SplitH);
     let pane_b = c.wait_layout(10, "2 panes", |l| l.panes.len() == 2).focus;
 
-    // The focused pane B becomes vim-like: mouse reporting + SGR, held open.
-    c.input(b"printf '\\033[?1000h\\033[?1006h'; cat\r");
-    // Focused-pane live mode changes sync immediately (R2 generalized).
-    c.wait(10, "mouse-on ModeSync", |c| {
+    // Focused pane B negotiates BOTH bracketed paste (?2004, synced) AND mouse
+    // reporting (?1000/?1006). Phase 5 (brief Locked 2): mouse modes are NOT
+    // synced to the client - it owns capture and the server routes - so only
+    // the paste mode reaches the client terminal.
+    c.input(b"printf '\\033[?2004h\\033[?1000h\\033[?1006h'; cat\r");
+    c.wait(10, "paste-on ModeSync", |c| {
         c.modesyncs
             .iter()
-            .any(|b| String::from_utf8_lossy(b).contains("?1000h"))
+            .any(|b| String::from_utf8_lossy(b).contains("?2004h"))
             .then_some(())
     });
+    // The mouse-mode enable must NEVER cross the wire, even though B negotiated it.
+    assert!(
+        !c.modesyncs
+            .iter()
+            .any(|b| String::from_utf8_lossy(b).contains("?1000h")),
+        "mouse reporting must not sync (Phase 5); got {:?}",
+        c.modesyncs
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect::<Vec<_>>()
+    );
 
-    // Focus to the plain shell: the client terminal must RESET B's modes.
+    // Focus to the plain shell: the client terminal must RESET B's paste mode.
     c.modesyncs.clear();
     c.cmd(Command::FocusDir(Dir::Left));
     c.wait_layout(10, "focus A", |l| l.focus == pane_a);
-    c.wait(10, "mouse-off ModeSync", |c| {
+    c.wait(10, "paste-off ModeSync", |c| {
         c.modesyncs
             .iter()
-            .any(|b| {
-                let s = String::from_utf8_lossy(b);
-                s.contains("?1000l") && s.contains("?1006l")
-            })
+            .any(|b| String::from_utf8_lossy(b).contains("?2004l"))
             .then_some(())
     });
 
-    // And back: B's modes re-apply.
+    // And back: B's paste mode re-applies.
     c.modesyncs.clear();
     c.cmd(Command::FocusDir(Dir::Right));
     c.wait_layout(10, "focus B", |l| l.focus == pane_b);
-    c.wait(10, "mouse-on again", |c| {
+    c.wait(10, "paste-on again", |c| {
         c.modesyncs
             .iter()
-            .any(|b| String::from_utf8_lossy(b).contains("?1000h"))
+            .any(|b| String::from_utf8_lossy(b).contains("?2004h"))
             .then_some(())
     });
 }
