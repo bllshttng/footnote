@@ -576,14 +576,21 @@ fn parallel_tick_dispatches_lanes_and_journals() {
     let bin = tmp.path().join("bin");
     // Walker claim succeeds; dispatch-lanes fire-and-forgets two picks, one of
     // which fails to spawn (contained per-lane: receipt status "skipped").
+    // The stub records its argv: the cap and project scope MUST cross the
+    // Rust->Python seam, else the daemon lane-fills the wrong scope.
+    let args_file = tmp.path().join("dispatch-args.txt");
     let fno = write_stub(
         &bin,
         "fno",
-        r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then
-  echo '[{"node_id":"x-a","status":"dispatched","short_id":"s1"},{"node_id":"x-b","status":"skipped","error":"spawn rc=127"}]'
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then
+  echo "$@" > "{a}"
+  echo '[{{"node_id":"x-a","status":"dispatched","short_id":"s1"}},{{"node_id":"x-b","status":"skipped","error":"spawn rc=127"}}]'
   exit 0
 fi
 exit 0"#,
+            a = args_file.display()
+        ),
     );
     let lib = driver_lib_noop(&tmp.path().join("lib"));
     let (journal, project_journal) = journal_in(tmp.path());
@@ -605,6 +612,12 @@ exit 0"#,
             .iter()
             .any(|e| e.contains("active_backlog_dispatched") && e.contains("max_lanes")),
         "expected a lanes dispatch event, got: {events:?}"
+    );
+    let args = fs::read_to_string(&args_file).expect("dispatch-lanes argv recorded");
+    assert!(args.contains("--max 3"), "cap not forwarded: {args}");
+    assert!(
+        args.contains("--project footnote"),
+        "project scope not forwarded: {args}"
     );
 }
 

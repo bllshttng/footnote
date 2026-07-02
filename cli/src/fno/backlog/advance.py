@@ -678,8 +678,11 @@ def dispatch_lanes(
             # loop value.
             try:
                 release_lane_slot(_nid, root=claims_root)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning(
+                    "dispatch_lanes: slot release failed for %s (%s); "
+                    "slot lingers to TTL", _nid, exc,
+                )
             receipts.append({"node_id": _nid, "status": "skipped", "error": reason})
 
         # The lane slot (parallel-lane:<id>) is invisible to the sequential

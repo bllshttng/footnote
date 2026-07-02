@@ -118,3 +118,24 @@ def test_as_dicts_shape(monkeypatch):
             "max_lanes": 1,
         }
     ]
+
+
+def test_as_dicts_reads_configured_max_lanes(monkeypatch):
+    # The happy path must actually reach config.parallel.max_lanes: if the
+    # read path breaks (rename, loader change), the fail-safe 1 would silently
+    # disable parallel mode and only this test notices.
+    import fno.config as cfgmod
+
+    class _Parallel:
+        max_lanes = 3
+
+    class _Config:
+        parallel = _Parallel()
+
+    class _Settings:
+        config = _Config()
+
+    _patch(monkeypatch, enabled={"footnote": True}, paths={"footnote": "/repo/footnote"})
+    monkeypatch.setattr(cfgmod, "load_settings_for_repo", lambda _p: _Settings())
+    dicts = ab.drain_targets_as_dicts()
+    assert dicts[0]["max_lanes"] == 3

@@ -23,7 +23,7 @@ import shutil
 import sys
 import time
 from contextlib import contextmanager
-from typing import Iterator, List, Optional, Sequence
+from typing import Iterator, List, Literal, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
 
@@ -31,10 +31,17 @@ _VALID_INVOKERS = {"target", "megawalk"}
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
 
 # Merge serialization (parallel mode, epic x-42d5 G4, Locked Decision #9):
-# builds run parallel, merges run ONE AT A TIME. The lock is held only around
-# the gh merge call (seconds), so the wait is short and bounded - a peer still
-# holding it past the window is reported as "held" (exit 2) for the caller to
-# retry, never an indefinite block.
+# builds run parallel, merges run ONE AT A TIME. The lock is held across the
+# gh merge call and its post-merge followups (typically seconds), so the wait
+# is short and bounded - a peer still holding it past the window is reported
+# as "held" (exit 2) for the caller to retry, never an indefinite block.
+#
+# Scope: the lock + freshness hold cover the IMMEDIATE merge path. A queued
+# `--auto` merge (require_checks_pass) only ENQUEUES under the lock - GitHub
+# performs the actual merge asynchronously once checks pass, outside any lock,
+# so serialization there is delegated to GitHub. Operators running parallel
+# lanes with --auto should pair it with branch protection requiring branches
+# to be up to date before merging.
 _MERGE_LOCK_WAIT_S = 120
 _MERGE_LOCK_POLL_S = 5
 
@@ -241,8 +248,11 @@ def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_MergeLockState = Literal["acquired", "held", "unavailable"]
+
+
 @contextmanager
-def _merge_lock() -> Iterator[str]:
+def _merge_lock() -> Iterator[_MergeLockState]:
     """Serialize merges repo-wide; yield ``acquired`` | ``held`` | ``unavailable``.
 
     One ``merge:<canonical-root>`` claim per project (repo-local routing, so
@@ -295,34 +305,49 @@ def _live_lane_count() -> int:
         from fno.claims.lanes import active_lane_count
 
         return active_lane_count()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # A probe miss disarms the stale-base hold entirely - leave the audit
+        # breadcrumb so an unguarded merge is distinguishable after the fact.
+        sys.stderr.write(
+            f"pr-merge: lane probe unavailable ({exc}); merging without freshness hold\n"
+        )
         return 0
 
 
 def _behind_by(pr_number: int, cwd: str) -> int:
     """Commits the PR head is behind its base branch. 0 on any probe miss:
-    the hold must never block a merge because our own read failed."""
+    the hold must never block a merge because our own read failed, but each
+    miss leaves a stderr breadcrumb - a gh outage is likeliest exactly when
+    many lanes hammer gh, i.e. when the hold matters most."""
+
+    def _miss(why: str) -> int:
+        sys.stderr.write(
+            f"pr-merge: stale-base probe unavailable ({why}); "
+            "merging without freshness hold\n"
+        )
+        return 0
+
     view = _gh(["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd)
     if not view.ok:
-        return 0
+        return _miss("gh pr view failed")
     try:
         refs = json.loads(view.stdout or "{}")
     except json.JSONDecodeError:
-        return 0
+        return _miss("unparseable pr view output")
     base = refs.get("baseRefName")
     head = refs.get("headRefName")
     if not base or not head:
-        return 0
+        return _miss("missing base/head ref")
     res = _gh(
         ["api", f"repos/{{owner}}/{{repo}}/compare/{base}...{head}", "-q", ".behind_by"],
         cwd,
     )
     if not res.ok:
-        return 0
+        return _miss("gh compare failed")
     try:
         return int(res.stdout.strip())
     except ValueError:
-        return 0
+        return _miss("unparseable behind_by")
 
 
 # ---------------------------------------------------------------------------

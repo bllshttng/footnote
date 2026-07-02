@@ -151,6 +151,9 @@ With `config.parallel.max_lanes >= 2`, the active-backlog daemon dispatches up
 to that many ready nodes from distinct domains concurrently, each as an
 isolated bg worktree lane. Merges stay serialized (`fno pr merge` takes a
 repo-wide lock, and holds a stale-base PR for `fno pr rebase` while lanes run).
+This covers immediate merges; a queued `--auto` merge lands asynchronously on
+GitHub's side, so pair lanes with branch protection requiring up-to-date
+branches if you use `require_checks_pass`.
 
 ```bash
 fno backlog lane-fill --max 3      # preview which nodes would dispatch as lanes

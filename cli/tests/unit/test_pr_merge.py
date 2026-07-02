@@ -386,3 +386,20 @@ def test_up_to_date_head_with_live_lanes_merges(enabled, monkeypatch, capsys, tm
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_merge_lock_released_when_merge_body_raises(enabled, monkeypatch, tmp_path, capsys):
+    # Regression pin: an exception thrown through the lock's yield must still
+    # release the claim (the original except-then-yield shape leaked it).
+    from fno.claims.core import acquire_claim
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("merge body exploded")
+
+    monkeypatch.setattr(_merge, "_do_merge", _boom)
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    with pytest.raises(RuntimeError, match="merge body exploded"):
+        _merge.run_merge(["--invoker=target", "42"], cwd=str(tmp_path))
+    # the lock was released on the way out, not leaked
+    acquire_claim(_lock_key(), "pr-merge:next", reason="post-raise probe")

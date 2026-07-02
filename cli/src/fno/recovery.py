@@ -471,15 +471,22 @@ def _release_lane_slot(node: str, cwd: str) -> None:
     without the release a failed respawn would leave the node unselectable for
     up to the slot TTL. Best-effort, mirroring the force-release shell-out.
     """
+    import logging
     import subprocess
 
+    log = logging.getLogger(__name__)
     try:
-        subprocess.run(
+        rel = subprocess.run(
             ["fno", "claim", "lane-release", "--lane-id", node],
             cwd=cwd, capture_output=True, timeout=30, check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        pass
+        if rel.returncode != 0:
+            log.warning(
+                "recovery: lane-release failed for %s (exit %s); slot lingers to TTL",
+                node, rel.returncode,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("recovery: lane-release failed for %s: %s", node, exc)
 
 
 def _redispatch(candidate: "Candidate") -> bool:
