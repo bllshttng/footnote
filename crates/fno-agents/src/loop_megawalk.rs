@@ -742,12 +742,9 @@ impl Queue for MegawalkQueue {
             // is a loud Queue error naming the node and missing field.
             let mut extra_env = extract_mission_env(&v, &id)?;
 
-            // x-571f: a per-node model pin overrides the fleet default. The static
-            // env carries MODEL_FLAG from cfg.model; pushing the unit's value into
-            // extra_env makes it win via the same last-write-wins precedence
-            // MegawalkDispatcher::run relies on for TARGET_MISSION_*. Empty/absent
-            // = no override (fleet default stands). US2 validates a single token,
-            // so the `--model {m}` split is safe.
+            // x-571f: a per-node model pin overrides the fleet cfg.model via the
+            // same last-write-wins seam run() uses for TARGET_MISSION_* (extra_env
+            // beats static_env's MODEL_FLAG). Absent = fleet default stands.
             if let Some(m) = v["model"].as_str().filter(|m| !m.is_empty()) {
                 extra_env.push(("MODEL_FLAG".to_string(), format!("--model {m}")));
             }

@@ -172,9 +172,42 @@ def parse_locked_executor(text: str) -> str:
     return last_value
 
 
+# grep -oEi 'model[[:space:]]*:[[:space:]]*<token>' scoped to Locked Decisions.
+# The value is a single non-whitespace token (same shape `fno backlog update
+# --model` validates); backticks are stripped first so `Model: `fable`` works.
+_MODEL_KV_RE = re.compile(r"model[ \t]*:[ \t]*(\S+)", re.IGNORECASE)
+
+
+def parse_locked_model(text: str) -> str:
+    """Parse a locked ``Model:`` decision from design-doc ``text`` (x-571f).
+
+    Scans the ``## Locked Decisions`` section (a bare ``model:`` mention in prose
+    elsewhere is not a lock) for the LAST ``Model: <token>`` entry and returns
+    the single-token value, or '' when none is present / the value is not a
+    single token of <=64 chars. No allowlist: aliases (fable|opus|sonnet) and
+    full provider-model ids pass through verbatim, matching the update verb.
+    """
+    if not text:
+        return ""
+    section = _extract_section(text)
+    if not section:
+        return ""
+    # Strip backticks and bold markers so ``**Model**: `fable``` normalizes to
+    # ``Model: fable`` before the KV scan (tolerant of the executor-lock's own
+    # bold conventions). A model token never contains ``*`` or a backtick.
+    matches = _MODEL_KV_RE.findall(section.replace("`", "").replace("*", ""))
+    if not matches:
+        return ""
+    val = matches[-1]
+    return val if len(val) <= 64 else ""
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
     text = sys.stdin.read()
-    value = parse_locked_executor(text)
+    # `--key model` selects the model-pin parser; default is the executor lock
+    # (byte-for-byte backward compatible with `python3 -m fno.executor._locked`).
+    value = parse_locked_model(text) if argv[:2] == ["--key", "model"] else parse_locked_executor(text)
     if value:
         print(value)
     return 0
