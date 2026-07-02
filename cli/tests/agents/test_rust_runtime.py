@@ -643,7 +643,7 @@ def test_python_mode_forces_python_for_ask(monkeypatch, tmp_path, provider) -> N
 #
 # A bare ``fno agents --help`` always renders the *Python* group help (it never
 # execs the binary), so without the RUST_ONLY_VERB_HELP injection it would omit
-# every Rust-only verb (spawn/status/drive/grid/host/promote/*-channel) and an
+# every Rust-only verb (spawn/status/trace/*-channel) and an
 # agent reading the help could not discover them. These tests pin the listing,
 # the no-drift guard, and the legible fallback when the verb is reached without
 # an installed binary (instead of a bare "No such command").
@@ -657,8 +657,8 @@ def test_agents_help_lists_every_rust_only_verb() -> None:
     assert result.exit_code == 0
     for verb in rr.RUST_ONLY_VERB_HELP:
         assert verb in result.output, f"`fno agents --help` is missing the Rust-only verb {verb!r}"
-    # The verb that motivated the audit must be discoverable.
-    assert "host" in result.output
+    # A representative rust-only verb must be discoverable.
+    assert "trace" in result.output
 
 
 def test_rust_only_verb_help_covers_unregistered_verbs() -> None:
@@ -699,7 +699,7 @@ def test_rust_only_verb_python_mode_emits_legible_message(monkeypatch) -> None:
     from fno.cli import app
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "python")
-    result = CliRunner().invoke(app, ["agents", "host", "agent-A"])
+    result = CliRunner().invoke(app, ["agents", "restart"])
     assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
     assert "no Python implementation" in result.output
     assert "No such command" not in result.output
@@ -711,7 +711,7 @@ def test_rust_only_verb_no_binary_emits_install_hint(monkeypatch) -> None:
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
     monkeypatch.setattr(rr, "resolve_installed_binary", lambda: None)
-    result = CliRunner().invoke(app, ["agents", "grid", "a", "b"])
+    result = CliRunner().invoke(app, ["agents", "restart"])
     assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
     assert "Rust runtime" in result.output
     assert "No such command" not in result.output
@@ -732,9 +732,25 @@ def test_rust_only_verb_routes_when_installed(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
     monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
-    result = CliRunner().invoke(app, ["agents", "host", "agent-A"])
+    result = CliRunner().invoke(app, ["agents", "trace"])
     assert result.exit_code == 99
-    assert captured == [(["host", "agent-A"], binary)]
+    assert captured == [(["trace"], binary)]
+
+
+def test_retired_verb_emits_mux_pointer(monkeypatch, tmp_path) -> None:
+    """A verb retired at G4 (grid/drive/host/promote) prints a one-line mux
+    pointer and exits non-zero, even with an installed binary in auto mode -- it
+    is not auto-routed and not a silent no-op (AC5-EDGE)."""
+    from fno.cli import app
+
+    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    for verb in rr.RETIRED_VERB_POINTERS:
+        result = CliRunner().invoke(app, ["agents", verb])
+        assert result.exit_code == 2, f"{verb} should exit non-zero"
+        assert "retired at G4" in result.output, f"{verb} should point at the mux"
+        assert "No such command" not in result.output
 
 
 # --------------------------------------------------------------------------- #
