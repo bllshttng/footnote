@@ -70,7 +70,9 @@ enum CoreMsg {
         id: u64,
         rows: u16,
         cols: u16,
-        cwd: String,
+        /// Already resolved to the canonical squad key by `handle_client`'s
+        /// own task - the blocking git run never touches the core loop.
+        squad_key: String,
         reliable_tx: mpsc::Sender<ServerMsg>,
         dirty: DirtyMap,
         notify: Arc<Notify>,
@@ -171,7 +173,6 @@ struct Core {
     /// Monotonic, never reused (Locked Decision 6).
     next_pane_id: u64,
     next_squad_id: u64,
-    resolver: Resolver,
     /// Last-attach/resize-wins content-area geometry (per-client views are
     /// Phase 3).
     viewport: (u16, u16),
@@ -231,13 +232,12 @@ impl Core {
         id: u64,
         rows: u16,
         cols: u16,
-        cwd: String,
+        key: String,
         reliable_tx: mpsc::Sender<ServerMsg>,
         dirty: DirtyMap,
         notify: Arc<Notify>,
     ) {
         self.viewport = (rows, cols);
-        let key = self.resolver.resolve(&cwd);
         match self.session.find_by_cwd(&key) {
             Some(sid) => {
                 // Existing squad: the attach lands IN it (AC6-HP, worktree
@@ -321,10 +321,18 @@ impl Core {
         let mut dead = Vec::new();
         for c in &mut self.clients {
             // ModeSync BEFORE the Layout that assumes it (brief ordering).
+            // A failed send means the reliable channel is wedged: the client
+            // is dead, exactly like a failed Layout - a silently dropped
+            // ModeSync would desync its terminal's modes.
             if c.synced_modes != focused_modes {
                 let bytes = vt::mode_diff(c.synced_modes, focused_modes);
-                if !bytes.is_empty() {
-                    let _ = c.reliable_tx.try_send(ServerMsg::ModeSync { bytes });
+                if !bytes.is_empty()
+                    && c.reliable_tx
+                        .try_send(ServerMsg::ModeSync { bytes })
+                        .is_err()
+                {
+                    dead.push(c.id);
+                    continue;
                 }
                 c.synced_modes = focused_modes;
             }
@@ -409,15 +417,24 @@ impl Core {
             return;
         };
         let modes = entry.vt.modes();
+        let mut dead = Vec::new();
         for c in &mut self.clients {
             if c.synced_modes != modes {
                 let bytes = vt::mode_diff(c.synced_modes, modes);
-                if !bytes.is_empty() {
-                    let _ = c.reliable_tx.try_send(ServerMsg::ModeSync { bytes });
+                if !bytes.is_empty()
+                    && c.reliable_tx
+                        .try_send(ServerMsg::ModeSync { bytes })
+                        .is_err()
+                {
+                    // Wedged reliable channel = dead client (same policy as
+                    // push_layout); never silently desync a live terminal.
+                    dead.push(c.id);
+                    continue;
                 }
                 c.synced_modes = modes;
             }
         }
+        self.clients.retain(|c| !dead.contains(&c.id));
     }
 
     /// Close one pane: kill+reap its PTY, remove it from the tree (collapse +
@@ -621,12 +638,12 @@ impl Core {
                 id,
                 rows,
                 cols,
-                cwd,
+                squad_key,
                 reliable_tx,
                 dirty,
                 notify,
             } => {
-                self.attach(id, rows, cols, cwd, reliable_tx, dirty, notify);
+                self.attach(id, rows, cols, squad_key, reliable_tx, dirty, notify);
                 Flow::Continue
             }
             CoreMsg::Input(bytes) => {
@@ -689,13 +706,18 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
         clients: Vec::new(),
         next_pane_id: 1,
         next_squad_id: 1,
-        resolver: Resolver::default(),
         viewport: (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS),
         visible: HashSet::new(),
         shells: shell_candidates(std::env::var_os("SHELL").as_deref()),
         out_tx,
         exit_tx,
     };
+
+    // The squad-key cache, shared by the per-connection handshake tasks. The
+    // blocking git resolution runs there (spawn_blocking), NEVER on the core
+    // loop - a hung git may delay ONE attach by the 2s timeout, but every
+    // pane and peer keeps streaming (the drive-freeze class).
+    let resolver = Arc::new(Mutex::new(Resolver::default()));
 
     // Accept loop: handshake each connection off the core loop's back.
     let accept_core_tx = core_tx.clone();
@@ -706,7 +728,12 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
                 Ok((stream, _)) => {
                     let id = next_id;
                     next_id += 1;
-                    tokio::spawn(handle_client(stream, accept_core_tx.clone(), id));
+                    tokio::spawn(handle_client(
+                        stream,
+                        accept_core_tx.clone(),
+                        resolver.clone(),
+                        id,
+                    ));
                 }
                 Err(e) => {
                     eprintln!("fno mux: accept failed: {e}");
@@ -789,7 +816,12 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
 
 /// Handshake a fresh connection, then split it into the reader loop (this
 /// task) and the writer task.
-async fn handle_client(mut stream: UnixStream, core_tx: mpsc::Sender<CoreMsg>, id: u64) {
+async fn handle_client(
+    mut stream: UnixStream,
+    core_tx: mpsc::Sender<CoreMsg>,
+    resolver: Arc<Mutex<Resolver>>,
+    id: u64,
+) {
     let attach = tokio::time::timeout(ATTACH_TIMEOUT, read_msg::<_, ClientMsg>(&mut stream)).await;
     let (rows, cols, cwd) = match attach {
         Ok(Ok(ClientMsg::Attach {
@@ -811,6 +843,26 @@ async fn handle_client(mut stream: UnixStream, core_tx: mpsc::Sender<CoreMsg>, i
         _ => return,
     };
 
+    // Resolve the squad key HERE, on this connection's task: the git run
+    // blocks (bounded 2s), and the core loop must never wait on it. Cache
+    // check first; a miss runs off the async threads via spawn_blocking.
+    // Two racing misses on one cwd both resolve and insert the same
+    // idempotent answer - cheaper than a lock held across a subprocess.
+    // The guard must drop before the await below (a match-scrutinee
+    // temporary would live across it and un-Send the future).
+    let cached = resolver.lock().unwrap().cached(&cwd);
+    let squad_key = match cached {
+        Some(hit) => hit,
+        None => {
+            let owned = cwd.clone();
+            let key = tokio::task::spawn_blocking(move || squad::resolve_key(&owned))
+                .await
+                .unwrap_or_else(|_| cwd.clone());
+            resolver.lock().unwrap().insert(cwd, key.clone());
+            key
+        }
+    };
+
     let (reliable_tx, reliable_rx) = mpsc::channel::<ServerMsg>(RELIABLE_CAP);
     let dirty: DirtyMap = Arc::default();
     let notify = Arc::new(Notify::new());
@@ -819,7 +871,7 @@ async fn handle_client(mut stream: UnixStream, core_tx: mpsc::Sender<CoreMsg>, i
             id,
             rows,
             cols,
-            cwd,
+            squad_key,
             reliable_tx,
             dirty: dirty.clone(),
             notify: notify.clone(),

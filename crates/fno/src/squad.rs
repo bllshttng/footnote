@@ -202,22 +202,45 @@ pub fn display_names(canonical_cwds: &[String]) -> Vec<String> {
 
 /// Per-distinct-cwd resolution cache. Failures memoize the literal cwd so a
 /// broken git is paid for at most once per cwd per server lifetime.
+///
+/// The blocking git run must NEVER happen on the server's core loop (the
+/// grid rail's drive-freeze class: one hung subprocess freezes every pane),
+/// so the cache is split from the resolution: callers on async tasks check
+/// [`Resolver::cached`], run [`resolve_key`] off-loop (`spawn_blocking`),
+/// then [`Resolver::insert`]. Two racing misses for one cwd both run git and
+/// insert the same idempotent answer - harmless, and cheaper than holding a
+/// lock across a 2s subprocess.
 #[derive(Debug, Default)]
 pub struct Resolver {
     cache: HashMap<String, String>,
 }
 
 impl Resolver {
-    /// Resolve `cwd` to the squad key: the canonical repo root when git can
-    /// name one within [`GIT_TIMEOUT`], else the literal cwd. Never fails.
+    pub fn cached(&self, cwd: &str) -> Option<String> {
+        self.cache.get(cwd).cloned()
+    }
+
+    pub fn insert(&mut self, cwd: String, key: String) {
+        self.cache.insert(cwd, key);
+    }
+
+    /// Cache-through resolve for synchronous callers (unit tests). Server
+    /// code must use the split API above so the git run stays off-loop.
     pub fn resolve(&mut self, cwd: &str) -> String {
-        if let Some(hit) = self.cache.get(cwd) {
-            return hit.clone();
+        if let Some(hit) = self.cached(cwd) {
+            return hit;
         }
-        let key = canonical_root("git", cwd, GIT_TIMEOUT).unwrap_or_else(|| cwd.to_string());
-        self.cache.insert(cwd.to_string(), key.clone());
+        let key = resolve_key(cwd);
+        self.insert(cwd.to_string(), key.clone());
         key
     }
+}
+
+/// One uncached resolution: the canonical repo root when git can name one
+/// within [`GIT_TIMEOUT`], else the literal cwd. Never fails. Blocking -
+/// run it on a blocking-capable thread, never the core loop.
+pub fn resolve_key(cwd: &str) -> String {
+    canonical_root("git", cwd, GIT_TIMEOUT).unwrap_or_else(|| cwd.to_string())
 }
 
 /// One bounded `git rev-parse --path-format=absolute --git-common-dir` run.
