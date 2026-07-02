@@ -220,7 +220,9 @@ fn layout_e2e_inactive_tab_sends_no_frames_but_grid_updates() {
 
     // ...but its grid kept updating server-side: switching back shows a
     // fresh full frame with the still-running ticker (AC5-HP round-trip).
-    c.cmd(Command::SelectTab(0));
+    // v3: SelectTab names the stable TabId from the catalog, not an index.
+    let tab1_id = c.layout.as_ref().unwrap().squads[0].tabs[0].id;
+    c.cmd(Command::SelectTab(tab1_id));
     c.wait_layout(10, "tab 1 active again", |l| {
         l.squads.first().map(|s| s.active_tab) == Some(0) && l.focus == pane_a
     });
@@ -308,7 +310,8 @@ fn layout_e2e_multi_pane_multi_tab_reattach_restores_all_state() {
             .collect::<Vec<_>>()
     );
     // Back to tab 1: both panes' content survived server-side.
-    c2.cmd(Command::SelectTab(0));
+    let tab1_id = after.squads[0].tabs[0].id;
+    c2.cmd(Command::SelectTab(tab1_id));
     c2.wait_layout(10, "tab 1 again", |l| l.panes.len() == 2);
     c2.wait_pane_text(10, pane_a, |t| t.contains("marker-left"));
     c2.wait_pane_text(10, pane_b, |t| t.contains("marker-right"));
@@ -444,10 +447,10 @@ fn layout_e2e_hanging_git_falls_back_within_the_timeout() {
     );
 }
 
-// -- item 10: SelectSquad round-trip + stale-id fail-closed ------------------
+// -- item 10: per-client SelectSquad + stale-id fail-closed ------------------
 
 #[test]
-fn layout_e2e_select_squad_roundtrip_and_stale_id_refused() {
+fn layout_e2e_select_squad_is_per_client_and_stale_id_refused() {
     let scratch = Scratch::new("squadsel");
     let _server = sh_server(&scratch);
     let dir1 = scratch.dir("one");
@@ -459,29 +462,38 @@ fn layout_e2e_select_squad_roundtrip_and_stale_id_refused() {
         .squads[0]
         .id;
     let mut b = FakeClient::attach(&scratch.sock(), 24, 80, dir2.to_str().unwrap());
-    let l = b.wait_layout(10, "squad two active", |l| l.squads.len() == 2);
+    let l = b.wait_layout(10, "squad two active for b", |l| l.squads.len() == 2);
     let sid2 = l.active_squad;
     assert_ne!(sid1, sid2);
 
-    // Round-trip: selecting squad one re-emits its layout to BOTH clients
-    // (server-global active squad, Phase 2).
-    b.cmd(Command::SelectSquad(sid1));
-    b.wait_layout(10, "squad one active", |l| l.active_squad == sid1);
-    a.wait_layout(10, "peer sees the switch", |l| l.active_squad == sid1);
+    // Phase 3 (AC2-HP squad half): b's attach grew the catalog but did NOT
+    // move a's view - a's next Layout still shows squad one active.
+    let l = a.wait_layout(10, "a sees the catalog grow", |l| l.squads.len() == 2);
+    assert_eq!(l.active_squad, sid1, "a's view survives b's attach");
+
+    // a switches itself to squad two; b's view must not move.
+    a.cmd(Command::SelectSquad(sid2));
+    a.wait_layout(10, "a on squad two", |l| l.active_squad == sid2);
+    b.pump(Duration::from_millis(500));
+    assert_eq!(
+        b.layout.as_ref().unwrap().active_squad,
+        sid2,
+        "b's view is untouched by a's SelectSquad"
+    );
 
     // AC6-FR: a dead/unknown id is refused fail-closed - notice + BEL, the
-    // active squad unchanged, no crash.
-    let notices_before = b.notices.len();
-    b.cmd(Command::SelectSquad(999_999));
-    b.wait(10, "stale-id notice", |c| {
+    // sender's view unchanged, no crash.
+    let notices_before = a.notices.len();
+    a.cmd(Command::SelectSquad(999_999));
+    a.wait(10, "stale-id notice", |c| {
         (c.notices.len() > notices_before).then_some(())
     });
-    assert_eq!(b.layout.as_ref().unwrap().active_squad, sid1);
+    assert_eq!(a.layout.as_ref().unwrap().active_squad, sid2);
 
-    // Same fail-closed shape for a dead tab index (Boundaries).
-    let notices_before = b.notices.len();
-    b.cmd(Command::SelectTab(7));
-    b.wait(10, "stale-tab notice", |c| {
+    // Same fail-closed shape for a dead TabId (AC2-EDGE).
+    let notices_before = a.notices.len();
+    a.cmd(Command::SelectTab(999_999));
+    a.wait(10, "stale-tab notice", |c| {
         (c.notices.len() > notices_before).then_some(())
     });
 }

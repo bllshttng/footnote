@@ -79,9 +79,15 @@ pub enum Node {
     },
 }
 
-/// One tab: a pane tree plus exactly one focused (live) leaf.
+/// Stable tab identity: session-scoped, monotonic, never reused (Locked
+/// Decision 6 extended to tabs in Phase 3). Minted by `squad::Session`, like
+/// `PaneId` the tree itself never allocates one.
+pub type TabId = u64;
+
+/// One tab: a stable id, a pane tree, plus exactly one focused (live) leaf.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tab {
+    pub id: TabId,
     pub root: Node,
     pub focus: PaneId,
 }
@@ -818,6 +824,7 @@ mod tests {
     #[test]
     fn tree_split_horizontal_on_lone_leaf_wraps_and_focuses_new_pane() {
         let mut tab = Tab {
+            id: 0,
             root: Node::Leaf(1),
             focus: 1,
         };
@@ -838,6 +845,7 @@ mod tests {
     #[test]
     fn tree_split_same_axis_inserts_adjacent_halving_ratio() {
         let mut tab = Tab {
+            id: 0,
             root: Node::Branch {
                 axis: Axis::Horizontal,
                 children: vec![(0.6, Node::Leaf(1)), (0.4, Node::Leaf(2))],
@@ -872,6 +880,7 @@ mod tests {
     #[test]
     fn tree_split_cross_axis_wraps_leaf_in_new_branch() {
         let mut tab = Tab {
+            id: 0,
             root: Node::Branch {
                 axis: Axis::Horizontal,
                 children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
@@ -904,6 +913,7 @@ mod tests {
     #[test]
     fn tree_split_refused_below_min_size_leaves_tree_unchanged() {
         let mut tab = Tab {
+            id: 0,
             root: Node::Leaf(1),
             focus: 1,
         };
@@ -933,6 +943,7 @@ mod tests {
         // create (cols < MIN_COLS, rows huge) - a smallest-pane-by-min-dim
         // reduction checks only the former and wrongly allows the split.
         let mut tab = Tab {
+            id: 0,
             root: Node::Branch {
                 axis: Axis::Vertical,
                 children: vec![
@@ -1034,6 +1045,7 @@ mod tests {
     #[test]
     fn tree_close_middle_of_three_redistributes_ratios_proportionally() {
         let mut tab = Tab {
+            id: 0,
             root: Node::Branch {
                 axis: Axis::Horizontal,
                 children: vec![
@@ -1068,6 +1080,7 @@ mod tests {
         // Closing A collapses P to its single remaining child Q (axis V),
         // which nests inside GP (also axis V) - normalize must flatten it.
         let mut tab = Tab {
+            id: 0,
             root: Node::Branch {
                 axis: Axis::Vertical,
                 children: vec![
@@ -1116,6 +1129,7 @@ mod tests {
     #[test]
     fn tree_close_last_pane_reports_tab_empty() {
         let mut tab = Tab {
+            id: 0,
             root: Node::Leaf(1),
             focus: 1,
         };
@@ -1125,6 +1139,7 @@ mod tests {
     #[test]
     fn tree_close_unknown_pane_is_idempotent_noop() {
         let mut tab = Tab {
+            id: 0,
             root: Node::Branch {
                 axis: Axis::Horizontal,
                 children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
@@ -1141,6 +1156,7 @@ mod tests {
     #[test]
     fn tree_resize_transfers_ratio_between_neighbors() {
         let mut tab = Tab {
+            id: 0,
             root: Node::Branch {
                 axis: Axis::Horizontal,
                 children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
@@ -1162,6 +1178,7 @@ mod tests {
     #[test]
     fn tree_resize_noop_when_no_matching_ancestor() {
         let mut tab = Tab {
+            id: 0,
             root: Node::Leaf(1),
             focus: 1,
         };
