@@ -158,15 +158,19 @@ pub enum AcquireOutcome {
 /// becomes `%XX` with UPPERCASE hex (a lowercase encoder would produce a
 /// different filename and silently fork the lock).
 pub fn encode_key(key: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(key.len());
     for b in key.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'~' | b'-' => {
                 out.push(b as char)
             }
+            // Direct hex-nibble push: avoids the `format!` machinery + a heap
+            // allocation per escaped byte on this per-path-resolution hot path.
             _ => {
                 out.push('%');
-                out.push_str(&format!("{b:02X}"));
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0xF) as usize] as char);
             }
         }
     }
@@ -314,13 +318,19 @@ pub fn process_create_time_ms(pid: i32) -> Option<i64> {
 
 #[cfg(target_os = "linux")]
 fn linux_boot_time_s() -> Option<i64> {
-    let stat = std::fs::read_to_string("/proc/stat").ok()?;
-    for line in stat.lines() {
-        if let Some(rest) = line.strip_prefix("btime ") {
-            return rest.trim().parse().ok();
+    // btime (boot epoch seconds) is constant for the life of the host, so cache
+    // it: process_create_time_ms is on the claim status/acquire hot path and
+    // re-reading /proc/stat every call is wasted I/O.
+    static BTIME: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
+    *BTIME.get_or_init(|| {
+        let stat = std::fs::read_to_string("/proc/stat").ok()?;
+        for line in stat.lines() {
+            if let Some(rest) = line.strip_prefix("btime ") {
+                return rest.trim().parse().ok();
+            }
         }
-    }
-    None
+        None
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -448,13 +458,19 @@ fn atomic_create_exclusive(path: &Path, content: &str) -> Result<(), CreateError
 }
 
 fn create_via_link(parent: &Path, path: &Path, content: &str) -> std::io::Result<()> {
+    // pid + coarse clock alone can collide across threads in this process (same
+    // nanosecond bucket), and a colliding temp name makes the second thread's
+    // `create_new` fail AlreadyExists -> mis-mapped to a FALSE `AlreadyHeld`
+    // lock failure. A process-unique counter guarantees distinct temp names.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = parent.join(format!(
-        ".claim-tmp-{}-{}",
+        ".claim-tmp-{}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
-            .unwrap_or(0)
+            .unwrap_or(0),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     {
         let mut f = std::fs::OpenOptions::new()
@@ -475,7 +491,15 @@ fn create_via_link(parent: &Path, path: &Path, content: &str) -> std::io::Result
 /// re-acquire path). Temp in the same directory so the rename is atomic;
 /// tmp is cleaned up on any failure between write and rename.
 fn atomic_replace(path: &Path, content: &str) -> Result<(), String> {
-    let tmp = path.with_extension(format!("lock.tmp.{}", std::process::id()));
+    // Counter (not just pid): two threads replacing the SAME claim path (e.g.
+    // concurrent same-key idempotent re-acquires) would otherwise share a temp
+    // name and clobber each other. Uniqueness makes each replace independent.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "lock.tmp.{}.{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let write = std::fs::write(&tmp, content)
         .and_then(|()| std::fs::rename(&tmp, path))
         .map_err(|e| e.to_string());
@@ -486,17 +510,28 @@ fn atomic_replace(path: &Path, content: &str) -> Result<(), String> {
 }
 
 /// Archive a stale claim into `.expired/` by RENAME (never unlink: the
-/// forensic trail must survive). Missing source is success (another process
-/// archived first).
-fn archive_claim(path: &Path, ts_ms: i64) {
+/// forensic trail must survive). A missing source is success (another process
+/// archived first); a real rename/mkdir failure is PROPAGATED so the caller
+/// fails fast with a clear diagnostic instead of looping until the generic
+/// contention-retry ceiling (a persistently un-archivable stale file would
+/// otherwise exhaust every acquire attempt with a misleading error).
+fn archive_claim(path: &Path, ts_ms: i64) -> std::io::Result<()> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
     else {
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid claim path for archive",
+        ));
     };
     let stem = name.strip_suffix(".lock").unwrap_or(name);
     let archive_dir = parent.join(EXPIRED_SUBDIR);
-    let _ = std::fs::create_dir_all(&archive_dir);
-    let _ = std::fs::rename(path, archive_dir.join(format!("{stem}.{ts_ms}.lock")));
+    std::fs::create_dir_all(&archive_dir)?;
+    match std::fs::rename(path, archive_dir.join(format!("{stem}.{ts_ms}.lock"))) {
+        Ok(()) => Ok(()),
+        // Source gone: another actor archived it first — success.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -848,8 +883,14 @@ fn recover_stale_locked(
         });
     }
 
-    // Still stale: archive + recreate atomically (under the mutex).
-    archive_claim(path, now_ms());
+    // Still stale: archive + recreate atomically (under the mutex). A real
+    // archive failure (perms / disk) is surfaced, not retried into the generic
+    // contention ceiling.
+    if let Err(e) = archive_claim(path, now_ms()) {
+        return RecoverResult::Done(AcquireOutcome::Error(format!(
+            "failed to archive stale claim: {e}"
+        )));
+    }
     match atomic_create_exclusive(path, &payload) {
         Ok(()) => {
             let mut data = common_event_data(&new_claim);

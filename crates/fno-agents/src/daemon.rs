@@ -1841,7 +1841,19 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     // handoff, so the daemon does the re-anchor here. Every early-return failure
     // path above kept the guard armed and released exactly once.
     if let Some(guard) = claude_claim_guard {
-        reanchor_session_claim_to_pid(&guard.session_uuid, &guard.holder, worker_pid);
+        // Offload the reanchor: `crate::claims::acquire` is synchronous file io
+        // that can, in the worst case (a same-key stale-recovery contention),
+        // wait on the recovery mutex, so calling it inline would risk stalling
+        // the async executor (gemini review, high). spawn_blocking keeps the
+        // reanchor best-effort/fire-and-forget without blocking. Disarm
+        // immediately (the worker owns the claim now); the detached reanchor
+        // only refines the recorded pid. Kept a plain sync fn so it stays
+        // callable + unit-testable outside a tokio runtime.
+        let uuid = guard.session_uuid.clone();
+        let holder = guard.holder.clone();
+        tokio::task::spawn_blocking(move || {
+            reanchor_session_claim_to_pid(&uuid, &holder, worker_pid);
+        });
         guard.disarm();
     }
     let _ = ctx.emitter.emit(
