@@ -42,9 +42,8 @@ pub const DEFAULT_COLS: u16 = 80;
 
 /// A `Dimensions` impl for constructing / resizing a headless alacritty
 /// [`Term`]. `screen_lines` is the visible viewport height; `total_lines`
-/// equals it because we keep zero scrollback (the readiness seam and the
-/// compositor render only the visible screen). Shared with
-/// so all surfaces size their grids identically.
+/// equals it because we keep zero scrollback (the readiness path renders only
+/// the visible screen), so sizing stays identical across surfaces.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GridSize {
     pub rows: usize,
