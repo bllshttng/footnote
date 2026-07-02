@@ -144,18 +144,13 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::verify_evidence::run_verify_evidence(&args[1..]);
     }
 
-    // `drive` does not fit the one-shot request/response path: it upgrades to a
-    // long-lived WebSocket and takes over the terminal. Dispatch it directly.
-    if verb == "drive" {
-        return run_drive(&args[1..]).await;
-    }
-
-    // `grid` is the multi-pane sibling of `drive`: one watcher WebSocket per
-    // named agent, tiled in a TUI compositor, with the focused pane promotable
-    // to a driver on Enter (ab-3c063856). Like `drive`, it does not fit the
-    // one-shot RPC path; the runtime lives in `fno_agents::grid`.
-    if verb == "grid" {
-        return fno_agents::grid::run_grid(&args[1..], &AgentsHome::from_env()).await;
+    // Retired at G4 (x-f54c): the grid, the WebSocket drive surface, and the
+    // interactive daemon PTY hosting behind `host`/`promote` were deleted when
+    // the mux became the agent-PTY substrate. Each prints a one-line pointer to
+    // the mux and exits non-zero, never a silent no-op (AC5-EDGE).
+    if let Some(pointer) = retired_verb_pointer(verb) {
+        eprintln!("{pointer}");
+        return 2;
     }
 
     // Python-only verbs ported to the Rust client: these read state/registry/
@@ -820,38 +815,31 @@ fn unresolvable_ask_exit(params: &Value, name: &str) -> i32 {
     2
 }
 
-/// Dispatch `fno-agents drive <name> [--watch|--step|--paranoid]`.
-async fn run_drive(rest: &[String]) -> i32 {
-    use fno_agents::drive::DriveMode;
-    let mut name: Option<String> = None;
-    let mut mode = DriveMode::Interactive;
-    for a in rest {
-        match a.as_str() {
-            "--watch" => mode = DriveMode::Watch,
-            "--step" => mode = DriveMode::Step,
-            "--paranoid" => mode = DriveMode::Paranoid,
-            other if other.starts_with("--") => {
-                eprintln!("fno-agents: unknown drive flag: {other}");
-                return 2;
-            }
-            n => {
-                // Reject a second positional name rather than silently retargeting
-                // (Codex P2): `drive a b` must error, not drive `b`.
-                if name.is_some() {
-                    eprintln!("fno-agents: drive takes exactly one <name> (got extra: {n})");
-                    return 2;
-                }
-                name = Some(n.to_string());
-            }
-        }
+/// One-line pointers for the verbs retired at G4 (x-f54c): the grid, the
+/// WebSocket drive surface, and the interactive daemon PTY hosting behind
+/// `host`/`promote` moved to the mux. Returns `None` for a live verb. Callers
+/// print the pointer and exit non-zero so a script never reads a retired verb
+/// as a silent success (AC5-EDGE).
+fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
+    match verb {
+        "grid" => Some(
+            "fno agents grid was retired at G4: agent panes now live in the mux. \
+             Open `fno mux`, or script panes with `fno mux pane ls|read|run|send|wait|kill`.",
+        ),
+        "drive" => Some(
+            "fno agents drive was retired at G4: drive an agent pane in the mux. \
+             Use `fno mux pane send <pane> ...`, or open `fno mux` and type into the pane.",
+        ),
+        "host" => Some(
+            "fno agents host was retired at G4: spawn a mux-hosted agent pane with \
+             `fno agents spawn <name> --substrate pane`.",
+        ),
+        "promote" => Some(
+            "fno agents promote was retired at G4: the mux hosts agent panes; spawn one with \
+             `fno agents spawn <name> --substrate pane`.",
+        ),
+        _ => None,
     }
-    let Some(name) = name else {
-        eprintln!("fno-agents: drive needs a <name>");
-        return 2;
-    };
-    let home = AgentsHome::from_env();
-    let daemon_bin = resolve_daemon_bin();
-    fno_agents::drive_client::drive(&home, &daemon_bin, &name, mode).await
 }
 
 /// Dispatch `fno-agents status`: probe an already-running daemon and print its
@@ -1293,36 +1281,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "agent.ask"
         }
-        "host" => {
-            // `host` is now a thin alias for `spawn --mode interactive` (x-3ab8):
-            // `host <name> --provider codex|gemini|claude|agy ["<task>"]`. It always
-            // forces the owned interactive lane via the SAME helper `spawn` uses, so
-            // the two verbs produce identical params (no second mint path). Kept as a
-            // distinct routable verb for callers/docs/muscle-memory; not deprecated.
-            // Empty task -> bare interactive session.
-            let name = positional.first().ok_or("host needs a <name>")?;
-            params.insert("name".into(), Value::String(name.clone()));
-            if !params.contains_key("message") && positional.len() > 1 {
-                params.insert("message".into(), Value::String(positional[1..].join(" ")));
-            }
-            apply_interactive_defaults(&mut params);
-            "agent.spawn"
-        }
-        "promote" => {
-            // Promote an existing session to a live interactive host:
-            // `promote <name> --from <session-uuid>`. The daemon infers the
-            // provider from the source row, so --provider is not required.
-            let name = positional.first().ok_or("promote needs a <name>")?;
-            params.insert("name".into(), Value::String(name.clone()));
-            if !params.contains_key("resume_id") {
-                return Err("promote needs --from <session-uuid>".into());
-            }
-            params.insert(
-                "host_mode".into(),
-                Value::String(fno_agents::state::HOST_MODE_INTERACTIVE.into()),
-            );
-            "agent.spawn"
-        }
+        // `host`/`promote` (interactive daemon PTY hosting) were retired at G4
+        // (x-f54c) and intercepted with a mux pointer before build_request; they
+        // never reach this match.
         "list" => "agent.list",
         "status" => "agent.status",
         "stop" => {
@@ -1587,48 +1548,6 @@ fn format_success(
                 }))
                 .unwrap_or_default(),
             )
-        }
-        "host" | "promote" => {
-            // AC1-UI: a live spawn outcome is visible -- name, short_id, provider,
-            // status, and how to drive it. (A spawn-failed worker returns
-            // Response::Err, handled by the caller's nonzero-exit path, so this
-            // arm only renders the success case.)
-            let short_id = result
-                .get("short_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let provider = result
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let status = result
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("live");
-            if json_flag || !is_tty {
-                Some(
-                    serde_json::to_string_pretty(&json!({
-                        "name": name,
-                        "short_id": short_id,
-                        "provider": provider,
-                        "status": status,
-                        "host_mode": fno_agents::state::HOST_MODE_INTERACTIVE,
-                    }))
-                    .unwrap_or_default(),
-                )
-            } else if provider == "claude" {
-                // claude is the stream-json lane (no PTY): observe with `watch`,
-                // drive a turn with `send`, never `drive`/`grid`.
-                Some(format!(
-                    "adopted claude session as stream thread {name} ({short_id}), status={status}\n\
-                     observe with: fno agents watch {name}   (drive a turn: fno mail send {name} \"...\")"
-                ))
-            } else {
-                Some(format!(
-                    "hosted interactive {provider} agent {name} ({short_id}), status={status}\n\
-                     drive with: fno agents grid {name}   (or: fno agents drive {name} --mode interactive)"
-                ))
-            }
         }
         _ => None,
     }
@@ -1918,19 +1837,12 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "reap [--json]",
     "stop <name> [--force]",
     "rm <name> [--force]",
-    "drive <name> [--watch|--step|--paranoid]",
-    "grid [<name>...] [--all]",
     "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <settings.yaml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",
     "finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> [--transcript <transcript.jsonl>]",
     "reconcile",
     "register-channel --cc-session-id <id> [<name>]",
     "unregister-channel --channel-id <id>",
     "push-channel --channel-id <id>",
-    // ab-351427cb: these verbs are dispatchable in build_request / as specials
-    // but were missing from --help, and `<verb> --help` errored instead of
-    // printing usage.
-    "host <name> --provider codex|gemini|claude [--mode interactive] [<task>]",
-    "promote <name> --from <session-uuid> [--provider claude]",
     "drive-authority [--json]",
     "trace [options]",
     "ping",
@@ -2054,8 +1966,6 @@ mod tests {
             "stop",
             "rm",
             "reconcile",
-            "drive",
-            "grid",
             "register-channel",
             "unregister-channel",
             "push-channel",
@@ -2065,8 +1975,6 @@ mod tests {
             "resume",
             "attach",
             "logs",
-            "host",
-            "promote",
             "loop-check",
             "loop",
             "finalize",
@@ -2091,10 +1999,9 @@ mod tests {
 
     #[test]
     fn verb_usage_resolves_known_and_rejects_unknown() {
-        // The nine verbs that ab-351427cb added must each resolve a usage line.
+        // Verbs that ab-351427cb added must each resolve a usage line (host/
+        // promote retired at G4).
         for verb in [
-            "host",
-            "promote",
             "trace",
             "ping",
             "resume",
@@ -2666,50 +2573,6 @@ mod tests {
         assert_eq!(params["cc_session_id"], "cc-1");
     }
 
-    // -----------------------------------------------------------------------
-    // Interactive-drive verbs (host / promote): build_request dispatch
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn host_builds_interactive_spawn_with_message() {
-        let args = vec![
-            "worker".to_string(),
-            "--provider".to_string(),
-            "codex".to_string(),
-            "do".to_string(),
-            "the".to_string(),
-            "thing".to_string(),
-        ];
-        let (method, params) = build_request("host", &args).unwrap();
-        assert_eq!(method, "agent.spawn");
-        assert_eq!(params["name"], "worker");
-        assert_eq!(params["provider"], "codex");
-        assert_eq!(params["message"], "do the thing");
-        assert_eq!(params["host_mode"], "interactive");
-    }
-
-    #[test]
-    fn host_empty_task_is_bare_interactive() {
-        let args = vec![
-            "worker".to_string(),
-            "--provider".to_string(),
-            "gemini".to_string(),
-        ];
-        let (method, params) = build_request("host", &args).unwrap();
-        assert_eq!(method, "agent.spawn");
-        assert_eq!(params["host_mode"], "interactive");
-        assert!(
-            params.get("message").is_none(),
-            "no message -> bare session"
-        );
-    }
-
-    #[test]
-    fn host_needs_a_name() {
-        let args = vec!["--provider".to_string(), "codex".to_string()];
-        assert!(build_request("host", &args).is_err());
-    }
-
     #[test]
     fn mint_session_uuid_is_well_formed_v4() {
         let u = mint_session_uuid();
@@ -2732,74 +2595,6 @@ mod tests {
             "rfc-4122 variant: {u}"
         );
         assert_ne!(mint_session_uuid(), u, "two mints differ");
-    }
-
-    #[test]
-    fn host_claude_interactive_mints_session_id() {
-        let args = vec![
-            "wk-c".to_string(),
-            "--provider".to_string(),
-            "claude".to_string(),
-            "--mode".to_string(),
-            "interactive".to_string(),
-        ];
-        let (method, params) = build_request("host", &args).unwrap();
-        assert_eq!(method, "agent.spawn");
-        assert_eq!(params["provider"], "claude");
-        assert_eq!(params["mode"], "interactive");
-        assert_eq!(params["host_mode"], "interactive");
-        let sid = params["session_id"].as_str().expect("minted session_id");
-        assert_eq!(sid.split('-').count(), 5, "minted a uuid: {sid}");
-    }
-
-    #[test]
-    fn host_claude_interactive_accepts_equals_form_mode() {
-        // codex P2 PR#88: `--mode=interactive` must normalize like the other
-        // value flags, not fall through to "unknown flag".
-        let args = vec![
-            "wk-c".to_string(),
-            "--provider".to_string(),
-            "claude".to_string(),
-            "--mode=interactive".to_string(),
-        ];
-        let (_m, params) = build_request("host", &args).unwrap();
-        assert_eq!(params["mode"], "interactive");
-        assert!(
-            params["session_id"].as_str().is_some(),
-            "equals-form mode still mints the session id"
-        );
-    }
-
-    #[test]
-    fn host_claude_interactive_keeps_explicit_session_id() {
-        let args = vec![
-            "wk-c".to_string(),
-            "--provider".to_string(),
-            "claude".to_string(),
-            "--mode".to_string(),
-            "interactive".to_string(),
-            "--session-id".to_string(),
-            "019e7157-4236-7bb1-b274-ebbac6040ace".to_string(),
-        ];
-        let (_m, params) = build_request("host", &args).unwrap();
-        assert_eq!(params["session_id"], "019e7157-4236-7bb1-b274-ebbac6040ace");
-    }
-
-    #[test]
-    fn host_codex_does_not_mint_session_id() {
-        // The mint is claude+interactive only; codex must be byte-unchanged.
-        let args = vec![
-            "wk-x".to_string(),
-            "--provider".to_string(),
-            "codex".to_string(),
-            "--mode".to_string(),
-            "interactive".to_string(),
-        ];
-        let (_m, params) = build_request("host", &args).unwrap();
-        assert!(
-            params.get("session_id").is_none(),
-            "no mint for codex interactive host"
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -2961,35 +2756,6 @@ mod tests {
     }
 
     #[test]
-    fn host_equals_spawn_params_without_once() {
-        // Change 2 AC-HP: identical args via host vs spawn (no --once) produce
-        // equal params. The claude mint is a fresh uuid per call, so for claude we
-        // assert both mint then drop the id before the structural equality check.
-        for provider in ["codex", "gemini", "agy", "claude"] {
-            let args = vec![
-                "wk".to_string(),
-                "--provider".to_string(),
-                provider.to_string(),
-                "do".to_string(),
-                "it".to_string(),
-            ];
-            let (m_spawn, mut p_spawn) = build_request("spawn", &args).unwrap();
-            let (m_host, mut p_host) = build_request("host", &args).unwrap();
-            assert_eq!(m_spawn, m_host, "{provider}: same method");
-            if provider == "claude" {
-                assert!(
-                    p_spawn["session_id"].as_str().is_some()
-                        && p_host["session_id"].as_str().is_some(),
-                    "both mint a claude session id"
-                );
-                p_spawn.as_object_mut().unwrap().remove("session_id");
-                p_host.as_object_mut().unwrap().remove("session_id");
-            }
-            assert_eq!(p_spawn, p_host, "{provider}: host == spawn params");
-        }
-    }
-
-    #[test]
     fn format_success_spawn_emits_compact_receipt() {
         // x-3ab8: a daemon-routed spawn must emit the one-line JSON receipt that
         // advance.py / dispatch-node.sh parse for short_id (line-by-line
@@ -3009,48 +2775,16 @@ mod tests {
         assert_eq!(parsed["status"], "live");
     }
 
-    #[test]
-    fn promote_builds_interactive_spawn_with_resume_id() {
-        let args = vec![
-            "bot2".to_string(),
-            "--from".to_string(),
-            "019e7157-4236-7bb1-b274-ebbac6040ace".to_string(),
-        ];
-        let (method, params) = build_request("promote", &args).unwrap();
-        assert_eq!(method, "agent.spawn");
-        assert_eq!(params["name"], "bot2");
-        assert_eq!(params["resume_id"], "019e7157-4236-7bb1-b274-ebbac6040ace");
-        assert_eq!(params["host_mode"], "interactive");
-        // provider is intentionally absent: the daemon infers it from the source.
-        assert!(params.get("provider").is_none());
-    }
-
-    #[test]
-    fn promote_from_equals_form_is_accepted() {
-        let args = vec!["bot2".to_string(), "--from=uuid-xyz".to_string()];
-        let (_m, params) = build_request("promote", &args).unwrap();
-        assert_eq!(params["resume_id"], "uuid-xyz");
-    }
-
-    #[test]
-    fn promote_without_from_is_rejected() {
-        let args = vec!["bot2".to_string()];
-        let err = build_request("promote", &args).unwrap_err();
-        assert!(err.contains("--from"));
-    }
-
     // -----------------------------------------------------------------------
     // cwd forwarding (fix/agents-host-cwd): the daemon is a shared long-lived
     // process whose own current_dir is frozen to wherever it was first started,
     // so the client must stamp the caller's cwd into daemon-bound spawn/ask
-    // requests. Without this, `fno agents host` from project A opens the
-    // provider in the daemon's home project B.
+    // requests. Without this, a spawn from project A opens the provider in the
+    // daemon's home project B.
     // -----------------------------------------------------------------------
 
     #[test]
     fn ensure_request_cwd_stamps_caller_dir_for_spawn() {
-        // host and promote also resolve to "agent.spawn" in build_request, so
-        // this case covers all three spawn-bearing verbs.
         let mut params = json!({"name": "w", "provider": "codex"});
         ensure_request_cwd("agent.spawn", &mut params, Path::new("/work/proj"));
         assert_eq!(params["cwd"], "/work/proj");
