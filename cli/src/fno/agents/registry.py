@@ -349,7 +349,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     A future fno adding fields without bumping the schema_version must
     not silently corrupt the in-memory entry.
     """
-    from fno.agents.providers import KNOWN_PROVIDERS
+    from fno.agents.providers import READABLE_PROVIDERS
 
     target = _registry_path(path)
     if not target.exists():
@@ -407,10 +407,10 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                 f"(got {type(row).__name__})"
             )
         provider = row.get("provider")
-        if provider not in KNOWN_PROVIDERS:
+        if provider not in READABLE_PROVIDERS:
             raise RegistryVersionError(
                 f"registry at {target} row {index} has provider={provider!r}; "
-                f"this fno supports {KNOWN_PROVIDERS}. "
+                f"this fno reads {READABLE_PROVIDERS}. "
                 "Upgrade or downgrade fno to match."
             )
         if needs_v1_synthesis:
