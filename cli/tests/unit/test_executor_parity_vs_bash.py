@@ -348,6 +348,13 @@ def test_parse_locked_model_tolerates_bold_styles() -> None:
     assert _locked.parse_locked_model("## Locked Decisions\n**Model:** fo*\n") == ""
 
 
+def test_parse_locked_model_tolerates_crlf() -> None:
+    # A CRLF-checked-out plan must not leave a trailing \r on the value (gemini
+    # review PR #150) that would silently reject a valid pin.
+    assert _locked.parse_locked_model("## Locked Decisions\r\nModel: fable\r\n") == "fable"
+    assert _locked.parse_locked_model("## Locked Decisions\r\nModel: fable (user-confirmed)\r\n") == "fable"
+
+
 def test_parse_locked_model_strips_provenance_suffix() -> None:
     # A trailing (provenance) suffix mirrors the executor lock and is dropped.
     doc = "## Locked Decisions\nModel: fable (user-confirmed)\n"

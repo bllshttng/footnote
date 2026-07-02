@@ -208,7 +208,10 @@ def parse_locked_model(text: str) -> str:
     """
     if not text:
         return ""
-    section = _extract_section(text)
+    # Strip CR before anything else: on a CRLF checkout every line ends with \r,
+    # which `.` in the KV regex captures into the value (``fable\r``) and then the
+    # provenance/token checks reject a valid pin (gemini review PR #150).
+    section = _extract_section(text.replace("\r", ""))
     if not section:
         return ""
     # Strip backticks so ``Model: `fable``` normalizes before the KV scan (a model
