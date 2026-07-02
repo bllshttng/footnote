@@ -183,7 +183,10 @@ mod tests {
             Role::Client(Some("work".into()))
         );
         // Off a TTY it is the notice, mirroring bare `fno`.
-        assert_eq!(decide_role(&os(&["--session", "work"]), false), Role::NotTty);
+        assert_eq!(
+            decide_role(&os(&["--session", "work"]), false),
+            Role::NotTty
+        );
     }
 
     #[test]

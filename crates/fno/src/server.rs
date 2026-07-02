@@ -874,7 +874,8 @@ impl Core {
                 let Some((sid, ti)) = self.session.find_tab(view.1) else {
                     return Flow::Continue;
                 };
-                let pids = tree::leaves(&self.session.squad(sid).expect("live squad").tabs[ti].root);
+                let pids =
+                    tree::leaves(&self.session.squad(sid).expect("live squad").tabs[ti].root);
                 for pid in pids {
                     if let Some(entry) = self.panes.remove(&pid) {
                         entry.pty.kill();

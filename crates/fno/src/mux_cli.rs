@@ -7,9 +7,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::proto::{
-    self, read_msg_sync, write_msg_sync, ClientMsg, ServerMsg, DEFAULT_SESSION,
-};
+use crate::proto::{self, read_msg_sync, write_msg_sync, ClientMsg, ServerMsg, DEFAULT_SESSION};
 
 /// Bound every probe: a wedged server counts as alive-but-unqueryable, never
 /// a hang. Generous next to a socket round-trip, tight next to a human.

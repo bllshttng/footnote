@@ -672,7 +672,10 @@ mod tests {
         // encodings are FROZEN forever (Invariants). This pins the exact
         // bytes: if this test breaks, you changed a frozen shape - add a new
         // variant instead.
-        assert_eq!(serde_json::to_string(&ClientMsg::Query).unwrap(), r#""Query""#);
+        assert_eq!(
+            serde_json::to_string(&ClientMsg::Query).unwrap(),
+            r#""Query""#
+        );
         assert_eq!(
             serde_json::to_string(&ClientMsg::KillServer).unwrap(),
             r#""KillServer""#

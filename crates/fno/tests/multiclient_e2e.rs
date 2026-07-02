@@ -112,7 +112,10 @@ fn multiclient_clamp_below_min_pane_size_recovers_exactly() {
     // Degenerate but sane: no rect exceeds the area, no overlap panic
     // server-side (rects may saturate to zero size - the honest answer).
     for (_, r) in &lb.panes {
-        assert!(r.y + r.rows <= 3 && r.x + r.cols <= 12, "rect out of area: {r:?}");
+        assert!(
+            r.y + r.rows <= 3 && r.x + r.cols <= 12,
+            "rect out of area: {r:?}"
+        );
     }
 
     // The tiny client leaves cleanly: the layout recovers EXACTLY (same
@@ -121,7 +124,10 @@ fn multiclient_clamp_below_min_pane_size_recovers_exactly() {
     b.detach();
     drop(b);
     let after = a.wait_layout(10, "recovered", |l| l.area == (24, 80));
-    assert_eq!(after.panes, before.panes, "exact recovery after the squeeze");
+    assert_eq!(
+        after.panes, before.panes,
+        "exact recovery after the squeeze"
+    );
     assert_eq!(after.focus, before.focus);
     a.input(b"echo alive#\r");
     a.wait_pane_text(15, after.focus, |t| t.contains("alive#"));
@@ -217,7 +223,10 @@ fn multiclient_independent_views_frames_for_viewers_only_and_reanchor() {
         "ModeSync must precede Layout on re-anchor; got {tail:?}"
     );
     if let Some(frame_at) = frame_at {
-        assert!(layout_at < frame_at, "frames follow the Layout; got {tail:?}");
+        assert!(
+            layout_at < frame_at,
+            "frames follow the Layout; got {tail:?}"
+        );
     }
     b.input(b"echo landed#\r");
     b.wait_pane_text(15, pane_a, |t| t.contains("landed#"));
@@ -232,12 +241,7 @@ fn multiclient_named_session_sets_fno_session_in_panes() {
     let scratch = Scratch::new("named");
     let _server = spawn_server(&scratch.0.join("work.sock"), &[("SHELL", "/bin/sh")]);
     let cwd = scratch.dir("w");
-    let mut c = FakeClient::attach(
-        &scratch.0.join("work.sock"),
-        24,
-        80,
-        cwd.to_str().unwrap(),
-    );
+    let mut c = FakeClient::attach(&scratch.0.join("work.sock"), 24, 80, cwd.to_str().unwrap());
     let pane = c
         .wait_layout(10, "first layout", |l| l.panes.len() == 1)
         .focus;
@@ -288,9 +292,7 @@ fn multiclient_kill_server_live_stale_and_missing() {
     let mut server = sh_server(&scratch); // session "main"
     let cwd = scratch.dir("w");
     let mut c = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
-    let pane = c
-        .wait_layout(10, "attached", |l| l.panes.len() == 1)
-        .focus;
+    let pane = c.wait_layout(10, "attached", |l| l.panes.len() == 1).focus;
     // Learn the pane child's PID so AC4-FR (children do not outlive the
     // kill) is observable from outside. Skip the echoed command line (where
     // `$$` is still literal); take the first occurrence that parses.
@@ -349,7 +351,11 @@ fn multiclient_kill_server_live_stale_and_missing() {
 
     // Missing: "no server", exit 1.
     let out = fno_cmd(&scratch, &["mux", "kill-server", "nowhere"]);
-    assert_eq!(out.status.code(), Some(1), "missing socket exits 1: {out:?}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "missing socket exits 1: {out:?}"
+    );
     assert!(String::from_utf8_lossy(&out.stderr).contains("no server"));
 }
 
@@ -363,7 +369,10 @@ fn multiclient_nested_same_session_attach_refused_pre_raw_mode() {
     let scratch = common::Scratch::new("mc-nested");
     let mut h = common::ClientHarness::spawn_with(&scratch, &[("FNO_SESSION", "main")]);
     let status = h.wait_exit(15);
-    assert!(!status.success(), "nested attach must refuse, got {status:?}");
+    assert!(
+        !status.success(),
+        "nested attach must refuse, got {status:?}"
+    );
     let out = h.raw_output();
     assert!(out.contains("main"), "refusal names the session: {out}");
     assert!(
