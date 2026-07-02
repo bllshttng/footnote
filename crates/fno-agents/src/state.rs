@@ -431,7 +431,11 @@ impl RegistryEntry {
     /// finished ask to `exited` by process-liveness alone, never consulting
     /// session-file reachability for status. [plan ab-70faa65b, Locked Decision #1]
     pub fn is_one_shot_ask(&self) -> bool {
-        self.short_id.is_empty() && self.pid.is_none()
+        // A mux-hosted row (4a-G2) also has an empty short_id and may lack a
+        // pid (the pane-child lookup is best-effort), but it is a LIVE hosted
+        // agent, never a finished ask - without this exclusion the reconcile
+        // sweep would flip it to Exited unprobed (codex P1, PR #142).
+        self.short_id.is_empty() && self.pid.is_none() && self.mux.is_none()
     }
 }
 
@@ -668,7 +672,6 @@ where
     // on the early return, so a violation never wedges the registry.
     for entry in &registry.entries {
         if let Err(msg) = validate_single_live_ref(entry) {
-            let _ = lock.unlock();
             return Err(StateError::InvariantViolation(msg));
         }
     }
@@ -916,6 +919,21 @@ mod tests {
         // round-tripped worker row stays byte-familiar to older tooling.
         let v = serde_json::to_value(sample_entry("w")).unwrap();
         assert!(v.get("mux").is_none());
+    }
+
+    #[test]
+    fn state_mux_row_is_never_a_one_shot_ask() {
+        // codex P1 (PR #142): empty short_id + no pid describes a mux row too;
+        // reconcile must not settle a live hosted agent as a finished ask.
+        let mut e = sample_entry("mux-live");
+        e.short_id = String::new();
+        e.pid = None;
+        assert!(e.is_one_shot_ask(), "baseline: bare row reads as ask");
+        e.mux = Some(MuxRef {
+            session: "main".into(),
+            pane_id: 4,
+        });
+        assert!(!e.is_one_shot_ask(), "a mux ref is a live hosting handle");
     }
 
     #[test]
