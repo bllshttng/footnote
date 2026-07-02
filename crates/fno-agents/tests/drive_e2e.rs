@@ -194,10 +194,19 @@ async fn drive_roundtrips_input_output_and_manages_window_and_events() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(cleared, "drive window never cleared after detach");
-    assert!(
-        events_contains(&home, "drive_detached"),
-        "drive_detached not emitted"
-    );
+    // Poll for the detach event: cleanup() clears the state.json window BEFORE it
+    // appends drive_detached, and the daemon is a separate process, so a single
+    // read right after the window clears can race the emit (mirrors the
+    // heartbeat-lost test's poll).
+    let mut detached = false;
+    for _ in 0..50 {
+        if events_contains(&home, "drive_detached") {
+            detached = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(detached, "drive_detached not emitted");
     assert!(
         events_contains(&home, "user_sentinel"),
         "detach reason not recorded"
