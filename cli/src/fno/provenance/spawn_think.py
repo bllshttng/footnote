@@ -448,10 +448,10 @@ def assemble_seed(node: dict) -> ThinkSeed:
     if source_node:
         why_lines.append(f"  origin node chain: {source_node}")
 
-    # B (x-5d51): give the headless worker a durable, known home for its output
-    # so the /think doc is never written nowhere. Reuses the existing briefs dir
-    # (the lazy choice); best-effort - an unresolvable path just omits the line.
-    output_path = _think_output_path(node_id)
+    # Give the headless worker a durable, known home for its output so the
+    # /think doc is written where /blueprint mutates it in place (plans-dir,
+    # date-slug named); best-effort - an unresolvable path just omits the line.
+    output_path = _think_output_path(node_id, slug)
 
     prompt = (
         f"/think {node_id}\n\n"
@@ -484,19 +484,56 @@ def assemble_seed(node: dict) -> ThinkSeed:
     )
 
 
-def _think_output_path(node_id: str) -> str:
-    """Resolve the durable sidecar the headless /think worker writes to (B, x-5d51).
+def _plans_output_dir() -> Path:
+    """Resolve the plans dir the /think doc should land in (x-ff83 W1).
 
-    ``briefs_dir()/think-<node-id>.md`` - reuses the existing briefs dir. Returns
-    "" on any resolution failure (settings unreadable); a missing path just omits
-    the write-instruction line rather than wedging the spawn.
+    Same lookup /blueprint uses: ``.claude/settings.local.json`` ->
+    ``plansDirectory`` (the operator override), then ``config.plans_dir``
+    (settings.yaml, via fno.paths.plans_dir). Anchored to the repo root.
+    Raises on an unresolvable root so the caller can fall back to briefs.
     """
-    try:
-        from fno.paths import briefs_dir
+    from fno.paths import plans_dir, resolve_repo_root
 
-        return str(briefs_dir() / f"think-{node_id}.md")
-    except Exception:  # noqa: BLE001 - best-effort; an unresolved path is non-fatal
-        return ""
+    root = resolve_repo_root()
+    try:
+        local = json.loads((root / ".claude" / "settings.local.json").read_text())
+        raw = local.get("plansDirectory")
+        if raw:
+            p = Path(raw)
+            return p if p.is_absolute() else (root / p).resolve()
+    except (OSError, ValueError):
+        pass  # missing/unreadable settings.local -> fall through to config default
+    return plans_dir(root)
+
+
+def _think_output_path(node_id: str, slug: str = "") -> str:
+    """Resolve where the headless /think worker writes its design doc (x-ff83 W1).
+
+    Writes ``<plans-dir>/YYYY-MM-DD-<slug>.md`` (matching interactive /think) so
+    ``/blueprint <that-path>`` mutates it in place - no manual relocate from a
+    briefs/ sidecar. Falls back to ``briefs_dir()/think-<node-id>.md`` with a
+    visible warning (AC1-ERR) when the plans dir is unresolvable, so a broken
+    settings lookup never wedges the spawn. Returns "" only if even briefs is
+    unresolvable (a missing path just omits the write-instruction line).
+    """
+    tail = (slug or node_id).strip("-") or node_id
+    from datetime import datetime, timezone
+
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        return str(_plans_output_dir() / f"{date}-{tail}.md")
+    except Exception as exc:  # noqa: BLE001 - degrade to briefs, never wedge the spawn
+        try:
+            from fno.paths import briefs_dir
+
+            print(
+                f"warn: plans dir unresolvable ({exc}); /think doc falls back to "
+                f"briefs/ - relocate before /blueprint",
+                file=sys.stderr,
+            )
+            return str(briefs_dir() / f"think-{node_id}.md")
+        except Exception:  # noqa: BLE001 - best-effort; an unresolved path is non-fatal
+            return ""
 
 
 # ---------------------------------------------------------------------------
