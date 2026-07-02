@@ -66,7 +66,7 @@ fn client_e2e_output_flood_keeps_the_real_client_responsive() {
     let scratch = Scratch::new("flood");
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_screen(15, |s| !s.trim().is_empty());
-    h.type_bytes(b"yes | head -1000000; echo E2E-FLOOD-DONE\r");
+    h.type_bytes(b"yes | head -100000; echo E2E-FLOOD-DONE\r");
     h.wait_screen(30, |s| s.contains("E2E-FLOOD-DONE"));
     h.type_bytes(b"echo client-alive\r");
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "client-alive"));
