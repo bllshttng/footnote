@@ -720,7 +720,10 @@ async fn attach_and_run(
                 | ServerMsg::PaneSpawned { .. }
                 | ServerMsg::Ok
                 | ServerMsg::WaitDone { .. }
-                | ServerMsg::Err { .. },
+                | ServerMsg::Err { .. }
+                // Copy answers a mouse-release, which can only follow attach:
+                // stray in the preamble, ignore rather than desync.
+                | ServerMsg::Copy { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -828,6 +831,30 @@ async fn attach_and_run(
                     | ServerMsg::Ok
                     | ServerMsg::WaitDone { .. }
                     | ServerMsg::Err { .. }) => {}
+                Ok(ServerMsg::Copy { text }) => {
+                    // Land the server-extracted selection on the clipboard: local
+                    // exec first, OSC 52 to the outer terminal as fallback
+                    // (Locked 5). The status flash makes the auto-copy observable
+                    // (AC2-HP); a hard failure sounds BEL (AC2-ERR).
+                    let chars = text.chars().count();
+                    let notice = match crate::clipboard::deliver(&text, raw_out) {
+                        crate::clipboard::CopyOutcome::Local(_) => format!("copied {chars} chars"),
+                        crate::clipboard::CopyOutcome::Osc52 { truncated: false } => {
+                            format!("copied {chars} chars")
+                        }
+                        crate::clipboard::CopyOutcome::Osc52 { truncated: true } => {
+                            format!("copied {chars} chars (truncated to clipboard limit)")
+                        }
+                        crate::clipboard::CopyOutcome::Failed => {
+                            let _ = raw_out(b"\x07");
+                            "copy failed: no clipboard tool and OSC 52 blocked".to_string()
+                        }
+                    };
+                    view.set_notice(notice);
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
+                }
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
                 Err(ProtoError::Closed) => {
                     break Ok(exit_with_notice("session ended (server closed)".into()));

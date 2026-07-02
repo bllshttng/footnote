@@ -54,7 +54,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// `lines` reaches into history; `PaneWait` gains `command_done`; `WaitOutcome`
 /// gains `CommandDone`; `PaneText` gains `block` ([`BlockMeta`]); `err_code`
 /// gains `BLOCK_UNAVAILABLE`. OSC 133 command blocks (see [`crate::vt`]).
-pub const PROTO_VERSION: u32 = 6;
+///
+/// v7 (Phase 5 G1 scroll/select/copy): `ClientMsg::Mouse { pane, event }`
+/// ([`MouseEvent`]) - the client forwards pane-rect mouse events; the server
+/// routes by the pane's mouse mode (SGR-encode to the PTY, else mux-side
+/// scroll/focus/selection). `ServerMsg::Copy { text }` ships extracted
+/// selection text to the client's clipboard chain. `cell_flags::SELECTED`
+/// marks selected cells in a `Frame` so every co-viewer sees the highlight.
+pub const PROTO_VERSION: u32 = 7;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -130,6 +137,43 @@ pub enum ClientMsg {
         build: String,
         verb: ControlVerb,
     },
+    /// (v7) A mouse event inside a pane's content rect, forwarded for
+    /// server-side routing (brief Locked 2). `pane` names the rect the client
+    /// hit-tested; `event` is in 0-based pane-local coordinates (the client
+    /// maps outer-terminal coords and never sends a chrome click here).
+    /// Shift-modified events are the native-selection escape hatch and are
+    /// never captured, so they never reach this variant (AC3-EDGE).
+    Mouse { pane: u64, event: MouseEvent },
+}
+
+/// One mouse event forwarded from a client (v7, brief US1/US2/US3). Coordinates
+/// are 0-based and pane-rect-local; the server either SGR-encodes this onto the
+/// pane's PTY (the app has mouse reporting on) or interprets it mux-side.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub row: u16,
+    pub col: u16,
+    pub kind: MouseKind,
+}
+
+/// The mouse gesture. Wheel carries its own intent (there is no separate scroll
+/// verb - brief Locked 12); press/drag/release drive focus and selection when
+/// the mux interprets, and SGR button codes when it forwards.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MouseKind {
+    Press(MouseButton),
+    Release(MouseButton),
+    /// Motion with a button held (mouse-drag; drives selection mux-side).
+    Drag(MouseButton),
+    WheelUp,
+    WheelDown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
 }
 
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
@@ -328,6 +372,12 @@ pub enum ServerMsg {
     /// A control verb failed (dead pane, spawn failure, version skew, ...).
     /// `code` is one of [`err_code`]; `msg` is one human line.
     Err { code: u32, msg: String },
+    /// (v7) Extracted selection text destined for the client's clipboard chain
+    /// (brief Locked 5). Copy extraction happens server-side (history lives
+    /// there); the client execs its local clipboard tool, else emits OSC 52,
+    /// else reports the failure visibly. Reliable - a dropped copy is silent
+    /// data loss, never acceptable.
+    Copy { text: String },
 }
 
 /// One pane's metadata in a [`ServerMsg::PaneList`]. `cwd` is the squad's
@@ -476,6 +526,10 @@ pub mod cell_flags {
     /// The second cell of a wide (CJK/emoji) glyph. Compositors skip it so
     /// the glyph's right half is never overdrawn.
     pub const WIDE_SPACER: u8 = 1 << 5;
+    /// (v7) Part of the active selection. The server renders the flag into the
+    /// broadcast frame so every co-viewer sees the same highlight (brief
+    /// Locked 4); the compositor draws it as an inverse/tinted cell.
+    pub const SELECTED: u8 = 1 << 6;
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -754,6 +808,30 @@ mod tests {
             ClientMsg::Command(Command::SelectSquad(42)),
             ClientMsg::Query,
             ClientMsg::KillServer,
+            ClientMsg::Mouse {
+                pane: 3,
+                event: MouseEvent {
+                    row: 4,
+                    col: 9,
+                    kind: MouseKind::Press(MouseButton::Left),
+                },
+            },
+            ClientMsg::Mouse {
+                pane: 3,
+                event: MouseEvent {
+                    row: 0,
+                    col: 0,
+                    kind: MouseKind::WheelUp,
+                },
+            },
+            ClientMsg::Mouse {
+                pane: 7,
+                event: MouseEvent {
+                    row: 2,
+                    col: 2,
+                    kind: MouseKind::Drag(MouseButton::Left),
+                },
+            },
         ] {
             let bytes = encode(&msg).unwrap();
             let mut cursor = std::io::Cursor::new(bytes);
@@ -952,6 +1030,9 @@ mod tests {
             ServerMsg::Err {
                 code: err_code::DEAD_PANE,
                 msg: "no such pane: 99".into(),
+            },
+            ServerMsg::Copy {
+                text: "selected lines\nincluding history".into(),
             },
         ] {
             let bytes = encode(&msg).unwrap();

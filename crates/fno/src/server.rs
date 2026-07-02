@@ -35,8 +35,8 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use crate::agents_view::{self, RegistryAgent};
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentRow, BindOutcome,
-    BlockSel, ClientMsg, Command, ControlVerb, Frame, PaneInfo, ServerMsg, SquadMeta, TabMeta,
-    WaitOutcome,
+    BlockSel, ClientMsg, Command, ControlVerb, Frame, MouseButton, MouseEvent, MouseKind, PaneInfo,
+    ServerMsg, SquadMeta, TabMeta, WaitOutcome,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, RemoveOutcome, Resolver, Session};
@@ -69,6 +69,77 @@ const BYE_FLUSH: Duration = Duration::from_millis(250);
 /// The droppable outbound path: newest unsent frame per pane, per client.
 type DirtyMap = Arc<Mutex<HashMap<u64, Frame>>>;
 
+/// Lines a single wheel notch scrolls a mux-interpreted pane (brief Claude's
+/// discretion #4). Three matches the common terminal default; a mouse-mode app
+/// gets the raw wheel event and picks its own step.
+const MOUSE_WHEEL_LINES: i32 = 3;
+
+/// What the server does with a mouse event, decided purely from the pane's
+/// modes + the gesture so the routing (the brief's crux, Locked 2) is unit
+/// testable without a PTY. The `mouse` method executes the chosen action.
+#[derive(Debug, PartialEq, Eq)]
+enum MouseAction {
+    /// The app owns its mouse: SGR-encode and write to its PTY (AC3-HP).
+    Passthrough,
+    /// Mux-interpret a wheel notch: scroll the pane by N lines (US1).
+    Scroll(i32),
+    /// Left press begins a selection anchor (US2).
+    SelectStart,
+    /// Left drag extends the selection (US2).
+    SelectUpdate,
+    /// Left release finalizes: auto-copy a real selection, else clear (US2).
+    SelectRelease,
+    /// No mux meaning (middle/right buttons in v1).
+    Ignore,
+}
+
+/// Route by the pane's mode (brief Locked 2): a pane that negotiated SGR mouse
+/// reporting gets passthrough; otherwise the mux interprets the gesture. Only
+/// SGR is honored for passthrough - a mouse app that never negotiated SGR falls
+/// through to interpretation rather than receiving garbage (Domain: legacy X10
+/// truncates at column 223).
+fn route_mouse(modes: Modes, kind: MouseKind) -> MouseAction {
+    let reports_mouse = modes.mouse_click || modes.mouse_drag || modes.mouse_motion;
+    if reports_mouse && modes.sgr_mouse {
+        return MouseAction::Passthrough;
+    }
+    match kind {
+        MouseKind::WheelUp => MouseAction::Scroll(MOUSE_WHEEL_LINES),
+        MouseKind::WheelDown => MouseAction::Scroll(-MOUSE_WHEEL_LINES),
+        MouseKind::Press(MouseButton::Left) => MouseAction::SelectStart,
+        MouseKind::Drag(MouseButton::Left) => MouseAction::SelectUpdate,
+        MouseKind::Release(MouseButton::Left) => MouseAction::SelectRelease,
+        _ => MouseAction::Ignore,
+    }
+}
+
+/// SGR-encode one mouse event for an app that negotiated mouse reporting
+/// (`ESC [ < b ; x ; y {M|m}`, brief Locked 12 / Domain: SGR 1006 only). `b` is
+/// the button code plus the drag-motion bit; coordinates are 1-based. Press and
+/// motion terminate with `M`, release with `m`.
+fn sgr_mouse_bytes(event: &MouseEvent) -> Vec<u8> {
+    let (button, released) = match event.kind {
+        MouseKind::Press(b) => (button_code(b), false),
+        MouseKind::Release(b) => (button_code(b), true),
+        // Motion bit (32) rides on top of the held button (SGR drag report).
+        MouseKind::Drag(b) => (button_code(b) + 32, false),
+        MouseKind::WheelUp => (64, false),
+        MouseKind::WheelDown => (65, false),
+    };
+    let x = event.col as u32 + 1;
+    let y = event.row as u32 + 1;
+    let terminator = if released { 'm' } else { 'M' };
+    format!("\x1b[<{button};{x};{y}{terminator}").into_bytes()
+}
+
+fn button_code(b: MouseButton) -> u32 {
+    match b {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    }
+}
+
 /// What connected clients register with the core loop.
 enum CoreMsg {
     Attach {
@@ -100,6 +171,15 @@ enum CoreMsg {
     Command {
         id: u64,
         cmd: Command,
+    },
+    /// (v7) A mouse event from a client's pane rect, routed by the pane's mode
+    /// (brief Locked 2): an app in mouse mode gets an SGR-encoded event on its
+    /// PTY; otherwise the mux interprets it (wheel -> scroll, press -> focus +
+    /// selection anchor, drag -> selection update, release -> finalize + copy).
+    Mouse {
+        id: u64,
+        pane: u64,
+        event: MouseEvent,
     },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
@@ -946,6 +1026,69 @@ impl Core {
         }
     }
 
+    /// Route a client's pane-rect mouse event (brief Locked 2, US1/US2/US3).
+    /// An app that negotiated SGR mouse reporting owns its mouse: the event is
+    /// SGR-encoded onto its PTY and the mux consumes nothing (AC3-HP). Otherwise
+    /// the mux interprets it - wheel scrolls the pane's history (US1), a left
+    /// drag paints a server-side selection all viewers see (US2), and release
+    /// auto-copies (Warp behavior). Selection is per-pane, independent of focus;
+    /// click-to-focus is a documented candidate, not shipped in v1.
+    fn mouse(&mut self, client_id: u64, pane: u64, event: MouseEvent) {
+        let Some(modes) = self.panes.get(&pane).map(|e| e.vt.modes()) else {
+            return;
+        };
+        match route_mouse(modes, event.kind) {
+            MouseAction::Passthrough => {
+                let bytes = sgr_mouse_bytes(&event);
+                if let Some(entry) = self.panes.get(&pane) {
+                    let _ = entry.pty.write_input(&bytes);
+                }
+            }
+            MouseAction::Scroll(delta) => {
+                if let Some(e) = self.panes.get_mut(&pane) {
+                    e.vt.scroll(delta);
+                }
+                self.broadcast_pane(pane);
+            }
+            MouseAction::SelectStart => {
+                if let Some(e) = self.panes.get_mut(&pane) {
+                    e.vt.selection_start(event.row, event.col);
+                }
+                self.broadcast_pane(pane);
+            }
+            MouseAction::SelectUpdate => {
+                if let Some(e) = self.panes.get_mut(&pane) {
+                    e.vt.selection_update(event.row, event.col);
+                }
+                self.broadcast_pane(pane);
+            }
+            MouseAction::SelectRelease => {
+                // Auto-copy on release with a real selection; the highlight stays
+                // held (Warp). A plain click (empty selection) clears any prior
+                // highlight instead - never a third behavior.
+                match self.panes.get(&pane).and_then(|e| e.vt.selection_text()) {
+                    Some(text) => self.send_copy(client_id, text),
+                    None => {
+                        if let Some(e) = self.panes.get_mut(&pane) {
+                            e.vt.selection_clear();
+                        }
+                        self.broadcast_pane(pane);
+                    }
+                }
+            }
+            MouseAction::Ignore => {}
+        }
+    }
+
+    /// Ship extracted selection text to one client's clipboard chain (Locked 5).
+    /// Reliable: a dropped copy is silent data loss. A wedged channel means the
+    /// client is already dead (same policy as [`Core::notice`]).
+    fn send_copy(&self, client_id: u64, text: String) {
+        if let Some(c) = self.clients.iter().find(|c| c.id == client_id) {
+            let _ = c.reliable_tx.try_send(ServerMsg::Copy { text });
+        }
+    }
+
     /// Live mode changes in a focused pane (vim toggling mouse reporting
     /// mid-session) must reach the terminals of that pane's VIEWERS now, not
     /// at the next focus change. Cheap: a flag read per output burst, bytes
@@ -1290,6 +1433,19 @@ impl Core {
                         }
                         self.claims.remove(&focus);
                     }
+                    // A keystroke that will be delivered returns a scrolled pane
+                    // to the live bottom, so input always lands on the visible
+                    // line (AC1-ERR, Invariant). No-op when already live.
+                    if self
+                        .panes
+                        .get(&focus)
+                        .is_some_and(|e| e.vt.display_offset() != 0)
+                    {
+                        if let Some(e) = self.panes.get_mut(&focus) {
+                            e.vt.scroll_to_bottom();
+                        }
+                        self.broadcast_pane(focus);
+                    }
                     if let Some(entry) = self.panes.get(&focus) {
                         if let Err(crate::pty::PtyError::Write(e)) = entry.pty.write_input(&bytes) {
                             // Disconnected = child just exited (the exit
@@ -1315,6 +1471,10 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::Command { id, cmd } => self.command(id, cmd),
+            CoreMsg::Mouse { id, pane, event } => {
+                self.mouse(id, pane, event);
+                Flow::Continue
+            }
             CoreMsg::Query(reply) => {
                 let _ = reply.send(ServerMsg::Info {
                     session: self.session_name.clone(),
@@ -2131,6 +2291,15 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                     break;
                 }
             }
+            Ok(ClientMsg::Mouse { pane, event }) => {
+                if core_tx
+                    .send(CoreMsg::Mouse { id, pane, event })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Ok(ClientMsg::Detach) => {
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
@@ -2256,5 +2425,103 @@ mod tests {
         let t = WaitTick::default();
         assert!(!t.exited);
         assert!(t.text.is_empty());
+    }
+
+    fn mouse_mode() -> Modes {
+        Modes {
+            mouse_click: true,
+            sgr_mouse: true,
+            ..Modes::default()
+        }
+    }
+
+    #[test]
+    fn route_mouse_passes_through_when_app_owns_mouse() {
+        // AC3-HP: a pane in SGR mouse mode consumes nothing mux-side.
+        for kind in [
+            MouseKind::WheelUp,
+            MouseKind::Press(MouseButton::Left),
+            MouseKind::Drag(MouseButton::Left),
+            MouseKind::Release(MouseButton::Left),
+        ] {
+            assert_eq!(route_mouse(mouse_mode(), kind), MouseAction::Passthrough);
+        }
+    }
+
+    #[test]
+    fn route_mouse_interprets_when_pane_has_no_mouse_mode() {
+        // US1/US2: a plain shell pane scrolls and selects mux-side.
+        let plain = Modes::default();
+        assert_eq!(
+            route_mouse(plain, MouseKind::WheelUp),
+            MouseAction::Scroll(MOUSE_WHEEL_LINES)
+        );
+        assert_eq!(
+            route_mouse(plain, MouseKind::WheelDown),
+            MouseAction::Scroll(-MOUSE_WHEEL_LINES)
+        );
+        assert_eq!(
+            route_mouse(plain, MouseKind::Press(MouseButton::Left)),
+            MouseAction::SelectStart
+        );
+        assert_eq!(
+            route_mouse(plain, MouseKind::Drag(MouseButton::Left)),
+            MouseAction::SelectUpdate
+        );
+        assert_eq!(
+            route_mouse(plain, MouseKind::Release(MouseButton::Left)),
+            MouseAction::SelectRelease
+        );
+        assert_eq!(
+            route_mouse(plain, MouseKind::Press(MouseButton::Right)),
+            MouseAction::Ignore
+        );
+    }
+
+    #[test]
+    fn route_mouse_non_sgr_mouse_app_falls_through_to_interpretation() {
+        // A mouse-reporting app that never negotiated SGR is not sent garbage;
+        // the mux interprets instead (Domain: SGR-only passthrough).
+        let legacy = Modes {
+            mouse_click: true,
+            sgr_mouse: false,
+            ..Modes::default()
+        };
+        assert_eq!(
+            route_mouse(legacy, MouseKind::WheelUp),
+            MouseAction::Scroll(MOUSE_WHEEL_LINES)
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_bytes_encodes_button_coords_and_terminator() {
+        // Left press at pane-local (row 4, col 9) -> SGR button 0, 1-based coords.
+        let press = sgr_mouse_bytes(&MouseEvent {
+            row: 4,
+            col: 9,
+            kind: MouseKind::Press(MouseButton::Left),
+        });
+        assert_eq!(press, b"\x1b[<0;10;5M");
+        // Release terminates with lowercase m.
+        let release = sgr_mouse_bytes(&MouseEvent {
+            row: 4,
+            col: 9,
+            kind: MouseKind::Release(MouseButton::Left),
+        });
+        assert_eq!(release, b"\x1b[<0;10;5m");
+        // Drag adds the motion bit (32).
+        let drag = sgr_mouse_bytes(&MouseEvent {
+            row: 0,
+            col: 0,
+            kind: MouseKind::Drag(MouseButton::Left),
+        });
+        assert_eq!(drag, b"\x1b[<32;1;1M");
+        // Wheel up is button 64.
+        let wheel = sgr_mouse_bytes(&MouseEvent {
+            row: 2,
+            col: 3,
+            kind: MouseKind::WheelUp,
+        });
+        assert_eq!(wheel, b"\x1b[<64;4;3M");
     }
 }
