@@ -128,3 +128,66 @@ def test_deliver_live_dispatches_on_mux_ref_before_legacy_lanes(
     )
     assert dispatch_mod._deliver_live(worker, "hi", "fno") is True
     assert calls, "worker row keeps the legacy daemon lane during dual-run"
+
+
+# ---------------------------------------------------------------------------
+# `fno agents ask` follow-up on a mux row (routing fix)
+# ---------------------------------------------------------------------------
+# Before the fix, dispatch_ask routed a mux row to the provider follow-up
+# path, which keys on claude_short_id / codex_session_id / gemini_session_id
+# a mux row lacks, and raised exit 12. It must ride PaneSend instead.
+
+
+def _seed(entry) -> None:
+    from fno.agents.registry import write_registry
+
+    write_registry([entry])
+
+
+def test_ask_mux_row_rides_pane_send(tmp_path: Path, monkeypatch) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed(_mux_entry())  # claude provider, mux ref, NO claude_short_id
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+
+    from fno.agents.dispatch import dispatch_ask
+
+    result = dispatch_ask("muxed", "ping", provider=None, cwd=Path("/w"))
+
+    assert result.kind == "followup"
+    assert result.reply == ""  # fire-and-forget: no captured reply
+    assert result.short_id == "work:7"
+    verbs = [c[0][3] for c in fake.calls]
+    assert verbs == ["claim", "send", "send", "release"]
+    assert fake.calls[1][1] == "ping"  # the message rode --stdin verbatim
+
+
+def test_ask_mux_dead_pane_raises_transport_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed(_mux_entry())
+    fake = FakeMux(fail_verbs={"send"})
+    _patch_mux(monkeypatch, fake)
+
+    from fno.agents.dispatch import DispatchAskError, dispatch_ask
+
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_ask("muxed", "ping", provider=None, cwd=Path("/w"))
+    assert exc.value.exit_code == 1  # transport failure, not the old exit 12
+
+
+def test_ask_mux_codex_row_also_rides_pane_send(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Mux routing is provider-independent: a mux codex row rides PaneSend too."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed(_mux_entry(name="cmux", provider="codex"))
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+
+    from fno.agents.dispatch import dispatch_ask
+
+    result = dispatch_ask("cmux", "ping", provider=None, cwd=Path("/w"))
+    assert result.kind == "followup"
+    assert [c[0][3] for c in fake.calls] == ["claim", "send", "send", "release"]
