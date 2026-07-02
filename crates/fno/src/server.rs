@@ -30,16 +30,19 @@ use std::time::Duration;
 
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::proto::{
-    bind_or_probe, check_attach_version, read_msg, write_msg, BindOutcome, ClientMsg, Command,
-    Frame, ServerMsg, SquadMeta, TabMeta,
+    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, BindOutcome, ClientMsg,
+    Command, ControlVerb, Frame, PaneInfo, ServerMsg, SquadMeta, TabMeta, WaitOutcome,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, RemoveOutcome, Resolver, Session};
 use crate::tree::{self, Axis, Node, Rect, Tab, TabId};
-use crate::vt::{self, Modes};
+use crate::vt::{self, frame_text, Modes};
+
+/// A control connection's reply channel: exactly one [`ServerMsg`], then close.
+type ControlReply = oneshot::Sender<ServerMsg>;
 
 /// A silent connection (e.g. a liveness probe) gets this long to Attach
 /// before the server closes it.
@@ -102,6 +105,66 @@ enum CoreMsg {
     /// A pre-Attach `KillServer`: Bye every client, kill every pane child,
     /// exit 0 (Locked 12's second and last exit path).
     Kill,
+    // -- v4 control verbs (one-shot: reply on the oneshot, then the
+    // connection task closes). Snapshot reads and the spawn/kill mutations
+    // reply inline on the core loop; `PaneWait` hands its reply to an
+    // off-loop watcher so nothing blocking ever lands on the loop.
+    PaneLs(ControlReply),
+    PaneRead {
+        pane: u64,
+        lines: Option<u16>,
+        reply: ControlReply,
+    },
+    /// `squad_key` was resolved OFF the core loop (like `Attach`); `cwd` is the
+    /// literal launch dir for the child shell.
+    PaneRun {
+        squad_key: String,
+        cwd: String,
+        argv: Vec<String>,
+        cols: Option<u16>,
+        rows: Option<u16>,
+        reply: ControlReply,
+    },
+    PaneSend {
+        pane: u64,
+        bytes: Vec<u8>,
+        reply: ControlReply,
+    },
+    PaneWait {
+        pane: u64,
+        quiet_ms: Option<u64>,
+        /// Pre-compiled OFF the core loop (in `handle_control`): `Regex::new`
+        /// is bounded CPU the single-threaded loop must never run.
+        regex: Option<regex::Regex>,
+        timeout_ms: u64,
+        reply: ControlReply,
+    },
+    PaneKill {
+        pane: u64,
+        reply: ControlReply,
+    },
+}
+
+/// The per-pane signal an off-loop `PaneWait` watcher observes. The core loop
+/// refreshes `text` on every output burst and flips `exited` when the pane
+/// closes; a dropped sender (pane reaped) reads as exited too. `text` is the
+/// visible grid so a pattern watcher needs no round-trip back to the loop
+/// (only refreshed while a watcher is subscribed - see
+/// [`Core::note_pane_output`]). `watch`'s own change signal is the wakeup, so
+/// no sequence counter is needed - `send_modify` always notifies.
+#[derive(Clone)]
+struct WaitTick {
+    exited: bool,
+    text: Arc<str>,
+}
+
+impl Default for WaitTick {
+    fn default() -> Self {
+        WaitTick {
+            exited: false,
+            text: Arc::from(""),
+        }
+    }
 }
 
 struct Client {
@@ -204,6 +267,11 @@ pub fn run(socket: PathBuf) -> i32 {
 struct Core {
     session: Session,
     panes: HashMap<u64, PaneEntry>,
+    /// Per-pane output signal for off-loop `PaneWait` watchers. One entry per
+    /// live pane, created with the pane, dropped (flipped `exited`) when it is
+    /// reaped. Kept in lockstep with `panes` via [`Core::register_pane`] /
+    /// [`Core::reap_pane`].
+    pane_watch: HashMap<u64, watch::Sender<WaitTick>>,
     clients: Vec<Client>,
     /// Monotonic, never reused (Locked Decision 6).
     next_pane_id: u64,
@@ -266,6 +334,45 @@ impl Core {
             self.exit_tx.clone(),
         )
         .map_err(|e| e.to_string())?;
+        self.register_pane(id, pty, rows, cols);
+        Ok(id)
+    }
+
+    /// Spawn an explicit `argv` as a pane (the `pane run` / agents-spawn path)
+    /// - no shell candidate fallback: an unspawnable argv is the caller's
+    /// error, surfaced verbatim. Same atomic ordering as [`Core::spawn_pane`]
+    /// (PTY first, model second), so a spawn failure mutates nothing.
+    fn spawn_pane_cmd(
+        &mut self,
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: &str,
+    ) -> Result<u64, String> {
+        if argv.is_empty() {
+            return Err("pane run needs a command (empty argv)".into());
+        }
+        let id = self.next_pane_id;
+        let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
+        let pty = PtyShell::spawn_cmd(
+            argv,
+            rows,
+            cols,
+            dir,
+            &self.session_name,
+            id,
+            self.out_tx.clone(),
+            self.exit_tx.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        self.register_pane(id, pty, rows, cols);
+        Ok(id)
+    }
+
+    /// Record a freshly-spawned pane: bump the id, insert its VT grid, and
+    /// arm its output watch (dropped receiver, so the watch costs nothing
+    /// until a `PaneWait` subscribes).
+    fn register_pane(&mut self, id: u64, pty: PtyShell, rows: u16, cols: u16) {
         self.next_pane_id += 1;
         self.panes.insert(
             id,
@@ -274,7 +381,110 @@ impl Core {
                 vt: vt::Pane::new(rows, cols),
             },
         );
-        Ok(id)
+        let (tx, _rx) = watch::channel(WaitTick::default());
+        self.pane_watch.insert(id, tx);
+    }
+
+    /// Kill+reap a pane's PTY and retire its watch (flipping `exited` so any
+    /// subscribed `PaneWait` returns `PaneExited`). The single place panes
+    /// leave `panes`/`pane_watch`, so the two maps never drift. Idempotent.
+    fn reap_pane(&mut self, pid: u64) {
+        if let Some(entry) = self.panes.remove(&pid) {
+            entry.pty.kill();
+        }
+        if let Some(tx) = self.pane_watch.remove(&pid) {
+            // Last observable tick before the sender drops: a watcher that
+            // reads it sees `exited`; one blocked in `changed()` sees the
+            // sender-dropped error and treats it identically.
+            tx.send_modify(|t| t.exited = true);
+        }
+    }
+
+    /// Refresh a pane's output watch after a burst, but only while a
+    /// `PaneWait` is actually subscribed - `frame_text` is O(grid), so an
+    /// unwatched pane pays nothing (the common case).
+    fn note_pane_output(&self, pid: u64) {
+        let Some(tx) = self.pane_watch.get(&pid) else {
+            return;
+        };
+        if tx.receiver_count() == 0 {
+            return;
+        }
+        let Some(entry) = self.panes.get(&pid) else {
+            return;
+        };
+        let text: Arc<str> = Arc::from(frame_text(&entry.vt.frame()));
+        // `send_modify` always notifies watchers, so refreshing the text IS
+        // the wakeup - no counter needed.
+        tx.send_modify(|t| t.text = text);
+    }
+
+    /// Every pane's metadata for `pane ls`, ordered by pane id so the listing
+    /// is stable and machine-readable. A pane mid-teardown (not in the tree)
+    /// is still listed with what is known rather than dropped silently.
+    fn pane_infos(&self) -> Vec<PaneInfo> {
+        let mut out: Vec<PaneInfo> = self
+            .panes
+            .iter()
+            .map(|(&pid, entry)| {
+                let (squad_id, tab_id, cwd) = match self.session.find_pane(pid) {
+                    Some((sid, ti)) => {
+                        let sq = self.session.squad(sid).expect("find_pane live squad");
+                        (sid, sq.tabs[ti].id, sq.canonical_cwd.clone())
+                    }
+                    None => (0, 0, String::new()),
+                };
+                PaneInfo {
+                    pane_id: pid,
+                    squad_id,
+                    tab_id,
+                    cwd,
+                    child_pid: entry.pty.child_pid(),
+                    title: None,
+                }
+            })
+            .collect();
+        out.sort_by_key(|p| p.pane_id);
+        out
+    }
+
+    /// `pane run`: spawn `argv` as a new tab-pane in the squad `squad_key`
+    /// names (created if absent). PTY-first ordering (Locked 7): a spawn
+    /// failure mutates no model. Each call is its own pane, so three runs into
+    /// one cwd land three panes in one squad (no mux-layer dedup - that lives
+    /// in the spawn front half).
+    fn run_pane(
+        &mut self,
+        squad_key: String,
+        cwd: String,
+        argv: Vec<String>,
+        rows: u16,
+        cols: u16,
+    ) -> Result<u64, String> {
+        let pid = self.spawn_pane_cmd(&argv, rows, cols, &cwd)?;
+        let tid = self.session.mint_tab_id();
+        let tab = Tab {
+            id: tid,
+            root: Node::Leaf(pid),
+            focus: pid,
+        };
+        match self.session.find_by_cwd(&squad_key) {
+            Some(sid) => self
+                .session
+                .squad_mut(sid)
+                .expect("find_by_cwd hit")
+                .tabs
+                .push(tab),
+            None => {
+                let sid = self.next_squad_id;
+                self.next_squad_id += 1;
+                self.session.add_squad(sid, squad_key, tab);
+            }
+        }
+        // Keep any attached client's view consistent; a script-only session
+        // has no clients, so this is then a cheap no-op.
+        self.push_layout(true);
+        Ok(pid)
     }
 
     /// A one-line refusal/notice to ONE client (BEL + transient message on
@@ -667,14 +877,10 @@ impl Core {
         let Some((sid, ti)) = self.session.find_pane(pid) else {
             // Unknown to the tree; still reap a stray registry entry so a
             // half-created pane can never leak a child process.
-            if let Some(entry) = self.panes.remove(&pid) {
-                entry.pty.kill();
-            }
+            self.reap_pane(pid);
             return Flow::Continue;
         };
-        if let Some(entry) = self.panes.remove(&pid) {
-            entry.pty.kill();
-        }
+        self.reap_pane(pid);
         let tid = self
             .session
             .squad(sid)
@@ -773,9 +979,7 @@ impl Core {
                     Err(e) => {
                         // AC1-EDGE: refused split reaps the pre-spawned
                         // shell; the tree was never touched.
-                        if let Some(entry) = self.panes.remove(&pid) {
-                            entry.pty.kill();
-                        }
+                        self.reap_pane(pid);
                         self.notice(client_id, e.to_string());
                     }
                 }
@@ -895,9 +1099,7 @@ impl Core {
                 let pids =
                     tree::leaves(&self.session.squad(sid).expect("live squad").tabs[ti].root);
                 for pid in pids {
-                    if let Some(entry) = self.panes.remove(&pid) {
-                        entry.pty.kill();
-                    }
+                    self.reap_pane(pid);
                 }
                 match self.session.remove_tab(sid, ti) {
                     RemoveOutcome::SessionEmpty => Flow::Shutdown,
@@ -1014,6 +1216,104 @@ impl Core {
                 self.push_layout(true);
                 Flow::Continue
             }
+            // -- v4 control verbs. Each answers on its oneshot; a dropped
+            // receiver (client vanished mid-verb) makes the send a no-op.
+            CoreMsg::PaneLs(reply) => {
+                let _ = reply.send(ServerMsg::PaneList {
+                    panes: self.pane_infos(),
+                });
+                Flow::Continue
+            }
+            CoreMsg::PaneRead { pane, lines, reply } => {
+                let msg = match self.panes.get(&pane) {
+                    Some(entry) => {
+                        let text = frame_text(&entry.vt.frame());
+                        ServerMsg::PaneText {
+                            pane_id: pane,
+                            text: lines.map(|n| last_n_lines(&text, n)).unwrap_or(text),
+                        }
+                    }
+                    None => dead_pane(pane),
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::PaneRun {
+                squad_key,
+                cwd,
+                argv,
+                cols,
+                rows,
+                reply,
+            } => {
+                let rows = rows.unwrap_or(vt::DEFAULT_ROWS);
+                let cols = cols.unwrap_or(vt::DEFAULT_COLS);
+                let msg = match self.run_pane(squad_key, cwd, argv, rows, cols) {
+                    Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
+                    Err(e) => ServerMsg::Err {
+                        code: err_code::SPAWN_FAILED,
+                        msg: e,
+                    },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::PaneSend { pane, bytes, reply } => {
+                let msg = match self.panes.get(&pane) {
+                    None => dead_pane(pane),
+                    Some(entry) => match entry.pty.write_input(&bytes) {
+                        Ok(()) => ServerMsg::Ok,
+                        // A dead/wedged pane fails closed (AC4-ERR): the child
+                        // exited (BrokenPipe) or stopped reading (WouldBlock).
+                        // Either way the send did not land - never a silent Ok.
+                        Err(e) => ServerMsg::Err {
+                            code: err_code::DEAD_PANE,
+                            msg: format!("pane {pane} send failed: {e}"),
+                        },
+                    },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::PaneWait {
+                pane,
+                quiet_ms,
+                regex,
+                timeout_ms,
+                reply,
+            } => {
+                let Some(entry) = self.panes.get(&pane) else {
+                    let _ = reply.send(dead_pane(pane));
+                    return Flow::Continue;
+                };
+                // Seed `initial` from the pane's REAL current grid, not the
+                // watch value: the watch text is refreshed only while a
+                // watcher is subscribed, so output that landed before this
+                // wait started lives only in the grid. Reading it and
+                // subscribing are atomic on the single-threaded core loop, so
+                // there is no missed-output gap; the wait itself then runs
+                // entirely off-loop.
+                let initial: Arc<str> = Arc::from(frame_text(&entry.vt.frame()));
+                let rx = self
+                    .pane_watch
+                    .get(&pane)
+                    .expect("pane_watch is in lockstep with panes")
+                    .subscribe();
+                tokio::spawn(run_wait(rx, quiet_ms, regex, timeout_ms, initial, reply));
+                Flow::Continue
+            }
+            CoreMsg::PaneKill { pane, reply } => {
+                if !self.panes.contains_key(&pane) {
+                    let _ = reply.send(dead_pane(pane));
+                    return Flow::Continue;
+                }
+                // Reply Ok BEFORE propagating a possible session-ending
+                // Shutdown, so the client always learns the kill landed even
+                // when it closed the last pane.
+                let flow = self.close_pane(pane);
+                let _ = reply.send(ServerMsg::Ok);
+                flow
+            }
         }
     }
 
@@ -1025,6 +1325,84 @@ impl Core {
             });
         }
     }
+}
+
+/// The canonical `Err` for a pane id no live pane owns (read/send/wait/kill).
+fn dead_pane(pane: u64) -> ServerMsg {
+    ServerMsg::Err {
+        code: err_code::DEAD_PANE,
+        msg: format!("no such pane: {pane}"),
+    }
+}
+
+/// Last `n` lines of `text` (the `pane read --lines N` clamp; the visible grid
+/// only - scrollback is 4b). `n == 0` yields nothing.
+fn last_n_lines(text: &str, n: u16) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n as usize);
+    lines[start..].join("\n")
+}
+
+/// The off-loop `PaneWait` watcher: observes a pane's output watch and answers
+/// the control connection with the outcome. Nothing here runs on the core
+/// loop; the deadline is server-enforced and a vanished client (`reply.closed`)
+/// drops the watch at once.
+async fn run_wait(
+    mut rx: watch::Receiver<WaitTick>,
+    quiet_ms: Option<u64>,
+    pattern: Option<regex::Regex>,
+    timeout_ms: u64,
+    initial_text: Arc<str>,
+    mut reply: ControlReply,
+) {
+    // An already-present match settles immediately (the text at subscribe time
+    // already carries every prior byte, so there is no missed-output gap).
+    if let Some(re) = &pattern {
+        if re.is_match(&initial_text) {
+            let _ = reply.send(ServerMsg::WaitDone {
+                outcome: WaitOutcome::Matched,
+            });
+            return;
+        }
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let quiet = quiet_ms.map(Duration::from_millis);
+    let mut last_activity = tokio::time::Instant::now();
+    let outcome = loop {
+        // The quiet wakeup exists only when a quiet window was requested; it
+        // is recomputed every iteration so each output burst resets it.
+        let quiet_at = quiet.map(|q| last_activity + q);
+        tokio::select! {
+            biased;
+            // Client vanished: abandon the watch (Failure Modes: a client
+            // disconnect drops the watch).
+            _ = reply.closed() => return,
+            _ = tokio::time::sleep_until(deadline) => break WaitOutcome::Timeout,
+            _ = async { tokio::time::sleep_until(quiet_at.unwrap()).await }, if quiet_at.is_some() => {
+                break WaitOutcome::Quiet;
+            }
+            changed = rx.changed() => {
+                // A dropped sender (pane reaped) reads as exited too.
+                if changed.is_err() {
+                    break WaitOutcome::PaneExited;
+                }
+                let tick = rx.borrow_and_update().clone();
+                if tick.exited {
+                    break WaitOutcome::PaneExited;
+                }
+                if let Some(re) = &pattern {
+                    if re.is_match(&tick.text) {
+                        break WaitOutcome::Matched;
+                    }
+                }
+                last_activity = tokio::time::Instant::now();
+            }
+        }
+    };
+    let _ = reply.send(ServerMsg::WaitDone { outcome });
 }
 
 async fn serve(
@@ -1054,6 +1432,7 @@ async fn serve(
     let mut core = Core {
         session: Session::default(),
         panes: HashMap::new(),
+        pane_watch: HashMap::new(),
         clients: Vec::new(),
         next_pane_id: 1,
         next_squad_id: 1,
@@ -1119,6 +1498,9 @@ async fn serve(
                 }
                 for pid in touched {
                     core.broadcast_pane(pid);
+                    // Refresh any PaneWait watcher on this pane (no-op unless
+                    // one is subscribed).
+                    core.note_pane_output(pid);
                 }
                 core.sync_focused_modes();
             }
@@ -1177,6 +1559,162 @@ async fn serve(
     0
 }
 
+/// Resolve a client cwd to its canonical squad key, OFF the core loop: the
+/// git run blocks (bounded 2s) and the loop must never wait on it. Cache
+/// check first; a miss runs on a blocking thread. Two racing misses on one
+/// cwd both resolve and insert the same idempotent answer - cheaper than a
+/// lock held across a subprocess. Shared by `Attach` and `PaneRun`.
+async fn resolve_squad_key(resolver: &Arc<Mutex<Resolver>>, cwd: &str) -> String {
+    // The guard drops before the await (a temporary living across it would
+    // un-Send the future).
+    let cached = resolver.lock().unwrap().cached(cwd);
+    if let Some(hit) = cached {
+        return hit;
+    }
+    let owned = cwd.to_string();
+    let for_task = owned.clone();
+    let key = tokio::task::spawn_blocking(move || squad::resolve_key(&for_task))
+        .await
+        .unwrap_or_else(|_| owned.clone());
+    resolver.lock().unwrap().insert(owned, key.clone());
+    key
+}
+
+/// A one-shot v4 control connection: version-check, route the verb to the core
+/// loop with a oneshot reply, answer with exactly one message, close. A client
+/// that vanishes mid-verb drops the reply receiver, which the off-loop
+/// `PaneWait` watcher observes (`reply.closed()`) and abandons its watch.
+async fn handle_control(
+    mut stream: UnixStream,
+    core_tx: mpsc::Sender<CoreMsg>,
+    resolver: Arc<Mutex<Resolver>>,
+    proto: u32,
+    build: String,
+    verb: ControlVerb,
+) {
+    // Control verbs are versioned (AC4-FR): refuse a skewed connection loudly,
+    // naming both versions, unlike the frozen Query/KillServer pair.
+    if let Err(reason) = check_attach_version(proto, &build) {
+        let _ = write_msg(
+            &mut stream,
+            &ServerMsg::Err {
+                code: err_code::VERSION_SKEW,
+                msg: reason,
+            },
+        )
+        .await;
+        return;
+    }
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let sent = match verb {
+        ControlVerb::PaneLs => core_tx.send(CoreMsg::PaneLs(reply_tx)).await,
+        ControlVerb::PaneRead { pane, lines } => {
+            core_tx
+                .send(CoreMsg::PaneRead {
+                    pane,
+                    lines,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::PaneRun {
+            cwd,
+            argv,
+            cols,
+            rows,
+        } => {
+            // Resolve the squad key off the core loop, exactly like Attach.
+            let squad_key = resolve_squad_key(&resolver, &cwd).await;
+            core_tx
+                .send(CoreMsg::PaneRun {
+                    squad_key,
+                    cwd,
+                    argv,
+                    cols,
+                    rows,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::PaneSend { pane, bytes } => {
+            core_tx
+                .send(CoreMsg::PaneSend {
+                    pane,
+                    bytes,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::PaneWait {
+            pane,
+            quiet_ms,
+            pattern,
+            timeout_ms,
+        } => {
+            // Compile the pattern HERE, off the core loop (bounded CPU, but
+            // the single-threaded loop must never do it). A bad pattern is a
+            // BAD_REQUEST answered inline; the loop only ever gets a ready
+            // `Option<Regex>`.
+            let regex = match pattern.as_deref().map(regex::Regex::new).transpose() {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = write_msg(
+                        &mut stream,
+                        &ServerMsg::Err {
+                            code: err_code::BAD_REQUEST,
+                            msg: format!("bad --pattern: {e}"),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            };
+            core_tx
+                .send(CoreMsg::PaneWait {
+                    pane,
+                    quiet_ms,
+                    regex,
+                    timeout_ms,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::PaneKill { pane } => {
+            core_tx
+                .send(CoreMsg::PaneKill {
+                    pane,
+                    reply: reply_tx,
+                })
+                .await
+        }
+    };
+    if sent.is_err() {
+        return; // the server is shutting down
+    }
+    // Await the reply, but abandon it the moment the client disconnects: the
+    // select drops `reply_rx`, and a pending `PaneWait` watcher sees the
+    // closed receiver and drops its watch (Failure Modes: disconnect drops
+    // the watch). A one-shot control client sends nothing after its verb, so
+    // the peer-read only ever resolves on EOF.
+    tokio::select! {
+        reply = reply_rx => {
+            if let Ok(msg) = reply {
+                let _ = write_msg(&mut stream, &msg).await;
+            }
+        }
+        _ = wait_for_peer_close(&mut stream) => {}
+    }
+}
+
+/// Resolve when the control peer closes its half (or sends stray bytes). Used
+/// only to notice a mid-`PaneWait` disconnect; a one-shot client is otherwise
+/// silent until it reads the reply and closes.
+async fn wait_for_peer_close(stream: &mut UnixStream) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 1];
+    let _ = stream.read(&mut buf).await;
+}
+
 /// Handshake a fresh connection, then split it into the reader loop (this
 /// task) and the writer task.
 async fn handle_client(
@@ -1217,30 +1755,19 @@ async fn handle_client(
             let _ = core_tx.send(CoreMsg::Kill).await;
             return;
         }
+        // A v4 one-shot control connection (`fno mux pane ...`): versioned
+        // like Attach, answered with exactly one reply, then closed. Never
+        // registers a client, never splits into reader/writer tasks.
+        Ok(Ok(ClientMsg::Control { proto, build, verb })) => {
+            handle_control(stream, core_tx, resolver, proto, build, verb).await;
+            return;
+        }
         // Liveness probes connect and vanish; malformed first messages and
         // timeouts close the same way: without touching any pane.
         _ => return,
     };
 
-    // Resolve the squad key HERE, on this connection's task: the git run
-    // blocks (bounded 2s), and the core loop must never wait on it. Cache
-    // check first; a miss runs off the async threads via spawn_blocking.
-    // Two racing misses on one cwd both resolve and insert the same
-    // idempotent answer - cheaper than a lock held across a subprocess.
-    // The guard must drop before the await below (a match-scrutinee
-    // temporary would live across it and un-Send the future).
-    let cached = resolver.lock().unwrap().cached(&cwd);
-    let squad_key = match cached {
-        Some(hit) => hit,
-        None => {
-            let owned = cwd.clone();
-            let key = tokio::task::spawn_blocking(move || squad::resolve_key(&owned))
-                .await
-                .unwrap_or_else(|_| cwd.clone());
-            resolver.lock().unwrap().insert(cwd.clone(), key.clone());
-            key
-        }
-    };
+    let squad_key = resolve_squad_key(&resolver, &cwd).await;
 
     let (reliable_tx, reliable_rx) = mpsc::channel::<ServerMsg>(RELIABLE_CAP);
     let dirty: DirtyMap = Arc::default();
@@ -1302,14 +1829,20 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
             }
-            // A second Attach (or a pre-Attach-only Query/KillServer) on a
-            // live connection is a protocol violation: log it (this stderr is
-            // the session log) and close rather than acting on a confused
-            // stream.
-            Ok(msg @ (ClientMsg::Attach { .. } | ClientMsg::Query | ClientMsg::KillServer)) => {
+            // A second Attach, a pre-Attach-only Query/KillServer, or a
+            // one-shot Control on a live connection is a protocol violation:
+            // log it (this stderr is the session log) and close rather than
+            // acting on a confused stream.
+            Ok(
+                msg @ (ClientMsg::Attach { .. }
+                | ClientMsg::Query
+                | ClientMsg::KillServer
+                | ClientMsg::Control { .. }),
+            ) => {
                 let name = match msg {
                     ClientMsg::Attach { .. } => "Attach",
                     ClientMsg::Query => "Query",
+                    ClientMsg::Control { .. } => "Control",
                     _ => "KillServer",
                 };
                 eprintln!("fno mux: client {id} sent {name} on a live connection; dropping it");
@@ -1394,5 +1927,38 @@ async fn client_writer(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_control_last_n_lines_clamps_to_visible_tail() {
+        let text = "l1\nl2\nl3\nl4";
+        assert_eq!(last_n_lines(text, 2), "l3\nl4");
+        // N beyond the line count returns everything, never panics.
+        assert_eq!(last_n_lines(text, 99), text);
+        assert_eq!(last_n_lines(text, 0), "");
+        assert_eq!(last_n_lines("", 3), "");
+    }
+
+    #[test]
+    fn server_control_dead_pane_err_carries_the_code_and_id() {
+        match dead_pane(99) {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, err_code::DEAD_PANE);
+                assert!(msg.contains("99"), "{msg}");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_control_wait_tick_default_is_empty_and_live() {
+        let t = WaitTick::default();
+        assert!(!t.exited);
+        assert!(t.text.is_empty());
     }
 }
