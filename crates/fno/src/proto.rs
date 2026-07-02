@@ -37,7 +37,13 @@ use crate::tree::{Dir, Rect, TabId};
 /// gains `area` (the clamped content-area its rects were computed for);
 /// pre-Attach `ClientMsg::{Query, KillServer}` + `ServerMsg::Info` added
 /// (wire-shape FROZEN - see the variants).
-pub const PROTO_VERSION: u32 = 3;
+///
+/// v4 (Phase 4a script API): the one-shot control-verb family -
+/// `ClientMsg::Control { proto, build, verb }` carrying [`ControlVerb`], and
+/// the replies `ServerMsg::{PaneList, PaneText, PaneSpawned, Ok, WaitDone,
+/// Err}`. Control connections handshake exactly like `Attach` (versioned, NOT
+/// pre-Attach-frozen); the frozen `Query`/`KillServer` pair is untouched.
+pub const PROTO_VERSION: u32 = 4;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -103,6 +109,52 @@ pub enum ClientMsg {
     /// Wire shape FROZEN forever: pre-Attach, bypasses the version handshake
     /// (Invariants, Phase 3 plan). Changing it means a NEW variant.
     KillServer,
+    /// The v4 script-API one-shot control connection (`fno mux pane ...`):
+    /// `proto`/`build` drive the SAME version handshake as `Attach` (control
+    /// verbs are versioned, unlike the frozen `Query`/`KillServer` pair -
+    /// AC4-FR), then `verb` runs and the server answers with exactly one reply
+    /// and closes. No `Attach`, no frame stream, no registered client.
+    Control {
+        proto: u32,
+        build: String,
+        verb: ControlVerb,
+    },
+}
+
+/// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
+/// one-shot request answered by exactly one [`ServerMsg`] reply. Versioned as
+/// part of `Control` (v4); a new verb or a shape change bumps `PROTO_VERSION`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ControlVerb {
+    /// Every pane across every squad -> [`ServerMsg::PaneList`].
+    PaneLs,
+    /// One pane's current visible grid text -> [`ServerMsg::PaneText`].
+    /// `lines` clamps to the last N grid rows (full grid when `None`);
+    /// scrollback is 4b, so this is the visible frame only.
+    PaneRead { pane: u64, lines: Option<u16> },
+    /// Spawn `argv` as a new pane in the squad `cwd` resolves to (created if
+    /// absent) -> [`ServerMsg::PaneSpawned`]. The agents-spawn-agents
+    /// primitive. `cols`/`rows` default to the VT defaults when `None`.
+    PaneRun {
+        cwd: String,
+        argv: Vec<String>,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    },
+    /// Write raw bytes to a pane's PTY (no focus change) -> [`ServerMsg::Ok`].
+    PaneSend { pane: u64, bytes: Vec<u8> },
+    /// Block until the pane's output settles (`quiet_ms` with no new output),
+    /// matches `pattern` (regex over the visible grid), the child exits, or
+    /// `timeout_ms` elapses -> [`ServerMsg::WaitDone`]. The deadline is
+    /// ALWAYS bounded (no infinite wait); the outcome distinguishes which.
+    PaneWait {
+        pane: u64,
+        quiet_ms: Option<u64>,
+        pattern: Option<String>,
+        timeout_ms: u64,
+    },
+    /// Close a pane by id (the `ClosePane` cascade) -> [`ServerMsg::Ok`].
+    PaneKill { pane: u64 },
 }
 
 /// Layout mutations the client can request. Interpreted (leader-key table)
@@ -176,6 +228,61 @@ pub enum ServerMsg {
         squads: u32,
         panes: u32,
     },
+    // -- v4 control-verb replies (one per Control connection, then close) --
+    /// Answer to [`ControlVerb::PaneLs`].
+    PaneList { panes: Vec<PaneInfo> },
+    /// Answer to [`ControlVerb::PaneRead`]: the pane's visible grid text
+    /// (matches [`crate::vt::frame_text`]).
+    PaneText { pane_id: u64, text: String },
+    /// Answer to [`ControlVerb::PaneRun`]: the fresh pane's id, machine-read
+    /// by the CLI so scripts compose.
+    PaneSpawned { pane_id: u64 },
+    /// A verb that carries no payload succeeded (`PaneSend`, `PaneKill`).
+    Ok,
+    /// Answer to [`ControlVerb::PaneWait`].
+    WaitDone { outcome: WaitOutcome },
+    /// A control verb failed (dead pane, spawn failure, version skew, ...).
+    /// `code` is one of [`err_code`]; `msg` is one human line.
+    Err { code: u32, msg: String },
+}
+
+/// One pane's metadata in a [`ServerMsg::PaneList`]. `cwd` is the squad's
+/// canonical root; `child_pid` is `None` only if the OS never reported one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PaneInfo {
+    pub pane_id: u64,
+    pub squad_id: u64,
+    pub tab_id: u64,
+    pub cwd: String,
+    pub child_pid: Option<u32>,
+    pub title: Option<String>,
+}
+
+/// Why a [`ControlVerb::PaneWait`] returned. The CLI maps each to a distinct
+/// exit code (AC4-EDGE: timeout is tellable apart from a match and a settle).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// No new output for `quiet_ms`.
+    Quiet,
+    /// The `pattern` matched the visible grid.
+    Matched,
+    /// `timeout_ms` elapsed with neither condition met.
+    Timeout,
+    /// The pane's child exited (or the pane was closed) while waiting.
+    PaneExited,
+}
+
+/// `ServerMsg::Err` codes. One namespace so the CLI's exit-code mapping and
+/// the server's error construction never drift.
+pub mod err_code {
+    /// A pane id that no live pane owns (read/send/wait/kill).
+    pub const DEAD_PANE: u32 = 1;
+    /// A control connection whose `proto` disagrees with the server (AC4-FR).
+    pub const VERSION_SKEW: u32 = 2;
+    /// `PaneRun` could not spawn the child (no PTY, argv not executable).
+    pub const SPAWN_FAILED: u32 = 3;
+    /// A malformed request the server could parse but not act on.
+    pub const BAD_REQUEST: u32 = 4;
 }
 
 /// One tab's catalog entry inside [`ServerMsg::Layout`]. `id` is the stable
@@ -600,6 +707,88 @@ mod tests {
                 clients: 2,
                 squads: 1,
                 panes: 3,
+            },
+        ] {
+            let bytes = encode(&msg).unwrap();
+            let mut cursor = std::io::Cursor::new(bytes);
+            let decoded: ServerMsg = read_msg_sync(&mut cursor).unwrap();
+            assert_eq!(decoded, msg);
+        }
+    }
+
+    #[test]
+    fn proto_v4_control_verbs_roundtrip() {
+        // Every control verb survives the codec inside the versioned Control
+        // envelope (mirrors the v3 discipline). PROTO_VERSION rides along so a
+        // skew is detectable server-side.
+        for verb in [
+            ControlVerb::PaneLs,
+            ControlVerb::PaneRead {
+                pane: 3,
+                lines: Some(40),
+            },
+            ControlVerb::PaneRead {
+                pane: 3,
+                lines: None,
+            },
+            ControlVerb::PaneRun {
+                cwd: "/code/footnote".into(),
+                argv: vec!["claude".into(), "--print".into()],
+                cols: Some(120),
+                rows: None,
+            },
+            ControlVerb::PaneSend {
+                pane: 5,
+                bytes: b"hello\r".to_vec(),
+            },
+            ControlVerb::PaneWait {
+                pane: 5,
+                quiet_ms: Some(200),
+                pattern: Some("done".into()),
+                timeout_ms: 5000,
+            },
+            ControlVerb::PaneKill { pane: 5 },
+        ] {
+            let msg = ClientMsg::Control {
+                proto: PROTO_VERSION,
+                build: BUILD_VERSION.into(),
+                verb,
+            };
+            let bytes = encode(&msg).unwrap();
+            let mut cursor = std::io::Cursor::new(bytes);
+            let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
+            assert_eq!(decoded, msg);
+        }
+    }
+
+    #[test]
+    fn proto_v4_control_replies_roundtrip() {
+        for msg in [
+            ServerMsg::PaneList {
+                panes: vec![PaneInfo {
+                    pane_id: 4,
+                    squad_id: 1,
+                    tab_id: 7,
+                    cwd: "/code/footnote".into(),
+                    child_pid: Some(4242),
+                    title: None,
+                }],
+            },
+            ServerMsg::PaneText {
+                pane_id: 4,
+                text: "marker-42\n$ ".into(),
+            },
+            ServerMsg::PaneSpawned { pane_id: 9 },
+            ServerMsg::Ok,
+            ServerMsg::WaitDone {
+                outcome: WaitOutcome::Quiet,
+            },
+            ServerMsg::WaitDone {
+                outcome: WaitOutcome::Timeout,
+            },
+            ServerMsg::Err {
+                code: err_code::DEAD_PANE,
+                msg: "no such pane: 99".into(),
             },
         ] {
             let bytes = encode(&msg).unwrap();

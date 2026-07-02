@@ -1302,14 +1302,20 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
             }
-            // A second Attach (or a pre-Attach-only Query/KillServer) on a
-            // live connection is a protocol violation: log it (this stderr is
-            // the session log) and close rather than acting on a confused
-            // stream.
-            Ok(msg @ (ClientMsg::Attach { .. } | ClientMsg::Query | ClientMsg::KillServer)) => {
+            // A second Attach, a pre-Attach-only Query/KillServer, or a
+            // one-shot Control on a live connection is a protocol violation:
+            // log it (this stderr is the session log) and close rather than
+            // acting on a confused stream.
+            Ok(
+                msg @ (ClientMsg::Attach { .. }
+                | ClientMsg::Query
+                | ClientMsg::KillServer
+                | ClientMsg::Control { .. }),
+            ) => {
                 let name = match msg {
                     ClientMsg::Attach { .. } => "Attach",
                     ClientMsg::Query => "Query",
+                    ClientMsg::Control { .. } => "Control",
                     _ => "KillServer",
                 };
                 eprintln!("fno mux: client {id} sent {name} on a live connection; dropping it");

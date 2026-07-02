@@ -614,9 +614,19 @@ async fn attach_and_run(
                 }
                 view.frames.insert(pane_id, frame);
             }
-            // Info only ever answers a pre-Attach Query; on an attached
-            // connection it is stray - ignore rather than desync.
-            Ok(ServerMsg::Notice { .. }) | Ok(ServerMsg::Info { .. }) => {}
+            // Info answers a pre-Attach Query; the v4 control-verb replies
+            // answer one-shot `fno mux pane` connections. Neither belongs on
+            // an attached connection - ignore rather than desync.
+            Ok(
+                ServerMsg::Notice { .. }
+                | ServerMsg::Info { .. }
+                | ServerMsg::PaneList { .. }
+                | ServerMsg::PaneText { .. }
+                | ServerMsg::PaneSpawned { .. }
+                | ServerMsg::Ok
+                | ServerMsg::WaitDone { .. }
+                | ServerMsg::Err { .. },
+            ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
     }
@@ -715,6 +725,14 @@ async fn attach_and_run(
                     }
                 }
                 Ok(ServerMsg::Info { .. }) => {} // pre-Attach-only answer; stray here
+                // v4 control-verb replies belong to one-shot `fno mux pane`
+                // connections, never an attached client's stream: ignore.
+                Ok(ServerMsg::PaneList { .. }
+                    | ServerMsg::PaneText { .. }
+                    | ServerMsg::PaneSpawned { .. }
+                    | ServerMsg::Ok
+                    | ServerMsg::WaitDone { .. }
+                    | ServerMsg::Err { .. }) => {}
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
                 Err(ProtoError::Closed) => {
                     break Ok(exit_with_notice("session ended (server closed)".into()));

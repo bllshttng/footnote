@@ -358,6 +358,14 @@ impl FakeClient {
             ServerMsg::Bye { reason } => self.byes.push(reason),
             // Answers a pre-Attach Query only; stray on an attached client.
             ServerMsg::Info { .. } => {}
+            // v4 control-verb replies belong to one-shot `fno mux pane`
+            // connections, never this attached client - ignore.
+            ServerMsg::PaneList { .. }
+            | ServerMsg::PaneText { .. }
+            | ServerMsg::PaneSpawned { .. }
+            | ServerMsg::Ok
+            | ServerMsg::WaitDone { .. }
+            | ServerMsg::Err { .. } => {}
         }
     }
 
