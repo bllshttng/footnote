@@ -201,6 +201,53 @@ def _plan_line(plan_path: Optional[str], project_root: Path) -> str:
     return reconcile_plan(plan_path, project_root).summary()
 
 
+def _render_boundary(verdicts: list) -> str:
+    """Collapse per-blocker verdicts to one line. STALE > unknown > reconciled >
+    fresh -- a single stale blocker is the actionable signal Step 0 keys on."""
+    if not verdicts:
+        return "fresh (no blockers)"
+    stale = [v for v in verdicts if v.verdict == "stale"]
+    unknown = [v for v in verdicts if v.verdict == "unknown"]
+    reconciled = [v for v in verdicts if v.verdict == "reconciled"]
+    if stale:
+        clauses = [
+            f"{v.blocker_id} ("
+            f"{('PR #' + str(v.pr_number)) if v.pr_number else 'no PR'}"
+            f"{', merged ' + v.completed_at[:10] if v.completed_at else ''})"
+            for v in stale
+        ]
+        return "STALE vs " + ", ".join(clauses) + " - Step 0 required"
+    if unknown:
+        return "unknown (" + "; ".join(f"{v.blocker_id}: {v.reason}" for v in unknown) + ")"
+    if reconciled:
+        return "reconciled (" + ", ".join(f"{v.blocker_id} marker present" for v in reconciled) + ")"
+    return "fresh (no done blocker newer than plan)"
+
+
+def _boundary_line(
+    node_id: Optional[str], plan_path: Optional[str], project_root: Path
+) -> str:
+    """Boundary-reconcile verdict for the report (x-d0ad). Advisory: the /target
+    spine's Step 0 is what mandates acting on STALE. Never raises."""
+    if not node_id:
+        return "fresh (no node bound)"
+    try:
+        entry = _graph_entry(node_id, project_root)
+    except Exception as exc:  # noqa: BLE001 - degrade, never abort the report
+        return f"unknown (graph unreadable: {exc})"
+    if entry is None:
+        return "unknown (not in graph)"
+    try:
+        from fno.graph.load import load_graph
+        from fno.paths import graph_json
+        from fno.plan.boundary import boundary_reconcile
+
+        verdicts = boundary_reconcile(entry, plan_path, load_graph(graph_json()))
+    except Exception as exc:  # noqa: BLE001
+        return f"unknown ({exc})"
+    return _render_boundary(verdicts)
+
+
 # --- assembly + render -------------------------------------------------------
 
 def build_report(
@@ -217,6 +264,7 @@ def build_report(
         OrientLine("worktree", _worktree_line(project_root, node_id)),
         OrientLine("tests", _tests_line(project_root)),
         OrientLine("plan", _plan_line(plan_path, project_root)),
+        OrientLine("boundary-reconcile", _boundary_line(node_id, plan_path, project_root)),
         OrientLine("done-when", _done_when_line(manifest_raw, project_root)),
     ]
 
@@ -303,7 +351,8 @@ def _self_check() -> None:
         os.environ.pop("TARGET_UNATTENDED", None)
         lines = build_report(root, node_id=None, plan_path=None, manifest_raw=None)
         assert [ln.label for ln in lines] == [
-            "node", "attended", "worktree", "tests", "plan", "done-when",
+            "node", "attended", "worktree", "tests", "plan",
+            "boundary-reconcile", "done-when",
         ], lines
         by = {ln.label: ln.value for ln in lines}
         assert by["node"].startswith("fresh"), by
