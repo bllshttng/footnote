@@ -26,6 +26,26 @@ fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let mut perms = fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&path, perms).unwrap();
+    // Probe-exec until the script actually runs. A parallel test's fork can
+    // inherit the just-written fd (CLOEXEC closes it only at the CHILD's
+    // exec), so the verb under test exec'ing this script can hit ETXTBSY,
+    // read the mock as "unavailable", and degrade fail-open - the
+    // ac1_fr/ac2_edge/ac5_hp "allow where block expected" CI flake family.
+    // Mock bodies are side-effect-free echoes, so one probe run is harmless;
+    // any non-ETXTBSY outcome (nonzero exits included) proves exec works.
+    for _ in 0..100 {
+        match std::process::Command::new(&path)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            _ => break,
+        }
+    }
     path
 }
 
