@@ -289,13 +289,14 @@ impl Pane {
     /// Text from absolute row `anchor` down to the current output bottom (cursor
     /// line), plus whether the span is possibly `truncated` at its top.
     ///
-    // ponytail: `history_size()` saturates at the scrollback cap and alacritty
-    // exposes no post-cap scroll counter (VoidListener), so once the pane fills
-    // its scrollback we cannot prove a block's top survived - `truncated` is
-    // then conservatively true (older rows of a large block MAY have evicted).
-    // Below the cap it is exact-false: nothing has scrolled off, so the whole
-    // span is present. Upgrade path for a precise flag: a self-maintained
-    // scrolled-off counter fed from a real EventListener.
+    // ponytail: `history_size()` saturates at the scrollback cap, so once the
+    // pane fills its scrollback the anchor stops tracking scrolled-off lines and
+    // the extracted span drifts - `truncated` is then conservatively true (the
+    // read may be incomplete). Below the cap it is exact-false: nothing has
+    // scrolled off, so the whole span is present (the common case at 100k).
+    // alacritty 0.26 emits no scroll event, so a scrolled-off counter can't be
+    // maintained; the real fix is to accumulate the C..D output byte span
+    // instead of reading the grid (tracked as a follow-up).
     fn extract_from(&self, anchor: u64) -> (String, bool) {
         let grid = self.term.grid();
         let hist = grid.history_size();
