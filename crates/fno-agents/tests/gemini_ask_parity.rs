@@ -565,6 +565,7 @@ fn gemini_registry_entry(name: &str, cwd: &str, sid: &str, log_path: &str) -> Re
         last_reconciled_at: None,
         inside_leg: None,
         exited_at: None,
+        mux: None,
     }
 }
 

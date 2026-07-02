@@ -1730,6 +1730,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         last_reconciled_at: None,
         inside_leg: None,
         exited_at: None,
+        mux: None,
     };
     // Reserve the name atomically UNDER the exclusive registry lock. The
     // lock-free collision check above can be passed by two concurrent
@@ -2023,6 +2024,7 @@ fn build_claude_stream_entry(
         last_reconciled_at: None,
         inside_leg: None,
         exited_at: None,
+        mux: None,
     }
 }
 
@@ -5397,6 +5399,7 @@ mod tests {
             last_reconciled_at: None,
             inside_leg: None,
             exited_at: exited_at.map(str::to_string),
+            mux: None,
         }
     }
 
@@ -5498,6 +5501,7 @@ mod tests {
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -5561,6 +5565,7 @@ mod tests {
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -5607,6 +5612,7 @@ mod tests {
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -5719,6 +5725,7 @@ mod tests {
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -5802,6 +5809,7 @@ mod tests {
             last_reconciled_at: None,
             inside_leg: None,
             exited_at: None,
+            mux: None,
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -5833,6 +5841,7 @@ mod tests {
             last_reconciled_at: last_reconciled.map(String::from),
             inside_leg: None,
             exited_at: None,
+            mux: None,
         }
     }
 
@@ -6706,6 +6715,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -7390,6 +7400,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -7753,6 +7764,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -7813,6 +7825,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -7865,6 +7878,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -7927,6 +7941,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -8040,6 +8055,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -8202,6 +8218,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -8321,6 +8338,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();
@@ -8431,6 +8449,7 @@ done
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();

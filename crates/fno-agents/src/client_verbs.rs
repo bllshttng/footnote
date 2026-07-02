@@ -377,7 +377,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// reads of v1..=v4 are retained. Anything else is a hard error - which is the
 /// point of each bump: a pre-inside-leg reader pinned to {1,2,3,4} rejects a v5
 /// store instead of silently dropping the inside-leg report.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced

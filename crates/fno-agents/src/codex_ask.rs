@@ -1145,6 +1145,7 @@ fn dispatch_create(
         last_reconciled_at: None,
         inside_leg: None,
         exited_at: None,
+        mux: None,
     };
 
     match update_registry(registry_path, |reg| {

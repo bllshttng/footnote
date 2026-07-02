@@ -251,8 +251,8 @@ def test_ac3_hp_flock_blocks_concurrent_write(tmp_path: Path, monkeypatch) -> No
 def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> None:
     """AC4-ERR: loading a file with a future schema_version raises RegistryVersionError.
 
-    SCHEMA_VERSION is now 5 (inside-out E3.1 inside_leg forward-compat bump); v6
-    is the future-drift case.
+    SCHEMA_VERSION is now 6 (4a-G2 mux-ref forward-compat bump); v7 is the
+    future-drift case.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -261,15 +261,15 @@ def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> No
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
-        json.dumps({"schema_version": 6, "agents": []}), encoding="utf-8"
+        json.dumps({"schema_version": 7, "agents": []}), encoding="utf-8"
     )
 
     with pytest.raises(RegistryVersionError) as exc_info:
         load_registry(path=registry_path)
 
     msg = str(exc_info.value)
-    assert "6" in msg  # read version present
-    assert "5" in msg  # expected version present
+    assert "7" in msg  # read version present
+    assert "6" in msg  # expected version present
 
 
 def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatch) -> None:
@@ -287,7 +287,9 @@ def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatc
     with pytest.raises(RegistryVersionError, match=r"99") as exc_info:
         load_registry(path=registry_path)
 
-    assert "4" in str(exc_info.value)
+    from fno.agents.registry import SCHEMA_VERSION
+
+    assert f"schema_version={SCHEMA_VERSION}" in str(exc_info.value)
 
 
 def test_ac4_err_unknown_provider_in_row_rejected(tmp_path: Path, monkeypatch) -> None:
@@ -547,14 +549,14 @@ def test_ac5_hp_write_registry_uses_paths_default(tmp_path: Path, monkeypatch) -
 
 
 def test_us2_schema_version_is_three() -> None:
-    """The on-disk schema version is 5 after the inside-out E3.1 inside_leg bump.
+    """The on-disk schema version is 6 after the 4a-G2 mux-ref bump.
 
     (Test name retained for greppability of the original US2 commit;
     the value tracks the latest bump.)
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 5
+    assert SCHEMA_VERSION == 6
 
 
 def test_us2_agent_entry_has_status_and_last_message_at() -> None:
@@ -673,11 +675,11 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
     """The v4 host_mode forward-compat bump reads cleanly with host_mode
     preserved, and the widened accepted range still reads v1..=v4 (the bump
     must not drop back-compat reads; ab-a171ceb2). The current SCHEMA_VERSION
-    is 5 after the inside-out E3.1 inside_leg bump."""
+    is 6 after the 4a-G2 mux-ref bump."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import SCHEMA_VERSION, load_registry
 
-    assert SCHEMA_VERSION == 5
+    assert SCHEMA_VERSION == 6
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1505,3 +1507,75 @@ def test_python_write_emits_rust_readable_values(tmp_path: Path, monkeypatch) ->
     assert row["cc_session_id"] is None
     # `session_id` is a @property, never serialized as a stored field.
     assert "session_id" not in row
+
+
+# ---------------------------------------------------------------------------
+# 4a-G2: mux ref mirror + one-live-ref invariant
+# ---------------------------------------------------------------------------
+
+
+def test_mux_ref_roundtrips_and_reaches_rust_shape(tmp_path: Path, monkeypatch) -> None:
+    """The mux ref survives a Python write/read cycle and serializes as the
+    exact ``{"session": ..., "pane_id": ...}`` dict the Rust ``MuxRef``
+    deserializes (X3 mixed-language rule)."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    entry = AgentEntry(
+        name="mux-agent",
+        provider="claude",
+        cwd="/p",
+        log_path="/l",
+        mux={"session": "work", "pane_id": 7},
+    )
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    write_registry([entry], path=registry_path)
+
+    raw = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert raw["agents"][0]["mux"] == {"session": "work", "pane_id": 7}
+
+    loaded = load_registry(path=registry_path)
+    assert loaded[0].mux == {"session": "work", "pane_id": 7}
+    # Non-mux rows carry an explicit null (Rust reads it as None).
+    entry_plain = AgentEntry(name="plain", provider="claude", cwd="/p", log_path="/l")
+    assert entry_plain.mux is None
+
+
+def test_write_registry_rejects_double_ref_rows(tmp_path: Path, monkeypatch) -> None:
+    """One live ref per row (brief Locked 7): a mux ref alongside a worker
+    short_id or a bg-thread claude_short_id is refused at write time, and the
+    prior store is left intact."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    write_registry(
+        [AgentEntry(name="ok", provider="claude", cwd="/p", log_path="/l")],
+        path=registry_path,
+    )
+
+    worker_double = AgentEntry(
+        name="w",
+        provider="codex",
+        cwd="/p",
+        log_path="/l",
+        short_id="wk-1",
+        mux={"session": "main", "pane_id": 1},
+    )
+    with pytest.raises(ValueError, match="one live ref"):
+        write_registry([worker_double], path=registry_path)
+
+    bg_double = AgentEntry(
+        name="b",
+        provider="claude",
+        cwd="/p",
+        log_path="/l",
+        claude_short_id="abcd1234",
+        mux={"session": "main", "pane_id": 2},
+    )
+    with pytest.raises(ValueError, match="one live ref"):
+        write_registry([bg_double], path=registry_path)
+
+    # The refused writes must not have clobbered the store.
+    raw = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert [r["name"] for r in raw["agents"]] == ["ok"]
