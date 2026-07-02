@@ -231,12 +231,19 @@ fn server_spine_output_flood_stays_responsive() {
     wait_for_frame(&mut stream, 15, |text| {
         text.lines().filter(|l| l.trim() == "y").count() >= 5 || text.contains("FLOOD-DONE")
     });
+    // The typed line carries quotes so only the OUTPUT is bare, and the
+    // match is contains-based: input landing during the pipeline teardown
+    // can lose its echo-back to the tty line-discipline flush (the Phase 1
+    // codex P1 class), gluing the output onto the prompt line
+    // ("$ after-flood") - the input still landed, which is what this test
+    // proves.
     send(
         &mut stream,
-        &ClientMsg::Input(b"echo after-flood\r".to_vec()),
+        &ClientMsg::Input(b"echo af\"ter\"-flood\r".to_vec()),
     );
     wait_for_frame(&mut stream, 30, |text| {
-        text.lines().any(|l| l.trim() == "after-flood")
+        text.lines()
+            .any(|l| l.contains("after-flood") && !l.contains('"'))
     });
 }
 
