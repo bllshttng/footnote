@@ -81,7 +81,11 @@ fn copy_via_tool(text: &str) -> Option<&'static str> {
             .stdin
             .take()
             .is_some_and(|mut s| s.write_all(text.as_bytes()).is_ok());
-        if wrote && child.wait().map(|s| s.success()).unwrap_or(false) {
+        // Always reap the child before moving on: dropping `Child` does not
+        // wait, so a helper that spawned then died (e.g. no display) would
+        // otherwise leak a zombie for the mux client's lifetime.
+        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        if wrote && ok {
             return Some(name);
         }
     }

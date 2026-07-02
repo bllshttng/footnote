@@ -838,6 +838,11 @@ async fn attach_and_run(
     let mut scanner = Scanner::default();
     // Carries a partial SGR mouse report split across reads (mouse.rs).
     let mut mouse_carry: Vec<u8> = Vec::new();
+    // Clipboard delivery runs on a blocking thread and reports its outcome back
+    // here, so a hanging helper (xclip on a dead X11 link) never parks the UI
+    // select loop - the loop keeps draining stdin/frames while the copy lands.
+    let (copy_tx, mut copy_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(usize, crate::clipboard::CopyOutcome)>();
     compositor
         .draw(&view.compose())
         .map_err(|e| format!("draw: {e}"))?;
@@ -896,34 +901,17 @@ async fn attach_and_run(
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback
-                    // (Locked 5). The status flash makes the auto-copy observable
-                    // (AC2-HP); a hard failure sounds BEL (AC2-ERR). The exec chain
-                    // spawns and waits on a clipboard tool (xclip can hang on a slow
-                    // X11 connection), so it runs on a blocking thread rather than
-                    // freezing the event loop.
+                    // (Locked 5). The exec chain can hang (xclip on a slow X11
+                    // link), so delivery runs on a blocking thread and reports its
+                    // outcome back over `copy_tx` - NOT awaited here, so the select
+                    // loop keeps draining stdin/frames meanwhile. The status flash
+                    // (below, on the outcome arm) makes the copy observable.
                     let chars = text.chars().count();
-                    let outcome = tokio::task::spawn_blocking(move || {
-                        crate::clipboard::deliver(&text, raw_out)
-                    })
-                    .await
-                    .unwrap_or(crate::clipboard::CopyOutcome::Failed);
-                    let notice = match outcome {
-                        crate::clipboard::CopyOutcome::Local(_) => format!("copied {chars} chars"),
-                        crate::clipboard::CopyOutcome::Osc52 { truncated: false } => {
-                            format!("copied {chars} chars")
-                        }
-                        crate::clipboard::CopyOutcome::Osc52 { truncated: true } => {
-                            format!("copied {chars} chars (truncated to clipboard limit)")
-                        }
-                        crate::clipboard::CopyOutcome::Failed => {
-                            let _ = raw_out(b"\x07");
-                            "copy failed: no clipboard tool and OSC 52 blocked".to_string()
-                        }
-                    };
-                    view.set_notice(notice);
-                    if let Err(e) = compositor.draw(&view.compose()) {
-                        break Err(format!("draw: {e}"));
-                    }
+                    let tx = copy_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let outcome = crate::clipboard::deliver(&text, raw_out);
+                        let _ = tx.send((chars, outcome));
+                    });
                 }
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
                 Err(ProtoError::Closed) => {
@@ -950,6 +938,27 @@ async fn attach_and_run(
                 // the time we see None we cannot tell which, so say so.
                 None => break Ok(exit_with_notice("stdin ended (closed or read error); detached".into())),
             },
+            Some((chars, outcome)) = copy_rx.recv() => {
+                // A clipboard delivery finished on its blocking thread: flash the
+                // result (AC2-HP) or sound BEL on hard failure (AC2-ERR).
+                let notice = match outcome {
+                    crate::clipboard::CopyOutcome::Local(_)
+                    | crate::clipboard::CopyOutcome::Osc52 { truncated: false } => {
+                        format!("copied {chars} chars")
+                    }
+                    crate::clipboard::CopyOutcome::Osc52 { truncated: true } => {
+                        format!("copied {chars} chars (truncated to clipboard limit)")
+                    }
+                    crate::clipboard::CopyOutcome::Failed => {
+                        let _ = raw_out(b"\x07");
+                        "copy failed: no clipboard tool and OSC 52 blocked".to_string()
+                    }
+                };
+                view.set_notice(notice);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             _ = winch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
                     view.term = (rows, cols);
