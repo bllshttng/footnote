@@ -105,6 +105,43 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
 }
 
 #[test]
+fn persistence_multi_pane_reattach_is_screen_exact() {
+    // AC3-HP/AC5-FR generalized to N panes through the REAL client: build a
+    // split via leader chords, put distinct markers in both panes, detach,
+    // reattach - the settled screen (chrome + both panes) is byte-identical.
+    let scratch = Scratch::new("multipane");
+    let mut h = ClientHarness::spawn(&scratch);
+    h.wait_prompt(15);
+    h.type_bytes(b"\x02%"); // leader+% : split H, focus lands right
+    h.wait_screen(15, |s| s.lines().skip(1).any(|l| l.contains('│')));
+    h.type_bytes(b"echo marker-right\r");
+    h.wait_screen(15, |s| s.contains("marker-right"));
+    h.type_bytes(b"\x02h"); // leader+h : focus left
+    h.type_bytes(b"echo marker-left\r");
+    h.wait_screen(15, |s| s.contains("marker-left"));
+    let before = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let a = h.screen();
+            std::thread::sleep(Duration::from_millis(150));
+            let b = h.screen();
+            if a == b {
+                break b;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("screen never settled; last:\n{b}");
+            }
+        }
+    };
+    h.type_bytes(&[0x1C]);
+    assert!(h.wait_exit(10).success());
+    drop(h);
+
+    let mut h2 = ClientHarness::spawn(&scratch);
+    h2.wait_screen(15, |s| s == before);
+}
+
+#[test]
 fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
     // AC4-HP / exit criterion 3: the client dies without ANY protocol
     // goodbye; the server keeps the PTY and child, and a reattach works.
