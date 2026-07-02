@@ -147,7 +147,7 @@ def test_boundary_line_graph_error_degrades(monkeypatch) -> None:  # AC8-FR
 def test_render_boundary_verdicts() -> None:  # AC4-UI all four verdict shapes
     from fno.plan.boundary import BlockerVerdict
 
-    assert orient._render_boundary([]) == "fresh (no blockers)"
+    assert orient._render_boundary([]) == "fresh (no landed blocker to reconcile)"
     stale = orient._render_boundary(
         [BlockerVerdict("x-e317", "stale", pr_number=141, completed_at="2026-07-02T09:12:12+00:00")]
     )

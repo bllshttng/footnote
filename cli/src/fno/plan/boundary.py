@@ -6,10 +6,13 @@ computes, per done blocker, a mechanical staleness verdict for the orientation
 report:
 
   reconciled  -- the plan already carries the blocker's landed-marker (the
-                 resume/handoff case). Checked FIRST so a reconcile append that
-                 bumps mtime never masks a *different* blocker that merged later.
+                 resume/handoff case). Checked FIRST, per blocker.
   fresh       -- the plan/brief file mtime is newer than the blocker's
-                 ``completed_at``: nothing to reconcile.
+                 ``completed_at`` AND the doc carries no reconcile markers yet.
+                 Once Step 0 has appended any marker, mtime is a poisoned proxy
+                 (the append bumped it), so an un-markered blocker reads *stale*
+                 instead -- that is what stops an A-reconcile append from masking
+                 a different blocker B that merged later.
   stale       -- neither: the /target spine's Step 0 must read the blocker's
                  landed diff and append a section before the first code commit.
   unknown     -- detection failed for this entry (bad graph/stat/pr). Rendered,
@@ -27,10 +30,11 @@ the appended plan section IS the durable marker.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -93,17 +97,33 @@ def _reconcile_against(text: str) -> list[str]:
     return []
 
 
+def _is_marker_heading(s: str) -> bool:
+    return s.startswith("#") and "landed" in s.lower()
+
+
+def _has_any_marker(text: str) -> bool:
+    """True if the doc carries ANY ``### ... landed ...`` heading -- i.e. Step 0
+    has run at least once. Once it has, the file mtime is a poisoned freshness
+    proxy (the reconcile append bumped it), so un-markered blockers must not be
+    trusted as fresh on mtime alone."""
+    return any(_is_marker_heading(line.strip()) for line in text.splitlines())
+
+
 def _marker_present(text: str, blocker_id: str, pr_number: Optional[int]) -> bool:
     """True if a ``### <blocker-id> landed ...`` heading (id OR PR-number match)
-    is already in the doc -- the idempotence marker Step 0 writes."""
-    bid = blocker_id.lower()
+    is already in the doc -- the idempotence marker Step 0 writes. Both keys match
+    on a TOKEN boundary so ``x-14`` does not match ``x-141`` and ``#2`` does not
+    match ``#20``."""
+    # (?<![\w-]) / (?!\w) so a hyphenated id is matched whole, not as a prefix.
+    id_re = re.compile(rf"(?<![\w-]){re.escape(blocker_id)}(?![\w-])", re.IGNORECASE)
+    pr_re = re.compile(rf"#{pr_number}(?!\d)") if pr_number is not None else None
     for line in text.splitlines():
         s = line.strip()
-        if not s.startswith("#") or "landed" not in s.lower():
+        if not _is_marker_heading(s):
             continue
-        if bid in s.lower():
+        if id_re.search(s):
             return True
-        if pr_number is not None and f"#{pr_number}" in s:
+        if pr_re is not None and pr_re.search(s):
             return True
     return False
 
@@ -118,7 +138,7 @@ def _is_fresh(completed_at: str, mtime: float) -> bool:
 
 
 def _evaluate(
-    entry: Optional[dict], explicit: bool, text: str, mtime: float
+    entry: Optional[dict], explicit: bool, text: str, mtime: float, doc_markered: bool
 ) -> Optional[BlockerVerdict]:
     """Verdict for one blocker, or None to skip it silently. ``explicit`` marks a
     ``reconcile_against:`` entry -- those surface as ``unknown`` instead of a
@@ -149,7 +169,11 @@ def _evaluate(
         fresh = _is_fresh(completed, mtime)
     except (ValueError, TypeError):
         return BlockerVerdict(bid, "unknown", pr_number=pr, completed_at=completed, reason="bad completed_at")
-    verdict = "fresh" if fresh else "stale"
+    # mtime-fresh is trustworthy ONLY on an un-touched doc. Once Step 0 has
+    # appended any marker (doc_markered), that append bumped the file mtime past
+    # this un-markered blocker's completed_at, which would false-fresh it and mask
+    # real drift. Bias to stale (a wasted diff read) over masking (the bad way).
+    verdict = "fresh" if (fresh and not doc_markered) else "stale"
     return BlockerVerdict(bid, verdict, pr_number=pr, completed_at=completed)
 
 
@@ -183,16 +207,17 @@ def boundary_reconcile(
                 pairs.append((tok, True))
                 seen.add(tok.lower())
 
+        doc_markered = _has_any_marker(text)
         out: list[BlockerVerdict] = []
         for token, explicit in pairs:
             try:
-                v = _evaluate(_find(graph, token), explicit, text, mtime)
+                v = _evaluate(_find(graph, token), explicit, text, mtime, doc_markered)
             except Exception as exc:  # noqa: BLE001 - one bad blocker never sinks the rest
                 v = BlockerVerdict(token, "unknown", reason=str(exc))
             if v is not None:
                 # carry the input token when the entry could not name itself
                 if v.blocker_id == "(unknown)":
-                    v = BlockerVerdict(token, v.verdict, v.pr_number, v.completed_at, v.reason)
+                    v = replace(v, blocker_id=token)
                 out.append(v)
         return out
     except Exception as exc:  # noqa: BLE001 - AC8-FR: detection never crashes init

@@ -63,6 +63,35 @@ def test_independent_blockers_marker_does_not_mask_later(tmp_path: Path) -> None
     assert verdicts == {"x-blk": "reconciled", "x-late": "stale"}
 
 
+def test_marker_pr_number_no_substring_false_match() -> None:
+    # A #20 heading must NOT satisfy the marker check for a blocker with PR #2.
+    from fno.plan.boundary import _marker_present
+
+    assert _marker_present("### x-other landed (PR #20)", "x-blk", 2) is False
+    assert _marker_present("### z landed (PR #123)", "z-blk", 12) is False
+    # exact PR match still works, even with trailing punctuation.
+    assert _marker_present("### z landed (PR #12, merged)", "z-blk", 12) is True
+
+
+def test_marker_id_no_substring_false_match() -> None:
+    # `x-14` must NOT match a heading for `x-141` (hyphenated-id prefix).
+    from fno.plan.boundary import _marker_present
+
+    assert _marker_present("### x-141 landed (PR #9)", "x-14", None) is False
+    assert _marker_present("### x-14 landed (PR #9)", "x-14", None) is True
+
+
+def test_mtime_poisoned_after_any_marker_reads_stale(tmp_path: Path) -> None:
+    # Reconciling x-blk (marker + mtime bumped to now) must NOT false-fresh a
+    # different, un-markered blocker (x-late) that merged before the plan edit.
+    late = {"id": "x-late", "_status": "done", "pr_number": 200, "completed_at": "2026-06-01T00:00:00+00:00"}
+    # mtime = now (NOT epoch): x-late would read fresh on mtime alone.
+    plan = _plan(tmp_path / "p.md", "# plan\n### x-blk landed (PR #141)\n")
+    node = {"id": "x-dep", "blocked_by": ["x-blk", "x-late"]}
+    verdicts = {v.blocker_id: v.verdict for v in boundary_reconcile(node, str(plan), [_DONE, late])}
+    assert verdicts == {"x-blk": "reconciled", "x-late": "stale"}
+
+
 def test_open_blocker_skipped(tmp_path: Path) -> None:
     plan = _plan(tmp_path / "p.md", "# plan\n", epoch=True)
     node = {"id": "x-dep", "blocked_by": ["x-open"]}

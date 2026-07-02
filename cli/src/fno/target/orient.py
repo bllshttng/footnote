@@ -205,7 +205,8 @@ def _render_boundary(verdicts: list) -> str:
     """Collapse per-blocker verdicts to one line. STALE > unknown > reconciled >
     fresh -- a single stale blocker is the actionable signal Step 0 keys on."""
     if not verdicts:
-        return "fresh (no blockers)"
+        # empty covers both "no blockers" and "blockers all skipped as not-stale"
+        return "fresh (no landed blocker to reconcile)"
     stale = [v for v in verdicts if v.verdict == "stale"]
     unknown = [v for v in verdicts if v.verdict == "unknown"]
     reconciled = [v for v in verdicts if v.verdict == "reconciled"]
@@ -243,9 +244,11 @@ def _boundary_line(
         from fno.plan.boundary import boundary_reconcile
 
         verdicts = boundary_reconcile(entry, plan_path, load_graph(graph_json()))
-    except Exception as exc:  # noqa: BLE001
+        return _render_boundary(verdicts)
+    except Exception as exc:  # noqa: BLE001 - render inside the try so the
+        # module's "each line resolves independently, never abort" contract holds
+        # even if _render_boundary itself raises on malformed verdict data.
         return f"unknown ({exc})"
-    return _render_boundary(verdicts)
 
 
 # --- assembly + render -------------------------------------------------------
@@ -257,7 +260,7 @@ def build_report(
     plan_path: Optional[str] = None,
     manifest_raw: Optional[Dict[str, Any]] = None,
 ) -> List[OrientLine]:
-    """Resolve all six orientation lines. Read-only; never raises."""
+    """Resolve all seven orientation lines. Read-only; never raises."""
     return [
         OrientLine("node", _node_line(node_id, project_root, manifest_raw)),
         OrientLine("attended", _attended_line(manifest_raw)),
