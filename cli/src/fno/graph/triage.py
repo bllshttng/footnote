@@ -1017,13 +1017,22 @@ def cmd_health(
 
         # Batch state (and its journal) is canonical-rooted, like fno.claims;
         # the collision repo_root above is the working checkout, which differs
-        # inside a linked worktree.
-        try:
-            from fno.paths import resolve_canonical_repo_root
+        # inside a linked worktree. When the health scope is a --project with a
+        # mapped root, read THAT repo's journal (a controller checkout scoped
+        # to another project must not report its own repo's batching) - codex
+        # P2 on this PR. Unmapped/absent project falls back to ambient.
+        _events_root = None
+        if project:
+            _proj_root = _root_cache.get(project, project_root_from_settings(project))
+            if _proj_root:
+                _events_root = _Path(_proj_root)
+        if _events_root is None:
+            try:
+                from fno.paths import resolve_canonical_repo_root
 
-            _events_root = resolve_canonical_repo_root()
-        except Exception:  # noqa: BLE001 - outside a git repo, fall back to cwd
-            _events_root = _Path.cwd()
+                _events_root = resolve_canonical_repo_root()
+            except Exception:  # noqa: BLE001 - outside a git repo, fall back to cwd
+                _events_root = _Path.cwd()
         _batch_events = read_batch_events(_events_root / ".fno" / "events.jsonl")
         if _batch_events:
             _bv = compute_metrics(_batch_events)["verdict"]
