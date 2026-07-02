@@ -96,10 +96,8 @@ fn main() {
     }
 }
 
-fn run_client(_session: &str) {
-    // Task 1.3 wires the client TUI.
-    eprintln!("fno mux: client not implemented yet");
-    std::process::exit(1);
+fn run_client(session: &str) {
+    std::process::exit(fno::client::run(session));
 }
 
 fn run_server(socket: PathBuf) {
