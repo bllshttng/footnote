@@ -116,6 +116,7 @@ fn base_cfg(tmp: &Path, abi_bin: PathBuf, lib_path: PathBuf, failure_limit: u32)
         per_unit_max_dispatches: 1,
         failure_limit,
         batch: false,
+        max_lanes: 1,
     }
 }
 
@@ -578,5 +579,142 @@ exit 0"#,
     assert!(
         ship_marker.exists(),
         "ship-closeable must run on a drained (NoWork) tick to close an open batch"
+    );
+}
+
+// ── parallel mode (x-42d5 G4): lane-fill tick ───────────────────────────────────
+
+#[test]
+fn parallel_tick_dispatches_lanes_and_journals() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    // Walker claim succeeds; dispatch-lanes fire-and-forgets two picks, one of
+    // which fails to spawn (contained per-lane: receipt status "skipped").
+    // The stub records its argv: the cap and project scope MUST cross the
+    // Rust->Python seam, else the daemon lane-fills the wrong scope.
+    let args_file = tmp.path().join("dispatch-args.txt");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then
+  echo "$@" > "{a}"
+  echo '[{{"node_id":"x-a","status":"dispatched","short_id":"s1"}},{{"node_id":"x-b","status":"skipped","error":"spawn rc=127"}}]'
+  exit 0
+fi
+exit 0"#,
+            a = args_file.display()
+        ),
+    );
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    let (journal, project_journal) = journal_in(tmp.path());
+    let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
+    cfg.max_lanes = 3;
+    cfg.mission = Some("m-7".to_string());
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(
+        out,
+        DrainOutcome::LanesDispatched {
+            dispatched: 1,
+            skipped: 1
+        }
+    );
+    let events = journal_events(&project_journal);
+    assert!(
+        events
+            .iter()
+            .any(|e| e.contains("active_backlog_dispatched") && e.contains("max_lanes")),
+        "expected a lanes dispatch event, got: {events:?}"
+    );
+    let args = fs::read_to_string(&args_file).expect("dispatch-lanes argv recorded");
+    assert!(args.contains("--max 3"), "cap not forwarded: {args}");
+    assert!(
+        args.contains("--project footnote"),
+        "project scope not forwarded: {args}"
+    );
+    assert!(
+        args.contains("--mission m-7"),
+        "mission scope not forwarded (codex P1): {args}"
+    );
+}
+
+#[test]
+fn parallel_tick_empty_selection_is_no_work() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then echo '[]'; exit 0; fi
+exit 0"#,
+    );
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    let (journal, project_journal) = journal_in(tmp.path());
+    let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
+    cfg.max_lanes = 2;
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(out, DrainOutcome::NoWork);
+    let events = journal_events(&project_journal);
+    assert!(!events
+        .iter()
+        .any(|e| e.contains("active_backlog_dispatched")));
+}
+
+#[test]
+fn parallel_tick_dispatch_failure_skips_and_journals() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then echo 'wedged' >&2; exit 3; fi
+exit 0"#,
+    );
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    let (journal, project_journal) = journal_in(tmp.path());
+    let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
+    cfg.max_lanes = 2;
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert!(matches!(out, DrainOutcome::Skipped { .. }), "got {out:?}");
+    let events = journal_events(&project_journal);
+    assert!(
+        events.iter().any(|e| e.contains("dispatch-lanes-failed")),
+        "expected a dispatch-lanes-failed skip event, got: {events:?}"
+    );
+}
+
+#[test]
+fn max_lanes_one_never_calls_dispatch_lanes() {
+    // AC1-EDGE: max_lanes == 1 is byte-identical sequential behavior - the
+    // lane dispatcher is never consulted (a call would trip the stub's marker).
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    let marker = tmp.path().join("lanes-called");
+    let fno = write_stub(
+        &bin,
+        "fno",
+        &format!(
+            r#"if [[ "$1" == "backlog" && "$2" == "dispatch-lanes" ]]; then touch "{m}"; exit 0; fi
+if [[ "$1" == "backlog" && "$2" == "next" ]]; then echo 'null'; exit 0; fi
+exit 0"#,
+            m = marker.display()
+        ),
+    );
+    let lib = driver_lib_noop(&tmp.path().join("lib"));
+    let (journal, _project_journal) = journal_in(tmp.path());
+    let cfg = base_cfg(tmp.path(), fno, lib, 3); // max_lanes: 1
+    let mut breaker = CircuitBreaker::new(3);
+
+    let out = drain_tick(&cfg, &mut breaker, &journal);
+    assert_eq!(out, DrainOutcome::NoWork);
+    assert!(
+        !marker.exists(),
+        "sequential tick must not consult dispatch-lanes"
     );
 }

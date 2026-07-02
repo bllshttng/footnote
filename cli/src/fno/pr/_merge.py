@@ -21,12 +21,29 @@ import os
 import re
 import shutil
 import sys
-from typing import List, Optional, Sequence
+import time
+from contextlib import contextmanager
+from typing import Iterator, List, Literal, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
 
 _VALID_INVOKERS = {"target", "megawalk"}
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
+
+# Merge serialization (parallel mode, epic x-42d5 G4, Locked Decision #9):
+# builds run parallel, merges run ONE AT A TIME. The lock is held across the
+# gh merge call and its post-merge followups (typically seconds), so the wait
+# is short and bounded - a peer still holding it past the window is reported
+# as "held" (exit 2) for the caller to retry, never an indefinite block.
+#
+# Scope: the lock + freshness hold cover the IMMEDIATE merge path. A queued
+# `--auto` merge (require_checks_pass) only ENQUEUES under the lock - GitHub
+# performs the actual merge asynchronously once checks pass, outside any lock,
+# so serialization there is delegated to GitHub. Operators running parallel
+# lanes with --auto should pair it with branch protection requiring branches
+# to be up to date before merging.
+_MERGE_LOCK_WAIT_S = 120
+_MERGE_LOCK_POLL_S = 5
 
 
 def _emit(pr: int, outcome: str, reason: str, strategy: str, invoker: str, *, err: bool) -> None:
@@ -227,6 +244,115 @@ def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Merge serialization + stale-base hold (parallel mode G4, LD#9)
+# ---------------------------------------------------------------------------
+
+
+_MergeLockState = Literal["acquired", "held", "unavailable"]
+
+
+@contextmanager
+def _merge_lock() -> Iterator[_MergeLockState]:
+    """Serialize merges repo-wide; yield ``acquired`` | ``held`` | ``unavailable``.
+
+    One ``merge:<canonical-root>`` claim per project (repo-local routing, so
+    every worktree lane contends on the SAME lock - like ``walker:<root>``),
+    pid-liveness anchored so a crashed merger frees it instantly. Acquisition
+    polls for up to ``_MERGE_LOCK_WAIT_S`` (a merge holds it for seconds), then
+    yields ``held``. A claims-layer error yields ``unavailable`` and the merge
+    proceeds unserialized: the lock is coordination, GitHub stays the merge
+    authority, and our own tooling failing must never block a merge.
+    """
+    state = "acquired"
+    key = holder = release = None
+    # Acquisition happens fully BEFORE the yield: an exception the consumer
+    # body throws into the generator must reach the finally-release, never an
+    # except-then-yield-again (which would RuntimeError inside contextmanager).
+    try:
+        from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim
+        from fno.paths import resolve_canonical_repo_root
+
+        key = f"merge:{resolve_canonical_repo_root()}"
+        holder = f"pr-merge:{os.getpid()}"
+        deadline = time.monotonic() + _MERGE_LOCK_WAIT_S
+        while True:
+            try:
+                acquire_claim(key, holder, reason="serialized PR merge (LD#9)")
+                release = release_claim
+                break
+            except ClaimHeldByOther:
+                if time.monotonic() >= deadline:
+                    state = "held"
+                    break
+                time.sleep(_MERGE_LOCK_POLL_S)
+    except Exception as exc:  # noqa: BLE001 - fail-open: lock is best-effort
+        sys.stderr.write(f"pr-merge: merge lock unavailable ({exc}); proceeding\n")
+        state = "unavailable"
+    try:
+        yield state
+    finally:
+        if release is not None and state == "acquired":
+            try:
+                release(key, holder)
+            except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
+                pass
+
+
+def _live_lane_count() -> int:
+    """Live parallel-lane slots (0 on any probe miss, keeping sequential paths
+    byte-identical: the stale-base hold below only arms while lanes run)."""
+    try:
+        from fno.claims.lanes import active_lane_count
+
+        return active_lane_count()
+    except Exception as exc:  # noqa: BLE001
+        # A probe miss disarms the stale-base hold entirely - leave the audit
+        # breadcrumb so an unguarded merge is distinguishable after the fact.
+        sys.stderr.write(
+            f"pr-merge: lane probe unavailable ({exc}); merging without freshness hold\n"
+        )
+        return 0
+
+
+def _behind_by(pr_number: int, cwd: str) -> int:
+    """Commits the PR head is behind its base branch. 0 on any probe miss:
+    the hold must never block a merge because our own read failed, but each
+    miss leaves a stderr breadcrumb - a gh outage is likeliest exactly when
+    many lanes hammer gh, i.e. when the hold matters most."""
+
+    def _miss(why: str) -> int:
+        sys.stderr.write(
+            f"pr-merge: stale-base probe unavailable ({why}); "
+            "merging without freshness hold\n"
+        )
+        return 0
+
+    try:
+        view = _gh(
+            ["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd
+        )
+        if not view.ok:
+            return _miss("gh pr view failed")
+        try:
+            refs = json.loads(view.stdout or "{}")
+        except json.JSONDecodeError:
+            return _miss("unparseable pr view output")
+        base = refs.get("baseRefName") if isinstance(refs, dict) else None
+        head = refs.get("headRefName") if isinstance(refs, dict) else None
+        if not base or not head:
+            return _miss("missing base/head ref")
+        res = _gh(
+            ["api", f"repos/{{owner}}/{{repo}}/compare/{base}...{head}", "-q", ".behind_by"],
+            cwd,
+        )
+        if not res.ok:
+            return _miss("gh compare failed")
+        return int(res.stdout.strip())
+    except Exception as exc:  # noqa: BLE001 - the hold must never BLOCK a merge
+        return _miss(f"probe error: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
 
@@ -314,6 +440,42 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         _emit(pr_number, "failed", "gh CLI not installed", "none", invoker, err=True)
         return 127
 
+    # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
+    # Builds run parallel; merges run one at a time, and while lanes are live a
+    # PR whose head is behind its base is held for `fno pr rebase` first, so a
+    # lane never merges a stale base. Both checks run UNDER the lock: a peer
+    # merge landing between the freshness read and our merge is exactly the
+    # race the lock exists to close. Sequential runs (no live lanes) skip the
+    # freshness hold and see only an uncontended lock - behavior unchanged.
+    with _merge_lock() as lock:
+        if lock == "held":
+            _emit(
+                pr_number,
+                "held",
+                "merge serialized: another merge holds the lock; retry",
+                "none",
+                invoker,
+                err=False,
+            )
+            return 2
+        if _live_lane_count() > 0:
+            behind = _behind_by(pr_number, repo)
+            if behind > 0:
+                _emit(
+                    pr_number,
+                    "held",
+                    f"stale base: head is {behind} commit(s) behind base with "
+                    "parallel lanes live; run fno pr rebase, then retry",
+                    "none",
+                    invoker,
+                    err=False,
+                )
+                return 2
+        return _do_merge(pr_number, auto_merge, invoker, repo)
+
+
+def _do_merge(pr_number: int, auto_merge, invoker: str, repo: str) -> int:
+    """Steps (3)-(4): build + run the gh merge and classify the outcome."""
     # (3) Build command.
     strategy = auto_merge.merge_strategy
     cmd: List[str] = ["pr", "merge", str(pr_number), f"--{strategy}"]

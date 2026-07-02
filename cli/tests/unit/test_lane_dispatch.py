@@ -31,7 +31,7 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     # claims root into tmp so it lands in the same isolated dir as the explicit
     # lane-slot root (claims_root=tmp_path/"claims") and never touches ~/.fno.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
     monkeypatch.setattr(advance, "_canonical_root", lambda: tmp_path / "canonical")
     monkeypatch.setattr(advance, "_base_project_id", lambda root: "fno")
 

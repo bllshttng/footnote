@@ -739,6 +739,24 @@ class TestRedispatch:
         self._patch_run(monkeypatch, spawn_rc=1)
         assert recovery._redispatch(self._cand()) is False
 
+    def test_spawn_failure_releases_lane_slot(self, monkeypatch):
+        # Parallel G4: no replacement worker → the dead lane's dispatch-time
+        # slot is freed so lane-fill can re-select the node before the TTL.
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(monkeypatch, spawn_rc=1)
+        assert recovery._redispatch(self._cand()) is False
+        lr = self._index_of(calls, ["fno", "claim", "lane-release"])
+        assert lr is not None
+        assert "x-370f" in calls[lr]
+
+    def test_successful_respawn_keeps_lane_slot(self, monkeypatch):
+        # A respawned worker reconciles the existing slot at target init; the
+        # sweep must not release it out from under the new lane.
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(monkeypatch)
+        assert recovery._redispatch(self._cand()) is True
+        assert self._index_of(calls, ["fno", "claim", "lane-release"]) is None
+
     def test_unresolvable_node_returns_false(self, monkeypatch):
         # No node id in the worktree manifest → nothing to re-dispatch.
         monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: None)

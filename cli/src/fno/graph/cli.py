@@ -1864,6 +1864,11 @@ def cmd_ready(
         "--include-deferred",
         help="Also list deferred rows for explicit re-engagement.",
     ),
+    mission: Optional[str] = typer.Option(
+        None,
+        "--mission",
+        help="Restrict to nodes whose mission_id matches (same contract as `next`).",
+    ),
     # ponytail: `ready` already always emits JSON; the flag exists only so a
     # caller passing --json (inbox triage) isn't rejected with Typer exit 2.
     # Accepted-and-ignored, never a behavior switch.
@@ -1893,6 +1898,11 @@ def cmd_ready(
     ready = filter_by_project(ready, project, all_)
     if roadmap_id:
         ready = [e for e in ready if e.get("roadmap_id") == roadmap_id]
+    # Mission scope (same rule as `next`): a mission-scoped caller (the
+    # active-backlog daemon's lane-fill, megatron child walks) must never see
+    # out-of-mission nodes as actionable (codex P1 on PR #137).
+    if mission:
+        ready = [e for e in ready if e.get("mission_id") == mission]
     # Epic-scope filter (C2, ab-facfaade): transitive children of --parent.
     if parent:
         target = _find_node(entries, parent)
@@ -1957,6 +1967,9 @@ def cmd_lane_fill(
     project: Optional[str] = typer.Option(
         None, "--project", "-p", help="Filter by project name"
     ),
+    mission: Optional[str] = typer.Option(
+        None, "--mission", help="Restrict selection to this mission's nodes."
+    ),
     claim: bool = typer.Option(
         False,
         "--claim",
@@ -1977,7 +1990,7 @@ def cmd_lane_fill(
         from fno.config import load_settings
         max_lanes = load_settings().config.parallel.max_lanes
 
-    selected = select_lane_fill(max_lanes, project, claim=claim)
+    selected = select_lane_fill(max_lanes, project, mission=mission, claim=claim)
     typer.echo(json.dumps(selected, indent=2))
 
 
@@ -1990,6 +2003,9 @@ def cmd_dispatch_lanes(
     ),
     project: Optional[str] = typer.Option(
         None, "--project", "-p", help="Filter by project name"
+    ),
+    mission: Optional[str] = typer.Option(
+        None, "--mission", help="Restrict dispatch to this mission's nodes."
     ),
 ) -> None:
     """Spawn up to max_lanes isolated background lanes (parallel mode, group 3).
@@ -2007,8 +2023,74 @@ def cmd_dispatch_lanes(
         from fno.config import load_settings
         max_lanes = load_settings().config.parallel.max_lanes
 
-    receipts = dispatch_lanes(max_lanes, project)
+    receipts = dispatch_lanes(max_lanes, project, mission=mission)
     typer.echo(json.dumps(receipts, indent=2))
+
+
+# -- lanes --
+
+@cli.command("lanes")
+def cmd_lanes(
+    json_output: bool = typer.Option(False, "--json", "-J", help="JSON rollup."),
+) -> None:
+    """One-read parallel-lane rollup (US5): live lanes vs the cap.
+
+    Joins each live lane-slot claim with its graph node (slug, status, PR) so
+    the operator reviews the fleet's shape - which nodes hold lanes, in which
+    domains - without stitching ``fno claim list`` to the board by hand. The
+    grid's BgRoster tiles show the workers themselves; this is the aggregated
+    outcome view. Read-only.
+    """
+    from fno.claims.core import list_claims
+    from fno.claims.lanes import LANE_SLOT_PREFIX
+
+    try:
+        from fno.config import load_settings
+
+        max_lanes = load_settings().config.parallel.max_lanes
+    except Exception:  # noqa: BLE001 - a config miss must not hide live lanes
+        max_lanes = 1
+
+    nodes: dict = {}
+    try:
+        from fno.graph.store import read_graph
+
+        nodes = {
+            e["id"]: e
+            for e in read_graph(_graph_path())
+            if isinstance(e, dict) and e.get("id")
+        }
+    except Exception:  # noqa: BLE001 - rollup degrades to claims-only rows
+        pass
+
+    lanes = []
+    for s in sorted(list_claims(prefix=LANE_SLOT_PREFIX), key=lambda c: c.get("key", "")):
+        meta = s.get("metadata") or {}
+        lane_id = meta.get("lane_id") or ""
+        node = nodes.get(lane_id) or {}
+        lanes.append(
+            {
+                "slot": s.get("key"),
+                "lane_id": lane_id,
+                "domain": meta.get("domain"),
+                "slug": node.get("slug"),
+                "status": node.get("_status"),
+                "pr_number": node.get("pr_number"),
+                "holder": s.get("holder"),
+            }
+        )
+
+    if json_output:
+        typer.echo(json.dumps({"max_lanes": max_lanes, "active": len(lanes), "lanes": lanes}))
+        return
+    typer.echo(f"lanes: {len(lanes)}/{max_lanes} active")
+    for ln in lanes:
+        slug = f"  {ln['slug']}" if ln.get("slug") else ""
+        pr = f"  pr#{ln['pr_number']}" if ln.get("pr_number") else ""
+        typer.echo(
+            f"{ln['slot']}  {ln['lane_id']}{slug}  "
+            f"domain={ln.get('domain') or '-'}  {ln.get('status') or '-'}{pr}"
+        )
 
 
 # -- get --

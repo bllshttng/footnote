@@ -139,6 +139,26 @@ def _batch_enabled_for(cwd: str) -> bool:
         return False
 
 
+def _max_lanes_for(cwd: str) -> int:
+    """config.parallel.max_lanes for a target repo (parallel mode x-42d5, G4).
+
+    Read per-repo like ``_batch_enabled_for`` so a project opts into parallel
+    lane-fill independently. Fail-safe to 1 (today's sequential single-lane
+    path): a bad/absent settings read must never fan a repo out into lanes.
+    """
+    try:
+        from pathlib import Path as _P
+
+        from fno.config import load_settings_for_repo
+
+        # Clamp at 0: the schema already rejects negatives (ge=0), but a
+        # negative escaping here would fail the Rust daemon's u64 deserialize
+        # for the WHOLE target list, silently disabling the drain (gemini).
+        return max(0, int(load_settings_for_repo(_P(cwd)).config.parallel.max_lanes))
+    except Exception:  # noqa: BLE001 - a bad/absent settings must not go parallel
+        return 1
+
+
 def drain_targets_as_dicts() -> list[dict]:
     """JSON-serializable form of :func:`resolve_drain_targets` for the daemon."""
     return [
@@ -149,6 +169,7 @@ def drain_targets_as_dicts() -> list[dict]:
             "failure_limit": t.failure_limit,
             "mission": t.mission,
             "batch": _batch_enabled_for(t.cwd),
+            "max_lanes": _max_lanes_for(t.cwd),
         }
         for t in resolve_drain_targets()
     ]

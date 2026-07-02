@@ -460,6 +460,35 @@ def _node_is_done(node: str) -> bool:
     return False
 
 
+def _release_lane_slot(node: str, cwd: str) -> None:
+    """Free a dead lane's parallel-lane slot (parallel mode x-42d5, G4).
+
+    Called only when the respawn did NOT start: a successful respawn keeps the
+    slot for the new worker's target-init reconcile, and a post-init slot is
+    pid-anchored so it frees itself on worker death anyway. What this shortens
+    is the dispatch-time (pre-init, TTL-anchored) slot's linger - while it is
+    live, ``select_lane_fill`` skips the node as "owned by a peer lane", so
+    without the release a failed respawn would leave the node unselectable for
+    up to the slot TTL. Best-effort, mirroring the force-release shell-out.
+    """
+    import logging
+    import subprocess
+
+    log = logging.getLogger(__name__)
+    try:
+        rel = subprocess.run(
+            ["fno", "claim", "lane-release", "--lane-id", node],
+            cwd=cwd, capture_output=True, timeout=30, check=False,
+        )
+        if rel.returncode != 0:
+            log.warning(
+                "recovery: lane-release failed for %s (exit %s); slot lingers to TTL",
+                node, rel.returncode,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("recovery: lane-release failed for %s: %s", node, exc)
+
+
 def _redispatch(candidate: "Candidate") -> bool:
     """Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
@@ -529,7 +558,13 @@ def _redispatch(candidate: "Candidate") -> bool:
              "--substrate", "bg", "--cwd", cwd, agent, f"/target no-merge {node}"],
             cwd=cwd, capture_output=True, timeout=60, check=False,
         )
-        return proc.returncode == 0
+        if proc.returncode != 0:
+            # No replacement worker started: the node claim is already freed
+            # (above), so also free any dispatch-time lane slot or lane-fill
+            # keeps skipping the node as peer-owned until the slot TTL (G4).
+            _release_lane_slot(node, cwd)
+            return False
+        return True
     except (OSError, subprocess.SubprocessError):
         # Non-fatal: the swap already landed; never let a respawn miss crash the
         # sweep for the rest of this tick.
