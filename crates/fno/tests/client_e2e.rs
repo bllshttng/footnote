@@ -49,7 +49,11 @@ fn client_e2e_utf8_and_control_keys_pass_through() {
     // could let ^C hit the prompt and the test pass without exercising it).
     h.type_bytes(b"echo start-sleep; sleep 100\r");
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "start-sleep"));
-    h.type_bytes(&[0x03]); // ^C
+    // ^C, then wait for the shell to regain the foreground before typing:
+    // bytes sent while sleep is still dying can be flushed by the line
+    // discipline.
+    h.type_bytes(&[0x03]);
+    h.wait_prompt(15);
     h.type_bytes(b"echo interrupted\r");
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "interrupted"));
 }

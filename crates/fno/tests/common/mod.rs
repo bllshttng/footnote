@@ -125,6 +125,20 @@ impl ClientHarness {
         }
     }
 
+    /// Wait until the shell sits at a fresh prompt: the last non-empty screen
+    /// line ends with the pinned `PS1` (`$ `). Required after an interrupt
+    /// (^C) before typing again - until the shell regains the foreground, the
+    /// tty line discipline can flush/drop bytes typed at the dying process
+    /// (codex P1: consistently reproducible on Linux PTYs).
+    pub fn wait_prompt(&mut self, secs: u64) -> String {
+        self.wait_screen(secs, |s| {
+            s.lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .is_some_and(|l| l.trim_end().ends_with('$'))
+        })
+    }
+
     pub fn wait_exit(&mut self, secs: u64) -> portable_pty::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(secs);
         loop {

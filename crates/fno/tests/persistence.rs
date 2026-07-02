@@ -93,8 +93,11 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
         screen.trim_start().starts_with("ALT-SCREEN-HELD"),
         "alt screen must redraw from the top: {screen:?}"
     );
-    // Leave the program: ^C ends cat; the shell must still be there.
+    // Leave the program: ^C ends cat; the shell must still be there. Wait for
+    // the prompt before typing - bytes sent while cat still holds the
+    // foreground can be flushed by the line discipline instead of executed.
     h2.type_bytes(&[0x03]);
+    h2.wait_prompt(15);
     h2.type_bytes(b"printf '\\033[?1049l'; echo back-on-main\r");
     h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "back-on-main"));
 }
