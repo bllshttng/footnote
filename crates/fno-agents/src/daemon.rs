@@ -288,8 +288,10 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
                 if reaped.contains(&e.short_id) {
                     e.status = AgentStatus::Exited;
                     // Clear the inside-leg authority on exit (E3.3 / AC-X2-4):
-                    // a dead pane's last badge must not linger.
+                    // a dead pane's last badge must not linger. Same for a
+                    // scraped verdict.
                     e.inside_leg = None;
+                    e.screen_state = None;
                 }
             }
         }) {
@@ -804,6 +806,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut idle_check = tokio::time::interval(Duration::from_secs(5));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_activity = Instant::now();
+    // Screen-manifest scrape gate: at most one sweep in flight (a slow mux
+    // stalls its own sweep, never the loop or a pile-up of sweeps).
+    let scrape_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     loop {
         tokio::select! {
@@ -829,6 +834,18 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // Reap any worker that exited since the last tick so it never
                 // lingers as a zombie under the long-lived daemon.
                 reap_zombies();
+                // Screen-manifest scrape sweep (the badge-lattice fallback
+                // rung): subprocesses + file IO, so it runs off-loop under
+                // spawn_blocking behind the one-in-flight gate.
+                if !scrape_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&scrape_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    tokio::task::spawn_blocking(move || {
+                        crate::scrape::scrape_sweep(&home, &emitter);
+                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                }
                 // Dead-row GC (x-b1aa): remove terminal, past-grace, clean
                 // agent-view rows so finished rows self-clean without the merge
                 // ritual. Cheap in steady state (no candidates -> no git, no
@@ -4616,8 +4633,10 @@ fn apply_reconcile_change(e: &mut RegistryEntry, new_status: Option<AgentStatus>
             // Ordered exit teardown (E3.3, AC-X2-4): clear the inside-leg
             // authority on exit so a stale `working` never wins after the pane
             // is gone. The completion event is published by the caller BEFORE
-            // this write (publish completion -> clear authority).
+            // this write (publish completion -> clear authority). A scraped
+            // verdict dies with the pane for the same reason.
             e.inside_leg = None;
+            e.screen_state = None;
         }
     }
 }
@@ -4959,6 +4978,8 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
             let newer = e.inside_leg.as_ref().is_none_or(|cur| rep.seq > cur.seq);
             if newer {
                 e.inside_leg = Some(rep);
+                // Capability flip (see handle_report): hook beats scrape.
+                e.screen_state = None;
             }
         }
     });
@@ -5042,6 +5063,9 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
             }
         }
         entry.inside_leg = Some(report_for_store);
+        // Capability flip: the hook now owns this row's signal; a stale
+        // scrape verdict must never shadow it (per-capability arbitration).
+        entry.screen_state = None;
         outcome = Outcome::Stored;
     }) {
         return Response::err(
@@ -7611,6 +7635,43 @@ done
         assert!(
             events.iter().any(|e| e["kind"] == "inside_leg_report"),
             "inside_leg_report not emitted: {events:?}"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// Capability flip (screen-manifest fallback authority): the row's FIRST
+    /// inside-leg report makes the hook the sole authority - a stored scrape
+    /// verdict is cleared in the same registry write, so it can never shadow
+    /// the hook.
+    #[test]
+    fn handle_report_capability_flip_clears_screen_state() {
+        let home = tmp_home("report-flip-clears-scrape");
+        seed_stream_row(&home, "worker-A", "repF");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries[0].screen_state = Some(state::ScreenStateReport {
+                state: "idle".into(),
+                rule: "idle_prompt".into(),
+                seq: 4,
+                at: "2026-07-02T00:00:00Z".into(),
+                ttl_ms: Some(120_000),
+            });
+        })
+        .unwrap();
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let resp = handle_report(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.report",
+                json!({"session_id": "uuid-repF", "seq": 1, "state": "working"}),
+            ),
+        );
+        assert_eq!(resp.result().unwrap()["stored"], true);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries[0].inside_leg.is_some());
+        assert_eq!(
+            reg.entries[0].screen_state, None,
+            "capability flip must clear the scrape verdict"
         );
         std::fs::remove_dir_all(home.root()).ok();
     }

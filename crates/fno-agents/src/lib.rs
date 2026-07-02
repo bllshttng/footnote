@@ -78,6 +78,7 @@ pub mod protocol;
 pub mod provider;
 pub mod pty;
 pub mod readiness;
+pub mod scrape;
 pub mod screen;
 pub mod state;
 pub mod stream_worker;
@@ -711,6 +712,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // flushed onto the row at creation.
     "inside_leg_report_buffered",
     "inside_leg_buffer_flushed",
+    // Screen-manifest fallback rung (daemon-emitted, scrape sweep): a scraped
+    // verdict was stored/refreshed/cleared on a hook-less mux row, or a
+    // provider's manifest failed to load.
+    "screen_state_change",
 ];
 
 /// Build the Branch B (Rust/fno-agents) envelope JSON Schema and the

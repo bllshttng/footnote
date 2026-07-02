@@ -87,7 +87,8 @@
             "inside_leg_report_dropped",
             "inside_leg_completed",
             "inside_leg_report_buffered",
-            "inside_leg_buffer_flushed"
+            "inside_leg_buffer_flushed",
+            "screen_state_change"
           ],
           "description": "Event kind name from the Rust KNOWN_EVENT_KINDS constant. Closed enum; kept in lockstep with the constant by the cross-language parity gate (compare_json diffs this set against fno-agents --emit-schema)."
         },
