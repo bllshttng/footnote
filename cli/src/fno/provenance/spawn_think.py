@@ -485,25 +485,15 @@ def assemble_seed(node: dict) -> ThinkSeed:
 
 
 def _plans_output_dir() -> Path:
-    """Resolve the plans dir the /think doc should land in (x-ff83 W1).
+    """The plans dir the /think doc lands in (x-ff83 W1); shared with W2's sweep.
 
-    Same lookup /blueprint uses: ``.claude/settings.local.json`` ->
-    ``plansDirectory`` (the operator override), then ``config.plans_dir``
-    (settings.yaml, via fno.paths.plans_dir). Anchored to the repo root.
-    Raises on an unresolvable root so the caller can fall back to briefs.
+    Delegates to :func:`fno.paths.plans_content_dir` (settings.local
+    ``plansDirectory`` -> ``config.plans_dir``). Raises on an unresolvable
+    root so the caller can fall back to briefs.
     """
-    from fno.paths import plans_dir, resolve_repo_root
+    from fno.paths import plans_content_dir
 
-    root = resolve_repo_root()
-    try:
-        local = json.loads((root / ".claude" / "settings.local.json").read_text())
-        raw = local.get("plansDirectory")
-        if raw:
-            p = Path(raw)
-            return p if p.is_absolute() else (root / p).resolve()
-    except (OSError, ValueError):
-        pass  # missing/unreadable settings.local -> fall through to config default
-    return plans_dir(root)
+    return plans_content_dir()
 
 
 def _think_output_path(node_id: str, slug: str = "") -> str:

@@ -1,9 +1,10 @@
 """fno plan CLI - plan management verbs.
 
 Verbs:
-    stamp     - mark a plan's frontmatter with ship metadata (status:shipped)
-    graduate  - flip a stamped plan from status:shipped to status:done
-    brief     - generate a scoped task brief from a single-doc plan
+    stamp             - mark a plan's frontmatter with ship metadata (status:shipped)
+    graduate          - flip a stamped plan from status:shipped to status:done
+    brief             - generate a scoped task brief from a single-doc plan
+    reconcile-status  - normalize drifted plan frontmatter status in place
 
 stamp and graduate forward all unknown args + propagate exit codes from the
 in-package ``fno.plan._stamp`` module. brief is implemented in fno.plan.brief.
@@ -199,3 +200,35 @@ def brief(
         typer.echo(json.dumps(result.to_json_dict(), indent=2))
     else:
         typer.echo(result.to_markdown())
+
+
+@plan_app.command(
+    "reconcile-status",
+    help=(
+        "Normalize drifted plan frontmatter status to the canonical vocabulary "
+        "in place. Dry-run by default; pass --apply to write. Prints "
+        "'N normalized, M archived, K skipped'."
+    ),
+)
+def reconcile_status(
+    plans_dir: Optional[str] = typer.Option(
+        None, "--plans-dir", help="Plans dir to sweep (default: resolved plans-content dir)."
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Write the changes (default: dry-run, report only)."
+    ),
+) -> None:
+    """Sweep the plans dir, normalizing off-vocabulary/blank statuses."""
+    from fno.paths import plans_content_dir
+    from fno.plan.reconcile_status import sweep
+
+    target = Path(plans_dir) if plans_dir else plans_content_dir()
+    res = sweep(target, apply=apply)
+
+    for path, old, new in res.changes:
+        arrow = "->" if apply else "would ->"
+        typer.echo(f"  {Path(path).name}: {old} {arrow} {new}")
+    for warn in res.warnings:
+        typer.echo(f"  ! {warn}", err=True)
+    prefix = "" if apply else "[dry-run] "
+    typer.echo(f"{prefix}{res.summary()}")
