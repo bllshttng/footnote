@@ -277,6 +277,39 @@ since the previous invocation, re-transcribe: the parser is deterministic
 and the frontmatter overwrite is idempotent. Stale executor fields are
 the worst-case outcome; this guard prevents them.
 
+## Model Pin Transcription (x-571f: when a plan supplies a model)
+
+A plan can pin the model its dispatchers launch the node's worker on. Like the
+executor lock, the choice is made once at planning time; `/blueprint`
+transcribes it onto the graph node so every dispatcher honors it (US1-US3).
+Unset = today's provider default, no behavior change.
+
+Resolve the pin AFTER auto-intake has minted the node id (`$NODE_ID`), from two
+sources in precedence order (frontmatter wins):
+
+```bash
+# 1. Plan frontmatter `model:` (primary). Scope to the frontmatter block only.
+MODEL_PIN="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^model:/{sub(/^model:[[:space:]]*/,""); print; exit}' "$PLAN_INDEX")"
+# 2. Fallback: a `Model: <token>` Locked Decision (same parser module as the
+#    executor lock, selected with --key model; empty when none).
+if [[ -z "$MODEL_PIN" ]]; then
+  MODEL_PIN="$(python3 -m fno.executor._locked --key model < "$DESIGN_DOC_PATH")"
+fi
+```
+
+Then, only when non-empty, transcribe onto the node (idempotent; last writer
+wins, so a re-run with a changed pin overwrites cleanly):
+
+```bash
+[[ -n "$MODEL_PIN" ]] && fno backlog update "$NODE_ID" --model "$MODEL_PIN"
+```
+
+The `fno backlog update --model` verb validates the value as a single
+non-whitespace token; a malformed pin exits non-zero and leaves the node
+unchanged (surface the error, do not fabricate a pin). When `/blueprint`
+decomposes a scope:epic into child nodes, apply the same transcription to each
+child id it creates. No pin present -> write nothing (no `--model` call).
+
 ## PRODUCT.md Prereq Check (when executor: impeccable is locked)
 
 When `/blueprint` generates a plan that locks `executor: impeccable` at the plan

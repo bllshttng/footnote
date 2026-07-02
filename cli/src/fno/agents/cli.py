@@ -346,6 +346,14 @@ def cmd_spawn(
             "on the primary Anthropic model."
         ),
     ),
+    model: str | None = typer.Option(
+        None, "--model",
+        help=(
+            "Per-node model pin (x-571f). Appended as --model <m> to the "
+            "claude --bg (and agy) worker argv; unset = provider default. "
+            "codex/gemini and claude --headless ignore it."
+        ),
+    ),
 ) -> None:
     """Spawn a new agent.
 
@@ -429,6 +437,7 @@ def cmd_spawn(
             from_name=from_name,
             yolo=yolo,
             role=role,
+            model=model,
         )
     except DispatchAskError as exc:
         print(str(exc), file=sys.stderr)

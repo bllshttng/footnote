@@ -151,7 +151,7 @@ def test_dispatch_reservation_held(iso, monkeypatch):
 def test_dispatched_happy_path_and_claim_survives(iso, monkeypatch):
     """AC1-HP + AC1-CLAIM: dispatch + reservation stays LIVE after advance returns."""
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None: "deadbeef")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None: "deadbeef")
 
     res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
 
@@ -170,7 +170,7 @@ def test_idempotent_same_merge_twice(iso, monkeypatch):
     """AC1-FR: a second advance for the same node does not double-dispatch."""
     calls = []
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None: calls.append(node_id) or "sid")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None: calls.append(node_id) or "sid")
 
     first = adv.advance(project="fno", events_path=iso)
     second = adv.advance(project="fno", events_path=iso)
@@ -182,7 +182,7 @@ def test_idempotent_same_merge_twice(iso, monkeypatch):
 
 def test_spawn_failure_releases_reservation(iso, monkeypatch):
     """AC1-ERR / AC2-FR: a spawn failure releases dispatch:<id> + emits failed."""
-    def boom(node_id, node_cwd, node_slug=None):
+    def boom(node_id, node_cwd, node_slug=None, model=None):
         raise adv.SpawnError("daemon unreachable")
 
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -200,7 +200,7 @@ def test_spawn_failure_releases_reservation(iso, monkeypatch):
 
 def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
     """A name-collision (peer beat us) -> already-claimed, reservation released."""
-    def collide(node_id, node_cwd, node_slug=None):
+    def collide(node_id, node_cwd, node_slug=None, model=None):
         raise adv.SpawnAlreadyRunning("tgt-... already exists")
 
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -219,7 +219,7 @@ def test_failed_then_retry_dispatches(iso, monkeypatch):
     'the reservation is free')."""
     n = {"calls": 0}
 
-    def spawn(node_id, node_cwd, node_slug=None):
+    def spawn(node_id, node_cwd, node_slug=None, model=None):
         n["calls"] += 1
         if n["calls"] == 1:
             raise adv.SpawnError("transient daemon blip")
@@ -240,7 +240,7 @@ def test_release_raises_still_emits_and_never_raises(iso, monkeypatch):
     path, advance still emits exactly one decision event and does not raise."""
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
 
-    def boom_spawn(node_id, node_cwd, node_slug=None):
+    def boom_spawn(node_id, node_cwd, node_slug=None, model=None):
         raise adv.SpawnError("spawn boom")
 
     monkeypatch.setattr(adv, "_spawn_worker", boom_spawn)
@@ -262,9 +262,9 @@ def test_release_raises_still_emits_and_never_raises(iso, monkeypatch):
 def test_exactly_one_event_every_path(iso, monkeypatch, tmp_path):
     """AC1-UI / LD#12: every decision path emits exactly one event - iterated."""
     scenarios = [
-        ("disabled", {"FNO_AUTO_CONTINUE": "0"}, lambda p: NODE, lambda *a: "s", "advance_skipped"),
-        ("no_work", {}, lambda p: None, lambda *a: "s", "advance_skipped"),
-        ("dispatched", {}, lambda p: NODE, lambda *a: "s", "advance_dispatched"),
+        ("disabled", {"FNO_AUTO_CONTINUE": "0"}, lambda p: NODE, lambda *a, **k: "s", "advance_skipped"),
+        ("no_work", {}, lambda p: None, lambda *a, **k: "s", "advance_skipped"),
+        ("dispatched", {}, lambda p: NODE, lambda *a, **k: "s", "advance_dispatched"),
     ]
     for name, env, nxt, spawn, expected in scenarios:
         ev = tmp_path / f".fno/events-{name}.jsonl"
@@ -512,7 +512,7 @@ def test_dependents_cross_project_dispatch(iso, monkeypatch):
     _map_project(monkeypatch, {"web": "/mapped/web"})
     captured = {}
 
-    def fake_spawn(node_id, node_cwd, node_slug=None):
+    def fake_spawn(node_id, node_cwd, node_slug=None, model=None):
         captured["args"] = (node_id, node_cwd, node_slug)
         return "depsid01"
 
@@ -598,7 +598,7 @@ def test_dependents_idempotent_double_call(iso, monkeypatch):
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
     _map_project(monkeypatch, {"web": "/mapped/web"})
     calls = []
-    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None: calls.append(nid) or "sid")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None: calls.append(nid) or "sid")
 
     first = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -649,7 +649,7 @@ def test_dependents_same_project_dispatch(iso, monkeypatch):
     _map_project(monkeypatch, {"fno": "/mapped/fno"})
     captured = {}
 
-    def fake_spawn(node_id, node_cwd, node_slug=None):
+    def fake_spawn(node_id, node_cwd, node_slug=None, model=None):
         captured["args"] = (node_id, node_cwd, node_slug)
         return "samesid1"
 
@@ -676,7 +676,7 @@ def test_dependents_same_project_falls_back_to_recorded_cwd(iso, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         adv, "_spawn_worker",
-        lambda nid, cwd, slug=None: captured.update(cwd=cwd) or "sid",
+        lambda nid, cwd, slug=None, model=None: captured.update(cwd=cwd) or "sid",
     )
 
     results = adv.advance_dependents(
@@ -732,7 +732,7 @@ def test_dependents_dispatch_independent_of_next_selection(iso, monkeypatch):
         adv, "_next_node",
         lambda project: pytest.fail("advance_dependents must not select via `next`"),
     )
-    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None: "edgesid")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None: "edgesid")
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso

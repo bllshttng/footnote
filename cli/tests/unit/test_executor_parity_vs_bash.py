@@ -303,3 +303,78 @@ def test_locked_parity_vs_bash(doc: str, expected: str, parse_script) -> None:
     )
     assert py.stdout == bash_out, f"doc={doc!r} py={py.stdout!r} bash={bash_out!r}"
     assert bash_out.strip() == expected
+
+
+# ── x-571f: parse_locked_model (sibling of parse_locked_executor) ──────────────
+
+def test_parse_locked_model_extracts_from_locked_decisions() -> None:
+    doc = (
+        "# Plan\n\n## Architecture\nWe discuss the model resolver here.\n\n"
+        "## Locked Decisions\n1. **Model**: `fable` (user-confirmed)\n"
+        "2. Executor: do\n"
+    )
+    assert _locked.parse_locked_model(doc) == "fable"
+
+
+def test_parse_locked_model_ignores_prose_outside_section() -> None:
+    # A bare `model:` outside Locked Decisions is prose, not a lock.
+    doc = "## Overview\nmodel: fable\n\n## Locked Decisions\nExecutor: do\n"
+    assert _locked.parse_locked_model(doc) == ""
+
+
+def test_parse_locked_model_last_wins_and_rejects_overlong() -> None:
+    doc = "## Locked Decisions\nModel: opus\nModel: sonnet\n"
+    assert _locked.parse_locked_model(doc) == "sonnet"
+    over = "## Locked Decisions\nModel: " + "x" * 65 + "\n"
+    assert _locked.parse_locked_model(over) == ""
+
+
+def test_parse_locked_model_rejects_multitoken_and_metachars() -> None:
+    # codex review PR #150: a spaced value must be REJECTED, not truncated to the
+    # first token (which would transcribe a wrong-but-valid pin onto the node).
+    assert _locked.parse_locked_model("## Locked Decisions\nModel: opus 4.8\n") == ""
+    # A glob/shell metacharacter is out of the shell-safe charset -> rejected.
+    assert _locked.parse_locked_model("## Locked Decisions\nModel: fo*\n") == ""
+
+
+def test_parse_locked_model_tolerates_bold_styles() -> None:
+    # Both bold conventions must parse to the bare token (gemini review PR #150):
+    # key-only bold and key+colon bold.
+    assert _locked.parse_locked_model("## Locked Decisions\n**Model**: fable\n") == "fable"
+    assert _locked.parse_locked_model("## Locked Decisions\n**Model:** fable\n") == "fable"
+    assert _locked.parse_locked_model("## Locked Decisions\n1. **Model:** fable\n") == "fable"
+    # A metacharacter value is still rejected (the closing-bold consumption does
+    # not eat a value's own '*').
+    assert _locked.parse_locked_model("## Locked Decisions\n**Model:** fo*\n") == ""
+
+
+def test_parse_locked_model_tolerates_crlf() -> None:
+    # A CRLF-checked-out plan must not leave a trailing \r on the value (gemini
+    # review PR #150) that would silently reject a valid pin.
+    assert _locked.parse_locked_model("## Locked Decisions\r\nModel: fable\r\n") == "fable"
+    assert _locked.parse_locked_model("## Locked Decisions\r\nModel: fable (user-confirmed)\r\n") == "fable"
+
+
+def test_parse_locked_model_strips_provenance_suffix() -> None:
+    # A trailing (provenance) suffix mirrors the executor lock and is dropped.
+    doc = "## Locked Decisions\nModel: fable (user-confirmed)\n"
+    assert _locked.parse_locked_model(doc) == "fable"
+    # A full provider-model id with dots/slashes/dashes passes verbatim.
+    assert _locked.parse_locked_model("## Locked Decisions\nModel: claude-opus-4-8\n") == "claude-opus-4-8"
+
+
+def test_locked_model_cli_key_flag_and_backward_compat() -> None:
+    doc = "## Locked Decisions\nModel: fable\n"
+    model_out = subprocess.run(
+        [sys.executable, "-m", "fno.executor._locked", "--key", "model"],
+        input=doc, capture_output=True, text=True, cwd=_REPO_ROOT, env={**_module_env()},
+    )
+    assert model_out.stdout.strip() == "fable"
+    # No flag -> the executor parser (backward compatible): a Model line is
+    # invisible to it, so it emits nothing. This proves --key routes the parser
+    # rather than the default silently changing.
+    exec_out = subprocess.run(
+        [sys.executable, "-m", "fno.executor._locked"],
+        input=doc, capture_output=True, text=True, cwd=_REPO_ROOT, env={**_module_env()},
+    )
+    assert exec_out.stdout.strip() == ""

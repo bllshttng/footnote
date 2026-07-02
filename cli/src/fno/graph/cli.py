@@ -1277,6 +1277,11 @@ def cmd_update(
     ),
     domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
     size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
+    model: Optional[str] = typer.Option(
+        None,
+        "--model",
+        help="Pin the model dispatchers launch this node's worker on (x-571f), e.g. fable|opus|sonnet or a full provider-model id. Single non-whitespace token. Pass 'null' to clear (revert to provider default).",
+    ),
     batch: Optional[str] = typer.Option(
         None,
         "--batch",
@@ -1355,6 +1360,25 @@ def cmd_update(
     if size is not None and size.lower() != "null" and size.upper() not in {"S", "M", "L"}:
         typer.echo(f"Error: invalid size '{size}'. Must be one of: S, M, L", err=True)
         raise typer.Exit(code=1)
+    # Model pin (x-571f): a validated-shape pass-through, not an allowlist. The
+    # value must be a single shell-safe token so it survives unquoted use in the
+    # dispatchers (dispatch-node.sh $model_arg, the loop-driver MODEL_FLAG
+    # word-split) without word-splitting OR globbing. The charset [A-Za-z0-9._:/-]
+    # covers every real model id (fable, claude-opus-4-8, openai/gpt-4,
+    # us.anthropic.claude-...) while forbidding whitespace and shell/glob
+    # metacharacters (* ? [ ] etc.); the CLI (not fno) resolves the alias.
+    # 'null' clears.
+    if model is not None and model.lower() != "null":
+        import re  # module-level `re` is function-local elsewhere; scope it here
+
+        if not re.fullmatch(r"[A-Za-z0-9._:/-]{1,64}", model):
+            typer.echo(
+                "Error: --model must be a single token of [A-Za-z0-9._:/-], at most 64 chars "
+                "(e.g. fable|opus|sonnet or a full provider-model id); no whitespace or "
+                "shell/glob metacharacters",
+                err=True,
+            )
+            raise typer.Exit(code=1)
     _VALID_TYPES = {"feature", "epic", "bug", "roadmap"}
     if type_ is not None and type_ not in _VALID_TYPES:
         typer.echo(
@@ -1461,6 +1485,8 @@ def cmd_update(
             node["domain"] = domain
         if size is not None:
             node["size"] = size.upper() if size.lower() != "null" else None
+        if model is not None:
+            node["model"] = None if model.lower() == "null" else model
         if type_ is not None:
             node["type"] = type_
         if public is not None:
@@ -1815,6 +1841,9 @@ def cmd_next(
             "priority": e.get("priority"), "domain": e.get("domain"),
             "project": e.get("project"), "cwd": e.get("cwd"),
             "size": e.get("size"), "plan_path": e.get("plan_path"),
+            # x-571f: the per-node model pin must ride in the next-JSON so the
+            # megawalk drain (loop_megawalk.rs) can prefer it over cfg.model.
+            "model": e.get("model"),
             "mission_id": e.get("mission_id"),
             "mission_wave": e.get("mission_wave"),
             "mission_slug": e.get("mission_slug"),
@@ -1952,6 +1981,9 @@ def cmd_ready(
         "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
         "domain": e.get("domain"), "project": e.get("project"),
         "cwd": e.get("cwd"), "parent": e.get("parent"),
+        # x-571f: carry the model pin so the lane-fill dispatcher (select_lane_fill
+        # -> _ready_nodes -> `fno backlog ready`) can thread it into the spawn.
+        "model": e.get("model"),
     } for e in ready]
 
     typer.echo(json.dumps(output, indent=2))

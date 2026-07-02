@@ -187,6 +187,7 @@ fn spawn_writes_python_readable_row_and_emits_done() {
         false,
         None,
         &[("PATH", path.as_str())],
+        None,
     );
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     // spawn returns JSON receipt, not bare short_id.
@@ -241,6 +242,7 @@ fn spawn_yolo_prints_noop_note() {
         true,
         None,
         &[("PATH", path.as_str())],
+        None,
     );
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     assert!(
@@ -541,6 +543,7 @@ fn spawn_missing_cli_exit_14() {
         false,
         Some(Duration::from_secs(5)),
         &[("PATH", path.as_str())],
+        None,
     );
     assert_eq!(out.exit_code, 14, "stderr={}", out.stderr);
 }

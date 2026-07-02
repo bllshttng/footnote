@@ -188,6 +188,19 @@ for id in "${NODES[@]}"; do
     agent_name="target-${id}"
   fi
 
+  # x-571f: per-node model pin. Read once from the node JSON we already hold; a
+  # non-empty value is applied as `--model <m>` to every spawn branch below (and
+  # the dry-run hint). A bash ARRAY (not a string) so the value is quoted at
+  # expansion - no globbing/word-splitting even if a pin ever carried a glob char
+  # (gemini review PR #150; `fno backlog update --model` already forbids those,
+  # this is defense-in-depth). Expanded as `"${model_args[@]+"${model_args[@]}"}"`
+  # - the `+` guard keeps an EMPTY array from tripping bash 3.2's set -u unbound
+  # error (the same trap the --cwd branches below avoid). Empty pin -> zero args =
+  # byte-identical to today; fail-open on a bad read since jq // empty yields "".
+  model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null || true)"
+  model_args=()
+  [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")
+
   # ---- Guards 1+2 via the shared spawn-guard verb (x-73cc) ----
   # The race-critical node:<id> claim probe (Guard 1) + create-only dispatch:<id>
   # reservation (Guard 2) live in `fno agents spawn-guard` so this path and
@@ -295,7 +308,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}$agent_name '$tgt_cmd'\""
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --provider claude --substrate bg ${cwd_hint}${model_pin:+--model $model_pin }$agent_name '$tgt_cmd'\""
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -347,7 +360,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$node_cwd" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$node_cwd" "${model_args[@]+"${model_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" 2>/dev/null)"
@@ -357,16 +370,16 @@ for id in "${NODES[@]}"; do
       # may not shell out to a repo-root script (shellout-drift gate).
       _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
       [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
-      spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$wt" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider claude --substrate bg --cwd "$wt" "${model_args[@]+"${model_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --provider claude --substrate bg --fresh "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --provider claude --substrate bg --fresh "${model_args[@]+"${model_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --provider claude --substrate bg "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --provider claude --substrate bg "${model_args[@]+"${model_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then
