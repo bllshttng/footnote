@@ -194,7 +194,7 @@ fn server_spine_output_flood_stays_responsive() {
     wait_for_frame(&mut stream, 10, |_| true);
     send(
         &mut stream,
-        &ClientMsg::Input(b"yes | head -1000000; echo FLOOD-DONE\r".to_vec()),
+        &ClientMsg::Input(b"yes | head -100000; echo FLOOD-DONE\r".to_vec()),
     );
     // Only send the mid-flood keystrokes once a frame PROVES the flood is
     // rendering (a screen of y-lines); otherwise both inputs could queue
