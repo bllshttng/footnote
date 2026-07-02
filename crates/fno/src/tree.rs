@@ -1,0 +1,1121 @@
+//! Pure n-ary pane-tree layout engine: split / close+collapse / rect tiling /
+//! geometric directional navigation / pairwise resize.
+//!
+//! Deliberately I/O-free (no tokio, no `proto`/`server` dependency) so the
+//! whole layout model is exhaustively unit-testable without a socket, a PTY,
+//! or an event loop. `server.rs` (task 2.3) owns PaneId allocation (an
+//! `AtomicU64`) and wires these ops into the core loop; this module only
+//! knows about `Node`/`Tab` shapes and geometry.
+//!
+//! Model: an n-ary tree (`Warp`'s `pane_group/tree.rs` shape - `Branch` with
+//! a `Vec` of ratio-tagged children, not a binary tree) so a 3-way split
+//! never needs a synthetic wrapper branch. Directional navigation ports
+//! herdr's `find_in_direction` geometry exactly (see `navigate` below).
+
+use serde::{Deserialize, Serialize};
+
+/// Monotonic allocation is the SERVER's job (task 2.3, an `AtomicU64`); the
+/// tree never mints ids, callers pass a new id into [`split`].
+pub type PaneId = u64;
+
+/// Minimum pane size the layout engine will ever produce. [`split`] refuses
+/// (tree unchanged) rather than emit a pane smaller than this.
+pub const MIN_ROWS: u16 = 2;
+pub const MIN_COLS: u16 = 8;
+
+/// Ratio transferred per [`resize`] step. A plain constant, not a config
+/// value - the caller (keys.rs, task 2.5) can always call `resize` in a loop
+/// for a bigger jump; there's no product need to make this configurable.
+pub const RESIZE_STEP: f32 = 0.05;
+
+/// Split direction: `Horizontal` children sit side by side (left -> right,
+/// i.e. a "split H" / vertical divider line); `Vertical` children stack top
+/// -> bottom (a "split V" / horizontal divider line). Named for the axis
+/// panes are arranged ALONG, matching tmux/i3 convention, not the divider's
+/// own orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+/// A navigate/resize direction. Rides the wire in `Command::FocusDir` /
+/// `Command::ResizeDir` (task 2.2), hence `Serialize`/`Deserialize` here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// A tiled rectangle: `(x, y)` is the top-left corner within the content
+/// area, `rows`/`cols` the size in cells. u16 matches terminal dimensions
+/// (`ClientMsg::Attach`/`Resize` already use u16 rows/cols).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// A node in the pane tree. `Branch` ratios sum to 1.0 (checked by
+/// [`check_invariants`]); a `Branch` always has >= 2 children - a
+/// single-child branch is collapsed away by [`close`], and a same-axis
+/// nested branch is normalized (merged) away, never left standing.
+///
+/// ponytail: the shared-type contract asks for `Copy, Eq` on every type in
+/// this module, but neither derives on `Node`/`Tab`: `Vec` is never `Copy`,
+/// and `f32` never implements `Eq` (NaN), so `#[derive(Eq)]` on a type
+/// containing one is a compile error, not a style choice. `Axis`, `Dir`,
+/// `Rect` (below) get the full derive set as specified.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Node {
+    Leaf(PaneId),
+    Branch {
+        axis: Axis,
+        children: Vec<(f32, Node)>,
+    },
+}
+
+/// One tab: a pane tree plus exactly one focused (live) leaf.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tab {
+    pub root: Node,
+    pub focus: PaneId,
+}
+
+/// [`split`] failure. The tree is left completely unchanged on `Err`.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum SplitError {
+    #[error(
+        "split refused: a resulting pane would be smaller than the {min_rows}x{min_cols} minimum"
+    )]
+    TooSmall { min_rows: u16, min_cols: u16 },
+    #[error("focused pane {0} not found in the tree")]
+    FocusNotFound(PaneId),
+}
+
+// ---------------------------------------------------------------------------
+// layout: tree -> tiled rects
+// ---------------------------------------------------------------------------
+
+/// Tile `node` into `viewport`, returning every leaf's rect. Siblings along a
+/// branch's axis are separated by a 1-cell divider (`N` children consume
+/// `N-1` divider cells). Integer tiling is exact and deterministic: every
+/// child but the last gets `floor(available * ratio)`, and the LAST child
+/// absorbs whatever remains - so the union of pane rects plus divider cells
+/// always equals the input area exactly, with no gaps, no overlaps, and no
+/// rounding drift accumulating toward one side.
+pub fn layout(node: &Node, viewport: Rect) -> Vec<(PaneId, Rect)> {
+    let mut out = Vec::new();
+    layout_into(node, viewport, &mut out);
+    out
+}
+
+fn layout_into(node: &Node, area: Rect, out: &mut Vec<(PaneId, Rect)>) {
+    match node {
+        Node::Leaf(id) => out.push((*id, area)),
+        Node::Branch { axis, children } => {
+            for (i, child_area) in child_areas(*axis, area, children).into_iter().enumerate() {
+                layout_into(&children[i].1, child_area, out);
+            }
+        }
+    }
+}
+
+/// Compute each child's area for one branch level. Shared by [`layout_into`]
+/// (recurses into every child) and [`area_at_path`]/[`resize`] (which only
+/// need one specific child's or the branch's own area).
+///
+/// ponytail: a viewport smaller than `children.len() - 1` divider cells
+/// saturates to a zero-width/height tail rather than panicking or going
+/// negative. Real call sites never hit this: [`split`] already refuses to
+/// create a pane below [`MIN_ROWS`]/[`MIN_COLS`], so a degenerate viewport
+/// can only reach here via a caller handing `layout`/`resize` a viewport
+/// directly - in which case a zero-sized (never overlapping, never negative)
+/// rect is the honest answer, not a clamp that would fabricate space that
+/// isn't there.
+fn child_areas(axis: Axis, area: Rect, children: &[(f32, Node)]) -> Vec<Rect> {
+    let n = children.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let dividers = (n - 1) as u16;
+    let total = match axis {
+        Axis::Horizontal => area.cols,
+        Axis::Vertical => area.rows,
+    };
+    let available = total.saturating_sub(dividers);
+
+    let mut out = Vec::with_capacity(n);
+    let mut offset: u16 = 0;
+    let mut used: u16 = 0;
+    for (i, (ratio, _)) in children.iter().enumerate() {
+        let len = if i + 1 == n {
+            available.saturating_sub(used)
+        } else {
+            let l = ((available as f32) * ratio).floor() as u16;
+            used += l;
+            l
+        };
+        let child_area = match axis {
+            Axis::Horizontal => Rect {
+                x: area.x + offset,
+                y: area.y,
+                rows: area.rows,
+                cols: len,
+            },
+            Axis::Vertical => Rect {
+                x: area.x,
+                y: area.y + offset,
+                rows: len,
+                cols: area.cols,
+            },
+        };
+        out.push(child_area);
+        offset += len;
+        if i + 1 < n {
+            offset += 1; // divider cell
+        }
+    }
+    out
+}
+
+/// The area of the node reached by descending `path` (a chain of child
+/// indices from the root). Used by [`resize`] to find a branch's own area
+/// (to compute its minimum-size ratio) without walking every leaf.
+fn area_at_path(node: &Node, area: Rect, path: &[usize]) -> Rect {
+    match path.split_first() {
+        None => area,
+        Some((&idx, rest)) => match node {
+            Node::Branch { axis, children } => {
+                let areas = child_areas(*axis, area, children);
+                area_at_path(&children[idx].1, areas[idx], rest)
+            }
+            Node::Leaf(_) => area,
+        },
+    }
+}
+
+/// The node reached by descending `path`.
+fn node_at_path<'a>(node: &'a Node, path: &[usize]) -> &'a Node {
+    match path.split_first() {
+        None => node,
+        Some((&idx, rest)) => match node {
+            Node::Branch { children, .. } => node_at_path(&children[idx].1, rest),
+            Node::Leaf(_) => node,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// split
+// ---------------------------------------------------------------------------
+
+/// Split the focused leaf along `axis`, inserting a new leaf carrying
+/// `new_id`. The new pane takes focus.
+///
+/// - Same-axis parent: the new leaf is inserted adjacent to the target
+///   inside the SAME branch, halving the target's ratio (`r -> r/2, r/2`).
+/// - Cross-axis (or the target is a lone leaf with no matching-axis parent):
+///   the target leaf is wrapped in a new `Branch` of the requested axis with
+///   two `[0.5, 0.5]` children.
+///
+/// Refuses (tree unchanged) if any resulting pane would drop below
+/// [`MIN_ROWS`]x[`MIN_COLS`] in `viewport`.
+pub fn split(tab: &mut Tab, viewport: Rect, axis: Axis, new_id: PaneId) -> Result<(), SplitError> {
+    let candidate = split_node(&tab.root, tab.focus, axis, new_id)
+        .ok_or(SplitError::FocusNotFound(tab.focus))?;
+
+    if let Some((rows, cols)) = smallest_pane(&candidate, viewport) {
+        if rows < MIN_ROWS || cols < MIN_COLS {
+            return Err(SplitError::TooSmall {
+                min_rows: MIN_ROWS,
+                min_cols: MIN_COLS,
+            });
+        }
+    }
+
+    tab.root = candidate;
+    tab.focus = new_id;
+    Ok(())
+}
+
+fn smallest_pane(node: &Node, viewport: Rect) -> Option<(u16, u16)> {
+    layout(node, viewport)
+        .into_iter()
+        .map(|(_, r)| (r.rows, r.cols))
+        .min_by_key(|(rows, cols)| *rows.min(cols))
+}
+
+/// Build the post-split tree. `None` means `target` isn't in this subtree.
+fn split_node(node: &Node, target: PaneId, split_axis: Axis, new_id: PaneId) -> Option<Node> {
+    match node {
+        Node::Leaf(id) if *id == target => Some(Node::Branch {
+            axis: split_axis,
+            children: vec![(0.5, Node::Leaf(*id)), (0.5, Node::Leaf(new_id))],
+        }),
+        Node::Leaf(_) => None,
+        Node::Branch { axis, children } => {
+            // Same-axis parent with the target as a DIRECT child: insert
+            // adjacent inside this branch rather than wrapping.
+            if *axis == split_axis {
+                if let Some(idx) = children
+                    .iter()
+                    .position(|(_, n)| matches!(n, Node::Leaf(id) if *id == target))
+                {
+                    let half = children[idx].0 / 2.0;
+                    let mut new_children = children.clone();
+                    new_children[idx] = (half, Node::Leaf(target));
+                    new_children.insert(idx + 1, (half, Node::Leaf(new_id)));
+                    return Some(Node::Branch {
+                        axis: *axis,
+                        children: new_children,
+                    });
+                }
+            }
+            // Not a direct same-axis match: recurse (handles both
+            // cross-axis leaf-wrap and deeper nesting).
+            for (i, (ratio, child)) in children.iter().enumerate() {
+                if let Some(new_child) = split_node(child, target, split_axis, new_id) {
+                    let mut new_children = children.clone();
+                    new_children[i] = (*ratio, new_child);
+                    return Some(Node::Branch {
+                        axis: *axis,
+                        children: new_children,
+                    });
+                }
+            }
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// close
+// ---------------------------------------------------------------------------
+
+/// Close the `target` leaf. Returns `true` if that was the tab's last pane -
+/// the caller must discard the `Tab` (a `Node` cannot represent "empty").
+///
+/// A `target` not present in the tree is a no-op (`false`, tree unchanged) -
+/// idempotent by construction so a racing double-close (task 2.3's AC4-ERR)
+/// never double-reaps here.
+///
+/// Redistributes the closed leaf's ratio proportionally to its siblings
+/// (`scale = 1 / (1 - r)`), collapses any branch that drops to a single
+/// child, normalizes any resulting nested same-axis branch, and - if the
+/// closed pane held focus - re-anchors focus to the geometrically nearest
+/// surviving leaf relative to the closed pane's last rect.
+pub fn close(tab: &mut Tab, viewport: Rect, target: PaneId) -> bool {
+    if matches!(&tab.root, Node::Leaf(id) if *id == target) {
+        return true;
+    }
+
+    let before = layout(&tab.root, viewport);
+    let closed_rect = before.iter().find(|(id, _)| *id == target).map(|(_, r)| *r);
+
+    match remove_leaf(&tab.root, target) {
+        None => false, // not found: idempotent no-op
+        Some(None) => unreachable!("remove_leaf(root) only returns Some(None) for a root Leaf"),
+        Some(Some(new_root)) => {
+            tab.root = normalize(new_root);
+            if tab.focus == target {
+                let after = layout(&tab.root, viewport);
+                let from = closed_rect.unwrap_or(viewport);
+                if let Some(new_focus) = nearest_surviving(&after, from) {
+                    tab.focus = new_focus;
+                }
+            }
+            false
+        }
+    }
+}
+
+/// `None`: `target` not found. `Some(None)`: `node` itself was the target
+/// leaf (only reachable when `node` is a direct `Branch` child). `Some(Some
+/// (n))`: `node` is replaced by `n` in its parent's slot (same ratio).
+fn remove_leaf(node: &Node, target: PaneId) -> Option<Option<Node>> {
+    match node {
+        Node::Leaf(id) if *id == target => Some(None),
+        Node::Leaf(_) => None,
+        Node::Branch { axis, children } => {
+            for (i, (ratio, child)) in children.iter().enumerate() {
+                match remove_leaf(child, target) {
+                    None => continue,
+                    Some(None) => {
+                        // Direct child removed entirely: redistribute its
+                        // ratio to the survivors, then collapse if only one
+                        // remains.
+                        let removed_ratio = *ratio;
+                        let scale = if (1.0 - removed_ratio).abs() > f32::EPSILON {
+                            1.0 / (1.0 - removed_ratio)
+                        } else {
+                            1.0
+                        };
+                        let mut remaining: Vec<(f32, Node)> = children
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| *j != i)
+                            .map(|(_, (r, n))| (r * scale, n.clone()))
+                            .collect();
+                        return Some(Some(if remaining.len() == 1 {
+                            remaining.pop().unwrap().1
+                        } else {
+                            Node::Branch {
+                                axis: *axis,
+                                children: remaining,
+                            }
+                        }));
+                    }
+                    Some(Some(new_child)) => {
+                        let mut new_children = children.clone();
+                        new_children[i] = (*ratio, new_child);
+                        return Some(Some(Node::Branch {
+                            axis: *axis,
+                            children: new_children,
+                        }));
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Merge any `Branch` whose child is a `Branch` of the SAME axis into its
+/// parent, multiplying ratios through so relative proportions are preserved
+/// (`grandchild_ratio * child_ratio`). Runs bottom-up so a chain of nested
+/// same-axis branches (which [`close`]'s collapse can produce) flattens in
+/// one pass.
+fn normalize(node: Node) -> Node {
+    match node {
+        Node::Leaf(id) => Node::Leaf(id),
+        Node::Branch { axis, children } => {
+            let mut merged: Vec<(f32, Node)> = Vec::with_capacity(children.len());
+            for (ratio, child) in children {
+                match normalize(child) {
+                    Node::Branch {
+                        axis: child_axis,
+                        children: grandchildren,
+                    } if child_axis == axis => {
+                        for (gratio, gnode) in grandchildren {
+                            merged.push((gratio * ratio, gnode));
+                        }
+                    }
+                    other => merged.push((ratio, other)),
+                }
+            }
+            if merged.len() == 1 {
+                merged.pop().unwrap().1
+            } else {
+                Node::Branch {
+                    axis,
+                    children: merged,
+                }
+            }
+        }
+    }
+}
+
+/// Nearest surviving leaf to `from` (the closed pane's last rect), reusing
+/// the directional-navigation geometry: try all four directions and take
+/// whichever candidate has the smallest edge distance overall. Falls back to
+/// an arbitrary survivor if geometry finds nothing (defensive only - a
+/// tiled tree always has SOME pane in some direction from any point inside
+/// its former viewport).
+fn nearest_surviving(panes: &[(PaneId, Rect)], from: Rect) -> Option<PaneId> {
+    [Dir::Left, Dir::Right, Dir::Up, Dir::Down]
+        .into_iter()
+        .filter_map(|dir| {
+            let id = find_in_direction(panes, from, None, dir)?;
+            let rect = panes.iter().find(|(pid, _)| *pid == id)?.1;
+            Some((id, edge_distance(from, rect, dir)))
+        })
+        .min_by_key(|(_, dist)| *dist)
+        .map(|(id, _)| id)
+        .or_else(|| panes.first().map(|(id, _)| *id))
+}
+
+// ---------------------------------------------------------------------------
+// navigate
+// ---------------------------------------------------------------------------
+
+/// Geometric adjacency, ported EXACTLY from herdr's `find_in_direction`
+/// (`~/code/tools/herdr/src/layout.rs`): filter to panes strictly beyond the
+/// focused rect in `dir` with perpendicular-range overlap, then pick the min
+/// by `(edge_distance, Reverse(overlap_amount), center_distance, index)`.
+pub fn navigate(node: &Node, viewport: Rect, focus: PaneId, dir: Dir) -> Option<PaneId> {
+    let panes = layout(node, viewport);
+    let from = panes.iter().find(|(id, _)| *id == focus)?.1;
+    find_in_direction(&panes, from, Some(focus), dir)
+}
+
+fn find_in_direction(
+    panes: &[(PaneId, Rect)],
+    from: Rect,
+    exclude: Option<PaneId>,
+    dir: Dir,
+) -> Option<PaneId> {
+    panes
+        .iter()
+        .enumerate()
+        .filter(|(_, (id, _))| Some(*id) != exclude)
+        .filter(|(_, (_, r))| match dir {
+            Dir::Left => r.x + r.cols <= from.x && ranges_overlap(r.y, r.rows, from.y, from.rows),
+            Dir::Right => {
+                r.x >= from.x + from.cols && ranges_overlap(r.y, r.rows, from.y, from.rows)
+            }
+            Dir::Up => r.y + r.rows <= from.y && ranges_overlap(r.x, r.cols, from.x, from.cols),
+            Dir::Down => {
+                r.y >= from.y + from.rows && ranges_overlap(r.x, r.cols, from.x, from.cols)
+            }
+        })
+        .min_by_key(|(index, (_, r))| {
+            let overlap = match dir {
+                Dir::Left | Dir::Right => range_overlap_amount(r.y, r.rows, from.y, from.rows),
+                Dir::Up | Dir::Down => range_overlap_amount(r.x, r.cols, from.x, from.cols),
+            };
+            let center_distance = match dir {
+                Dir::Left | Dir::Right => range_center_distance(r.y, r.rows, from.y, from.rows),
+                Dir::Up | Dir::Down => range_center_distance(r.x, r.cols, from.x, from.cols),
+            };
+            (
+                edge_distance(from, *r, dir),
+                std::cmp::Reverse(overlap),
+                center_distance,
+                *index,
+            )
+        })
+        .map(|(_, (id, _))| *id)
+}
+
+fn edge_distance(from: Rect, r: Rect, dir: Dir) -> u16 {
+    match dir {
+        Dir::Left => from.x.saturating_sub(r.x + r.cols),
+        Dir::Right => r.x.saturating_sub(from.x + from.cols),
+        Dir::Up => from.y.saturating_sub(r.y + r.rows),
+        Dir::Down => r.y.saturating_sub(from.y + from.rows),
+    }
+}
+
+fn ranges_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> bool {
+    a_start < b_start + b_len && a_start + a_len > b_start
+}
+
+fn range_overlap_amount(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> u16 {
+    let a_end = a_start.saturating_add(a_len);
+    let b_end = b_start.saturating_add(b_len);
+    a_end.min(b_end).saturating_sub(a_start.max(b_start))
+}
+
+fn range_center_distance(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> u16 {
+    let a_center = a_start.saturating_mul(2).saturating_add(a_len);
+    let b_center = b_start.saturating_mul(2).saturating_add(b_len);
+    a_center.abs_diff(b_center)
+}
+
+// ---------------------------------------------------------------------------
+// resize
+// ---------------------------------------------------------------------------
+
+/// Grow/shrink the focused pane along `dir` by transferring `step` of ratio
+/// between it and its neighbor in the nearest ancestor branch whose axis
+/// matches (`Left`/`Right` -> `Horizontal`, `Up`/`Down` -> `Vertical`).
+/// Returns `true` if anything changed (caller sounds BEL only on `false`).
+///
+/// Direction convention (the brief leaves the exact edge semantics to the
+/// implementer): `Right`/`Down` grow the focused pane by taking ratio from
+/// its NEXT sibling; `Left`/`Up` shrink the focused pane, giving ratio to
+/// its PREVIOUS sibling. No sibling in that direction (focus is already the
+/// edge child) is a no-op, same as "no matching ancestor".
+///
+/// The transfer clamps so neither side drops below the minimum cell size for
+/// the branch's own area (partial application allowed, per AC3-ERR) and
+/// conserves the branch's ratio sum exactly (what one side gains is exactly
+/// what the other loses - no separate renormalize pass needed).
+pub fn resize(tab: &mut Tab, viewport: Rect, dir: Dir, step: f32) -> bool {
+    let want_axis = match dir {
+        Dir::Left | Dir::Right => Axis::Horizontal,
+        Dir::Up | Dir::Down => Axis::Vertical,
+    };
+
+    let mut path = Vec::new();
+    if !find_path(&tab.root, tab.focus, &mut path) {
+        return false;
+    }
+
+    let Some(prefix_len) = deepest_matching_ancestor(&tab.root, &path, want_axis) else {
+        return false;
+    };
+    let branch_path = &path[..prefix_len];
+    let child_idx = path[prefix_len];
+
+    let Node::Branch { children, .. } = node_at_path(&tab.root, branch_path) else {
+        return false;
+    };
+    let n = children.len();
+    let neighbor_idx = match dir {
+        Dir::Right | Dir::Down => child_idx.checked_add(1).filter(|&i| i < n),
+        Dir::Left | Dir::Up => child_idx.checked_sub(1),
+    };
+    let Some(neighbor_idx) = neighbor_idx else {
+        return false;
+    };
+
+    let branch_area = area_at_path(&tab.root, viewport, branch_path);
+    let axis_len = match want_axis {
+        Axis::Horizontal => branch_area.cols,
+        Axis::Vertical => branch_area.rows,
+    };
+    let dividers = (n as u16).saturating_sub(1);
+    let available = axis_len.saturating_sub(dividers).max(1) as f32;
+    let min_len = match want_axis {
+        Axis::Horizontal => MIN_COLS,
+        Axis::Vertical => MIN_ROWS,
+    };
+    let min_ratio = (min_len as f32 / available).min(1.0);
+
+    let focus_ratio = children[child_idx].0;
+    let neighbor_ratio = children[neighbor_idx].0;
+    let focus_delta = match dir {
+        Dir::Right | Dir::Down => step,
+        Dir::Left | Dir::Up => -step,
+    };
+    let transfer = if focus_delta > 0.0 {
+        focus_delta.min((neighbor_ratio - min_ratio).max(0.0))
+    } else {
+        focus_delta.max(-(focus_ratio - min_ratio).max(0.0))
+    };
+    if transfer == 0.0 {
+        return false;
+    }
+
+    let updates = [
+        (child_idx, focus_ratio + transfer),
+        (neighbor_idx, neighbor_ratio - transfer),
+    ];
+    tab.root = set_children_ratios(&tab.root, branch_path, &updates);
+    true
+}
+
+/// Populate `path` with the child-index chain from `node` down to `target`.
+/// Returns `false` (and leaves `path` unchanged in length) if not found.
+fn find_path(node: &Node, target: PaneId, path: &mut Vec<usize>) -> bool {
+    match node {
+        Node::Leaf(id) => *id == target,
+        Node::Branch { children, .. } => {
+            for (i, (_, child)) in children.iter().enumerate() {
+                path.push(i);
+                if find_path(child, target, path) {
+                    return true;
+                }
+                path.pop();
+            }
+            false
+        }
+    }
+}
+
+/// The deepest prefix of `path` whose branch axis matches `want_axis` -
+/// "nearest ancestor" means closest to the leaf, so scan from the end.
+fn deepest_matching_ancestor(root: &Node, path: &[usize], want_axis: Axis) -> Option<usize> {
+    (0..path.len())
+        .rev()
+        .find(|&level| match node_at_path(root, &path[..level]) {
+            Node::Branch { axis, .. } => *axis == want_axis,
+            Node::Leaf(_) => false,
+        })
+}
+
+/// Rebuild `node` with `updates` (index, new_ratio) applied to the branch at
+/// `path`.
+fn set_children_ratios(node: &Node, path: &[usize], updates: &[(usize, f32)]) -> Node {
+    match path.split_first() {
+        None => match node {
+            Node::Branch { axis, children } => {
+                let mut new_children = children.clone();
+                for &(idx, r) in updates {
+                    new_children[idx].0 = r;
+                }
+                Node::Branch {
+                    axis: *axis,
+                    children: new_children,
+                }
+            }
+            leaf => leaf.clone(),
+        },
+        Some((&idx, rest)) => match node {
+            Node::Branch { axis, children } => {
+                let mut new_children = children.clone();
+                new_children[idx] = (
+                    new_children[idx].0,
+                    set_children_ratios(&children[idx].1, rest, updates),
+                );
+                Node::Branch {
+                    axis: *axis,
+                    children: new_children,
+                }
+            }
+            leaf => leaf.clone(),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// invariants
+// ---------------------------------------------------------------------------
+
+/// Debug-assert-style checker, run after every mutation in tests: ratio sums
+/// == 1.0 (within an f32 epsilon) in every branch, focus is a live leaf, no
+/// single-child branch survives, no branch nests a same-axis child, and
+/// every `PaneId` in the tree is unique.
+pub fn check_invariants(tab: &Tab) -> Result<(), String> {
+    fn walk(
+        node: &Node,
+        ids: &mut std::collections::HashSet<PaneId>,
+        errors: &mut Vec<String>,
+        parent_axis: Option<Axis>,
+    ) {
+        match node {
+            Node::Leaf(id) => {
+                if !ids.insert(*id) {
+                    errors.push(format!("duplicate PaneId {id}"));
+                }
+            }
+            Node::Branch { axis, children } => {
+                if children.len() < 2 {
+                    errors.push(format!(
+                        "branch with {} child(ren), must be collapsed",
+                        children.len()
+                    ));
+                }
+                if parent_axis == Some(*axis) {
+                    errors.push("nested same-axis branch was not normalized".to_string());
+                }
+                let sum: f32 = children.iter().map(|(r, _)| r).sum();
+                if (sum - 1.0).abs() > 1e-4 {
+                    errors.push(format!("branch ratios sum to {sum}, expected 1.0"));
+                }
+                for (_, child) in children {
+                    walk(child, ids, errors, Some(*axis));
+                }
+            }
+        }
+    }
+
+    let mut ids = std::collections::HashSet::new();
+    let mut errors = Vec::new();
+    walk(&tab.root, &mut ids, &mut errors, None);
+    if !ids.contains(&tab.focus) {
+        errors.push(format!("focus {} is not a live leaf", tab.focus));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VIEWPORT: Rect = Rect {
+        x: 0,
+        y: 0,
+        rows: 21,
+        cols: 21,
+    };
+
+    fn leaf_rect(panes: &[(PaneId, Rect)], id: PaneId) -> Rect {
+        panes.iter().find(|(pid, _)| *pid == id).unwrap().1
+    }
+
+    // -- layout ---------------------------------------------------------
+
+    #[test]
+    fn tree_layout_single_leaf_fills_viewport() {
+        let node = Node::Leaf(1);
+        let panes = layout(&node, VIEWPORT);
+        assert_eq!(panes, vec![(1, VIEWPORT)]);
+    }
+
+    #[test]
+    fn tree_layout_two_leaf_horizontal_split_no_gaps_no_overlap() {
+        let node = Node::Branch {
+            axis: Axis::Horizontal,
+            children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+        };
+        let panes = layout(&node, VIEWPORT);
+        let r1 = leaf_rect(&panes, 1);
+        let r2 = leaf_rect(&panes, 2);
+        assert_eq!(r1.x, 0);
+        assert_eq!(r1.y, 0);
+        assert_eq!(r1.rows, VIEWPORT.rows);
+        assert_eq!(r2.rows, VIEWPORT.rows);
+        // exactly one divider cell between them, no gap, no overlap
+        assert_eq!(r2.x, r1.x + r1.cols + 1);
+        assert_eq!(r1.cols + 1 + r2.cols, VIEWPORT.cols);
+    }
+
+    #[test]
+    fn tree_layout_integer_tiling_exact_union_no_gaps() {
+        let node = Node::Branch {
+            axis: Axis::Horizontal,
+            children: vec![
+                (0.33, Node::Leaf(1)),
+                (0.33, Node::Leaf(2)),
+                (0.34, Node::Leaf(3)),
+            ],
+        };
+        let viewport = Rect {
+            x: 0,
+            y: 0,
+            rows: 30,
+            cols: 101,
+        };
+        let panes = layout(&node, viewport);
+        let mut by_x: Vec<Rect> = panes.iter().map(|(_, r)| *r).collect();
+        by_x.sort_by_key(|r| r.x);
+        // contiguous with exactly 1-cell dividers, and the union covers the
+        // full viewport width with no gap and no overlap.
+        for w in by_x.windows(2) {
+            assert_eq!(
+                w[1].x,
+                w[0].x + w[0].cols + 1,
+                "gap or overlap between panes"
+            );
+        }
+        assert_eq!(by_x[0].x, 0);
+        let last = by_x.last().unwrap();
+        assert_eq!(last.x + last.cols, viewport.cols);
+        for r in &by_x {
+            assert_eq!(r.rows, viewport.rows);
+        }
+    }
+
+    // -- split ------------------------------------------------------------
+
+    #[test]
+    fn tree_split_horizontal_on_lone_leaf_wraps_and_focuses_new_pane() {
+        let mut tab = Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+        };
+        split(&mut tab, VIEWPORT, Axis::Horizontal, 2).unwrap();
+        assert_eq!(tab.focus, 2);
+        match &tab.root {
+            Node::Branch { axis, children } => {
+                assert_eq!(*axis, Axis::Horizontal);
+                assert_eq!(children.len(), 2);
+                assert!((children[0].0 - 0.5).abs() < 1e-6);
+                assert!((children[1].0 - 0.5).abs() < 1e-6);
+            }
+            other => panic!("expected a Branch, got {other:?}"),
+        }
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_split_same_axis_inserts_adjacent_halving_ratio() {
+        let mut tab = Tab {
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.6, Node::Leaf(1)), (0.4, Node::Leaf(2))],
+            },
+            focus: 1,
+        };
+        // Wide enough that a 3-way split still clears MIN_COLS (VIEWPORT is
+        // sized for the 2x2 nav grid, too narrow for a 3-way split here).
+        let viewport = Rect {
+            x: 0,
+            y: 0,
+            rows: 24,
+            cols: 41,
+        };
+        split(&mut tab, viewport, Axis::Horizontal, 3).unwrap();
+        assert_eq!(tab.focus, 3);
+        match &tab.root {
+            Node::Branch { children, .. } => {
+                assert_eq!(children.len(), 3);
+                assert_eq!(children[0].1, Node::Leaf(1));
+                assert_eq!(children[1].1, Node::Leaf(3));
+                assert_eq!(children[2].1, Node::Leaf(2));
+                assert!((children[0].0 - 0.3).abs() < 1e-6);
+                assert!((children[1].0 - 0.3).abs() < 1e-6);
+                assert!((children[2].0 - 0.4).abs() < 1e-6);
+            }
+            other => panic!("expected a Branch, got {other:?}"),
+        }
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_split_cross_axis_wraps_leaf_in_new_branch() {
+        let mut tab = Tab {
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+            },
+            focus: 1,
+        };
+        split(&mut tab, VIEWPORT, Axis::Vertical, 3).unwrap();
+        match &tab.root {
+            Node::Branch { axis, children } => {
+                assert_eq!(*axis, Axis::Horizontal);
+                assert_eq!(children.len(), 2);
+                assert!(
+                    (children[0].0 - 0.5).abs() < 1e-6,
+                    "outer ratio for the split slot unchanged"
+                );
+                match &children[0].1 {
+                    Node::Branch { axis, children } => {
+                        assert_eq!(*axis, Axis::Vertical);
+                        assert_eq!(children[0].1, Node::Leaf(1));
+                        assert_eq!(children[1].1, Node::Leaf(3));
+                    }
+                    other => panic!("expected a nested V branch, got {other:?}"),
+                }
+            }
+            other => panic!("expected a Branch, got {other:?}"),
+        }
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_split_refused_below_min_size_leaves_tree_unchanged() {
+        let mut tab = Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+        };
+        let tiny = Rect {
+            x: 0,
+            y: 0,
+            rows: 24,
+            cols: 16,
+        };
+        let before = tab.clone();
+        let err = split(&mut tab, tiny, Axis::Horizontal, 2).unwrap_err();
+        assert_eq!(
+            err,
+            SplitError::TooSmall {
+                min_rows: MIN_ROWS,
+                min_cols: MIN_COLS
+            }
+        );
+        assert_eq!(tab, before, "tree must be unchanged on refusal");
+    }
+
+    // -- navigate -----------------------------------------------------------
+
+    fn grid_2x2() -> Node {
+        Node::Branch {
+            axis: Axis::Vertical,
+            children: vec![
+                (
+                    0.5,
+                    Node::Branch {
+                        axis: Axis::Horizontal,
+                        children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+                    },
+                ),
+                (
+                    0.5,
+                    Node::Branch {
+                        axis: Axis::Horizontal,
+                        children: vec![(0.5, Node::Leaf(3)), (0.5, Node::Leaf(4))],
+                    },
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn tree_navigate_2x2_grid_geometric_corners() {
+        // 1=TL 2=TR 3=BL 4=BR
+        let node = grid_2x2();
+        assert_eq!(navigate(&node, VIEWPORT, 1, Dir::Right), Some(2));
+        assert_eq!(navigate(&node, VIEWPORT, 1, Dir::Down), Some(3));
+        assert_eq!(navigate(&node, VIEWPORT, 2, Dir::Left), Some(1));
+        assert_eq!(navigate(&node, VIEWPORT, 2, Dir::Down), Some(4));
+        assert_eq!(navigate(&node, VIEWPORT, 3, Dir::Up), Some(1));
+        assert_eq!(navigate(&node, VIEWPORT, 3, Dir::Right), Some(4));
+        assert_eq!(navigate(&node, VIEWPORT, 4, Dir::Up), Some(2));
+        assert_eq!(navigate(&node, VIEWPORT, 4, Dir::Left), Some(3));
+        // no pane exists beyond an edge
+        assert_eq!(navigate(&node, VIEWPORT, 1, Dir::Left), None);
+        assert_eq!(navigate(&node, VIEWPORT, 1, Dir::Up), None);
+    }
+
+    #[test]
+    fn tree_navigate_partial_overlap_picks_largest_overlap() {
+        // Left column split V: pane 1 gets 70% of the height (tall), pane 2
+        // gets 30% (short). Pane 3 spans the full height on the right.
+        // Both 1 and 2 are "left of" 3 with the same edge distance, so the
+        // tie-break must pick 1 (the larger vertical overlap with 3).
+        let node = Node::Branch {
+            axis: Axis::Horizontal,
+            children: vec![
+                (
+                    0.4,
+                    Node::Branch {
+                        axis: Axis::Vertical,
+                        children: vec![(0.7, Node::Leaf(1)), (0.3, Node::Leaf(2))],
+                    },
+                ),
+                (0.6, Node::Leaf(3)),
+            ],
+        };
+        let viewport = Rect {
+            x: 0,
+            y: 0,
+            rows: 20,
+            cols: 20,
+        };
+        assert_eq!(navigate(&node, viewport, 3, Dir::Left), Some(1));
+    }
+
+    // -- close ----------------------------------------------------------
+
+    #[test]
+    fn tree_close_middle_of_three_redistributes_ratios_proportionally() {
+        let mut tab = Tab {
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![
+                    (0.2, Node::Leaf(1)),
+                    (0.3, Node::Leaf(2)),
+                    (0.5, Node::Leaf(3)),
+                ],
+            },
+            focus: 2,
+        };
+        let empty = close(&mut tab, VIEWPORT, 2);
+        assert!(!empty);
+        match &tab.root {
+            Node::Branch { children, .. } => {
+                assert_eq!(children.len(), 2);
+                let scale = 1.0 / (1.0 - 0.3_f32);
+                assert!((children[0].0 - 0.2 * scale).abs() < 1e-5);
+                assert!((children[1].0 - 0.5 * scale).abs() < 1e-5);
+            }
+            other => panic!("expected a Branch, got {other:?}"),
+        }
+        assert!(
+            tab.focus == 1 || tab.focus == 3,
+            "focus must re-anchor to a surviving sibling"
+        );
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_close_collapses_nested_same_axis_branch() {
+        // GP(V) [ P(H) [ Leaf(A), Q(V)[Leaf(B), Leaf(C)] ], Leaf(X) ]
+        // Closing A collapses P to its single remaining child Q (axis V),
+        // which nests inside GP (also axis V) - normalize must flatten it.
+        let mut tab = Tab {
+            root: Node::Branch {
+                axis: Axis::Vertical,
+                children: vec![
+                    (
+                        0.3,
+                        Node::Branch {
+                            axis: Axis::Horizontal,
+                            children: vec![
+                                (0.4, Node::Leaf(100)), // A
+                                (
+                                    0.6,
+                                    Node::Branch {
+                                        axis: Axis::Vertical,
+                                        children: vec![
+                                            (0.5, Node::Leaf(200)),
+                                            (0.5, Node::Leaf(300)),
+                                        ], // B, C
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                    (0.7, Node::Leaf(400)), // X
+                ],
+            },
+            focus: 400,
+        };
+        let empty = close(&mut tab, VIEWPORT, 100);
+        assert!(!empty);
+        match &tab.root {
+            Node::Branch { axis, children } => {
+                assert_eq!(*axis, Axis::Vertical);
+                assert_eq!(children.len(), 3, "no nested same-axis branch must remain");
+                assert_eq!(children[0].1, Node::Leaf(200));
+                assert_eq!(children[1].1, Node::Leaf(300));
+                assert_eq!(children[2].1, Node::Leaf(400));
+                assert!((children[0].0 - 0.15).abs() < 1e-5);
+                assert!((children[1].0 - 0.15).abs() < 1e-5);
+                assert!((children[2].0 - 0.7).abs() < 1e-5);
+            }
+            other => panic!("expected a flattened Branch, got {other:?}"),
+        }
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_close_last_pane_reports_tab_empty() {
+        let mut tab = Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+        };
+        assert!(close(&mut tab, VIEWPORT, 1));
+    }
+
+    #[test]
+    fn tree_close_unknown_pane_is_idempotent_noop() {
+        let mut tab = Tab {
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+            },
+            focus: 1,
+        };
+        let before = tab.clone();
+        assert!(!close(&mut tab, VIEWPORT, 999));
+        assert_eq!(tab, before);
+    }
+
+    // -- resize -----------------------------------------------------------
+
+    #[test]
+    fn tree_resize_transfers_ratio_between_neighbors() {
+        let mut tab = Tab {
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+            },
+            focus: 1,
+        };
+        let changed = resize(&mut tab, VIEWPORT, Dir::Right, RESIZE_STEP);
+        assert!(changed);
+        match &tab.root {
+            Node::Branch { children, .. } => {
+                assert!((children[0].0 - (0.5 + RESIZE_STEP)).abs() < 1e-5);
+                assert!((children[1].0 - (0.5 - RESIZE_STEP)).abs() < 1e-5);
+            }
+            other => panic!("expected a Branch, got {other:?}"),
+        }
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_resize_noop_when_no_matching_ancestor() {
+        let mut tab = Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+        };
+        let before = tab.clone();
+        assert!(!resize(&mut tab, VIEWPORT, Dir::Right, RESIZE_STEP));
+        assert_eq!(tab, before);
+    }
+}
