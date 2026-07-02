@@ -47,8 +47,12 @@ class BlockerVerdict:
 
 
 def _brief_path(node_id: str) -> Path:
-    """Convention path for a node's sidecar brief. Overridable in tests."""
-    return Path.home() / ".fno" / "briefs" / f"{node_id}.md"
+    """Convention path for a node's sidecar brief. Overridable in tests. Routed
+    through fno.paths (never bare Path.home()) so config.paths overrides win and
+    the no-hardcoded-paths gate stays green."""
+    from fno.paths import briefs_dir
+
+    return briefs_dir() / f"{node_id}.md"
 
 
 def _resolve_target(node: dict, plan_or_brief_path: Optional[str]) -> Optional[Path]:
