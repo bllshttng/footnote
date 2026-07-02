@@ -2216,7 +2216,7 @@ mod tests {
         // v6 is the future-drift case a pre-bump reader would have on v5.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":6,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":7,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // Unknown provider -> Err.

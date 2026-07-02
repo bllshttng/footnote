@@ -1357,15 +1357,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v6, or - for an old daemon -
-        // a v5 it cannot interpret), while v1..=v5 still read.
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v7, or - for an old daemon -
+        // a v6 it cannot interpret), while v1..=v6 still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":6,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":7,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 6);
+                assert_eq!(found, 7);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
