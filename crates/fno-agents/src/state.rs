@@ -40,7 +40,14 @@ use std::path::{Path, PathBuf};
 /// to REJECT rather than silently DROP a stored inside-leg report on write-back
 /// (Rust serde has no `deny_unknown_fields`, so an old daemon would otherwise
 /// round-trip the field out of existence). Accepted set widens to 1..=5.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 5;
+///
+/// v6 (mux agent edge, 4a-G2) is the same kind of forward-compat bump for the
+/// additive `mux` ref: structurally identical to v5 (an absent `mux` reads as
+/// `None`), but stamping v6 forces a pre-mux reader to REJECT rather than
+/// silently drop the ref on write-back - losing it would orphan a live
+/// mux-hosted agent (badges, inject, and list all dispatch on the ref during
+/// the dual-run window). Accepted set widens to 1..=6.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 6;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -56,6 +63,8 @@ pub enum StateError {
          Upgrade or downgrade fno to match."
     )]
     UnsupportedSchemaVersion { found: u32, max: u32 },
+    #[error("registry invariant violation: {0}")]
+    InvariantViolation(String),
 }
 
 /// The daemon-owned agent registry (`~/.fno/agents/registry.json`).
@@ -205,7 +214,20 @@ pub fn rfc3339_like_to_secs(s: &str) -> Option<u64> {
     u64::try_from(secs).ok()
 }
 
-/// One registry row (design schema v5). Optional fields default to `None` and
+/// Where a mux-hosted agent's PTY lives (4a-G2, brief Locked 4/7): the mux
+/// session name + the pane id `fno mux pane run` printed. A row carries
+/// exactly ONE live ref - `mux` XOR a worker-socket identity (non-empty
+/// `short_id`) XOR a `claude --bg` thread (`claude_short_id`) - enforced at
+/// write time by [`validate_single_live_ref`]; every consumer (list, badges,
+/// inject) dispatches on the ref during the G2-G4 dual-run window. Mirrored in
+/// Python's `AgentEntry` as `mux: Optional[dict]` (X3 rule).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MuxRef {
+    pub session: String,
+    pub pane_id: u64,
+}
+
+/// One registry row (design schema v6). Optional fields default to `None` and
 /// are preserved across `update_registry` because the whole row round-trips
 /// through this typed struct.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -324,6 +346,37 @@ pub struct RegistryEntry {
     /// schema bump).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exited_at: Option<String>,
+    /// The mux hosting ref for a pane-substrate agent (4a-G2): `Some` means
+    /// this row's PTY is a pane in `mux.session`, and pane-exit facts /
+    /// live-inject / sideline badges all key on it. `None` for every daemon
+    /// worker, bg-thread, and headless row. One live ref per row (mux XOR
+    /// worker XOR bg) - see [`MuxRef`] and [`validate_single_live_ref`].
+    /// Skip-when-`None` so a pre-mux row stays slim; a stale reader rejects
+    /// via the v6 schema bump rather than silently dropping the ref. Mirrored
+    /// in Python's `AgentEntry` as `mux: Optional[dict]` (X3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mux: Option<MuxRef>,
+}
+
+/// The one-live-ref invariant (brief Locked 7), checked at write time by both
+/// [`update_registry`] (Rust) and Python's `write_registry`: a row that carries
+/// the `mux` ref must not ALSO carry a worker-socket identity (non-empty
+/// `short_id`) or a `claude --bg` thread id (`claude_short_id`) - a double-ref
+/// row would make consumers dispatch the same agent down two substrates.
+/// Scoped to mux rows only: pre-existing worker/bg field combinations are not
+/// this invariant's business.
+pub fn validate_single_live_ref(entry: &RegistryEntry) -> Result<(), String> {
+    if entry.mux.is_none() {
+        return Ok(());
+    }
+    if !entry.short_id.is_empty() || entry.claude_short_id.is_some() {
+        return Err(format!(
+            "registry row {:?} carries a mux ref alongside a {} ref; a row holds exactly one live ref (mux XOR worker XOR bg)",
+            entry.name,
+            if entry.short_id.is_empty() { "bg-thread" } else { "worker" },
+        ));
+    }
+    Ok(())
 }
 
 /// `host_mode` value for a one-shot exec session (the default when absent).
@@ -378,7 +431,11 @@ impl RegistryEntry {
     /// finished ask to `exited` by process-liveness alone, never consulting
     /// session-file reachability for status. [plan ab-70faa65b, Locked Decision #1]
     pub fn is_one_shot_ask(&self) -> bool {
-        self.short_id.is_empty() && self.pid.is_none()
+        // A mux-hosted row (4a-G2) also has an empty short_id and may lack a
+        // pid (the pane-child lookup is best-effort), but it is a LIVE hosted
+        // agent, never a finished ask - without this exclusion the reconcile
+        // sweep would flip it to Exited unprobed (codex P1, PR #142).
+        self.short_id.is_empty() && self.pid.is_none() && self.mux.is_none()
     }
 }
 
@@ -610,6 +667,14 @@ where
     let lock = acquire_exclusive(&lock_path(path))?;
     let mut registry = read_existing_registry(path)?;
     let out = f(&mut registry);
+    // One-live-ref invariant (4a-G2), enforced at the single Rust write choke
+    // point so no closure can persist a double-ref row. The lock guard drops
+    // on the early return, so a violation never wedges the registry.
+    for entry in &registry.entries {
+        if let Err(msg) = validate_single_live_ref(entry) {
+            return Err(StateError::InvariantViolation(msg));
+        }
+    }
     // Upgrade-on-write (Codex P2, ab-a171ceb2): stamp the current schema version
     // so a Rust write of an older (e.g. v3) store bumps it to v4, matching
     // Python's write_registry (which always writes SCHEMA_VERSION). Without this,
@@ -817,7 +882,110 @@ mod tests {
             last_reconciled_at: None,
             inside_leg: None,
             exited_at: None,
+            mux: None,
         }
+    }
+
+    #[test]
+    fn state_mux_ref_roundtrips_and_python_dict_shape_parses() {
+        // 4a-G2: the mux ref survives the typed round-trip, and the exact
+        // JSON shape Python's AgentEntry writes ({"session": ..., "pane_id":
+        // ...} under "mux") parses back into MuxRef (X3 mixed-language rule).
+        let mut e = sample_entry("mux-agent");
+        e.short_id = String::new(); // one live ref: mux only
+        e.mux = Some(MuxRef {
+            session: "work".into(),
+            pane_id: 7,
+        });
+        let json = serde_json::to_string(&e).unwrap();
+        let back: RegistryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mux.as_ref().unwrap().session, "work");
+        assert_eq!(back.mux.as_ref().unwrap().pane_id, 7);
+
+        // Python-authored shape (dict passthrough) parses identically.
+        let python_row = r#"{"name":"m","provider":"claude","cwd":"/p","log_path":null,
+            "claude_short_id":null,"codex_session_id":null,"gemini_session_id":null,
+            "created_at":"2026-07-02T00:00:00Z","status":"live","last_message_at":null,
+            "mcp_channel_id":null,"mux":{"session":"main","pane_id":3}}"#;
+        let row: RegistryEntry = serde_json::from_str(python_row).unwrap();
+        assert_eq!(row.mux.as_ref().unwrap().pane_id, 3);
+        // A pre-mux row (absent key) reads as None.
+        assert_eq!(sample_entry("plain").mux, None);
+    }
+
+    #[test]
+    fn state_mux_row_skips_key_when_absent() {
+        // Slim rows: no "mux" key serialized for non-mux rows, so a
+        // round-tripped worker row stays byte-familiar to older tooling.
+        let v = serde_json::to_value(sample_entry("w")).unwrap();
+        assert!(v.get("mux").is_none());
+    }
+
+    #[test]
+    fn state_mux_row_is_never_a_one_shot_ask() {
+        // codex P1 (PR #142): empty short_id + no pid describes a mux row too;
+        // reconcile must not settle a live hosted agent as a finished ask.
+        let mut e = sample_entry("mux-live");
+        e.short_id = String::new();
+        e.pid = None;
+        assert!(e.is_one_shot_ask(), "baseline: bare row reads as ask");
+        e.mux = Some(MuxRef {
+            session: "main".into(),
+            pane_id: 4,
+        });
+        assert!(!e.is_one_shot_ask(), "a mux ref is a live hosting handle");
+    }
+
+    #[test]
+    fn state_update_registry_enforces_one_live_ref() {
+        // Write-time invariant (brief Locked 7): a mux ref alongside a worker
+        // short_id (or a bg claude_short_id) is refused; the store is left
+        // untouched and the lock released (a later clean write succeeds).
+        let dir = tmpdir("one-ref");
+        let path = dir.join("registry.json");
+        let res = update_registry(&path, |r| {
+            let mut e = sample_entry("double"); // sample has short_id set
+            e.mux = Some(MuxRef {
+                session: "main".into(),
+                pane_id: 1,
+            });
+            r.entries.push(e);
+        });
+        assert!(
+            matches!(res, Err(StateError::InvariantViolation(_))),
+            "double-ref row must be refused: {res:?}"
+        );
+        assert!(
+            load_registry(&path).unwrap().entries.is_empty(),
+            "refused write must not persist"
+        );
+        // bg-thread ref + mux is refused the same way.
+        let res = update_registry(&path, |r| {
+            let mut e = sample_entry("bg-double");
+            e.short_id = String::new();
+            e.claude_short_id = Some("abcd1234".into());
+            e.mux = Some(MuxRef {
+                session: "main".into(),
+                pane_id: 2,
+            });
+            r.entries.push(e);
+        });
+        assert!(matches!(res, Err(StateError::InvariantViolation(_))));
+        // A clean mux-only row persists (lock was released by the refusals).
+        update_registry(&path, |r| {
+            let mut e = sample_entry("clean");
+            e.short_id = String::new();
+            e.mux = Some(MuxRef {
+                session: "main".into(),
+                pane_id: 3,
+            });
+            r.entries.push(e);
+        })
+        .unwrap();
+        let reg = load_registry(&path).unwrap();
+        assert_eq!(reg.entries.len(), 1);
+        assert_eq!(reg.schema_version, REGISTRY_SCHEMA_VERSION);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1207,15 +1375,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v6, or - for an old daemon -
-        // a v5 it cannot interpret), while v1..=v5 still read.
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v7, or - for an old daemon -
+        // a v6 it cannot interpret), while v1..=v6 still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":6,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":7,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 6);
+                assert_eq!(found, 7);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),

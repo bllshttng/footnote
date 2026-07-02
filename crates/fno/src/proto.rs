@@ -43,7 +43,13 @@ use crate::tree::{Dir, Rect, TabId};
 /// the replies `ServerMsg::{PaneList, PaneText, PaneSpawned, Ok, WaitDone,
 /// Err}`. Control connections handshake exactly like `Attach` (versioned, NOT
 /// pre-Attach-frozen); the frozen `Query`/`KillServer` pair is untouched.
-pub const PROTO_VERSION: u32 = 4;
+///
+/// v5 (Phase 4a agent edge, G2+G3 shapes in one bump): `Layout` gains
+/// `agents` (sideline [`AgentRow`]s with the fact-badge lattice);
+/// `ControlVerb::PaneRun` gains `claim` (the per-pane writer-claim opt-in set
+/// at agent spawn); `ControlVerb::{PaneClaim, PaneRelease}` added (the relay
+/// acquires around an injection burst).
+pub const PROTO_VERSION: u32 = 5;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -135,11 +141,16 @@ pub enum ControlVerb {
     /// Spawn `argv` as a new pane in the squad `cwd` resolves to (created if
     /// absent) -> [`ServerMsg::PaneSpawned`]. The agents-spawn-agents
     /// primitive. `cols`/`rows` default to the VT defaults when `None`.
+    /// `claim: true` (v5) marks the pane writer-claim ELIGIBLE (an agent pane:
+    /// the relay may hold its input around an injection burst); general panes
+    /// pass `false` and never consult a claim (brief Locked 5).
     PaneRun {
         cwd: String,
         argv: Vec<String>,
         cols: Option<u16>,
         rows: Option<u16>,
+        #[serde(default)]
+        claim: bool,
     },
     /// Write raw bytes to a pane's PTY (no focus change) -> [`ServerMsg::Ok`].
     PaneSend { pane: u64, bytes: Vec<u8> },
@@ -155,6 +166,49 @@ pub enum ControlVerb {
     },
     /// Close a pane by id (the `ClosePane` cascade) -> [`ServerMsg::Ok`].
     PaneKill { pane: u64 },
+    /// Acquire the writer claim on a claim-eligible pane (v5) ->
+    /// [`ServerMsg::Ok`] / [`ServerMsg::Err`]. While held, human `Input` to
+    /// the pane bounces with BEL + a `busy: relay` notice; `PaneSend` (the
+    /// holder's own channel) still lands. `holder_pid` anchors the off-loop
+    /// PID-liveness release (a dead holder frees the pane without a server
+    /// restart - AC3-FR). Refused on a general (non-eligible) pane and when
+    /// another live holder has it.
+    PaneClaim { pane: u64, holder_pid: u32 },
+    /// Release the writer claim (v5) -> [`ServerMsg::Ok`]. Idempotent: no
+    /// claim held is still Ok (the burst may have raced a pane exit, which
+    /// releases unconditionally).
+    PaneRelease { pane: u64 },
+}
+
+/// One sideline agent row inside [`ServerMsg::Layout`] (v5, brief US2). The
+/// server's off-loop registry reader joins registry rows to panes via the
+/// `mux` ref and derives the 3-tier fact-badge lattice: `exited` (pane-exit
+/// fact, beats everything) > `badge` (in-TTL inside-leg report) > liveness
+/// (both `None`/`false` - a plain row). `squad` is the squad the row renders
+/// under; `None` is the catch-all for rows whose cwd matches no squad.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRow {
+    pub squad: Option<u64>,
+    pub name: String,
+    /// The mux pane hosting this agent in THIS session; `None` = a watch-only
+    /// row (bg/headless/daemon-worker agents surfaced from the registry).
+    pub pane_id: Option<u64>,
+    /// In-TTL inside-leg badge; `None` = liveness-only (never a scraped guess).
+    pub badge: Option<AgentBadge>,
+    /// The report's human reason, when badged.
+    pub reason: Option<String>,
+    /// Pane-exit / registry-exited fact: renders dim + exit marker regardless
+    /// of any live-TTL badge (fact beats report, structurally).
+    pub exited: bool,
+}
+
+/// The inside-leg badge vocabulary (contract v2), as rendered in the sideline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentBadge {
+    Working,
+    Blocked,
+    Done,
 }
 
 /// Layout mutations the client can request. Interpreted (leader-key table)
@@ -206,6 +260,10 @@ pub enum ServerMsg {
         panes: Vec<(u64, Rect)>,
         focus: u64,
         area: (u16, u16),
+        /// Sideline agent rows (v5): registry-derived, fact-badged. Empty for
+        /// a session with no known agents.
+        #[serde(default)]
+        agents: Vec<AgentRow>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -692,6 +750,24 @@ mod tests {
                 ],
                 focus: 9,
                 area: (24, 80),
+                agents: vec![
+                    AgentRow {
+                        squad: Some(1),
+                        name: "peer".into(),
+                        pane_id: Some(4),
+                        badge: Some(AgentBadge::Blocked),
+                        reason: Some("permission prompt".into()),
+                        exited: false,
+                    },
+                    AgentRow {
+                        squad: None,
+                        name: "bg-watch".into(),
+                        pane_id: None,
+                        badge: None,
+                        reason: None,
+                        exited: true,
+                    },
+                ],
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
@@ -736,7 +812,13 @@ mod tests {
                 argv: vec!["claude".into(), "--print".into()],
                 cols: Some(120),
                 rows: None,
+                claim: true,
             },
+            ControlVerb::PaneClaim {
+                pane: 5,
+                holder_pid: 4242,
+            },
+            ControlVerb::PaneRelease { pane: 5 },
             ControlVerb::PaneSend {
                 pane: 5,
                 bytes: b"hello\r".to_vec(),

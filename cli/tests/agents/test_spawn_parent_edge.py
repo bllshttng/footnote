@@ -94,7 +94,7 @@ def test_spawn_records_parent_edge_claude(workdir_claude, captured_emits, monkey
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "test-parent-edge", "-p", "claude", "do something"],
+        ["spawn", "test-parent-edge", "-p", "claude", "do something", "--substrate", "bg"],
         catch_exceptions=False,
     )
 
@@ -144,7 +144,7 @@ def test_spawn_parent_edge_codex_harness(workdir_claude, captured_emits, monkeyp
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "test-codex-edge", "-p", "claude", "do something"],
+        ["spawn", "test-codex-edge", "-p", "claude", "do something", "--substrate", "bg"],
         catch_exceptions=False,
     )
 
@@ -182,7 +182,7 @@ def test_spawn_parent_edge_gemini_harness(workdir_claude, captured_emits, monkey
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "test-gemini-edge", "-p", "claude", "do something"],
+        ["spawn", "test-gemini-edge", "-p", "claude", "do something", "--substrate", "bg"],
         catch_exceptions=False,
     )
 
@@ -216,7 +216,7 @@ def test_spawn_parent_edge_no_env_vars(workdir_claude, captured_emits, monkeypat
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "test-no-env", "-p", "claude", "do something"],
+        ["spawn", "test-no-env", "-p", "claude", "do something", "--substrate", "bg"],
         catch_exceptions=False,
     )
 
@@ -254,7 +254,7 @@ def test_spawn_parent_edge_claude_wins_over_codex(workdir_claude, captured_emits
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "test-priority", "-p", "claude", "do something"],
+        ["spawn", "test-priority", "-p", "claude", "do something", "--substrate", "bg"],
         catch_exceptions=False,
     )
 
@@ -289,7 +289,7 @@ def test_spawn_emits_exactly_one_agent_spawned(workdir_claude, captured_emits, m
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "test-once-emit", "-p", "claude", "task"],
+        ["spawn", "test-once-emit", "-p", "claude", "task", "--substrate", "bg"],
         catch_exceptions=False,
     )
 

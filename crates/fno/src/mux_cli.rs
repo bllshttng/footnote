@@ -292,6 +292,7 @@ enum PaneCmd {
     Run {
         cwd: Option<String>,
         argv: Vec<String>,
+        claim: bool,
     },
     Send {
         pane: u64,
@@ -304,6 +305,13 @@ enum PaneCmd {
         timeout_ms: u64,
     },
     Kill {
+        pane: u64,
+    },
+    Claim {
+        pane: u64,
+        pid: u32,
+    },
+    Release {
         pane: u64,
     },
 }
@@ -336,7 +344,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
         .and_then(|a| a.to_str())
-        .ok_or_else(|| "pane needs a verb: ls|read|run|send|wait|kill".to_string())?;
+        .ok_or_else(|| "pane needs a verb: ls|read|run|send|wait|kill|claim|release".to_string())?;
 
     // `run` is special: leading flags, then the command argv verbatim (its own
     // flags are NOT ours to parse), optionally after a `--` separator.
@@ -344,6 +352,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut session = None;
         let mut json = false;
         let mut cwd = None;
+        let mut claim = false;
         let mut i = 1;
         while i < args.len() {
             let tok = args[i]
@@ -355,6 +364,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     break;
                 }
                 "--json" => json = true,
+                "--claim" => claim = true,
                 "--session" => session = Some(flag_value(args, &mut i, "--session")?),
                 "--cwd" => cwd = Some(flag_value(args, &mut i, "--cwd")?),
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
@@ -376,7 +386,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         return Ok(ParsedPane {
             session,
             json,
-            cmd: PaneCmd::Run { cwd, argv },
+            cmd: PaneCmd::Run { cwd, argv, claim },
         });
     }
 
@@ -389,6 +399,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut quiet_ms = None;
     let mut pattern = None;
     let mut timeout_s = None;
+    let mut pid = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -398,6 +409,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         match tok {
             "--json" => json = true,
             "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--pid" => pid = Some(parse_u64(&flag_value(args, &mut i, "--pid")?, "--pid")? as u32),
             "--lines" => {
                 lines = Some(parse_u64(&flag_value(args, &mut i, "--lines")?, "--lines")? as u16)
             }
@@ -454,9 +466,18 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         "kill" => PaneCmd::Kill {
             pane: pane_arg("kill")?,
         },
+        "claim" => PaneCmd::Claim {
+            pane: pane_arg("claim")?,
+            // The holder is the CALLER (it outlives this one-shot CLI); the
+            // parent pid is the honest default when --pid is not passed.
+            pid: pid.unwrap_or_else(std::os::unix::process::parent_id),
+        },
+        "release" => PaneCmd::Release {
+            pane: pane_arg("release")?,
+        },
         other => {
             return Err(format!(
-                "unknown pane verb: {other} (ls|read|run|send|wait|kill)"
+                "unknown pane verb: {other} (ls|read|run|send|wait|kill|claim|release)"
             ))
         }
     };
@@ -493,7 +514,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
     let (verb, read_timeout) = match cmd {
         PaneCmd::Ls => (ControlVerb::PaneLs, CONTROL_TIMEOUT),
         PaneCmd::Read { pane, lines } => (ControlVerb::PaneRead { pane, lines }, CONTROL_TIMEOUT),
-        PaneCmd::Run { cwd, argv } => {
+        PaneCmd::Run { cwd, argv, claim } => {
             let cwd = resolve_run_cwd(cwd, std::env::current_dir().ok());
             (
                 ControlVerb::PaneRun {
@@ -501,6 +522,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     argv,
                     cols: None,
                     rows: None,
+                    claim,
                 },
                 CONTROL_TIMEOUT,
             )
@@ -534,6 +556,14 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             Duration::from_millis(timeout_ms) + Duration::from_secs(2),
         ),
         PaneCmd::Kill { pane } => (ControlVerb::PaneKill { pane }, CONTROL_TIMEOUT),
+        PaneCmd::Claim { pane, pid } => (
+            ControlVerb::PaneClaim {
+                pane,
+                holder_pid: pid,
+            },
+            CONTROL_TIMEOUT,
+        ),
+        PaneCmd::Release { pane } => (ControlVerb::PaneRelease { pane }, CONTROL_TIMEOUT),
     };
 
     let is_run = matches!(verb, ControlVerb::PaneRun { .. });
@@ -778,6 +808,7 @@ mod tests {
                 cmd: PaneCmd::Run {
                     cwd: Some("/code/foo".into()),
                     argv: vec!["claude".into(), "--print".into(), "hi".into()],
+                    claim: false,
                 },
             }
         );

@@ -2149,6 +2149,7 @@ fn create(
         last_reconciled_at: None,
         inside_leg: None,
         exited_at: None,
+        mux: None,
     };
 
     // Re-check the name UNDER the registry lock before appending. The per-agent

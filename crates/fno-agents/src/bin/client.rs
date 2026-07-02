@@ -362,11 +362,58 @@ async fn run(args: Vec<String>) -> i32 {
     // codex/gemini + --once -> dispatch_codex_once / dispatch_gemini_once.
     // `host` and `promote` must fall through to the daemon RPC unchanged.
     if method == "agent.spawn" && verb_owned == "spawn" {
+        // 4a-G2: the `pane` substrate (the default) is mux-hosted now, and the
+        // Python back half owns it (fno.agents.mux_spawn: front-half reuse +
+        // `fno mux pane run` + the registry mux ref). The Python front door
+        // already carves pane spawns out of the binary route (rust_runtime),
+        // so this arm is only reached by a DIRECT `fno-agents spawn` call -
+        // re-exec the Python CLI rather than falling through to the daemon
+        // PTY host (retiring at G4; a silent daemon fallback is exactly what
+        // AC1-ERR forbids). FNO_AGENTS_RUNTIME=python stops the front door
+        // routing straight back here.
+        let substrate = params
+            .get("substrate")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pane");
+        if substrate == "pane" {
+            use fno_agents::claude_ask::py_repr;
+            use std::os::unix::process::CommandExt;
+            // Provider parity with maybe_run_spawn BEFORE the re-exec: a
+            // missing/unknown --provider stays a client-side exit 2 even
+            // where the `fno` front door is absent (CI).
+            match params.get("provider").and_then(|v| v.as_str()) {
+                None => {
+                    eprintln!(
+                        "provider is required to spawn a new agent {}; pass --provider one of: claude, codex, gemini, agy",
+                        py_repr(&agent_name)
+                    );
+                    return 2;
+                }
+                Some(p) if !matches!(p, "claude" | "codex" | "gemini" | "agy") => {
+                    eprintln!(
+                        "unknown provider {}; supported: claude, codex, gemini, agy",
+                        py_repr(p)
+                    );
+                    return 2;
+                }
+                Some(_) => {}
+            }
+            let err = std::process::Command::new("fno")
+                .arg("agents")
+                .args(&args[..])
+                .env("FNO_AGENTS_RUNTIME", "python")
+                .exec();
+            eprintln!(
+                "fno-agents: substrate 'pane' is mux-hosted via the Python CLI, \
+                 but exec of 'fno agents spawn' failed: {err}. Install the fno \
+                 front door or run `fno agents spawn ...` directly."
+            );
+            return 127;
+        }
         if let Some(code) = maybe_run_spawn(&home, &params, &agent_name) {
             return code;
         }
-        // No client-side handler matched (codex/gemini without --once):
-        // fall through to the daemon RPC below.
+        // No client-side handler matched: fall through to the daemon RPC below.
     }
 
     let daemon_bin = resolve_daemon_bin();
@@ -675,9 +722,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     }
 
     match (provider, substrate) {
-        // pane (default): plain `spawn` is an owned interactive daemon pane
-        // (host_mode=interactive set in build_request) -> fall through (None) to
-        // the daemon RPC, exactly like host. The x-3ab8 default; unchanged.
+        // pane (default): mux-hosted since 4a-G2. The caller intercepts pane
+        // spawns BEFORE this fn and re-execs the Python CLI (mux_spawn back
+        // half), so this arm is unreachable; None keeps the match total.
         (_, "pane") => None,
 
         // claude bg: the detached `claude --bg` thread (appears in `claude

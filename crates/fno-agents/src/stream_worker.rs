@@ -1608,6 +1608,7 @@ cat >/dev/null
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
+                mux: None,
             });
         })
         .unwrap();

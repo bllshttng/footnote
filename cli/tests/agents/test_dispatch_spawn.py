@@ -295,13 +295,14 @@ def test_spawn_once_teardown_failure(workdir, fake_codex_create_once, monkeypatc
 
 
 def test_spawn_claude_plain(workdir_claude) -> None:
-    """claude plain spawn: compact JSON receipt on stdout, registry row with provider=claude."""
+    """claude bg-substrate spawn: compact JSON receipt on stdout (4a-G2: the
+    plain/pane default is mux-hosted; the bg thread lane keeps this shape)."""
     from fno.agents.cli import agents_app
 
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "myagent-c", "-p", "claude", "hello"],
+        ["spawn", "myagent-c", "-p", "claude", "hello", "--substrate", "bg"],
         catch_exceptions=False,
     )
 
@@ -364,13 +365,14 @@ def test_spawn_claude_once_refused(workdir_claude) -> None:
 
 
 def test_spawn_codex_plain_no_once_refused(workdir, monkeypatch) -> None:
-    """codex plain spawn (no --once) in Python fallback -> exit 13, explains PTY daemon."""
+    """codex bg-substrate spawn (no --once) in Python fallback -> exit 13 (the
+    daemon-worker lane; the pane default routes to the mux instead, 4a-G2)."""
     from fno.agents.cli import agents_app
 
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "ptagent", "-p", "codex", "hello"],
+        ["spawn", "ptagent", "-p", "codex", "hello", "--substrate", "bg"],
     )
 
     assert result.exit_code == 13, (

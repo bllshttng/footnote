@@ -100,7 +100,7 @@ from fno import paths
 # reject a v5 store instead of silently dropping the inside-leg report on
 # write-back. Reads stay backward-compatible: load_registry accepts
 # 1..=SCHEMA_VERSION.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class RegistryVersionError(RuntimeError):
@@ -222,6 +222,15 @@ class AgentEntry:
     # Additive-optional: an absent key reads as None and the Rust RegistryEntry
     # mirrors it with #[serde(default, skip_serializing_if=...)], so no schema bump.
     exited_at: Optional[str] = None
+    # Mux hosting ref (4a-G2): ``{"session": <mux session>, "pane_id": <u64>}``
+    # for an agent whose PTY is a mux pane (``fno agents spawn --substrate
+    # pane``); ``None`` for daemon-worker, bg-thread, and headless rows. The
+    # Python spawn back half writes it; the mux server's sideline reader and
+    # ``fno mail`` live-inject dispatch on it (a row carries exactly ONE live
+    # ref - mux XOR worker XOR bg - enforced by ``write_registry``). Mirrors
+    # Rust ``RegistryEntry.mux: Option<MuxRef>`` (X3); gated by the v6 schema
+    # bump so a pre-mux reader rejects instead of silently dropping the ref.
+    mux: Optional[dict] = None
 
     @property
     def session_id(self) -> Optional[str]:
@@ -281,6 +290,25 @@ def _hold_registry_lock(registry_path: Path) -> Iterator[None]:
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def _validate_single_live_ref(entry: AgentEntry) -> None:
+    """One-live-ref invariant (4a-G2, mirrors Rust ``validate_single_live_ref``).
+
+    A row carrying the ``mux`` ref must not ALSO carry a worker-socket
+    identity (non-empty ``short_id``) or a ``claude --bg`` thread id
+    (``claude_short_id``) - a double-ref row would make consumers dispatch one
+    agent down two substrates. Scoped to mux rows only; pre-existing
+    worker/bg field combinations are untouched.
+    """
+    if entry.mux is None:
+        return
+    if entry.short_id or entry.claude_short_id is not None:
+        other = "worker" if entry.short_id else "bg-thread"
+        raise ValueError(
+            f"registry row {entry.name!r} carries a mux ref alongside a "
+            f"{other} ref; a row holds exactly one live ref (mux XOR worker XOR bg)"
+        )
+
+
 def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> None:
     """Atomically write the registry to disk.
 
@@ -291,6 +319,8 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     the orphan ``.tmp`` is unlinked so it doesn't accumulate on retry.
     """
     target = _registry_path(path)
+    for e in entries:
+        _validate_single_live_ref(e)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "agents": [asdict(e) for e in entries],

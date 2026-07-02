@@ -297,10 +297,10 @@ def cmd_spawn(
     substrate: str = typer.Option(
         "pane", "--substrate",
         help=(
-            "Session substrate (x-2c27): pane (owned-PTY) | bg (claude --bg "
-            "thread) | headless (-p/--exec one-shot). The Rust runtime owns the "
-            "full routing; this Python fallback maps headless->one-shot and "
-            "bg/pane->plain spawn so the flag is never a hard 'unknown option'."
+            "Session substrate (x-2c27): pane (mux-hosted PTY, the default; "
+            "4a-G2) | bg (claude --bg thread) | headless (-p/--exec one-shot). "
+            "Python owns the pane back half (fno mux pane run + registry mux "
+            "ref); bg/headless keep their existing lanes."
         ),
     ),
     cwd: str | None = typer.Option(
@@ -347,13 +347,18 @@ def cmd_spawn(
         ),
     ),
 ) -> None:
-    """Spawn a new agent (Python fallback runtime).
+    """Spawn a new agent.
 
     ``spawn`` creates a new peer. Use ``ask`` for follow-up messages to
     an already-running agent.
 
-    claude plain spawn: creates a persistent bg thread; prints a compact
-    JSON receipt on stdout: {\"name\": ..., \"short_id\": ...,
+    Default substrate ``pane`` (4a-G2): the agent runs as a mux pane
+    (``fno mux pane run``), the registry row carries ``mux: {session,
+    pane_id}``, and the receipt is one JSON line with ``mux_session`` +
+    ``pane_id``.
+
+    claude ``--substrate bg``: creates a persistent bg thread; prints a
+    compact JSON receipt on stdout: {\"name\": ..., \"short_id\": ...,
     \"provider\": \"claude\", \"status\": \"live\"}.
 
     codex/gemini --once: creates + exchanges + tears down the registry
@@ -366,18 +371,50 @@ def cmd_spawn(
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
 
-    # x-2c27: the Rust client owns substrate routing; this Python fallback only
-    # runs when the binary is absent / FNO_AGENTS_RUNTIME=python / a --role spawn.
-    # Validate to parity with the Rust client (exit 2 on a bad value) rather than
-    # silently falling back to plain spawn, then map the substrate onto the
-    # existing `once` lever: headless -> one-shot; bg/pane -> plain spawn (for
-    # claude that already IS the bg thread).
+    # x-2c27 named the substrate axis; 4a-G2 retargeted its default: `pane`
+    # is mux-hosted and Python OWNS that back half (rust_runtime carves pane
+    # spawns out of the binary route), `bg`/`headless` keep their existing
+    # lanes. Validate to parity with the Rust client (exit 2 on a bad value);
+    # headless still maps onto the `once` lever.
     if substrate not in ("pane", "bg", "headless"):
         print(
             f"--substrate must be one of: pane, bg, headless (got {substrate})",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+    # `--once` is the pre-substrate spelling of headless (the Rust client maps
+    # it to --substrate headless): it always means a one-shot, never a pane.
+    if substrate == "pane" and not once:
+        from fno.agents.mux_spawn import dispatch_spawn_pane
+
+        try:
+            pane_result = dispatch_spawn_pane(
+                name=name,
+                message=message,
+                provider=provider,
+                cwd=workdir,
+                yolo=yolo,
+                role=role,
+            )
+        except DispatchAskError as exc:
+            print(str(exc), file=sys.stderr)
+            raise typer.Exit(code=exc.exit_code) from exc
+        # Compact one-line receipt, superset of the daemon-spawn receipt shape
+        # ({"name","short_id","provider","status"}) so line-parsing consumers
+        # keep working; short_id is empty (a mux row has no worker socket).
+        receipt = json.dumps(
+            {
+                "name": pane_result.name,
+                "short_id": "",
+                "provider": pane_result.provider,
+                "status": "live",
+                "mux_session": pane_result.session,
+                "pane_id": pane_result.pane_id,
+            }
+        )
+        sys.stdout.write(receipt + "\n")
+        sys.stdout.flush()
+        return
     if substrate == "headless":
         once = True
 

@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use fno::proto::{
-    read_msg_sync, write_msg_sync, ClientMsg, Command, Frame, ProtoError, ServerMsg, SquadMeta,
-    BUILD_VERSION, PROTO_VERSION,
+    read_msg_sync, write_msg_sync, AgentRow, ClientMsg, Command, Frame, ProtoError, ServerMsg,
+    SquadMeta, BUILD_VERSION, PROTO_VERSION,
 };
 use fno::tree::Rect;
 use fno::vt::{frame_text, Pane};
@@ -240,6 +240,7 @@ pub struct LayoutSnap {
     pub panes: Vec<(u64, Rect)>,
     pub focus: u64,
     pub area: (u16, u16),
+    pub agents: Vec<AgentRow>,
 }
 
 /// One absorbed message kind, in arrival order - the seam for asserting the
@@ -344,6 +345,7 @@ impl FakeClient {
                 panes,
                 focus,
                 area,
+                agents,
             } => {
                 self.layout = Some(LayoutSnap {
                     squads,
@@ -351,6 +353,7 @@ impl FakeClient {
                     panes,
                     focus,
                     area,
+                    agents,
                 });
             }
             ServerMsg::ModeSync { bytes } => self.modesyncs.push(bytes),

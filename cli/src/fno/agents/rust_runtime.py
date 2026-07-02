@@ -355,6 +355,34 @@ def resolve_installed_binary() -> Optional[Path]:
     return None
 
 
+def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` targeting the ``pane`` substrate (4a-G2).
+
+    The pane substrate is mux-hosted now: the Python back half owns the
+    ``fno mux pane run`` spawn (front-half reuse + registry mux ref), so a
+    pane spawn must never route to the Rust client's daemon RPC (the daemon
+    PTY host retires at G4; a silent fallback there is exactly what AC1-ERR
+    forbids). ``pane`` is the default, so an absent ``--substrate`` counts.
+    The scan stops at ``--argv`` like the other raw-args scans so a payload
+    token can never masquerade as our flag.
+    """
+    if verb != "spawn":
+        return False
+    substrate = "pane"
+    it = iter(args)
+    for a in it:
+        if a == "--argv":
+            break
+        if a in ("--once", "-o"):
+            # The pre-substrate spelling of headless: a one-shot, never a pane.
+            return False
+        if a == "--substrate":
+            substrate = next(it, "")
+        elif a.startswith("--substrate="):
+            substrate = a.split("=", 1)[1]
+    return substrate == "pane"
+
+
 def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--role`` (x-d2fe).
 
@@ -534,10 +562,15 @@ def make_agents_group_cls() -> type:
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any
                 # mode; fall through to the Python dispatch that implements it.
-                role_spawn = _is_role_bearing_spawn(verb, args)
-                if mode == "rust" and not role_spawn:
+                # A pane-substrate spawn (4a-G2, the default) is Python-only the
+                # same way: the mux-hosted back half lives in cmd_spawn, and the
+                # binary would route it to the retiring daemon PTY host.
+                py_spawn = _is_role_bearing_spawn(verb, args) or _is_pane_substrate_spawn(
+                    verb, args
+                )
+                if mode == "rust" and not py_spawn:
                     route_to_rust(list(args))  # execs; does not return
-                elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not role_spawn:
+                elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     # Since ab-73da4ac2 this includes ``ask`` for every provider
                     # (the unconditional flip): the Rust client owns the full
                     # create/resume decision and surfaces the unresolvable-create

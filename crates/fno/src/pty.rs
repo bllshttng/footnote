@@ -89,7 +89,7 @@ impl PtyShell {
         let mut errors = Vec::new();
         let mut child = None;
         for cand in candidates {
-            let cmd = base_command(cand, cwd, session);
+            let cmd = base_command(cand, cwd, session, pane_id);
             match pair.slave.spawn_command(cmd) {
                 Ok(c) => {
                     child = Some(c);
@@ -120,7 +120,7 @@ impl PtyShell {
             .split_first()
             .ok_or_else(|| PtyError::Spawn("empty argv".into()))?;
         let pair = open_pty(rows, cols)?;
-        let mut cmd = base_command(OsStr::new(program), cwd, session);
+        let mut cmd = base_command(OsStr::new(program), cwd, session, pane_id);
         for a in args {
             cmd.arg(a);
         }
@@ -213,11 +213,19 @@ fn open_pty(rows: u16, cols: u16) -> Result<portable_pty::PtyPair, PtyError> {
 
 /// A `CommandBuilder` for `program` carrying the pane environment: a login-ish
 /// `TERM`, `FNO_SESSION` (AC3-HP: the nested-attach guard and kill-server both
-/// read it), and the launch cwd when it is still a directory.
-fn base_command(program: &OsStr, cwd: Option<&std::path::Path>, session: &str) -> CommandBuilder {
+/// read it), `FNO_PANE` (4a-G2: the pane's own id, so an agent hosted in a
+/// pane can name itself to the registry and an in-pane spawn can address its
+/// host), and the launch cwd when it is still a directory.
+fn base_command(
+    program: &OsStr,
+    cwd: Option<&std::path::Path>,
+    session: &str,
+    pane_id: u64,
+) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(program);
     cmd.env("TERM", "xterm-256color");
     cmd.env("FNO_SESSION", session);
+    cmd.env("FNO_PANE", pane_id.to_string());
     if let Some(dir) = cwd.filter(|d| d.is_dir()) {
         cmd.cwd(dir);
     }
@@ -400,6 +408,47 @@ mod tests {
             .expect("exit must be signaled")
             .expect("channel open");
         assert_eq!(pid, 42, "exit signal must carry the pane id");
+    }
+
+    #[tokio::test]
+    async fn server_spine_pane_env_carries_session_and_pane_id() {
+        // 4a-G2: FNO_PANE joins FNO_SESSION in every pane child env, so a
+        // hosted agent can name its own pane and an in-pane spawn inherits
+        // the session.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
+        let shell = PtyShell::spawn(
+            &shell_candidates(Some(OsStr::new("/bin/sh"))),
+            24,
+            80,
+            None,
+            "envtest",
+            31,
+            tx,
+            exit_tx,
+        )
+        .expect("spawns");
+        shell
+            .write_input(b"echo mark-$FNO_SESSION-$FNO_PANE-end\r")
+            .unwrap();
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
+                Ok(Some((_, chunk))) => {
+                    seen.extend_from_slice(&chunk);
+                    if String::from_utf8_lossy(&seen).contains("mark-envtest-31-end") {
+                        return;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {}
+            }
+        }
+        panic!(
+            "pane env vars never echoed: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
     }
 
     #[test]
