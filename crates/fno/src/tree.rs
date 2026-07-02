@@ -183,6 +183,24 @@ fn child_areas(axis: Axis, area: Rect, children: &[(f32, Node)]) -> Vec<Rect> {
     out
 }
 
+/// Every leaf id in `node`, in tree order. The cheap membership walk callers
+/// (squad.rs pane lookup) use when they need ids but not geometry.
+pub fn leaves(node: &Node) -> Vec<PaneId> {
+    fn walk(node: &Node, out: &mut Vec<PaneId>) {
+        match node {
+            Node::Leaf(id) => out.push(*id),
+            Node::Branch { children, .. } => {
+                for (_, child) in children {
+                    walk(child, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, &mut out);
+    out
+}
+
 /// The area of the node reached by descending `path` (a chain of child
 /// indices from the root). Used by [`resize`] to find a branch's own area
 /// (to compute its minimum-size ratio) without walking every leaf.

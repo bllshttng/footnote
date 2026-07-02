@@ -7,5 +7,6 @@ pub mod client;
 pub mod proto;
 pub mod pty;
 pub mod server;
+pub mod squad;
 pub mod tree;
 pub mod vt;
