@@ -68,7 +68,9 @@ pub struct PtyShell {
 
 impl PtyShell {
     /// Spawn the first spawnable candidate from `candidates` on a fresh
-    /// `rows`x`cols` PTY. Output chunks flow into the SHARED `out_tx` tagged
+    /// `rows`x`cols` PTY, starting the shell in `cwd` when given and still a
+    /// directory (a vanished dir degrades to the server's cwd rather than
+    /// refusing the pane). Output chunks flow into the SHARED `out_tx` tagged
     /// with `pane_id`; when the child is gone (EOF/EIO on the master) the
     /// reader thread sends `pane_id` on `exit_tx` and ends. An explicit exit
     /// channel replaces Phase 1's channel-close signal: with one shared
@@ -77,6 +79,7 @@ impl PtyShell {
         candidates: &[OsString],
         rows: u16,
         cols: u16,
+        cwd: Option<&std::path::Path>,
         pane_id: u64,
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
@@ -97,6 +100,9 @@ impl PtyShell {
             let mut cmd = CommandBuilder::new(cand);
             // A login-ish TERM so shells and full-screen programs behave.
             cmd.env("TERM", "xterm-256color");
+            if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+                cmd.cwd(dir);
+            }
             match pair.slave.spawn_command(cmd) {
                 Ok(c) => {
                     child = Some(c);
@@ -290,8 +296,8 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
         let candidates = shell_candidates(Some(OsStr::new("/nonexistent/definitely-not-a-shell")));
-        let shell =
-            PtyShell::spawn(&candidates, 24, 80, 7, tx, exit_tx).expect("fallback must spawn");
+        let shell = PtyShell::spawn(&candidates, 24, 80, None, 7, tx, exit_tx)
+            .expect("fallback must spawn");
         assert!(shell.is_child_alive());
         // Prove the fallback shell is real: round-trip a command, and assert
         // every chunk carries this pane's tag.
@@ -325,6 +331,7 @@ mod tests {
             &shell_candidates(Some(OsStr::new("/bin/sh"))),
             24,
             80,
+            None,
             42,
             tx,
             exit_tx,
@@ -346,6 +353,7 @@ mod tests {
             &["/nonexistent/a".into(), "/nonexistent/b".into()],
             24,
             80,
+            None,
             0,
             tx,
             exit_tx,

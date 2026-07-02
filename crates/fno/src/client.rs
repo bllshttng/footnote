@@ -144,9 +144,19 @@ impl TerminalGuard {
     }
 }
 
+/// Every DEC/private mode `ModeSync` can set, reset. Emitted unconditionally
+/// on exit (codex P2): a focused vim's mouse reporting or bracketed paste
+/// must never survive onto the user's real terminal after `fno` exits, and
+/// tracking exactly-what-was-set buys nothing over resetting the fixed set
+/// `vt::mode_diff` can emit. Unknown sequences (kitty CSI-u on a plain
+/// terminal) are ignored by terminals by design.
+const MODE_RESET: &[u8] =
+    b"\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1007l\x1b[?2004l\x1b[=0;1u";
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let mut out = std::io::stdout();
+        let _ = out.write_all(MODE_RESET);
         let _ = crossterm::execute!(out, terminal::LeaveAlternateScreen, cursor::Show);
         let _ = terminal::disable_raw_mode();
     }
@@ -183,6 +193,10 @@ struct View {
     expanded: HashSet<u64>,
     /// Selector cursor into [`View::sel_rows`], when open.
     selector: Option<usize>,
+    /// Pending escape bytes in selector mode, carried ACROSS reads so a
+    /// split arrow sequence can never half-close the selector and leak its
+    /// tail into the pane (gemini medium).
+    sel_esc: Vec<u8>,
     notice: Option<(String, Instant)>,
 }
 
@@ -195,6 +209,7 @@ impl View {
             panel_on: true,
             expanded: HashSet::new(),
             selector: None,
+            sel_esc: Vec::new(),
             notice: None,
         }
     }
@@ -759,6 +774,7 @@ async fn handle_stdin(
                 } else {
                     view.panel_on = true;
                     view.selector = Some(0);
+                    view.sel_esc.clear();
                 }
             }
             Event::TogglePanel => {
@@ -778,11 +794,53 @@ async fn handle_stdin(
     Ok(StdinFlow::Continue)
 }
 
-/// Selector-mode keys: j/k move, h/l collapse/expand, Enter selects (squad
-/// or tab), Esc/q closes. Escape SEQUENCES (arrows etc.) are ignored whole
-/// so their tail bytes never leak into the pane as input; the detach byte
-/// still works. ponytail: hjkl-only nav keeps the selector a pure byte
-/// interpreter - arrow support means another escape accumulator here.
+/// Fold raw selector-mode bytes into simple key bytes, carrying escape state
+/// in `esc` ACROSS reads (gemini medium: an arrow sequence split at a read
+/// boundary must neither close the selector nor leak its tail into the
+/// pane). Arrows map to their hjkl twins; unknown escape tails are
+/// swallowed. A lone ESC stays pending until the next byte decides it - a
+/// bare-Esc close lands on the following keypress (which is swallowed);
+/// `q` closes instantly.
+fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
+    let mut keys = Vec::new();
+    for &b in bytes {
+        if !esc.is_empty() {
+            if esc.as_slice() == [0x1b] && b == b'[' {
+                esc.push(b);
+                continue;
+            }
+            if esc.as_slice() == [0x1b, b'['] {
+                match b {
+                    b'A' => keys.push(b'k'),
+                    b'B' => keys.push(b'j'),
+                    b'C' => keys.push(b'l'),
+                    b'D' => keys.push(b'h'),
+                    _ => {} // unknown sequence: swallowed whole
+                }
+                esc.clear();
+                continue;
+            }
+            // Pending [ESC] + a non-'[' byte: that ESC was a bare Esc press.
+            esc.clear();
+            keys.push(0x1b);
+            if b == 0x1b {
+                esc.push(0x1b); // and a new one just started
+            }
+            continue;
+        }
+        if b == 0x1b {
+            esc.push(0x1b);
+            continue;
+        }
+        keys.push(b);
+    }
+    keys
+}
+
+/// Selector-mode keys: j/k (and arrows) move, h/l (and left/right) collapse/
+/// expand, Enter selects (squad or tab), Esc/q closes. Rows and cursor are
+/// re-read per key so a close mid-chunk swallows the remainder instead of
+/// resurrecting the selector. The detach byte still works from here.
 async fn selector_keys(
     view: &mut View,
     bytes: &[u8],
@@ -791,19 +849,18 @@ async fn selector_keys(
     if bytes.contains(&crate::keys::DETACH) {
         return Ok(StdinFlow::Detach);
     }
-    if bytes.len() > 1 && bytes[0] == 0x1b {
-        return Ok(StdinFlow::Continue); // whole escape sequence: ignored
-    }
-    let rows = view.sel_rows();
-    let Some(cur) = view.selector else {
-        return Ok(StdinFlow::Continue);
-    };
-    for &b in bytes {
-        match b {
+    let mut esc = std::mem::take(&mut view.sel_esc);
+    let keys = fold_selector_keys(&mut esc, bytes);
+    view.sel_esc = esc;
+    for &k in &keys {
+        let rows = view.sel_rows();
+        let Some(cur) = view.selector else {
+            break; // closed mid-chunk: swallow the rest, never forward
+        };
+        match k {
             b'j' => {
-                let n = view.sel_rows().len();
-                if n > 0 {
-                    view.selector = Some((cur + 1).min(n - 1));
+                if !rows.is_empty() {
+                    view.selector = Some((cur + 1).min(rows.len() - 1));
                 }
             }
             b'k' => view.selector = Some(cur.saturating_sub(1)),
@@ -1171,6 +1228,31 @@ mod tests {
             !view.frames.contains_key(&11),
             "frames for dead panes are dropped at Layout"
         );
+    }
+
+    #[test]
+    fn client_selector_fold_handles_split_escape_sequences() {
+        // Gemini medium: an arrow sequence split across reads must fold into
+        // one nav key - never a bare-Esc close plus leaked tail bytes.
+        let mut esc = Vec::new();
+        let mut keys = Vec::new();
+        for chunk in [&b"\x1b"[..], &b"["[..], &b"B"[..]] {
+            keys.extend(fold_selector_keys(&mut esc, chunk));
+        }
+        assert_eq!(keys, b"j".to_vec());
+        assert!(esc.is_empty());
+        // Whole-chunk arrows and hjkl mix.
+        let mut esc = Vec::new();
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b[Aj\x1b[C"), b"kjl");
+        // A bare Esc resolves on the NEXT byte (which is swallowed).
+        let mut esc = Vec::new();
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b"), b"");
+        assert_eq!(esc, vec![0x1b], "lone ESC stays pending");
+        assert_eq!(fold_selector_keys(&mut esc, b"x"), vec![0x1b]);
+        assert!(esc.is_empty());
+        // Unknown sequences are swallowed whole, selector unaffected.
+        let mut esc = Vec::new();
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b[Z"), b"");
     }
 
     #[test]

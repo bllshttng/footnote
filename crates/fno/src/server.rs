@@ -70,6 +70,10 @@ enum CoreMsg {
         id: u64,
         rows: u16,
         cols: u16,
+        /// The client's literal launch directory - where a FRESH squad's
+        /// first shell starts (more precise than the canonical root when the
+        /// user launched from a subdirectory).
+        cwd: String,
         /// Already resolved to the canonical squad key by `handle_client`'s
         /// own task - the blocking git run never touches the core loop.
         squad_key: String,
@@ -194,12 +198,18 @@ impl Core {
         }
     }
 
-    fn spawn_pane(&mut self, rows: u16, cols: u16) -> Result<u64, String> {
+    /// Spawn a pane's shell in `cwd` (codex P2: a long-lived server serves
+    /// squads from MANY repos; inheriting the server process cwd would start
+    /// every later squad's shell in the first client's directory). Empty /
+    /// vanished dirs degrade to the server cwd inside `PtyShell::spawn`.
+    fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
         let id = self.next_pane_id;
+        let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn(
             &self.shells,
             rows,
             cols,
+            dir,
             id,
             self.out_tx.clone(),
             self.exit_tx.clone(),
@@ -227,11 +237,13 @@ impl Core {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn attach(
         &mut self,
         id: u64,
         rows: u16,
         cols: u16,
+        cwd: String,
         key: String,
         reliable_tx: mpsc::Sender<ServerMsg>,
         dirty: DirtyMap,
@@ -246,7 +258,8 @@ impl Core {
             }
             None => {
                 // Fresh squad: PTY spawn FIRST (Locked 7), then the model.
-                match self.spawn_pane(rows, cols) {
+                // The first shell starts in the client's literal launch dir.
+                match self.spawn_pane(rows, cols, &cwd) {
                     Ok(pid) => {
                         let sid = self.next_squad_id;
                         self.next_squad_id += 1;
@@ -485,13 +498,19 @@ impl Core {
                     return Flow::Continue;
                 };
                 // Spawn at the focused pane's current size; the layout pass
-                // right after resizes both halves to their real rects.
+                // right after resizes both halves to their real rects. New
+                // shells within a squad start in its canonical root.
                 let (rows, cols) = self
                     .panes
                     .get(&tab.focus)
                     .map(|e| e.vt.size())
                     .unwrap_or(self.viewport);
-                let pid = match self.spawn_pane(rows, cols) {
+                let squad_cwd = self
+                    .session
+                    .active()
+                    .map(|s| s.canonical_cwd.clone())
+                    .unwrap_or_default();
+                let pid = match self.spawn_pane(rows, cols, &squad_cwd) {
                     Ok(p) => p,
                     Err(e) => {
                         // AC1-ERR: nothing mutated yet - the tree is
@@ -549,7 +568,12 @@ impl Core {
             }
             Command::NewTab => {
                 let (rows, cols) = self.viewport;
-                let pid = match self.spawn_pane(rows, cols) {
+                let squad_cwd = self
+                    .session
+                    .active()
+                    .map(|s| s.canonical_cwd.clone())
+                    .unwrap_or_default();
+                let pid = match self.spawn_pane(rows, cols, &squad_cwd) {
                     Ok(p) => p,
                     Err(e) => {
                         // AC5-ERR: stay on the current tab, error visible.
@@ -638,12 +662,13 @@ impl Core {
                 id,
                 rows,
                 cols,
+                cwd,
                 squad_key,
                 reliable_tx,
                 dirty,
                 notify,
             } => {
-                self.attach(id, rows, cols, squad_key, reliable_tx, dirty, notify);
+                self.attach(id, rows, cols, cwd, squad_key, reliable_tx, dirty, notify);
                 Flow::Continue
             }
             CoreMsg::Input(bytes) => {
@@ -858,7 +883,7 @@ async fn handle_client(
             let key = tokio::task::spawn_blocking(move || squad::resolve_key(&owned))
                 .await
                 .unwrap_or_else(|_| cwd.clone());
-            resolver.lock().unwrap().insert(cwd, key.clone());
+            resolver.lock().unwrap().insert(cwd.clone(), key.clone());
             key
         }
     };
@@ -871,6 +896,7 @@ async fn handle_client(
             id,
             rows,
             cols,
+            cwd,
             squad_key,
             reliable_tx,
             dirty: dirty.clone(),
@@ -968,6 +994,26 @@ async fn client_writer(
                 // Drain the whole map; every frame is self-contained, and a
                 // frame inserted mid-drain re-notifies, so nothing is lost.
                 loop {
+                    // Reliable messages queued mid-flood jump ahead of the
+                    // frame stream (codex P2): continuous re-insertion could
+                    // otherwise pin the writer inside this arm, and the
+                    // biased select only prioritizes at the select point -
+                    // not while an arm is running.
+                    loop {
+                        match reliable_rx.try_recv() {
+                            Ok(msg) => {
+                                let is_bye = matches!(msg, ServerMsg::Bye { .. });
+                                if write_msg(&mut w, &msg).await.is_err() {
+                                    let _ = core_tx.send(CoreMsg::Gone(id)).await;
+                                    return;
+                                }
+                                if is_bye {
+                                    return;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     let next = {
                         let mut d = dirty.lock().unwrap();
                         let key = d.keys().next().copied();

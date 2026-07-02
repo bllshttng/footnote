@@ -402,11 +402,17 @@ fn layout_e2e_worktree_attach_rolls_up_to_one_squad() {
     assert_eq!(l.squads.len(), 1, "worktree must roll up, not duplicate");
     assert_eq!(l.squads[0].name, "footnote");
 
-    // A non-git cwd creates a SECOND, literal-path squad (AC6-ERR half).
+    // A non-git cwd creates a SECOND, literal-path squad (AC6-ERR half) -
+    // and its shell starts IN that directory, not wherever the long-lived
+    // server process happens to live (codex P2: later squads must not
+    // inherit the first client's cwd).
     let plain = scratch.dir("plain");
     let mut p = FakeClient::attach(&scratch.sock(), 24, 80, plain.to_str().unwrap());
     let l = p.wait_layout(10, "plain squad", |l| l.squads.len() == 2);
     assert_eq!(l.squads[1].name, "plain");
+    let pane = l.focus;
+    p.input(b"echo d=$(pwd)#\r");
+    p.wait_pane_text(15, pane, |t| t.contains("/plain#"));
 }
 
 #[test]
