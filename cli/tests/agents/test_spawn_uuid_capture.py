@@ -123,7 +123,7 @@ def test_spawn_claude_persists_resolved_uuid(workdir_claude, monkeypatch) -> Non
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "uuid-agent", "-p", "claude", "hello"],
+        ["spawn", "uuid-agent", "-p", "claude", "hello", "--substrate", "bg"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -142,7 +142,7 @@ def test_spawn_claude_unresolved_uuid_still_launches(workdir_claude) -> None:
     # autouse _isolate_spawn_uuid_capture already stubs the reader -> None.
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "nouuid-agent", "-p", "claude", "hello"],
+        ["spawn", "nouuid-agent", "-p", "claude", "hello", "--substrate", "bg"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output

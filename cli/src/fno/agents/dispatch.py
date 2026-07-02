@@ -1640,6 +1640,40 @@ class SpawnResult:
             raise ValueError("SpawnResult kind='created' must have reply=None")
 
 
+def validate_spawn_name(name: str) -> None:
+    """Spawn-name rules, shared by the daemon/bg/one-shot path
+    (:func:`dispatch_spawn`) and the mux-pane back half
+    (``fno.agents.mux_spawn``) so the two can never drift (4a-G2 front-half
+    reuse). Raises :class:`DispatchAskError` (exit 2) on every violation.
+    """
+    if not name:
+        raise DispatchAskError("agent name must not be empty", exit_code=2)
+    if "/" in name or "\\" in name or ".." in name:
+        raise DispatchAskError(
+            f"agent name must not contain path separators or '..': {name!r}",
+            exit_code=2,
+        )
+    if len(name) > _NAME_MAX_LEN:
+        raise DispatchAskError(
+            f"name must be <={_NAME_MAX_LEN} chars (got {len(name)})",
+            exit_code=2,
+        )
+    if _SHORT_ID_NAME_SHAPE.match(name):
+        raise DispatchAskError(
+            f"agent name {name!r} must not match short-id shape "
+            f"^[0-9a-f]{{8}}$ (prevents name/id collision)",
+            exit_code=2,
+        )
+    _forbidden_env_chars = ("\x00", "\n", "\r", "=")
+    bad = next((ch for ch in _forbidden_env_chars if ch in name), None)
+    if bad is not None:
+        raise DispatchAskError(
+            f"agent name {name!r} contains a forbidden character "
+            f"({bad!r} would corrupt subprocess env injection)",
+            exit_code=2,
+        )
+
+
 def dispatch_spawn(
     name: str,
     message: str,
@@ -1682,32 +1716,7 @@ def dispatch_spawn(
         :class:`DispatchAskError`: every documented failure mode.
     """
     # 1. Name validation. spawn allows empty message (default "").
-    if not name:
-        raise DispatchAskError("agent name must not be empty", exit_code=2)
-    if "/" in name or "\\" in name or ".." in name:
-        raise DispatchAskError(
-            f"agent name must not contain path separators or '..': {name!r}",
-            exit_code=2,
-        )
-    if len(name) > _NAME_MAX_LEN:
-        raise DispatchAskError(
-            f"name must be <={_NAME_MAX_LEN} chars (got {len(name)})",
-            exit_code=2,
-        )
-    if _SHORT_ID_NAME_SHAPE.match(name):
-        raise DispatchAskError(
-            f"agent name {name!r} must not match short-id shape "
-            f"^[0-9a-f]{{8}}$ (prevents name/id collision)",
-            exit_code=2,
-        )
-    _forbidden_env_chars = ("\x00", "\n", "\r", "=")
-    bad = next((ch for ch in _forbidden_env_chars if ch in name), None)
-    if bad is not None:
-        raise DispatchAskError(
-            f"agent name {name!r} contains a forbidden character "
-            f"({bad!r} would corrupt subprocess env injection)",
-            exit_code=2,
-        )
+    validate_spawn_name(name)
     _validate_from_name(from_name)
 
     # 2. Provider validation. _check_known_provider raises ValueError, which

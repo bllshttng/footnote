@@ -769,8 +769,10 @@ def test_role_bearing_spawn_not_routed_in_forced_rust_mode(monkeypatch, tmp_path
     assert called == []
 
 
-def test_plain_spawn_still_auto_routes(monkeypatch, tmp_path) -> None:
-    """Regression guard: a spawn WITHOUT --role still auto-routes to the binary."""
+def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) -> None:
+    """4a-G2 routing: a plain spawn (default = pane substrate) is Python-owned
+    (the mux back half) and must NOT route to the binary; a --substrate bg
+    spawn still auto-routes."""
     from fno.cli import app
 
     binary = _make_exe(tmp_path / rr.BINARY_NAME)
@@ -783,9 +785,21 @@ def test_plain_spawn_still_auto_routes(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
     monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
-    result = CliRunner().invoke(app, ["agents", "spawn", "worker", "--provider", "claude"])
+
+    # Plain spawn: stays Python (the pane back half). It will fail inside the
+    # Python dispatch (no mux in this test env), but must never exec the binary.
+    CliRunner().invoke(app, ["agents", "spawn", "worker", "--provider", "claude"])
+    assert captured == [], "a pane-substrate spawn must not route to the binary"
+
+    # bg substrate: still the binary's lane.
+    result = CliRunner().invoke(
+        app,
+        ["agents", "spawn", "worker", "--provider", "claude", "--substrate", "bg"],
+    )
     assert result.exit_code == 99
-    assert captured == [["spawn", "worker", "--provider", "claude"]]
+    assert captured == [
+        ["spawn", "worker", "--provider", "claude", "--substrate", "bg"]
+    ]
 
 
 def test_is_role_bearing_spawn_predicate() -> None:
