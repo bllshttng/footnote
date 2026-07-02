@@ -509,9 +509,15 @@ def _think_output_path(node_id: str, slug: str = "") -> str:
     tail = (slug or node_id).strip("-") or node_id
     from datetime import datetime, timezone
 
-    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
-        return str(_plans_output_dir() / f"{date}-{tail}.md")
+        pdir = _plans_output_dir()
+        # AC1-EDGE: a re-dispatch reuses this slug's existing date-slug doc
+        # rather than minting a second file under today's (different) date.
+        existing = sorted(pdir.glob(f"*-{tail}.md"))
+        if existing:
+            return str(existing[0])
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return str(pdir / f"{date}-{tail}.md")
     except Exception as exc:  # noqa: BLE001 - degrade to briefs, never wedge the spawn
         try:
             from fno.paths import briefs_dir

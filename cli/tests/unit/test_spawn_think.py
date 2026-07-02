@@ -539,6 +539,17 @@ def test_think_output_path_falls_back_to_config_plans_dir(monkeypatch, tmp_path)
     assert "plans" in out
 
 
+def test_think_output_path_reuses_existing_doc_on_redispatch(monkeypatch, tmp_path):
+    """AC1-EDGE: a re-dispatch reuses this slug's existing doc, not a new date file."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    plans = tmp_path / ".fno" / "plans"
+    plans.mkdir(parents=True)
+    prior = plans / "2020-01-01-my-slug.md"
+    prior.write_text("# earlier dispatch\n")
+    out = st._think_output_path("x-2222aaaa", "my-slug")
+    assert out == str(prior)  # reused, not a fresh today-dated file
+
+
 def test_think_output_path_empty_slug_uses_node_id(monkeypatch, tmp_path):
     """AC3-ERR analogue: an empty slug degrades to the node id, never a bare date-.md."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
