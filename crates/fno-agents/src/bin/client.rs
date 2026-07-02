@@ -376,7 +376,28 @@ async fn run(args: Vec<String>) -> i32 {
             .and_then(|v| v.as_str())
             .unwrap_or("pane");
         if substrate == "pane" {
+            use fno_agents::claude_ask::py_repr;
             use std::os::unix::process::CommandExt;
+            // Provider parity with maybe_run_spawn BEFORE the re-exec: a
+            // missing/unknown --provider stays a client-side exit 2 even
+            // where the `fno` front door is absent (CI).
+            match params.get("provider").and_then(|v| v.as_str()) {
+                None => {
+                    eprintln!(
+                        "provider is required to spawn a new agent {}; pass --provider one of: claude, codex, gemini, agy",
+                        py_repr(&agent_name)
+                    );
+                    return 2;
+                }
+                Some(p) if !matches!(p, "claude" | "codex" | "gemini" | "agy") => {
+                    eprintln!(
+                        "unknown provider {}; supported: claude, codex, gemini, agy",
+                        py_repr(p)
+                    );
+                    return 2;
+                }
+                Some(_) => {}
+            }
             let err = std::process::Command::new("fno")
                 .arg("agents")
                 .args(&args[..])
