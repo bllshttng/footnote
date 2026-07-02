@@ -1280,6 +1280,17 @@ event_types:
         pid:
           type: integer
 
+  - name: agent_row_reaped
+    description: "A terminal, past-grace, clean agent-view row was removed from the registry by the dead-row GC sweep or `fno agents reap` (x-b1aa). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        short_id:
+          type: string
+        name:
+          type: string
+
   - name: agent_orphan_state_archived
     description: "An orphaned agent's state directory was archived to the orphan archive path before removal."
     sources: [daemon]
