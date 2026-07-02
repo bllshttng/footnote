@@ -19,6 +19,7 @@ requires:
 
 ```
 resolve node  →  fno target start <node>   worktree off origin/main + claim + init prints the orienter
+              →  Step 0 (only if STALE)     orienter says boundary-reconcile: STALE -> read blocker diffs, append landed-facts sections
               →  implement                  edit the plan; atomic commits as you go
               →  /review                     internal sigma panel (cheap insurance)
               →  validate                    fno test  (real exit code; not bare pytest)
@@ -32,6 +33,7 @@ That is the whole job when a backlog node or plan is already bound. `fno target 
 - **only if** you were handed a bare idea (no plan): run `/think` then `/blueprint` before implementing.
 - **only if** `.fno/target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
 - **only if** dispatching nodes fire-and-forget: [§0a Background Dispatch](#0a-background-dispatch-bg).
+- **only if** the orienter printed `boundary-reconcile: STALE`: perform **Step 0** before any code commit - for each stale blocker, read its merged diff (`gh pr diff <n>`) and append a `### <blocker> landed ... - boundary reconcile` landed-facts section to the plan/brief. This is a *different* thing from de-stub reconcile below (hard-serialized dependent vs a stubbed contract). Full procedure + section format: [references/boundary-reconcile.md](references/boundary-reconcile.md).
 - **only if** spawned to de-stub a merged blocker: [§0b Reconcile mode](#0b-reconcile-mode---reconcile-manifest).
 - **only if** a Claude Plan-Mode plan was just approved: [§3f-pm Plan Mode Front Door](#3f-pm-plan-mode-front-door-mode-1-claude-code-only).
 

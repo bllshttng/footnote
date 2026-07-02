@@ -117,11 +117,46 @@ def test_plan_line(tmp_path) -> None:
     assert "stale-reference" in orient._plan_line(str(plan), tmp_path)
 
 
-def test_build_report_is_read_only_six_lines(monkeypatch, tmp_path) -> None:
+def test_build_report_is_read_only_seven_lines(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(orient, "_graph_entry", lambda *_: None)
     lines = orient.build_report(tmp_path, node_id="x-1", plan_path=None, manifest_raw={})
     labels = [ln.label for ln in lines]
-    assert labels == ["node", "attended", "worktree", "tests", "plan", "done-when"]
+    assert labels == [
+        "node", "attended", "worktree", "tests", "plan",
+        "boundary-reconcile", "done-when",
+    ]
+
+
+def test_boundary_line_no_node() -> None:  # AC4-UI: line always renders
+    assert orient._boundary_line(None, None, Path("/")).startswith("fresh")
+
+
+def test_boundary_line_not_in_graph(monkeypatch) -> None:  # AC8-FR degrade
+    monkeypatch.setattr(orient, "_graph_entry", lambda *_: None)
+    assert "not in graph" in orient._boundary_line("x-zzzz", None, Path("/"))
+
+
+def test_boundary_line_graph_error_degrades(monkeypatch) -> None:  # AC8-FR
+    def boom(*_):
+        raise RuntimeError("graph blew up")
+
+    monkeypatch.setattr(orient, "_graph_entry", boom)
+    assert "unknown" in orient._boundary_line("x-1", None, Path("/"))
+
+
+def test_render_boundary_verdicts() -> None:  # AC4-UI all four verdict shapes
+    from fno.plan.boundary import BlockerVerdict
+
+    assert orient._render_boundary([]) == "fresh (no landed blocker to reconcile)"
+    stale = orient._render_boundary(
+        [BlockerVerdict("x-e317", "stale", pr_number=141, completed_at="2026-07-02T09:12:12+00:00")]
+    )
+    assert stale == "STALE vs x-e317 (PR #141, merged 2026-07-02) - Step 0 required"
+    assert "marker present" in orient._render_boundary([BlockerVerdict("x-1", "reconciled")])
+    assert orient._render_boundary(
+        [BlockerVerdict("x-1", "unknown", reason="oops")]
+    ) == "unknown (x-1: oops)"
+    assert "no done blocker" in orient._render_boundary([BlockerVerdict("x-1", "fresh")])
 
 
 def test_read_manifest_merges_body_keys(tmp_path, monkeypatch) -> None:
