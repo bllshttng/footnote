@@ -1287,7 +1287,10 @@ mod tests {
         }
         run_command(&mut pane, "exact-output", 0);
         let read = pane.read_block(BlockSel::Last).unwrap();
-        assert_eq!(read.text, "exact-output", "captured pre-grid, scroll-independent");
+        assert_eq!(
+            read.text, "exact-output",
+            "captured pre-grid, scroll-independent"
+        );
         assert!(!read.truncated, "small block under the byte cap is exact");
     }
 
@@ -1332,7 +1335,10 @@ mod tests {
         assert!(!out.contains('\x1b'), "no ESC survives: {out:?}");
         assert!(out.starts_with("redtext"), "visible text kept: {out:?}");
         assert!(out.ends_with('!'), "trailing text kept: {out:?}");
-        assert!(out.contains('\u{fffd}'), "bad UTF-8 -> replacement char: {out:?}");
+        assert!(
+            out.contains('\u{fffd}'),
+            "bad UTF-8 -> replacement char: {out:?}"
+        );
     }
 
     #[test]
