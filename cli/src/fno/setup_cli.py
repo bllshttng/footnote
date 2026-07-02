@@ -296,11 +296,17 @@ def offer_recommended_rules(
     shipped plugin ``rules/`` dir and ``target_dir`` to ``~/.claude/rules/`` -
     both overridable for tests. Returns ``{"installed": bool, "results": [...]}``.
     """
-    from fno.setup.recommended_rules import install_recommended_rules, summarize
+    import os
 
-    src = source_dir or _paths.resolve_plugin_script("rules")
-    if not Path(src).is_dir():
-        # Bare install / no pack shipped: nothing to offer, say nothing.
+    from fno.setup.recommended_rules import (
+        default_rules_source,
+        install_recommended_rules,
+        summarize,
+    )
+
+    src = source_dir or default_rules_source()
+    if src is None or not Path(src).is_dir():
+        # No pack resolvable anywhere: nothing to offer, say nothing.
         return {"installed": False, "results": []}
 
     if not confirm_fn(
@@ -308,7 +314,9 @@ def offer_recommended_rules(
     ):
         return {"installed": False, "results": []}
 
-    tgt = target_dir or (Path.home() / ".claude" / "rules")
+    # os.path.expanduser (not Path.home()) so a headless / sandboxed setup run
+    # with an unset HOME degrades instead of raising RuntimeError (PR #146 gemini).
+    tgt = target_dir or (Path(os.path.expanduser("~")) / ".claude" / "rules")
     results = install_recommended_rules(Path(src), Path(tgt))
     echo_fn(summarize(results))
     return {"installed": True, "results": results}

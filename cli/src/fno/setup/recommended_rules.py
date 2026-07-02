@@ -17,11 +17,40 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 # The index is documentation about the pack, not itself a loaded rule, so it is
 # not installed into the user's rules dir.
 _INDEX_NAME = "RULES.md"
+
+
+def _package_rules_dir() -> Optional[Path]:
+    """The pack bundled inside the wheel at ``fno/recommended_rules/`` (see the
+    wheel force-include in cli/pyproject.toml). Present in an installed wheel,
+    absent in a bare source/editable checkout (where it lives at the repo root)."""
+    try:
+        from importlib.resources import files
+
+        p = Path(str(files("fno") / "recommended_rules"))
+        return p if p.is_dir() else None
+    except (ImportError, ModuleNotFoundError, TypeError, ValueError, OSError):
+        return None
+
+
+def default_rules_source() -> Optional[Path]:
+    """Resolve the shipped rules pack, robust to install path.
+
+    Package data first (always present after ``pip install fno``, so the
+    plugin-install ``fno setup wizard`` path never silently skips), then the
+    repo/plugin ``rules/`` checkout for dev + OSS clones. ``None`` when neither
+    exists (nothing to offer)."""
+    pkg = _package_rules_dir()
+    if pkg is not None:
+        return pkg
+    from fno import paths as _paths
+
+    repo = Path(_paths.resolve_plugin_script("rules"))
+    return repo if repo.is_dir() else None
 
 
 @dataclass

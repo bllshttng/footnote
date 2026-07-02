@@ -44,6 +44,15 @@ path = "src/fno/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/fno"]
 
+# Ship the recommended-rules pack (repo-root `rules/`, the OSS-facing source of
+# truth) INSIDE the wheel as `fno/recommended_rules/`, so `fno setup wizard`
+# finds it in every install path - including the fresh plugin-install path where
+# postinstall runs `fno setup wizard` before session-start has primed the
+# plugin-root pointer, so `resolve_plugin_script("rules")` would otherwise fall
+# back to cwd and silently skip the offer (PR #146 codex P2).
+[tool.hatch.build.targets.wheel.force-include]
+"../rules" = "fno/recommended_rules"
+
 # The canonical events schema ships INSIDE the wheel as `fno/events/schema.yaml`
 # - ordinary package data under `src/fno`, so both the wheel and the sdist carry
 # it with no force-include machinery. The Python validator reads the sibling
