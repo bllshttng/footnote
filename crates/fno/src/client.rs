@@ -48,7 +48,7 @@ fn run_inner(session: &str) -> Result<i32, String> {
     let stream = connect_or_spawn(&path)?;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
-    runtime.block_on(attach_and_run(stream))
+    runtime.block_on(attach_and_run(stream, &path))
 }
 
 /// Connect to a live server, or spawn one and connect. AC3-ERR: a dead
@@ -120,8 +120,13 @@ impl TerminalGuard {
     fn enter() -> Result<Self, String> {
         terminal::enable_raw_mode().map_err(|e| format!("raw mode: {e}"))?;
         let mut out = std::io::stdout();
-        let _ = crossterm::execute!(out, terminal::EnterAlternateScreen);
-        Ok(TerminalGuard)
+        // Surface an alt-screen failure instead of silently painting over the
+        // user's scrollback. The guard exists from here, so raw mode is
+        // restored by Drop on the error path.
+        let guard = TerminalGuard;
+        crossterm::execute!(out, terminal::EnterAlternateScreen)
+            .map_err(|e| format!("alternate screen: {e}"))?;
+        Ok(guard)
     }
 }
 
@@ -133,7 +138,13 @@ impl Drop for TerminalGuard {
     }
 }
 
-async fn attach_and_run(stream: std::os::unix::net::UnixStream) -> Result<i32, String> {
+async fn attach_and_run(
+    stream: std::os::unix::net::UnixStream,
+    socket: &Path,
+) -> Result<i32, String> {
+    // A server that dies between accept and Attach (e.g. no spawnable shell)
+    // closes the connection without a reason; its stderr has the real cause.
+    let log_hint = format!("check {}", log_path(socket).display());
     stream
         .set_nonblocking(true)
         .map_err(|e| format!("socket setup: {e}"))?;
@@ -160,13 +171,29 @@ async fn attach_and_run(stream: std::os::unix::net::UnixStream) -> Result<i32, S
         read_msg::<_, ServerMsg>(&mut sock_r),
     )
     .await
-    .map_err(|_| "server did not answer the attach".to_string())?;
+    .map_err(|_| format!("server did not answer the attach; {log_hint}"))?;
     let first_frame = match first {
-        Ok(ServerMsg::Frame(f)) => f,
+        Ok(ServerMsg::Frame(f)) => checked_frame(f)?,
         Ok(ServerMsg::Bye { reason }) => return Err(reason),
         Ok(ServerMsg::Cursor { .. }) => return Err("server spoke out of order".into()),
-        Err(e) => return Err(format!("attach failed: {e}")),
+        Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
     };
+
+    // Socket reads get their own task. `read_msg` is NOT cancellation-safe
+    // (a select! that drops it between the length prefix and the body loses
+    // the consumed bytes and desyncs the whole stream), so the select loop
+    // below must never poll it directly - it drains this channel instead,
+    // and mpsc recv IS cancel-safe.
+    let (srv_tx, mut srv_rx) = mpsc::channel::<Result<ServerMsg, ProtoError>>(16);
+    tokio::spawn(async move {
+        loop {
+            let msg = read_msg::<_, ServerMsg>(&mut sock_r).await;
+            let is_err = msg.is_err();
+            if srv_tx.send(msg).await.is_err() || is_err {
+                break;
+            }
+        }
+    });
 
     // Raw stdin -> channel; forwarded verbatim below.
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -201,8 +228,12 @@ async fn attach_and_run(stream: std::os::unix::net::UnixStream) -> Result<i32, S
 
     let exit: Result<i32, String> = loop {
         tokio::select! {
-            msg = read_msg::<_, ServerMsg>(&mut sock_r) => match msg {
+            msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame(f)) => {
+                    let f = match checked_frame(f) {
+                        Ok(f) => f,
+                        Err(e) => break Err(e),
+                    };
                     if let Err(e) = compositor.draw(&f) {
                         break Err(format!("draw: {e}"));
                     }
@@ -233,7 +264,9 @@ async fn attach_and_run(stream: std::os::unix::net::UnixStream) -> Result<i32, S
                         break Err(format!("input send failed: {e}"));
                     }
                 }
-                None => break Ok(exit_with_notice("stdin closed; detached".into())),
+                // The stdin thread breaks on EOF and on read error alike; by
+                // the time we see None we cannot tell which, so say so.
+                None => break Ok(exit_with_notice("stdin ended (closed or read error); detached".into())),
             },
             _ = winch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
@@ -268,6 +301,22 @@ thread_local! {
 fn exit_with_notice(notice: String) -> i32 {
     NOTICE.with(|n| *n.borrow_mut() = Some(notice));
     0
+}
+
+/// The wire trust boundary: a `Frame` whose cell count disagrees with its
+/// geometry would panic the compositor's slice math. Reject it like a
+/// malformed message - close loudly, never draw (same posture as `read_msg`).
+fn checked_frame(f: Frame) -> Result<Frame, String> {
+    if f.geometry_ok() {
+        Ok(f)
+    } else {
+        Err(format!(
+            "malformed frame from server: {}x{} but {} cells",
+            f.rows,
+            f.cols,
+            f.cells.len()
+        ))
+    }
 }
 
 /// Draws frames with a row-level diff against what was actually drawn last -

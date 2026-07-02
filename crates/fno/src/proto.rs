@@ -23,6 +23,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Bumped on any wire-incompatible change. The server outlives `cargo install`
 /// upgrades, so both sides exchange this at Attach and refuse loudly on skew.
+/// There is no automated backstop tying this to the message shapes: bump it in
+/// the SAME commit as any `ClientMsg`/`ServerMsg`/`Frame` shape change.
 pub const PROTO_VERSION: u32 = 1;
 
 /// The crate version, carried in the handshake purely for the error message.
@@ -94,6 +96,16 @@ pub struct Frame {
     pub cursor_row: u16,
     pub cursor_col: u16,
     pub cursor_visible: bool,
+}
+
+impl Frame {
+    /// The load-bearing invariant: exactly `rows * cols` cells. Serde cannot
+    /// enforce it (a short `cells` deserializes cleanly), so the compositor
+    /// checks this at the trust boundary before doing any slice math - a
+    /// mismatched frame is treated like a malformed message, never drawn.
+    pub fn geometry_ok(&self) -> bool {
+        self.cells.len() == self.rows as usize * self.cols as usize
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -433,6 +445,16 @@ mod tests {
             "server proto version missing: {err}"
         );
         assert!(err.contains(BUILD_VERSION), "server build missing: {err}");
+    }
+
+    #[test]
+    fn proto_frame_geometry_check_catches_cell_count_mismatch() {
+        let mut f = test_frame();
+        assert!(f.geometry_ok());
+        f.cells.pop();
+        assert!(!f.geometry_ok(), "short cells vec must fail the check");
+        f.cells.clear();
+        assert!(!f.geometry_ok());
     }
 
     #[test]

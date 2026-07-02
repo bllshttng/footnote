@@ -91,6 +91,16 @@ fn connect_with_retry(sock: &Path) -> UnixStream {
 /// Read frames until `pred` matches one (returns its text), or panic with the
 /// last screen at the deadline.
 fn wait_for_frame(stream: &mut UnixStream, secs: u64, pred: impl Fn(&str) -> bool) -> String {
+    let f = wait_for_raw_frame(stream, secs, |f| pred(&frame_text(f)));
+    frame_text(&f)
+}
+
+/// Same, but the predicate sees the whole `Frame` (geometry included).
+fn wait_for_raw_frame(
+    stream: &mut UnixStream,
+    secs: u64,
+    pred: impl Fn(&fno::proto::Frame) -> bool,
+) -> fno::proto::Frame {
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
@@ -100,8 +110,8 @@ fn wait_for_frame(stream: &mut UnixStream, secs: u64, pred: impl Fn(&str) -> boo
         match read_msg_sync::<_, ServerMsg>(stream) {
             Ok(ServerMsg::Frame(f)) => {
                 last = frame_text(&f);
-                if pred(&last) {
-                    return last;
+                if pred(&f) {
+                    return f;
                 }
             }
             Ok(ServerMsg::Cursor { .. }) => {}
@@ -157,8 +167,9 @@ fn server_spine_exited_child_fails_closed_and_shows_state() {
     send(&mut stream, &ClientMsg::Input(b"exit\r".to_vec()));
     wait_for_frame(&mut stream, 10, |text| text.contains("[fno: pane exited]"));
     // Input after exit: dropped fail-closed. The server must still be alive
-    // and serving this connection afterwards - prove it with a resize, which
-    // always produces a fresh frame.
+    // and serving this connection afterwards - prove it with a resize and
+    // assert the resize's EFFECT (new geometry), so a stale pre-crash frame
+    // still buffered in the socket can never satisfy this.
     send(&mut stream, &ClientMsg::Input(b"ignored\r".to_vec()));
     send(
         &mut stream,
@@ -167,7 +178,8 @@ fn server_spine_exited_child_fails_closed_and_shows_state() {
             cols: 100,
         },
     );
-    wait_for_frame(&mut stream, 10, |text| text.contains("[fno: pane exited]"));
+    let f = wait_for_raw_frame(&mut stream, 10, |f| f.rows == 30 && f.cols == 100);
+    assert!(frame_text(&f).contains("[fno: pane exited]"));
 }
 
 #[test]
@@ -182,10 +194,17 @@ fn server_spine_output_flood_stays_responsive() {
     wait_for_frame(&mut stream, 10, |_| true);
     send(
         &mut stream,
-        &ClientMsg::Input(b"yes | head -100000; echo FLOOD-DONE\r".to_vec()),
+        &ClientMsg::Input(b"yes | head -1000000; echo FLOOD-DONE\r".to_vec()),
     );
-    // Mid-flood keystrokes (queued by the shell's line editor during the
-    // flood, echoed at the next prompt).
+    // Only send the mid-flood keystrokes once a frame PROVES the flood is
+    // rendering (a screen of y-lines); otherwise both inputs could queue
+    // before the flood starts and "input works during the flood" would be
+    // asserted without being exercised. The FLOOD-DONE alternative keeps the
+    // test deterministic on a machine fast enough that our reader only ever
+    // sees the final frame (frames are droppable; we cannot force one).
+    wait_for_frame(&mut stream, 15, |text| {
+        text.lines().filter(|l| l.trim() == "y").count() >= 5 || text.contains("FLOOD-DONE")
+    });
     send(
         &mut stream,
         &ClientMsg::Input(b"echo after-flood\r".to_vec()),

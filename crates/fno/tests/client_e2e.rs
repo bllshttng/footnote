@@ -44,12 +44,28 @@ fn client_e2e_utf8_and_control_keys_pass_through() {
     h.wait_screen(15, |s| !s.trim().is_empty());
     h.type_bytes("echo caf\u{00e9}\r".as_bytes());
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "caf\u{00e9}"));
-    // Ctrl-C a sleep; the shell survives and answers again.
-    h.type_bytes(b"sleep 100\r");
-    std::thread::sleep(Duration::from_millis(300));
+    // Ctrl-C a sleep; the shell survives and answers again. The start marker
+    // proves sleep is actually FOREGROUND-RUNNING before the ^C (a bare delay
+    // could let ^C hit the prompt and the test pass without exercising it).
+    h.type_bytes(b"echo start-sleep; sleep 100\r");
+    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "start-sleep"));
     h.type_bytes(&[0x03]); // ^C
     h.type_bytes(b"echo interrupted\r");
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "interrupted"));
+}
+
+#[test]
+fn client_e2e_output_flood_keeps_the_real_client_responsive() {
+    // AC2-EDGE through the REAL client (the server-side flood test uses a
+    // fake client): a large burst must not wedge the client's compositor or
+    // its input path - a command typed after the flood still round-trips.
+    let scratch = Scratch::new("flood");
+    let mut h = ClientHarness::spawn(&scratch);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.type_bytes(b"yes | head -1000000; echo E2E-FLOOD-DONE\r");
+    h.wait_screen(30, |s| s.contains("E2E-FLOOD-DONE"));
+    h.type_bytes(b"echo client-alive\r");
+    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "client-alive"));
 }
 
 #[test]

@@ -8,7 +8,7 @@ mod common;
 use std::time::Duration;
 
 use common::{ClientHarness, Scratch};
-use fno::proto::{read_msg_sync, write_msg_sync, ClientMsg, ServerMsg};
+use fno::proto::{read_msg_sync, write_msg_sync, Cell, ClientMsg, Frame, ServerMsg};
 
 /// Count live processes whose command line carries this scratch's socket
 /// path: exactly the servers of this test's session (the path is unique per
@@ -43,15 +43,22 @@ fn persistence_reattach_restores_the_exact_screen() {
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_screen(15, |s| !s.trim().is_empty());
     h.type_bytes(b"echo marker-one; echo marker-two\r");
-    let before = h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "marker-two"));
-    std::thread::sleep(Duration::from_millis(300));
+    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "marker-two"));
+    // Snapshot only once the screen has been STABLE for two consecutive
+    // polls, so a late-rendering prompt can never make the byte-exact
+    // comparison below unreachable on a loaded runner.
     let before = {
-        // Re-read after a settle so the prompt after the command is included.
-        let s = h.screen();
-        if s != before {
-            s
-        } else {
-            before
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let a = h.screen();
+            std::thread::sleep(Duration::from_millis(150));
+            let b = h.screen();
+            if a == b {
+                break b;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("screen never settled; last:\n{b}");
+            }
         }
     };
     h.type_bytes(&[0x1C]);
@@ -99,8 +106,10 @@ fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
     let scratch = Scratch::new("kill9");
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_screen(15, |s| !s.trim().is_empty());
-    h.type_bytes(b"SURVIVED=kill9\r");
-    std::thread::sleep(Duration::from_millis(300));
+    // The echo marker proves the assignment traversed client -> server ->
+    // PTY -> shell BEFORE the kill; a bare sleep could race a loaded runner.
+    h.type_bytes(b"SURVIVED=kill9; echo set-ok\r");
+    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "set-ok"));
     let pid = h.child.process_id().expect("client pid") as i32;
     unsafe {
         libc::kill(pid, libc::SIGKILL);
@@ -165,6 +174,43 @@ fn persistence_two_cold_clients_converge_on_one_server() {
         1,
         "exactly one server may own the session"
     );
+}
+
+#[test]
+fn persistence_malformed_frame_is_rejected_not_panicked() {
+    // The wire trust boundary: a Frame whose cell count disagrees with its
+    // geometry must be refused like a malformed message - a clear one-liner
+    // and a non-zero exit, never a slice panic inside the alternate screen.
+    let scratch = Scratch::new("badframe");
+    let listener = std::os::unix::net::UnixListener::bind(scratch.main_sock()).unwrap();
+    let accept_thread = std::thread::spawn(move || {
+        if let Ok((mut conn, _)) = listener.accept() {
+            let _: Result<ClientMsg, _> = read_msg_sync(&mut conn);
+            let bad = Frame {
+                rows: 24,
+                cols: 80,
+                cells: vec![Cell::default(); 10], // 10 != 24*80
+                cursor_row: 0,
+                cursor_col: 0,
+                cursor_visible: true,
+            };
+            let _ = write_msg_sync(&mut conn, &ServerMsg::Frame(bad));
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    });
+
+    let mut h = ClientHarness::spawn(&scratch);
+    let status = h.wait_exit(15);
+    assert!(
+        !status.success(),
+        "a malformed frame must exit non-zero, got {status:?}"
+    );
+    assert!(
+        h.raw_output().contains("malformed frame"),
+        "rejection must name the cause; output: {}",
+        h.raw_output()
+    );
+    accept_thread.join().unwrap();
 }
 
 #[test]

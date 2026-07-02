@@ -105,7 +105,8 @@ pub fn run(socket: PathBuf) -> i32 {
 }
 
 async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32 {
-    if listener.set_nonblocking(true).is_err() {
+    if let Err(e) = listener.set_nonblocking(true) {
+        eprintln!("fno mux: listener setup failed: {e}");
         return 1;
     }
     let listener = match tokio::net::UnixListener::from_std(listener) {
@@ -191,7 +192,7 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
                         // Last attach wins geometry (Phase 1: one client at a
                         // time; multi-client polish is Phase 3).
                         if !child_exited {
-                            let _ = pty.resize(rows, cols, 0, 0);
+                            log_resize_err(pty.resize(rows, cols, 0, 0));
                         }
                         vt.resize(rows, cols);
                         // Full-state resync: the new client's first frame is
@@ -210,7 +211,7 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
                     }
                     CoreMsg::Resize { rows, cols } => {
                         if !child_exited {
-                            let _ = pty.resize(rows, cols, 0, 0);
+                            log_resize_err(pty.resize(rows, cols, 0, 0));
                         }
                         vt.resize(rows, cols);
                         broadcast(&vt, &clients);
@@ -228,6 +229,15 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
         }
     }
     0
+}
+
+/// A live-child resize failure must not be silent: the VT grid resizes
+/// anyway, so kernel winsize and grid would disagree and full-screen programs
+/// render garbled with nothing in the log to correlate.
+fn log_resize_err(res: Result<(), crate::pty::PtyError>) {
+    if let Err(e) = res {
+        eprintln!("fno mux: pty resize failed: {e}");
+    }
 }
 
 /// Snapshot once, fan out to every client's newest-frame slot. `send_replace`
@@ -300,9 +310,24 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                     break;
                 }
             }
+            Ok(ClientMsg::Detach) => {
+                let _ = core_tx.send(CoreMsg::Gone(id)).await;
+                break;
+            }
             // A second Attach on a live connection is a protocol violation:
-            // close loudly rather than acting on a confused stream.
-            Ok(ClientMsg::Detach) | Ok(ClientMsg::Attach { .. }) | Err(_) => {
+            // log it (this stderr is the session log) and close rather than
+            // acting on a confused stream.
+            Ok(ClientMsg::Attach { .. }) => {
+                eprintln!("fno mux: client {id} sent Attach on a live connection; dropping it");
+                let _ = core_tx.send(CoreMsg::Gone(id)).await;
+                break;
+            }
+            Err(e) => {
+                // Includes the abrupt-close case (killed client): routine, but
+                // one log line makes a misbehaving client diagnosable.
+                if !matches!(e, crate::proto::ProtoError::Closed) {
+                    eprintln!("fno mux: client {id} read failed: {e}");
+                }
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
             }
