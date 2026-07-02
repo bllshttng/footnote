@@ -90,6 +90,18 @@ pub struct Pane {
     /// text is captured while history is at this cap may have lost its top to
     /// eviction, so it is flagged `truncated` (honest, conservative).
     scrollback: usize,
+    /// Running sum of `text.len()` across retained `blocks`, so eviction can
+    /// bound retained block memory by BYTES (a high-output agent's blocks would
+    /// otherwise pin gigabytes under a count-only cap - the whole point of
+    /// capture-at-completion is that the text is stored).
+    retained_bytes: usize,
+    /// Per-block captured-text cap: a single command's stored span is trimmed to
+    /// its most-recent tail past this (flagged `truncated`), so one huge command
+    /// cannot pin memory that eviction can never reclaim (the last block stays).
+    max_block_bytes: usize,
+    /// Total retained-block-text budget across the pane; oldest blocks front-drop
+    /// until under it.
+    max_retained_bytes: usize,
 }
 
 impl Pane {
@@ -101,6 +113,18 @@ impl Pane {
     /// it from config). Lets tests exercise the at-cap `truncated` flag without
     /// touching a process-global env var.
     fn with_scrollback(rows: u16, cols: u16, scrollback: usize) -> Self {
+        Pane::with_limits(rows, cols, scrollback, MAX_BLOCK_BYTES, MAX_RETAINED_BYTES)
+    }
+
+    /// Construct with explicit block-memory budgets. Lets tests drive eviction
+    /// with tiny caps instead of feeding megabytes.
+    fn with_limits(
+        rows: u16,
+        cols: u16,
+        scrollback: usize,
+        max_block_bytes: usize,
+        max_retained_bytes: usize,
+    ) -> Self {
         let rows = rows.max(1);
         let cols = cols.max(1);
         let scrollback = scrollback.max(1);
@@ -126,6 +150,9 @@ impl Pane {
             next_seq: 0,
             saw_marker: false,
             scrollback,
+            retained_bytes: 0,
+            max_block_bytes: max_block_bytes.max(1),
+            max_retained_bytes: max_retained_bytes.max(1),
         }
     }
 
@@ -227,19 +254,36 @@ impl Pane {
         grid.history_size() as u64 + grid.cursor.point.line.0.max(0) as u64
     }
 
-    /// Close the open block: capture its output text now and retain it.
+    /// Close the open block: capture its output text now and retain it, bounding
+    /// per-block and total retained bytes.
     fn finalize_open(&mut self, exit: Option<i32>) {
         let Some(open) = self.open.take() else { return };
-        let (text, truncated) = self.extract_from(open.anchor);
-        if self.blocks.len() >= MAX_BLOCKS {
-            self.blocks.pop_front();
+        let (mut text, mut truncated) = self.extract_from(open.anchor);
+        // Cap a single block's stored text: keep the most-recent tail, drop the
+        // head, flag truncated. Prevents one huge command from pinning memory
+        // that total-budget eviction can never reclaim (the last block stays).
+        if text.len() > self.max_block_bytes {
+            let cut = char_boundary_at_or_before(&text, text.len() - self.max_block_bytes);
+            text.drain(..cut);
+            truncated = true;
         }
+        self.retained_bytes += text.len();
         self.blocks.push_back(Block {
             seq: open.seq,
             exit,
             truncated,
             text,
         });
+        // Front-drop oldest until within BOTH the count and byte budgets. Always
+        // keep at least the block just pushed (a single over-budget block is
+        // already tail-capped above).
+        while self.blocks.len() > 1
+            && (self.blocks.len() > MAX_BLOCKS || self.retained_bytes > self.max_retained_bytes)
+        {
+            if let Some(dropped) = self.blocks.pop_front() {
+                self.retained_bytes -= dropped.text.len();
+            }
+        }
     }
 
     /// Text from absolute row `anchor` down to the current output bottom (cursor
@@ -500,6 +544,19 @@ pub fn frame_text(frame: &Frame) -> String {
     rows.join("\n")
 }
 
+/// Largest byte index `<= idx` that is a UTF-8 char boundary (std's
+/// `floor_char_boundary` is still unstable). Used to trim a block's stored text
+/// to its tail without splitting a codepoint.
+fn char_boundary_at_or_before(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 fn map_cell(c: char, fg: VtColor, bg: VtColor, flags: Flags) -> Cell {
     let mut f = 0u8;
     // BOLD_ITALIC sets both bits; DIM_BOLD sets BOLD - `contains` covers them.
@@ -580,10 +637,20 @@ fn map_color(c: VtColor) -> Color {
 // scroll counter, no reflow dependence. Eviction is a bounded retained-block
 // budget (front-drop), not a row-scroll computation.
 
-/// Max retained completed blocks per pane. Bounds retained block memory
-/// independent of scrollback; oldest front-dropped, and an evicted block reads
-/// `BLOCK_UNAVAILABLE` (AC1-FR).
+/// Max retained completed blocks per pane. A count backstop; retained block
+/// memory is bounded primarily by BYTES (below). Oldest front-dropped, and an
+/// evicted block reads `BLOCK_UNAVAILABLE` (AC1-FR).
 const MAX_BLOCKS: usize = 512;
+
+/// Per-block captured-text cap (256 KiB). A single command's stored span is
+/// trimmed to its most-recent tail past this, so one huge command cannot pin
+/// memory the total-budget eviction can never reclaim (the last block stays).
+const MAX_BLOCK_BYTES: usize = 256 * 1024;
+
+/// Total retained-block-text budget per pane (8 MiB). Oldest blocks front-drop
+/// until under it, so a high-output agent's blocks stay bounded regardless of
+/// the (now 100k-line) scrollback.
+const MAX_RETAINED_BYTES: usize = 8 * 1024 * 1024;
 
 /// A completed command block: the output span between an OSC 133 `C` (output
 /// start) and `D` (command done), with its text captured at `D`.
@@ -1175,6 +1242,33 @@ mod tests {
         assert!(
             pane.read_block(BlockSel::Last).unwrap().truncated,
             "at-cap block is flagged possibly-truncated"
+        );
+    }
+
+    #[test]
+    fn block_text_is_bounded_by_byte_budgets() {
+        // Tiny budgets: 10 bytes per block, 30 bytes total.
+        let mut pane = Pane::with_limits(4, 80, 100, 10, 30);
+
+        // A block past the per-block cap is tail-trimmed and flagged truncated.
+        run_command(&mut pane, "0123456789ABCDEF", 0); // "$ 0123456789ABCDEF" = 18B
+        let b0 = pane.read_block(BlockSel::Seq(0)).unwrap();
+        assert!(b0.text.len() <= 12, "per-block cap trims: {:?}", b0.text);
+        assert!(b0.truncated, "a trimmed block is flagged truncated");
+        assert!(b0.text.ends_with("ABCDEF"), "keeps the tail: {:?}", b0.text);
+
+        // Many more blocks: total retained stays under budget, so the oldest
+        // evicts by BYTES (not the 512 count cap, which 11 blocks never hit).
+        for i in 0..10 {
+            run_command(&mut pane, &format!("cmd{i}xxxxx"), 0);
+        }
+        assert!(
+            pane.read_block(BlockSel::Seq(0)).is_err(),
+            "oldest evicted by the byte budget"
+        );
+        assert!(
+            pane.read_block(BlockSel::Last).is_ok(),
+            "the newest block always survives"
         );
     }
 
