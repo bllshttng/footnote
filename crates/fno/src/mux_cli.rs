@@ -534,16 +534,24 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
     } else {
         match std::os::unix::net::UnixStream::connect(sock) {
             Ok(s) => s,
-            Err(_) => {
-                // No live server. `ls` = no panes (0); the rest have nothing
-                // to act on = error.
-                if is_ls {
+            // Only a refused/absent socket proves "no server" (nothing to act
+            // on): `ls` -> empty listing (exit 0), the rest -> error. Any
+            // OTHER connect error (fd exhaustion, permissions) is a real
+            // failure that must never read as a clean empty result - mirrors
+            // the sibling `ls`/`kill_server` split, which keeps a bad session
+            // from looking like zero panes.
+            Err(e) => {
+                let no_server = matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                );
+                if is_ls && no_server {
                     if json {
                         println!("[]");
                     }
                     return EXIT_OK;
                 }
-                eprintln!("fno mux pane: no mux server for session {session:?}");
+                eprintln!("fno mux pane: cannot reach session {session:?}: {e}");
                 return EXIT_ERROR;
             }
         }

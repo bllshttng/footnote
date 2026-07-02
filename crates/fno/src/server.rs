@@ -133,7 +133,9 @@ enum CoreMsg {
     PaneWait {
         pane: u64,
         quiet_ms: Option<u64>,
-        pattern: Option<String>,
+        /// Pre-compiled OFF the core loop (in `handle_control`): `Regex::new`
+        /// is bounded CPU the single-threaded loop must never run.
+        regex: Option<regex::Regex>,
         timeout_ms: u64,
         reply: ControlReply,
     },
@@ -144,14 +146,14 @@ enum CoreMsg {
 }
 
 /// The per-pane signal an off-loop `PaneWait` watcher observes. The core loop
-/// bumps `seq` (and refreshes `text`) on every output burst and flips `exited`
-/// when the pane closes; a dropped sender (pane reaped) reads as exited too.
-/// `text` is the visible grid so a pattern watcher needs no round-trip back to
-/// the loop (only refreshed while a watcher is subscribed - see
-/// [`Core::note_pane_output`]).
+/// refreshes `text` on every output burst and flips `exited` when the pane
+/// closes; a dropped sender (pane reaped) reads as exited too. `text` is the
+/// visible grid so a pattern watcher needs no round-trip back to the loop
+/// (only refreshed while a watcher is subscribed - see
+/// [`Core::note_pane_output`]). `watch`'s own change signal is the wakeup, so
+/// no sequence counter is needed - `send_modify` always notifies.
 #[derive(Clone)]
 struct WaitTick {
-    seq: u64,
     exited: bool,
     text: Arc<str>,
 }
@@ -159,7 +161,6 @@ struct WaitTick {
 impl Default for WaitTick {
     fn default() -> Self {
         WaitTick {
-            seq: 0,
             exited: false,
             text: Arc::from(""),
         }
@@ -413,10 +414,9 @@ impl Core {
             return;
         };
         let text: Arc<str> = Arc::from(frame_text(&entry.vt.frame()));
-        tx.send_modify(|t| {
-            t.seq = t.seq.wrapping_add(1);
-            t.text = text;
-        });
+        // `send_modify` always notifies watchers, so refreshing the text IS
+        // the wakeup - no counter needed.
+        tx.send_modify(|t| t.text = text);
     }
 
     /// Every pane's metadata for `pane ls`, ordered by pane id so the listing
@@ -1278,23 +1278,13 @@ impl Core {
             CoreMsg::PaneWait {
                 pane,
                 quiet_ms,
-                pattern,
+                regex,
                 timeout_ms,
                 reply,
             } => {
                 let Some(entry) = self.panes.get(&pane) else {
                     let _ = reply.send(dead_pane(pane));
                     return Flow::Continue;
-                };
-                let regex = match pattern.as_deref().map(regex::Regex::new).transpose() {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = reply.send(ServerMsg::Err {
-                            code: err_code::BAD_REQUEST,
-                            msg: format!("bad --pattern: {e}"),
-                        });
-                        return Flow::Continue;
-                    }
                 };
                 // Seed `initial` from the pane's REAL current grid, not the
                 // watch value: the watch text is refreshed only while a
@@ -1661,11 +1651,29 @@ async fn handle_control(
             pattern,
             timeout_ms,
         } => {
+            // Compile the pattern HERE, off the core loop (bounded CPU, but
+            // the single-threaded loop must never do it). A bad pattern is a
+            // BAD_REQUEST answered inline; the loop only ever gets a ready
+            // `Option<Regex>`.
+            let regex = match pattern.as_deref().map(regex::Regex::new).transpose() {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = write_msg(
+                        &mut stream,
+                        &ServerMsg::Err {
+                            code: err_code::BAD_REQUEST,
+                            msg: format!("bad --pattern: {e}"),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            };
             core_tx
                 .send(CoreMsg::PaneWait {
                     pane,
                     quiet_ms,
-                    pattern,
+                    regex,
                     timeout_ms,
                     reply: reply_tx,
                 })
@@ -1950,7 +1958,6 @@ mod tests {
     #[test]
     fn server_control_wait_tick_default_is_empty_and_live() {
         let t = WaitTick::default();
-        assert_eq!(t.seq, 0);
         assert!(!t.exited);
         assert!(t.text.is_empty());
     }
