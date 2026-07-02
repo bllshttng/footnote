@@ -1106,18 +1106,6 @@ fn handle(session: &StreamSession, req: &Request) -> (Response, bool) {
     }
 }
 
-/// The `fno claim release` argv for a session claim. Extracted (pure) so the
-/// gating + argv shape is unit-testable without shelling out.
-fn claim_release_argv(claim: &SessionClaim) -> Vec<String> {
-    vec![
-        "claim".into(),
-        "release".into(),
-        format!("session:{}", claim.session_uuid),
-        "--holder".into(),
-        claim.claim_holder.clone(),
-    ]
-}
-
 /// Releases the single-writer claim on Drop, so EVERY exit path of [`run`] -
 /// an early `?` return (StreamSession::spawn / UnixListener::bind failing), a
 /// clean shutdown, or an orphan - releases the claim exactly once. Without this,
@@ -1137,84 +1125,51 @@ impl Drop for SessionClaimGuard {
     }
 }
 
-/// Best-effort release of the `session:<uuid>` single-writer claim via the
-/// Python `fno claim` CLI (the claim substrate is Python-only). A no-op when the
-/// uuid/holder are empty; a missing `fno` on PATH or a non-zero exit is logged
-/// and ignored — the worker is exiting regardless, and the claim's PID-liveness
-/// plus the daemon's reconcile are the backstops.
+/// Best-effort native release of the `session:<uuid>` single-writer claim. A
+/// no-op when the uuid/holder are empty; an error is logged and ignored — the
+/// worker is exiting regardless, and the claim's PID-liveness plus the daemon's
+/// reconcile are the backstops. No subprocess: a direct file operation.
 fn release_session_claim(claim: &SessionClaim) {
     if claim.session_uuid.is_empty() || claim.claim_holder.is_empty() {
         return;
     }
-    let status = Command::new("fno")
-        .args(claim_release_argv(claim))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    match status {
-        Err(e) => eprintln!(
-            "fno-agents stream-worker: claim release for session:{} failed to run: {e}",
+    if let Err(e) = crate::claims::release(
+        &format!("session:{}", claim.session_uuid),
+        &claim.claim_holder,
+        None,
+        None,
+    ) {
+        eprintln!(
+            "fno-agents stream-worker: claim release for session:{} failed: {e}",
             claim.session_uuid
-        ),
-        Ok(s) if !s.success() => eprintln!(
-            "fno-agents stream-worker: claim release for session:{} exited {}",
-            claim.session_uuid,
-            s.code().unwrap_or(-1)
-        ),
-        Ok(_) => {}
+        );
     }
 }
 
-/// The `fno claim acquire session:<uuid> --holder <holder> --pid <pid>` argv.
-/// Extracted (pure) so the argv shape is unit-testable without shelling out.
-/// `--pid` re-anchors PID-liveness to `pid` (the LONG-LIVED worker, ab-6d5afbde);
-/// the daemon's pre-spawn acquire pinned liveness to the EPHEMERAL `fno` child it
-/// shelled, which dies instantly, so the file-claim read stale the moment it was
-/// written and a live human-TUI co-writing the transcript was never refused.
-fn claim_reacquire_argv(claim: &SessionClaim, pid: u32) -> Vec<String> {
-    vec![
-        "claim".into(),
-        "acquire".into(),
-        format!("session:{}", claim.session_uuid),
-        "--holder".into(),
-        claim.claim_holder.clone(),
-        "--pid".into(),
-        pid.to_string(),
-    ]
-}
-
 /// Re-anchor the single-writer claim's PID-liveness to THIS worker process
-/// (ab-6d5afbde). The daemon acquires `session:<uuid>` before spawn by shelling
-/// `fno claim acquire`, so PID-liveness pins to that ephemeral `fno` process — it
-/// exits immediately, the claim reads stale at once, and the cross-process
-/// `HeldByOther` refusal (a live human-TUI co-writing the same transcript) never
-/// fires. Re-acquiring with the same holder + the worker's own (long-lived) PID
-/// is an idempotent re-acquire (core.py rewrites pid/host/acquired_at) that makes
-/// the claim track the actual writer for the session's whole life. Best-effort:
-/// the registry one-host guard remains the authoritative in-daemon gate, so a
-/// missing `fno` / non-zero exit is logged and ignored, never fatal.
+/// (ab-6d5afbde). With the daemon's native acquire the claim is already born
+/// live (anchored to the daemon pid), so this re-anchor now refines the record
+/// to name the actual writer rather than closing a stale window. A same-holder
+/// re-acquire is idempotent (rewrites pid/host/acquired_at). Best-effort: the
+/// registry one-host guard remains the authoritative in-daemon gate, so an
+/// error is logged and ignored, never fatal. Native call — no subprocess to
+/// leak or reap.
 fn reacquire_session_claim_self_pid(claim: &SessionClaim) {
     if claim.session_uuid.is_empty() || claim.claim_holder.is_empty() {
         return;
     }
-    let status = Command::new("fno")
-        .args(claim_reacquire_argv(claim, std::process::id()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    match status {
-        Err(e) => eprintln!(
-            "fno-agents stream-worker: claim re-acquire for session:{} failed to run: {e}",
+    if let crate::claims::AcquireOutcome::Error(e) = crate::claims::acquire(
+        &format!("session:{}", claim.session_uuid),
+        &claim.claim_holder,
+        crate::claims::AcquireOpts {
+            pid: Some(std::process::id()),
+            ..Default::default()
+        },
+    ) {
+        eprintln!(
+            "fno-agents stream-worker: claim re-acquire for session:{} failed: {e}",
             claim.session_uuid
-        ),
-        Ok(s) if !s.success() => eprintln!(
-            "fno-agents stream-worker: claim re-acquire for session:{} exited {}",
-            claim.session_uuid,
-            s.code().unwrap_or(-1)
-        ),
-        Ok(_) => {}
+        );
     }
 }
 
@@ -1742,38 +1697,61 @@ cat >/dev/null
     // io::Error and handle() turns it into an ErrorCode::Internal response. A
     // flaky test would cost more (CI noise) than this glue is worth.
 
-    #[test]
-    fn claim_release_argv_has_session_key_and_holder() {
-        let claim = SessionClaim {
-            session_uuid: "uuid-1".into(),
-            claim_holder: "daemon:1".into(),
-        };
-        assert_eq!(
-            claim_release_argv(&claim),
-            vec!["claim", "release", "session:uuid-1", "--holder", "daemon:1"]
-        );
+    /// Shared mutex so the FNO_CLAIMS_ROOT-mutating claim tests never
+    /// interleave (env vars are process-global; cargo runs the suite
+    /// multi-threaded).
+    fn claims_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     #[test]
-    fn claim_reacquire_argv_pins_pid_liveness_to_given_worker_pid() {
-        // ab-6d5afbde: the re-acquire passes --pid so PID-liveness tracks the
-        // long-lived worker, not the ephemeral `fno` process the daemon shelled.
+    fn release_session_claim_drops_owned_lockfile() {
+        let td = tempfile::tempdir().unwrap();
+        let _guard = claims_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_CLAIMS_ROOT", td.path());
         let claim = SessionClaim {
-            session_uuid: "uuid-1".into(),
+            session_uuid: "uuid-rel".into(),
+            claim_holder: "daemon:1".into(),
+        };
+        crate::claims::acquire(
+            "session:uuid-rel",
+            "daemon:1",
+            crate::claims::AcquireOpts::default(),
+        );
+        release_session_claim(&claim);
+        let (state, _) = crate::claims::status("session:uuid-rel", None);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        assert_eq!(state, crate::claims::ClaimState::Free);
+    }
+
+    #[test]
+    fn reacquire_pins_pid_liveness_to_the_worker_process() {
+        // ab-6d5afbde: the re-acquire pins PID-liveness to THIS worker via a
+        // same-holder idempotent re-acquire; the record's pid becomes the
+        // worker's own process id.
+        let td = tempfile::tempdir().unwrap();
+        let _guard = claims_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_CLAIMS_ROOT", td.path());
+        let claim = SessionClaim {
+            session_uuid: "uuid-re".into(),
             claim_holder: "stream:sw7".into(),
         };
-        assert_eq!(
-            claim_reacquire_argv(&claim, 4242),
-            vec![
-                "claim",
-                "acquire",
-                "session:uuid-1",
-                "--holder",
-                "stream:sw7",
-                "--pid",
-                "4242",
-            ]
+        // Pre-anchor to a stand-in "daemon" pid, then reanchor to self.
+        crate::claims::acquire(
+            "session:uuid-re",
+            "stream:sw7",
+            crate::claims::AcquireOpts {
+                pid: Some(999_999),
+                ..Default::default()
+            },
         );
+        reacquire_session_claim_self_pid(&claim);
+        let (_, rec) = crate::claims::status("session:uuid-re", None);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let rec = rec.expect("claim survives reanchor");
+        assert_eq!(rec.pid, std::process::id() as i32);
+        assert_eq!(rec.holder, "stream:sw7");
     }
 
     // ---- ab-28feac77: headless can_use_tool permission posture ----------
