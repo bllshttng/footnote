@@ -257,12 +257,24 @@ pub fn mux_dir() -> PathBuf {
     home.join(".fno").join("mux")
 }
 
+/// Create `dir` (and parents) born 0700, then force 0700 on a pre-existing
+/// one. `DirBuilder::mode` makes fresh directories private atomically -
+/// `create_dir_all` + `set_permissions` leaves a window where the dir exists
+/// with umask-loosened permissions (gemini security-medium). The follow-up
+/// `set_permissions` only tightens a dir that already existed.
+pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
 /// Create the mux dir if needed and force 0700 either way: the sockets in it
 /// accept keystrokes into your shell, so group/world access is never OK.
 pub fn ensure_mux_dir() -> std::io::Result<PathBuf> {
     let dir = mux_dir();
-    std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    ensure_private_dir(&dir)?;
     Ok(dir)
 }
 

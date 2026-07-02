@@ -68,13 +68,13 @@ impl Drop for SocketGuard {
 /// Run the server on `socket`. Returns the process exit code.
 pub fn run(socket: PathBuf) -> i32 {
     if let Some(parent) = socket.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
+        // The socket accepts keystrokes into your shell: never group/world.
+        // Born-0700 (atomic) rather than create-then-tighten (gemini
+        // security-medium).
+        if let Err(e) = crate::proto::ensure_private_dir(parent) {
             eprintln!("fno mux: cannot create {}: {e}", parent.display());
             return 1;
         }
-        // The socket accepts keystrokes into your shell: never group/world.
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
     }
     let listener = match bind_or_probe(&socket) {
         Ok(BindOutcome::Bound(l)) => l,
@@ -119,7 +119,7 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
 
     // The pane: one shell on one PTY, emulated into one grid.
     let (pty_tx, mut pty_rx) = mpsc::channel::<Vec<u8>>(256);
-    let candidates = shell_candidates(std::env::var("SHELL").ok().as_deref());
+    let candidates = shell_candidates(std::env::var_os("SHELL").as_deref());
     let pty = match PtyShell::spawn(&candidates, DEFAULT_ROWS, DEFAULT_COLS, pty_tx) {
         Ok(p) => p,
         Err(e) => {

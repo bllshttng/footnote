@@ -10,6 +10,7 @@
 //! queue (AC2-EDGE).
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::sync::Mutex;
 
@@ -30,17 +31,22 @@ pub enum PtyError {
 }
 
 /// Resolve the shell candidates to try, in order: `$SHELL` (when set and
-/// non-empty) then `/bin/sh` (AC1-ERR fallback). Pure so it is unit-testable.
-pub fn shell_candidates(env_shell: Option<&str>) -> Vec<String> {
+/// non-empty) then `/bin/sh` (AC1-ERR fallback). `OsStr` in/out so a non-UTF-8
+/// shell path survives without lossy conversion (gemini). Pure so it is
+/// unit-testable.
+pub fn shell_candidates(env_shell: Option<&OsStr>) -> Vec<OsString> {
     let mut v = Vec::new();
     if let Some(s) = env_shell {
-        let s = s.trim();
-        if !s.is_empty() {
-            v.push(s.to_string());
+        let is_empty = match s.to_str() {
+            Some(utf8) => utf8.trim().is_empty(),
+            None => s.is_empty(),
+        };
+        if !is_empty {
+            v.push(s.to_os_string());
         }
     }
-    if !v.iter().any(|s| s == "/bin/sh") {
-        v.push("/bin/sh".to_string());
+    if !v.iter().any(|s| s == OsStr::new("/bin/sh")) {
+        v.push(OsString::from("/bin/sh"));
     }
     v
 }
@@ -50,7 +56,13 @@ pub fn shell_candidates(env_shell: Option<&str>) -> Vec<String> {
 pub struct PtyShell {
     // Held for the fd + resize; boxed trait object as returned by portable-pty.
     master: Box<dyn MasterPty + Send>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    // Input goes through a dedicated writer thread (spawn_writer): a PTY
+    // master write blocks when the kernel input buffer is full, and doing
+    // that on the tokio core loop could deadlock the whole server against a
+    // child that is itself blocked on output (gemini high). Bounded queue:
+    // when a pathological child stops reading input, keystrokes drop
+    // (fail-closed, same policy as input-after-exit) - never unbounded memory.
+    input_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
 }
 
@@ -59,7 +71,7 @@ impl PtyShell {
     /// `rows`x`cols` PTY. Output chunks flow into `tx`; the channel closing
     /// (sender dropped) is the child-exited signal to the consumer.
     pub fn spawn(
-        candidates: &[String],
+        candidates: &[OsString],
         rows: u16,
         cols: u16,
         tx: tokio::sync::mpsc::Sender<Vec<u8>>,
@@ -85,7 +97,7 @@ impl PtyShell {
                     child = Some(c);
                     break;
                 }
-                Err(e) => errors.push(format!("{cand}: {e}")),
+                Err(e) => errors.push(format!("{}: {e}", cand.to_string_lossy())),
             }
         }
         let child = child.ok_or_else(|| PtyError::Spawn(errors.join("; ")))?;
@@ -103,24 +115,31 @@ impl PtyShell {
             .map_err(|e| PtyError::Reader(e.to_string()))?;
 
         spawn_reader(reader, tx)?;
+        let input_tx = spawn_writer(writer)?;
 
         Ok(PtyShell {
             master: pair.master,
-            writer: Mutex::new(writer),
+            input_tx,
             child: Mutex::new(child),
         })
     }
 
-    /// Write keystrokes to the child. The caller decides what a failure means
-    /// (the server drops input fail-closed once the child has exited, AC2-ERR).
+    /// Queue keystrokes for the child (the writer thread performs the actual
+    /// blocking write, so this never blocks the caller). The caller decides
+    /// what a failure means (the server drops input fail-closed once the
+    /// child has exited, AC2-ERR); a full queue drops the chunk the same way.
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
-        let mut w = self
-            .writer
-            .lock()
-            .map_err(|_| PtyError::Write(std::io::Error::other("writer mutex poisoned")))?;
-        w.write_all(bytes).map_err(PtyError::Write)?;
-        w.flush().map_err(PtyError::Write)?;
-        Ok(())
+        use std::sync::mpsc::TrySendError;
+        self.input_tx.try_send(bytes.to_vec()).map_err(|e| match e {
+            TrySendError::Full(_) => PtyError::Write(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "pty input queue full; chunk dropped",
+            )),
+            TrySendError::Disconnected(_) => PtyError::Write(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "pty writer thread gone (child exited)",
+            )),
+        })
     }
 
     /// Resize the PTY. Pixel dimensions ride along for programs that read
@@ -153,6 +172,34 @@ impl PtyShell {
         };
         !matches!(child.try_wait(), Ok(Some(_)))
     }
+}
+
+/// The blocking writer thread: bounded channel -> PTY master. Owns the writer
+/// so its blocking `write_all`/`flush` never runs on the tokio core loop
+/// (gemini high: a full kernel input buffer + a child blocked on output is a
+/// deadlock if the core loop does the write). Exits when the channel closes
+/// (PtyShell dropped) or a write fails (child gone).
+fn spawn_writer(
+    mut writer: Box<dyn Write + Send>,
+) -> Result<std::sync::mpsc::SyncSender<Vec<u8>>, PtyError> {
+    // 256 keystroke-sized chunks of headroom; beyond that the child has
+    // stopped reading input for a long while and dropping is the safe answer.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+    std::thread::Builder::new()
+        .name("fno-mux-pty-writer".into())
+        .spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                if writer
+                    .write_all(&bytes)
+                    .and_then(|()| writer.flush())
+                    .is_err()
+                {
+                    break; // child/master gone; senders see Disconnected
+                }
+            }
+        })
+        .map_err(|e| PtyError::Writer(format!("writer thread spawn failed: {e}")))?;
+    Ok(tx)
 }
 
 /// The blocking reader thread: PTY master -> bounded channel. Exits on EOF
@@ -198,20 +245,29 @@ mod tests {
     #[test]
     fn server_spine_shell_candidates_prefer_env_then_sh() {
         assert_eq!(
-            shell_candidates(Some("/bin/zsh")),
-            vec!["/bin/zsh", "/bin/sh"]
+            shell_candidates(Some(OsStr::new("/bin/zsh"))),
+            vec![OsString::from("/bin/zsh"), OsString::from("/bin/sh")]
         );
-        assert_eq!(shell_candidates(None), vec!["/bin/sh"]);
-        assert_eq!(shell_candidates(Some("")), vec!["/bin/sh"]);
-        assert_eq!(shell_candidates(Some("  ")), vec!["/bin/sh"]);
+        assert_eq!(shell_candidates(None), vec![OsString::from("/bin/sh")]);
+        assert_eq!(
+            shell_candidates(Some(OsStr::new(""))),
+            vec![OsString::from("/bin/sh")]
+        );
+        assert_eq!(
+            shell_candidates(Some(OsStr::new("  "))),
+            vec![OsString::from("/bin/sh")]
+        );
         // No duplicate when $SHELL already is /bin/sh.
-        assert_eq!(shell_candidates(Some("/bin/sh")), vec!["/bin/sh"]);
+        assert_eq!(
+            shell_candidates(Some(OsStr::new("/bin/sh"))),
+            vec![OsString::from("/bin/sh")]
+        );
     }
 
     #[tokio::test]
     async fn server_spine_unspawnable_shell_falls_back() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        let candidates = shell_candidates(Some("/nonexistent/definitely-not-a-shell"));
+        let candidates = shell_candidates(Some(OsStr::new("/nonexistent/definitely-not-a-shell")));
         let shell = PtyShell::spawn(&candidates, 24, 80, tx).expect("fallback must spawn");
         assert!(shell.is_child_alive());
         // Prove the fallback shell is real: round-trip a command.
