@@ -279,7 +279,12 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                     // progress; no bundled rule reads osc_progress today.
                     osc_progress: None,
                 };
-                decide(t.last.as_ref(), manifest.evaluate(&view), now_secs, &now_stamp)
+                decide(
+                    t.last.as_ref(),
+                    manifest.evaluate(&view),
+                    now_secs,
+                    &now_stamp,
+                )
             }
         };
         match decision {
@@ -586,11 +591,21 @@ mod tests {
         let m = one_rule_manifest("working", "busy", false);
         let last = rep("idle", NOW_STAMP, 1);
         assert_eq!(
-            decide(Some(&last), verdict_from(&m, "nothing here"), now_secs(), NOW_STAMP),
+            decide(
+                Some(&last),
+                verdict_from(&m, "nothing here"),
+                now_secs(),
+                NOW_STAMP
+            ),
             Decision::Hold
         );
         assert_eq!(
-            decide(None, verdict_from(&m, "nothing here"), now_secs(), NOW_STAMP),
+            decide(
+                None,
+                verdict_from(&m, "nothing here"),
+                now_secs(),
+                NOW_STAMP
+            ),
             Decision::Hold
         );
     }
@@ -669,14 +684,11 @@ mod tests {
         }
         std::env::set_var("FNO_BIN", &stub);
 
-        let live_pane = r#"[{"pane_id":7,"squad_id":1,"tab_id":1,"cwd":"/w","child_pid":42,"title":null}]"#;
+        let live_pane =
+            r#"[{"pane_id":7,"squad_id":1,"tab_id":1,"cwd":"/w","child_pid":42,"title":null}]"#;
         // codex.toml idle rule: a lone composer prompt on the last line.
         std::fs::write(&ls_path, live_pane).unwrap();
-        std::fs::write(
-            &read_path,
-            r#"{"pane_id":7,"text":"some scrollback\n› "}"#,
-        )
-        .unwrap();
+        std::fs::write(&read_path, r#"{"pane_id":7,"text":"some scrollback\n› "}"#).unwrap();
         let emitter = EventEmitter::new(home.events_jsonl(), "test");
 
         scrape_sweep(&home, &emitter);

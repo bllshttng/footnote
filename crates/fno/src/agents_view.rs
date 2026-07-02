@@ -174,11 +174,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                         // an inside-leg reason does.
                         let reason = badge
                             .is_some()
-                            .then(|| {
-                                ss.get("rule")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string)
-                            })
+                            .then(|| ss.get("rule").and_then(|v| v.as_str()).map(str::to_string))
                             .flatten();
                         (badge, reason)
                     } else {
