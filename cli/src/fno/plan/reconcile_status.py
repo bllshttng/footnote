@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -102,26 +103,33 @@ class SweepResult:
         return f"{self.normalized} normalized, {self.archived} archived, {self.skipped} skipped"
 
 
-def _default_signal(frontmatter: dict) -> bool:
-    """True when the plan's linked node reads as closed (`_status == done`).
+@lru_cache(maxsize=1)
+def _done_node_ids() -> frozenset:
+    """Ids of every closed (`_status == done`) node. Read once per process.
 
-    ponytail: node-closed is the one cheap true-state signal; a merged-PR probe
-    would add gh calls. Upgrade to a PR check if blank-status plans with an open
-    node but a merged PR start mis-archiving.
+    ponytail: cached for the life of a one-shot sweep so the graph is parsed
+    once, not once per plan file (gemini PR#149). A merged-PR probe would add gh
+    calls; node-closed is the one cheap true-state signal.
     """
-    node_id = frontmatter.get("node")
-    if not node_id:
-        return False
     try:
         from fno.graph.store import read_graph
         from fno.paths import graph_json
 
-        for e in read_graph(graph_json()):
-            if e.get("id") == node_id:
-                return e.get("_status") == "done"
+        return frozenset(
+            e.get("id") for e in read_graph(graph_json()) if e.get("_status") == "done"
+        )
     except Exception:  # noqa: BLE001 - no graph => no signal => archived (honest)
-        return False
-    return False
+        return frozenset()
+
+
+def _default_signal(frontmatter: dict) -> bool:
+    """True when the plan's linked node reads as closed.
+
+    Plans link their node via ``claims:`` (the preferred key written by
+    /blueprint) or a bare ``node:``; check both (codex PR#149).
+    """
+    node_id = frontmatter.get("claims") or frontmatter.get("node")
+    return bool(node_id) and node_id in _done_node_ids()
 
 
 def sweep(

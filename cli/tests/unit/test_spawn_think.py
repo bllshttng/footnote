@@ -546,8 +546,10 @@ def test_think_output_path_reuses_existing_doc_on_redispatch(monkeypatch, tmp_pa
     plans.mkdir(parents=True)
     prior = plans / "2020-01-01-my-slug.md"
     prior.write_text("# earlier dispatch\n")
+    # A different slug that merely ENDS with -my-slug must NOT be reused (gemini PR#149).
+    (plans / "2020-01-01-awesome-my-slug.md").write_text("# unrelated\n")
     out = st._think_output_path("x-2222aaaa", "my-slug")
-    assert out == str(prior)  # reused, not a fresh today-dated file
+    assert out == str(prior)  # reused, not a fresh today-dated file, not the over-match
 
 
 def test_think_output_path_empty_slug_uses_node_id(monkeypatch, tmp_path):

@@ -151,6 +151,17 @@ def test_sweep_tier2_uses_signal(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
+def test_default_signal_reads_claims_or_node(monkeypatch):
+    """codex PR#149: plans link the node via `claims:` (preferred) or `node:`."""
+    import fno.plan.reconcile_status as rs
+
+    monkeypatch.setattr(rs, "_done_node_ids", lambda: frozenset({"x-closed"}))
+    assert rs._default_signal({"claims": "x-closed"}) is True
+    assert rs._default_signal({"node": "x-closed"}) is True
+    assert rs._default_signal({"claims": "x-open"}) is False
+    assert rs._default_signal({}) is False
+
+
 def test_cli_verb_registered_and_prints_summary(tmp_path: Path):
     from typer.testing import CliRunner
     from fno.plan.cli import plan_app

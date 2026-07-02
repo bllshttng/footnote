@@ -513,7 +513,9 @@ def _think_output_path(node_id: str, slug: str = "") -> str:
         pdir = _plans_output_dir()
         # AC1-EDGE: a re-dispatch reuses this slug's existing date-slug doc
         # rather than minting a second file under today's (different) date.
-        existing = sorted(pdir.glob(f"*-{tail}.md"))
+        # Anchor to the YYYY-MM-DD- prefix so `slug` does not spuriously match a
+        # file whose slug merely ENDS with `-slug` (e.g. awesome-slug); gemini PR#149.
+        existing = sorted(pdir.glob(f"????-??-??-{tail}.md"))
         if existing:
             return str(existing[0])
         date = datetime.now(timezone.utc).strftime("%Y-%m-%d")

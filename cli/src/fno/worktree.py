@@ -29,7 +29,9 @@ from typing import Optional
 # it is the load-bearing round-trip token. 60 keeps the whole ref well under
 # git's ergonomic limit.
 _BRANCH_SLUG_MAX = 60
-_REF_UNSAFE_RE = re.compile(r"[^a-z0-9._-]")
+# Drop everything but [a-z0-9_-]; dots are excluded so a slug can never produce
+# a `..` (which git rejects in a ref) or a leading-dot component (gemini PR#149).
+_REF_UNSAFE_RE = re.compile(r"[^a-z0-9_-]")
 
 
 def _branch_prefix() -> str:
