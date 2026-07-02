@@ -78,7 +78,7 @@ pub struct Pane {
     /// finished block is width- and scroll-independent.
     blocks: VecDeque<Block>,
     /// The block whose `C` (output start) was seen but not yet its `D`. Read live
-    /// from the grid until finalized.
+    /// from its accumulated output buffer until finalized.
     open: Option<OpenBlock>,
     /// Monotonic per-pane block sequence; never reuses.
     next_seq: u64,
@@ -86,10 +86,6 @@ pub struct Pane {
     /// reads as ONE implicit block (whole output); one that did but has none
     /// retained reads `BLOCK_UNAVAILABLE`.
     saw_marker: bool,
-    /// The resolved scrollback cap (from [`scrollback_lines`]). A block whose
-    /// text is captured while history is at this cap may have lost its top to
-    /// eviction, so it is flagged `truncated` (honest, conservative).
-    scrollback: usize,
     /// Running sum of `text.len()` across retained `blocks`, so eviction can
     /// bound retained block memory by BYTES (a high-output agent's blocks would
     /// otherwise pin gigabytes under a count-only cap - the whole point of
@@ -149,7 +145,6 @@ impl Pane {
             open: None,
             next_seq: 0,
             saw_marker: false,
-            scrollback,
             retained_bytes: 0,
             max_block_bytes: max_block_bytes.max(1),
             max_retained_bytes: max_retained_bytes.max(1),
@@ -163,9 +158,30 @@ impl Pane {
     pub fn feed(&mut self, bytes: &[u8]) {
         for seg in self.scanner.scan(bytes) {
             match seg {
-                // Advance passthrough FIRST so a marker records the Term's row
-                // AFTER its preceding output landed.
-                Seg::Pass(b) => self.processor.advance(&mut self.term, &b),
+                Seg::Pass(b) => {
+                    // While a block is open, capture the SAME output bytes that
+                    // advance the Term - held pre-grid, so the capture is
+                    // scroll- and scrollback-independent (the whole point: the
+                    // old grid-anchor path drifted once history saturated).
+                    // Prompt/echo bytes (before `C`) arrive with `open == None`
+                    // and are never buffered, so block text is pure output.
+                    if let Some(open) = self.open.as_mut() {
+                        open.raw.extend_from_slice(&b);
+                        // Bound a possibly never-closing block (`tail -f`, a busy
+                        // build log). Hysteresis: let raw grow to 2x the cap, then
+                        // drain the head back to the cap - amortized O(1) per byte
+                        // (draining on every append is O(cap) per feed once
+                        // saturated, i.e. O(N*cap) for a runaway stream).
+                        // `finalize_open`/`read_open` slice to the exact cap, so
+                        // the retained/returned text is still strictly bounded.
+                        if open.raw.len() > self.max_block_bytes.saturating_mul(2) {
+                            let cut = open.raw.len() - self.max_block_bytes;
+                            open.raw.drain(..cut);
+                            open.truncated = true;
+                        }
+                    }
+                    self.processor.advance(&mut self.term, &b);
+                }
                 Seg::Marker(m) => self.on_marker(m),
             }
         }
@@ -238,7 +254,8 @@ impl Pane {
                 self.next_seq += 1;
                 self.open = Some(OpenBlock {
                     seq,
-                    anchor: self.abs_row(),
+                    raw: Vec::new(),
+                    truncated: false,
                 });
             }
             Osc133::CmdDone { exit } => self.finalize_open(exit),
@@ -246,32 +263,17 @@ impl Pane {
         }
     }
 
-    /// The cursor's absolute row: lines scrolled into history + current grid line.
-    /// Exact below the scrollback cap (history grows monotonically as lines scroll
-    /// off); see `extract_from` for the past-cap honesty.
-    fn abs_row(&self) -> u64 {
-        let grid = self.term.grid();
-        grid.history_size() as u64 + grid.cursor.point.line.0.max(0) as u64
-    }
-
-    /// Close the open block: capture its output text now and retain it, bounding
-    /// per-block and total retained bytes.
+    /// Close the open block: slice its accumulated bytes to the strict per-block
+    /// cap (feed's hysteresis lets raw run up to 2x), ANSI-strip to clean text,
+    /// and retain it.
     fn finalize_open(&mut self, exit: Option<i32>) {
         let Some(open) = self.open.take() else { return };
-        let (mut text, mut truncated) = self.extract_from(open.anchor);
-        // Cap a single block's stored text: keep the most-recent tail, drop the
-        // head, flag truncated. Prevents one huge command from pinning memory
-        // that total-budget eviction can never reclaim (the last block stays).
-        if text.len() > self.max_block_bytes {
-            let cut = char_boundary_at_or_before(&text, text.len() - self.max_block_bytes);
-            text.drain(..cut);
-            truncated = true;
-        }
+        let (text, capped) = capped_text(&open.raw, self.max_block_bytes);
         self.retained_bytes += text.len();
         self.blocks.push_back(Block {
             seq: open.seq,
             exit,
-            truncated,
+            truncated: open.truncated || capped,
             text,
         });
         // Front-drop oldest until within BOTH the count and byte budgets. Always
@@ -284,27 +286,6 @@ impl Pane {
                 self.retained_bytes -= dropped.text.len();
             }
         }
-    }
-
-    /// Text from absolute row `anchor` down to the current output bottom (cursor
-    /// line), plus whether the span is possibly `truncated` at its top.
-    ///
-    // ponytail: `history_size()` saturates at the scrollback cap, so once the
-    // pane fills its scrollback the anchor stops tracking scrolled-off lines and
-    // the extracted span drifts - `truncated` is then conservatively true (the
-    // read may be incomplete). Below the cap it is exact-false: nothing has
-    // scrolled off, so the whole span is present (the common case at 100k).
-    // alacritty 0.26 emits no scroll event, so a scrolled-off counter can't be
-    // maintained; the real fix is to accumulate the C..D output byte span
-    // instead of reading the grid (tracked as a follow-up).
-    fn extract_from(&self, anchor: u64) -> (String, bool) {
-        let grid = self.term.grid();
-        let hist = grid.history_size();
-        let top = grid.topmost_line().0 as i64; // == -(hist as i64)
-        let start = (anchor as i64 - hist as i64).max(top);
-        let truncated = hist >= self.scrollback;
-        let end = grid.cursor.point.line.0 as i64;
-        (self.rows_text(start, end), truncated)
     }
 
     /// Render grid rows `[start ..= end]` (Line coords; negatives reach history)
@@ -388,15 +369,16 @@ impl Pane {
         }
     }
 
-    /// Live snapshot of a still-streaming block (no `D` yet): text so far,
-    /// `complete=false`. Never hangs waiting for the terminator (AC2-FR).
+    /// Live snapshot of a still-streaming block (no `D` yet): the output bytes so
+    /// far, sliced to the per-block cap and ANSI-stripped, `complete=false`. Never
+    /// hangs waiting for the terminator (AC2-FR).
     fn read_open(&self, open: &OpenBlock) -> BlockRead {
-        let (text, truncated) = self.extract_from(open.anchor);
+        let (text, capped) = capped_text(&open.raw, self.max_block_bytes);
         BlockRead {
             seq: Some(open.seq),
             exit: None,
             complete: false,
-            truncated,
+            truncated: open.truncated || capped,
             implicit: false,
             text,
         }
@@ -545,17 +527,96 @@ pub fn frame_text(frame: &Frame) -> String {
     rows.join("\n")
 }
 
-/// Largest byte index `<= idx` that is a UTF-8 char boundary (std's
-/// `floor_char_boundary` is still unstable). Used to trim a block's stored text
-/// to its tail without splitting a codepoint.
-fn char_boundary_at_or_before(s: &str, mut idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
+/// Slice raw output to its most-recent `max` bytes, then ANSI-strip to clean
+/// text; returns `(text, capped)` where `capped` is whether the head was
+/// dropped. `feed`'s hysteresis lets an open block's raw run up to `2 * max`, so
+/// this enforces the strict per-block cap at finalize/read time. Slicing on a
+/// raw byte offset may start mid-escape or mid-codepoint, but that only happens
+/// on the already-`capped` (flagged) path and `strip_ansi` decodes lossily.
+fn capped_text(raw: &[u8], max: usize) -> (String, bool) {
+    if raw.len() > max {
+        (strip_ansi(&raw[raw.len() - max..]), true)
+    } else {
+        (strip_ansi(raw), false)
     }
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
+}
+
+/// Strip ANSI escape sequences from raw terminal output, returning escape-free
+/// text (`from_utf8_lossy`, so malformed bytes yield the replacement char, never
+/// a panic). Mirrors [`Osc133Scanner`]'s discipline: a tiny byte state machine,
+/// bounded, panic-free. OSC 133 never reaches here - the scanner already split
+/// it into `Seg::Marker`. A partial/unterminated escape at the buffer end is
+/// held mid-state and dropped, never emitted as literal text.
+fn strip_ansi(bytes: &[u8]) -> String {
+    #[derive(Clone, Copy)]
+    enum S {
+        /// Bytes flow to the output.
+        Ground,
+        /// Saw `ESC`; the next byte selects the sequence kind.
+        Esc,
+        /// In a CSI (`ESC [ ...`); consuming until a final byte `0x40..=0x7e`.
+        Csi,
+        /// In an nF escape (`ESC` + intermediate `0x20..=0x2f`, e.g. charset
+        /// designation `ESC ( B`); consuming intermediates until a final byte
+        /// `0x30..=0x7e`.
+        EscInt,
+        /// In a string sequence (OSC/DCS/PM/APC); consuming until ST/BEL.
+        Str,
+        /// In a string, saw `ESC`; a following `\` is ST (terminator).
+        StrEsc,
     }
-    idx
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut st = S::Ground;
+    for &b in bytes {
+        st = match st {
+            S::Ground => {
+                if b == 0x1b {
+                    S::Esc
+                } else {
+                    out.push(b);
+                    S::Ground
+                }
+            }
+            S::Esc => match b {
+                b'[' => S::Csi,
+                // OSC, DCS, PM, APC all run until ST (or BEL for OSC).
+                b']' | b'P' | b'^' | b'_' => S::Str,
+                // nF escape: an intermediate byte opens a multi-byte sequence
+                // (charset designation `ESC ( B`, `ESC ) 0`, ...) that ends only
+                // at a final byte - so the final (e.g. the `B`) is not leaked.
+                0x20..=0x2f => S::EscInt,
+                0x1b => S::Esc, // ESC ESC: restart the escape.
+                // A simple 2-byte escape (`ESC =`, `ESC M`, ...): drop both.
+                _ => S::Ground,
+            },
+            S::Csi => {
+                if (0x40..=0x7e).contains(&b) {
+                    S::Ground
+                } else {
+                    S::Csi
+                }
+            }
+            S::EscInt => {
+                // More intermediates stay in EscInt; a final byte ends the seq.
+                if (0x30..=0x7e).contains(&b) {
+                    S::Ground
+                } else {
+                    S::EscInt
+                }
+            }
+            S::Str => match b {
+                0x07 => S::Ground, // BEL terminates OSC.
+                0x1b => S::StrEsc, // maybe ST.
+                _ => S::Str,
+            },
+            S::StrEsc => match b {
+                b'\\' => S::Ground, // ST.
+                0x1b => S::StrEsc,  // another ESC; still awaiting `\`.
+                _ => S::Str,        // ESC then non-`\`: still in the string.
+            },
+        };
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn map_cell(c: char, fg: VtColor, bg: VtColor, flags: Flags) -> Cell {
@@ -663,12 +724,17 @@ struct Block {
     text: String,
 }
 
-/// A block whose `C` was seen but not yet its `D`: read live from the grid.
-#[derive(Debug, Clone, Copy)]
+/// A block whose `C` was seen but not yet its `D`: its output bytes accumulate
+/// in `raw` (pre-grid), ANSI-stripped to text at `D` or on a live read.
+#[derive(Debug, Clone)]
 struct OpenBlock {
     seq: u64,
-    /// Absolute output-start row (`history_size + line` at `C`).
-    anchor: u64,
+    /// Accumulated passthrough output bytes since `C`, tail-bounded by
+    /// `max_block_bytes` (dropping the head sets `truncated`).
+    raw: Vec<u8>,
+    /// Head bytes were dropped by the per-block cap (this block only, decoupled
+    /// from the pane's scrollback fullness).
+    truncated: bool,
 }
 
 /// A block read result: text plus the metadata `--json` surfaces. Degradations
@@ -1168,11 +1234,13 @@ mod tests {
 
         let b0 = pane.read_block(BlockSel::Seq(0)).unwrap();
         assert_eq!((b0.seq, b0.exit, b0.complete), (Some(0), Some(0), true));
-        assert_eq!(b0.text, "$ hello");
+        // Locked decision 2: block text is pure output - the `$ ` prompt/echo
+        // arrives before `C` (open == None), so it is never buffered.
+        assert_eq!(b0.text, "hello");
 
         let b1 = pane.read_block(BlockSel::Seq(1)).unwrap();
         assert_eq!((b1.seq, b1.exit), (Some(1), Some(1)));
-        assert_eq!(b1.text, "$ boom");
+        assert_eq!(b1.text, "boom");
 
         // AC2-HP: `Last` is the most recent completed block.
         assert_eq!(pane.read_block(BlockSel::Last).unwrap().seq, Some(1));
@@ -1197,7 +1265,7 @@ mod tests {
         pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07partial");
         let read = pane.read_block(BlockSel::Last).unwrap();
         assert_eq!((read.seq, read.complete), (Some(0), false));
-        assert_eq!(read.text, "$ partial");
+        assert_eq!(read.text, "partial");
     }
 
     #[test]
@@ -1208,7 +1276,7 @@ mod tests {
         run_command(&mut pane, "keepme", 0);
         pane.resize(24, 40); // width change reflows the grid
         let read = pane.read_block(BlockSel::Seq(0)).unwrap();
-        assert_eq!(read.text, "$ keepme");
+        assert_eq!(read.text, "keepme");
     }
 
     #[test]
@@ -1225,25 +1293,113 @@ mod tests {
     }
 
     #[test]
-    fn block_truncated_flag_fires_only_at_scrollback_cap() {
-        // Below the cap a completed block is exact (nothing evicted) - not
-        // truncated. Once the pane fills its (tiny) scrollback, a block's top
-        // may have scrolled off, so the flag conservatively fires.
-        let mut pane = Pane::with_scrollback(4, 20, 8);
-        run_command(&mut pane, "small", 0);
+    fn block_truncated_flag_fires_at_per_block_byte_cap() {
+        // Locked decision 4: `truncated` now means THIS block's head bytes were
+        // dropped by the per-block byte cap, decoupled from the pane's scrollback
+        // fullness. A block under the cap is exact; one over it is flagged.
+        let mut pane = Pane::with_limits(4, 20, 8, 10, 1000);
+        run_command(&mut pane, "small", 0); // 5B <= 10B cap
         assert!(
             !pane.read_block(BlockSel::Seq(0)).unwrap().truncated,
-            "below-cap block is exact"
+            "under the per-block cap: exact, not truncated"
         );
-        // Push enough rows to fill the 8-line scrollback, then capture a block.
-        for i in 0..40 {
-            pane.feed(format!("filler{i}\r\n").as_bytes());
-        }
-        run_command(&mut pane, "big", 0);
+        run_command(&mut pane, "0123456789ABCDEF", 0); // 16B > 10B cap
         assert!(
             pane.read_block(BlockSel::Last).unwrap().truncated,
-            "at-cap block is flagged possibly-truncated"
+            "over the per-block cap: head dropped, flagged truncated"
         );
+    }
+
+    #[test]
+    fn block_capture_survives_scrollback_saturation() {
+        // AC2-HP: fill a tiny scrollback well past its cap, THEN run a command
+        // block. Its output is captured exactly - the pre-fix grid-anchor path
+        // returned a wrong span here once `history_size()` saturated.
+        let mut pane = Pane::with_scrollback(4, 20, 8);
+        for i in 0..50 {
+            pane.feed(format!("filler{i}\r\n").as_bytes());
+        }
+        run_command(&mut pane, "exact-output", 0);
+        let read = pane.read_block(BlockSel::Last).unwrap();
+        assert_eq!(
+            read.text, "exact-output",
+            "captured pre-grid, scroll-independent"
+        );
+        assert!(!read.truncated, "small block under the byte cap is exact");
+    }
+
+    #[test]
+    fn runaway_open_block_is_memory_bounded() {
+        // AC1-FR: an open block (no `D`) fed more than `max_block_bytes` keeps only
+        // the most-recent tail, flagged truncated - a never-closing command
+        // (`tail -f`) cannot pin unbounded server memory.
+        let mut pane = Pane::with_limits(4, 80, 100, 16, 1000);
+        pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07");
+        for _ in 0..100 {
+            pane.feed(b"0123456789"); // 1000B total, per-block cap 16B
+        }
+        let read = pane.read_block(BlockSel::Last).unwrap();
+        assert!(!read.complete, "still streaming (no D)");
+        assert!(read.text.len() <= 16, "tail-bounded: {:?}", read.text);
+        assert!(read.truncated, "head dropped -> truncated");
+        assert!(
+            read.text.ends_with("0123456789"),
+            "keeps the most-recent tail: {:?}",
+            read.text
+        );
+    }
+
+    #[test]
+    fn block_captures_logical_not_wrapped_lines() {
+        // AC1-EDGE: a 200-char logical line to an 80-col pane is captured as one
+        // 200-char line (the grid path would have wrapped it to 3 rows).
+        let mut pane = Pane::new(24, 80);
+        let long = "x".repeat(200);
+        pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07");
+        pane.feed(long.as_bytes());
+        pane.feed(b"\x1b]133;D;0\x07");
+        assert_eq!(pane.read_block(BlockSel::Last).unwrap().text, long);
+    }
+
+    #[test]
+    fn strip_ansi_removes_escapes_keeps_visible_text() {
+        // AC1-ERR: CSI color, a non-133 OSC title, a 2-byte escape, and invalid
+        // UTF-8 -> visible characters only, no ESC byte, no panic.
+        let out = strip_ansi(b"\x1b[31mred\x1b[0m\x1b]0;title\x07\x1b=text\xff!");
+        assert!(!out.contains('\x1b'), "no ESC survives: {out:?}");
+        assert!(out.starts_with("redtext"), "visible text kept: {out:?}");
+        assert!(out.ends_with('!'), "trailing text kept: {out:?}");
+        assert!(
+            out.contains('\u{fffd}'),
+            "bad UTF-8 -> replacement char: {out:?}"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_drops_partial_trailing_escape() {
+        // An unterminated escape at the buffer end is dropped, not emitted raw
+        // (Errors: partial escape at an open block's end).
+        assert_eq!(strip_ansi(b"ok\x1b[3"), "ok"); // partial CSI
+        assert_eq!(strip_ansi(b"ok\x1b]0;unterminated"), "ok"); // partial OSC
+        assert_eq!(strip_ansi(b"ok\x1b"), "ok"); // bare ESC
+    }
+
+    #[test]
+    fn strip_ansi_keeps_newlines_tabs_and_cr() {
+        // Discretion 4: keep `\n`/`\r`/`\t` verbatim; drop only escape sequences.
+        assert_eq!(strip_ansi(b"a\tb\nc\rd"), "a\tb\nc\rd");
+    }
+
+    #[test]
+    fn strip_ansi_consumes_charset_designation_final_byte() {
+        // `ESC ( B` (designate US-ASCII into G0, common in `sgr0`/reset) is a
+        // 3-byte nF escape: the intermediate `(` AND the final `B` must both be
+        // dropped, not leak a stray `B` into captured text.
+        assert_eq!(strip_ansi(b"a\x1b(Bb"), "ab");
+        assert_eq!(strip_ansi(b"\x1b)0\x1b(Bx"), "x"); // ESC ) 0 then ESC ( B
+        assert_eq!(strip_ansi(b"red\x1b(B\x1b[mtext"), "redtext");
+        // Unterminated nF escape at the buffer end is dropped, not leaked.
+        assert_eq!(strip_ansi(b"ok\x1b("), "ok");
     }
 
     #[test]
@@ -1252,9 +1408,10 @@ mod tests {
         let mut pane = Pane::with_limits(4, 80, 100, 10, 30);
 
         // A block past the per-block cap is tail-trimmed and flagged truncated.
-        run_command(&mut pane, "0123456789ABCDEF", 0); // "$ 0123456789ABCDEF" = 18B
+        // Output is now prompt-excluded: raw is the 16B "0123456789ABCDEF".
+        run_command(&mut pane, "0123456789ABCDEF", 0);
         let b0 = pane.read_block(BlockSel::Seq(0)).unwrap();
-        assert!(b0.text.len() <= 12, "per-block cap trims: {:?}", b0.text);
+        assert!(b0.text.len() <= 10, "per-block cap trims: {:?}", b0.text);
         assert!(b0.truncated, "a trimmed block is flagged truncated");
         assert!(b0.text.ends_with("ABCDEF"), "keeps the tail: {:?}", b0.text);
 
