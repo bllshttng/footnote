@@ -22,9 +22,13 @@ use crate::proto::{cell_flags, Cell, Color, Frame};
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_COLS: u16 = 80;
 
-/// Scrollback cap per pane. `Term::new` treats `scrolling_history` as a bound
-/// the history grows toward, not an allocation.
-const SCROLLBACK_LINES: usize = 10_000;
+/// Default scrollback cap per pane. `Term::new` treats `scrolling_history` as a
+/// bound the history grows toward, not an allocation, so a pane that emits 500
+/// lines costs 500 lines even at this ceiling. 100k is alacritty's documented
+/// max; a memory-constrained deployment lowers it via `config.mux.scrollback_lines`
+/// (wired in Task 1.5). Governs how far `pane read --lines` and a still-streaming
+/// block can reach into history (4b).
+const SCROLLBACK_LINES: usize = 100_000;
 
 /// `Dimensions` impl for constructing/resizing the headless [`Term`].
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +55,14 @@ pub struct Pane {
     processor: Processor,
     rows: u16,
     cols: u16,
+    /// OSC 133 shell-integration scanner: splits PTY output at FinalTerm markers
+    /// BEFORE they reach the Term (which drops unknown OSC anyway) so 4b can turn
+    /// a pane's scroll into typed command blocks. Stateful across feeds.
+    scanner: Osc133Scanner,
+    /// Markers recognized since the last drain, in stream order. Task 1.2's block
+    /// store consumes these; keeping the seam explicit means the scanner stays a
+    /// pure byte machine with no knowledge of blocks.
+    markers: Vec<Osc133>,
 }
 
 impl Pane {
@@ -73,14 +85,29 @@ impl Pane {
             processor: Processor::new(),
             rows,
             cols,
+            scanner: Osc133Scanner::default(),
+            markers: Vec::new(),
         }
     }
 
-    /// Feed raw PTY output. Safe with partial escape sequences split across
-    /// reads; `vte` buffers incomplete sequences between calls. Malformed
-    /// sequences are the parser's problem (bounded parse, no panic).
+    /// Feed raw PTY output. The OSC 133 scanner splits the stream: passthrough
+    /// spans advance the Term (which buffers partial escape sequences across
+    /// calls); recognized FinalTerm markers are stripped and queued for the block
+    /// store. Partial markers split across reads carry over in the scanner state.
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.processor.advance(&mut self.term, bytes);
+        for seg in self.scanner.scan(bytes) {
+            match seg {
+                Seg::Pass(b) => self.processor.advance(&mut self.term, &b),
+                Seg::Marker(m) => self.markers.push(m),
+            }
+        }
+    }
+
+    /// Drain the markers recognized since the last call (stream order). Task 1.2
+    /// drives the block store from this.
+    #[cfg(test)]
+    pub fn take_markers(&mut self) -> Vec<Osc133> {
+        std::mem::take(&mut self.markers)
     }
 
     /// Resize the grid, mirroring a PTY winsize change. Clamped to 1 so a
@@ -324,6 +351,189 @@ fn map_color(c: VtColor) -> Color {
     }
 }
 
+// -- OSC 133 (FinalTerm) shell-integration scanner ------------------------------
+//
+// alacritty's ANSI processor silently drops OSC sequences it does not model, so
+// OSC 133 never reaches a handler we control (verified against the landed code).
+// Capture is therefore a pre-`advance` byte scanner: it walks the PTY stream, and
+// at each `ESC ] 133 ; <arg> (BEL | ST)` it emits a typed marker and STRIPS the
+// bytes (the Term would ignore them anyway; stripping keeps the grid canonical).
+// Everything else flows to the Term verbatim - nothing is ever swallowed. The
+// discipline mirrors `keys.rs`: a tiny state machine with a bounded accumulator,
+// safe with a marker split one byte per read.
+
+/// A recognized OSC 133 marker. FinalTerm's letters: `A` prompt start, `B`
+/// command start, `C` command output start, `D[;exit]` command finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc133 {
+    PromptStart,
+    CmdStart,
+    OutputStart,
+    CmdDone { exit: Option<i32> },
+}
+
+/// One unit of scanner output, in stream order: bytes bound for the Term, or a
+/// marker to record at the Term's position after the preceding bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seg {
+    Pass(Vec<u8>),
+    Marker(Osc133),
+}
+
+/// The FinalTerm prefix after `ESC ]`: the literal `133;`.
+const OSC133_PREFIX: &[u8] = b"133;";
+/// Payload cap: a real FinalTerm arg is a few bytes (`D;137`, `A;cl=m`). Anything
+/// longer is hostile/garbage - flush what we held and bail (bounded, no panic).
+const MAX_PAYLOAD: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScanState {
+    /// Bytes flow to the Term.
+    Ground,
+    /// Saw `ESC`; awaiting `]` (or a divergence back to Ground).
+    Esc,
+    /// Saw `ESC ]`; matched `n` bytes of `133;`.
+    Prefix(usize),
+    /// Matched `ESC ] 133 ;`; accumulating the arg until a terminator.
+    Payload(Vec<u8>),
+    /// In the payload, saw `ESC`; a following `\` closes the marker (ST).
+    PayloadEsc(Vec<u8>),
+}
+
+/// Per-pane OSC 133 scanner. State persists across `scan` calls so a marker split
+/// across PTY reads still parses (`keys.rs` accumulation discipline, output-side).
+pub struct Osc133Scanner {
+    state: ScanState,
+}
+
+impl Default for Osc133Scanner {
+    fn default() -> Self {
+        Osc133Scanner { state: ScanState::Ground }
+    }
+}
+
+impl Osc133Scanner {
+    /// Split `bytes` into passthrough spans and stripped markers, in order.
+    /// Common case (no `ESC`): one `Pass` covering the whole read.
+    // ponytail: one to_vec per read of terminal output; alacritty's advance
+    // copies into the grid anyway, so this is not the hot allocation. Zero-copy
+    // spans would need lifetimes across the carried-over state - not worth it.
+    fn scan(&mut self, bytes: &[u8]) -> Vec<Seg> {
+        let mut out: Vec<Seg> = Vec::new();
+        let mut plain: Vec<u8> = Vec::new();
+
+        // Flush any pending passthrough bytes as one segment before a marker.
+        macro_rules! flush {
+            () => {
+                if !plain.is_empty() {
+                    out.push(Seg::Pass(std::mem::take(&mut plain)));
+                }
+            };
+        }
+
+        for &b in bytes {
+            match std::mem::replace(&mut self.state, ScanState::Ground) {
+                ScanState::Ground => {
+                    if b == 0x1b {
+                        self.state = ScanState::Esc;
+                    } else {
+                        plain.push(b);
+                    }
+                }
+                ScanState::Esc => {
+                    if b == 0x5d {
+                        // `ESC ]` - an OSC; start matching the 133 prefix.
+                        self.state = ScanState::Prefix(0);
+                    } else if b == 0x1b {
+                        // `ESC ESC` - the first ESC is not ours; hand it back and
+                        // stay in Esc for the new one.
+                        plain.push(0x1b);
+                        self.state = ScanState::Esc;
+                    } else {
+                        // `ESC <other>` - some other escape; hand both to the Term.
+                        plain.push(0x1b);
+                        plain.push(b);
+                    }
+                }
+                ScanState::Prefix(n) => {
+                    if b == OSC133_PREFIX[n] {
+                        if n + 1 == OSC133_PREFIX.len() {
+                            self.state = ScanState::Payload(Vec::new());
+                        } else {
+                            self.state = ScanState::Prefix(n + 1);
+                        }
+                    } else {
+                        // Not a 133 OSC (e.g. a title `ESC ] 0 ;`). Hand back what
+                        // we held and let the Term parse the rest of this OSC.
+                        plain.push(0x1b);
+                        plain.push(0x5d);
+                        plain.extend_from_slice(&OSC133_PREFIX[..n]);
+                        plain.push(b);
+                    }
+                }
+                ScanState::Payload(mut buf) => {
+                    if b == 0x07 {
+                        // BEL terminator: emit + strip.
+                        flush!();
+                        if let Some(m) = parse_osc133(&buf) {
+                            out.push(Seg::Marker(m));
+                        }
+                    } else if b == 0x1b {
+                        self.state = ScanState::PayloadEsc(buf);
+                    } else if buf.len() >= MAX_PAYLOAD {
+                        // Hostile length: hand everything back, nothing swallowed.
+                        plain.push(0x1b);
+                        plain.push(0x5d);
+                        plain.extend_from_slice(OSC133_PREFIX);
+                        plain.append(&mut buf);
+                        plain.push(b);
+                    } else {
+                        buf.push(b);
+                        self.state = ScanState::Payload(buf);
+                    }
+                }
+                ScanState::PayloadEsc(mut buf) => {
+                    if b == 0x5c {
+                        // `ESC \` (ST) terminator: emit + strip.
+                        flush!();
+                        if let Some(m) = parse_osc133(&buf) {
+                            out.push(Seg::Marker(m));
+                        }
+                    } else {
+                        // ESC not closing the marker: garbage. Hand it all back.
+                        plain.push(0x1b);
+                        plain.push(0x5d);
+                        plain.extend_from_slice(OSC133_PREFIX);
+                        plain.append(&mut buf);
+                        plain.push(0x1b);
+                        plain.push(b);
+                    }
+                }
+            }
+        }
+        flush!();
+        out
+    }
+}
+
+/// Parse the payload after `133;` into a marker. Unknown subtypes yield `None`
+/// (stripped, no event) - they are semantic markers the Term ignores anyway.
+fn parse_osc133(buf: &[u8]) -> Option<Osc133> {
+    let s = std::str::from_utf8(buf).ok()?;
+    let mut fields = s.split(';');
+    match fields.next()? {
+        "A" => Some(Osc133::PromptStart),
+        "B" => Some(Osc133::CmdStart),
+        "C" => Some(Osc133::OutputStart),
+        "D" => {
+            // `D` or `D;<exit>[;...]`; the exit is the first field, if numeric.
+            let exit = fields.next().and_then(|f| f.parse::<i32>().ok());
+            Some(Osc133::CmdDone { exit })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +686,87 @@ mod tests {
         assert_eq!(pane.size(), (1, 1));
         let frame = pane.frame();
         assert_eq!(frame.cells.len(), 1);
+    }
+
+    // -- OSC 133 scanner (Task 1.1) --------------------------------------------
+
+    #[test]
+    fn osc133_recognizes_finalterm_letters_and_exit() {
+        let mut pane = Pane::new(24, 80);
+        // A prompt, B command, C output-start, D;1 done-with-exit-1 (BEL-terminated).
+        pane.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07false\x1b]133;C\x07\x1b]133;D;1\x07");
+        assert_eq!(
+            pane.take_markers(),
+            vec![
+                Osc133::PromptStart,
+                Osc133::CmdStart,
+                Osc133::OutputStart,
+                Osc133::CmdDone { exit: Some(1) },
+            ]
+        );
+        // AC1-UI: no marker bytes reach the grid; only the real text does.
+        assert_eq!(pane.text(), "$ false");
+    }
+
+    #[test]
+    fn osc133_st_terminator_and_bare_d() {
+        let mut pane = Pane::new(24, 80);
+        // ST (ESC \) terminator, and a bare `D` with no exit field.
+        pane.feed(b"\x1b]133;C\x1b\\ok\x1b]133;D\x1b\\");
+        assert_eq!(
+            pane.take_markers(),
+            vec![Osc133::OutputStart, Osc133::CmdDone { exit: None }]
+        );
+        assert_eq!(pane.text(), "ok");
+    }
+
+    #[test]
+    fn osc133_splits_one_byte_per_feed_identically() {
+        // AC1-EDGE: a marker split arbitrarily still parses.
+        let stream = b"a\x1b]133;C\x07b\x1b]133;D;0\x07c";
+        let mut split = Pane::new(24, 80);
+        for &byte in stream {
+            split.feed(&[byte]);
+        }
+        assert_eq!(
+            split.take_markers(),
+            vec![Osc133::OutputStart, Osc133::CmdDone { exit: Some(0) }]
+        );
+        assert_eq!(split.text(), "abc");
+    }
+
+    #[test]
+    fn osc133_non_133_osc_passes_through() {
+        let mut pane = Pane::new(24, 80);
+        // A window-title OSC (`ESC ] 0 ; ...`) is not ours - hand it to the Term,
+        // which consumes it as a title (never printed), and record no marker.
+        pane.feed(b"\x1b]0;my title\x07hello");
+        assert!(pane.take_markers().is_empty());
+        assert_eq!(pane.text(), "hello");
+    }
+
+    #[test]
+    fn osc133_hostile_payload_is_bounded_no_marker() {
+        // AC1-ERR: a garbage payload past the length cap flushes as inert bytes,
+        // records no phantom marker, and does not panic or buffer unbounded.
+        let mut pane = Pane::new(24, 80);
+        let mut hostile = b"\x1b]133;".to_vec();
+        hostile.extend(std::iter::repeat(b'X').take(500));
+        hostile.push(0x07);
+        hostile.extend_from_slice(b"tail");
+        pane.feed(&hostile);
+        assert!(pane.take_markers().is_empty());
+        // The tail survives (nothing swallowed after the bounded flush).
+        assert!(pane.text().ends_with("tail"), "{:?}", pane.text());
+    }
+
+    #[test]
+    fn osc133_unknown_subtype_is_stripped_without_marker() {
+        let mut pane = Pane::new(24, 80);
+        // FinalTerm defines A/B/C/D; an unknown letter is a semantic marker the
+        // Term would ignore - strip it, record nothing.
+        pane.feed(b"x\x1b]133;Z;foo\x07y");
+        assert!(pane.take_markers().is_empty());
+        assert_eq!(pane.text(), "xy");
     }
 }
