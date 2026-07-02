@@ -1,17 +1,22 @@
-//! The mux client: a dumb compositor over the server's frames.
+//! The mux client: chrome + a dumb compositor over the server's pane frames.
 //!
 //! Takes over the terminal (crossterm raw mode + alternate screen), attaches
-//! to the session server (spawning one if absent), draws `Frame`s, and
-//! forwards stdin to the server. Input fidelity is by construction: in raw
-//! mode the client reads RAW STDIN BYTES and forwards them verbatim on the
-//! reliable channel - Ctrl-C, arrow keys, and UTF-8 are never re-encoded
-//! (AC2-UI). The client never emulates VT itself; the server grid is the
-//! single source of truth, which is what makes reattach exact.
+//! to the session server (spawning one if absent), and renders three things:
+//! a top tab bar, a left sideline (squads with caret dropdowns), and the
+//! content area where per-pane `Frame`s are blitted into the rects the last
+//! `Layout` assigned. The client never runs the layout algorithm and never
+//! emulates VT (Locked Decision 3): rects and grids both come from the
+//! server, which is what makes reattach exact.
 //!
-//! Detach: Ctrl-\ (byte 0x1C). ponytail: a bare byte-match means a 0x1C
-//! inside a paste also detaches; a prefix-key state machine is the Phase-3
-//! upgrade if that ever bites.
+//! Input goes through the leader-key scanner (`keys.rs`): bare bytes forward
+//! verbatim on the reliable channel (AC2-UI), chords become `Command`s.
+//! Caret expansion, sideline visibility, and the selector are CLIENT-LOCAL
+//! view state - never on the wire (Locked Decision 15).
+//!
+//! Every error surface while the compositor owns the terminal goes through
+//! the rendered UI (tab-bar notice + BEL), never stderr (x-0175 pitfall).
 
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -20,16 +25,25 @@ use crossterm::style::Color as CtColor;
 use crossterm::{cursor, queue, style, terminal};
 use tokio::sync::mpsc;
 
+use crate::keys::{Event, Scanner};
 use crate::proto::{
-    self, read_msg, write_msg, Cell, ClientMsg, Color, Frame, ProtoError, ServerMsg, BUILD_VERSION,
-    PROTO_VERSION,
+    self, cell_flags, read_msg, write_msg, Cell, ClientMsg, Color, Command, Frame, ProtoError,
+    ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
 };
-
-/// Ctrl-\ : detach from the session, leaving the server (and shell) running.
-const DETACH_BYTE: u8 = 0x1C;
+use crate::tree::Rect;
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Sideline width in columns, divider column included. Client-local chrome:
+/// the server sees only the content-area viewport.
+const PANEL_W: u16 = 28;
+/// Below this many content columns the sideline auto-hides (AC6-EDGE).
+const MIN_CONTENT_COLS: u16 = 40;
+/// The tab bar row.
+const TAB_BAR_ROWS: u16 = 1;
+/// Transient notice lifetime on the tab bar.
+const NOTICE_TTL: Duration = Duration::from_secs(3);
 
 /// Run the client for `session`. Returns the process exit code.
 pub fn run(session: &str) -> i32 {
@@ -138,6 +152,323 @@ impl Drop for TerminalGuard {
     }
 }
 
+// ---------------------------------------------------------------------------
+// View state + pure composition
+// ---------------------------------------------------------------------------
+
+/// The last `Layout` as the client holds it.
+struct LayoutView {
+    squads: Vec<SquadMeta>,
+    active_squad: u64,
+    panes: Vec<(u64, Rect)>,
+    focus: u64,
+}
+
+/// One selectable sideline row: a squad, or one of its tabs when expanded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelRow {
+    squad: u64,
+    tab: Option<usize>,
+}
+
+/// Everything the client renders from. Pure state - `compose` turns it into
+/// one full-terminal `Frame` the row-diffing `Compositor` draws.
+struct View {
+    term: (u16, u16), // full terminal (rows, cols)
+    layout: LayoutView,
+    frames: HashMap<u64, Frame>,
+    /// Manual sideline toggle; narrow terminals override it (auto-hide).
+    panel_on: bool,
+    /// Caret expansion per squad id - client-local, instant (AC6-UI).
+    expanded: HashSet<u64>,
+    /// Selector cursor into [`View::sel_rows`], when open.
+    selector: Option<usize>,
+    notice: Option<(String, Instant)>,
+}
+
+impl View {
+    fn new(term: (u16, u16), layout: LayoutView) -> Self {
+        View {
+            term,
+            layout,
+            frames: HashMap::new(),
+            panel_on: true,
+            expanded: HashSet::new(),
+            selector: None,
+            notice: None,
+        }
+    }
+
+    fn panel_visible(&self) -> bool {
+        self.panel_on && self.term.1 >= PANEL_W + MIN_CONTENT_COLS
+    }
+
+    fn panel_w(&self) -> u16 {
+        if self.panel_visible() {
+            PANEL_W
+        } else {
+            0
+        }
+    }
+
+    /// The CONTENT-AREA viewport reported to the server (terminal minus
+    /// chrome). Never zero, so a degenerate terminal cannot wedge the server.
+    fn content_dims(&self) -> (u16, u16) {
+        (
+            self.term.0.saturating_sub(TAB_BAR_ROWS).max(1),
+            self.term.1.saturating_sub(self.panel_w()).max(1),
+        )
+    }
+
+    fn set_layout(&mut self, layout: LayoutView) {
+        // Frames for panes unknown to the new Layout are dead - drop them
+        // (Concurrency: a frame is only ever drawn against the Layout
+        // generation it belongs to).
+        let live: HashSet<u64> = layout.panes.iter().map(|(id, _)| *id).collect();
+        self.frames.retain(|id, _| live.contains(id));
+        self.layout = layout;
+        // Selector re-anchors to a live row on catalog change (AC6-FR).
+        if let Some(cur) = self.selector {
+            let n = self.sel_rows().len();
+            self.selector = if n == 0 { None } else { Some(cur.min(n - 1)) };
+        }
+    }
+
+    fn set_notice(&mut self, text: String) {
+        self.notice = Some((text, Instant::now() + NOTICE_TTL));
+    }
+
+    /// The sideline rows in display order: each squad, then its tabs when
+    /// expanded. The ids are (namespace, key)-style typed pairs from day one
+    /// (x-fef5 lesson): a squad row and a tab row can never collide.
+    fn sel_rows(&self) -> Vec<SelRow> {
+        let mut rows = Vec::new();
+        for s in &self.layout.squads {
+            rows.push(SelRow {
+                squad: s.id,
+                tab: None,
+            });
+            if self.expanded.contains(&s.id) {
+                for t in 0..s.tabs.len() {
+                    rows.push(SelRow {
+                        squad: s.id,
+                        tab: Some(t),
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    /// Compose the full-terminal frame: tab bar, sideline, dividers, panes.
+    /// Pure - all the drawing machinery (row diff, styles, wide-spacer
+    /// handling) stays in [`Compositor`].
+    fn compose(&self) -> Frame {
+        let (rows, cols) = self.term;
+        let (rows, cols) = (rows.max(1) as usize, cols.max(1) as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        let panel_w = self.panel_w() as usize;
+
+        self.draw_tab_bar(&mut cells, cols);
+        if panel_w > 0 {
+            self.draw_sideline(&mut cells, rows, cols, panel_w);
+        }
+
+        // Content area: dividers first (uncovered cells), panes blitted over.
+        let origin_r = TAB_BAR_ROWS as usize;
+        let origin_c = panel_w;
+        let mut covered = vec![false; rows * cols];
+        for (pid, rect) in &self.layout.panes {
+            let frame = self.frames.get(pid);
+            for fr in 0..rect.rows as usize {
+                let r = origin_r + rect.y as usize + fr;
+                if r >= rows {
+                    break;
+                }
+                for fc in 0..rect.cols as usize {
+                    let c = origin_c + rect.x as usize + fc;
+                    if c >= cols {
+                        break;
+                    }
+                    covered[r * cols + c] = true;
+                    if let Some(f) = frame {
+                        if fr < f.rows as usize && fc < f.cols as usize {
+                            cells[r * cols + c] = f.cells[fr * f.cols as usize + fc];
+                        }
+                    }
+                }
+            }
+        }
+        // Divider glyphs for content cells no pane covers: pick by which
+        // neighbors are panes so vertical strips read '│', horizontal '─',
+        // crossings '┼'. Dim so chrome never shouts over content.
+        for r in origin_r..rows {
+            for c in origin_c..cols {
+                if covered[r * cols + c] {
+                    continue;
+                }
+                let horiz = c > origin_c && covered[r * cols + c - 1]
+                    || c + 1 < cols && covered[r * cols + c + 1];
+                let vert = r > origin_r && covered[(r - 1) * cols + c]
+                    || r + 1 < rows && covered[(r + 1) * cols + c];
+                cells[r * cols + c] = Cell {
+                    c: match (horiz, vert) {
+                        (true, true) => '┼',
+                        (true, false) => '│',
+                        (false, true) => '─',
+                        (false, false) => ' ',
+                    },
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: cell_flags::DIM,
+                };
+            }
+        }
+
+        // Terminal cursor: the FOCUSED pane's, offset into its rect - the
+        // one place the cursor may sit (AC1-UI/AC5-UI).
+        let (mut cur_r, mut cur_c, mut cur_vis) = (0u16, 0u16, false);
+        if self.selector.is_none() {
+            if let Some((_, rect)) = self
+                .layout
+                .panes
+                .iter()
+                .find(|(id, _)| *id == self.layout.focus)
+            {
+                if let Some(f) = self.frames.get(&self.layout.focus) {
+                    cur_r = TAB_BAR_ROWS + rect.y + f.cursor_row.min(rect.rows.saturating_sub(1));
+                    cur_c = self.panel_w() + rect.x + f.cursor_col.min(rect.cols.saturating_sub(1));
+                    cur_vis = f.cursor_visible;
+                }
+            }
+        }
+        Frame {
+            rows: rows as u16,
+            cols: cols as u16,
+            cells,
+            cursor_row: cur_r,
+            cursor_col: cur_c,
+            cursor_visible: cur_vis,
+        }
+    }
+
+    fn draw_tab_bar(&self, cells: &mut [Cell], cols: usize) {
+        let active = self
+            .layout
+            .squads
+            .iter()
+            .find(|s| s.id == self.layout.active_squad);
+        let mut spans: Vec<(String, u8)> = Vec::new(); // (text, flags)
+        if let Some(s) = active {
+            spans.push((format!(" {} ", s.name), cell_flags::BOLD));
+            for (i, _) in s.tabs.iter().enumerate() {
+                if i == s.active_tab {
+                    spans.push((format!("[{}]", i + 1), cell_flags::INVERSE));
+                } else {
+                    spans.push((format!(" {} ", i + 1), 0));
+                }
+            }
+        }
+        let mut c = 0usize;
+        for (text, flags) in spans {
+            for ch in text.chars() {
+                if c >= cols {
+                    return;
+                }
+                cells[c] = Cell {
+                    c: ch,
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags,
+                };
+                c += 1;
+            }
+        }
+        // Transient notice, right-aligned, INVERSE (paired with the BEL the
+        // event handler already sounded).
+        if let Some((text, _)) = &self.notice {
+            let text: String = text.chars().take(cols.saturating_sub(1)).collect();
+            let start = cols.saturating_sub(text.chars().count() + 1);
+            for (i, ch) in text.chars().enumerate() {
+                let idx = start + i;
+                if idx > c && idx < cols {
+                    cells[idx] = Cell {
+                        c: ch,
+                        fg: Color::Default,
+                        bg: Color::Default,
+                        flags: cell_flags::INVERSE,
+                    };
+                }
+            }
+        }
+    }
+
+    fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
+        let sel_rows = self.sel_rows();
+        let text_w = panel_w - 1; // last column is the divider
+        for (i, row) in sel_rows.iter().enumerate() {
+            let r = TAB_BAR_ROWS as usize + i;
+            if r >= rows {
+                break;
+            }
+            let squad = self.layout.squads.iter().find(|s| s.id == row.squad);
+            let Some(squad) = squad else { continue };
+            let is_active_squad = squad.id == self.layout.active_squad;
+            let (text, mut flags) = match row.tab {
+                None => {
+                    let caret = if self.expanded.contains(&squad.id) {
+                        '▾'
+                    } else {
+                        '▸'
+                    };
+                    (
+                        format!("{caret} {}", squad.name),
+                        if is_active_squad { cell_flags::BOLD } else { 0 },
+                    )
+                }
+                Some(t) => {
+                    let marker = if is_active_squad && t == squad.active_tab {
+                        '*'
+                    } else {
+                        ' '
+                    };
+                    (format!("  {marker}{}", t + 1), 0)
+                }
+            };
+            if self.selector == Some(i) {
+                flags |= cell_flags::INVERSE;
+            }
+            for (j, ch) in text.chars().take(text_w).enumerate() {
+                cells[r * cols + j] = Cell {
+                    c: ch,
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags,
+                };
+            }
+            // Pad the highlight across the row so the cursor reads as a bar.
+            if self.selector == Some(i) {
+                for j in text.chars().count().min(text_w)..text_w {
+                    cells[r * cols + j].flags |= cell_flags::INVERSE;
+                }
+            }
+        }
+        // The divider column, full height below the tab bar.
+        for r in TAB_BAR_ROWS as usize..rows {
+            cells[r * cols + (panel_w - 1)] = Cell {
+                c: '│',
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: cell_flags::DIM,
+            };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attach + main loop
+// ---------------------------------------------------------------------------
+
 async fn attach_and_run(
     stream: std::os::unix::net::UnixStream,
     socket: &Path,
@@ -158,41 +489,80 @@ async fn attach_and_run(
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // Chrome is client-local: report the CONTENT area. A placeholder View
+    // computes it before any Layout exists.
+    let mut view = View::new(
+        (rows, cols),
+        LayoutView {
+            squads: Vec::new(),
+            active_squad: 0,
+            panes: Vec::new(),
+            focus: 0,
+        },
+    );
+    let (c_rows, c_cols) = view.content_dims();
     write_msg(
         &mut sock_w,
         &ClientMsg::Attach {
             proto: PROTO_VERSION,
             build: BUILD_VERSION.to_string(),
-            rows,
-            cols,
+            rows: c_rows,
+            cols: c_cols,
             cwd,
         },
     )
     .await
     .map_err(|e| format!("attach failed: {e}"))?;
 
-    // The first frame (or refusal) decides everything, BEFORE the terminal
+    // The first Layout (or refusal) decides everything, BEFORE the terminal
     // is taken over, so a refusal prints as a plain one-liner (AC1-ERR,
-    // version skew). The v2 server sends a reliable preamble ahead of it
-    // (ModeSync/Layout/Notice); this Phase-1-shaped client skips those - the
-    // N-pane compositor (task 2.5) renders them.
+    // version skew). ModeSync may precede it on the reliable channel - stash
+    // and apply once the TUI owns the terminal.
     let deadline = Instant::now() + Duration::from_secs(10);
-    let first_frame = loop {
+    let mut stashed_modesync: Vec<u8> = Vec::new();
+    loop {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or_else(|| format!("server did not answer the attach; {log_hint}"))?;
-        let first = tokio::time::timeout(remaining, read_msg::<_, ServerMsg>(&mut sock_r))
+        let msg = tokio::time::timeout(remaining, read_msg::<_, ServerMsg>(&mut sock_r))
             .await
             .map_err(|_| format!("server did not answer the attach; {log_hint}"))?;
-        match first {
-            Ok(ServerMsg::Frame { frame, .. }) => break checked_frame(frame)?,
+        match msg {
+            Ok(ServerMsg::Layout {
+                squads,
+                active_squad,
+                panes,
+                focus,
+            }) => {
+                view.set_layout(LayoutView {
+                    squads,
+                    active_squad,
+                    panes,
+                    focus,
+                });
+                break;
+            }
+            Ok(ServerMsg::ModeSync { bytes }) => stashed_modesync.extend_from_slice(&bytes),
             Ok(ServerMsg::Bye { reason }) => return Err(reason),
-            Ok(ServerMsg::Layout { .. })
-            | Ok(ServerMsg::ModeSync { .. })
-            | Ok(ServerMsg::Notice { .. }) => continue,
+            Ok(ServerMsg::Frame { pane_id, frame }) => {
+                // Tolerated out-of-order preamble: keep it; the Layout names
+                // its rect a message later. The wire trust boundary holds
+                // even here: a geometry-inconsistent frame is refused loudly
+                // (like a malformed message), never skipped or drawn.
+                if !frame.geometry_ok() {
+                    return Err(format!(
+                        "malformed frame from server: {}x{} but {} cells",
+                        frame.rows,
+                        frame.cols,
+                        frame.cells.len()
+                    ));
+                }
+                view.frames.insert(pane_id, frame);
+            }
+            Ok(ServerMsg::Notice { .. }) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
-    };
+    }
 
     // Socket reads get their own task. `read_msg` is NOT cancellation-safe
     // (a select! that drops it between the length prefix and the body loses
@@ -210,7 +580,7 @@ async fn attach_and_run(
         }
     });
 
-    // Raw stdin -> channel; forwarded verbatim below.
+    // Raw stdin -> channel; scanned by the leader layer below.
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
     std::thread::Builder::new()
         .name("fno-mux-stdin".into())
@@ -236,29 +606,57 @@ async fn attach_and_run(
         .map_err(|e| format!("signal setup: {e}"))?;
 
     let guard = TerminalGuard::enter()?;
+    if !stashed_modesync.is_empty() {
+        raw_out(&stashed_modesync).map_err(|e| format!("mode sync: {e}"))?;
+    }
     let mut compositor = Compositor::new();
+    let mut scanner = Scanner::default();
     compositor
-        .draw(&first_frame)
+        .draw(&view.compose())
         .map_err(|e| format!("draw: {e}"))?;
 
     let exit: Result<i32, String> = loop {
+        // Redraw-after-event; expiry of the transient notice needs a timer.
+        let notice_deadline = view.notice.as_ref().map(|(_, d)| *d);
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
-                Ok(ServerMsg::Frame { frame, .. }) => {
-                    let f = match checked_frame(frame) {
-                        Ok(f) => f,
-                        Err(e) => break Err(e),
-                    };
-                    if let Err(e) = compositor.draw(&f) {
+                Ok(ServerMsg::Frame { pane_id, frame }) => {
+                    if !frame.geometry_ok() {
+                        break Err(format!(
+                            "malformed frame from server: {}x{} but {} cells",
+                            frame.rows, frame.cols, frame.cells.len()
+                        ));
+                    }
+                    // Frames for pane ids unknown to the current Layout are
+                    // ignored (Concurrency: flush-then-re-emit ordering).
+                    let known = view.layout.panes.iter().any(|(id, _)| *id == pane_id);
+                    if known {
+                        view.frames.insert(pane_id, frame);
+                        if let Err(e) = compositor.draw(&view.compose()) {
+                            break Err(format!("draw: {e}"));
+                        }
+                    }
+                }
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus });
+                    if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
                 }
-                // Layout/ModeSync/Notice render in the N-pane compositor
-                // (task 2.5). The Phase-1-shaped server never sends them;
-                // ignoring instead of erroring keeps mixed-task states sane.
-                Ok(ServerMsg::Layout { .. })
-                | Ok(ServerMsg::ModeSync { .. })
-                | Ok(ServerMsg::Notice { .. }) => {}
+                Ok(ServerMsg::ModeSync { bytes }) => {
+                    // Reliable-channel ordering guarantees these precede the
+                    // Layout/frames that assume them; apply verbatim.
+                    if let Err(e) = raw_out(&bytes) {
+                        break Err(format!("mode sync: {e}"));
+                    }
+                }
+                Ok(ServerMsg::Notice { text }) => {
+                    view.set_notice(text);
+                    let _ = raw_out(b"\x07");
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
+                }
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
                 Err(ProtoError::Closed) => {
                     break Ok(exit_with_notice("session ended (server closed)".into()));
@@ -267,17 +665,17 @@ async fn attach_and_run(
             },
             bytes = stdin_rx.recv() => match bytes {
                 Some(bytes) => {
-                    if let Some(pos) = bytes.iter().position(|&b| b == DETACH_BYTE) {
-                        // Forward what was typed before the detach key, then go.
-                        if pos > 0 {
-                            let _ = write_msg(&mut sock_w, &ClientMsg::Input(bytes[..pos].to_vec())).await;
+                    match handle_stdin(&mut view, &mut scanner, &bytes, &mut sock_w).await {
+                        Ok(StdinFlow::Continue) => {
+                            if let Err(e) = compositor.draw(&view.compose()) {
+                                break Err(format!("draw: {e}"));
+                            }
                         }
-                        let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
-                        break Ok(exit_with_notice("detached; run fno to reattach".into()));
-                    }
-                    // Reliable channel: awaited send, input is NEVER dropped.
-                    if let Err(e) = write_msg(&mut sock_w, &ClientMsg::Input(bytes)).await {
-                        break Err(format!("input send failed: {e}"));
+                        Ok(StdinFlow::Detach) => {
+                            let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
+                            break Ok(exit_with_notice("detached; run fno to reattach".into()));
+                        }
+                        Err(e) => break Err(e),
                     }
                 }
                 // The stdin thread breaks on EOF and on read error alike; by
@@ -286,11 +684,28 @@ async fn attach_and_run(
             },
             _ = winch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
-                    // The server resizes PTY + grid and broadcasts a fresh
-                    // frame; the size change makes the compositor full-redraw.
-                    if let Err(e) = write_msg(&mut sock_w, &ClientMsg::Resize { rows, cols }).await {
+                    view.term = (rows, cols);
+                    let (c_rows, c_cols) = view.content_dims();
+                    // The server resizes PTYs + grids off the content area
+                    // and re-emits Layout + frames; the local redraw keeps
+                    // chrome coherent meanwhile.
+                    if let Err(e) = write_msg(&mut sock_w, &ClientMsg::Resize { rows: c_rows, cols: c_cols }).await {
                         break Err(format!("resize send failed: {e}"));
                     }
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
+                }
+            }
+            _ = async {
+                match notice_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if notice_deadline.is_some() => {
+                view.notice = None;
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
                 }
             }
         }
@@ -307,6 +722,150 @@ async fn attach_and_run(
     }
 }
 
+enum StdinFlow {
+    Continue,
+    Detach,
+}
+
+/// Route one stdin chunk: the selector consumes keys while open (AC6-FR
+/// validates against the CURRENT layout before sending); otherwise the
+/// leader scanner splits it into forwards and commands.
+async fn handle_stdin(
+    view: &mut View,
+    scanner: &mut Scanner,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    if view.selector.is_some() {
+        return selector_keys(view, bytes, sock_w).await;
+    }
+    for event in scanner.scan(bytes) {
+        match event {
+            Event::Forward(chunk) => {
+                // Reliable channel: awaited send, input is NEVER dropped.
+                write_msg(sock_w, &ClientMsg::Input(chunk))
+                    .await
+                    .map_err(|e| format!("input send failed: {e}"))?;
+            }
+            Event::Cmd(cmd) => {
+                write_msg(sock_w, &ClientMsg::Command(cmd))
+                    .await
+                    .map_err(|e| format!("command send failed: {e}"))?;
+            }
+            Event::Detach => return Ok(StdinFlow::Detach),
+            Event::OpenSelector => {
+                if view.sel_rows().is_empty() || view.term.1 < PANEL_W + MIN_CONTENT_COLS {
+                    let _ = raw_out(b"\x07");
+                } else {
+                    view.panel_on = true;
+                    view.selector = Some(0);
+                }
+            }
+            Event::TogglePanel => {
+                view.panel_on = !view.panel_on;
+                // Chrome changed size: report the new content area so rects
+                // fill it (the reply Layout redraws everything).
+                let (r, c) = view.content_dims();
+                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                    .await
+                    .map_err(|e| format!("resize send failed: {e}"))?;
+            }
+            Event::Bell => {
+                let _ = raw_out(b"\x07");
+            }
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Selector-mode keys: j/k move, h/l collapse/expand, Enter selects (squad
+/// or tab), Esc/q closes. Escape SEQUENCES (arrows etc.) are ignored whole
+/// so their tail bytes never leak into the pane as input; the detach byte
+/// still works. ponytail: hjkl-only nav keeps the selector a pure byte
+/// interpreter - arrow support means another escape accumulator here.
+async fn selector_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    if bytes.contains(&crate::keys::DETACH) {
+        return Ok(StdinFlow::Detach);
+    }
+    if bytes.len() > 1 && bytes[0] == 0x1b {
+        return Ok(StdinFlow::Continue); // whole escape sequence: ignored
+    }
+    let rows = view.sel_rows();
+    let Some(cur) = view.selector else {
+        return Ok(StdinFlow::Continue);
+    };
+    for &b in bytes {
+        match b {
+            b'j' => {
+                let n = view.sel_rows().len();
+                if n > 0 {
+                    view.selector = Some((cur + 1).min(n - 1));
+                }
+            }
+            b'k' => view.selector = Some(cur.saturating_sub(1)),
+            b'l' => {
+                if let Some(row) = rows.get(cur) {
+                    if row.tab.is_none() {
+                        view.expanded.insert(row.squad);
+                    }
+                }
+            }
+            b'h' => {
+                if let Some(row) = rows.get(cur) {
+                    if row.tab.is_none() {
+                        view.expanded.remove(&row.squad);
+                    }
+                }
+            }
+            b'\r' | b'\n' => {
+                if let Some(row) = rows.get(cur) {
+                    // Validate against the CURRENT catalog before sending
+                    // (AC6-FR); the server refuses stale ids regardless.
+                    let squad = view.layout.squads.iter().find(|s| s.id == row.squad);
+                    match (squad, row.tab) {
+                        (Some(_), None) => {
+                            write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(row.squad)))
+                                .await
+                                .map_err(|e| format!("command send failed: {e}"))?;
+                        }
+                        (Some(s), Some(t)) if t < s.tabs.len() => {
+                            if s.id != view.layout.active_squad {
+                                write_msg(
+                                    sock_w,
+                                    &ClientMsg::Command(Command::SelectSquad(row.squad)),
+                                )
+                                .await
+                                .map_err(|e| format!("command send failed: {e}"))?;
+                            }
+                            write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(t)))
+                                .await
+                                .map_err(|e| format!("command send failed: {e}"))?;
+                        }
+                        _ => {
+                            let _ = raw_out(b"\x07");
+                        }
+                    }
+                }
+                view.selector = None;
+            }
+            0x1b | b'q' => view.selector = None,
+            _ => {}
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Write raw bytes (BEL, ModeSync escapes) straight to the terminal.
+fn raw_out(bytes: &[u8]) -> std::io::Result<()> {
+    let mut out = std::io::stdout().lock();
+    out.write_all(bytes)?;
+    out.flush()
+}
+
 // The exit notice must print AFTER the alternate screen is left, or it is
 // erased with the TUI. Thread-local because the select loop returns through
 // several arms; a struct field would work too but this stays local to the file.
@@ -317,22 +876,6 @@ thread_local! {
 fn exit_with_notice(notice: String) -> i32 {
     NOTICE.with(|n| *n.borrow_mut() = Some(notice));
     0
-}
-
-/// The wire trust boundary: a `Frame` whose cell count disagrees with its
-/// geometry would panic the compositor's slice math. Reject it like a
-/// malformed message - close loudly, never draw (same posture as `read_msg`).
-fn checked_frame(f: Frame) -> Result<Frame, String> {
-    if f.geometry_ok() {
-        Ok(f)
-    } else {
-        Err(format!(
-            "malformed frame from server: {}x{} but {} cells",
-            f.rows,
-            f.cols,
-            f.cells.len()
-        ))
-    }
 }
 
 /// Draws frames with a row-level diff against what was actually drawn last -
@@ -422,16 +965,235 @@ fn apply_style(out: &mut impl Write, cell: &Cell) -> std::io::Result<()> {
     }
     queue!(
         out,
-        style::SetForegroundColor(map_color(cell.fg, true)),
-        style::SetBackgroundColor(map_color(cell.bg, false))
+        style::SetForegroundColor(map_color(cell.fg)),
+        style::SetBackgroundColor(map_color(cell.bg))
     )?;
     Ok(())
 }
 
-fn map_color(c: Color, _fg: bool) -> CtColor {
+fn map_color(c: Color) -> CtColor {
     match c {
         Color::Default => CtColor::Reset,
         Color::Indexed(i) => CtColor::AnsiValue(i),
         Color::Rgb(r, g, b) => CtColor::Rgb { r, g, b },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::TabMeta;
+    use crate::vt::frame_text;
+
+    fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
+        SquadMeta {
+            id,
+            name: name.into(),
+            canonical_cwd: format!("/code/{name}"),
+            tabs: (1..=tabs)
+                .map(|i| TabMeta {
+                    name: i.to_string(),
+                })
+                .collect(),
+            active_tab,
+        }
+    }
+
+    fn text_frame(rows: u16, cols: u16, ch: char) -> Frame {
+        Frame {
+            rows,
+            cols,
+            cells: vec![
+                Cell {
+                    c: ch,
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: 0,
+                };
+                rows as usize * cols as usize
+            ],
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+        }
+    }
+
+    fn two_pane_view() -> View {
+        // 30x100 terminal, panel visible (100 >= 28+40). Content = 29x72.
+        // Two panes split H: 35 cols + divider + 36 cols.
+        let mut view = View::new(
+            (30, 100),
+            LayoutView {
+                squads: vec![meta(1, "footnote", 2, 1), meta(2, "herdr", 1, 0)],
+                active_squad: 1,
+                panes: vec![
+                    (
+                        10,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            rows: 29,
+                            cols: 35,
+                        },
+                    ),
+                    (
+                        11,
+                        Rect {
+                            x: 36,
+                            y: 0,
+                            rows: 29,
+                            cols: 36,
+                        },
+                    ),
+                ],
+                focus: 11,
+            },
+        );
+        view.frames.insert(10, text_frame(29, 35, 'a'));
+        view.frames.insert(11, text_frame(29, 36, 'b'));
+        view
+    }
+
+    #[test]
+    fn client_compose_places_panes_divider_and_chrome() {
+        let view = two_pane_view();
+        let frame = view.compose();
+        assert!(frame.geometry_ok());
+        let text = frame_text(&frame);
+        let lines: Vec<&str> = text.lines().collect();
+        // Tab bar: active squad name + tabs with the active one bracketed.
+        assert!(lines[0].contains("footnote"), "{:?}", lines[0]);
+        assert!(lines[0].contains("[2]"), "{:?}", lines[0]);
+        // Sideline: both squads listed with carets.
+        assert!(lines[1].contains("▸ footnote"), "{:?}", lines[1]);
+        assert!(lines[2].contains("▸ herdr"), "{:?}", lines[2]);
+        // Content row: pane a, the 1-cell divider, pane b - at the offsets
+        // implied by (tab bar 1 row, panel 28 cols).
+        let row1: Vec<char> = lines[1].chars().collect();
+        assert_eq!(row1[27], '│', "panel divider column");
+        assert_eq!(row1[28], 'a', "pane 10 starts at content origin");
+        assert_eq!(row1[28 + 35], '│', "pane divider between the panes");
+        assert_eq!(row1[28 + 36], 'b', "pane 11 after the divider");
+        // Cursor: focused pane 11's (0,0) offset by chrome + rect.
+        assert_eq!(frame.cursor_row, 1);
+        assert_eq!(frame.cursor_col, 28 + 36);
+        assert!(frame.cursor_visible);
+    }
+
+    #[test]
+    fn client_compose_panel_autohides_below_min_width() {
+        let mut view = two_pane_view();
+        // AC6-EDGE: 60 < 28 + 40 -> panel hidden, content takes full width.
+        view.term = (30, 60);
+        assert!(!view.panel_visible());
+        assert_eq!(view.content_dims(), (29, 60));
+        let frame = view.compose();
+        let text = frame_text(&frame);
+        let row1 = text.lines().nth(1).unwrap();
+        assert!(
+            row1.starts_with('a'),
+            "content must start at column 0 when the panel hides: {row1:?}"
+        );
+    }
+
+    #[test]
+    fn client_compose_expanded_squad_lists_tabs_and_selector_highlights() {
+        let mut view = two_pane_view();
+        view.expanded.insert(1);
+        view.selector = Some(1); // first tab row of squad 1
+        let rows = view.sel_rows();
+        assert_eq!(
+            rows,
+            vec![
+                SelRow {
+                    squad: 1,
+                    tab: None
+                },
+                SelRow {
+                    squad: 1,
+                    tab: Some(0)
+                },
+                SelRow {
+                    squad: 1,
+                    tab: Some(1)
+                },
+                SelRow {
+                    squad: 2,
+                    tab: None
+                },
+            ]
+        );
+        let frame = view.compose();
+        let text = frame_text(&frame);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[1].contains("▾ footnote"), "{:?}", lines[1]);
+        assert!(lines[2].contains('1'), "{:?}", lines[2]);
+        assert!(lines[3].contains("*2"), "active tab marked: {:?}", lines[3]);
+        // The selector row's cells carry INVERSE.
+        let cols = frame.cols as usize;
+        assert!(
+            frame.cells[2 * cols].flags & cell_flags::INVERSE != 0,
+            "selector cursor row must be highlighted"
+        );
+        // While the selector is open the terminal cursor hides.
+        assert!(!frame.cursor_visible);
+    }
+
+    #[test]
+    fn client_compose_ignores_stale_frames_and_clips_overflow() {
+        let mut view = two_pane_view();
+        // A frame bigger than its rect (resize in flight) must clip, not
+        // panic or bleed into the divider.
+        view.frames.insert(10, text_frame(40, 60, 'X'));
+        let frame = view.compose();
+        let text = frame_text(&frame);
+        let row1: Vec<char> = text.lines().nth(1).unwrap().chars().collect();
+        assert_eq!(row1[28 + 34], 'X', "last in-rect column draws");
+        assert_eq!(row1[28 + 35], '│', "divider survives an oversized frame");
+        // set_layout drops frames for panes the new Layout does not know.
+        let mut view = two_pane_view();
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 1, 0)],
+            active_squad: 1,
+            panes: vec![(
+                10,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 72,
+                },
+            )],
+            focus: 10,
+        });
+        assert!(view.frames.contains_key(&10));
+        assert!(
+            !view.frames.contains_key(&11),
+            "frames for dead panes are dropped at Layout"
+        );
+    }
+
+    #[test]
+    fn client_selector_rows_reanchor_on_catalog_shrink() {
+        let mut view = two_pane_view();
+        view.expanded.insert(1);
+        view.selector = Some(3);
+        // AC6-FR: the catalog shrinks (squad 1 gone); the cursor re-anchors
+        // to a live row instead of pointing off the end.
+        view.set_layout(LayoutView {
+            squads: vec![meta(2, "herdr", 1, 0)],
+            active_squad: 2,
+            panes: vec![(
+                20,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 72,
+                },
+            )],
+            focus: 20,
+        });
+        assert_eq!(view.selector, Some(0), "cursor clamped to the live rows");
     }
 }

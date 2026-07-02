@@ -88,10 +88,12 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
 
     let mut h2 = ClientHarness::spawn(&scratch);
     let screen = h2.wait_screen(15, |s| s.contains("ALT-SCREEN-HELD"));
-    // The alt screen starts with the marker at home - no garbled partial.
+    // The alt screen starts with the marker at the top of the CONTENT area -
+    // the first row under the tab bar - with no garbled partial.
+    let content_top = screen.lines().nth(1).unwrap_or_default();
     assert!(
-        screen.trim_start().starts_with("ALT-SCREEN-HELD"),
-        "alt screen must redraw from the top: {screen:?}"
+        content_top.trim_start().starts_with("ALT-SCREEN-HELD"),
+        "alt screen must redraw from the content top: {screen:?}"
     );
     // Leave the program: ^C ends cat; the shell must still be there. Wait for
     // the prompt before typing - bytes sent while cat still holds the

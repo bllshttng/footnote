@@ -49,10 +49,16 @@ pub struct ClientHarness {
 
 impl ClientHarness {
     pub fn spawn(scratch: &Scratch) -> Self {
+        // 60 columns: below the sideline's auto-hide threshold (panel 28 +
+        // min content 40), so the panel stays hidden and Phase-1-era screen
+        // assertions see bare content lines under the 1-row tab bar. The
+        // sideline-visible chrome has its own compose unit tests + the
+        // layout e2e suite; here it would only salt every line with the
+        // divider column.
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
-                cols: 80,
+                cols: 60,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -84,7 +90,7 @@ impl ClientHarness {
             writer,
             output,
             consumed: 0,
-            pane: Pane::new(24, 80),
+            pane: Pane::new(24, 60),
             _master: pty.master,
         }
     }
