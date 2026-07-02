@@ -167,11 +167,14 @@ impl Pane {
                     // and are never buffered, so block text is pure output.
                     if let Some(open) = self.open.as_mut() {
                         open.raw.extend_from_slice(&b);
-                        // Bound a possibly never-closing block (`tail -f`): keep
-                        // the most-recent tail, drop the head, flag truncated.
-                        // ponytail: O(n) drain once saturated; hysteresis-trim
-                        // (2x cap -> cap) if a runaway open block ever runs hot.
-                        if open.raw.len() > self.max_block_bytes {
+                        // Bound a possibly never-closing block (`tail -f`, a busy
+                        // build log). Hysteresis: let raw grow to 2x the cap, then
+                        // drain the head back to the cap - amortized O(1) per byte
+                        // (draining on every append is O(cap) per feed once
+                        // saturated, i.e. O(N*cap) for a runaway stream).
+                        // `finalize_open`/`read_open` slice to the exact cap, so
+                        // the retained/returned text is still strictly bounded.
+                        if open.raw.len() > self.max_block_bytes.saturating_mul(2) {
                             let cut = open.raw.len() - self.max_block_bytes;
                             open.raw.drain(..cut);
                             open.truncated = true;
@@ -260,17 +263,17 @@ impl Pane {
         }
     }
 
-    /// Close the open block: ANSI-strip its accumulated output bytes to clean
-    /// text and retain it. The per-block byte cap was already enforced during
-    /// accumulation (`feed`), so `open.raw` is already bounded here.
+    /// Close the open block: slice its accumulated bytes to the strict per-block
+    /// cap (feed's hysteresis lets raw run up to 2x), ANSI-strip to clean text,
+    /// and retain it.
     fn finalize_open(&mut self, exit: Option<i32>) {
         let Some(open) = self.open.take() else { return };
-        let text = strip_ansi(&open.raw);
+        let (text, capped) = capped_text(&open.raw, self.max_block_bytes);
         self.retained_bytes += text.len();
         self.blocks.push_back(Block {
             seq: open.seq,
             exit,
-            truncated: open.truncated,
+            truncated: open.truncated || capped,
             text,
         });
         // Front-drop oldest until within BOTH the count and byte budgets. Always
@@ -367,16 +370,17 @@ impl Pane {
     }
 
     /// Live snapshot of a still-streaming block (no `D` yet): the output bytes so
-    /// far, ANSI-stripped, `complete=false`. Never hangs waiting for the
-    /// terminator (AC2-FR).
+    /// far, sliced to the per-block cap and ANSI-stripped, `complete=false`. Never
+    /// hangs waiting for the terminator (AC2-FR).
     fn read_open(&self, open: &OpenBlock) -> BlockRead {
+        let (text, capped) = capped_text(&open.raw, self.max_block_bytes);
         BlockRead {
             seq: Some(open.seq),
             exit: None,
             complete: false,
-            truncated: open.truncated,
+            truncated: open.truncated || capped,
             implicit: false,
-            text: strip_ansi(&open.raw),
+            text,
         }
     }
 
@@ -523,6 +527,20 @@ pub fn frame_text(frame: &Frame) -> String {
     rows.join("\n")
 }
 
+/// Slice raw output to its most-recent `max` bytes, then ANSI-strip to clean
+/// text; returns `(text, capped)` where `capped` is whether the head was
+/// dropped. `feed`'s hysteresis lets an open block's raw run up to `2 * max`, so
+/// this enforces the strict per-block cap at finalize/read time. Slicing on a
+/// raw byte offset may start mid-escape or mid-codepoint, but that only happens
+/// on the already-`capped` (flagged) path and `strip_ansi` decodes lossily.
+fn capped_text(raw: &[u8], max: usize) -> (String, bool) {
+    if raw.len() > max {
+        (strip_ansi(&raw[raw.len() - max..]), true)
+    } else {
+        (strip_ansi(raw), false)
+    }
+}
+
 /// Strip ANSI escape sequences from raw terminal output, returning escape-free
 /// text (`from_utf8_lossy`, so malformed bytes yield the replacement char, never
 /// a panic). Mirrors [`Osc133Scanner`]'s discipline: a tiny byte state machine,
@@ -538,6 +556,10 @@ fn strip_ansi(bytes: &[u8]) -> String {
         Esc,
         /// In a CSI (`ESC [ ...`); consuming until a final byte `0x40..=0x7e`.
         Csi,
+        /// In an nF escape (`ESC` + intermediate `0x20..=0x2f`, e.g. charset
+        /// designation `ESC ( B`); consuming intermediates until a final byte
+        /// `0x30..=0x7e`.
+        EscInt,
         /// In a string sequence (OSC/DCS/PM/APC); consuming until ST/BEL.
         Str,
         /// In a string, saw `ESC`; a following `\` is ST (terminator).
@@ -559,8 +581,12 @@ fn strip_ansi(bytes: &[u8]) -> String {
                 b'[' => S::Csi,
                 // OSC, DCS, PM, APC all run until ST (or BEL for OSC).
                 b']' | b'P' | b'^' | b'_' => S::Str,
+                // nF escape: an intermediate byte opens a multi-byte sequence
+                // (charset designation `ESC ( B`, `ESC ) 0`, ...) that ends only
+                // at a final byte - so the final (e.g. the `B`) is not leaked.
+                0x20..=0x2f => S::EscInt,
                 0x1b => S::Esc, // ESC ESC: restart the escape.
-                // Any other 2-byte escape (`ESC =`, `ESC M`, ...): drop both.
+                // A simple 2-byte escape (`ESC =`, `ESC M`, ...): drop both.
                 _ => S::Ground,
             },
             S::Csi => {
@@ -568,6 +594,14 @@ fn strip_ansi(bytes: &[u8]) -> String {
                     S::Ground
                 } else {
                     S::Csi
+                }
+            }
+            S::EscInt => {
+                // More intermediates stay in EscInt; a final byte ends the seq.
+                if (0x30..=0x7e).contains(&b) {
+                    S::Ground
+                } else {
+                    S::EscInt
                 }
             }
             S::Str => match b {
@@ -1354,6 +1388,18 @@ mod tests {
     fn strip_ansi_keeps_newlines_tabs_and_cr() {
         // Discretion 4: keep `\n`/`\r`/`\t` verbatim; drop only escape sequences.
         assert_eq!(strip_ansi(b"a\tb\nc\rd"), "a\tb\nc\rd");
+    }
+
+    #[test]
+    fn strip_ansi_consumes_charset_designation_final_byte() {
+        // `ESC ( B` (designate US-ASCII into G0, common in `sgr0`/reset) is a
+        // 3-byte nF escape: the intermediate `(` AND the final `B` must both be
+        // dropped, not leak a stray `B` into captured text.
+        assert_eq!(strip_ansi(b"a\x1b(Bb"), "ab");
+        assert_eq!(strip_ansi(b"\x1b)0\x1b(Bx"), "x"); // ESC ) 0 then ESC ( B
+        assert_eq!(strip_ansi(b"red\x1b(B\x1b[mtext"), "redtext");
+        // Unterminated nF escape at the buffer end is dropped, not leaked.
+        assert_eq!(strip_ansi(b"ok\x1b("), "ok");
     }
 
     #[test]
