@@ -17,7 +17,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
 
-use crate::proto::{cell_flags, Cell, Color, Frame};
+use crate::proto::{cell_flags, BlockMeta, BlockSel, Cell, Color, Frame};
 
 /// Default grid until the first client reports its real size. 24x80 is the
 /// historical terminal default (matches the fno-agents drive fallback).
@@ -184,7 +184,10 @@ impl Pane {
                 }
                 let seq = self.next_seq;
                 self.next_seq += 1;
-                self.open = Some(OpenBlock { seq, anchor: self.abs_row() });
+                self.open = Some(OpenBlock {
+                    seq,
+                    anchor: self.abs_row(),
+                });
             }
             Osc133::CmdDone { exit } => self.finalize_open(exit),
             Osc133::PromptStart | Osc133::CmdStart => {}
@@ -328,6 +331,18 @@ impl Pane {
             implicit: false,
             text,
         }
+    }
+
+    /// Whether this pane ever emitted an OSC 133 marker. A markerless pane's
+    /// `--command-done` wait degrades to quiet semantics (the server decides).
+    pub fn saw_marker(&self) -> bool {
+        self.saw_marker
+    }
+
+    /// The most recently completed block's `(seq, exit)`, or `None`. Feeds the
+    /// `command_done` wait signal.
+    pub fn last_done(&self) -> Option<(u64, Option<i32>)> {
+        self.blocks.back().map(|b| (b.seq, b.exit))
     }
 
     /// The whole output (history + grid) as one implicit block for a pane that
@@ -570,16 +585,6 @@ struct OpenBlock {
     anchor: u64,
 }
 
-/// Which block `read_block` should return.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlockSel {
-    /// The most recent block (open if streaming, else last completed, else the
-    /// implicit whole-output block on a markerless pane).
-    Last,
-    /// A specific monotonic `seq`.
-    Seq(u64),
-}
-
 /// A block read result: text plus the metadata `--json` surfaces. Degradations
 /// (still streaming, markerless-implicit, truncated) are VISIBLE flags, never
 /// silent (silent-failure hunter).
@@ -603,6 +608,17 @@ impl BlockRead {
             truncated: b.truncated,
             implicit: false,
             text: b.text.clone(),
+        }
+    }
+
+    /// The wire metadata for this read (the `text` rides `PaneText` alongside).
+    pub fn meta(&self) -> BlockMeta {
+        BlockMeta {
+            seq: self.seq,
+            exit: self.exit,
+            complete: self.complete,
+            truncated: self.truncated,
+            implicit: self.implicit,
         }
     }
 }
@@ -664,7 +680,9 @@ pub struct Osc133Scanner {
 
 impl Default for Osc133Scanner {
     fn default() -> Self {
-        Osc133Scanner { state: ScanState::Ground }
+        Osc133Scanner {
+            state: ScanState::Ground,
+        }
     }
 }
 

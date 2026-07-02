@@ -35,7 +35,8 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use crate::agents_view::{self, RegistryAgent};
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentRow, BindOutcome,
-    ClientMsg, Command, ControlVerb, Frame, PaneInfo, ServerMsg, SquadMeta, TabMeta, WaitOutcome,
+    BlockSel, ClientMsg, Command, ControlVerb, Frame, PaneInfo, ServerMsg, SquadMeta, TabMeta,
+    WaitOutcome,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, RemoveOutcome, Resolver, Session};
@@ -114,6 +115,8 @@ enum CoreMsg {
     PaneRead {
         pane: u64,
         lines: Option<u16>,
+        /// (v6) Select an OSC 133 command block instead of a plain read.
+        block: Option<BlockSel>,
         reply: ControlReply,
     },
     /// `squad_key` was resolved OFF the core loop (like `Attach`); `cwd` is the
@@ -140,6 +143,8 @@ enum CoreMsg {
         /// is bounded CPU the single-threaded loop must never run.
         regex: Option<regex::Regex>,
         timeout_ms: u64,
+        /// (v6) Also resolve on the next OSC 133 `D` -> `CommandDone`.
+        command_done: bool,
         reply: ControlReply,
     },
     PaneKill {
@@ -173,6 +178,9 @@ enum CoreMsg {
 struct WaitTick {
     exited: bool,
     text: Arc<str>,
+    /// (v6) The most recently completed OSC 133 block's `(seq, exit)`, or `None`.
+    /// A `command_done` watcher resolves when this advances past its baseline.
+    last_done: Option<(u64, Option<i32>)>,
 }
 
 impl Default for WaitTick {
@@ -180,6 +188,7 @@ impl Default for WaitTick {
         WaitTick {
             exited: false,
             text: Arc::from(""),
+            last_done: None,
         }
     }
 }
@@ -457,9 +466,14 @@ impl Core {
             return;
         };
         let text: Arc<str> = Arc::from(frame_text(&entry.vt.frame()));
+        let last_done = entry.vt.last_done();
         // `send_modify` always notifies watchers, so refreshing the text IS
-        // the wakeup - no counter needed.
-        tx.send_modify(|t| t.text = text);
+        // the wakeup - no counter needed. `last_done` rides along so a
+        // `command_done` watcher sees a finished command in the same tick.
+        tx.send_modify(|t| {
+            t.text = text;
+            t.last_done = last_done;
+        });
     }
 
     /// Every pane's metadata for `pane ls`, ordered by pane id so the listing
@@ -1338,15 +1352,41 @@ impl Core {
                 });
                 Flow::Continue
             }
-            CoreMsg::PaneRead { pane, lines, reply } => {
+            CoreMsg::PaneRead {
+                pane,
+                lines,
+                block,
+                reply,
+            } => {
                 let msg = match self.panes.get(&pane) {
-                    Some(entry) => {
-                        let text = frame_text(&entry.vt.frame());
-                        ServerMsg::PaneText {
-                            pane_id: pane,
-                            text: lines.map(|n| last_n_lines(&text, n)).unwrap_or(text),
+                    Some(entry) => match block {
+                        // Block mode: `lines` is ignored; an unanswerable block
+                        // is BLOCK_UNAVAILABLE, never empty/stale text.
+                        Some(sel) => match entry.vt.read_block(sel) {
+                            Ok(read) => ServerMsg::PaneText {
+                                pane_id: pane,
+                                text: read.text.clone(),
+                                block: Some(read.meta()),
+                            },
+                            Err(()) => ServerMsg::Err {
+                                code: err_code::BLOCK_UNAVAILABLE,
+                                msg: format!("pane {pane}: no such block"),
+                            },
+                        },
+                        // Plain read: `lines` reaches into history (v6, US5);
+                        // no `--lines` keeps the visible-grid behavior (AC5-UI).
+                        None => {
+                            let text = match lines {
+                                Some(n) => entry.vt.read_tail(n),
+                                None => frame_text(&entry.vt.frame()),
+                            };
+                            ServerMsg::PaneText {
+                                pane_id: pane,
+                                text,
+                                block: None,
+                            }
                         }
-                    }
+                    },
                     None => dead_pane(pane),
                 };
                 let _ = reply.send(msg);
@@ -1395,6 +1435,7 @@ impl Core {
                 quiet_ms,
                 regex,
                 timeout_ms,
+                command_done,
                 reply,
             } => {
                 let Some(entry) = self.panes.get(&pane) else {
@@ -1409,12 +1450,34 @@ impl Core {
                 // there is no missed-output gap; the wait itself then runs
                 // entirely off-loop.
                 let initial: Arc<str> = Arc::from(frame_text(&entry.vt.frame()));
+                // Baseline the command-done watch against blocks already done,
+                // atomically with the subscribe (same core-loop turn).
+                let done_baseline = entry.vt.last_done().map(|(seq, _)| seq);
+                // A markerless pane can never emit `D`; --command-done degrades
+                // to a quiet settle (AC3-FR) instead of always timing out. The
+                // CLI notes the degradation from (asked command_done, got Quiet).
+                let quiet_ms = if command_done && quiet_ms.is_none() && !entry.vt.saw_marker() {
+                    Some(MARKERLESS_DONE_QUIET_MS)
+                } else {
+                    quiet_ms
+                };
                 let rx = self
                     .pane_watch
                     .get(&pane)
                     .expect("pane_watch is in lockstep with panes")
                     .subscribe();
-                tokio::spawn(run_wait(rx, quiet_ms, regex, timeout_ms, initial, reply));
+                tokio::spawn(run_wait(
+                    rx,
+                    quiet_ms,
+                    regex,
+                    timeout_ms,
+                    initial,
+                    WaitDoneWatch {
+                        enabled: command_done,
+                        baseline: done_baseline,
+                    },
+                    reply,
+                ));
                 Flow::Continue
             }
             CoreMsg::PaneKill { pane, reply } => {
@@ -1499,15 +1562,17 @@ fn dead_pane(pane: u64) -> ServerMsg {
     }
 }
 
-/// Last `n` lines of `text` (the `pane read --lines N` clamp; the visible grid
-/// only - scrollback is 4b). `n == 0` yields nothing.
-fn last_n_lines(text: &str, n: u16) -> String {
-    if n == 0 {
-        return String::new();
-    }
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(n as usize);
-    lines[start..].join("\n")
+/// The quiet window a markerless pane's `--command-done` degrades to (AC3-FR):
+/// it can never emit `D`, so it settles when output stops instead of always
+/// running to `timeout_ms`.
+const MARKERLESS_DONE_QUIET_MS: u64 = 200;
+
+/// The `--command-done` arm of a wait: resolve when the pane's last-completed
+/// block advances past `baseline`.
+#[derive(Clone, Copy)]
+struct WaitDoneWatch {
+    enabled: bool,
+    baseline: Option<u64>,
 }
 
 /// The off-loop `PaneWait` watcher: observes a pane's output watch and answers
@@ -1520,6 +1585,7 @@ async fn run_wait(
     pattern: Option<regex::Regex>,
     timeout_ms: u64,
     initial_text: Arc<str>,
+    done_watch: WaitDoneWatch,
     mut reply: ControlReply,
 ) {
     // An already-present match settles immediately (the text at subscribe time
@@ -1560,6 +1626,15 @@ async fn run_wait(
                 if let Some(re) = &pattern {
                     if re.is_match(&tick.text) {
                         break WaitOutcome::Matched;
+                    }
+                }
+                // A command finished if the last-done block advanced past the
+                // baseline captured at subscribe time.
+                if done_watch.enabled {
+                    if let Some((seq, exit)) = tick.last_done {
+                        if done_watch.baseline.map_or(true, |b| seq > b) {
+                            break WaitOutcome::CommandDone { exit };
+                        }
                     }
                 }
                 last_activity = tokio::time::Instant::now();
@@ -1825,11 +1900,12 @@ async fn handle_control(
     let (reply_tx, reply_rx) = oneshot::channel();
     let sent = match verb {
         ControlVerb::PaneLs => core_tx.send(CoreMsg::PaneLs(reply_tx)).await,
-        ControlVerb::PaneRead { pane, lines } => {
+        ControlVerb::PaneRead { pane, lines, block } => {
             core_tx
                 .send(CoreMsg::PaneRead {
                     pane,
                     lines,
+                    block,
                     reply: reply_tx,
                 })
                 .await
@@ -1869,6 +1945,7 @@ async fn handle_control(
             quiet_ms,
             pattern,
             timeout_ms,
+            command_done,
         } => {
             // Compile the pattern HERE, off the core loop (bounded CPU, but
             // the single-threaded loop must never do it). A bad pattern is a
@@ -1894,6 +1971,7 @@ async fn handle_control(
                     quiet_ms,
                     regex,
                     timeout_ms,
+                    command_done,
                     reply: reply_tx,
                 })
                 .await
@@ -2169,16 +2247,6 @@ async fn client_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn server_control_last_n_lines_clamps_to_visible_tail() {
-        let text = "l1\nl2\nl3\nl4";
-        assert_eq!(last_n_lines(text, 2), "l3\nl4");
-        // N beyond the line count returns everything, never panics.
-        assert_eq!(last_n_lines(text, 99), text);
-        assert_eq!(last_n_lines(text, 0), "");
-        assert_eq!(last_n_lines("", 3), "");
-    }
 
     #[test]
     fn server_control_dead_pane_err_carries_the_code_and_id() {
