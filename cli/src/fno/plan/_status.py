@@ -20,6 +20,15 @@ STATUS_PROGRESSION: tuple[str, ...] = (
     "shipped",
 )
 
+# Off-axis terminals: written directly (graduate stamps `done`; the status
+# sweep stamps `archived`), NOT part of the monotonic axis. Inserting either
+# into STATUS_PROGRESSION would break the forward-transition index math.
+TERMINAL_STATUSES: tuple[str, ...] = ("done", "archived")
+
+# The full canonical plan-status vocabulary: axis + terminals. The reconcile
+# sweep leaves any status in this set untouched (it corrects drift only).
+KNOWN_STATUSES: frozenset[str] = frozenset(STATUS_PROGRESSION) | frozenset(TERMINAL_STATUSES)
+
 
 class StatusTransitionError(ValueError):
     """Raised on invalid status transitions."""

@@ -1768,6 +1768,30 @@ class BatchBlock(BaseModel):
         return None
 
 
+class BranchBlock(BaseModel):
+    """Dispatch branch naming (nested under 'config.branch', x-ff83 W3).
+
+    ``prefix`` is the leading segment of a dispatched worktree branch:
+    ``<prefix>/<slug>-<node>`` (e.g. ``fno/plan-docs-...-x-ff83``). A legible
+    branch that round-trips back to its node beats the opaque ``feature/<hex>``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    prefix: str = "fno"
+
+    @field_validator("prefix")
+    @classmethod
+    def prefix_ref_safe(cls, v: str) -> str:
+        """A ref prefix must be a non-empty, git-ref-safe path segment."""
+        v = (v or "").strip().strip("/")
+        if not v or ".." in v or any(c in v for c in " ~^:?*[\\"):
+            raise ValueError(
+                "config.branch.prefix must be a non-empty git-ref-safe segment"
+            )
+        return v
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -1775,6 +1799,7 @@ class ConfigBlock(BaseModel):
 
     state_dir: str = "~/.fno/"
     plans_dir: str = ".fno/plans/"
+    branch: BranchBlock = Field(default_factory=BranchBlock)
     paths: PathsBlock = Field(default_factory=PathsBlock)
     obsidian: ObsidianBlock = Field(default_factory=ObsidianBlock)
     project: ProjectBlock = Field(default_factory=ProjectBlock)
@@ -1809,6 +1834,14 @@ class ConfigBlock(BaseModel):
         settings load. A dict passes through so the inner coercers still run.
         """
         if isinstance(v, (dict, ModelRoutingBlock)):
+            return v
+        return {}
+
+    @field_validator("branch", mode="before")
+    @classmethod
+    def _coerce_branch(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``branch:`` degrades to defaults (prefix fno)."""
+        if isinstance(v, (dict, BranchBlock)):
             return v
         return {}
 

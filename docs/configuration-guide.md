@@ -7,6 +7,7 @@
 | `schema_version` | int | `1` | never | Settings schema version; managed by fno, not hand-set. |
 | `config.state_dir` | str | `~/.fno/` | advanced | Root dir for global fno state. |
 | `config.plans_dir` | str | `.fno/plans/` | advanced | Where folder plans are written. |
+| `config.branch.prefix` | str | `fno` | advanced | Prefix for dispatched worktree branches: <prefix>/<slug>-<node>. |
 | `config.paths.graph_json` | str (optional) | _(none)_ | never | Override path to the backlog graph.json. |
 | `config.paths.ledger_json` | str (optional) | _(none)_ | never | Override path to ledger.json. |
 | `config.paths.briefs_dir` | str (optional) | _(none)_ | never | Override path to the sidecar briefs dir. |
