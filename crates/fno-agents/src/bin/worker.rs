@@ -1,5 +1,5 @@
-//! `fno-agents-worker` entrypoint (Wave 3, Outcome B). Argv parsing ->
-//! `worker::run`.
+//! `fno-agents-worker` entrypoint. Post-G4 (x-f54c) only the `--stream`
+//! claude stream-json adoption lane survives; the PTY worker lane retired.
 //!
 //! Usage (the daemon builds this argv; humans never type it):
 //! ```text
@@ -11,9 +11,7 @@
 //! going away) cannot take it — and therefore the PTY child — down. Outlasting
 //! the daemon is the whole point.
 
-use fno_agents::pty::DEFAULT_OUTPUT_RING_BYTES;
 use fno_agents::stream_worker::{self, SessionClaim, StreamWorkerConfig};
-use fno_agents::worker::{run, WorkerConfig};
 use std::path::PathBuf;
 
 fn main() {
@@ -26,39 +24,17 @@ fn main() {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
 
-    // The stream-json lane (claude adoption) is selected by `--stream`; the
-    // default lane is the PTY worker (codex/gemini).
-    if args.iter().any(|a| a == "--stream") {
-        run_stream_lane(args);
-        return;
+    // Post-G4 (x-f54c): the PTY worker lane retired with daemon PTY hosting. The
+    // only surviving lane is `--stream` (claude stream-json adoption), launched
+    // by the daemon's spawn_claude_stream_lane.
+    if !args.iter().any(|a| a == "--stream") {
+        eprintln!(
+            "fno-agents-worker: the PTY worker lane was retired at G4; only --stream \
+             (claude stream-json adoption) remains"
+        );
+        std::process::exit(2);
     }
-
-    let cfg = match parse_args(args) {
-        Ok(cfg) => cfg,
-        Err(msg) => {
-            eprintln!("fno-agents-worker: {msg}");
-            std::process::exit(2);
-        }
-    };
-
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("fno-agents-worker: cannot build runtime: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    match rt.block_on(run(cfg)) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("fno-agents-worker: {e}");
-            std::process::exit(1);
-        }
-    }
+    run_stream_lane(args);
 }
 
 /// `fno-agents-worker --stream` entrypoint: the claude stream-json host lane.
@@ -140,69 +116,5 @@ fn parse_stream_args(args: Vec<String>) -> Result<StreamWorkerConfig, String> {
 
     let mut cfg = StreamWorkerConfig::new(short_id, home, cwd, argv);
     cfg.session_claim = session_claim;
-    Ok(cfg)
-}
-
-fn parse_args(args: Vec<String>) -> Result<WorkerConfig, String> {
-    let mut short_id = None;
-    let mut home = None;
-    let mut cwd = None;
-    let mut rows = 24u16;
-    let mut cols = 80u16;
-    let mut ring_bytes = DEFAULT_OUTPUT_RING_BYTES;
-    let mut name: Option<String> = None;
-    let mut provider: Option<String> = None;
-    let mut argv: Vec<String> = Vec::new();
-
-    let mut it = args.into_iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--short-id" => short_id = it.next(),
-            "--home" => home = it.next().map(PathBuf::from),
-            "--cwd" => cwd = it.next().map(PathBuf::from),
-            // Mesh identity (x-3ab8): stamped into the PTY child as
-            // FNO_AGENT_SELF / FNO_AGENT_PROVIDER. Optional; byte-unchanged when
-            // absent (a raw `fno-agents-worker` launch without them).
-            "--name" => name = it.next(),
-            "--provider" => provider = it.next(),
-            "--rows" => {
-                rows = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .ok_or("--rows needs a number")?
-            }
-            "--cols" => {
-                cols = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .ok_or("--cols needs a number")?
-            }
-            "--ring-bytes" => {
-                ring_bytes = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .ok_or("--ring-bytes needs a number")?
-            }
-            "--" => {
-                argv.extend(it.by_ref());
-                break;
-            }
-            other => return Err(format!("unknown arg: {other}")),
-        }
-    }
-
-    let short_id = short_id.ok_or("missing --short-id")?;
-    let home = home.ok_or("missing --home")?;
-    let cwd = cwd.unwrap_or_else(std::env::temp_dir);
-    if argv.is_empty() {
-        return Err("missing provider argv after `--`".into());
-    }
-
-    let mut cfg = WorkerConfig::new(short_id, home, cwd, argv);
-    cfg.rows = rows;
-    cfg.cols = cols;
-    cfg.ring_bytes = ring_bytes;
-    cfg.name = name.unwrap_or_default();
-    cfg.provider = provider.unwrap_or_default();
     Ok(cfg)
 }

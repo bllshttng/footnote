@@ -1161,14 +1161,6 @@ fn stream_claim_holder(short_id: &str) -> String {
     format!("stream:{short_id}")
 }
 
-/// The single-writer claim holder for an interactive PTY-hosted claude (E1),
-/// derived from its short_id (stable + unique per worker). Distinct prefix from
-/// [`stream_claim_holder`] so the relay (E4) can tell which lane holds the
-/// session when it reads the claim record.
-pub(crate) fn interactive_claim_holder(short_id: &str) -> String {
-    format!("pty:{short_id}")
-}
-
 /// Is this row a LIVE writer for the one-host guard? Narrower than
 /// [`is_non_terminal`]: it EXCLUDES the dead-but-non-terminal states (`Orphaned`
 /// = the child died and the worker released its claim; `Failed` = the task
@@ -4913,17 +4905,6 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // -----------------------------------------------------------------------
-
-    /// E1 claim holder is per-worker and distinct from the stream lane's, so the
-    /// relay (E4) can tell which lane holds a session from the claim record.
-    #[test]
-    fn interactive_claim_holder_is_pty_scoped() {
-        assert_eq!(interactive_claim_holder("ab12cd34"), "pty:ab12cd34");
-        assert_ne!(
-            interactive_claim_holder("ab12cd34"),
-            stream_claim_holder("ab12cd34")
-        );
-    }
 
     /// E1 fix: the locked one-host re-check matches an interactive claude row by
     /// its `claude_session_uuid`, so a second writer on the same pinned session id
