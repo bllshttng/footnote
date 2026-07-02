@@ -151,7 +151,10 @@ def _max_lanes_for(cwd: str) -> int:
 
         from fno.config import load_settings_for_repo
 
-        return int(load_settings_for_repo(_P(cwd)).config.parallel.max_lanes)
+        # Clamp at 0: the schema already rejects negatives (ge=0), but a
+        # negative escaping here would fail the Rust daemon's u64 deserialize
+        # for the WHOLE target list, silently disabling the drain (gemini).
+        return max(0, int(load_settings_for_repo(_P(cwd)).config.parallel.max_lanes))
     except Exception:  # noqa: BLE001 - a bad/absent settings must not go parallel
         return 1
 

@@ -327,27 +327,29 @@ def _behind_by(pr_number: int, cwd: str) -> int:
         )
         return 0
 
-    view = _gh(["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd)
-    if not view.ok:
-        return _miss("gh pr view failed")
     try:
-        refs = json.loads(view.stdout or "{}")
-    except json.JSONDecodeError:
-        return _miss("unparseable pr view output")
-    base = refs.get("baseRefName")
-    head = refs.get("headRefName")
-    if not base or not head:
-        return _miss("missing base/head ref")
-    res = _gh(
-        ["api", f"repos/{{owner}}/{{repo}}/compare/{base}...{head}", "-q", ".behind_by"],
-        cwd,
-    )
-    if not res.ok:
-        return _miss("gh compare failed")
-    try:
+        view = _gh(
+            ["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd
+        )
+        if not view.ok:
+            return _miss("gh pr view failed")
+        try:
+            refs = json.loads(view.stdout or "{}")
+        except json.JSONDecodeError:
+            return _miss("unparseable pr view output")
+        base = refs.get("baseRefName") if isinstance(refs, dict) else None
+        head = refs.get("headRefName") if isinstance(refs, dict) else None
+        if not base or not head:
+            return _miss("missing base/head ref")
+        res = _gh(
+            ["api", f"repos/{{owner}}/{{repo}}/compare/{base}...{head}", "-q", ".behind_by"],
+            cwd,
+        )
+        if not res.ok:
+            return _miss("gh compare failed")
         return int(res.stdout.strip())
-    except ValueError:
-        return _miss("unparseable behind_by")
+    except Exception as exc:  # noqa: BLE001 - the hold must never BLOCK a merge
+        return _miss(f"probe error: {exc}")
 
 
 # ---------------------------------------------------------------------------
