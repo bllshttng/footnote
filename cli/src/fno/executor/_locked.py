@@ -179,7 +179,13 @@ def parse_locked_executor(text: str) -> str:
 # value is REJECTED instead, matching ``fno backlog update --model``. The ``\**``
 # around the key tolerate a bold ``**Model**:`` head WITHOUT eating a ``*`` in the
 # value (so a metacharacter value stays intact and is rejected, not sanitized).
-_MODEL_KV_RE = re.compile(r"\**model\**[ \t]*:[ \t]*(.+)", re.IGNORECASE)
+# Anchored to line start (after an optional list marker) with re.MULTILINE so a
+# prose ``the model:`` mention inside the section is not a false lock (gemini
+# review PR #150).
+_MODEL_KV_RE = re.compile(
+    r"^[ \t]*(?:\d+\.[ \t]+|[-*][ \t]+)?\**model\**[ \t]*:[ \t]*(.+)",
+    re.IGNORECASE | re.MULTILINE,
+)
 # Same shell-safe single-token charset the update verb enforces.
 _MODEL_TOKEN_RE = re.compile(r"[A-Za-z0-9._:/-]{1,64}")
 # An optional trailing provenance suffix, e.g. ``fable (user-confirmed)`` ->
