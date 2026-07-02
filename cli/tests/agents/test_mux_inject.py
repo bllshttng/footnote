@@ -159,7 +159,25 @@ def test_ask_mux_row_rides_pane_send(tmp_path: Path, monkeypatch) -> None:
     assert result.short_id == "work:7"
     verbs = [c[0][3] for c in fake.calls]
     assert verbs == ["claim", "send", "send", "release"]
-    assert fake.calls[1][1] == "ping"  # the message rode --stdin verbatim
+    # The body rides --stdin inside the cross-session-message container so the
+    # pane reads it as a peer turn, not bare operator input.
+    sent = fake.calls[1][1]
+    assert "<cross-session-message from-name=" in sent
+    assert "\nping\n" in sent
+
+
+def test_ask_mux_preserves_from_name_framing(tmp_path: Path, monkeypatch) -> None:
+    """A --from-name peer message keeps its attribution in the mux container."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed(_mux_entry())
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+
+    from fno.agents.dispatch import dispatch_ask
+
+    dispatch_ask("muxed", "ping", provider=None, cwd=Path("/w"), from_name="peer-x")
+    sent = fake.calls[1][1]
+    assert '<cross-session-message from-name="peer-x">' in sent
 
 
 def test_ask_mux_dead_pane_raises_transport_error(

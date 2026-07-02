@@ -1543,6 +1543,7 @@ def dispatch_ask(
                         return _mux_followup_path(
                             name=name,
                             message=message,
+                            from_name=from_name,
                             existing=existing,
                             lock_handle=lock_handle,
                         )
@@ -3955,6 +3956,7 @@ def _mux_followup_path(
     *,
     name: str,
     message: str,
+    from_name: str,
     existing: "AgentEntry",
     lock_handle,  # type: ignore[no-untyped-def]
 ) -> DispatchAskResult:
@@ -3966,7 +3968,14 @@ def _mux_followup_path(
     Deliver over PaneSend instead -- the same claim->text->CR->release burst
     _deliver_live uses for live mail. PaneSend is fire-and-forget: there is no
     captured reply, so the result carries an empty reply and a stderr note.
+
+    The body rides the SAME cross-session-message container the socket (claude)
+    and PTY (codex/gemini) follow-up paths use, so a peer / nested-agent message
+    lands as an attributed peer turn rather than bare operator input (the PTY
+    delivery contract in docs/architecture/fno-agents-deliver-gate.md).
     """
+    from fno.agents.providers.claude import build_cross_session_container
+
     mux = existing.mux or {}
     ref = f"{mux.get('session')}:{mux.get('pane_id')}"
     _emit_ev(
@@ -3975,7 +3984,8 @@ def _mux_followup_path(
         provider=existing.provider,
         short_id=ref,
     )
-    if not _mux_pane_send(existing, message):
+    wrapped = build_cross_session_container(message, from_name)
+    if not _mux_pane_send(existing, wrapped):
         events.emit(
             "agent_followup_failed",
             stage="mux-send",
