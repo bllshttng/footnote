@@ -19,7 +19,7 @@ def _nodes(*specs):
 
 def test_selects_first_of_each_distinct_domain_up_to_cap(tmp_path, monkeypatch):
     ready = _nodes(("n-a", "code"), ("n-b", "code"), ("n-c", "docs"), ("n-d", "infra"))
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
     sel = advance.select_lane_fill(3, claims_root=tmp_path)
 
@@ -31,7 +31,7 @@ def test_selects_first_of_each_distinct_domain_up_to_cap(tmp_path, monkeypatch):
 
 def test_cap_limits_selection(tmp_path, monkeypatch):
     ready = _nodes(("n-a", "code"), ("n-c", "docs"), ("n-d", "infra"))
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
     sel = advance.select_lane_fill(2, claims_root=tmp_path)
 
@@ -42,7 +42,7 @@ def test_cap_limits_selection(tmp_path, monkeypatch):
 def test_max_lanes_below_two_is_sequential_noop(tmp_path, monkeypatch):
     """AC1-EDGE: <2 lanes selects nothing and holds no slot (caller uses `next`)."""
     ready = _nodes(("n-a", "code"), ("n-c", "docs"))
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
     assert advance.select_lane_fill(1, claims_root=tmp_path) == []
     assert advance.select_lane_fill(0, claims_root=tmp_path) == []
@@ -57,7 +57,7 @@ def test_recomputes_distinctness_after_each_claim(tmp_path, monkeypatch):
     """
     calls = {"n": 0}
 
-    def fake_ready(project=None):
+    def fake_ready(project=None, mission=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return _nodes(("n-a", "code"), ("n-b", "docs"))
@@ -81,7 +81,7 @@ def test_seeds_used_domains_from_live_peer_lane_domains(tmp_path, monkeypatch):
     from fno.claims.lanes import acquire_lane_slot
 
     ready = _nodes(("n-b", "code"), ("n-c", "docs"))
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
     # A live peer lane already works a `code` node (records its domain).
     acquire_lane_slot(
         max_lanes=3, lane_id="n-a", extra_metadata={"domain": "code"}, root=tmp_path
@@ -96,7 +96,7 @@ def test_seeds_used_domains_from_live_peer_lane_domains(tmp_path, monkeypatch):
 def test_skips_node_a_peer_lane_already_holds(tmp_path, monkeypatch):
     """A node with a live lane slot is skipped so it is never double-dispatched."""
     ready = _nodes(("n-a", "code"), ("n-b", "docs"))
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
     # A peer lane already owns n-a (different domain would otherwise be picked).
     acquire_lane_slot(max_lanes=3, lane_id="n-a", root=tmp_path)
 
@@ -112,7 +112,7 @@ def test_domain_unset_collapses_to_one_lane(tmp_path, monkeypatch):
         {"id": "n-b", "domain": None, "title": "n-b"},  # explicit None
         {"id": "n-c", "domain": "docs", "title": "n-c"},
     ]
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
     sel = advance.select_lane_fill(3, claims_root=tmp_path)
 
@@ -122,7 +122,7 @@ def test_domain_unset_collapses_to_one_lane(tmp_path, monkeypatch):
 def test_preview_mode_holds_no_slots(tmp_path, monkeypatch):
     """claim=False returns the would-dispatch set without acquiring any slot."""
     ready = _nodes(("n-a", "code"), ("n-c", "docs"))
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: list(ready))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
     sel = advance.select_lane_fill(3, claim=False, claims_root=tmp_path)
 
@@ -131,7 +131,7 @@ def test_preview_mode_holds_no_slots(tmp_path, monkeypatch):
 
 
 def test_empty_ready_selects_nothing(tmp_path, monkeypatch):
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None: [])
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: [])
     assert advance.select_lane_fill(3, claims_root=tmp_path) == []
 
 
@@ -148,7 +148,7 @@ def test_midloop_raise_releases_already_acquired_slots(tmp_path, monkeypatch):
 
     calls = {"n": 0}
 
-    def flaky_ready(project=None):
+    def flaky_ready(project=None, mission=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return _nodes(("n-a", "code"), ("n-b", "docs"))
@@ -174,7 +174,7 @@ def test_cli_lane_fill_echoes_selection_json(monkeypatch):
 
     seen = {}
 
-    def fake_select(max_lanes, project=None, *, claim=False):
+    def fake_select(max_lanes, project=None, *, mission=None, claim=False):
         seen.update(max_lanes=max_lanes, project=project, claim=claim)
         return [{"id": "n-a", "domain": "code"}]
 
@@ -199,7 +199,7 @@ def test_cli_lane_fill_defaults_max_from_config(monkeypatch):
 
     seen = {}
 
-    def fake_select(max_lanes, project=None, *, claim=False):
+    def fake_select(max_lanes, project=None, *, mission=None, claim=False):
         seen["max_lanes"] = max_lanes
         return []
 
@@ -213,3 +213,48 @@ def test_cli_lane_fill_defaults_max_from_config(monkeypatch):
 
     assert res.exit_code == 0, res.stdout
     assert seen["max_lanes"] == 2
+
+
+def test_mission_scope_reaches_ready_query(tmp_path, monkeypatch):
+    """codex P1 (PR #137): a mission-scoped caller's selection must query the
+    ready list WITH the mission filter, mirroring MegawalkQueue::with_mission."""
+    seen = {}
+
+    def fake_ready(project=None, mission=None):
+        seen["project"] = project
+        seen["mission"] = mission
+        return _nodes(("n-a", "code"))
+
+    monkeypatch.setattr(advance, "_ready_nodes", fake_ready)
+    sel = advance.select_lane_fill(2, "fno", mission="m-7", claims_root=tmp_path)
+    assert [n["id"] for n in sel] == ["n-a"]
+    assert seen == {"project": "fno", "mission": "m-7"}
+
+
+def test_cli_ready_mission_filter(tmp_path, monkeypatch):
+    """`fno backlog ready --mission` mirrors `next`'s mission_id filter."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as gcli
+
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "x-in", "title": "in", "_status": "ready", "mission_id": "m-7"},
+                    {"id": "x-out", "title": "out", "_status": "ready"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gcli, "_graph_path", lambda: path)
+    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda: set())
+
+    res = CliRunner().invoke(gcli.cli, ["ready", "--all", "--mission", "m-7"])
+    assert res.exit_code == 0, res.output
+    ids = [e["id"] for e in json.loads(res.output)]
+    assert ids == ["x-in"]

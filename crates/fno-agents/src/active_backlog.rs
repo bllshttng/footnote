@@ -326,6 +326,12 @@ fn lane_fill_tick(cfg: &DrainConfig, journal: &Journal) -> DrainOutcome {
     if let Some(ref p) = cfg.project {
         cmd.args(["--project", p]);
     }
+    // Mission scope must survive the seam: the sequential path applies it via
+    // MegawalkQueue::with_mission, and dropping it here would let a
+    // mission-scoped daemon lane-fill unrelated same-project nodes (codex P1).
+    if let Some(ref m) = cfg.mission {
+        cmd.args(["--mission", m]);
+    }
     cmd.current_dir(&cfg.cwd);
     let out = match cmd.output() {
         Ok(o) if o.status.success() => o,

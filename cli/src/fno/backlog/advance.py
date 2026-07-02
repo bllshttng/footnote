@@ -223,17 +223,21 @@ def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
     return domains
 
 
-def _ready_nodes(project: Optional[str]) -> list[dict]:
+def _ready_nodes(project: Optional[str], mission: Optional[str] = None) -> list[dict]:
     """Ordered ready-node summaries via ``fno backlog ready`` (JSON list).
 
     Reuses the SAME selection surface as ``fno backlog next``: claim-filtered,
     open-PR-filtered, container-filtered, and rank-sorted. Lane-fill therefore
     never diverges from the single-node dispatch path. Raises on a garbled
     response so the caller skips rather than guessing (Failure Modes: Errors).
+    ``mission`` restricts to that mission's nodes, mirroring the sequential
+    path's ``MegawalkQueue::with_mission`` (codex P1 on PR #137).
     """
     cmd = ["fno", "backlog", "ready"]
     if project:
         cmd += ["--project", project]
+    if mission:
+        cmd += ["--mission", mission]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if proc.returncode != 0:
         raise RuntimeError(
@@ -252,6 +256,7 @@ def select_lane_fill(
     max_lanes: int,
     project: Optional[str] = None,
     *,
+    mission: Optional[str] = None,
     claim: bool = True,
     claims_root: Optional[Path] = None,
 ) -> list[dict]:
@@ -313,7 +318,7 @@ def select_lane_fill(
             # and refresh only the claim-state. The fresh query is what makes
             # distinctness "recomputed after each claim" not snapshot-stale.
             candidate = None
-            for node in _ready_nodes(project):
+            for node in _ready_nodes(project, mission):
                 nid = node["id"]
                 if nid in picked_ids:
                     continue
@@ -633,6 +638,7 @@ def dispatch_lanes(
     max_lanes: int,
     project: Optional[str] = None,
     *,
+    mission: Optional[str] = None,
     project_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
     claims_root: Optional[Path] = None,
@@ -658,7 +664,9 @@ def dispatch_lanes(
     from fno.claims.core import ClaimHeldByOther, acquire_claim
     from fno.claims.lanes import release_lane_slot
 
-    selected = select_lane_fill(max_lanes, project, claim=True, claims_root=claims_root)
+    selected = select_lane_fill(
+        max_lanes, project, mission=mission, claim=True, claims_root=claims_root
+    )
     if not selected:
         return []
 

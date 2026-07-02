@@ -596,6 +596,7 @@ exit 0"#,
     let (journal, project_journal) = journal_in(tmp.path());
     let mut cfg = base_cfg(tmp.path(), fno, lib, 3);
     cfg.max_lanes = 3;
+    cfg.mission = Some("m-7".to_string());
     let mut breaker = CircuitBreaker::new(3);
 
     let out = drain_tick(&cfg, &mut breaker, &journal);
@@ -618,6 +619,10 @@ exit 0"#,
     assert!(
         args.contains("--project footnote"),
         "project scope not forwarded: {args}"
+    );
+    assert!(
+        args.contains("--mission m-7"),
+        "mission scope not forwarded (codex P1): {args}"
     );
 }
 
