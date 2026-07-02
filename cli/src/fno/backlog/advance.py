@@ -405,6 +405,7 @@ def _spawn_worker(
     node_slug: Optional[str] = None,
     *,
     reconcile_manifest: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> str:
     """Dispatch a fire-and-forget detached ``claude --bg`` ``/target`` worker.
 
@@ -434,6 +435,10 @@ def _spawn_worker(
         cmd += ["--cwd", node_cwd]
     else:
         cmd += ["--fresh"]
+    # x-571f: a per-node model pin rides as a spawn flag (US1 honors it on the
+    # claude/bg arm). Empty/None = provider default, byte-identical to today.
+    if model:
+        cmd += ["--model", model]
     target_cmd = (
         f"/target no-merge --reconcile {reconcile_manifest} {node_id}"
         if is_reconcile
@@ -728,7 +733,7 @@ def dispatch_lanes(
         try:
             worktree = _ensure_lane_worktree(node_id, canonical_root=canonical)
             _seed_lane_local_settings(worktree, node_id, base_pid)
-            short_id = _spawn_worker(node_id, str(worktree), slug)
+            short_id = _spawn_worker(node_id, str(worktree), slug, model=node.get("model"))
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
             # Release BOTH the boot-window reservation and the dispatch-time lane
             # slot so the node returns to the pool (a later tick re-dispatches it).
@@ -925,7 +930,9 @@ def advance(
     #    stays re-dispatchable (a later reconcile retries - AC2-FR). The release
     #    is non-raising (_safe_release) so the decision event below always lands.
     try:
-        short_id = _spawn_worker(node_id, node_cwd, node.get("slug") or node.get("title"))
+        short_id = _spawn_worker(
+            node_id, node_cwd, node.get("slug") or node.get("title"), model=node.get("model")
+        )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed", node_id=node_id)
@@ -981,7 +988,7 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     Reads the graph (``read_graph`` recomputes ``_status`` at read), so a
     dependent whose only open blocker was the just-closed node already reads
     ``ready`` here. Returns minimal dicts
-    ``{id, project, slug, cwd, cross_project}``.
+    ``{id, project, slug, cwd, model, cross_project}``.
 
     RC1 (x-33b2): returns BOTH same-project and cross-project dependents, each
     tagged with ``cross_project = (project != closed_project)``. The caller routes
@@ -1041,6 +1048,8 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
             "project": e.get("project"),
             "slug": e.get("slug") or e.get("title"),
             "cwd": e.get("cwd"),
+            # x-571f: carry the model pin so _dispatch_one_dependent threads it.
+            "model": e.get("model"),
             "cross_project": (e.get("project") or None) != (closed_project or None),
         })
     return out
@@ -1148,7 +1157,7 @@ def _dispatch_one_dependent(
         return skip("claim-error", detail=str(exc))
 
     try:
-        short_id = _spawn_worker(node_id, root, dep.get("slug"))
+        short_id = _spawn_worker(node_id, root, dep.get("slug"), model=dep.get("model"))
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed")

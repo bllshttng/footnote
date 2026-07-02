@@ -1833,6 +1833,9 @@ def cmd_next(
             "priority": e.get("priority"), "domain": e.get("domain"),
             "project": e.get("project"), "cwd": e.get("cwd"),
             "size": e.get("size"), "plan_path": e.get("plan_path"),
+            # x-571f: the per-node model pin must ride in the next-JSON so the
+            # megawalk drain (loop_megawalk.rs) can prefer it over cfg.model.
+            "model": e.get("model"),
             "mission_id": e.get("mission_id"),
             "mission_wave": e.get("mission_wave"),
             "mission_slug": e.get("mission_slug"),
@@ -1970,6 +1973,9 @@ def cmd_ready(
         "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
         "domain": e.get("domain"), "project": e.get("project"),
         "cwd": e.get("cwd"), "parent": e.get("parent"),
+        # x-571f: carry the model pin so the lane-fill dispatcher (select_lane_fill
+        # -> _ready_nodes -> `fno backlog ready`) can thread it into the spawn.
+        "model": e.get("model"),
     } for e in ready]
 
     typer.echo(json.dumps(output, indent=2))

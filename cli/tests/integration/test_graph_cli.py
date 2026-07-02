@@ -997,6 +997,25 @@ def test_model_pin_rejects_whitespace_token(tmp_graph):
     assert got.get("model") is None
 
 
+def test_model_pin_rides_in_ready_and_next_json(tmp_graph):
+    """x-571f US3: the model pin must ride in the `ready` and `next` JSON so the
+    lane-fill (`_ready_nodes`) and sequential-drain (`fno backlog next`)
+    dispatchers can thread it into the spawn they build (AC1-HP / AC2-HP)."""
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {"id": "ab-pinned00", "title": "Pinned", "priority": "p1",
+             "plan_path": "x.md", "_status": "ready", "model": "fable",
+             "created_at": "2026-01-01T00:00:00Z"},
+        ]
+    }))
+
+    listing = json.loads(_invoke("backlog", "ready", "--all").stdout)
+    assert listing[0]["model"] == "fable"
+
+    nxt = json.loads(_invoke("backlog", "next", "--all").stdout)
+    assert nxt["model"] == "fable"
+
+
 def test_priority_read_path_backfill(tmp_graph):
     """Read-only commands (`backlog ready`/`next`) sort correctly even before
     the first mutation triggers the on-disk backfill - `_apply_graph_defaults`
