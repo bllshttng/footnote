@@ -324,6 +324,58 @@ def test_ac4_err_unknown_provider_in_row_rejected(tmp_path: Path, monkeypatch) -
         load_registry(path=registry_path)
 
 
+def test_load_registry_tolerates_agy_provider(tmp_path: Path, monkeypatch) -> None:
+    """A provider='agy' row loads without raising.
+
+    Rust writes agy rows; before the READABLE_PROVIDERS split, load_registry
+    rc=12'd on the first agy row, bricking every Python consumer (spawn
+    collision check, mail send, discuss dispatch).
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "agents": [
+                    {
+                        "name": "relay-agy-live",
+                        "provider": "agy",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/agy.log",
+                        "created_at": "2026-06-30T00:00:00Z",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = load_registry(path=registry_path)
+    assert len(entries) == 1
+    assert entries[0].provider == "agy"
+
+
+def test_dispatch_still_refuses_agy_provider() -> None:
+    """agy is read-tolerant but NOT Python-dispatchable (no adapter).
+
+    The dispatch vocabulary (KNOWN_PROVIDERS) must stay narrower than the
+    read vocabulary (READABLE_PROVIDERS), so a Python spawn/ask of agy is
+    rejected early rather than crashing late with a missing adapter.
+    """
+    from fno.agents.dispatch import _check_known_provider
+    from fno.agents.providers import KNOWN_PROVIDERS, READABLE_PROVIDERS
+
+    assert "agy" in READABLE_PROVIDERS
+    assert "agy" not in KNOWN_PROVIDERS
+    with pytest.raises(ValueError, match="agy"):
+        _check_known_provider("agy")
+
+
 def test_ac4_err_malformed_row_shape_rejected(tmp_path: Path, monkeypatch) -> None:
     """A row with unknown fields (future-schema drift) is rejected loudly, not silently."""
     use_tmpdir(monkeypatch, tmp_path)

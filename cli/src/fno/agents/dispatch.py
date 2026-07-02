@@ -1535,6 +1535,18 @@ def dispatch_ask(
                 # under the same flock so two parallel asks for the same name
                 # serialize end to end (AC2-EDGE concurrent ask same-name).
                 if existing is not None:
+                    # Mux-hosted agents (any provider) ride PaneSend, not the
+                    # provider socket/MCP/worker follow-up lanes below (which
+                    # key on a provider short_id a mux row lacks). Mirror
+                    # _deliver_live's mux short-circuit before provider routing.
+                    if existing.mux:
+                        return _mux_followup_path(
+                            name=name,
+                            message=message,
+                            from_name=from_name,
+                            existing=existing,
+                            lock_handle=lock_handle,
+                        )
                     if yolo and existing.provider == "claude":
                         # AC3-ERR: --yolo is a no-op for the claude path
                         # (claude's --bg has no equivalent flag). Emit a
@@ -3938,6 +3950,90 @@ def _mux_pane_send(entry: "AgentEntry", text: str) -> bool:
     finally:
         if claimed:
             _run(["release", pane])
+
+
+def _mux_followup_path(
+    *,
+    name: str,
+    message: str,
+    from_name: str,
+    existing: "AgentEntry",
+    lock_handle,  # type: ignore[no-untyped-def]
+) -> DispatchAskResult:
+    """Follow-up delivery to a mux-hosted agent (any provider).
+
+    A mux row's PTY is a mux pane, not a provider socket / MCP / worker lane,
+    so the legacy provider follow-up paths (which key on claude_short_id /
+    codex_session_id / gemini_session_id) cannot reach it and raise exit 12.
+    Deliver over PaneSend instead -- the same claim->text->CR->release burst
+    _deliver_live uses for live mail. PaneSend is fire-and-forget: there is no
+    captured reply, so the result carries an empty reply and a stderr note.
+
+    The body rides the SAME cross-session-message container the socket (claude)
+    and PTY (codex/gemini) follow-up paths use, so a peer / nested-agent message
+    lands as an attributed peer turn rather than bare operator input (the PTY
+    delivery contract in docs/architecture/fno-agents-deliver-gate.md).
+    """
+    from fno.agents.providers.claude import build_cross_session_container
+
+    mux = existing.mux or {}
+    ref = f"{mux.get('session')}:{mux.get('pane_id')}"
+    _emit_ev(
+        "agent_followup_started",
+        name=name,
+        provider=existing.provider,
+        short_id=ref,
+    )
+    wrapped = build_cross_session_container(message, from_name)
+    if not _mux_pane_send(existing, wrapped):
+        events.emit(
+            "agent_followup_failed",
+            stage="mux-send",
+            name=name,
+            short_id=ref,
+            reason="pane-send-failed",
+        )
+        raise DispatchAskError(
+            f"mux pane send to {name!r} failed; the pane may be gone. "
+            f"Check 'fno mux ls' or 'fno agents logs {name}'.",
+            exit_code=1,
+        )
+    # Message delivered. Bump registry under the held flock; on OSError the
+    # send already landed, so keep the lock and do not retry (AC2-FR parity
+    # with the claude follow-up path).
+    try:
+        update_registry(
+            _stamp_status(name, status="live", last_message_at=_utc_now_iso),
+        )
+    except (OSError, RegistryVersionError) as exc:
+        events.emit(
+            "agent_followup_failed",
+            stage="registry-write",
+            name=name,
+            short_id=ref,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        lock_handle.detach()
+        raise DispatchAskError(
+            f"registry write failed: {exc}. "
+            "NOTE: message was already delivered; do not retry.",
+            exit_code=12,
+        ) from exc
+    _emit_ev(
+        "agent_followup_done",
+        stage="followup",
+        name=name,
+        provider=existing.provider,
+        short_id=ref,
+        reply_chars=0,
+        backend="mux",
+    )
+    print(
+        f"delivered to mux pane {ref} (fire-and-forget; no reply captured)",
+        file=sys.stderr,
+    )
+    return DispatchAskResult(kind="followup", short_id=ref, reply="")
 
 
 def _mail_inject_claude(recipient: str, text: str) -> bool:

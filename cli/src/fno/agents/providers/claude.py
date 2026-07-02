@@ -374,25 +374,36 @@ class ProviderTimeoutError(RuntimeError):
         self.short_id = short_id
 
 
-def _build_envelope(message: str, from_name: str) -> bytes:
-    """Render the BG8 envelope as UTF-8 bytes including the trailing newline.
-
-    Tag/attribute structure is fixed by claude 2.1.143's CE7 listener:
+def build_cross_session_container(message: str, from_name: str) -> str:
+    """Wrap a body in the cross-session-message container that marks it as a
+    peer turn (not operator input).
 
       <cross-session-message from-name="<escaped>">
       <message-text>
       </cross-session-message>
 
-    XML-attribute escape is mandatory; the dispatch layer rejects
-    XML-unsafe input before we get here, but a defensive escape keeps
-    the envelope shape safe in every code path.
+    Shared by the socket envelope (below) and the mux PTY paste path in
+    dispatch, so the from-name escaping stays byte-in-lockstep with the Rust
+    PTY injector. See docs/architecture/fno-agents-deliver-gate.md; changing
+    the escaper here means changing `xml_attr_escape` in daemon.rs too.
     """
     safe_from = html.escape(from_name, quote=True)
-    wrapped = (
+    return (
         f"<cross-session-message from-name=\"{safe_from}\">\n"
         f"{message}\n"
         f"</cross-session-message>"
     )
+
+
+def _build_envelope(message: str, from_name: str) -> bytes:
+    """Render the BG8 envelope as UTF-8 bytes including the trailing newline.
+
+    Tag/attribute structure is fixed by claude 2.1.143's CE7 listener.
+    XML-attribute escape is mandatory; the dispatch layer rejects
+    XML-unsafe input before we get here, but a defensive escape keeps
+    the envelope shape safe in every code path.
+    """
+    wrapped = build_cross_session_container(message, from_name)
     envelope = {
         "type": "user",
         "message": {"role": "user", "content": wrapped},
