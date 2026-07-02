@@ -21,11 +21,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::tree::{Dir, Rect};
+
 /// Bumped on any wire-incompatible change. The server outlives `cargo install`
 /// upgrades, so both sides exchange this at Attach and refuse loudly on skew.
 /// There is no automated backstop tying this to the message shapes: bump it in
 /// the SAME commit as any `ClientMsg`/`ServerMsg`/`Frame` shape change.
-pub const PROTO_VERSION: u32 = 1;
+///
+/// v2 (Phase 2 layout): `Attach` gains `cwd`; `Frame`s are pane-tagged;
+/// `Command`/`Layout`/`ModeSync` added; the never-sent `ServerMsg::Cursor`
+/// variant is removed (the cursor rides INSIDE `Frame`).
+pub const PROTO_VERSION: u32 = 2;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -55,34 +61,105 @@ pub enum ProtoError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ClientMsg {
     /// First message on a fresh connection. `proto`/`build` drive the version
-    /// handshake; `rows`/`cols` are the client's terminal size.
+    /// handshake; `rows`/`cols` are the client's CONTENT-AREA viewport (its
+    /// terminal minus client-local chrome: sideline panel, tab bar). `cwd` is
+    /// the directory the client was launched from - the server resolves it to
+    /// a canonical repo root to select or create the squad (squad.rs).
     Attach {
         proto: u32,
         build: String,
         rows: u16,
         cols: u16,
+        cwd: String,
     },
-    /// Raw keystroke bytes for the pane's PTY. Never dropped.
+    /// Raw keystroke bytes for the focused pane's PTY. Never dropped.
     Input(Vec<u8>),
-    Resize {
-        rows: u16,
-        cols: u16,
-    },
-    /// Clean detach: the client is leaving; the server keeps the PTY.
+    /// The client's CONTENT-AREA viewport changed.
+    Resize { rows: u16, cols: u16 },
+    /// Clean detach: the client is leaving; the server keeps the PTYs.
     Detach,
+    /// A layout/tab/squad command from the client's leader-key layer
+    /// (keys.rs). Reliable; a refused command comes back as a one-line
+    /// notice, never a dropped connection.
+    Command(Command),
+}
+
+/// Layout mutations the client can request. Interpreted (leader-key table)
+/// client-side; executed on the server's core loop, which owns the tree.
+/// `SelectTab` indexes into the active squad's tab list as shown in the last
+/// `Layout`; `SelectSquad` names a squad id from the same catalog - the
+/// server rejects stale values fail-closed (BEL + notice), so a client racing
+/// a layout change can never corrupt state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Command {
+    SplitH,
+    SplitV,
+    ClosePane,
+    FocusDir(Dir),
+    ResizeDir(Dir),
+    NewTab,
+    SelectTab(usize),
+    NextTab,
+    PrevTab,
+    CloseTab,
+    SelectSquad(u64),
 }
 
 /// Server -> client.
+///
+/// Channel discipline (Locked Decision 4): `Layout`/`ModeSync`/`Bye` ride the
+/// per-client RELIABLE channel (awaited, never dropped - a dropped Layout is
+/// a protocol bug, not a degraded mode); only pane-tagged self-contained
+/// `Frame`s are droppable (per-(client, pane) newest-wins). v1's `Cursor`
+/// variant is gone: it was never sent (the cursor rides inside `Frame`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServerMsg {
-    /// A self-contained render frame (full grid + cursor). Droppable: the
-    /// server keeps only the newest unsent frame per client.
-    Frame(Frame),
-    /// Cursor-only movement (absolute, so it composes with any prior frame).
-    Cursor { row: u16, col: u16, visible: bool },
+    /// A self-contained render frame (full grid + cursor) for ONE pane.
+    /// Droppable: the server keeps only the newest unsent frame per
+    /// (client, pane), so a flooded pane coalesces without starving its
+    /// siblings. `pane_id` lives on the variant, not in [`Frame`]: the VT
+    /// grid (`vt::Pane`) does not know its mux pane id - the server's pane
+    /// registry tags the frame at send time.
+    Frame { pane_id: u64, frame: Frame },
+    /// The squad/tab catalog + computed rects for the active tab, relative
+    /// to the CONTENT AREA. The server sends rects, never the tree; the
+    /// client never runs the layout algorithm. Reliable.
+    Layout {
+        squads: Vec<SquadMeta>,
+        active_squad: u64,
+        panes: Vec<(u64, Rect)>,
+        focus: u64,
+    },
+    /// Escape bytes syncing the client terminal to the newly focused pane's
+    /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
+    /// Applied verbatim to the client TTY. Reliable, and ordered BEFORE the
+    /// `Layout`/frames that assume those modes.
+    ModeSync { bytes: Vec<u8> },
+    /// A one-line human-facing notice (refused command, failed split, ...)
+    /// the client renders as transient feedback + BEL. Reliable.
+    Notice { text: String },
     /// The server is refusing or ending this connection; `reason` is
-    /// human-facing (version skew, shutdown, ...).
+    /// human-facing (version skew, shutdown, session ended, ...).
     Bye { reason: String },
+}
+
+/// One tab's catalog entry inside [`ServerMsg::Layout`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TabMeta {
+    pub name: String,
+}
+
+/// One squad's catalog entry inside [`ServerMsg::Layout`]. Identity is the
+/// server-scoped `id` (monotonic, never reused); `canonical_cwd` is the
+/// resolved repo root the squad is keyed by; `name` is display-only (the
+/// root's basename, disambiguated by a parent segment when needed).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SquadMeta {
+    pub id: u64,
+    pub name: String,
+    pub canonical_cwd: String,
+    pub tabs: Vec<TabMeta>,
+    pub active_tab: usize,
 }
 
 /// A complete rendered screen: `rows * cols` cells in row-major order plus the
@@ -385,7 +462,10 @@ mod tests {
 
     #[test]
     fn proto_frame_roundtrips_through_codec() {
-        let msg = ServerMsg::Frame(test_frame());
+        let msg = ServerMsg::Frame {
+            pane_id: 7,
+            frame: test_frame(),
+        };
         let bytes = encode(&msg).unwrap();
         let mut cursor = std::io::Cursor::new(bytes);
         let decoded: ServerMsg = read_msg_sync(&mut cursor).unwrap();
@@ -400,14 +480,73 @@ mod tests {
                 build: BUILD_VERSION.into(),
                 rows: 40,
                 cols: 120,
+                cwd: "/home/user/code/footnote".into(),
             },
             ClientMsg::Input(b"echo hello\r".to_vec()),
             ClientMsg::Resize { rows: 50, cols: 90 },
             ClientMsg::Detach,
+            ClientMsg::Command(Command::SplitH),
+            ClientMsg::Command(Command::FocusDir(Dir::Left)),
+            ClientMsg::Command(Command::ResizeDir(Dir::Down)),
+            ClientMsg::Command(Command::SelectTab(3)),
+            ClientMsg::Command(Command::SelectSquad(42)),
         ] {
             let bytes = encode(&msg).unwrap();
             let mut cursor = std::io::Cursor::new(bytes);
             let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
+            assert_eq!(decoded, msg);
+        }
+    }
+
+    #[test]
+    fn proto_v2_server_msgs_roundtrip() {
+        // Every new/changed v2 server message survives the codec (mirrors the
+        // Phase 1 roundtrip discipline for the shapes 2.3/2.5 depend on).
+        for msg in [
+            ServerMsg::Layout {
+                squads: vec![SquadMeta {
+                    id: 1,
+                    name: "footnote".into(),
+                    canonical_cwd: "/code/footnote/footnote".into(),
+                    tabs: vec![TabMeta { name: "1".into() }, TabMeta { name: "2".into() }],
+                    active_tab: 1,
+                }],
+                active_squad: 1,
+                panes: vec![
+                    (
+                        4,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            rows: 24,
+                            cols: 40,
+                        },
+                    ),
+                    (
+                        9,
+                        Rect {
+                            x: 41,
+                            y: 0,
+                            rows: 24,
+                            cols: 39,
+                        },
+                    ),
+                ],
+                focus: 9,
+            },
+            ServerMsg::ModeSync {
+                bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
+            },
+            ServerMsg::Notice {
+                text: "split refused: pane too small".into(),
+            },
+            ServerMsg::Bye {
+                reason: "session ended".into(),
+            },
+        ] {
+            let bytes = encode(&msg).unwrap();
+            let mut cursor = std::io::Cursor::new(bytes);
+            let decoded: ServerMsg = read_msg_sync(&mut cursor).unwrap();
             assert_eq!(decoded, msg);
         }
     }

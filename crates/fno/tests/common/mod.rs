@@ -1,15 +1,27 @@
-//! Shared e2e harness: the real `fno` client on a real portable-pty, with a
-//! human-eye view of its output through our own VT emulator (`fno::vt::Pane`).
-//! Used by `client_e2e.rs` (task 1.3) and `persistence.rs` (task 1.4).
+//! Shared e2e harness, two seams:
+//!
+//! - [`ClientHarness`]: the real `fno` client on a real portable-pty, with a
+//!   human-eye view of its output through our own VT emulator
+//!   (`fno::vt::Pane`). Used by `client_e2e.rs` and `persistence.rs`.
+//! - [`FakeClient`]: a raw `UnixStream` speaking the wire protocol against a
+//!   real headless server - the layout e2e seam (task 2.6). It tracks the
+//!   latest `Layout`, per-pane frames + counts (the AC5-EDGE
+//!   no-frames-for-inactive assertion), `ModeSync` bytes, and `Notice`s.
 
-use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::io::{ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use fno::vt::Pane;
+use fno::proto::{
+    read_msg_sync, write_msg_sync, ClientMsg, Command, Frame, ProtoError, ServerMsg, SquadMeta,
+    BUILD_VERSION, PROTO_VERSION,
+};
+use fno::tree::Rect;
+use fno::vt::{frame_text, Pane};
 
 pub struct Scratch(pub PathBuf);
 
@@ -49,10 +61,16 @@ pub struct ClientHarness {
 
 impl ClientHarness {
     pub fn spawn(scratch: &Scratch) -> Self {
+        // 60 columns: below the sideline's auto-hide threshold (panel 28 +
+        // min content 40), so the panel stays hidden and Phase-1-era screen
+        // assertions see bare content lines under the 1-row tab bar. The
+        // sideline-visible chrome has its own compose unit tests + the
+        // layout e2e suite; here it would only salt every line with the
+        // divider column.
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
-                cols: 80,
+                cols: 60,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -84,7 +102,7 @@ impl ClientHarness {
             writer,
             output,
             consumed: 0,
-            pane: Pane::new(24, 80),
+            pane: Pane::new(24, 60),
             _master: pty.master,
         }
     }
@@ -157,5 +175,221 @@ impl Drop for ClientHarness {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Headless server + fake wire client (the layout e2e seam)
+// ---------------------------------------------------------------------------
+
+/// A `fno --server` child, always killed on test exit.
+pub struct ServerProc(pub std::process::Child);
+
+impl Drop for ServerProc {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Spawn the real server binary headless on `sock`, with `envs` overriding
+/// the inherited environment (SHELL, PATH for the git-stub cases, ...).
+#[allow(dead_code)]
+pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_fno"));
+    cmd.args(["--server"])
+        .arg(sock)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    ServerProc(cmd.spawn().unwrap())
+}
+
+#[allow(dead_code)]
+pub fn connect_with_retry(sock: &Path) -> std::os::unix::net::UnixStream {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match std::os::unix::net::UnixStream::connect(sock) {
+            Ok(s) => return s,
+            Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("server never came up at {}: {e}", sock.display()),
+        }
+    }
+}
+
+/// The last `Layout` a [`FakeClient`] saw.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub struct LayoutSnap {
+    pub squads: Vec<SquadMeta>,
+    pub active_squad: u64,
+    pub panes: Vec<(u64, Rect)>,
+    pub focus: u64,
+}
+
+/// A raw wire client: sends `ClientMsg`s, absorbs everything the server
+/// streams back into inspectable state.
+#[allow(dead_code)]
+pub struct FakeClient {
+    stream: std::os::unix::net::UnixStream,
+    pub layout: Option<LayoutSnap>,
+    pub frames: HashMap<u64, Frame>,
+    /// Frames received per pane since the last [`FakeClient::reset_counts`] -
+    /// the wire-silence assertion for inactive tabs (AC5-EDGE).
+    pub frame_counts: HashMap<u64, usize>,
+    pub modesyncs: Vec<Vec<u8>>,
+    pub notices: Vec<String>,
+    pub byes: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl FakeClient {
+    /// Connect + Attach (content-area `rows`x`cols`, squad-keying `cwd`).
+    pub fn attach(sock: &Path, rows: u16, cols: u16, cwd: &str) -> Self {
+        let stream = connect_with_retry(sock);
+        let mut w = stream.try_clone().unwrap();
+        write_msg_sync(
+            &mut w,
+            &ClientMsg::Attach {
+                proto: PROTO_VERSION,
+                build: BUILD_VERSION.to_string(),
+                rows,
+                cols,
+                cwd: cwd.to_string(),
+            },
+        )
+        .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        FakeClient {
+            stream,
+            layout: None,
+            frames: HashMap::new(),
+            frame_counts: HashMap::new(),
+            modesyncs: Vec::new(),
+            notices: Vec::new(),
+            byes: Vec::new(),
+        }
+    }
+
+    pub fn input(&mut self, bytes: &[u8]) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(&mut w, &ClientMsg::Input(bytes.to_vec())).unwrap();
+    }
+
+    pub fn cmd(&mut self, cmd: Command) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(&mut w, &ClientMsg::Command(cmd)).unwrap();
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(&mut w, &ClientMsg::Resize { rows, cols }).unwrap();
+    }
+
+    pub fn detach(&mut self) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(&mut w, &ClientMsg::Detach).unwrap();
+    }
+
+    pub fn reset_counts(&mut self) {
+        self.frame_counts.clear();
+    }
+
+    fn absorb(&mut self, msg: ServerMsg) {
+        match msg {
+            ServerMsg::Frame { pane_id, frame } => {
+                assert!(frame.geometry_ok(), "server sent a malformed frame");
+                *self.frame_counts.entry(pane_id).or_insert(0) += 1;
+                self.frames.insert(pane_id, frame);
+            }
+            ServerMsg::Layout {
+                squads,
+                active_squad,
+                panes,
+                focus,
+            } => {
+                self.layout = Some(LayoutSnap {
+                    squads,
+                    active_squad,
+                    panes,
+                    focus,
+                });
+            }
+            ServerMsg::ModeSync { bytes } => self.modesyncs.push(bytes),
+            ServerMsg::Notice { text } => self.notices.push(text),
+            ServerMsg::Bye { reason } => self.byes.push(reason),
+        }
+    }
+
+    /// Absorb whatever arrives for `dur` (used for wire-SILENCE windows).
+    pub fn pump(&mut self, dur: Duration) {
+        let deadline = Instant::now() + dur;
+        while Instant::now() < deadline {
+            match read_msg_sync::<_, ServerMsg>(&mut self.stream) {
+                Ok(m) => self.absorb(m),
+                Err(ProtoError::Io(e))
+                    if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+                Err(ProtoError::Closed) => return,
+                Err(e) => panic!("fake client read failed: {e}"),
+            }
+        }
+    }
+
+    /// Absorb until `f` yields, or panic with the current state at `secs`.
+    pub fn wait<T>(&mut self, secs: u64, what: &str, f: impl Fn(&FakeClient) -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if let Some(v) = f(self) {
+                return v;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "never saw {what} within {secs}s; layout: {:?}; notices: {:?}; pane texts: {:?}",
+                    self.layout,
+                    self.notices,
+                    self.frames
+                        .iter()
+                        .map(|(id, f)| (*id, frame_text(f)))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            match read_msg_sync::<_, ServerMsg>(&mut self.stream) {
+                Ok(m) => self.absorb(m),
+                Err(ProtoError::Io(e))
+                    if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+                Err(e) => panic!("fake client read failed waiting for {what}: {e}"),
+            }
+        }
+    }
+
+    pub fn wait_layout(
+        &mut self,
+        secs: u64,
+        what: &str,
+        pred: impl Fn(&LayoutSnap) -> bool,
+    ) -> LayoutSnap {
+        self.wait(secs, what, |c| c.layout.clone().filter(|l| pred(l)))
+    }
+
+    pub fn pane_text(&self, pid: u64) -> String {
+        self.frames.get(&pid).map(frame_text).unwrap_or_default()
+    }
+
+    pub fn wait_pane_text(&mut self, secs: u64, pid: u64, pred: impl Fn(&str) -> bool) -> String {
+        self.wait(secs, &format!("pane {pid} text"), |c| {
+            Some(c.pane_text(pid)).filter(|t| pred(t))
+        })
+    }
+
+    /// The current focused pane per the last Layout.
+    pub fn focus(&self) -> u64 {
+        self.layout.as_ref().expect("no Layout yet").focus
     }
 }

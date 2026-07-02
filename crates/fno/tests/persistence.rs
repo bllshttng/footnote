@@ -88,10 +88,12 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
 
     let mut h2 = ClientHarness::spawn(&scratch);
     let screen = h2.wait_screen(15, |s| s.contains("ALT-SCREEN-HELD"));
-    // The alt screen starts with the marker at home - no garbled partial.
+    // The alt screen starts with the marker at the top of the CONTENT area -
+    // the first row under the tab bar - with no garbled partial.
+    let content_top = screen.lines().nth(1).unwrap_or_default();
     assert!(
-        screen.trim_start().starts_with("ALT-SCREEN-HELD"),
-        "alt screen must redraw from the top: {screen:?}"
+        content_top.trim_start().starts_with("ALT-SCREEN-HELD"),
+        "alt screen must redraw from the content top: {screen:?}"
     );
     // Leave the program: ^C ends cat; the shell must still be there. Wait for
     // the prompt before typing - bytes sent while cat still holds the
@@ -100,6 +102,43 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
     h2.wait_prompt(15);
     h2.type_bytes(b"printf '\\033[?1049l'; echo back-on-main\r");
     h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "back-on-main"));
+}
+
+#[test]
+fn persistence_multi_pane_reattach_is_screen_exact() {
+    // AC3-HP/AC5-FR generalized to N panes through the REAL client: build a
+    // split via leader chords, put distinct markers in both panes, detach,
+    // reattach - the settled screen (chrome + both panes) is byte-identical.
+    let scratch = Scratch::new("multipane");
+    let mut h = ClientHarness::spawn(&scratch);
+    h.wait_prompt(15);
+    h.type_bytes(b"\x02%"); // leader+% : split H, focus lands right
+    h.wait_screen(15, |s| s.lines().skip(1).any(|l| l.contains('│')));
+    h.type_bytes(b"echo marker-right\r");
+    h.wait_screen(15, |s| s.contains("marker-right"));
+    h.type_bytes(b"\x02h"); // leader+h : focus left
+    h.type_bytes(b"echo marker-left\r");
+    h.wait_screen(15, |s| s.contains("marker-left"));
+    let before = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let a = h.screen();
+            std::thread::sleep(Duration::from_millis(150));
+            let b = h.screen();
+            if a == b {
+                break b;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("screen never settled; last:\n{b}");
+            }
+        }
+    };
+    h.type_bytes(&[0x1C]);
+    assert!(h.wait_exit(10).success());
+    drop(h);
+
+    let mut h2 = ClientHarness::spawn(&scratch);
+    h2.wait_screen(15, |s| s == before);
 }
 
 #[test]
@@ -197,7 +236,13 @@ fn persistence_malformed_frame_is_rejected_not_panicked() {
                 cursor_col: 0,
                 cursor_visible: true,
             };
-            let _ = write_msg_sync(&mut conn, &ServerMsg::Frame(bad));
+            let _ = write_msg_sync(
+                &mut conn,
+                &ServerMsg::Frame {
+                    pane_id: 0,
+                    frame: bad,
+                },
+            );
             std::thread::sleep(Duration::from_millis(500));
         }
     });

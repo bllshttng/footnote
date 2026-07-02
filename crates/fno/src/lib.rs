@@ -4,7 +4,10 @@
 
 pub mod bootstrap;
 pub mod client;
+pub mod keys;
 pub mod proto;
 pub mod pty;
 pub mod server;
+pub mod squad;
+pub mod tree;
 pub mod vt;

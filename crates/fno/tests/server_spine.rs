@@ -69,6 +69,7 @@ fn attach(sock: &Path, rows: u16, cols: u16) -> UnixStream {
             build: BUILD_VERSION.to_string(),
             rows,
             cols,
+            cwd: "/".to_string(),
         },
     )
     .unwrap();
@@ -108,13 +109,17 @@ fn wait_for_raw_frame(
     let mut last = String::new();
     while Instant::now() < deadline {
         match read_msg_sync::<_, ServerMsg>(stream) {
-            Ok(ServerMsg::Frame(f)) => {
-                last = frame_text(&f);
-                if pred(&f) {
-                    return f;
+            Ok(ServerMsg::Frame { frame, .. }) => {
+                last = frame_text(&frame);
+                if pred(&frame) {
+                    return frame;
                 }
             }
-            Ok(ServerMsg::Cursor { .. }) => {}
+            // Reliable-channel messages (Layout/ModeSync/Notice) are asserted
+            // by the layout e2e suite (task 2.6), not the spine helpers.
+            Ok(ServerMsg::Layout { .. })
+            | Ok(ServerMsg::ModeSync { .. })
+            | Ok(ServerMsg::Notice { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
@@ -157,29 +162,50 @@ fn server_spine_unspawnable_shell_falls_back_to_sh() {
 }
 
 #[test]
-fn server_spine_exited_child_fails_closed_and_shows_state() {
-    // AC2-ERR: after the child exits the pane shows an exited state and
-    // further input is dropped - no panic, no crash, connection stays up.
+fn server_spine_exited_child_ends_the_session_with_bye() {
+    // Locked Decision 8 (supersedes Phase 1's rendered "exited" state): the
+    // child exiting closes its pane; the last pane of the last tab of the
+    // last squad ends the session - the client receives Bye and the server
+    // process exits cleanly.
     let scratch = Scratch::new("exited");
-    let _server = spawn_server(&scratch.sock(), "/bin/sh");
+    let mut server = spawn_server(&scratch.sock(), "/bin/sh");
     let mut stream = attach(&scratch.sock(), 24, 80);
     wait_for_frame(&mut stream, 10, |_| true);
     send(&mut stream, &ClientMsg::Input(b"exit\r".to_vec()));
-    wait_for_frame(&mut stream, 10, |text| text.contains("[fno: pane exited]"));
-    // Input after exit: dropped fail-closed. The server must still be alive
-    // and serving this connection afterwards - prove it with a resize and
-    // assert the resize's EFFECT (new geometry), so a stale pre-crash frame
-    // still buffered in the socket can never satisfy this.
-    send(&mut stream, &ClientMsg::Input(b"ignored\r".to_vec()));
-    send(
-        &mut stream,
-        &ClientMsg::Resize {
-            rows: 30,
-            cols: 100,
-        },
-    );
-    let f = wait_for_raw_frame(&mut stream, 10, |f| f.rows == 30 && f.cols == 100);
-    assert!(frame_text(&f).contains("[fno: pane exited]"));
+
+    // Read past frames/layouts until the Bye lands.
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match read_msg_sync::<_, ServerMsg>(&mut stream) {
+            Ok(ServerMsg::Bye { reason }) => {
+                assert!(reason.contains("session ended"), "{reason}");
+                break;
+            }
+            Ok(_) => {}
+            Err(fno::proto::ProtoError::Io(e))
+                if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+            Err(e) => panic!("expected Bye, got error: {e}"),
+        }
+        if Instant::now() >= deadline {
+            panic!("no Bye within 10s of the last pane's child exiting");
+        }
+    }
+
+    // The server process itself exits 0 (session over, socket unlinked).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            assert!(status.success(), "server must exit 0, got {status:?}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("server did not exit after the session ended");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -205,12 +231,19 @@ fn server_spine_output_flood_stays_responsive() {
     wait_for_frame(&mut stream, 15, |text| {
         text.lines().filter(|l| l.trim() == "y").count() >= 5 || text.contains("FLOOD-DONE")
     });
+    // The typed line carries quotes so only the OUTPUT is bare, and the
+    // match is contains-based: input landing during the pipeline teardown
+    // can lose its echo-back to the tty line-discipline flush (the Phase 1
+    // codex P1 class), gluing the output onto the prompt line
+    // ("$ after-flood") - the input still landed, which is what this test
+    // proves.
     send(
         &mut stream,
-        &ClientMsg::Input(b"echo after-flood\r".to_vec()),
+        &ClientMsg::Input(b"echo af\"ter\"-flood\r".to_vec()),
     );
     wait_for_frame(&mut stream, 30, |text| {
-        text.lines().any(|l| l.trim() == "after-flood")
+        text.lines()
+            .any(|l| l.contains("after-flood") && !l.contains('"'))
     });
 }
 
@@ -247,6 +280,7 @@ fn server_spine_version_skew_is_refused_with_both_versions() {
             build: "99.0.0".to_string(),
             rows: 24,
             cols: 80,
+            cwd: "/".to_string(),
         },
     )
     .unwrap();
