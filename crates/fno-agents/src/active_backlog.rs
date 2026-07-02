@@ -555,14 +555,36 @@ fn abandon_batch_for(cfg: &DrainConfig, journal: &Journal, domain: &str) {
         .args(["backlog", "batch", "abandon", "--domain", domain])
         .current_dir(&cfg.cwd)
         .output();
-    let detail = match out {
-        Ok(o) if o.status.success() => "ok".to_string(),
-        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-        Err(e) => format!("{e}"),
+    // `member_count`/`members` are the runs_wasted term for the Wave-4-trigger
+    // metric (`fno backlog batch metrics`): the clean members this abandon
+    // requeued. Parsed from the abandon CLI's JSON; 0/[] when absent or failed.
+    let (detail, member_count, members) = match out {
+        Ok(o) if o.status.success() => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(String::from_utf8_lossy(&o.stdout).trim())
+                    .unwrap_or(serde_json::Value::Null);
+            let count = parsed
+                .get("member_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let members = parsed.get("requeued").cloned().unwrap_or_else(|| json!([]));
+            ("ok".to_string(), count, members)
+        }
+        Ok(o) => (
+            String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            0,
+            json!([]),
+        ),
+        Err(e) => (format!("{e}"), 0, json!([])),
     };
     let _ = journal.append(
         "active_backlog_batch_abandon",
-        json!({"domain": domain, "detail": detail}),
+        json!({
+            "domain": domain,
+            "detail": detail,
+            "member_count": member_count,
+            "members": members,
+        }),
     );
 }
 

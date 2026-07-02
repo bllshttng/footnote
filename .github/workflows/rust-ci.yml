@@ -59,8 +59,12 @@ jobs:
           rustup toolchain install "$RUSTFMT_TOOLCHAIN" --component rustfmt --profile minimal --no-self-update
           rustup run "$RUSTFMT_TOOLCHAIN" rustfmt --version
 
-      - name: cargo fmt --check
+      - name: cargo fmt --check (fno-agents)
         working-directory: crates/fno-agents
+        run: cargo "+$RUSTFMT_TOOLCHAIN" fmt --all --check
+
+      - name: cargo fmt --check (fno)
+        working-directory: crates/fno
         run: cargo "+$RUSTFMT_TOOLCHAIN" fmt --all --check
 
   test:
@@ -82,7 +86,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             crates/fno-agents/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock') }}
+            crates/fno/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -116,6 +121,12 @@ jobs:
 
       - name: cargo test --all-targets
         working-directory: crates/fno-agents
+        run: cargo test --all-targets
+
+      - name: cargo test --all-targets (fno mux)
+        # The mux e2e tests spawn real PTYs and Unix sockets; both work on
+        # the ubuntu-latest runner (the harness needs no TTY of its own).
+        working-directory: crates/fno
         run: cargo test --all-targets
 
       - name: Build fno-agents binary (for parity check)
@@ -159,6 +170,10 @@ jobs:
         with:
           tool: cargo-audit
 
-      - name: cargo audit
+      - name: cargo audit (fno-agents)
         working-directory: crates/fno-agents
+        run: cargo audit
+
+      - name: cargo audit (fno)
+        working-directory: crates/fno
         run: cargo audit
