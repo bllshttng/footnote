@@ -29,6 +29,13 @@ _SESSION_HOME = tempfile.mkdtemp(prefix="fno-test-home-")
 # there) so the isolation holds regardless of platform (gemini review).
 os.environ["HOME"] = _SESSION_HOME
 os.environ["USERPROFILE"] = _SESSION_HOME
+# Kill env-gated side effects the HOME redirect can't reach: born-with-why
+# reads config.think_spawn.enabled from the AMBIENT repo (armed on a dev box),
+# so fixture node births during tests spawned REAL `claude --bg` /think
+# workers, burning tokens. FNO_THINK_SPAWN is the gate's highest-precedence
+# input; hard-set it off (a shell-exported =1 must not leak either). Tests
+# that exercise the spawn path re-arm per-test via monkeypatch.setenv.
+os.environ["FNO_THINK_SPAWN"] = "0"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
