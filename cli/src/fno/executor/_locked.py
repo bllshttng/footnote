@@ -172,34 +172,46 @@ def parse_locked_executor(text: str) -> str:
     return last_value
 
 
-# grep -oEi 'model[[:space:]]*:[[:space:]]*<token>' scoped to Locked Decisions.
-# The value is a single non-whitespace token (same shape `fno backlog update
-# --model` validates); backticks are stripped first so `Model: `fable`` works.
-_MODEL_KV_RE = re.compile(r"model[ \t]*:[ \t]*(\S+)", re.IGNORECASE)
+# Capture the WHOLE value after ``model:`` (to end of line), scoped to Locked
+# Decisions. Capturing only the first token would silently truncate a malformed
+# spaced value like ``opus 4.8`` to ``opus`` and transcribe a wrong-but-valid
+# pin (codex review PR #150); the whole value is validated below so a multi-token
+# value is REJECTED instead, matching ``fno backlog update --model``. The ``\**``
+# around the key tolerate a bold ``**Model**:`` head WITHOUT eating a ``*`` in the
+# value (so a metacharacter value stays intact and is rejected, not sanitized).
+_MODEL_KV_RE = re.compile(r"\**model\**[ \t]*:[ \t]*(.+)", re.IGNORECASE)
+# Same shell-safe single-token charset the update verb enforces.
+_MODEL_TOKEN_RE = re.compile(r"[A-Za-z0-9._:/-]{1,64}")
+# An optional trailing provenance suffix, e.g. ``fable (user-confirmed)`` ->
+# ``fable`` (mirrors the executor lock's provenance tolerance).
+_MODEL_PROVENANCE_RE = re.compile(r"[ \t]*\([^)]*\)[ \t]*$")
 
 
 def parse_locked_model(text: str) -> str:
     """Parse a locked ``Model:`` decision from design-doc ``text`` (x-571f).
 
     Scans the ``## Locked Decisions`` section (a bare ``model:`` mention in prose
-    elsewhere is not a lock) for the LAST ``Model: <token>`` entry and returns
-    the single-token value, or '' when none is present / the value is not a
-    single token of <=64 chars. No allowlist: aliases (fable|opus|sonnet) and
-    full provider-model ids pass through verbatim, matching the update verb.
+    elsewhere is not a lock) for the LAST ``Model: <value>`` entry and returns
+    the value when it is a single shell-safe token of <=64 chars, else '' (a
+    multi-token / whitespaced / metacharacter value is REJECTED, not truncated).
+    No allowlist: aliases (fable|opus|sonnet) and full provider-model ids pass
+    through verbatim, matching the update verb.
     """
     if not text:
         return ""
     section = _extract_section(text)
     if not section:
         return ""
-    # Strip backticks and bold markers so ``**Model**: `fable``` normalizes to
-    # ``Model: fable`` before the KV scan (tolerant of the executor-lock's own
-    # bold conventions). A model token never contains ``*`` or a backtick.
-    matches = _MODEL_KV_RE.findall(section.replace("`", "").replace("*", ""))
+    # Strip backticks so ``Model: `fable``` normalizes before the KV scan (a model
+    # token never contains a backtick); bold ``*`` around the key are consumed by
+    # the regex, not stripped, so a value's own ``*`` survives to be rejected.
+    matches = _MODEL_KV_RE.findall(section.replace("`", ""))
     if not matches:
         return ""
-    val = matches[-1]
-    return val if len(val) <= 64 else ""
+    # Drop a trailing provenance suffix, then require the remainder be exactly one
+    # shell-safe token (rejects ``opus 4.8`` and any glob/shell metacharacter).
+    val = _MODEL_PROVENANCE_RE.sub("", matches[-1]).strip()
+    return val if _MODEL_TOKEN_RE.fullmatch(val) else ""
 
 
 def main(argv: list[str] | None = None) -> int:

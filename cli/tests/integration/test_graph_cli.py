@@ -980,21 +980,28 @@ def test_model_pin_set_visible_and_cleared(tmp_graph):
 
 
 def test_model_pin_rejects_whitespace_token(tmp_graph):
-    """x-571f US2 AC1-ERR: an embedded-space model exits non-zero and leaves the
-    node's model unchanged (protects MODEL_FLAG shell word-splitting)."""
+    """x-571f US2 AC1-ERR: a whitespaced OR glob/shell-metacharacter model exits
+    non-zero and leaves the node unchanged (protects the unquoted MODEL_FLAG /
+    dispatch-node.sh spawn against word-splitting AND globbing; gemini review)."""
     node_id = json.loads(_invoke("backlog", "add", "Nopin").output)["id"]
 
-    bad = runner.invoke(
-        app,
-        ["backlog", "update", node_id, "--model", "opus 4.8"],
-        catch_exceptions=True,
-    )
-    assert bad.exit_code != 0
-    combined = (bad.output or "") + (getattr(bad, "stderr", "") or "")
-    assert "single non-whitespace token" in combined
-    # Node unchanged: model still unset.
-    got = json.loads(_invoke("backlog", "get", node_id).output)
-    assert got.get("model") is None
+    for bad_val in ("opus 4.8", "fo*", "a?b", "x[y]"):
+        bad = runner.invoke(
+            app,
+            ["backlog", "update", node_id, "--model", bad_val],
+            catch_exceptions=True,
+        )
+        assert bad.exit_code != 0, f"{bad_val!r} should be rejected"
+        combined = (bad.output or "") + (getattr(bad, "stderr", "") or "")
+        assert "single token" in combined
+        # Node unchanged: model still unset after every rejection.
+        got = json.loads(_invoke("backlog", "get", node_id).output)
+        assert got.get("model") is None
+
+    # A full provider-model id with dots/slashes/dashes/colons is accepted.
+    ok = _invoke("backlog", "update", node_id, "--model", "openai/gpt-4.1")
+    assert ok.exit_code == 0, ok.output
+    assert json.loads(_invoke("backlog", "get", node_id).output)["model"] == "openai/gpt-4.1"
 
 
 def test_model_pin_rides_in_ready_and_next_json(tmp_graph):

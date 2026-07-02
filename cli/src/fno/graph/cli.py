@@ -1360,14 +1360,22 @@ def cmd_update(
     if size is not None and size.lower() != "null" and size.upper() not in {"S", "M", "L"}:
         typer.echo(f"Error: invalid size '{size}'. Must be one of: S, M, L", err=True)
         raise typer.Exit(code=1)
-    # Model pin (x-571f): a validated-shape pass-through, not an allowlist. A
-    # single non-whitespace token protects MODEL_FLAG shell word-splitting in
-    # the loop drivers; the CLI (not fno) resolves the alias. 'null' clears.
+    # Model pin (x-571f): a validated-shape pass-through, not an allowlist. The
+    # value must be a single shell-safe token so it survives unquoted use in the
+    # dispatchers (dispatch-node.sh $model_arg, the loop-driver MODEL_FLAG
+    # word-split) without word-splitting OR globbing. The charset [A-Za-z0-9._:/-]
+    # covers every real model id (fable, claude-opus-4-8, openai/gpt-4,
+    # us.anthropic.claude-...) while forbidding whitespace and shell/glob
+    # metacharacters (* ? [ ] etc.); the CLI (not fno) resolves the alias.
+    # 'null' clears.
     if model is not None and model.lower() != "null":
-        if model.split() != [model] or len(model) > 64:
+        import re  # module-level `re` is function-local elsewhere; scope it here
+
+        if not re.fullmatch(r"[A-Za-z0-9._:/-]{1,64}", model):
             typer.echo(
-                "Error: --model must be a single non-whitespace token, at most 64 chars "
-                "(e.g. fable|opus|sonnet or a full provider-model id)",
+                "Error: --model must be a single token of [A-Za-z0-9._:/-], at most 64 chars "
+                "(e.g. fable|opus|sonnet or a full provider-model id); no whitespace or "
+                "shell/glob metacharacters",
                 err=True,
             )
             raise typer.Exit(code=1)

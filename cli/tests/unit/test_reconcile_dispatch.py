@@ -43,8 +43,8 @@ def _patch_deps(monkeypatch, deps):
 
 def _patch_spawn(monkeypatch):
     calls = []
-    def fake(node_id, node_cwd, node_slug=None, *, reconcile_manifest=None):
-        calls.append({"node": node_id, "cwd": node_cwd, "manifest": reconcile_manifest})
+    def fake(node_id, node_cwd, node_slug=None, *, reconcile_manifest=None, model=None):
+        calls.append({"node": node_id, "cwd": node_cwd, "manifest": reconcile_manifest, "model": model})
         return "short123"
     monkeypatch.setattr(rd, "_spawn_worker", fake)
     return calls
@@ -67,6 +67,22 @@ def test_unreconciled_manifest_dispatches_reconcile(iso, tmp_path, monkeypatch):
     assert calls[0]["manifest"] == str(sm.manifest_path("x-dep", tmp_path))
     ev = _events(iso)
     assert [e for e in ev if e["type"] == "advance_dispatched"]
+
+
+def test_reconcile_threads_node_model_pin(iso, tmp_path, monkeypatch):
+    # x-571f (codex review PR #150): a pinned contract dependent's reconcile
+    # worker must launch on the node's model, not the provider default.
+    sm.write("x-dep", [{"stub_id": "a", "file": "f", "kind": "fn"}], tmp_path,
+             contract_test="true")
+    dep = _dep(tmp_path)
+    dep["model"] = "fable"
+    _patch_deps(monkeypatch, [dep])
+    calls = _patch_spawn(monkeypatch)
+
+    res = rd.dispatch_reconcile_for_blocker(closed_node_id="x-blk", events_path=iso)
+
+    assert res[0].decision == "dispatched"
+    assert calls[0]["model"] == "fable"
 
 
 def test_missing_manifest_writes_pending_sentinel(iso, tmp_path, monkeypatch):

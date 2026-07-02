@@ -329,6 +329,22 @@ def test_parse_locked_model_last_wins_and_rejects_overlong() -> None:
     assert _locked.parse_locked_model(over) == ""
 
 
+def test_parse_locked_model_rejects_multitoken_and_metachars() -> None:
+    # codex review PR #150: a spaced value must be REJECTED, not truncated to the
+    # first token (which would transcribe a wrong-but-valid pin onto the node).
+    assert _locked.parse_locked_model("## Locked Decisions\nModel: opus 4.8\n") == ""
+    # A glob/shell metacharacter is out of the shell-safe charset -> rejected.
+    assert _locked.parse_locked_model("## Locked Decisions\nModel: fo*\n") == ""
+
+
+def test_parse_locked_model_strips_provenance_suffix() -> None:
+    # A trailing (provenance) suffix mirrors the executor lock and is dropped.
+    doc = "## Locked Decisions\nModel: fable (user-confirmed)\n"
+    assert _locked.parse_locked_model(doc) == "fable"
+    # A full provider-model id with dots/slashes/dashes passes verbatim.
+    assert _locked.parse_locked_model("## Locked Decisions\nModel: claude-opus-4-8\n") == "claude-opus-4-8"
+
+
 def test_locked_model_cli_key_flag_and_backward_compat() -> None:
     doc = "## Locked Decisions\nModel: fable\n"
     model_out = subprocess.run(
