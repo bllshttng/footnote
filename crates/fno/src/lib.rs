@@ -5,6 +5,7 @@
 pub mod bootstrap;
 pub mod client;
 pub mod keys;
+pub mod mux_cli;
 pub mod proto;
 pub mod pty;
 pub mod server;

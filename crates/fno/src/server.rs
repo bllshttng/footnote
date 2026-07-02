@@ -97,6 +97,11 @@ enum CoreMsg {
         cmd: Command,
     },
     Gone(u64),
+    /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
+    Query(tokio::sync::oneshot::Sender<ServerMsg>),
+    /// A pre-Attach `KillServer`: Bye every client, kill every pane child,
+    /// exit 0 (Locked 12's second and last exit path).
+    Kill,
 }
 
 struct Client {
@@ -145,6 +150,11 @@ impl Drop for SocketGuard {
 }
 
 /// Run the server on `socket`. Returns the process exit code.
+///
+/// The session NAME is the socket's file stem (`work.sock` -> `work`): every
+/// creation path routes through `proto::socket_path`, so deriving it here
+/// needs no extra flag on the internal `--server` surface. It feeds the
+/// `Info` answer and every pane's `FNO_SESSION`.
 pub fn run(socket: PathBuf) -> i32 {
     if let Some(parent) = socket.parent() {
         // The socket accepts keystrokes into your shell: never group/world.
@@ -180,7 +190,11 @@ pub fn run(socket: PathBuf) -> i32 {
             return 1;
         }
     };
-    runtime.block_on(serve(listener, &socket))
+    let session_name = socket
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| crate::proto::DEFAULT_SESSION.to_string());
+    runtime.block_on(serve(listener, &socket, session_name))
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +213,9 @@ struct Core {
     /// as the fallback when a tab loses its last viewer. Purged when a tab
     /// dies (ids are never reused, so stale entries would only accumulate).
     tab_areas: HashMap<TabId, (u16, u16)>,
+    /// This server's session name (the socket's file stem): the `Info`
+    /// answer, and `FNO_SESSION` in every pane it spawns.
+    session_name: String,
     shells: Vec<OsString>,
     out_tx: mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: mpsc::Sender<u64>,
@@ -243,6 +260,7 @@ impl Core {
             rows,
             cols,
             dir,
+            &self.session_name,
             id,
             self.out_tx.clone(),
             self.exit_tx.clone(),
@@ -938,6 +956,26 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::Command { id, cmd } => self.command(id, cmd),
+            CoreMsg::Query(reply) => {
+                let _ = reply.send(ServerMsg::Info {
+                    session: self.session_name.clone(),
+                    clients: self.clients.len() as u32,
+                    squads: self.session.squads.len() as u32,
+                    panes: self.panes.len() as u32,
+                });
+                Flow::Continue
+            }
+            CoreMsg::Kill => {
+                // kill-server: the second (and last) sanctioned exit path
+                // (Locked 12). Bye every client, kill every pane child
+                // (AC4-FR: nothing outlives the session), then shut down -
+                // the SocketGuard unlinks on the way out.
+                self.bye_all("killed");
+                for entry in self.panes.values() {
+                    entry.pty.kill();
+                }
+                Flow::Shutdown
+            }
             CoreMsg::Gone(id) => {
                 // Gone is a geometry event (Locked 5, AC1-ERR): a vanished
                 // constraining client releases its clamp, so the tab regrows
@@ -960,7 +998,11 @@ impl Core {
     }
 }
 
-async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32 {
+async fn serve(
+    listener: std::os::unix::net::UnixListener,
+    socket: &Path,
+    session_name: String,
+) -> i32 {
     if let Err(e) = listener.set_nonblocking(true) {
         eprintln!("fno mux: listener setup failed: {e}");
         return 1;
@@ -987,6 +1029,7 @@ async fn serve(listener: std::os::unix::net::UnixListener, socket: &Path) -> i32
         next_pane_id: 1,
         next_squad_id: 1,
         tab_areas: HashMap::new(),
+        session_name,
         shells: shell_candidates(std::env::var_os("SHELL").as_deref()),
         out_tx,
         exit_tx,
@@ -1128,6 +1171,22 @@ async fn handle_client(
                 return;
             }
             (rows, cols, cwd)
+        }
+        // Pre-Attach management pair (wire shapes FROZEN, no version
+        // handshake - proto.rs): Query answers one Info then closes;
+        // KillServer triggers shutdown. Neither registers a client.
+        Ok(Ok(ClientMsg::Query)) => {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if core_tx.send(CoreMsg::Query(reply_tx)).await.is_ok() {
+                if let Ok(info) = reply_rx.await {
+                    let _ = write_msg(&mut stream, &info).await;
+                }
+            }
+            return;
+        }
+        Ok(Ok(ClientMsg::KillServer)) => {
+            let _ = core_tx.send(CoreMsg::Kill).await;
+            return;
         }
         // Liveness probes connect and vanish; malformed first messages and
         // timeouts close the same way: without touching any pane.

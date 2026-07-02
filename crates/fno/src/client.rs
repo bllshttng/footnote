@@ -57,6 +57,18 @@ pub fn run(session: &str) -> i32 {
 }
 
 fn run_inner(session: &str) -> Result<i32, String> {
+    // Nested same-session guard (AC3-UI/EDGE): BEFORE any socket, spawn, or
+    // terminal mode change. `FNO_SESSION` is set in every pane the server
+    // spawns, so target == env means "attaching to the session I am already
+    // inside" - an instant hall of mirrors. Different-session nesting is
+    // allowed (the flag already beat the env in resolution).
+    if std::env::var("FNO_SESSION").ok().as_deref() == Some(session) {
+        return Err(format!(
+            "already inside mux session {session:?} (FNO_SESSION is set). \
+             Attach to another session with `fno --session <other>`, or \
+             `unset FNO_SESSION` if this shell is not really inside a pane."
+        ));
+    }
     proto::ensure_mux_dir().map_err(|e| format!("cannot prepare the mux dir: {e}"))?;
     let path = proto::socket_path(session)?;
     let stream = connect_or_spawn(&path)?;
