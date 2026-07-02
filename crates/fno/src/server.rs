@@ -539,6 +539,12 @@ impl Core {
             }
         }
         self.clients.retain(|c| !dead.contains(&c.id));
+        // A wedged-channel death is a membership event like Gone: without a
+        // re-push, survivors stay clamped to the dead client's dims until
+        // some later event. Terminates: each pass removes >= 1 client.
+        if !dead.is_empty() {
+            self.push_layout(true);
+        }
     }
 
     /// One client's `Layout`: the shared squad/tab catalog, with the
@@ -648,6 +654,9 @@ impl Core {
             }
         }
         self.clients.retain(|c| !dead.contains(&c.id));
+        if !dead.is_empty() {
+            self.push_layout(true);
+        }
     }
 
     /// Close one pane: kill+reap its PTY, remove it from the tree (collapse +

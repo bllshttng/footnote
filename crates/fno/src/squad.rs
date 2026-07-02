@@ -112,6 +112,8 @@ impl Session {
     /// active. The caller allocates `id` and has already spawned the first
     /// pane's PTY (atomic split ordering, Locked Decision 7).
     pub fn add_squad(&mut self, id: u64, canonical_cwd: String, first_tab: Tab) {
+        // A caller-built tab id must never collide with a future mint.
+        self.next_tab_id = self.next_tab_id.max(first_tab.id);
         self.squads.push(Squad {
             id,
             canonical_cwd,
