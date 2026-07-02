@@ -26,6 +26,8 @@ alacritty_terminal = "0.26"
 crossterm = { version = "0.29", features = ["event-stream"] }
 libc = "0.2"
 portable-pty = "0.9"
+# `pane wait --pattern RE`: regex over a pane's visible grid (script API).
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

@@ -85,28 +85,11 @@ impl PtyShell {
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<PtyShell, PtyError> {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| PtyError::OpenPty(e.to_string()))?;
-
+        let pair = open_pty(rows, cols)?;
         let mut errors = Vec::new();
         let mut child = None;
         for cand in candidates {
-            let mut cmd = CommandBuilder::new(cand);
-            // A login-ish TERM so shells and full-screen programs behave.
-            cmd.env("TERM", "xterm-256color");
-            // Every pane knows its session (AC3-HP): the nested-attach guard
-            // and `fno mux kill-server`'s default both read this.
-            cmd.env("FNO_SESSION", session);
-            if let Some(dir) = cwd.filter(|d| d.is_dir()) {
-                cmd.cwd(dir);
-            }
+            let cmd = base_command(cand, cwd, session);
             match pair.slave.spawn_command(cmd) {
                 Ok(c) => {
                     child = Some(c);
@@ -116,27 +99,42 @@ impl PtyShell {
             }
         }
         let child = child.ok_or_else(|| PtyError::Spawn(errors.join("; ")))?;
+        wire(pair, child, pane_id, out_tx, exit_tx)
+    }
 
-        // Standard pattern: drop the slave so only the child holds it.
-        drop(pair.slave);
+    /// Spawn an explicit command (`argv[0]` + args) as a pane - the
+    /// `fno mux pane run` / agents-spawn primitive. No shell fallback: an
+    /// unspawnable argv is the caller's error, surfaced verbatim. Env + cwd
+    /// (incl. `FNO_SESSION`) match [`PtyShell::spawn`].
+    pub fn spawn_cmd(
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&std::path::Path>,
+        session: &str,
+        pane_id: u64,
+        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        exit_tx: tokio::sync::mpsc::Sender<u64>,
+    ) -> Result<PtyShell, PtyError> {
+        let (program, args) = argv
+            .split_first()
+            .ok_or_else(|| PtyError::Spawn("empty argv".into()))?;
+        let pair = open_pty(rows, cols)?;
+        let mut cmd = base_command(OsStr::new(program), cwd, session);
+        for a in args {
+            cmd.arg(a);
+        }
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| PtyError::Spawn(format!("{program}: {e}")))?;
+        wire(pair, child, pane_id, out_tx, exit_tx)
+    }
 
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| PtyError::Writer(e.to_string()))?;
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| PtyError::Reader(e.to_string()))?;
-
-        spawn_reader(reader, pane_id, out_tx, exit_tx)?;
-        let input_tx = spawn_writer(writer)?;
-
-        Ok(PtyShell {
-            master: pair.master,
-            input_tx,
-            child: Mutex::new(child),
-        })
+    /// The child's OS process id, when the platform reported one. Read for
+    /// `pane ls`; `None` never means "dead" (use [`PtyShell::is_child_alive`]).
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.lock().ok().and_then(|c| c.process_id())
     }
 
     /// Queue keystrokes for the child (the writer thread performs the actual
@@ -199,6 +197,60 @@ impl PtyShell {
             let _ = child.wait();
         }
     }
+}
+
+/// Open a fresh PTY pair at `rows`x`cols` (clamped to >=1).
+fn open_pty(rows: u16, cols: u16) -> Result<portable_pty::PtyPair, PtyError> {
+    native_pty_system()
+        .openpty(PtySize {
+            rows: rows.max(1),
+            cols: cols.max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| PtyError::OpenPty(e.to_string()))
+}
+
+/// A `CommandBuilder` for `program` carrying the pane environment: a login-ish
+/// `TERM`, `FNO_SESSION` (AC3-HP: the nested-attach guard and kill-server both
+/// read it), and the launch cwd when it is still a directory.
+fn base_command(program: &OsStr, cwd: Option<&std::path::Path>, session: &str) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(program);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("FNO_SESSION", session);
+    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+        cmd.cwd(dir);
+    }
+    cmd
+}
+
+/// Wire a spawned child's PTY into the mux: drop the slave (only the child
+/// holds it), start the reader + writer threads, and hand back the owning
+/// [`PtyShell`]. Shared by [`PtyShell::spawn`] and [`PtyShell::spawn_cmd`].
+fn wire(
+    pair: portable_pty::PtyPair,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    pane_id: u64,
+    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    exit_tx: tokio::sync::mpsc::Sender<u64>,
+) -> Result<PtyShell, PtyError> {
+    // Standard pattern: drop the slave so only the child holds it.
+    drop(pair.slave);
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| PtyError::Writer(e.to_string()))?;
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| PtyError::Reader(e.to_string()))?;
+    spawn_reader(reader, pane_id, out_tx, exit_tx)?;
+    let input_tx = spawn_writer(writer)?;
+    Ok(PtyShell {
+        master: pair.master,
+        input_tx,
+        child: Mutex::new(child),
+    })
 }
 
 /// The blocking writer thread: bounded channel -> PTY master. Owns the writer
