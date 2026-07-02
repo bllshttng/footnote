@@ -84,6 +84,11 @@ chrono = { version = "0.4", default-features = false, features = ["std", "alloc"
 crossterm = { version = "0.29", features = ["event-stream"] }
 toml = "0.8"
 regex = "1"
+# Native claims substrate (claims.rs): the lockfile records are YAML written
+# by Python's yaml.safe_dump and must round-trip under yaml.safe_load.
+# serde_yaml_ng is the maintained serde_yaml fork; transitive tree is
+# unsafe-libyaml (pure Rust), no C toolchain.
+serde_yaml_ng = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

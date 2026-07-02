@@ -8,10 +8,11 @@
 //! [`crate::claude_attach`].
 //!
 //! The claim is **anchored to the long-lived HOLDER pid from the first acquire**
-//! (footnote's attach-holder process via `--pid`), never to the transient `fno
-//! claim` subprocess -- a claim anchored to a process that exits the instant the
-//! acquire returns goes instantly `stale` and a concurrent adopter could reclaim
-//! it (the daemon-claim-reanchor lesson, PR#53; codex P1 on this PR). The
+//! (footnote's attach-holder process), so it is live from birth. The daemon's
+//! historical shell-out recorded the transient `fno claim` subprocess pid, so
+//! the claim went instantly `stale` and a concurrent adopter could reclaim it
+//! (the daemon-claim-reanchor lesson, PR#53; codex P1 on this PR); the native
+//! acquire records the holder pid directly and closes that window. The
 //! `session:<uuid>` key routes to the host-global claims root, so two checkouts
 //! cannot take separate project-local claims for the same session.
 
@@ -102,59 +103,35 @@ pub enum ClaimOutcome {
     Acquired,
     /// Another live writer holds it; refuse to double-adopt (AC1-EDGE).
     HeldByOther(String),
-    /// The claim substrate could not be consulted (no `fno` on PATH, exec error,
-    /// unparseable output). Fail OPEN -- the file-claim is the cross-process
+    /// The claim substrate could not be consulted (io / validation error from
+    /// the native acquire). Fail OPEN -- the file-claim is the cross-process
     /// coordination record, best-effort like the daemon's.
     Unavailable(String),
 }
 
-/// `fno claim acquire session:<uuid> --holder <holder> --pid <pid> -J` -- the
-/// acquire argv. `--pid` anchors PID-liveness to the LONG-LIVED holder from the
-/// very first acquire: an omitted `--pid` would record the transient `fno claim`
-/// subprocess (which exits the instant `.output()` returns), so the claim would be
-/// `stale` before any reanchor could fire and a concurrent adopter could reclaim
-/// it -- defeating the single-writer guard (codex P1). `session:<uuid>` keys route
-/// to the host-global claims root in the CLI, so two checkouts cannot take
-/// separate project-local claims for the same session.
-fn claim_acquire_argv(uuid: &str, holder: &str, holder_pid: u32) -> Vec<String> {
-    vec![
-        "claim".into(),
-        "acquire".into(),
-        format!("session:{uuid}"),
-        "--holder".into(),
-        holder.into(),
-        "--pid".into(),
-        holder_pid.to_string(),
-        "-J".into(),
-    ]
-}
-
-/// Acquire the `session:<uuid>` claim for `holder`, anchored to `holder_pid` (the
-/// long-lived attach holder). Shells the Python `fno claim` CLI (the claim
-/// substrate is Python-only + cross-worktree). Fails OPEN on an unconsultable
-/// substrate.
+/// Acquire the `session:<uuid>` claim for `holder`, anchored to `holder_pid`
+/// (the long-lived attach holder). Native `crate::claims` call — no subprocess.
+/// Pinning `--pid` to the long-lived holder from the very first acquire is what
+/// keeps the claim from being born `stale`; with the native path there is no
+/// transient `fno claim` subprocess to record in the first place, but the
+/// explicit holder pid is preserved so the record still names the real writer
+/// (codex P1). `session:<uuid>` keys route to the host-global claims root, so
+/// two checkouts cannot take separate project-local claims for the same
+/// session. Fails OPEN (`Unavailable`) on an unconsultable substrate.
 pub fn acquire_pty_claim(uuid: &str, holder: &str, holder_pid: u32) -> ClaimOutcome {
-    let output = std::process::Command::new("fno")
-        .args(claim_acquire_argv(uuid, holder, holder_pid))
-        .stdin(std::process::Stdio::null())
-        .output();
-    match output {
-        Err(e) => ClaimOutcome::Unavailable(format!("fno claim acquire failed to run: {e}")),
-        Ok(o) if !o.status.success() => {
-            let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            ClaimOutcome::HeldByOther(if detail.is_empty() {
-                "held by another writer".into()
-            } else {
-                detail
-            })
-        }
-        Ok(o) => match serde_json::from_slice::<serde_json::Value>(&o.stdout) {
-            Ok(v) if v.get("holder").and_then(serde_json::Value::as_str) == Some(holder) => {
-                ClaimOutcome::Acquired
-            }
-            Ok(_) => ClaimOutcome::Unavailable("claim acquired but holder mismatch".into()),
-            Err(e) => ClaimOutcome::Unavailable(format!("unparseable claim output: {e}")),
+    match crate::claims::acquire(
+        &format!("session:{uuid}"),
+        holder,
+        crate::claims::AcquireOpts {
+            pid: Some(holder_pid),
+            ..Default::default()
         },
+    ) {
+        crate::claims::AcquireOutcome::Acquired(_) => ClaimOutcome::Acquired,
+        crate::claims::AcquireOutcome::HeldByOther { holder, .. } => {
+            ClaimOutcome::HeldByOther(holder)
+        }
+        crate::claims::AcquireOutcome::Error(e) => ClaimOutcome::Unavailable(e),
     }
 }
 
@@ -167,8 +144,8 @@ pub fn acquire_pty_claim(uuid: &str, holder: &str, holder_pid: u32) -> ClaimOutc
 /// taken -- the Phase-0 spike retired the held-attach layer; idle `claude --bg`
 /// sessions persist on their own.
 ///
-/// ponytail: live glue -- shells the real `fno claim` CLI, so it is not
-/// unit-tested; every composed piece (mint, upsert, claim argv) is.
+/// ponytail: live glue over registry io -- not unit-tested here; every composed
+/// piece (mint, upsert, native `acquire_pty_claim`) is.
 pub fn adopt(
     registry_path: &Path,
     worker: &RosterWorker,
@@ -298,22 +275,37 @@ mod tests {
     }
 
     #[test]
-    fn claim_argv_anchors_to_holder_pid_from_the_first_acquire() {
-        // The single acquire carries --pid <holder_pid> (not the transient fno
-        // subprocess) AND -J, so the claim is holder-anchored immediately and
-        // parseable -- no separate reanchor, no stale window (codex P1).
+    fn acquire_pty_claim_anchors_to_holder_pid_and_maps_outcomes() {
+        // The native acquire records the given holder pid immediately (no
+        // transient fno subprocess, no stale window, codex P1) and maps the
+        // native outcome onto ClaimOutcome.
+        let td = std::env::temp_dir().join(format!(
+            "fno-adopt-claim-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&td).unwrap();
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_CLAIMS_ROOT", &td);
+        // Fresh acquire pinned to a live pid (our own, so it classifies live).
+        let me = std::process::id();
         assert_eq!(
-            claim_acquire_argv("uuid-1", "pty:a1b2c3d4", 4242),
-            vec![
-                "claim",
-                "acquire",
-                "session:uuid-1",
-                "--holder",
-                "pty:a1b2c3d4",
-                "--pid",
-                "4242",
-                "-J"
-            ]
+            acquire_pty_claim("uuid-1", "pty:a1b2c3d4", me),
+            ClaimOutcome::Acquired
         );
+        let (_, rec) = crate::claims::status("session:uuid-1", None);
+        assert_eq!(rec.unwrap().pid, me as i32);
+        // A different holder against the live claim -> HeldByOther.
+        assert_eq!(
+            acquire_pty_claim("uuid-1", "pty:other", me),
+            ClaimOutcome::HeldByOther("pty:a1b2c3d4".into())
+        );
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::fs::remove_dir_all(&td).ok();
     }
 }

@@ -1653,6 +1653,168 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// claim (hidden debug verb over the native claims module)
+// ---------------------------------------------------------------------------
+
+/// `fno-agents claim <acquire|release|status> <key> [flags]` — a thin front
+/// over [`crate::claims`], the native lockfile-protocol implementation.
+///
+/// Purpose: (a) the cross-impl compatibility matrix
+/// (`cli/tests/integration/test_claims_cross_impl.py`) drives the Rust side
+/// of the protocol through it, and (b) an ops escape hatch when the Python
+/// CLI is unavailable. It is deliberately HIDDEN — dispatched via `matches!`
+/// in `bin/client.rs` (the `mail-inject` pattern) so it stays out of
+/// `CLIENT_VERB_USAGE` / `RUST_CLIENT_VERBS`; `fno claim` remains the only
+/// operator CLI for claims.
+///
+/// Output is one JSON object on stdout. Exit codes: 0 success, 1 held by
+/// another live writer, 2 usage/validation/io error.
+pub fn run_claim(args: &[String]) -> i32 {
+    let Some(op) = args.first().map(String::as_str) else {
+        eprintln!("fno-agents: claim requires an operation: acquire|release|status");
+        return 2;
+    };
+    let Some(key) = args.get(1).filter(|k| !k.starts_with("--")).cloned() else {
+        eprintln!("fno-agents: claim {op} requires a key argument");
+        return 2;
+    };
+
+    let mut holder: Option<String> = None;
+    let mut opts = crate::claims::AcquireOpts::default();
+    let mut it = args[2..].iter();
+    while let Some(a) = it.next() {
+        let mut take = |name: &str| -> Option<String> {
+            let v = it.next().cloned();
+            if v.is_none() {
+                eprintln!("fno-agents: claim: {name} requires a value");
+            }
+            v
+        };
+        match a.as_str() {
+            "--holder" => holder = take("--holder"),
+            "--pid" => match take("--pid").and_then(|v| v.parse::<u32>().ok()) {
+                Some(p) => opts.pid = Some(p),
+                None => return 2,
+            },
+            "--ttl-ms" => match take("--ttl-ms").and_then(|v| v.parse::<i64>().ok()) {
+                Some(t) => opts.ttl_ms = Some(t),
+                None => return 2,
+            },
+            "--reason" => match take("--reason") {
+                Some(r) => opts.reason = Some(r),
+                None => return 2,
+            },
+            "--metadata" => {
+                let Some(raw) = take("--metadata") else {
+                    return 2;
+                };
+                match serde_json::from_str::<Value>(&raw) {
+                    Ok(Value::Object(m)) => opts.metadata = Some(m),
+                    _ => {
+                        eprintln!("fno-agents: claim: --metadata must be a JSON object");
+                        return 2;
+                    }
+                }
+            }
+            "--root" => match take("--root") {
+                Some(r) => opts.root = Some(PathBuf::from(r)),
+                None => return 2,
+            },
+            "--json" | "-J" => {} // output is always JSON; accepted for symmetry
+            other => {
+                eprintln!("fno-agents: claim: unknown flag {other}");
+                return 2;
+            }
+        }
+    }
+
+    match op {
+        "acquire" => {
+            let Some(holder) = holder else {
+                eprintln!("fno-agents: claim acquire requires --holder");
+                return 2;
+            };
+            match crate::claims::acquire(&key, &holder, opts) {
+                crate::claims::AcquireOutcome::Acquired(rec) => {
+                    let mut out = serde_json::to_value(&rec)
+                        .unwrap_or_else(|_| Value::Object(Default::default()));
+                    if let Value::Object(m) = &mut out {
+                        m.insert("outcome".into(), Value::String("acquired".into()));
+                    }
+                    println!("{out}");
+                    0
+                }
+                crate::claims::AcquireOutcome::HeldByOther { holder, pid, host } => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "held_by_other",
+                            "holder": holder, "pid": pid, "host": host,
+                        })
+                    );
+                    1
+                }
+                crate::claims::AcquireOutcome::Error(e) => {
+                    eprintln!("fno-agents: claim acquire failed: {e}");
+                    2
+                }
+            }
+        }
+        "release" => {
+            let Some(holder) = holder else {
+                eprintln!("fno-agents: claim release requires --holder");
+                return 2;
+            };
+            match crate::claims::release(
+                &key,
+                &holder,
+                opts.root.as_deref(),
+                opts.events_dir.as_deref(),
+            ) {
+                Ok(()) => {
+                    println!("{}", serde_json::json!({"outcome": "released", "key": key}));
+                    0
+                }
+                Err(e) => {
+                    eprintln!("fno-agents: claim release failed: {e}");
+                    2
+                }
+            }
+        }
+        "status" => {
+            let (state, rec) = crate::claims::status(&key, opts.root.as_deref());
+            // Mirror the `fno claim status -J` dict shape so the compat
+            // matrix can diff the two implementations field-by-field.
+            let mut out = serde_json::Map::new();
+            out.insert("key".into(), Value::String(key));
+            out.insert("state".into(), Value::String(state.as_str().into()));
+            if let Some(rec) = rec {
+                out.insert("holder".into(), Value::String(rec.holder));
+                out.insert("pid".into(), Value::Number(rec.pid.into()));
+                out.insert("host".into(), Value::String(rec.host));
+                out.insert("acquired_at".into(), Value::Number(rec.acquired_at.into()));
+                out.insert(
+                    "expires_at".into(),
+                    rec.expires_at.map(Value::from).unwrap_or(Value::Null),
+                );
+                if let Some(r) = rec.reason {
+                    out.insert("reason".into(), Value::String(r));
+                }
+                if !rec.metadata.is_empty() {
+                    out.insert("metadata".into(), Value::Object(rec.metadata));
+                }
+            }
+            println!("{}", Value::Object(out));
+            0
+        }
+        other => {
+            eprintln!("fno-agents: unknown claim operation: {other} (use acquire|release|status)");
+            2
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1841,7 +1841,19 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     // handoff, so the daemon does the re-anchor here. Every early-return failure
     // path above kept the guard armed and released exactly once.
     if let Some(guard) = claude_claim_guard {
-        reanchor_session_claim_to_pid(&guard.session_uuid, &guard.holder, worker_pid);
+        // Offload the reanchor: `crate::claims::acquire` is synchronous file io
+        // that can, in the worst case (a same-key stale-recovery contention),
+        // wait on the recovery mutex, so calling it inline would risk stalling
+        // the async executor (gemini review, high). spawn_blocking keeps the
+        // reanchor best-effort/fire-and-forget without blocking. Disarm
+        // immediately (the worker owns the claim now); the detached reanchor
+        // only refines the recorded pid. Kept a plain sync fn so it stays
+        // callable + unit-testable outside a tokio runtime.
+        let uuid = guard.session_uuid.clone();
+        let holder = guard.holder.clone();
+        tokio::task::spawn_blocking(move || {
+            reanchor_session_claim_to_pid(&uuid, &holder, worker_pid);
+        });
         guard.disarm();
     }
     let _ = ctx.emitter.emit(
@@ -1919,55 +1931,26 @@ fn is_live_writer(status: AgentStatus) -> bool {
     )
 }
 
-/// The `fno claim acquire session:<uuid> --holder <holder> -J` argv. Pure for
-/// unit-testability (mirrors `stream_worker::claim_release_argv`). `-J` makes the
-/// CLI emit the resulting claim record so the daemon can confirm WHO holds it.
-fn claim_acquire_argv(uuid: &str, holder: &str) -> Vec<String> {
-    vec![
-        "claim".into(),
-        "acquire".into(),
-        format!("session:{uuid}"),
-        "--holder".into(),
-        holder.into(),
-        "-J".into(),
-    ]
-}
-
-/// The `fno claim acquire session:<uuid> --holder <holder> --pid <pid>` argv that
-/// re-anchors PID-liveness to a specific (long-lived) process. Pure for
-/// unit-testability; mirrors `stream_worker::claim_reacquire_argv` so the daemon
-/// and worker re-anchor identically.
-fn claim_acquire_pid_argv(uuid: &str, holder: &str, pid: u32) -> Vec<String> {
-    vec![
-        "claim".into(),
-        "acquire".into(),
-        format!("session:{uuid}"),
-        "--holder".into(),
-        holder.into(),
-        "--pid".into(),
-        pid.to_string(),
-    ]
-}
-
 /// Re-anchor an interactive-claude `session:<uuid>` claim's PID-liveness to the
-/// long-lived worker process (codex review P1). The daemon's pre-spawn acquire
-/// pins liveness to the ephemeral `fno` subprocess it shelled (already dead by
-/// registration), so the claim reads stale at once; re-acquiring with the same
-/// holder + the worker pid (an idempotent re-acquire) makes the claim track the
-/// real writer for the PTY's whole life. Fire-and-forget (`spawn`, reaped by the
-/// daemon idle-tick) so it never blocks the async executor; best-effort like the
-/// guard's release - the registry one-host re-check stays the authoritative
-/// in-daemon gate.
+/// long-lived worker process. With the native acquire the claim is already born
+/// live (anchored to the daemon's own pid), so this is a refinement, not a
+/// race-with-staleness: pointing the record at the worker keeps liveness
+/// correct if the daemon restarts while the worker lives. A same-holder
+/// re-acquire is idempotent; best-effort like the guard's release — the
+/// registry one-host re-check stays the authoritative in-daemon gate. Direct
+/// call (file io, microseconds): there is no child process to reap anymore.
 fn reanchor_session_claim_to_pid(uuid: &str, holder: &str, pid: u32) {
     if uuid.is_empty() {
         return;
     }
-    let _ = std::process::Command::new("fno")
-        .args(claim_acquire_pid_argv(uuid, holder, pid))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let _ = crate::claims::acquire(
+        &format!("session:{uuid}"),
+        holder,
+        crate::claims::AcquireOpts {
+            pid: Some(pid),
+            ..Default::default()
+        },
+    );
 }
 
 /// The worker argv for the claude stream-json lane (everything after the worker
@@ -2044,6 +2027,7 @@ fn build_claude_stream_entry(
 }
 
 /// Outcome of the pre-spawn single-writer claim acquisition.
+#[derive(Debug)]
 enum ClaimOutcome {
     /// We hold `session:<uuid>` (fresh acquire or idempotent re-acquire).
     Acquired,
@@ -2058,42 +2042,25 @@ enum ClaimOutcome {
 
 /// Acquire the `session:<uuid>` single-writer claim before spawning the stream
 /// worker (Locked Decision 5; the worker's `SessionClaimGuard` RELEASES it on
-/// orphan/exit, so the daemon only acquires). Shells the Python `fno claim` CLI
-/// -- the claim substrate is Python-only and cross-worktree -- exactly as the
-/// worker's `release_session_claim` does. Inherits the daemon environment so the
-/// claims root matches the worker's release root.
+/// orphan/exit, so the daemon only acquires). Native `crate::claims` call — no
+/// subprocess, no Python cold start on the adopt path. The record is anchored
+/// to the daemon's own (long-lived) pid, so the claim is live from birth: the
+/// old acquire-to-reanchor stale window, where a concurrent adopter could
+/// reclaim a claim pinned to an already-dead `fno` subprocess, is gone
+/// structurally. The fail-open posture on an unconsultable substrate
+/// (`Unavailable` -> registry one-host re-check remains authoritative) is
+/// unchanged.
 fn acquire_session_claim(uuid: &str, holder: &str) -> ClaimOutcome {
-    let output = std::process::Command::new("fno")
-        .args(claim_acquire_argv(uuid, holder))
-        .stdin(std::process::Stdio::null())
-        .output();
-    match output {
-        Err(e) => ClaimOutcome::Unavailable(format!("fno claim acquire failed to run: {e}")),
-        Ok(o) if !o.status.success() => {
-            // Non-zero exit is the CLI's `ClaimHeldByOther` (a live different
-            // holder) or another claim error: refuse, naming the conflict.
-            let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            ClaimOutcome::HeldByOther(if detail.is_empty() {
-                "held by another writer".into()
-            } else {
-                detail
-            })
+    match crate::claims::acquire(
+        &format!("session:{uuid}"),
+        holder,
+        crate::claims::AcquireOpts::default(),
+    ) {
+        crate::claims::AcquireOutcome::Acquired(_) => ClaimOutcome::Acquired,
+        crate::claims::AcquireOutcome::HeldByOther { holder, .. } => {
+            ClaimOutcome::HeldByOther(holder)
         }
-        Ok(o) => {
-            // Exit 0: confirm WE hold it. The CLI is idempotent and can recover a
-            // stale (dead-holder) claim, so a returned holder != ours means a
-            // different live writer owns it -> refuse.
-            match serde_json::from_slice::<Value>(&o.stdout) {
-                Ok(v) => match v.get("holder").and_then(Value::as_str) {
-                    Some(h) if h == holder => ClaimOutcome::Acquired,
-                    Some(other) => ClaimOutcome::HeldByOther(other.to_string()),
-                    None => ClaimOutcome::Acquired,
-                },
-                // Exit 0 but no parseable JSON (older CLI without -J support):
-                // treat as acquired; the registry one-host guard still protects us.
-                Err(_) => ClaimOutcome::Acquired,
-            }
-        }
+        crate::claims::AcquireOutcome::Error(e) => ClaimOutcome::Unavailable(e),
     }
 }
 
@@ -2102,10 +2069,9 @@ fn acquire_session_claim(uuid: &str, holder: &str) -> ClaimOutcome {
 /// disarmed (the worker has taken ownership of the claim once the row is
 /// registered `live` and owns its own RAII release). This means every
 /// early-return failure path releases exactly once with no manual call (gemini
-/// review HIGH: prefer RAII over scattered manual releases), and the release is
-/// fire-and-forget (`spawn`, not `status`) so it never blocks the async executor
-/// (gemini review HIGH: no sync `Command` wait in async). The daemon's idle-tick
-/// reaper waitpid-sweeps the detached child.
+/// review HIGH: prefer RAII over scattered manual releases). The release is a
+/// native file operation (microseconds), so it no longer needs a detached
+/// subprocess or the idle-tick reaper to stay off the async executor.
 struct DaemonClaimGuard {
     session_uuid: String,
     holder: String,
@@ -2125,21 +2091,17 @@ impl Drop for DaemonClaimGuard {
         if !self.armed {
             return;
         }
-        // Best-effort, non-blocking: a non-zero exit / missing `fno` is ignored
-        // (the claim's PID-liveness + reconcile are the backstops). AC1-ERR: a
-        // failed adopt must release any claim it acquired.
-        let _ = std::process::Command::new("fno")
-            .args([
-                "claim",
-                "release",
-                &format!("session:{}", self.session_uuid),
-                "--holder",
-                &self.holder,
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        // Best-effort native release: an error is ignored (the claim's
+        // PID-liveness + reconcile are the backstops). AC1-ERR: a failed adopt
+        // must release any claim it acquired. Direct call — file io in a Drop
+        // is microseconds, and there is no detached child for the idle-tick
+        // reaper to sweep anymore.
+        let _ = crate::claims::release(
+            &format!("session:{}", self.session_uuid),
+            &self.holder,
+            None,
+            None,
+        );
     }
 }
 
@@ -6800,23 +6762,36 @@ done
         assert_eq!(stream_claim_holder("sw7"), "stream:sw7");
     }
 
-    /// E1 (codex P1): the re-anchor argv pins the claim to a specific pid via
-    /// `--pid`, so PID-liveness tracks the long-lived worker, not the dead `fno`
-    /// subprocess. Mirrors stream_worker::claim_reacquire_argv.
+    /// E1 (codex P1), post-native-port: the re-anchor is a same-holder
+    /// idempotent re-acquire that pins PID-liveness to the given worker pid.
+    /// Exercised against a real lockfile via FNO_CLAIMS_ROOT (session: keys
+    /// route to the global root; the var scopes it to a tempdir).
     #[test]
-    fn claim_acquire_pid_argv_pins_worker_pid() {
-        assert_eq!(
-            claim_acquire_pid_argv("uuid-1", "pty:ab12cd34", 4242),
-            vec![
-                "claim",
-                "acquire",
-                "session:uuid-1",
-                "--holder",
-                "pty:ab12cd34",
-                "--pid",
-                "4242"
-            ]
+    fn reanchor_rewrites_claim_pid_to_worker() {
+        let td = tempfile::tempdir().unwrap();
+        // Serialize env access with the acquire test below via a shared lock.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_CLAIMS_ROOT", td.path());
+        let outcome = crate::claims::acquire(
+            "session:uuid-re",
+            "pty:ab12cd34",
+            crate::claims::AcquireOpts::default(),
         );
+        assert!(matches!(
+            outcome,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        reanchor_session_claim_to_pid("uuid-re", "pty:ab12cd34", 4242);
+        let (_, rec) = crate::claims::status("session:uuid-re", None);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let rec = rec.expect("claim record survives the reanchor");
+        assert_eq!(
+            rec.pid, 4242,
+            "reanchor must pin liveness to the worker pid"
+        );
+        assert_eq!(rec.holder, "pty:ab12cd34");
     }
 
     /// E1 (codex P2): interactive claude resolves to a real readiness detector,
@@ -6859,18 +6834,29 @@ done
     }
 
     #[test]
-    fn claim_acquire_argv_targets_session_key() {
-        assert_eq!(
-            claim_acquire_argv("U-1", "stream:sw1"),
-            vec![
-                "claim",
-                "acquire",
-                "session:U-1",
-                "--holder",
-                "stream:sw1",
-                "-J"
-            ]
-        );
+    fn acquire_session_claim_maps_native_outcomes() {
+        let td = tempfile::tempdir().unwrap();
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_CLAIMS_ROOT", td.path());
+        // Fresh acquire -> Acquired.
+        assert!(matches!(
+            acquire_session_claim("U-1", "stream:sw1"),
+            ClaimOutcome::Acquired
+        ));
+        // Same holder re-acquire -> still Acquired (idempotent).
+        assert!(matches!(
+            acquire_session_claim("U-1", "stream:sw1"),
+            ClaimOutcome::Acquired
+        ));
+        // A different holder against a LIVE claim -> HeldByOther naming the
+        // incumbent (the claim is pinned to this live test process).
+        match acquire_session_claim("U-1", "stream:other") {
+            ClaimOutcome::HeldByOther(who) => assert_eq!(who, "stream:sw1"),
+            other => panic!("expected HeldByOther, got {other:?}"),
+        }
+        std::env::remove_var("FNO_CLAIMS_ROOT");
     }
 
     #[test]

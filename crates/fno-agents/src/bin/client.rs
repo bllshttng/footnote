@@ -64,6 +64,17 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::mail_inject::run_mail_inject(&args[1..]);
     }
 
+    // `claim` is the HIDDEN debug front over the native claims module
+    // (`fno_agents::claims`): the cross-impl compatibility matrix drives the
+    // Rust side of the lockfile protocol through it, and it doubles as an ops
+    // escape hatch when the Python CLI is unavailable. Matched with `matches!`
+    // (like `mail-inject`) so the routable-verb parity guard does not see it
+    // and it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS — `fno claim`
+    // remains the only operator CLI for claims.
+    if matches!(verb, "claim") {
+        return fno_agents::client_verbs::run_claim(&args[1..]);
+    }
+
     // Per-verb help: `fno agents <verb> --help` prints that verb's usage line
     // and exits 0, instead of the verb's arg parser erroring "unknown flag:
     // --help" / "takes no arguments" (ab-351427cb). Only fires for a recognized

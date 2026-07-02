@@ -168,6 +168,20 @@ jobs:
         working-directory: crates/fno-agents
         run: cargo build
 
+      - name: Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)
+        # The claims lockfile protocol has two implementations: the Python
+        # reference (cli/src/fno/claims) and the native Rust module
+        # (crates/fno-agents/src/claims.rs) the daemon hot paths use. This job
+        # builds both toolchains, so the parity matrix must RUN here — the
+        # REQUIRED flag turns a missing binary into a failure instead of the
+        # skip the module allows on binary-less checkouts. (The full-suite
+        # pytest step above runs before the cargo build and skips this module;
+        # this step is the one that gates.)
+        working-directory: cli
+        env:
+          FNO_CLAIMS_COMPAT_REQUIRED: "1"
+        run: uv run pytest --tb=short -q tests/integration/test_claims_cross_impl.py
+
       - name: loop-check journey tests (e2e + emission-schema + backstop-subprocess)
         # Gap 1+2: real shim+binary e2e (green/block/budget-coherence).
         # Gap 3: every emitted event validated against events-schema.yaml.
