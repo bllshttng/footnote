@@ -263,6 +263,9 @@ async fn handle_client(mut stream: UnixStream, core_tx: mpsc::Sender<CoreMsg>, i
             build,
             rows,
             cols,
+            // Squad selection consumes this (squad.rs, task 2.4); the
+            // Phase-1-shaped single-pane loop has no squads yet.
+            cwd: _,
         })) => {
             if let Err(reason) = check_attach_version(proto, &build) {
                 // Refuse loudly with both versions; the client relays it.
@@ -310,6 +313,10 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                     break;
                 }
             }
+            Ok(ClientMsg::Command(_)) => {
+                // Wired into the core loop by the pane registry (task 2.3).
+                // Until then a command is dropped fail-closed, never a crash.
+            }
             Ok(ClientMsg::Detach) => {
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
@@ -349,7 +356,12 @@ async fn client_writer(
         }
         let frame = frame_rx.borrow_and_update().clone();
         if let Some(frame) = frame {
-            if write_msg(&mut w, &ServerMsg::Frame(frame)).await.is_err() {
+            // pane_id 0: the Phase-1-shaped loop still runs its single pane;
+            // the pane registry (task 2.3) replaces this with real ids.
+            if write_msg(&mut w, &ServerMsg::Frame { pane_id: 0, frame })
+                .await
+                .is_err()
+            {
                 // AC4-ERR: one bad client never takes down the server - or
                 // its peers. Deregister and stop writing.
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;

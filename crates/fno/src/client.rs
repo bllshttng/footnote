@@ -152,6 +152,12 @@ async fn attach_and_run(
     let (mut sock_r, mut sock_w) = stream.into_split();
 
     let (cols, rows) = terminal::size().map_err(|e| format!("terminal size: {e}"))?;
+    // The launch cwd keys squad selection server-side (squad.rs). An
+    // unreadable cwd (deleted directory) degrades to "" - the server treats
+    // it as a literal-path squad, never a refused attach.
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     write_msg(
         &mut sock_w,
         &ClientMsg::Attach {
@@ -159,6 +165,7 @@ async fn attach_and_run(
             build: BUILD_VERSION.to_string(),
             rows,
             cols,
+            cwd,
         },
     )
     .await
@@ -173,9 +180,9 @@ async fn attach_and_run(
     .await
     .map_err(|_| format!("server did not answer the attach; {log_hint}"))?;
     let first_frame = match first {
-        Ok(ServerMsg::Frame(f)) => checked_frame(f)?,
+        Ok(ServerMsg::Frame { frame, .. }) => checked_frame(frame)?,
         Ok(ServerMsg::Bye { reason }) => return Err(reason),
-        Ok(ServerMsg::Cursor { .. }) => return Err("server spoke out of order".into()),
+        Ok(_) => return Err("server spoke out of order".into()),
         Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
     };
 
@@ -229,8 +236,8 @@ async fn attach_and_run(
     let exit: Result<i32, String> = loop {
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
-                Ok(ServerMsg::Frame(f)) => {
-                    let f = match checked_frame(f) {
+                Ok(ServerMsg::Frame { frame, .. }) => {
+                    let f = match checked_frame(frame) {
                         Ok(f) => f,
                         Err(e) => break Err(e),
                     };
@@ -238,11 +245,12 @@ async fn attach_and_run(
                         break Err(format!("draw: {e}"));
                     }
                 }
-                Ok(ServerMsg::Cursor { row, col, visible }) => {
-                    if let Err(e) = compositor.place_cursor(row, col, visible) {
-                        break Err(format!("draw: {e}"));
-                    }
-                }
+                // Layout/ModeSync/Notice render in the N-pane compositor
+                // (task 2.5). The Phase-1-shaped server never sends them;
+                // ignoring instead of erroring keeps mixed-task states sane.
+                Ok(ServerMsg::Layout { .. })
+                | Ok(ServerMsg::ModeSync { .. })
+                | Ok(ServerMsg::Notice { .. }) => {}
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
                 Err(ProtoError::Closed) => {
                     break Ok(exit_with_notice("session ended (server closed)".into()));
@@ -381,17 +389,6 @@ impl Compositor {
         // Leave the line in a reset state so scrolling artifacts never bleed.
         queue!(out, style::SetAttribute(style::Attribute::Reset))?;
         Ok(())
-    }
-
-    fn place_cursor(&self, row: u16, col: u16, visible: bool) -> std::io::Result<()> {
-        let mut out = std::io::stdout().lock();
-        queue!(out, cursor::MoveTo(col, row))?;
-        if visible {
-            queue!(out, cursor::Show)?;
-        } else {
-            queue!(out, cursor::Hide)?;
-        }
-        out.flush()
     }
 }
 

@@ -197,7 +197,13 @@ fn persistence_malformed_frame_is_rejected_not_panicked() {
                 cursor_col: 0,
                 cursor_visible: true,
             };
-            let _ = write_msg_sync(&mut conn, &ServerMsg::Frame(bad));
+            let _ = write_msg_sync(
+                &mut conn,
+                &ServerMsg::Frame {
+                    pane_id: 0,
+                    frame: bad,
+                },
+            );
             std::thread::sleep(Duration::from_millis(500));
         }
     });

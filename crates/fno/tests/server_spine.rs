@@ -69,6 +69,7 @@ fn attach(sock: &Path, rows: u16, cols: u16) -> UnixStream {
             build: BUILD_VERSION.to_string(),
             rows,
             cols,
+            cwd: "/".to_string(),
         },
     )
     .unwrap();
@@ -108,13 +109,17 @@ fn wait_for_raw_frame(
     let mut last = String::new();
     while Instant::now() < deadline {
         match read_msg_sync::<_, ServerMsg>(stream) {
-            Ok(ServerMsg::Frame(f)) => {
-                last = frame_text(&f);
-                if pred(&f) {
-                    return f;
+            Ok(ServerMsg::Frame { frame, .. }) => {
+                last = frame_text(&frame);
+                if pred(&frame) {
+                    return frame;
                 }
             }
-            Ok(ServerMsg::Cursor { .. }) => {}
+            // Reliable-channel messages (Layout/ModeSync/Notice) are asserted
+            // by the layout e2e suite (task 2.6), not the spine helpers.
+            Ok(ServerMsg::Layout { .. })
+            | Ok(ServerMsg::ModeSync { .. })
+            | Ok(ServerMsg::Notice { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
@@ -247,6 +252,7 @@ fn server_spine_version_skew_is_refused_with_both_versions() {
             build: "99.0.0".to_string(),
             rows: 24,
             cols: 80,
+            cwd: "/".to_string(),
         },
     )
     .unwrap();
