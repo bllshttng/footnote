@@ -1277,6 +1277,11 @@ def cmd_update(
     ),
     domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
     size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
+    model: Optional[str] = typer.Option(
+        None,
+        "--model",
+        help="Pin the model dispatchers launch this node's worker on (x-571f), e.g. fable|opus|sonnet or a full provider-model id. Single non-whitespace token. Pass 'null' to clear (revert to provider default).",
+    ),
     batch: Optional[str] = typer.Option(
         None,
         "--batch",
@@ -1355,6 +1360,17 @@ def cmd_update(
     if size is not None and size.lower() != "null" and size.upper() not in {"S", "M", "L"}:
         typer.echo(f"Error: invalid size '{size}'. Must be one of: S, M, L", err=True)
         raise typer.Exit(code=1)
+    # Model pin (x-571f): a validated-shape pass-through, not an allowlist. A
+    # single non-whitespace token protects MODEL_FLAG shell word-splitting in
+    # the loop drivers; the CLI (not fno) resolves the alias. 'null' clears.
+    if model is not None and model.lower() != "null":
+        if model.split() != [model] or len(model) > 64:
+            typer.echo(
+                "Error: --model must be a single non-whitespace token, at most 64 chars "
+                "(e.g. fable|opus|sonnet or a full provider-model id)",
+                err=True,
+            )
+            raise typer.Exit(code=1)
     _VALID_TYPES = {"feature", "epic", "bug", "roadmap"}
     if type_ is not None and type_ not in _VALID_TYPES:
         typer.echo(
@@ -1461,6 +1477,8 @@ def cmd_update(
             node["domain"] = domain
         if size is not None:
             node["size"] = size.upper() if size.lower() != "null" else None
+        if model is not None:
+            node["model"] = None if model.lower() == "null" else model
         if type_ is not None:
             node["type"] = type_
         if public is not None:

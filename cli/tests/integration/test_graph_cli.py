@@ -962,6 +962,41 @@ def test_priority_update_rejects_invalid(tmp_graph):
     assert "p0" in combined and "p1" in combined and "p2" in combined and "p3" in combined
 
 
+def test_model_pin_set_visible_and_cleared(tmp_graph):
+    """x-571f US2 AC1-UI: `backlog update <id> --model` sets the pin (visible in
+    `get`), and `--model null` clears it back to provider default."""
+    node_id = json.loads(_invoke("backlog", "add", "Pinme").output)["id"]
+
+    r = _invoke("backlog", "update", node_id, "--model", "fable")
+    assert r.exit_code == 0, r.output
+    got = json.loads(_invoke("backlog", "get", node_id).output)
+    assert got["model"] == "fable"
+
+    # 'null' clears (revert to default).
+    r = _invoke("backlog", "update", node_id, "--model", "null")
+    assert r.exit_code == 0, r.output
+    got = json.loads(_invoke("backlog", "get", node_id).output)
+    assert got["model"] is None
+
+
+def test_model_pin_rejects_whitespace_token(tmp_graph):
+    """x-571f US2 AC1-ERR: an embedded-space model exits non-zero and leaves the
+    node's model unchanged (protects MODEL_FLAG shell word-splitting)."""
+    node_id = json.loads(_invoke("backlog", "add", "Nopin").output)["id"]
+
+    bad = runner.invoke(
+        app,
+        ["backlog", "update", node_id, "--model", "opus 4.8"],
+        catch_exceptions=True,
+    )
+    assert bad.exit_code != 0
+    combined = (bad.output or "") + (getattr(bad, "stderr", "") or "")
+    assert "single non-whitespace token" in combined
+    # Node unchanged: model still unset.
+    got = json.loads(_invoke("backlog", "get", node_id).output)
+    assert got.get("model") is None
+
+
 def test_priority_read_path_backfill(tmp_graph):
     """Read-only commands (`backlog ready`/`next`) sort correctly even before
     the first mutation triggers the on-disk backfill - `_apply_graph_defaults`
