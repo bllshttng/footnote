@@ -1697,18 +1697,12 @@ cat >/dev/null
     // io::Error and handle() turns it into an ErrorCode::Internal response. A
     // flaky test would cost more (CI noise) than this glue is worth.
 
-    /// Shared mutex so the FNO_CLAIMS_ROOT-mutating claim tests never
-    /// interleave (env vars are process-global; cargo runs the suite
-    /// multi-threaded).
-    fn claims_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     #[test]
     fn release_session_claim_drops_owned_lockfile() {
         let td = tempfile::tempdir().unwrap();
-        let _guard = claims_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FNO_CLAIMS_ROOT", td.path());
         let claim = SessionClaim {
             session_uuid: "uuid-rel".into(),
@@ -1731,7 +1725,9 @@ cat >/dev/null
         // same-holder idempotent re-acquire; the record's pid becomes the
         // worker's own process id.
         let td = tempfile::tempdir().unwrap();
-        let _guard = claims_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FNO_CLAIMS_ROOT", td.path());
         let claim = SessionClaim {
             session_uuid: "uuid-re".into(),

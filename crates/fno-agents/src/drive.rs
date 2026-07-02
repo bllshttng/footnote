@@ -1147,20 +1147,15 @@ async fn resize_worker(sock: &std::path::Path, rows: u16, cols: u16) -> Option<(
 mod tests {
     use super::*;
 
-    /// Shared env lock: FNO_CLAIMS_ROOT is process-global; the suite runs
-    /// multithreaded, so the native-claim tests must not interleave.
-    fn claims_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     #[test]
     fn external_claude_writer_reads_native_claim_and_fails_open() {
         // AC2-HP/ERR/EDGE: the drive verdict comes from a native
         // crate::claims::status read (zero subprocess). free/stale/corrupted
         // fail open; a live external holder refuses; a self-held claim allows.
         let td = tempfile::tempdir().unwrap();
-        let _g = claims_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FNO_CLAIMS_ROOT", td.path());
         let self_holder = "pty:short1";
 
@@ -1206,7 +1201,9 @@ mod tests {
         // this still shelled out, a stripped PATH would fail it open (None)
         // instead of returning the holder.
         let td = tempfile::tempdir().unwrap();
-        let _g = claims_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FNO_CLAIMS_ROOT", td.path());
         let saved_path = std::env::var_os("PATH");
         std::env::remove_var("PATH");

@@ -928,6 +928,18 @@ pub fn status(key: &str, root: Option<&Path>) -> (ClaimState, Option<ClaimRecord
     }
 }
 
+/// Process-global lock serializing every test (in ANY module) that mutates
+/// `FNO_CLAIMS_ROOT` / `PATH` / `FNO_BIN`. Env vars are process-global and the
+/// crate test suite runs multithreaded, so a per-module lock lets a daemon test
+/// and a drive test interleave and clobber each other's env — one shared mutex
+/// is the only correct serialization. `cfg(test)` sets crate-wide during
+/// `cargo test`, so this is visible to every module's test code.
+#[cfg(test)]
+pub fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

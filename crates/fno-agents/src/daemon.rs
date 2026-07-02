@@ -6758,7 +6758,9 @@ done
     fn reanchor_rewrites_claim_pid_to_worker() {
         let td = tempfile::tempdir().unwrap();
         // Serialize env access with the acquire test below via a shared lock.
-        let _guard = claims_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FNO_CLAIMS_ROOT", td.path());
         let outcome = crate::claims::acquire(
             "session:uuid-re",
@@ -6778,13 +6780,6 @@ done
             "reanchor must pin liveness to the worker pid"
         );
         assert_eq!(rec.holder, "pty:ab12cd34");
-    }
-
-    /// Shared mutex so the FNO_CLAIMS_ROOT-mutating tests never interleave
-    /// (cargo test runs the suite multi-threaded; env vars are process-global).
-    fn claims_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     /// E1 (codex P2): interactive claude resolves to a real readiness detector,
@@ -6829,7 +6824,9 @@ done
     #[test]
     fn acquire_session_claim_maps_native_outcomes() {
         let td = tempfile::tempdir().unwrap();
-        let _guard = claims_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FNO_CLAIMS_ROOT", td.path());
         // Fresh acquire -> Acquired.
         assert!(matches!(

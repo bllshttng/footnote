@@ -8,10 +8,11 @@
 //! [`crate::claude_attach`].
 //!
 //! The claim is **anchored to the long-lived HOLDER pid from the first acquire**
-//! (footnote's attach-holder process via `--pid`), never to the transient `fno
-//! claim` subprocess -- a claim anchored to a process that exits the instant the
-//! acquire returns goes instantly `stale` and a concurrent adopter could reclaim
-//! it (the daemon-claim-reanchor lesson, PR#53; codex P1 on this PR). The
+//! (footnote's attach-holder process), so it is live from birth. The daemon's
+//! historical shell-out recorded the transient `fno claim` subprocess pid, so
+//! the claim went instantly `stale` and a concurrent adopter could reclaim it
+//! (the daemon-claim-reanchor lesson, PR#53; codex P1 on this PR); the native
+//! acquire records the holder pid directly and closes that window. The
 //! `session:<uuid>` key routes to the host-global claims root, so two checkouts
 //! cannot take separate project-local claims for the same session.
 
@@ -102,8 +103,8 @@ pub enum ClaimOutcome {
     Acquired,
     /// Another live writer holds it; refuse to double-adopt (AC1-EDGE).
     HeldByOther(String),
-    /// The claim substrate could not be consulted (no `fno` on PATH, exec error,
-    /// unparseable output). Fail OPEN -- the file-claim is the cross-process
+    /// The claim substrate could not be consulted (io / validation error from
+    /// the native acquire). Fail OPEN -- the file-claim is the cross-process
     /// coordination record, best-effort like the daemon's.
     Unavailable(String),
 }
@@ -143,8 +144,8 @@ pub fn acquire_pty_claim(uuid: &str, holder: &str, holder_pid: u32) -> ClaimOutc
 /// taken -- the Phase-0 spike retired the held-attach layer; idle `claude --bg`
 /// sessions persist on their own.
 ///
-/// ponytail: live glue -- shells the real `fno claim` CLI, so it is not
-/// unit-tested; every composed piece (mint, upsert, claim argv) is.
+/// ponytail: live glue over registry io -- not unit-tested here; every composed
+/// piece (mint, upsert, native `acquire_pty_claim`) is.
 pub fn adopt(
     registry_path: &Path,
     worker: &RosterWorker,
@@ -287,7 +288,9 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&td).unwrap();
-        let _guard = claims_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FNO_CLAIMS_ROOT", &td);
         // Fresh acquire pinned to a live pid (our own, so it classifies live).
         let me = std::process::id();
@@ -304,12 +307,5 @@ mod tests {
         );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         std::fs::remove_dir_all(&td).ok();
-    }
-
-    /// Shared mutex so the FNO_CLAIMS_ROOT-mutating test never interleaves with
-    /// other env-mutating tests (env is process-global; suite is multithreaded).
-    fn claims_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 }
