@@ -131,6 +131,102 @@ impl Pane {
         let frame = self.frame();
         frame_text(&frame)
     }
+
+    /// The pane's negotiated terminal modes - the per-pane state whose
+    /// EFFECT lives on the client's real terminal. Only the focused pane's
+    /// modes may own the client TTY at any moment (replaying an unfocused
+    /// vim's mouse reporting would break the focused shell), so the server
+    /// syncs these on focus change and attach via [`mode_diff`].
+    pub fn modes(&self) -> Modes {
+        let m = self.term.mode();
+        Modes {
+            app_cursor: m.contains(TermMode::APP_CURSOR),
+            app_keypad: m.contains(TermMode::APP_KEYPAD),
+            bracketed_paste: m.contains(TermMode::BRACKETED_PASTE),
+            focus_in_out: m.contains(TermMode::FOCUS_IN_OUT),
+            mouse_click: m.contains(TermMode::MOUSE_REPORT_CLICK),
+            mouse_drag: m.contains(TermMode::MOUSE_DRAG),
+            mouse_motion: m.contains(TermMode::MOUSE_MOTION),
+            sgr_mouse: m.contains(TermMode::SGR_MOUSE),
+            utf8_mouse: m.contains(TermMode::UTF8_MOUSE),
+            alternate_scroll: m.contains(TermMode::ALTERNATE_SCROLL),
+            kitty_flags: kitty_bits(m),
+        }
+    }
+}
+
+/// The negotiated-mode subset that crosses the wire in `ModeSync`. Alt screen
+/// is deliberately ABSENT: panes composite into the client's own alt screen,
+/// so a pane's alt-screen state must never leak to the client TTY. Cursor
+/// visibility rides inside every `Frame` instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Modes {
+    pub app_cursor: bool,
+    pub app_keypad: bool,
+    pub bracketed_paste: bool,
+    pub focus_in_out: bool,
+    pub mouse_click: bool,
+    pub mouse_drag: bool,
+    pub mouse_motion: bool,
+    pub sgr_mouse: bool,
+    pub utf8_mouse: bool,
+    pub alternate_scroll: bool,
+    /// The kitty keyboard-protocol flag bits (progressive enhancement), as
+    /// alacritty_terminal 0.26 models them: 1 disambiguate, 2 event types,
+    /// 4 alternate keys, 8 all-keys-as-esc, 16 associated text.
+    pub kitty_flags: u8,
+}
+
+/// The kitty progressive-enhancement bits from a live mode set, in the wire
+/// order the kitty protocol defines.
+fn kitty_bits(m: &TermMode) -> u8 {
+    let mut bits = 0u8;
+    if m.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
+        bits |= 1;
+    }
+    if m.contains(TermMode::REPORT_EVENT_TYPES) {
+        bits |= 2;
+    }
+    if m.contains(TermMode::REPORT_ALTERNATE_KEYS) {
+        bits |= 4;
+    }
+    if m.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
+        bits |= 8;
+    }
+    if m.contains(TermMode::REPORT_ASSOCIATED_TEXT) {
+        bits |= 16;
+    }
+    bits
+}
+
+/// The escape bytes that move a terminal from `old` to `new` mode state.
+/// Pure and minimal: only CHANGED modes emit a sequence, so syncing a pane
+/// against itself is zero bytes (the server skips empty syncs entirely).
+pub fn mode_diff(old: Modes, new: Modes) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut dec = |on: bool, was: bool, code: &str| {
+        if on != was {
+            out.extend_from_slice(format!("\x1b[?{code}{}", if on { 'h' } else { 'l' }).as_bytes());
+        }
+    };
+    dec(new.app_cursor, old.app_cursor, "1");
+    dec(new.mouse_click, old.mouse_click, "1000");
+    dec(new.mouse_drag, old.mouse_drag, "1002");
+    dec(new.mouse_motion, old.mouse_motion, "1003");
+    dec(new.focus_in_out, old.focus_in_out, "1004");
+    dec(new.utf8_mouse, old.utf8_mouse, "1005");
+    dec(new.sgr_mouse, old.sgr_mouse, "1006");
+    dec(new.alternate_scroll, old.alternate_scroll, "1007");
+    dec(new.bracketed_paste, old.bracketed_paste, "2004");
+    if new.app_keypad != old.app_keypad {
+        out.extend_from_slice(if new.app_keypad { b"\x1b=" } else { b"\x1b>" });
+    }
+    if new.kitty_flags != old.kitty_flags {
+        // "CSI = flags ; 1 u": set the given flags and unset the rest - the
+        // stateless form, so no push/pop stack bookkeeping crosses the wire.
+        out.extend_from_slice(format!("\x1b[={};1u", new.kitty_flags).as_bytes());
+    }
+    out
 }
 
 /// Render a [`Frame`]'s cells as trimmed plain text, one line per row with
@@ -309,6 +405,67 @@ mod tests {
         );
         // The text projection skips the spacer: 宽 then x, no phantom gap.
         assert_eq!(frame_text(&frame), "宽x");
+    }
+
+    #[test]
+    fn server_spine_vt_modes_track_dec_private_sets() {
+        let mut pane = Pane::new(4, 20);
+        // alacritty's TermMode::default() ships ALTERNATE_SCROLL on, so a
+        // fresh pane is NOT Modes::default() (= a raw client terminal). The
+        // attach-time sync therefore emits one ?1007h - deliberate: the
+        // client terminal should mirror the pane's real state, not our guess.
+        assert_eq!(
+            pane.modes(),
+            Modes {
+                alternate_scroll: true,
+                ..Modes::default()
+            }
+        );
+        // vim-with-mouse territory: app cursor, SGR mouse w/ motion,
+        // bracketed paste.
+        pane.feed(b"\x1b[?1h\x1b[?1003h\x1b[?1006h\x1b[?2004h");
+        let m = pane.modes();
+        assert!(m.app_cursor && m.mouse_motion && m.sgr_mouse && m.bracketed_paste);
+        assert!(!m.mouse_click && !m.utf8_mouse, "unset modes stay unset");
+        pane.feed(b"\x1b[?1003l\x1b[?2004l");
+        let m = pane.modes();
+        assert!(!m.mouse_motion && !m.bracketed_paste);
+        assert!(m.sgr_mouse, "unrelated modes survive");
+    }
+
+    #[test]
+    fn server_spine_vt_mode_diff_emits_only_changes() {
+        let plain = Modes::default();
+        let vim = Modes {
+            app_cursor: true,
+            mouse_motion: true,
+            sgr_mouse: true,
+            bracketed_paste: true,
+            ..Modes::default()
+        };
+        assert!(
+            mode_diff(plain, plain).is_empty(),
+            "identical modes must sync zero bytes"
+        );
+        let to_vim = String::from_utf8(mode_diff(plain, vim)).unwrap();
+        assert!(to_vim.contains("\x1b[?1h"), "{to_vim:?}");
+        assert!(to_vim.contains("\x1b[?1003h"), "{to_vim:?}");
+        assert!(to_vim.contains("\x1b[?1006h"), "{to_vim:?}");
+        assert!(to_vim.contains("\x1b[?2004h"), "{to_vim:?}");
+        // The way back RESETS exactly what was set.
+        let to_plain = String::from_utf8(mode_diff(vim, plain)).unwrap();
+        assert!(to_plain.contains("\x1b[?1l"), "{to_plain:?}");
+        assert!(to_plain.contains("\x1b[?1003l"), "{to_plain:?}");
+        assert!(to_plain.contains("\x1b[?2004l"), "{to_plain:?}");
+        // Kitty flags use the stateless absolute-set form.
+        let kitty = Modes {
+            kitty_flags: 0b1011,
+            ..Modes::default()
+        };
+        let set = String::from_utf8(mode_diff(plain, kitty)).unwrap();
+        assert!(set.contains("\x1b[=11;1u"), "{set:?}");
+        let clear = String::from_utf8(mode_diff(kitty, plain)).unwrap();
+        assert!(clear.contains("\x1b[=0;1u"), "{clear:?}");
     }
 
     #[test]

@@ -171,19 +171,27 @@ async fn attach_and_run(
     .await
     .map_err(|e| format!("attach failed: {e}"))?;
 
-    // First server message decides everything, BEFORE the terminal is taken
-    // over, so a refusal prints as a plain one-liner (AC1-ERR, version skew).
-    let first = tokio::time::timeout(
-        Duration::from_secs(10),
-        read_msg::<_, ServerMsg>(&mut sock_r),
-    )
-    .await
-    .map_err(|_| format!("server did not answer the attach; {log_hint}"))?;
-    let first_frame = match first {
-        Ok(ServerMsg::Frame { frame, .. }) => checked_frame(frame)?,
-        Ok(ServerMsg::Bye { reason }) => return Err(reason),
-        Ok(_) => return Err("server spoke out of order".into()),
-        Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
+    // The first frame (or refusal) decides everything, BEFORE the terminal
+    // is taken over, so a refusal prints as a plain one-liner (AC1-ERR,
+    // version skew). The v2 server sends a reliable preamble ahead of it
+    // (ModeSync/Layout/Notice); this Phase-1-shaped client skips those - the
+    // N-pane compositor (task 2.5) renders them.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let first_frame = loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| format!("server did not answer the attach; {log_hint}"))?;
+        let first = tokio::time::timeout(remaining, read_msg::<_, ServerMsg>(&mut sock_r))
+            .await
+            .map_err(|_| format!("server did not answer the attach; {log_hint}"))?;
+        match first {
+            Ok(ServerMsg::Frame { frame, .. }) => break checked_frame(frame)?,
+            Ok(ServerMsg::Bye { reason }) => return Err(reason),
+            Ok(ServerMsg::Layout { .. })
+            | Ok(ServerMsg::ModeSync { .. })
+            | Ok(ServerMsg::Notice { .. }) => continue,
+            Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
+        }
     };
 
     // Socket reads get their own task. `read_msg` is NOT cancellation-safe

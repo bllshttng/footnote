@@ -68,13 +68,18 @@ pub struct PtyShell {
 
 impl PtyShell {
     /// Spawn the first spawnable candidate from `candidates` on a fresh
-    /// `rows`x`cols` PTY. Output chunks flow into `tx`; the channel closing
-    /// (sender dropped) is the child-exited signal to the consumer.
+    /// `rows`x`cols` PTY. Output chunks flow into the SHARED `out_tx` tagged
+    /// with `pane_id`; when the child is gone (EOF/EIO on the master) the
+    /// reader thread sends `pane_id` on `exit_tx` and ends. An explicit exit
+    /// channel replaces Phase 1's channel-close signal: with one shared
+    /// output channel for N panes, one reader exiting can no longer close it.
     pub fn spawn(
         candidates: &[OsString],
         rows: u16,
         cols: u16,
-        tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+        pane_id: u64,
+        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<PtyShell, PtyError> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -114,7 +119,7 @@ impl PtyShell {
             .try_clone_reader()
             .map_err(|e| PtyError::Reader(e.to_string()))?;
 
-        spawn_reader(reader, tx)?;
+        spawn_reader(reader, pane_id, out_tx, exit_tx)?;
         let input_tx = spawn_writer(writer)?;
 
         Ok(PtyShell {
@@ -172,6 +177,18 @@ impl PtyShell {
         };
         !matches!(child.try_wait(), Ok(Some(_)))
     }
+
+    /// Kill and reap the child (explicit ClosePane / CloseTab). Idempotent:
+    /// killing an already-dead child errors harmlessly and the wait reaps
+    /// either way, so a close racing a natural exit never double-reaps or
+    /// leaves a zombie. SIGKILL makes the post-kill wait effectively
+    /// immediate, so this is safe on the core loop.
+    pub fn kill(&self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// The blocking writer thread: bounded channel -> PTY master. Owns the writer
@@ -202,12 +219,15 @@ fn spawn_writer(
     Ok(tx)
 }
 
-/// The blocking reader thread: PTY master -> bounded channel. Exits on EOF
-/// (child gone; macOS reports Ok(0), Linux EIO) or a closed channel, dropping
-/// `tx` either way so the consumer sees the stream end.
+/// The blocking reader thread: PTY master -> the shared pane-tagged channel.
+/// Exits on EOF (child gone; macOS reports Ok(0), Linux EIO) or a closed
+/// channel, sending the pane id on `exit_tx` either way so the core loop
+/// learns WHICH pane's child ended.
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
-    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pane_id: u64,
+    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    exit_tx: tokio::sync::mpsc::Sender<u64>,
 ) -> Result<(), PtyError> {
     std::thread::Builder::new()
         .name("fno-mux-pty-reader".into())
@@ -219,7 +239,7 @@ fn spawn_reader(
                     Ok(n) => {
                         // blocking_send backpressures the reader (and thus the
                         // child) when the core loop lags; never unbounded.
-                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        if out_tx.blocking_send((pane_id, buf[..n].to_vec())).is_err() {
                             break; // consumer gone; nothing to drain for
                         }
                     }
@@ -233,6 +253,7 @@ fn spawn_reader(
                     }
                 }
             }
+            let _ = exit_tx.blocking_send(pane_id);
         })
         .map_err(|e| PtyError::Reader(format!("reader thread spawn failed: {e}")))?;
     Ok(())
@@ -267,16 +288,20 @@ mod tests {
     #[tokio::test]
     async fn server_spine_unspawnable_shell_falls_back() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
         let candidates = shell_candidates(Some(OsStr::new("/nonexistent/definitely-not-a-shell")));
-        let shell = PtyShell::spawn(&candidates, 24, 80, tx).expect("fallback must spawn");
+        let shell =
+            PtyShell::spawn(&candidates, 24, 80, 7, tx, exit_tx).expect("fallback must spawn");
         assert!(shell.is_child_alive());
-        // Prove the fallback shell is real: round-trip a command.
+        // Prove the fallback shell is real: round-trip a command, and assert
+        // every chunk carries this pane's tag.
         shell.write_input(b"echo fallback-ok\r").unwrap();
         let mut seen = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
-                Ok(Some(chunk)) => {
+                Ok(Some((pane_id, chunk))) => {
+                    assert_eq!(pane_id, 7, "reader must tag output with its pane id");
                     seen.extend_from_slice(&chunk);
                     if String::from_utf8_lossy(&seen).contains("fallback-ok") {
                         return;
@@ -292,14 +317,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn server_spine_child_exit_signals_the_exit_channel() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let (exit_tx, mut exit_rx) = tokio::sync::mpsc::channel(4);
+        let shell = PtyShell::spawn(
+            &shell_candidates(Some(OsStr::new("/bin/sh"))),
+            24,
+            80,
+            42,
+            tx,
+            exit_tx,
+        )
+        .expect("spawns");
+        shell.write_input(b"exit\r").unwrap();
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(10), exit_rx.recv())
+            .await
+            .expect("exit must be signaled")
+            .expect("channel open");
+        assert_eq!(pid, 42, "exit signal must carry the pane id");
+    }
+
     #[test]
     fn server_spine_all_candidates_unspawnable_is_a_clear_error() {
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
         let err = PtyShell::spawn(
             &["/nonexistent/a".into(), "/nonexistent/b".into()],
             24,
             80,
+            0,
             tx,
+            exit_tx,
         )
         .err()
         .expect("must fail");
