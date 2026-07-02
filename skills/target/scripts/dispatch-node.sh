@@ -197,7 +197,7 @@ for id in "${NODES[@]}"; do
   # - the `+` guard keeps an EMPTY array from tripping bash 3.2's set -u unbound
   # error (the same trap the --cwd branches below avoid). Empty pin -> zero args =
   # byte-identical to today; fail-open on a bad read since jq // empty yields "".
-  model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null)"
+  model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null || true)"
   model_args=()
   [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")
 

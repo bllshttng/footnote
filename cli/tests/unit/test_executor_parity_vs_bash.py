@@ -337,6 +337,17 @@ def test_parse_locked_model_rejects_multitoken_and_metachars() -> None:
     assert _locked.parse_locked_model("## Locked Decisions\nModel: fo*\n") == ""
 
 
+def test_parse_locked_model_tolerates_bold_styles() -> None:
+    # Both bold conventions must parse to the bare token (gemini review PR #150):
+    # key-only bold and key+colon bold.
+    assert _locked.parse_locked_model("## Locked Decisions\n**Model**: fable\n") == "fable"
+    assert _locked.parse_locked_model("## Locked Decisions\n**Model:** fable\n") == "fable"
+    assert _locked.parse_locked_model("## Locked Decisions\n1. **Model:** fable\n") == "fable"
+    # A metacharacter value is still rejected (the closing-bold consumption does
+    # not eat a value's own '*').
+    assert _locked.parse_locked_model("## Locked Decisions\n**Model:** fo*\n") == ""
+
+
 def test_parse_locked_model_strips_provenance_suffix() -> None:
     # A trailing (provenance) suffix mirrors the executor lock and is dropped.
     doc = "## Locked Decisions\nModel: fable (user-confirmed)\n"
