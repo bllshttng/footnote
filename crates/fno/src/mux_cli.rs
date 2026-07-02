@@ -243,6 +243,27 @@ const DEFAULT_WAIT_TIMEOUT_S: u64 = 30;
 /// short by the client's read timeout.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Resolve `pane run --cwd` to an absolute path CLIENT-side. The server is a
+/// detached daemon with its own cwd, so a RELATIVE path would resolve against
+/// the wrong directory there (gemini review). Absolute passes through; a
+/// relative path is joined onto `client_cwd`; omitted defaults to `client_cwd`.
+/// `client_cwd` is passed in (not read here) so the branch is unit-testable.
+fn resolve_run_cwd(cwd: Option<String>, client_cwd: Option<std::path::PathBuf>) -> String {
+    let join = |rel: &str| -> Option<String> {
+        client_cwd
+            .as_ref()
+            .map(|d| d.join(rel).to_string_lossy().into_owned())
+    };
+    match cwd {
+        Some(c) if std::path::Path::new(&c).is_absolute() => c,
+        Some(c) => join(&c).unwrap_or(c),
+        None => client_cwd
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
+}
+
 fn wait_exit_code(outcome: WaitOutcome) -> i32 {
     match outcome {
         WaitOutcome::Quiet => EXIT_OK,
@@ -473,13 +494,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
         PaneCmd::Ls => (ControlVerb::PaneLs, CONTROL_TIMEOUT),
         PaneCmd::Read { pane, lines } => (ControlVerb::PaneRead { pane, lines }, CONTROL_TIMEOUT),
         PaneCmd::Run { cwd, argv } => {
-            let cwd = cwd
-                .or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .map(|p| p.to_string_lossy().into_owned())
-                })
-                .unwrap_or_default();
+            let cwd = resolve_run_cwd(cwd, std::env::current_dir().ok());
             (
                 ControlVerb::PaneRun {
                     cwd,
@@ -834,6 +849,24 @@ mod tests {
             parse_pane_args(&os(&["read"])).is_err(),
             "read needs a pane id"
         );
+    }
+
+    #[test]
+    fn mux_pane_run_cwd_resolves_relative_client_side() {
+        let base = std::path::PathBuf::from("/home/u/proj");
+        // Absolute passes through untouched.
+        assert_eq!(
+            resolve_run_cwd(Some("/code/foo".into()), Some(base.clone())),
+            "/code/foo"
+        );
+        // Relative is joined onto the client cwd (the daemon would otherwise
+        // resolve it against ITS own cwd).
+        assert_eq!(
+            resolve_run_cwd(Some("sub/dir".into()), Some(base.clone())),
+            "/home/u/proj/sub/dir"
+        );
+        // Omitted defaults to the client cwd.
+        assert_eq!(resolve_run_cwd(None, Some(base)), "/home/u/proj");
     }
 
     #[test]
