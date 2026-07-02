@@ -282,6 +282,46 @@ def run_wizard(
     return {"written": written, "cancelled": False}
 
 
+def offer_recommended_rules(
+    *,
+    confirm_fn: Callable[[str], bool],
+    echo_fn: Callable[[str], None] = lambda _m: None,
+    source_dir: Optional[Path] = None,
+    target_dir: Optional[Path] = None,
+) -> dict:
+    """Opt-in offer to install footnote's recommended claude-code rules.
+
+    Interactive-agnostic core (the CLI passes typer confirm/echo). Prompts once,
+    default No; installs only on explicit yes. ``source_dir`` defaults to the
+    shipped plugin ``rules/`` dir and ``target_dir`` to ``~/.claude/rules/`` -
+    both overridable for tests. Returns ``{"installed": bool, "results": [...]}``.
+    """
+    import os
+
+    from fno.setup.recommended_rules import (
+        default_rules_source,
+        install_recommended_rules,
+        summarize,
+    )
+
+    src = source_dir or default_rules_source()
+    if src is None or not Path(src).is_dir():
+        # No pack resolvable anywhere: nothing to offer, say nothing.
+        return {"installed": False, "results": []}
+
+    if not confirm_fn(
+        "Install footnote's recommended claude-code rules into ~/.claude/rules/?"
+    ):
+        return {"installed": False, "results": []}
+
+    # os.path.expanduser (not Path.home()) so a headless / sandboxed setup run
+    # with an unset HOME degrades instead of raising RuntimeError (PR #146 gemini).
+    tgt = target_dir or (Path(os.path.expanduser("~")) / ".claude" / "rules")
+    results = install_recommended_rules(Path(src), Path(tgt))
+    echo_fn(summarize(results))
+    return {"installed": True, "results": results}
+
+
 @app.command("wizard")
 def wizard_cmd(
     advanced: bool = typer.Option(
@@ -339,6 +379,16 @@ def wizard_cmd(
         f"\nwizard complete: {n} key(s) written. "
         "Run `fno config doctor` to verify."
     )
+
+    # Optional capstone: install footnote's recommended claude-code rules into
+    # ~/.claude/rules/ (opt-in, default No). Never overwrites a real user file.
+    def rules_confirm_fn(message: str) -> bool:
+        try:
+            return typer.confirm(message, default=False)
+        except typer.Abort:
+            return False
+
+    offer_recommended_rules(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
 
     # Optional capstone: wire the /fno:* slash commands into the agent CLIs on
     # PATH. A CLI-only install has the binary but not the slash commands; this
