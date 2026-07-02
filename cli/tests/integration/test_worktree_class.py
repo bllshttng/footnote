@@ -70,14 +70,18 @@ def wm(tmp_git_repo: Path) -> WorktreeManager:
 
 
 def test_create_makes_worktree_with_unique_branch(wm: WorktreeManager, tmp_git_repo: Path):
-    """create() produces a worktree dir and a branch named feature/{last8}."""
+    """create() produces a worktree dir and a legible <prefix>/<slug>-<node> branch.
+
+    With no graph slug the branch degrades to <prefix>/<node> (x-ff83 W3 AC3-ERR),
+    never a truncated hex and never a dangling <prefix>/-<node>.
+    """
     node_id = "ab-12345678"
     wt = wm.create(node_id, base_ref="main")
 
     # Path should exist on disk
     assert wt.path.exists(), f"expected worktree at {wt.path}"
-    # Branch should be feature/{last 8 chars}
-    assert wt.branch == "feature/12345678"
+    # Branch carries the FULL node id (round-trip resolvable), default prefix fno.
+    assert wt.branch == "fno/ab-12345678"
     # The git worktree list should include the path
     result = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],

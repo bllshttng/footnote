@@ -19,6 +19,9 @@ config:
   state_dir: "~/.fno/"
   # Where folder plans are written.
   plans_dir: .fno/plans/
+  branch:
+    # Prefix for dispatched worktree branches: <prefix>/<slug>-<node>.
+    prefix: fno
   paths:
     # Override path to the backlog graph.json.
     graph_json: null

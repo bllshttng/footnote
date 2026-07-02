@@ -410,6 +410,33 @@ def plans_dir(project_root: Optional[Path] = None) -> Path:
     return _resolve(raw, project_root=root)
 
 
+def plans_content_dir(project_root: Optional[Path] = None) -> Path:
+    """Resolve where plan DOCS actually live (x-ff83).
+
+    Same lookup ``/blueprint`` and interactive ``/think`` use (mirrors the
+    ``scripts/lib/config.sh`` resolution order):
+      1. ``.claude/settings.local.json`` -> ``plansDirectory`` (per-machine).
+      2. ``.claude/settings.json`` -> ``plansDirectory`` (project-level, committed).
+      3. ``config.plans_dir`` (settings.yaml) via :func:`plans_dir`.
+
+    Distinct from :func:`plans_dir`, which returns only the settings.yaml
+    default and does not read the ``.claude`` override the docs vault uses.
+    """
+    import json
+
+    root = project_root or resolve_repo_root()
+    for name in ("settings.local.json", "settings.json"):
+        try:
+            data = json.loads((root / ".claude" / name).read_text())
+            raw = data.get("plansDirectory")
+            if raw:
+                p = Path(raw)
+                return p if p.is_absolute() else (root / p).resolve()
+        except (OSError, ValueError):
+            continue  # missing/unreadable -> try the next tier
+    return plans_dir(root)
+
+
 def handoffs_dir(project_root: Optional[Path] = None) -> Path:
     """Return the directory where target writes session handoff artifacts.
 
