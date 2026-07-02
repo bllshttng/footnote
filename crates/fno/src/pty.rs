@@ -80,6 +80,7 @@ impl PtyShell {
         rows: u16,
         cols: u16,
         cwd: Option<&std::path::Path>,
+        session: &str,
         pane_id: u64,
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
@@ -100,6 +101,9 @@ impl PtyShell {
             let mut cmd = CommandBuilder::new(cand);
             // A login-ish TERM so shells and full-screen programs behave.
             cmd.env("TERM", "xterm-256color");
+            // Every pane knows its session (AC3-HP): the nested-attach guard
+            // and `fno mux kill-server`'s default both read this.
+            cmd.env("FNO_SESSION", session);
             if let Some(dir) = cwd.filter(|d| d.is_dir()) {
                 cmd.cwd(dir);
             }
@@ -296,7 +300,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
         let candidates = shell_candidates(Some(OsStr::new("/nonexistent/definitely-not-a-shell")));
-        let shell = PtyShell::spawn(&candidates, 24, 80, None, 7, tx, exit_tx)
+        let shell = PtyShell::spawn(&candidates, 24, 80, None, "main", 7, tx, exit_tx)
             .expect("fallback must spawn");
         assert!(shell.is_child_alive());
         // Prove the fallback shell is real: round-trip a command, and assert
@@ -332,6 +336,7 @@ mod tests {
             24,
             80,
             None,
+            "main",
             42,
             tx,
             exit_tx,
@@ -354,6 +359,7 @@ mod tests {
             24,
             80,
             None,
+            "main",
             0,
             tx,
             exit_tx,

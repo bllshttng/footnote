@@ -61,6 +61,12 @@ pub struct ClientHarness {
 
 impl ClientHarness {
     pub fn spawn(scratch: &Scratch) -> Self {
+        Self::spawn_with(scratch, &[])
+    }
+
+    /// Like [`ClientHarness::spawn`] with extra environment on the client
+    /// process (the nested-guard cases need `FNO_SESSION` preset).
+    pub fn spawn_with(scratch: &Scratch, envs: &[(&str, &str)]) -> Self {
         // 60 columns: below the sideline's auto-hide threshold (panel 28 +
         // min content 40), so the panel stays hidden and Phase-1-era screen
         // assertions see bare content lines under the 1-row tab bar. The
@@ -81,6 +87,9 @@ impl ClientHarness {
         cmd.env("TERM", "xterm-256color");
         // A bare, predictable prompt so screen assertions are stable.
         cmd.env("PS1", "$ ");
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
         let child = pty.slave.spawn_command(cmd).unwrap();
         drop(pty.slave);
 
@@ -230,6 +239,17 @@ pub struct LayoutSnap {
     pub active_squad: u64,
     pub panes: Vec<(u64, Rect)>,
     pub focus: u64,
+    pub area: (u16, u16),
+}
+
+/// One absorbed message kind, in arrival order - the seam for asserting the
+/// re-anchor ordering contract (ModeSync -> Layout -> frames, AC2-ERR).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum Absorbed {
+    ModeSync,
+    Layout,
+    Frame(u64),
 }
 
 /// A raw wire client: sends `ClientMsg`s, absorbs everything the server
@@ -245,6 +265,8 @@ pub struct FakeClient {
     pub modesyncs: Vec<Vec<u8>>,
     pub notices: Vec<String>,
     pub byes: Vec<String>,
+    /// Every absorbed message's kind, chronologically.
+    pub order: Vec<Absorbed>,
 }
 
 #[allow(dead_code)]
@@ -275,6 +297,7 @@ impl FakeClient {
             modesyncs: Vec::new(),
             notices: Vec::new(),
             byes: Vec::new(),
+            order: Vec::new(),
         }
     }
 
@@ -303,6 +326,12 @@ impl FakeClient {
     }
 
     fn absorb(&mut self, msg: ServerMsg) {
+        match &msg {
+            ServerMsg::Frame { pane_id, .. } => self.order.push(Absorbed::Frame(*pane_id)),
+            ServerMsg::Layout { .. } => self.order.push(Absorbed::Layout),
+            ServerMsg::ModeSync { .. } => self.order.push(Absorbed::ModeSync),
+            _ => {}
+        }
         match msg {
             ServerMsg::Frame { pane_id, frame } => {
                 assert!(frame.geometry_ok(), "server sent a malformed frame");
@@ -314,17 +343,21 @@ impl FakeClient {
                 active_squad,
                 panes,
                 focus,
+                area,
             } => {
                 self.layout = Some(LayoutSnap {
                     squads,
                     active_squad,
                     panes,
                     focus,
+                    area,
                 });
             }
             ServerMsg::ModeSync { bytes } => self.modesyncs.push(bytes),
             ServerMsg::Notice { text } => self.notices.push(text),
             ServerMsg::Bye { reason } => self.byes.push(reason),
+            // Answers a pre-Attach Query only; stray on an attached client.
+            ServerMsg::Info { .. } => {}
         }
     }
 

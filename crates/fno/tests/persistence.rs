@@ -7,7 +7,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{ClientHarness, Scratch};
+use common::{spawn_server, ClientHarness, FakeClient, Scratch};
 use fno::proto::{read_msg_sync, write_msg_sync, Cell, ClientMsg, Frame, ServerMsg};
 
 /// Count live processes whose command line carries this scratch's socket
@@ -61,7 +61,7 @@ fn persistence_reattach_restores_the_exact_screen() {
             }
         }
     };
-    h.type_bytes(&[0x1C]);
+    h.type_bytes(b"\x02d"); // leader+d detach
     assert!(h.wait_exit(10).success());
     drop(h);
 
@@ -82,7 +82,7 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
     // "open" in the foreground exactly like an editor session.
     h.type_bytes(b"printf '\\033[?1049h\\033[2J\\033[HALT-SCREEN-HELD'; cat\r");
     h.wait_screen(15, |s| s.contains("ALT-SCREEN-HELD"));
-    h.type_bytes(&[0x1C]); // detach with the alt screen active
+    h.type_bytes(b"\x02d"); // leader+d: detach with the alt screen active
     assert!(h.wait_exit(10).success());
     drop(h);
 
@@ -133,7 +133,7 @@ fn persistence_multi_pane_reattach_is_screen_exact() {
             }
         }
     };
-    h.type_bytes(&[0x1C]);
+    h.type_bytes(b"\x02d"); // leader+d detach
     assert!(h.wait_exit(10).success());
     drop(h);
 
@@ -295,4 +295,85 @@ fn persistence_client_relays_a_version_skew_refusal() {
         h.raw_output()
     );
     accept_thread.join().unwrap();
+}
+
+// -- Phase 3 (task 3.6): lifecycle - persistence is the product --------------
+
+#[test]
+fn persistence_zero_client_session_survives_and_resyncs_fully() {
+    // AC6-HP + AC6-UI: every client detaches; the server holds identical
+    // pane state ("hours" compressed to a beat), `mux ls` shows the
+    // persistent session with clients=0 and live pane counts, and a
+    // reattach resyncs Layout + full frames.
+    let scratch = Scratch::new("zeroclient");
+    let _server = spawn_server(&scratch.main_sock(), &[("SHELL", "/bin/sh")]);
+    let cwd = scratch.0.join("w");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut c = FakeClient::attach(&scratch.main_sock(), 24, 80, cwd.to_str().unwrap());
+    let pane = c
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+    c.input(b"echo survives-detach#\r");
+    c.wait_pane_text(15, pane, |t| t.contains("survives-detach#"));
+    c.detach();
+    drop(c);
+    std::thread::sleep(Duration::from_millis(800));
+
+    // Persistence is visible, not spooky (AC6-UI).
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fno"))
+        .args(["mux", "ls"])
+        .env("FNO_MUX_DIR", &scratch.0)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("main: 0 clients, 1 squads, 1 panes"),
+        "zero-client persistence must be listable; got: {stdout}"
+    );
+
+    // Full resync on reattach: Layout, then the frame carries the old
+    // marker without any new input.
+    let mut c2 = FakeClient::attach(&scratch.main_sock(), 24, 80, cwd.to_str().unwrap());
+    c2.wait_layout(10, "reattach layout", |l| l.panes.len() == 1);
+    c2.wait_pane_text(15, pane, |t| t.contains("survives-detach#"));
+}
+
+#[test]
+fn persistence_last_pane_exit_with_zero_clients_ends_the_server() {
+    // AC6-ERR: the last pane's child exits while NO client is attached -
+    // the server exits 0 (nobody to Bye) and unlinks its socket (Locked 12's
+    // first exit path, with the client count at zero).
+    let scratch = Scratch::new("lastpane");
+    let mut server = spawn_server(&scratch.main_sock(), &[("SHELL", "/bin/sh")]);
+    let cwd = scratch.0.join("w");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut c = FakeClient::attach(&scratch.main_sock(), 24, 80, cwd.to_str().unwrap());
+    let pane = c
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+    // Arm the exit, prove it reached the shell, then leave before it fires.
+    c.input(b"echo armed#; sleep 1; exit\r");
+    c.wait_pane_text(15, pane, |t| t.contains("armed#"));
+    c.detach();
+    drop(c);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(s) = server.0.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server must exit after its last pane dies"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "clean exit 0, got {status:?}");
+    assert!(
+        !scratch.main_sock().exists(),
+        "the SocketGuard must unlink the socket on the way out"
+    );
 }

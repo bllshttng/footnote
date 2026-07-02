@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
-use crate::tree::{self, PaneId, Tab};
+use crate::tree::{self, PaneId, Tab, TabId};
 
 /// How long the one `git rev-parse` per distinct cwd may take before the
 /// literal-cwd fallback wins. Generous for a warm disk, tight enough that a
@@ -45,14 +45,18 @@ pub struct Squad {
 }
 
 /// The server's whole layout world: squads in creation order (stable sideline
-/// ordering within a session) plus the server-global active squad (Locked
-/// Decision 9; per-client views are Phase 3).
+/// ordering within a session). Phase 3: routing is per-client (each `Client`
+/// carries its own view); `active_squad` and each squad's `active_tab`
+/// survive as the most-recently-active anchors a FRESH attach and a view
+/// re-anchor fall back to, not as routing state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Session {
     pub squads: Vec<Squad>,
     /// `None` only while the session has no squads (cold start, or after the
     /// last squad died - which ends the session anyway).
     pub active_squad: Option<u64>,
+    /// Monotonic [`TabId`] mint - session-scoped, never reused (Locked 6).
+    next_tab_id: TabId,
 }
 
 /// What [`Session::remove_tab`] left behind.
@@ -69,32 +73,30 @@ pub enum RemoveOutcome {
 }
 
 impl Session {
+    /// Mint the next stable tab id (1, 2, 3, ... - 0 is never minted, so
+    /// tests can use it as a sentinel).
+    pub fn mint_tab_id(&mut self) -> TabId {
+        self.next_tab_id += 1;
+        self.next_tab_id
+    }
+
+    /// Which squad holds tab `tid`, and at which index. Ids are
+    /// session-unique, so the first hit is the only hit.
+    pub fn find_tab(&self, tid: TabId) -> Option<(u64, usize)> {
+        for squad in &self.squads {
+            if let Some(idx) = squad.tabs.iter().position(|t| t.id == tid) {
+                return Some((squad.id, idx));
+            }
+        }
+        None
+    }
+
     pub fn squad(&self, id: u64) -> Option<&Squad> {
         self.squads.iter().find(|s| s.id == id)
     }
 
     pub fn squad_mut(&mut self, id: u64) -> Option<&mut Squad> {
         self.squads.iter_mut().find(|s| s.id == id)
-    }
-
-    pub fn active(&self) -> Option<&Squad> {
-        self.squad(self.active_squad?)
-    }
-
-    pub fn active_mut(&mut self) -> Option<&mut Squad> {
-        self.squad_mut(self.active_squad?)
-    }
-
-    /// The active squad's active tab - where input, splits, and focus land.
-    pub fn active_tab(&self) -> Option<&Tab> {
-        let s = self.active()?;
-        s.tabs.get(s.active_tab)
-    }
-
-    pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
-        let s = self.active_mut()?;
-        let idx = s.active_tab;
-        s.tabs.get_mut(idx)
     }
 
     /// Squad identity keys on the resolved PATH (Invariant: worktree attaches
@@ -110,6 +112,8 @@ impl Session {
     /// active. The caller allocates `id` and has already spawned the first
     /// pane's PTY (atomic split ordering, Locked Decision 7).
     pub fn add_squad(&mut self, id: u64, canonical_cwd: String, first_tab: Tab) {
+        // A caller-built tab id must never collide with a future mint.
+        self.next_tab_id = self.next_tab_id.max(first_tab.id);
         self.squads.push(Squad {
             id,
             canonical_cwd,
@@ -323,9 +327,28 @@ mod tests {
             }
         };
         Tab {
+            id: ids[0], // unique-enough stable id for container tests
             root,
             focus: ids[0],
         }
+    }
+
+    #[test]
+    fn squad_tab_ids_mint_monotonic_and_resolve() {
+        let mut s = Session::default();
+        let (t1, t2) = (s.mint_tab_id(), s.mint_tab_id());
+        assert!(t1 > 0 && t2 > t1, "ids are monotonic and never 0");
+        s.add_squad(1, "/a".into(), tab(&[10]));
+        s.squad_mut(1).unwrap().tabs.push(tab(&[11]));
+        s.add_squad(2, "/b".into(), tab(&[20]));
+        assert_eq!(s.find_tab(10), Some((1, 0)));
+        assert_eq!(s.find_tab(11), Some((1, 1)));
+        assert_eq!(s.find_tab(20), Some((2, 0)));
+        assert_eq!(s.find_tab(999), None);
+        // Removal never recycles: the mint keeps counting upward.
+        s.remove_tab(1, 1);
+        let t3 = s.mint_tab_id();
+        assert!(t3 > t2, "a removed tab's id is never reused");
     }
 
     // -- container model -------------------------------------------------

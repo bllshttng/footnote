@@ -14,17 +14,30 @@
 //! unmapped is swallowed with BEL - a chord typo must never leak half a
 //! chord into the pane (AC2-UI's never-leak guarantee).
 //!
-//! Ctrl-\ (0x1C) detaches from ANY state, preserving the Phase 1 key.
-//! ponytail: like Phase 1, a 0x1C inside a paste still detaches; bracketed-
-//! paste awareness in the scanner is the Phase-3 upgrade if it bites.
+//! Detach is leader+d ONLY (Phase 3 Locked 11): the Phase 1/2 raw-0x1C
+//! match is gone, so Ctrl-\ forwards to the pane and SIGQUIT works again.
+//!
+//! Bracketed-paste passthrough (US5): `ESC[200~` puts the scanner in a
+//! verbatim state where every byte - leader bytes, Ctrl-\, everything -
+//! forwards untouched until `ESC[201~`; both markers forward too. Marker
+//! matching is a rolling index that survives read boundaries (AC5-ERR), and
+//! bytes are never held back: a marker prefix that fizzles was already
+//! forwarded as the ordinary bytes it turned out to be. Residual (accepted,
+//! documented): an unterminated paste (no `201~` ever) leaves chords
+//! disabled until the close marker or reconnect - input keeps forwarding
+//! verbatim and EOF/terminal-close still detaches, so the state machine can
+//! disable chords at worst, never brick input (AC5-FR). Unbracketed paste
+//! can still trigger leader chords - the tmux-class residual (Locked 11).
 
 use crate::proto::Command;
 use crate::tree::Dir;
 
 /// The leader byte: Ctrl-b (0x02).
 pub const LEADER: u8 = 0x02;
-/// Ctrl-\ : detach, from any scanner state (the Phase 1 detach key).
-pub const DETACH: u8 = 0x1C;
+
+/// Bracketed-paste markers, as the terminal emits them.
+const PASTE_OPEN: &[u8] = b"\x1b[200~";
+const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 
 /// One scanned outcome. `Forward` chunks are byte-exact pass-through - bare
 /// bytes are NEVER re-encoded (AC2-UI).
@@ -32,6 +45,10 @@ pub const DETACH: u8 = 0x1C;
 pub enum Event {
     Forward(Vec<u8>),
     Cmd(Command),
+    /// Leader+digit: select the Nth tab of the viewed squad. The scanner
+    /// only knows the index; the client resolves it to a stable `TabId`
+    /// against its last `Layout` (v3: `SelectTab` names ids, not indices).
+    SelectTabIdx(usize),
     Detach,
     /// Open the sideline selector (leader+w). Selector-mode keys are
     /// interpreted by the client's view layer, not here.
@@ -44,16 +61,21 @@ pub enum Event {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum State {
-    Normal,
+    /// Bytes forward; `usize` is the rolling PASTE_OPEN match index (how
+    /// many marker bytes the forwarded tail already matches).
+    Normal(usize),
     /// Saw the leader; the next key (or escape sequence) is a chord.
     Leader,
     /// Accumulating an escape sequence after the leader (arrows /
-    /// Ctrl-arrows), possibly split across reads.
+    /// Ctrl-arrows / a paste-open marker), possibly split across reads.
     LeaderEsc(Vec<u8>),
+    /// Inside a bracketed paste: everything forwards verbatim; `usize` is
+    /// the rolling PASTE_CLOSE match index.
+    Paste(usize),
 }
 
 /// The scanner. One per client connection; state survives across reads so a
-/// chord split at a read boundary still lands.
+/// chord or marker split at a read boundary still lands.
 #[derive(Debug)]
 pub struct Scanner {
     state: State,
@@ -62,8 +84,22 @@ pub struct Scanner {
 impl Default for Scanner {
     fn default() -> Self {
         Scanner {
-            state: State::Normal,
+            state: State::Normal(0),
         }
+    }
+}
+
+/// Advance a rolling marker match: how many bytes of `marker` the stream
+/// tail matches after consuming `b`. The only self-overlap in either marker
+/// is a fresh ESC, so the KMP fallback table collapses to "mismatch: retry
+/// as position 0, i.e. matched-1 iff b is ESC".
+fn roll(idx: usize, b: u8, marker: &[u8]) -> usize {
+    if b == marker[idx] {
+        idx + 1
+    } else if b == marker[0] {
+        1
+    } else {
+        0
     }
 }
 
@@ -74,38 +110,62 @@ impl Scanner {
         let mut out = Vec::new();
         let mut plain: Vec<u8> = Vec::new();
         for &b in bytes {
-            match std::mem::replace(&mut self.state, State::Normal) {
-                State::Normal => {
-                    if b == DETACH {
-                        flush(&mut plain, &mut out);
-                        out.push(Event::Detach);
-                    } else if b == LEADER {
+            match std::mem::replace(&mut self.state, State::Normal(0)) {
+                State::Normal(open_idx) => {
+                    if b == LEADER {
                         flush(&mut plain, &mut out);
                         self.state = State::Leader;
                     } else {
+                        // Forward immediately; the rolling match only decides
+                        // whether chord interpretation turns off next.
                         plain.push(b);
+                        let idx = roll(open_idx, b, PASTE_OPEN);
+                        self.state = if idx == PASTE_OPEN.len() {
+                            State::Paste(0)
+                        } else {
+                            State::Normal(idx)
+                        };
                     }
                 }
+                State::Paste(close_idx) => {
+                    // Verbatim passthrough: leader bytes, 0x1C, everything
+                    // (AC5-HP). Only the close marker changes state.
+                    plain.push(b);
+                    let idx = roll(close_idx, b, PASTE_CLOSE);
+                    self.state = if idx == PASTE_CLOSE.len() {
+                        State::Normal(0)
+                    } else {
+                        State::Paste(idx)
+                    };
+                }
                 State::Leader => {
-                    if b == DETACH {
-                        // Detach wins from any state; the pending chord dies.
-                        out.push(Event::Detach);
-                    } else if b == 0x1b {
+                    if b == 0x1b {
                         self.state = State::LeaderEsc(vec![0x1b]);
                     } else {
                         out.push(chord(b));
                     }
                 }
                 State::LeaderEsc(mut seq) => {
-                    if b == DETACH {
-                        out.push(Event::Detach);
-                        continue;
-                    }
                     seq.push(b);
-                    match esc_chord(&seq) {
-                        EscScan::Complete(ev) => out.push(ev),
-                        EscScan::Partial => self.state = State::LeaderEsc(seq),
-                        EscScan::Invalid => out.push(Event::Bell),
+                    if seq == PASTE_OPEN {
+                        // AC5-EDGE: a paste-open lands while a chord is
+                        // pending - BEL the dangling chord deterministically,
+                        // forward the marker, enter paste mode. Paste content
+                        // is never read as a chord.
+                        out.push(Event::Bell);
+                        flush(&mut plain, &mut out);
+                        plain.extend_from_slice(PASTE_OPEN);
+                        self.state = State::Paste(0);
+                    } else if PASTE_OPEN.starts_with(&seq) {
+                        // Still ambiguous between a chord and a marker: keep
+                        // accumulating (split-across-reads safe).
+                        self.state = State::LeaderEsc(seq);
+                    } else {
+                        match esc_chord(&seq) {
+                            EscScan::Complete(ev) => out.push(ev),
+                            EscScan::Partial => self.state = State::LeaderEsc(seq),
+                            EscScan::Invalid => out.push(Event::Bell),
+                        }
                     }
                 }
             }
@@ -140,7 +200,7 @@ fn chord(b: u8) -> Event {
         b'n' => Event::Cmd(Command::NextTab),
         b'p' => Event::Cmd(Command::PrevTab),
         b'&' => Event::Cmd(Command::CloseTab),
-        b'1'..=b'9' => Event::Cmd(Command::SelectTab((b - b'1') as usize)),
+        b'1'..=b'9' => Event::SelectTabIdx((b - b'1') as usize),
         b'w' => Event::OpenSelector,
         b'b' => Event::TogglePanel,
         b'd' => Event::Detach,
@@ -156,7 +216,8 @@ enum EscScan {
 
 /// Arrows (`ESC [ A..D` -> focus) and Ctrl-arrows (`ESC [ 1 ; 5 A..D` ->
 /// resize) after the leader. Anything that stops matching either prefix is
-/// swallowed as one Bell.
+/// swallowed as one Bell. (The paste-open marker is peeled off by the caller
+/// before this runs.)
 fn esc_chord(seq: &[u8]) -> EscScan {
     const PLAIN: &[u8] = b"\x1b[";
     const CTRL: &[u8] = b"\x1b[1;5";
@@ -204,6 +265,18 @@ mod tests {
         chunks.iter().flat_map(|c| s.scan(c)).collect()
     }
 
+    /// Concatenate every Forward chunk; assert nothing but forwards came out.
+    fn forwarded_only(events: &[Event]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for e in events {
+            match e {
+                Event::Forward(chunk) => bytes.extend_from_slice(chunk),
+                other => panic!("expected only forwards, got {other:?}"),
+            }
+        }
+        bytes
+    }
+
     #[test]
     fn client_keys_bare_bytes_pass_through_byte_exact() {
         // AC2-UI carried: no re-encoding, one coalesced chunk.
@@ -237,10 +310,7 @@ mod tests {
             vec![Event::Cmd(Command::ResizeDir(Dir::Up))]
         );
         assert_eq!(scan_all(&[b"\x02x"]), vec![Event::Cmd(Command::ClosePane)]);
-        assert_eq!(
-            scan_all(&[b"\x027"]),
-            vec![Event::Cmd(Command::SelectTab(6))]
-        );
+        assert_eq!(scan_all(&[b"\x027"]), vec![Event::SelectTabIdx(6)]);
         assert_eq!(scan_all(&[b"\x02&"]), vec![Event::Cmd(Command::CloseTab)]);
         assert_eq!(scan_all(&[b"\x02w"]), vec![Event::OpenSelector]);
         assert_eq!(scan_all(&[b"\x02b"]), vec![Event::TogglePanel]);
@@ -275,12 +345,89 @@ mod tests {
     }
 
     #[test]
-    fn client_keys_detach_byte_works_from_any_state() {
+    fn client_keys_ctrl_backslash_forwards_to_the_pane() {
+        // Locked 11: the raw-0x1C detach is gone - Ctrl-\ is an ordinary
+        // byte again (SIGQUIT reaches the child; AC5-UI's second half).
         assert_eq!(
             scan_all(&[b"abc\x1c"]),
-            vec![Event::Forward(b"abc".to_vec()), Event::Detach]
+            vec![Event::Forward(b"abc\x1c".to_vec())]
         );
-        // Even mid-chord.
-        assert_eq!(scan_all(&[b"\x02\x1c"]), vec![Event::Detach]);
+        // Mid-chord it is just an unmapped chord key: swallowed with BEL.
+        assert_eq!(scan_all(&[b"\x02\x1c"]), vec![Event::Bell]);
+    }
+
+    #[test]
+    fn client_keys_paste_passes_leader_and_ctrl_backslash_verbatim() {
+        // AC5-HP: everything between the markers - leader bytes, 0x1C -
+        // forwards untouched, markers included; no chord, no detach.
+        let mut input = Vec::new();
+        input.extend_from_slice(PASTE_OPEN);
+        input.extend_from_slice(b"safe \x02d and \x1c inside");
+        input.extend_from_slice(PASTE_CLOSE);
+        let events = scan_all(&[&input]);
+        assert_eq!(forwarded_only(&events), input);
+    }
+
+    #[test]
+    fn client_keys_paste_markers_split_one_byte_per_read_still_engage() {
+        // AC5-ERR: the whole paste arrives one byte per read.
+        let mut input = Vec::new();
+        input.extend_from_slice(PASTE_OPEN);
+        input.extend_from_slice(b"\x02"); // leader inside the paste
+        input.extend_from_slice(PASTE_CLOSE);
+        let chunks: Vec<&[u8]> = input.chunks(1).collect();
+        let events = scan_all(&chunks);
+        assert_eq!(forwarded_only(&events), input);
+        // And chords work again after the close marker.
+        let mut s = Scanner::default();
+        for c in &chunks {
+            s.scan(c);
+        }
+        assert_eq!(s.scan(b"\x02%"), vec![Event::Cmd(Command::SplitH)]);
+    }
+
+    #[test]
+    fn client_keys_paste_open_during_pending_leader_bells_then_pastes() {
+        // AC5-EDGE: leader pressed, then a paste-open arrives - the dangling
+        // chord dies with one BEL, the marker forwards, paste mode engages
+        // (the leader byte inside the paste is inert).
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\x02");
+        input.extend_from_slice(PASTE_OPEN);
+        input.extend_from_slice(b"\x02x");
+        input.extend_from_slice(PASTE_CLOSE);
+        let events = scan_all(&[&input]);
+        assert_eq!(events[0], Event::Bell, "dangling chord dies with BEL");
+        let mut expect = Vec::new();
+        expect.extend_from_slice(PASTE_OPEN);
+        expect.extend_from_slice(b"\x02x");
+        expect.extend_from_slice(PASTE_CLOSE);
+        assert_eq!(forwarded_only(&events[1..]), expect);
+    }
+
+    #[test]
+    fn client_keys_unterminated_paste_keeps_forwarding_leader_inert() {
+        // AC5-FR: no close marker ever arrives. Bytes keep forwarding
+        // verbatim (chords disabled, input never bricked).
+        let mut s = Scanner::default();
+        let mut input = PASTE_OPEN.to_vec();
+        input.extend_from_slice(b"pasted");
+        assert_eq!(s.scan(&input), vec![Event::Forward(input.clone())]);
+        assert_eq!(
+            s.scan(b"\x02d more"),
+            vec![Event::Forward(b"\x02d more".to_vec())],
+            "leader stays inert until 201~ or reconnect"
+        );
+    }
+
+    #[test]
+    fn client_keys_fizzled_marker_prefix_was_already_forwarded() {
+        // ESC [ 2 J (clear screen, not a paste marker): every byte reaches
+        // the pane and the scanner stays in Normal with chords live.
+        let events = scan_all(&[b"\x1b[2J"]);
+        assert_eq!(events, vec![Event::Forward(b"\x1b[2J".to_vec())]);
+        let mut s = Scanner::default();
+        s.scan(b"\x1b[20");
+        assert_eq!(s.scan(b"\x02%"), vec![Event::Cmd(Command::SplitH)]);
     }
 }

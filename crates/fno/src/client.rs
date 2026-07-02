@@ -57,6 +57,18 @@ pub fn run(session: &str) -> i32 {
 }
 
 fn run_inner(session: &str) -> Result<i32, String> {
+    // Nested same-session guard (AC3-UI/EDGE): BEFORE any socket, spawn, or
+    // terminal mode change. `FNO_SESSION` is set in every pane the server
+    // spawns, so target == env means "attaching to the session I am already
+    // inside" - an instant hall of mirrors. Different-session nesting is
+    // allowed (the flag already beat the env in resolution).
+    if std::env::var("FNO_SESSION").ok().as_deref() == Some(session) {
+        return Err(format!(
+            "already inside mux session {session:?} (FNO_SESSION is set). \
+             Attach to another session with `fno --session <other>`, or \
+             `unset FNO_SESSION` if this shell is not really inside a pane."
+        ));
+    }
     proto::ensure_mux_dir().map_err(|e| format!("cannot prepare the mux dir: {e}"))?;
     let path = proto::socket_path(session)?;
     let stream = connect_or_spawn(&path)?;
@@ -172,6 +184,9 @@ struct LayoutView {
     active_squad: u64,
     panes: Vec<(u64, Rect)>,
     focus: u64,
+    /// The clamped content-area the rects were computed for; a client whose
+    /// own content area is larger letterboxes (3.5).
+    area: (u16, u16),
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -314,12 +329,28 @@ impl View {
                 }
             }
         }
-        // Divider glyphs for content cells no pane covers: pick by which
-        // neighbors are panes so vertical strips read '│', horizontal '─',
-        // crossings '┼'. Dim so chrome never shouts over content.
+        // Letterbox (AC1-UI): the server tiled its rects into `Layout.area`
+        // (the view-scoped clamp); content anchors top-left and everything
+        // beyond `area` up to the local content edge is visibly-inert dim
+        // filler, never divider glyphs. `(0, 0)` is the pre-Layout
+        // placeholder: no filler until the first real Layout names a bound.
+        let (a_rows, a_cols) = self.layout.area;
+        let boxed = self.layout.area != (0, 0);
+        // Divider glyphs for in-area content cells no pane covers: pick by
+        // which neighbors are panes so vertical strips read '│', horizontal
+        // '─', crossings '┼'. Dim so chrome never shouts over content.
         for r in origin_r..rows {
             for c in origin_c..cols {
                 if covered[r * cols + c] {
+                    continue;
+                }
+                if boxed && (r - origin_r >= a_rows as usize || c - origin_c >= a_cols as usize) {
+                    cells[r * cols + c] = Cell {
+                        c: '·',
+                        fg: Color::Default,
+                        bg: Color::Default,
+                        flags: cell_flags::DIM,
+                    };
                     continue;
                 }
                 let horiz = c > origin_c && covered[r * cols + c - 1]
@@ -353,6 +384,12 @@ impl View {
                 if let Some(f) = self.frames.get(&self.layout.focus) {
                     cur_r = TAB_BAR_ROWS + rect.y + f.cursor_row.min(rect.rows.saturating_sub(1));
                     cur_c = self.panel_w() + rect.x + f.cursor_col.min(rect.cols.saturating_sub(1));
+                    if boxed {
+                        // Never in the filler (AC1-UI), even mid-race when a
+                        // stale rect exceeds the just-shrunk area.
+                        cur_r = cur_r.min(TAB_BAR_ROWS + a_rows.saturating_sub(1));
+                        cur_c = cur_c.min(self.panel_w() + a_cols.saturating_sub(1));
+                    }
                     cur_vis = f.cursor_visible;
                 }
             }
@@ -513,6 +550,7 @@ async fn attach_and_run(
             active_squad: 0,
             panes: Vec::new(),
             focus: 0,
+            area: (0, 0),
         },
     );
     let (c_rows, c_cols) = view.content_dims();
@@ -548,12 +586,14 @@ async fn attach_and_run(
                 active_squad,
                 panes,
                 focus,
+                area,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
                     active_squad,
                     panes,
                     focus,
+                    area,
                 });
                 break;
             }
@@ -574,7 +614,9 @@ async fn attach_and_run(
                 }
                 view.frames.insert(pane_id, frame);
             }
-            Ok(ServerMsg::Notice { .. }) => {}
+            // Info only ever answers a pre-Attach Query; on an attached
+            // connection it is stray - ignore rather than desync.
+            Ok(ServerMsg::Notice { .. }) | Ok(ServerMsg::Info { .. }) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
     }
@@ -652,8 +694,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area });
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -672,6 +714,7 @@ async fn attach_and_run(
                         break Err(format!("draw: {e}"));
                     }
                 }
+                Ok(ServerMsg::Info { .. }) => {} // pre-Attach-only answer; stray here
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
                 Err(ProtoError::Closed) => {
                     break Ok(exit_with_notice("session ended (server closed)".into()));
@@ -767,6 +810,28 @@ async fn handle_stdin(
                     .await
                     .map_err(|e| format!("command send failed: {e}"))?;
             }
+            Event::SelectTabIdx(idx) => {
+                // Resolve the digit's index to a stable TabId against the
+                // last Layout; an out-of-range digit is a local BEL, never a
+                // wire message the server would refuse anyway.
+                let id = view
+                    .layout
+                    .squads
+                    .iter()
+                    .find(|s| s.id == view.layout.active_squad)
+                    .and_then(|s| s.tabs.get(idx))
+                    .map(|t| t.id);
+                match id {
+                    Some(id) => {
+                        write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(id)))
+                            .await
+                            .map_err(|e| format!("command send failed: {e}"))?;
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
             Event::Detach => return Ok(StdinFlow::Detach),
             Event::OpenSelector => {
                 if view.sel_rows().is_empty() || view.term.1 < PANEL_W + MIN_CONTENT_COLS {
@@ -840,15 +905,13 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
 /// Selector-mode keys: j/k (and arrows) move, h/l (and left/right) collapse/
 /// expand, Enter selects (squad or tab), Esc/q closes. Rows and cursor are
 /// re-read per key so a close mid-chunk swallows the remainder instead of
-/// resurrecting the selector. The detach byte still works from here.
+/// resurrecting the selector. Detach is leader+d from NORMAL mode only
+/// (Locked 11): close the selector first.
 async fn selector_keys(
     view: &mut View,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    if bytes.contains(&crate::keys::DETACH) {
-        return Ok(StdinFlow::Detach);
-    }
     let mut esc = std::mem::take(&mut view.sel_esc);
     let keys = fold_selector_keys(&mut esc, bytes);
     view.sel_esc = esc;
@@ -898,9 +961,12 @@ async fn selector_keys(
                                 .await
                                 .map_err(|e| format!("command send failed: {e}"))?;
                             }
-                            write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(t)))
-                                .await
-                                .map_err(|e| format!("command send failed: {e}"))?;
+                            write_msg(
+                                sock_w,
+                                &ClientMsg::Command(Command::SelectTab(s.tabs[t].id)),
+                            )
+                            .await
+                            .map_err(|e| format!("command send failed: {e}"))?;
                         }
                         _ => {
                             let _ = raw_out(b"\x07");
@@ -1049,6 +1115,7 @@ mod tests {
             canonical_cwd: format!("/code/{name}"),
             tabs: (1..=tabs)
                 .map(|i| TabMeta {
+                    id: (i - 1) as u64,
                     name: i.to_string(),
                 })
                 .collect(),
@@ -1104,6 +1171,7 @@ mod tests {
                     ),
                 ],
                 focus: 11,
+                area: (29, 72),
             },
         );
         view.frames.insert(10, text_frame(29, 35, 'a'));
@@ -1222,12 +1290,52 @@ mod tests {
                 },
             )],
             focus: 10,
+            area: (29, 72),
         });
         assert!(view.frames.contains_key(&10));
         assert!(
             !view.frames.contains_key(&11),
             "frames for dead panes are dropped at Layout"
         );
+    }
+
+    #[test]
+    fn client_compose_letterboxes_beyond_the_clamped_area() {
+        // AC1-UI: a 29x72 local content area showing a tab clamped to 20x50
+        // - content anchors top-left, everything beyond is dim '·' filler,
+        // and the cursor never enters the filler.
+        let mut view = View::new(
+            (30, 100),
+            LayoutView {
+                squads: vec![meta(1, "footnote", 1, 0)],
+                active_squad: 1,
+                panes: vec![(
+                    10,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 20,
+                        cols: 50,
+                    },
+                )],
+                focus: 10,
+                area: (20, 50),
+            },
+        );
+        view.frames.insert(10, text_frame(20, 50, 'a'));
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        // In-area content cell.
+        assert_eq!(frame.cells[1 * cols + 28].c, 'a');
+        // One column beyond the area: filler, dim.
+        let beyond_col = &frame.cells[1 * cols + 28 + 50];
+        assert_eq!(beyond_col.c, '·', "beyond-area column must be filler");
+        assert!(beyond_col.flags & cell_flags::DIM != 0);
+        // One row beyond the area (content row 20): filler too.
+        let beyond_row = &frame.cells[(1 + 20) * cols + 28];
+        assert_eq!(beyond_row.c, '·', "beyond-area row must be filler");
+        // Cursor confined to content even against a lying frame cursor.
+        assert!(frame.cursor_row < 1 + 20 && frame.cursor_col < 28 + 50);
     }
 
     #[test]
@@ -1275,6 +1383,7 @@ mod tests {
                 },
             )],
             focus: 20,
+            area: (29, 72),
         });
         assert_eq!(view.selector, Some(0), "cursor clamped to the live rows");
     }

@@ -119,7 +119,8 @@ fn wait_for_raw_frame(
             // by the layout e2e suite (task 2.6), not the spine helpers.
             Ok(ServerMsg::Layout { .. })
             | Ok(ServerMsg::ModeSync { .. })
-            | Ok(ServerMsg::Notice { .. }) => {}
+            | Ok(ServerMsg::Notice { .. })
+            | Ok(ServerMsg::Info { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
