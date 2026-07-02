@@ -187,6 +187,25 @@ fn multiclient_independent_views_frames_for_viewers_only_and_reanchor() {
     a.wait(10, "immediate frame on switch", |c| {
         c.frames.contains_key(&pane_b).then_some(())
     });
+    // AC2-UI: no stale-view frames after the new Layout - every frame that
+    // followed the switch's Layout belongs to the NEW view's pane set.
+    a.pump(Duration::from_millis(600)); // ticker keeps producing on pane_b
+    let last_layout = a
+        .order
+        .iter()
+        .rposition(|e| *e == Absorbed::Layout)
+        .expect("SelectTab produced a Layout");
+    let tail_frames: Vec<u64> = a.order[last_layout..]
+        .iter()
+        .filter_map(|e| match e {
+            Absorbed::Frame(pid) => Some(*pid),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !tail_frames.is_empty() && tail_frames.iter().all(|pid| *pid == pane_b),
+        "frames after the new Layout must be the new view's panes only; got {tail_frames:?}"
+    );
 
     // AC2-ERR: B's viewed pane holds negotiated modes (mouse on); A closes
     // the shared tab 2. Both re-anchor to tab 1; B's reliable stream must
@@ -232,6 +251,58 @@ fn multiclient_independent_views_frames_for_viewers_only_and_reanchor() {
     b.wait_pane_text(15, pane_a, |t| t.contains("landed#"));
 }
 
+#[test]
+fn multiclient_resize_storm_while_coviewing_settles_on_final_clamp() {
+    // AC1-FR: one client storms resizes while another co-views. The final
+    // geometry (and only meaningful geometry) is the final clamp: both
+    // clients' Layout.area and the pane's kernel winsize converge on it.
+    // (The strict SIGWINCH count bound is covered structurally by the
+    // no-op-tail rule in push_layout plus per-client channel coalescing.)
+    let scratch = Scratch::new("storm");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 40, 120, cwd.to_str().unwrap());
+    let pane = a
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+    let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    b.wait_layout(10, "clamped", |l| l.area == (24, 80));
+
+    for i in 0..30u16 {
+        b.resize(20 + (i % 5), 60 + i);
+    }
+    b.resize(22, 70);
+    a.wait_layout(10, "a settles on final clamp", |l| l.area == (22, 70));
+    b.wait_layout(10, "b settles on final clamp", |l| l.area == (22, 70));
+    a.input(b"echo sz=$(stty size)#\r");
+    a.wait_pane_text(15, pane, |t| t.contains("sz=22 70#"));
+}
+
+#[test]
+fn multiclient_server_outlives_client_crash_mid_command() {
+    // AC6-FR: a client dies between sending a Command and reading its
+    // Layout. The mutation stands, geometry recomputes for the survivor,
+    // and the remaining client sees consistent, interactive state.
+    let scratch = Scratch::new("midcmd");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 40, 120, cwd.to_str().unwrap());
+    a.wait_layout(10, "first layout", |l| l.panes.len() == 1);
+    let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    b.wait_layout(10, "b attached", |l| !l.panes.is_empty());
+
+    b.cmd(Command::SplitH);
+    drop(b); // gone before reading the Layout the split produces
+
+    let l = a.wait_layout(10, "split stands + regrown", |l| {
+        l.panes.len() == 2 && l.area == (40, 120)
+    });
+    a.input(b"echo consistent#\r");
+    a.wait_pane_text(15, l.focus, |t| t.contains("consistent#"));
+}
+
 // -- AC3: named sessions -----------------------------------------------------
 
 #[test]
@@ -267,6 +338,9 @@ fn multiclient_mux_ls_reports_live_counts_and_stale_without_unlinking() {
     let mut c = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
     c.wait_layout(10, "attached", |l| l.panes.len() == 1);
     plant_stale_socket(&scratch.0.join("dead.sock"));
+    // AC4-ERR: something accepts connections but never answers Query (an
+    // older build): listed as alive-unqueryable, never breaking the listing.
+    let _silent = std::os::unix::net::UnixListener::bind(scratch.0.join("odd.sock")).unwrap();
 
     let out = fno_cmd(&scratch, &["mux", "ls"]);
     assert!(out.status.success(), "ls exits 0: {out:?}");
@@ -276,6 +350,10 @@ fn multiclient_mux_ls_reports_live_counts_and_stale_without_unlinking() {
         "live row with counts; got: {stdout}"
     );
     assert!(stdout.contains("dead: stale"), "stale row; got: {stdout}");
+    assert!(
+        stdout.contains("odd: alive (unqueryable"),
+        "unanswering server degrades per-row (AC4-ERR); got: {stdout}"
+    );
     assert!(
         scratch.0.join("dead.sock").exists(),
         "ls is read-only: it never unlinks (AC4-HP)"

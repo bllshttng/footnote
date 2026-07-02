@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::tree::{Dir, Rect};
+use crate::tree::{Dir, Rect, TabId};
 
 /// Bumped on any wire-incompatible change. The server outlives `cargo install`
 /// upgrades, so both sides exchange this at Attach and refuse loudly on skew.
@@ -119,7 +119,7 @@ pub enum Command {
     FocusDir(Dir),
     ResizeDir(Dir),
     NewTab,
-    SelectTab(u64),
+    SelectTab(TabId),
     NextTab,
     PrevTab,
     CloseTab,

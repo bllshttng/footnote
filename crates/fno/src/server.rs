@@ -444,7 +444,11 @@ impl Core {
         let mut tab_rects: HashMap<TabId, (Vec<(u64, Rect)>, u64, (u16, u16))> = HashMap::new();
         for tid in viewed {
             let Some((sid, idx)) = self.session.find_tab(tid) else {
-                continue; // dangling view: re-anchor missed it upstream
+                // Unreachable while every tab-killing path re-anchors first;
+                // if a future mutation forgets, the symptom is a blank
+                // client - make it diagnosable from the session log.
+                eprintln!("fno mux: dangling view on tab {tid}; re-anchor missed it");
+                continue;
             };
             let area = self.tab_area(tid);
             self.tab_areas.insert(tid, area);
@@ -697,11 +701,16 @@ impl Core {
     /// squad's most-recently-active (the anchor fresh attaches and re-anchors
     /// fall back to). Mutates the SENDER only (Locked 3).
     fn set_view(&mut self, client_id: u64, sid: u64, tid: TabId) {
-        if let Some(sq) = self.session.squad_mut(sid) {
-            if let Some(idx) = sq.tabs.iter().position(|t| t.id == tid) {
-                sq.active_tab = idx;
-            }
-        }
+        // This is the one gateway that maintains "a view always names a live
+        // (squad, tab)" - enforce the postcondition here instead of trusting
+        // callers: an unvalidated pair leaves the view untouched.
+        let Some(sq) = self.session.squad_mut(sid) else {
+            return;
+        };
+        let Some(idx) = sq.tabs.iter().position(|t| t.id == tid) else {
+            return;
+        };
+        sq.active_tab = idx;
         if let Some(c) = self.clients.iter_mut().find(|c| c.id == client_id) {
             c.view = (sid, tid);
         }
@@ -940,7 +949,17 @@ impl Core {
                 if let Some(view) = self.client_view(id) {
                     if let Some(tab) = self.viewed_tab(view) {
                         if let Some(entry) = self.panes.get(&tab.focus) {
-                            let _ = entry.pty.write_input(&bytes);
+                            if let Err(crate::pty::PtyError::Write(e)) =
+                                entry.pty.write_input(&bytes)
+                            {
+                                // Disconnected = child just exited (the exit
+                                // signal follows; stay silent). Full = the
+                                // child stopped reading (^S, SIGSTOP): the
+                                // drop must not be invisible to the typist.
+                                if e.kind() == std::io::ErrorKind::WouldBlock {
+                                    self.notice(id, "pane not accepting input; keys dropped");
+                                }
+                            }
                         }
                     }
                 }

@@ -37,11 +37,19 @@ enum Probe {
     Unqueryable,
     /// Nothing listens: a leftover socket from a dead server.
     Stale,
+    /// The probe itself failed CLIENT-side (fd exhaustion, permissions):
+    /// says nothing about the server, so it must never read as `Stale` -
+    /// "stale" steers the operator toward kill-server's unlink.
+    Unprobeable(String),
 }
 
 fn probe(sock: &Path) -> Probe {
-    let Ok(stream) = std::os::unix::net::UnixStream::connect(sock) else {
-        return Probe::Stale;
+    let stream = match std::os::unix::net::UnixStream::connect(sock) {
+        Ok(s) => s,
+        // Only a refused connection proves nothing listens; every other
+        // error (EMFILE, EACCES, ...) is OUR failure, not the server's.
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return Probe::Stale,
+        Err(e) => return Probe::Unprobeable(e.to_string()),
     };
     let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
     let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
@@ -85,9 +93,16 @@ pub fn ls() -> i32 {
     let dir = proto::mux_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => {
+        // A missing dir means no session ever started here. Any OTHER error
+        // (permissions, I/O) must not read as an empty listing - a script
+        // grepping "no sessions" would get a clean false negative.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("no sessions");
             return 0;
+        }
+        Err(e) => {
+            eprintln!("fno: cannot read {}: {e}", dir.display());
+            return 1;
         }
     };
     let mut names: Vec<String> = entries
@@ -114,6 +129,7 @@ pub fn ls() -> i32 {
             } => println!("{name}: {clients} clients, {squads} squads, {panes} panes"),
             Probe::Unqueryable => println!("{name}: alive (unqueryable - older server?)"),
             Probe::Stale => println!("{name}: stale"),
+            Probe::Unprobeable(e) => println!("{name}: probe failed ({e})"),
         }
     }
     0
@@ -137,7 +153,16 @@ pub fn kill_server(session: &str) -> i32 {
     }
     let stream = match std::os::unix::net::UnixStream::connect(&sock) {
         Ok(s) => s,
-        Err(_) => {
+        // Only a REFUSED connection (or a socket that vanished mid-race)
+        // proves the server is dead. Any other connect error is client-side
+        // (fd exhaustion, permissions) - unlinking on it would orphan a LIVE
+        // server: still running, unreachable by name, invisible to ls.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
             // AC4-EDGE: dead server left its socket behind - take it out.
             return match std::fs::remove_file(&sock) {
                 Ok(()) => {
@@ -149,6 +174,10 @@ pub fn kill_server(session: &str) -> i32 {
                     1
                 }
             };
+        }
+        Err(e) => {
+            eprintln!("fno: cannot connect to {}: {e}", sock.display());
+            return 1;
         }
     };
     let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));

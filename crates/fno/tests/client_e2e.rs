@@ -81,6 +81,29 @@ fn client_e2e_output_flood_keeps_the_real_client_responsive() {
 }
 
 #[test]
+fn client_e2e_ctrl_backslash_reaches_the_child_as_sigquit() {
+    // AC5-UI second half (Phase 3): raw Ctrl-\ is no longer a detach - it
+    // forwards to the pane and the CHILD observes the SIGQUIT. Proven by a
+    // foreground job trapping QUIT; the client must still be attached after.
+    let scratch = Scratch::new("sigquit");
+    let mut h = ClientHarness::spawn(&scratch);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.type_bytes(b"sh -c \"trap 'echo GOTQUIT#' QUIT; while :; do sleep 0.2; done\"\r");
+    std::thread::sleep(Duration::from_millis(400));
+    h.type_bytes(&[0x1C]); // Ctrl-\ : plain byte now, SIGQUIT to the fg job
+    h.wait_screen(15, |s| s.contains("GOTQUIT#"));
+    assert!(
+        h.child.try_wait().unwrap().is_none(),
+        "Ctrl-\\ must NOT detach the client anymore (Locked 11)"
+    );
+    // Clean up the loop and prove the pane is still interactive.
+    h.type_bytes(&[0x03]);
+    h.wait_prompt(15);
+    h.type_bytes(b"echo still-here#\r");
+    h.wait_screen(15, |s| s.contains("still-here#"));
+}
+
+#[test]
 fn client_e2e_detach_exits_client_and_leaves_server_running() {
     // The Ctrl-\ detach: client exits 0, and the session (server + shell)
     // stays alive - proven by a fresh client reattaching and seeing state
