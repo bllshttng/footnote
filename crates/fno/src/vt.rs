@@ -8,6 +8,8 @@
 //! snapshot is a full styled [`Frame`], not trimmed text. The server grid is
 //! the single source of truth; the client never emulates VT itself.
 
+use std::collections::VecDeque;
+
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
@@ -15,16 +17,32 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
 
-use crate::proto::{cell_flags, Cell, Color, Frame};
+use crate::proto::{cell_flags, BlockMeta, BlockSel, Cell, Color, Frame};
 
 /// Default grid until the first client reports its real size. 24x80 is the
 /// historical terminal default (matches the fno-agents drive fallback).
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_COLS: u16 = 80;
 
-/// Scrollback cap per pane. `Term::new` treats `scrolling_history` as a bound
-/// the history grows toward, not an allocation.
-const SCROLLBACK_LINES: usize = 10_000;
+/// Default scrollback cap per pane. `Term::new` treats `scrolling_history` as a
+/// bound the history grows toward, not an allocation, so a pane that emits 500
+/// lines costs 500 lines even at this ceiling. 100k is alacritty's documented
+/// max; a memory-constrained deployment lowers it via `config.mux.scrollback_lines`
+/// (wired in Task 1.5). Governs how far `pane read --lines` and a still-streaming
+/// block can reach into history (4b).
+const SCROLLBACK_LINES: usize = 100_000;
+
+/// Resolve the per-pane scrollback cap. `config.mux.scrollback_lines` is
+/// exported by the launcher as `FNO_MUX_SCROLLBACK_LINES` (the crate reads env,
+/// not settings.yaml - same pattern as `FNO_SESSION`/`FNO_MUX_DIR`); a
+/// memory-constrained deployment lowers it. Falls back to the 100k default.
+fn scrollback_lines() -> usize {
+    std::env::var("FNO_MUX_SCROLLBACK_LINES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(SCROLLBACK_LINES)
+}
 
 /// `Dimensions` impl for constructing/resizing the headless [`Term`].
 #[derive(Debug, Clone, Copy)]
@@ -51,14 +69,67 @@ pub struct Pane {
     processor: Processor,
     rows: u16,
     cols: u16,
+    /// OSC 133 shell-integration scanner: splits PTY output at FinalTerm markers
+    /// BEFORE they reach the Term (which drops unknown OSC anyway) so 4b can turn
+    /// a pane's scroll into typed command blocks. Stateful across feeds.
+    scanner: Osc133Scanner,
+    /// Completed command blocks (oldest first), capped at `MAX_BLOCKS` and
+    /// front-dropped; capture-at-completion stores each block's text so a
+    /// finished block is width- and scroll-independent.
+    blocks: VecDeque<Block>,
+    /// The block whose `C` (output start) was seen but not yet its `D`. Read live
+    /// from the grid until finalized.
+    open: Option<OpenBlock>,
+    /// Monotonic per-pane block sequence; never reuses.
+    next_seq: u64,
+    /// Whether any OSC 133 marker was ever seen. A pane that never emitted markers
+    /// reads as ONE implicit block (whole output); one that did but has none
+    /// retained reads `BLOCK_UNAVAILABLE`.
+    saw_marker: bool,
+    /// The resolved scrollback cap (from [`scrollback_lines`]). A block whose
+    /// text is captured while history is at this cap may have lost its top to
+    /// eviction, so it is flagged `truncated` (honest, conservative).
+    scrollback: usize,
+    /// Running sum of `text.len()` across retained `blocks`, so eviction can
+    /// bound retained block memory by BYTES (a high-output agent's blocks would
+    /// otherwise pin gigabytes under a count-only cap - the whole point of
+    /// capture-at-completion is that the text is stored).
+    retained_bytes: usize,
+    /// Per-block captured-text cap: a single command's stored span is trimmed to
+    /// its most-recent tail past this (flagged `truncated`), so one huge command
+    /// cannot pin memory that eviction can never reclaim (the last block stays).
+    max_block_bytes: usize,
+    /// Total retained-block-text budget across the pane; oldest blocks front-drop
+    /// until under it.
+    max_retained_bytes: usize,
 }
 
 impl Pane {
     pub fn new(rows: u16, cols: u16) -> Self {
+        Pane::with_scrollback(rows, cols, scrollback_lines())
+    }
+
+    /// Construct with an explicit scrollback cap (the [`Pane::new`] path resolves
+    /// it from config). Lets tests exercise the at-cap `truncated` flag without
+    /// touching a process-global env var.
+    fn with_scrollback(rows: u16, cols: u16, scrollback: usize) -> Self {
+        Pane::with_limits(rows, cols, scrollback, MAX_BLOCK_BYTES, MAX_RETAINED_BYTES)
+    }
+
+    /// Construct with explicit block-memory budgets. Lets tests drive eviction
+    /// with tiny caps instead of feeding megabytes.
+    fn with_limits(
+        rows: u16,
+        cols: u16,
+        scrollback: usize,
+        max_block_bytes: usize,
+        max_retained_bytes: usize,
+    ) -> Self {
         let rows = rows.max(1);
         let cols = cols.max(1);
+        let scrollback = scrollback.max(1);
         let config = Config {
-            scrolling_history: SCROLLBACK_LINES,
+            scrolling_history: scrollback,
             ..Config::default()
         };
         Pane {
@@ -73,14 +144,31 @@ impl Pane {
             processor: Processor::new(),
             rows,
             cols,
+            scanner: Osc133Scanner::default(),
+            blocks: VecDeque::new(),
+            open: None,
+            next_seq: 0,
+            saw_marker: false,
+            scrollback,
+            retained_bytes: 0,
+            max_block_bytes: max_block_bytes.max(1),
+            max_retained_bytes: max_retained_bytes.max(1),
         }
     }
 
-    /// Feed raw PTY output. Safe with partial escape sequences split across
-    /// reads; `vte` buffers incomplete sequences between calls. Malformed
-    /// sequences are the parser's problem (bounded parse, no panic).
+    /// Feed raw PTY output. The OSC 133 scanner splits the stream: passthrough
+    /// spans advance the Term (which buffers partial escape sequences across
+    /// calls); recognized FinalTerm markers are stripped and queued for the block
+    /// store. Partial markers split across reads carry over in the scanner state.
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.processor.advance(&mut self.term, bytes);
+        for seg in self.scanner.scan(bytes) {
+            match seg {
+                // Advance passthrough FIRST so a marker records the Term's row
+                // AFTER its preceding output landed.
+                Seg::Pass(b) => self.processor.advance(&mut self.term, &b),
+                Seg::Marker(m) => self.on_marker(m),
+            }
+        }
     }
 
     /// Resize the grid, mirroring a PTY winsize change. Clamped to 1 so a
@@ -130,6 +218,210 @@ impl Pane {
     pub fn text(&self) -> String {
         let frame = self.frame();
         frame_text(&frame)
+    }
+
+    // -- OSC 133 command blocks (Task 1.2) -------------------------------------
+
+    /// Drive the block store from a recognized marker at the Term's current row.
+    /// `C` opens a block; `D` finalizes it (captures its text). `A`/`B` are
+    /// prompt/command boundaries the output-span model needs no transition for.
+    fn on_marker(&mut self, m: Osc133) {
+        self.saw_marker = true;
+        match m {
+            Osc133::OutputStart => {
+                // A prior still-open block (C with no D - e.g. a reprinted prompt)
+                // finalizes with unknown exit before the new one opens.
+                if self.open.is_some() {
+                    self.finalize_open(None);
+                }
+                let seq = self.next_seq;
+                self.next_seq += 1;
+                self.open = Some(OpenBlock {
+                    seq,
+                    anchor: self.abs_row(),
+                });
+            }
+            Osc133::CmdDone { exit } => self.finalize_open(exit),
+            Osc133::PromptStart | Osc133::CmdStart => {}
+        }
+    }
+
+    /// The cursor's absolute row: lines scrolled into history + current grid line.
+    /// Exact below the scrollback cap (history grows monotonically as lines scroll
+    /// off); see `extract_from` for the past-cap honesty.
+    fn abs_row(&self) -> u64 {
+        let grid = self.term.grid();
+        grid.history_size() as u64 + grid.cursor.point.line.0.max(0) as u64
+    }
+
+    /// Close the open block: capture its output text now and retain it, bounding
+    /// per-block and total retained bytes.
+    fn finalize_open(&mut self, exit: Option<i32>) {
+        let Some(open) = self.open.take() else { return };
+        let (mut text, mut truncated) = self.extract_from(open.anchor);
+        // Cap a single block's stored text: keep the most-recent tail, drop the
+        // head, flag truncated. Prevents one huge command from pinning memory
+        // that total-budget eviction can never reclaim (the last block stays).
+        if text.len() > self.max_block_bytes {
+            let cut = char_boundary_at_or_before(&text, text.len() - self.max_block_bytes);
+            text.drain(..cut);
+            truncated = true;
+        }
+        self.retained_bytes += text.len();
+        self.blocks.push_back(Block {
+            seq: open.seq,
+            exit,
+            truncated,
+            text,
+        });
+        // Front-drop oldest until within BOTH the count and byte budgets. Always
+        // keep at least the block just pushed (a single over-budget block is
+        // already tail-capped above).
+        while self.blocks.len() > 1
+            && (self.blocks.len() > MAX_BLOCKS || self.retained_bytes > self.max_retained_bytes)
+        {
+            if let Some(dropped) = self.blocks.pop_front() {
+                self.retained_bytes -= dropped.text.len();
+            }
+        }
+    }
+
+    /// Text from absolute row `anchor` down to the current output bottom (cursor
+    /// line), plus whether the span is possibly `truncated` at its top.
+    ///
+    // ponytail: `history_size()` saturates at the scrollback cap, so once the
+    // pane fills its scrollback the anchor stops tracking scrolled-off lines and
+    // the extracted span drifts - `truncated` is then conservatively true (the
+    // read may be incomplete). Below the cap it is exact-false: nothing has
+    // scrolled off, so the whole span is present (the common case at 100k).
+    // alacritty 0.26 emits no scroll event, so a scrolled-off counter can't be
+    // maintained; the real fix is to accumulate the C..D output byte span
+    // instead of reading the grid (tracked as a follow-up).
+    fn extract_from(&self, anchor: u64) -> (String, bool) {
+        let grid = self.term.grid();
+        let hist = grid.history_size();
+        let top = grid.topmost_line().0 as i64; // == -(hist as i64)
+        let start = (anchor as i64 - hist as i64).max(top);
+        let truncated = hist >= self.scrollback;
+        let end = grid.cursor.point.line.0 as i64;
+        (self.rows_text(start, end), truncated)
+    }
+
+    /// Render grid rows `[start ..= end]` (Line coords; negatives reach history)
+    /// as trimmed text, trailing blank rows dropped. Clamps to the live window.
+    fn rows_text(&self, start: i64, end: i64) -> String {
+        let grid = self.term.grid();
+        let cols = self.cols as usize;
+        let top = grid.topmost_line().0 as i64;
+        let bot = grid.bottommost_line().0 as i64;
+        let start = start.max(top);
+        let end = end.min(bot);
+        let mut rows: Vec<String> = Vec::new();
+        let mut ln = start;
+        while ln <= end {
+            let row = &grid[Line(ln as i32)];
+            let mut s = String::with_capacity(cols);
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                    || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                s.push(if cell.flags.contains(Flags::HIDDEN) {
+                    ' '
+                } else {
+                    cell.c
+                });
+            }
+            while s.ends_with(' ') {
+                s.pop();
+            }
+            rows.push(s);
+            ln += 1;
+        }
+        while rows.last().map(|r| r.is_empty()).unwrap_or(false) {
+            rows.pop();
+        }
+        rows.join("\n")
+    }
+
+    /// The last `lines` logical rows, reaching into history (US5). `lines` at or
+    /// below the viewport height reproduces the visible grid (AC5-UI); above it,
+    /// history is included up to the scrollback window.
+    pub fn read_tail(&self, lines: u16) -> String {
+        let grid = self.term.grid();
+        let bot = grid.bottommost_line().0 as i64;
+        let start = bot - (lines.max(1) as i64) + 1;
+        self.rows_text(start, bot)
+    }
+
+    /// Read a command block. `Err(())` is `BLOCK_UNAVAILABLE`: an evicted or
+    /// nonexistent block, or a specific `seq` on a markerless pane. A markerless
+    /// pane's `Last` degrades to ONE implicit block (whole output), flagged.
+    pub fn read_block(&self, sel: BlockSel) -> Result<BlockRead, ()> {
+        match sel {
+            BlockSel::Last => {
+                if let Some(open) = &self.open {
+                    return Ok(self.read_open(open));
+                }
+                if let Some(b) = self.blocks.back() {
+                    return Ok(BlockRead::complete(b));
+                }
+                if !self.saw_marker {
+                    return Ok(self.implicit_block());
+                }
+                Err(())
+            }
+            BlockSel::Seq(n) => {
+                if let Some(open) = &self.open {
+                    if open.seq == n {
+                        return Ok(self.read_open(open));
+                    }
+                }
+                self.blocks
+                    .iter()
+                    .find(|b| b.seq == n)
+                    .map(BlockRead::complete)
+                    .ok_or(())
+            }
+        }
+    }
+
+    /// Live snapshot of a still-streaming block (no `D` yet): text so far,
+    /// `complete=false`. Never hangs waiting for the terminator (AC2-FR).
+    fn read_open(&self, open: &OpenBlock) -> BlockRead {
+        let (text, truncated) = self.extract_from(open.anchor);
+        BlockRead {
+            seq: Some(open.seq),
+            exit: None,
+            complete: false,
+            truncated,
+            implicit: false,
+            text,
+        }
+    }
+
+    /// The most recently completed block's `(seq, exit)`, or `None`. Feeds the
+    /// `command_done` wait signal.
+    pub fn last_done(&self) -> Option<(u64, Option<i32>)> {
+        self.blocks.back().map(|b| (b.seq, b.exit))
+    }
+
+    /// The whole output (history + grid) as one implicit block for a pane that
+    /// never emitted markers.
+    fn implicit_block(&self) -> BlockRead {
+        let grid = self.term.grid();
+        let top = grid.topmost_line().0 as i64;
+        let bot = grid.cursor.point.line.0 as i64;
+        BlockRead {
+            seq: None,
+            exit: None,
+            complete: true,
+            truncated: false,
+            implicit: true,
+            text: self.rows_text(top, bot),
+        }
     }
 
     /// The pane's negotiated terminal modes - the per-pane state whose
@@ -253,6 +545,19 @@ pub fn frame_text(frame: &Frame) -> String {
     rows.join("\n")
 }
 
+/// Largest byte index `<= idx` that is a UTF-8 char boundary (std's
+/// `floor_char_boundary` is still unstable). Used to trim a block's stored text
+/// to its tail without splitting a codepoint.
+fn char_boundary_at_or_before(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 fn map_cell(c: char, fg: VtColor, bg: VtColor, flags: Flags) -> Cell {
     let mut f = 0u8;
     // BOLD_ITALIC sets both bits; DIM_BOLD sets BOLD - `contains` covers them.
@@ -321,6 +626,271 @@ fn map_color(c: VtColor) -> Color {
             };
             Color::Indexed(idx)
         }
+    }
+}
+
+// -- OSC 133 command block store (Task 1.2) -------------------------------------
+//
+// Capture-at-completion (blueprint amendment, overrides the epic's SumTree +
+// lazy-row-anchor design): a block opens on the `C` marker with a below-cap-exact
+// anchor and is read LIVE from the grid while streaming; on `D` its text is
+// extracted and STORED, so a completed block owns immutable bytes - no anchor, no
+// scroll counter, no reflow dependence. Eviction is a bounded retained-block
+// budget (front-drop), not a row-scroll computation.
+
+/// Max retained completed blocks per pane. A count backstop; retained block
+/// memory is bounded primarily by BYTES (below). Oldest front-dropped, and an
+/// evicted block reads `BLOCK_UNAVAILABLE` (AC1-FR).
+const MAX_BLOCKS: usize = 512;
+
+/// Per-block captured-text cap (256 KiB). A single command's stored span is
+/// trimmed to its most-recent tail past this, so one huge command cannot pin
+/// memory the total-budget eviction can never reclaim (the last block stays).
+const MAX_BLOCK_BYTES: usize = 256 * 1024;
+
+/// Total retained-block-text budget per pane (8 MiB). Oldest blocks front-drop
+/// until under it, so a high-output agent's blocks stay bounded regardless of
+/// the (now 100k-line) scrollback.
+const MAX_RETAINED_BYTES: usize = 8 * 1024 * 1024;
+
+/// A completed command block: the output span between an OSC 133 `C` (output
+/// start) and `D` (command done), with its text captured at `D`.
+#[derive(Debug, Clone)]
+struct Block {
+    seq: u64,
+    exit: Option<i32>,
+    truncated: bool,
+    text: String,
+}
+
+/// A block whose `C` was seen but not yet its `D`: read live from the grid.
+#[derive(Debug, Clone, Copy)]
+struct OpenBlock {
+    seq: u64,
+    /// Absolute output-start row (`history_size + line` at `C`).
+    anchor: u64,
+}
+
+/// A block read result: text plus the metadata `--json` surfaces. Degradations
+/// (still streaming, markerless-implicit, truncated) are VISIBLE flags, never
+/// silent (silent-failure hunter).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockRead {
+    /// `None` for the implicit whole-output block of a markerless pane.
+    pub seq: Option<u64>,
+    pub exit: Option<i32>,
+    pub complete: bool,
+    pub truncated: bool,
+    pub implicit: bool,
+    pub text: String,
+}
+
+impl BlockRead {
+    fn complete(b: &Block) -> Self {
+        BlockRead {
+            seq: Some(b.seq),
+            exit: b.exit,
+            complete: true,
+            truncated: b.truncated,
+            implicit: false,
+            text: b.text.clone(),
+        }
+    }
+
+    /// The wire metadata for this read (the `text` rides `PaneText` alongside).
+    pub fn meta(&self) -> BlockMeta {
+        BlockMeta {
+            seq: self.seq,
+            exit: self.exit,
+            complete: self.complete,
+            truncated: self.truncated,
+            implicit: self.implicit,
+        }
+    }
+}
+
+// -- OSC 133 (FinalTerm) shell-integration scanner ------------------------------
+//
+// alacritty's ANSI processor silently drops OSC sequences it does not model, so
+// OSC 133 never reaches a handler we control (verified against the landed code).
+// Capture is therefore a pre-`advance` byte scanner: it walks the PTY stream, and
+// at each `ESC ] 133 ; <arg> (BEL | ST)` it emits a typed marker and STRIPS the
+// bytes (the Term would ignore them anyway; stripping keeps the grid canonical).
+// Everything else flows to the Term verbatim - nothing is ever swallowed. The
+// discipline mirrors `keys.rs`: a tiny state machine with a bounded accumulator,
+// safe with a marker split one byte per read.
+
+/// A recognized OSC 133 marker. FinalTerm's letters: `A` prompt start, `B`
+/// command start, `C` command output start, `D[;exit]` command finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc133 {
+    PromptStart,
+    CmdStart,
+    OutputStart,
+    CmdDone { exit: Option<i32> },
+}
+
+/// One unit of scanner output, in stream order: bytes bound for the Term, or a
+/// marker to record at the Term's position after the preceding bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seg {
+    Pass(Vec<u8>),
+    Marker(Osc133),
+}
+
+/// The FinalTerm prefix after `ESC ]`: the literal `133;`.
+const OSC133_PREFIX: &[u8] = b"133;";
+/// Payload cap: a real FinalTerm arg is a few bytes (`D;137`, `A;cl=m`). Anything
+/// longer is hostile/garbage - flush what we held and bail (bounded, no panic).
+const MAX_PAYLOAD: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScanState {
+    /// Bytes flow to the Term.
+    Ground,
+    /// Saw `ESC`; awaiting `]` (or a divergence back to Ground).
+    Esc,
+    /// Saw `ESC ]`; matched `n` bytes of `133;`.
+    Prefix(usize),
+    /// Matched `ESC ] 133 ;`; accumulating the arg until a terminator.
+    Payload(Vec<u8>),
+    /// In the payload, saw `ESC`; a following `\` closes the marker (ST).
+    PayloadEsc(Vec<u8>),
+}
+
+/// Per-pane OSC 133 scanner. State persists across `scan` calls so a marker split
+/// across PTY reads still parses (`keys.rs` accumulation discipline, output-side).
+pub struct Osc133Scanner {
+    state: ScanState,
+}
+
+impl Default for Osc133Scanner {
+    fn default() -> Self {
+        Osc133Scanner {
+            state: ScanState::Ground,
+        }
+    }
+}
+
+impl Osc133Scanner {
+    /// Split `bytes` into passthrough spans and stripped markers, in order.
+    /// Common case (no `ESC`): one `Pass` covering the whole read.
+    // ponytail: one to_vec per read of terminal output; alacritty's advance
+    // copies into the grid anyway, so this is not the hot allocation. Zero-copy
+    // spans would need lifetimes across the carried-over state - not worth it.
+    fn scan(&mut self, bytes: &[u8]) -> Vec<Seg> {
+        let mut out: Vec<Seg> = Vec::new();
+        let mut plain: Vec<u8> = Vec::new();
+
+        // Flush any pending passthrough bytes as one segment before a marker.
+        macro_rules! flush {
+            () => {
+                if !plain.is_empty() {
+                    out.push(Seg::Pass(std::mem::take(&mut plain)));
+                }
+            };
+        }
+
+        for &b in bytes {
+            match std::mem::replace(&mut self.state, ScanState::Ground) {
+                ScanState::Ground => {
+                    if b == 0x1b {
+                        self.state = ScanState::Esc;
+                    } else {
+                        plain.push(b);
+                    }
+                }
+                ScanState::Esc => {
+                    if b == 0x5d {
+                        // `ESC ]` - an OSC; start matching the 133 prefix.
+                        self.state = ScanState::Prefix(0);
+                    } else if b == 0x1b {
+                        // `ESC ESC` - the first ESC is not ours; hand it back and
+                        // stay in Esc for the new one.
+                        plain.push(0x1b);
+                        self.state = ScanState::Esc;
+                    } else {
+                        // `ESC <other>` - some other escape; hand both to the Term.
+                        plain.push(0x1b);
+                        plain.push(b);
+                    }
+                }
+                ScanState::Prefix(n) => {
+                    if b == OSC133_PREFIX[n] {
+                        if n + 1 == OSC133_PREFIX.len() {
+                            self.state = ScanState::Payload(Vec::new());
+                        } else {
+                            self.state = ScanState::Prefix(n + 1);
+                        }
+                    } else {
+                        // Not a 133 OSC (e.g. a title `ESC ] 0 ;`). Hand back what
+                        // we held and let the Term parse the rest of this OSC.
+                        plain.push(0x1b);
+                        plain.push(0x5d);
+                        plain.extend_from_slice(&OSC133_PREFIX[..n]);
+                        plain.push(b);
+                    }
+                }
+                ScanState::Payload(mut buf) => {
+                    if b == 0x07 {
+                        // BEL terminator: emit + strip.
+                        flush!();
+                        if let Some(m) = parse_osc133(&buf) {
+                            out.push(Seg::Marker(m));
+                        }
+                    } else if b == 0x1b {
+                        self.state = ScanState::PayloadEsc(buf);
+                    } else if buf.len() >= MAX_PAYLOAD {
+                        // Hostile length: hand everything back, nothing swallowed.
+                        plain.push(0x1b);
+                        plain.push(0x5d);
+                        plain.extend_from_slice(OSC133_PREFIX);
+                        plain.append(&mut buf);
+                        plain.push(b);
+                    } else {
+                        buf.push(b);
+                        self.state = ScanState::Payload(buf);
+                    }
+                }
+                ScanState::PayloadEsc(mut buf) => {
+                    if b == 0x5c {
+                        // `ESC \` (ST) terminator: emit + strip.
+                        flush!();
+                        if let Some(m) = parse_osc133(&buf) {
+                            out.push(Seg::Marker(m));
+                        }
+                    } else {
+                        // ESC not closing the marker: garbage. Hand it all back.
+                        plain.push(0x1b);
+                        plain.push(0x5d);
+                        plain.extend_from_slice(OSC133_PREFIX);
+                        plain.append(&mut buf);
+                        plain.push(0x1b);
+                        plain.push(b);
+                    }
+                }
+            }
+        }
+        flush!();
+        out
+    }
+}
+
+/// Parse the payload after `133;` into a marker. Unknown subtypes yield `None`
+/// (stripped, no event) - they are semantic markers the Term ignores anyway.
+fn parse_osc133(buf: &[u8]) -> Option<Osc133> {
+    let s = std::str::from_utf8(buf).ok()?;
+    let mut fields = s.split(';');
+    match fields.next()? {
+        "A" => Some(Osc133::PromptStart),
+        "B" => Some(Osc133::CmdStart),
+        "C" => Some(Osc133::OutputStart),
+        "D" => {
+            // `D` or `D;<exit>[;...]`; the exit is the first field, if numeric.
+            let exit = fields.next().and_then(|f| f.parse::<i32>().ok());
+            Some(Osc133::CmdDone { exit })
+        }
+        _ => None,
     }
 }
 
@@ -476,5 +1046,245 @@ mod tests {
         assert_eq!(pane.size(), (1, 1));
         let frame = pane.frame();
         assert_eq!(frame.cells.len(), 1);
+    }
+
+    // -- OSC 133 scanner (Task 1.1) --------------------------------------------
+
+    /// Run byte chunks through a fresh scanner; return (markers, passthrough).
+    fn scan_chunks(chunks: &[&[u8]]) -> (Vec<Osc133>, Vec<u8>) {
+        let mut sc = Osc133Scanner::default();
+        let (mut markers, mut pass) = (Vec::new(), Vec::new());
+        for ch in chunks {
+            for seg in sc.scan(ch) {
+                match seg {
+                    Seg::Pass(b) => pass.extend_from_slice(&b),
+                    Seg::Marker(m) => markers.push(m),
+                }
+            }
+        }
+        (markers, pass)
+    }
+
+    fn scan(bytes: &[u8]) -> (Vec<Osc133>, Vec<u8>) {
+        scan_chunks(&[bytes])
+    }
+
+    #[test]
+    fn osc133_recognizes_finalterm_letters_and_exit() {
+        // A prompt, B command, C output-start, D;1 done-with-exit-1 (BEL-terminated).
+        let (markers, pass) =
+            scan(b"\x1b]133;A\x07$ \x1b]133;B\x07false\x1b]133;C\x07\x1b]133;D;1\x07");
+        assert_eq!(
+            markers,
+            vec![
+                Osc133::PromptStart,
+                Osc133::CmdStart,
+                Osc133::OutputStart,
+                Osc133::CmdDone { exit: Some(1) },
+            ]
+        );
+        // AC1-UI: no marker bytes survive in the passthrough - only real text.
+        assert_eq!(pass, b"$ false");
+    }
+
+    #[test]
+    fn osc133_st_terminator_and_bare_d() {
+        // ST (ESC \) terminator, and a bare `D` with no exit field.
+        let (markers, pass) = scan(b"\x1b]133;C\x1b\\ok\x1b]133;D\x1b\\");
+        assert_eq!(
+            markers,
+            vec![Osc133::OutputStart, Osc133::CmdDone { exit: None }]
+        );
+        assert_eq!(pass, b"ok");
+    }
+
+    #[test]
+    fn osc133_splits_one_byte_per_feed_identically() {
+        // AC1-EDGE: a marker split one byte per feed parses identically.
+        let stream = b"a\x1b]133;C\x07b\x1b]133;D;0\x07c";
+        let chunks: Vec<&[u8]> = stream.iter().map(std::slice::from_ref).collect();
+        let (markers, pass) = scan_chunks(&chunks);
+        assert_eq!(
+            markers,
+            vec![Osc133::OutputStart, Osc133::CmdDone { exit: Some(0) }]
+        );
+        assert_eq!(pass, b"abc");
+    }
+
+    #[test]
+    fn osc133_non_133_osc_passes_through() {
+        // A window-title OSC (`ESC ] 0 ; ...`) is not ours: passed through whole,
+        // no marker (the Term consumes it as a title).
+        let (markers, pass) = scan(b"\x1b]0;my title\x07hello");
+        assert!(markers.is_empty());
+        assert_eq!(pass, b"\x1b]0;my title\x07hello");
+    }
+
+    #[test]
+    fn osc133_hostile_payload_is_bounded_no_marker() {
+        // AC1-ERR: a garbage payload past the length cap flushes as inert bytes,
+        // records no phantom marker, does not panic or buffer unbounded.
+        let mut hostile = b"\x1b]133;".to_vec();
+        hostile.extend(std::iter::repeat(b'X').take(500));
+        hostile.push(0x07);
+        hostile.extend_from_slice(b"tail");
+        let (markers, pass) = scan(&hostile);
+        assert!(markers.is_empty());
+        assert!(pass.ends_with(b"tail"), "nothing swallowed after flush");
+    }
+
+    #[test]
+    fn osc133_unknown_subtype_is_stripped_without_marker() {
+        // FinalTerm defines A/B/C/D; an unknown letter is stripped, no marker.
+        let (markers, pass) = scan(b"x\x1b]133;Z;foo\x07y");
+        assert!(markers.is_empty());
+        assert_eq!(pass, b"xy");
+    }
+
+    #[test]
+    fn osc133_markers_never_reach_the_grid() {
+        // Integration: feed markers through a Pane; the grid holds only real text.
+        let mut pane = Pane::new(24, 80);
+        pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07out\x1b]133;D;0\x07");
+        assert_eq!(pane.text(), "$ out");
+    }
+
+    // -- OSC 133 block store (Task 1.2) ----------------------------------------
+
+    /// Feed one full command's markers + output: prompt, output-start, text,
+    /// done-with-exit. `\r\n` moves to a fresh row so blocks don't overwrite.
+    fn run_command(pane: &mut Pane, output: &str, exit: i32) {
+        pane.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;C\x07");
+        pane.feed(output.as_bytes());
+        pane.feed(format!("\x1b]133;D;{exit}\x07\r\n").as_bytes());
+    }
+
+    #[test]
+    fn blocks_capture_seq_and_exit_in_order() {
+        // AC1-HP: two commands -> two blocks, correct seq order and exit codes.
+        let mut pane = Pane::new(24, 80);
+        run_command(&mut pane, "hello", 0);
+        run_command(&mut pane, "boom", 1);
+
+        let b0 = pane.read_block(BlockSel::Seq(0)).unwrap();
+        assert_eq!((b0.seq, b0.exit, b0.complete), (Some(0), Some(0), true));
+        assert_eq!(b0.text, "$ hello");
+
+        let b1 = pane.read_block(BlockSel::Seq(1)).unwrap();
+        assert_eq!((b1.seq, b1.exit), (Some(1), Some(1)));
+        assert_eq!(b1.text, "$ boom");
+
+        // AC2-HP: `Last` is the most recent completed block.
+        assert_eq!(pane.read_block(BlockSel::Last).unwrap().seq, Some(1));
+    }
+
+    #[test]
+    fn markerless_pane_reads_one_implicit_block() {
+        // AC2-ERR: no markers -> `Last` returns the whole output, flagged
+        // implicit; a specific seq is BLOCK_UNAVAILABLE.
+        let mut pane = Pane::new(24, 80);
+        pane.feed(b"just output\r\nline two");
+        let read = pane.read_block(BlockSel::Last).unwrap();
+        assert!(read.implicit && read.seq.is_none() && read.complete);
+        assert_eq!(read.text, "just output\nline two");
+        assert!(pane.read_block(BlockSel::Seq(5)).is_err());
+    }
+
+    #[test]
+    fn open_block_reads_live_and_incomplete() {
+        // AC2-FR: a block mid-output (no D) reads the span so far, incomplete.
+        let mut pane = Pane::new(24, 80);
+        pane.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07partial");
+        let read = pane.read_block(BlockSel::Last).unwrap();
+        assert_eq!((read.seq, read.complete), (Some(0), false));
+        assert_eq!(read.text, "$ partial");
+    }
+
+    #[test]
+    fn completed_block_survives_width_resize() {
+        // AC2-EDGE flip (amendment): a completed block returns its CAPTURED text
+        // after a width-changing resize, never BLOCK_UNAVAILABLE.
+        let mut pane = Pane::new(24, 80);
+        run_command(&mut pane, "keepme", 0);
+        pane.resize(24, 40); // width change reflows the grid
+        let read = pane.read_block(BlockSel::Seq(0)).unwrap();
+        assert_eq!(read.text, "$ keepme");
+    }
+
+    #[test]
+    fn evicted_block_reads_unavailable() {
+        // AC1-FR: past the retained-block budget, the oldest evicts and reads
+        // BLOCK_UNAVAILABLE; the newest still reads.
+        let mut pane = Pane::new(24, 80);
+        for i in 0..(MAX_BLOCKS + 3) {
+            run_command(&mut pane, &format!("c{i}"), 0);
+        }
+        assert!(pane.read_block(BlockSel::Seq(0)).is_err(), "oldest evicted");
+        let last = (MAX_BLOCKS + 3 - 1) as u64;
+        assert!(pane.read_block(BlockSel::Seq(last)).is_ok(), "newest kept");
+    }
+
+    #[test]
+    fn block_truncated_flag_fires_only_at_scrollback_cap() {
+        // Below the cap a completed block is exact (nothing evicted) - not
+        // truncated. Once the pane fills its (tiny) scrollback, a block's top
+        // may have scrolled off, so the flag conservatively fires.
+        let mut pane = Pane::with_scrollback(4, 20, 8);
+        run_command(&mut pane, "small", 0);
+        assert!(
+            !pane.read_block(BlockSel::Seq(0)).unwrap().truncated,
+            "below-cap block is exact"
+        );
+        // Push enough rows to fill the 8-line scrollback, then capture a block.
+        for i in 0..40 {
+            pane.feed(format!("filler{i}\r\n").as_bytes());
+        }
+        run_command(&mut pane, "big", 0);
+        assert!(
+            pane.read_block(BlockSel::Last).unwrap().truncated,
+            "at-cap block is flagged possibly-truncated"
+        );
+    }
+
+    #[test]
+    fn block_text_is_bounded_by_byte_budgets() {
+        // Tiny budgets: 10 bytes per block, 30 bytes total.
+        let mut pane = Pane::with_limits(4, 80, 100, 10, 30);
+
+        // A block past the per-block cap is tail-trimmed and flagged truncated.
+        run_command(&mut pane, "0123456789ABCDEF", 0); // "$ 0123456789ABCDEF" = 18B
+        let b0 = pane.read_block(BlockSel::Seq(0)).unwrap();
+        assert!(b0.text.len() <= 12, "per-block cap trims: {:?}", b0.text);
+        assert!(b0.truncated, "a trimmed block is flagged truncated");
+        assert!(b0.text.ends_with("ABCDEF"), "keeps the tail: {:?}", b0.text);
+
+        // Many more blocks: total retained stays under budget, so the oldest
+        // evicts by BYTES (not the 512 count cap, which 11 blocks never hit).
+        for i in 0..10 {
+            run_command(&mut pane, &format!("cmd{i}xxxxx"), 0);
+        }
+        assert!(
+            pane.read_block(BlockSel::Seq(0)).is_err(),
+            "oldest evicted by the byte budget"
+        );
+        assert!(
+            pane.read_block(BlockSel::Last).is_ok(),
+            "the newest block always survives"
+        );
+    }
+
+    #[test]
+    fn read_tail_reaches_into_history() {
+        // AC5-HP: output taller than the viewport; a large --lines reaches history.
+        let mut pane = Pane::new(4, 20);
+        for i in 0..20 {
+            pane.feed(format!("row{i}\r\n").as_bytes());
+        }
+        // Viewport is 4 rows; a 10-line tail pulls scrolled-off rows back.
+        let tail = pane.read_tail(10);
+        assert!(tail.contains("row15") && tail.contains("row19"), "{tail:?}");
+        assert!(tail.contains("row11"), "reached into history: {tail:?}");
+        // AC5-UI: a viewport-sized read matches the visible grid.
+        assert_eq!(pane.read_tail(4), pane.text());
     }
 }

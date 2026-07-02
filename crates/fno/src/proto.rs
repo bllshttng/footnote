@@ -49,7 +49,12 @@ use crate::tree::{Dir, Rect, TabId};
 /// `ControlVerb::PaneRun` gains `claim` (the per-pane writer-claim opt-in set
 /// at agent spawn); `ControlVerb::{PaneClaim, PaneRelease}` added (the relay
 /// acquires around an injection burst).
-pub const PROTO_VERSION: u32 = 5;
+///
+/// v6 (Phase 4b block model): `PaneRead` gains `block` ([`BlockSel`]) and its
+/// `lines` reaches into history; `PaneWait` gains `command_done`; `WaitOutcome`
+/// gains `CommandDone`; `PaneText` gains `block` ([`BlockMeta`]); `err_code`
+/// gains `BLOCK_UNAVAILABLE`. OSC 133 command blocks (see [`crate::vt`]).
+pub const PROTO_VERSION: u32 = 6;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -134,10 +139,17 @@ pub enum ClientMsg {
 pub enum ControlVerb {
     /// Every pane across every squad -> [`ServerMsg::PaneList`].
     PaneLs,
-    /// One pane's current visible grid text -> [`ServerMsg::PaneText`].
-    /// `lines` clamps to the last N grid rows (full grid when `None`);
-    /// scrollback is 4b, so this is the visible frame only.
-    PaneRead { pane: u64, lines: Option<u16> },
+    /// One pane's text -> [`ServerMsg::PaneText`]. Without `block`, `lines`
+    /// selects the last N logical rows and (v6) reaches into scrollback history
+    /// (full visible grid when `None`; AC5-UI keeps the no-flag behavior). With
+    /// `block` set, returns that OSC 133 command block's output span instead
+    /// (v6); `lines` is ignored in block mode.
+    PaneRead {
+        pane: u64,
+        lines: Option<u16>,
+        #[serde(default)]
+        block: Option<BlockSel>,
+    },
     /// Spawn `argv` as a new pane in the squad `cwd` resolves to (created if
     /// absent) -> [`ServerMsg::PaneSpawned`]. The agents-spawn-agents
     /// primitive. `cols`/`rows` default to the VT defaults when `None`.
@@ -163,6 +175,13 @@ pub enum ControlVerb {
         quiet_ms: Option<u64>,
         pattern: Option<String>,
         timeout_ms: u64,
+        /// (v6) Also resolve on the pane's next OSC 133 `D` (command done),
+        /// yielding [`WaitOutcome::CommandDone`] with the command's exit code.
+        /// Always bounded by `timeout_ms`; a markerless pane (no shell-init)
+        /// simply times out (the CLI flags the degradation in `--json`), never
+        /// an infinite wait (AC3-FR).
+        #[serde(default)]
+        command_done: bool,
     },
     /// Close a pane by id (the `ClosePane` cascade) -> [`ServerMsg::Ok`].
     PaneKill { pane: u64 },
@@ -289,9 +308,16 @@ pub enum ServerMsg {
     // -- v4 control-verb replies (one per Control connection, then close) --
     /// Answer to [`ControlVerb::PaneLs`].
     PaneList { panes: Vec<PaneInfo> },
-    /// Answer to [`ControlVerb::PaneRead`]: the pane's visible grid text
-    /// (matches [`crate::vt::frame_text`]).
-    PaneText { pane_id: u64, text: String },
+    /// Answer to [`ControlVerb::PaneRead`]: the pane's text (matches
+    /// [`crate::vt::frame_text`]). `block` (v6) carries the command-block
+    /// metadata when the request selected a block; `None` for a plain grid/
+    /// history read. `#[serde(default)]` so a plain read stays wire-stable.
+    PaneText {
+        pane_id: u64,
+        text: String,
+        #[serde(default)]
+        block: Option<BlockMeta>,
+    },
     /// Answer to [`ControlVerb::PaneRun`]: the fresh pane's id, machine-read
     /// by the CLI so scripts compose.
     PaneSpawned { pane_id: u64 },
@@ -328,6 +354,35 @@ pub enum WaitOutcome {
     Timeout,
     /// The pane's child exited (or the pane was closed) while waiting.
     PaneExited,
+    /// (v6) An OSC 133 `D` marker fired (the running command finished);
+    /// `exit` is its reported exit code when the shell emitted one.
+    CommandDone { exit: Option<i32> },
+}
+
+/// Which OSC 133 command block a [`ControlVerb::PaneRead`] selects (v6). Defined
+/// here (not in [`crate::vt`]) so the wire and the VT store share one type.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BlockSel {
+    /// The most recent block: the open one if a command is still running, else
+    /// the last completed block, else the implicit whole-output block on a
+    /// pane that never emitted markers.
+    Last,
+    /// A specific monotonic per-pane block sequence.
+    Seq(u64),
+}
+
+/// Metadata for a command block in a [`ServerMsg::PaneText`] reply (v6). The
+/// degradation flags are VISIBLE, never silent: `implicit` = markerless pane's
+/// whole-output fallback; `complete=false` = still streaming (no `D` yet);
+/// `truncated` = the span's top scrolled out of the window.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlockMeta {
+    /// `None` for the implicit whole-output block of a markerless pane.
+    pub seq: Option<u64>,
+    pub exit: Option<i32>,
+    pub complete: bool,
+    pub truncated: bool,
+    pub implicit: bool,
 }
 
 /// `ServerMsg::Err` codes. One namespace so the CLI's exit-code mapping and
@@ -341,6 +396,9 @@ pub mod err_code {
     pub const SPAWN_FAILED: u32 = 3;
     /// A malformed request the server could parse but not act on.
     pub const BAD_REQUEST: u32 = 4;
+    /// (v6) A block read that cannot be answered: an evicted or nonexistent
+    /// block, or a specific `seq` requested on a markerless pane.
+    pub const BLOCK_UNAVAILABLE: u32 = 5;
 }
 
 /// One tab's catalog entry inside [`ServerMsg::Layout`]. `id` is the stable
@@ -802,10 +860,17 @@ mod tests {
             ControlVerb::PaneRead {
                 pane: 3,
                 lines: Some(40),
+                block: None,
             },
             ControlVerb::PaneRead {
                 pane: 3,
                 lines: None,
+                block: Some(BlockSel::Last),
+            },
+            ControlVerb::PaneRead {
+                pane: 3,
+                lines: None,
+                block: Some(BlockSel::Seq(7)),
             },
             ControlVerb::PaneRun {
                 cwd: "/code/footnote".into(),
@@ -828,6 +893,7 @@ mod tests {
                 quiet_ms: Some(200),
                 pattern: Some("done".into()),
                 timeout_ms: 5000,
+                command_done: true,
             },
             ControlVerb::PaneKill { pane: 5 },
         ] {
@@ -859,6 +925,18 @@ mod tests {
             ServerMsg::PaneText {
                 pane_id: 4,
                 text: "marker-42\n$ ".into(),
+                block: None,
+            },
+            ServerMsg::PaneText {
+                pane_id: 4,
+                text: "$ false".into(),
+                block: Some(BlockMeta {
+                    seq: Some(2),
+                    exit: Some(1),
+                    complete: true,
+                    truncated: false,
+                    implicit: false,
+                }),
             },
             ServerMsg::PaneSpawned { pane_id: 9 },
             ServerMsg::Ok,
@@ -867,6 +945,9 @@ mod tests {
             },
             ServerMsg::WaitDone {
                 outcome: WaitOutcome::Timeout,
+            },
+            ServerMsg::WaitDone {
+                outcome: WaitOutcome::CommandDone { exit: Some(0) },
             },
             ServerMsg::Err {
                 code: err_code::DEAD_PANE,

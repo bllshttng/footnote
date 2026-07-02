@@ -10,8 +10,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    self, read_msg_sync, write_msg_sync, ClientMsg, ControlVerb, ServerMsg, WaitOutcome,
-    BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
+    self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, ServerMsg,
+    WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
 };
 
 /// Bound every probe: a wedged server counts as alive-but-unqueryable, never
@@ -88,6 +88,76 @@ fn probe(sock: &Path) -> Probe {
         }
     }
     Probe::Unqueryable
+}
+
+/// The zsh OSC 133 shell-integration snippet: `precmd` emits `D;<exit>` (the
+/// just-finished command) then `A` (new prompt); `preexec` emits `B`/`C` (the
+/// command is about to run). Idempotent (guarded + double-eval-safe), no
+/// absolute paths (AC4-UI). A pane that eval's this captures blocks (US1).
+const ZSH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
+  _FNO_OSC133=1
+  autoload -Uz add-zsh-hook
+  _fno_osc133_precmd() { local e=$?; printf '\033]133;D;%s\a\033]133;A\a' "$e" }
+  _fno_osc133_preexec() { printf '\033]133;B\a\033]133;C\a' }
+  add-zsh-hook precmd _fno_osc133_precmd
+  add-zsh-hook preexec _fno_osc133_preexec
+fi
+"#;
+
+/// The bash OSC 133 snippet: `_fno_osc133_prompt` (LAST in `PROMPT_COMMAND`)
+/// emits `D;<exit>`/`A` and arms; the `DEBUG` trap emits `B`/`C` on the FIRST
+/// command after the prompt, then disarms - so a pipeline emits it once, and
+/// the commands inside `PROMPT_COMMAND` (and a bare Enter) do not trip it. The
+/// `_fno_osc133_prompt` guard skips the trap firing on the hook itself.
+/// Idempotent, no absolute paths. (A pre-existing `PROMPT_COMMAND` entry plus a
+/// bare Enter is the one residual edge - a rare phantom block; zsh has none.)
+const BASH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
+  _FNO_OSC133=1
+  _fno_osc133_armed=""
+  _fno_osc133_prompt() {
+    local e=$?
+    printf '\033]133;D;%s\a\033]133;A\a' "$e"
+    _fno_osc133_armed=1
+  }
+  _fno_osc133_preexec() {
+    [ -z "$_fno_osc133_armed" ] && return
+    [ -n "$COMP_LINE" ] && return
+    case "$BASH_COMMAND" in _fno_osc133_prompt) return ;; esac
+    _fno_osc133_armed=""
+    printf '\033]133;B\a\033]133;C\a'
+  }
+  case "$PROMPT_COMMAND" in
+    *_fno_osc133_prompt*) ;;
+    *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_fno_osc133_prompt" ;;
+  esac
+  trap '_fno_osc133_preexec' DEBUG
+fi
+"#;
+
+/// `fno mux shell-init <zsh|bash>`: print an eval-able OSC 133 snippet so a
+/// pane's shell emits command-block markers. A pane that never runs it still
+/// captures ONE implicit block; a terminal whose shell already emits OSC 133
+/// (Warp/iTerm) works with zero setup (AC4-EDGE) - the scanner does not care
+/// who emits. An unsupported / missing shell is a one-line error (AC4-ERR).
+pub fn shell_init(shell: Option<&str>) -> i32 {
+    match shell {
+        Some("zsh") => {
+            print!("{ZSH_SHELL_INIT}");
+            EXIT_OK
+        }
+        Some("bash") => {
+            print!("{BASH_SHELL_INIT}");
+            EXIT_OK
+        }
+        Some(other) => {
+            eprintln!("fno mux shell-init: unsupported shell {other:?}; supported: zsh, bash");
+            EXIT_USAGE
+        }
+        None => {
+            eprintln!("fno mux shell-init: needs a shell argument: zsh|bash");
+            EXIT_USAGE
+        }
+    }
 }
 
 /// `fno mux ls`: one row per `*.sock` in the mux dir. Read-only - a stale
@@ -233,6 +303,8 @@ pub const EXIT_USAGE: i32 = 2; // malformed arguments
 pub const EXIT_WAIT_MATCHED: i32 = 10; // wait: --pattern matched
 pub const EXIT_WAIT_TIMEOUT: i32 = 11; // wait: deadline elapsed
 pub const EXIT_WAIT_EXITED: i32 = 12; // wait: the pane's child exited
+pub const EXIT_WAIT_COMMAND_DONE: i32 = 13; // wait: --command-done, OSC 133 D fired (v6)
+pub const EXIT_BLOCK_UNAVAILABLE: i32 = 14; // read --block: evicted/nonexistent/markerless (v6)
 
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
@@ -270,6 +342,7 @@ fn wait_exit_code(outcome: WaitOutcome) -> i32 {
         WaitOutcome::Matched => EXIT_WAIT_MATCHED,
         WaitOutcome::Timeout => EXIT_WAIT_TIMEOUT,
         WaitOutcome::PaneExited => EXIT_WAIT_EXITED,
+        WaitOutcome::CommandDone { .. } => EXIT_WAIT_COMMAND_DONE,
     }
 }
 
@@ -288,6 +361,7 @@ enum PaneCmd {
     Read {
         pane: u64,
         lines: Option<u16>,
+        block: Option<BlockSel>,
     },
     Run {
         cwd: Option<String>,
@@ -303,6 +377,7 @@ enum PaneCmd {
         quiet_ms: Option<u64>,
         pattern: Option<String>,
         timeout_ms: u64,
+        command_done: bool,
     },
     Kill {
         pane: u64,
@@ -335,6 +410,17 @@ fn flag_value(args: &[OsString], i: &mut usize, flag: &str) -> Result<String, St
 fn parse_u64(s: &str, flag: &str) -> Result<u64, String> {
     s.parse::<u64>()
         .map_err(|_| format!("{flag} needs a number, got {s:?}"))
+}
+
+/// `--block last` or `--block <seq>`.
+fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
+    match s {
+        "last" => Ok(BlockSel::Last),
+        n => n
+            .parse::<u64>()
+            .map(BlockSel::Seq)
+            .map_err(|_| format!("--block takes `last` or a seq number, got {s:?}")),
+    }
 }
 
 /// Parse the tokens after `mux pane` into a [`ParsedPane`]. Pure, so the whole
@@ -400,6 +486,8 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut pattern = None;
     let mut timeout_s = None;
     let mut pid = None;
+    let mut block = None;
+    let mut command_done = false;
     let mut positionals: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -413,6 +501,8 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             "--lines" => {
                 lines = Some(parse_u64(&flag_value(args, &mut i, "--lines")?, "--lines")? as u16)
             }
+            "--block" => block = Some(parse_block_sel(&flag_value(args, &mut i, "--block")?)?),
+            "--command-done" => command_done = true,
             "--text" => text = Some(flag_value(args, &mut i, "--text")?),
             "--stdin" => stdin = true,
             "--quiet-ms" => {
@@ -446,6 +536,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         "read" => PaneCmd::Read {
             pane: pane_arg("read")?,
             lines,
+            block,
         },
         "send" => {
             let pane = pane_arg("send")?;
@@ -462,6 +553,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             quiet_ms,
             pattern,
             timeout_ms: timeout_s.unwrap_or(DEFAULT_WAIT_TIMEOUT_S) * 1000,
+            command_done,
         },
         "kill" => PaneCmd::Kill {
             pane: pane_arg("kill")?,
@@ -513,7 +605,10 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
     // server is "no panes" (exit 0); the rest are an error (nothing to act on).
     let (verb, read_timeout) = match cmd {
         PaneCmd::Ls => (ControlVerb::PaneLs, CONTROL_TIMEOUT),
-        PaneCmd::Read { pane, lines } => (ControlVerb::PaneRead { pane, lines }, CONTROL_TIMEOUT),
+        PaneCmd::Read { pane, lines, block } => (
+            ControlVerb::PaneRead { pane, lines, block },
+            CONTROL_TIMEOUT,
+        ),
         PaneCmd::Run { cwd, argv, claim } => {
             let cwd = resolve_run_cwd(cwd, std::env::current_dir().ok());
             (
@@ -546,12 +641,14 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             quiet_ms,
             pattern,
             timeout_ms,
+            command_done,
         } => (
             ControlVerb::PaneWait {
                 pane,
                 quiet_ms,
                 pattern,
                 timeout_ms,
+                command_done,
             },
             Duration::from_millis(timeout_ms) + Duration::from_secs(2),
         ),
@@ -602,8 +699,17 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
         }
     };
 
+    // Whether the caller asked for --command-done: used to note the markerless
+    // degradation when the server answers Quiet/Timeout instead of CommandDone.
+    let command_done_requested = matches!(
+        &verb,
+        ControlVerb::PaneWait {
+            command_done: true,
+            ..
+        }
+    );
     match send_control(stream, verb, read_timeout) {
-        Ok(reply) => render_reply(reply, json),
+        Ok(reply) => render_reply(reply, json, command_done_requested),
         Err(e) => {
             eprintln!("fno mux pane: {e}");
             EXIT_ERROR
@@ -644,8 +750,10 @@ fn send_control(
     }
 }
 
-/// Turn one server reply into stdout + an exit code.
-fn render_reply(reply: ServerMsg, json: bool) -> i32 {
+/// Turn one server reply into stdout + an exit code. `command_done_requested`
+/// lets a `wait` note the markerless degradation (asked --command-done, got a
+/// quiet/timeout settle because the pane emitted no OSC 133 `D`).
+fn render_reply(reply: ServerMsg, json: bool, command_done_requested: bool) -> i32 {
     match reply {
         ServerMsg::PaneList { panes } => {
             if json {
@@ -667,12 +775,25 @@ fn render_reply(reply: ServerMsg, json: bool) -> i32 {
             }
             EXIT_OK
         }
-        ServerMsg::PaneText { pane_id, text } => {
+        ServerMsg::PaneText {
+            pane_id,
+            text,
+            block,
+        } => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "pane_id": pane_id, "text": text })
-                );
+                // A block read carries its metadata (seq/exit/complete/truncated/
+                // implicit); a plain read omits `block`. Degradations are visible.
+                let mut obj = serde_json::json!({ "pane_id": pane_id, "text": text });
+                if let Some(m) = block {
+                    obj["block"] = serde_json::json!({
+                        "seq": m.seq,
+                        "exit": m.exit,
+                        "complete": m.complete,
+                        "truncated": m.truncated,
+                        "implicit": m.implicit,
+                    });
+                }
+                println!("{obj}");
             } else {
                 println!("{text}");
             }
@@ -699,9 +820,22 @@ fn render_reply(reply: ServerMsg, json: bool) -> i32 {
                 WaitOutcome::Matched => "matched",
                 WaitOutcome::Timeout => "timeout",
                 WaitOutcome::PaneExited => "exited",
+                WaitOutcome::CommandDone { .. } => "command-done",
             };
+            // --command-done that settled some other way = the pane emitted no
+            // OSC 133 D (markerless); surface the degradation, never silently.
+            let degraded =
+                command_done_requested && !matches!(outcome, WaitOutcome::CommandDone { .. });
             if json {
-                println!("{}", serde_json::json!({ "outcome": word }));
+                let mut obj = serde_json::json!({ "outcome": word });
+                if let WaitOutcome::CommandDone { exit } = outcome {
+                    obj["exit"] = serde_json::json!(exit);
+                }
+                if degraded {
+                    obj["degraded"] =
+                        serde_json::json!("no OSC 133 markers; settled by quiet/timeout");
+                }
+                println!("{obj}");
             } else {
                 println!("{word}");
             }
@@ -709,8 +843,14 @@ fn render_reply(reply: ServerMsg, json: bool) -> i32 {
         }
         ServerMsg::Err { code, msg } => {
             eprintln!("fno mux pane: {msg}");
-            let _ = code; // one nonzero code for every control error class
-            EXIT_ERROR
+            // BLOCK_UNAVAILABLE gets its own exit code (AC2-ERR: a caller can
+            // tell "no such block" apart from a dead pane); every other class
+            // shares the generic error code.
+            if code == err_code::BLOCK_UNAVAILABLE {
+                EXIT_BLOCK_UNAVAILABLE
+            } else {
+                EXIT_ERROR
+            }
         }
         // The server only ever answers a control connection with the replies
         // above; anything else is a protocol violation.
@@ -773,10 +913,33 @@ mod tests {
                 json: true,
                 cmd: PaneCmd::Read {
                     pane: 7,
-                    lines: Some(40)
+                    lines: Some(40),
+                    block: None,
                 }
             }
         );
+        // --block last | <seq> selects a command block (lines ignored server-side).
+        assert_eq!(
+            parse_pane_args(&os(&["read", "7", "--block", "last"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Read {
+                pane: 7,
+                lines: None,
+                block: Some(BlockSel::Last),
+            }
+        );
+        assert_eq!(
+            parse_pane_args(&os(&["read", "7", "--block", "3"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Read {
+                pane: 7,
+                lines: None,
+                block: Some(BlockSel::Seq(3)),
+            }
+        );
+        assert!(parse_pane_args(&os(&["read", "7", "--block", "nope"])).is_err());
         assert_eq!(
             parse_pane_args(&os(&["kill", "3", "--session", "work"])).unwrap(),
             ParsedPane {
@@ -832,6 +995,7 @@ mod tests {
                 quiet_ms: Some(200),
                 pattern: None,
                 timeout_ms: DEFAULT_WAIT_TIMEOUT_S * 1000,
+                command_done: false,
             }
         );
         let p =
@@ -843,6 +1007,19 @@ mod tests {
                 quiet_ms: None,
                 pattern: Some("done".into()),
                 timeout_ms: 3000,
+                command_done: false,
+            }
+        );
+        // --command-done is a bare flag.
+        let p = parse_pane_args(&os(&["wait", "5", "--command-done"])).unwrap();
+        assert_eq!(
+            p.cmd,
+            PaneCmd::Wait {
+                pane: 5,
+                quiet_ms: None,
+                pattern: None,
+                timeout_ms: DEFAULT_WAIT_TIMEOUT_S * 1000,
+                command_done: true,
             }
         );
     }
@@ -902,22 +1079,54 @@ mod tests {
 
     #[test]
     fn mux_pane_wait_exit_codes_are_distinct() {
-        // AC4-EDGE: timeout is tellable apart from a match and a settle.
+        // AC3-UI: CommandDone is tellable apart from quiet/matched/timeout/exited.
         let codes = [
             wait_exit_code(WaitOutcome::Quiet),
             wait_exit_code(WaitOutcome::Matched),
             wait_exit_code(WaitOutcome::Timeout),
             wait_exit_code(WaitOutcome::PaneExited),
+            wait_exit_code(WaitOutcome::CommandDone { exit: Some(0) }),
         ];
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(
             sorted.len(),
-            4,
+            5,
             "every wait outcome maps to a distinct code"
         );
         assert_eq!(wait_exit_code(WaitOutcome::Quiet), EXIT_OK);
         assert_ne!(EXIT_WAIT_TIMEOUT, EXIT_WAIT_MATCHED);
+        // The exit code is independent of the reported command exit.
+        assert_eq!(
+            wait_exit_code(WaitOutcome::CommandDone { exit: None }),
+            EXIT_WAIT_COMMAND_DONE
+        );
+    }
+
+    #[test]
+    fn mux_shell_init_snippets_are_marker_emitting_and_hygienic() {
+        for snippet in [ZSH_SHELL_INIT, BASH_SHELL_INIT] {
+            // Emits all four FinalTerm markers.
+            for m in ["133;A", "133;B", "133;C", "133;D"] {
+                assert!(snippet.contains(m), "missing {m} in {snippet:?}");
+            }
+            // Idempotent: guarded so a double-eval is a no-op (AC4-UI).
+            assert!(snippet.contains("_FNO_OSC133"));
+            // No absolute paths (AC4-UI): nothing references a `/...` path.
+            assert!(
+                !snippet.lines().any(|l| l.trim_start().starts_with('/')),
+                "snippet must carry no absolute paths"
+            );
+        }
+    }
+
+    #[test]
+    fn mux_shell_init_unsupported_shell_is_a_usage_error() {
+        // AC4-ERR: an unsupported / missing shell exits non-zero.
+        assert_eq!(shell_init(Some("zsh")), EXIT_OK);
+        assert_eq!(shell_init(Some("bash")), EXIT_OK);
+        assert_eq!(shell_init(Some("fish")), EXIT_USAGE);
+        assert_eq!(shell_init(None), EXIT_USAGE);
     }
 }
