@@ -254,6 +254,7 @@ impl Pane {
             cursor_row: (cursor_point.line.0 + offset).max(0) as u16,
             cursor_col: cursor_point.column.0 as u16,
             cursor_visible: !scrolled && self.term.mode().contains(TermMode::SHOW_CURSOR),
+            scroll_offset: offset.max(0).min(u16::MAX as i32) as u16,
         }
     }
 
@@ -569,6 +570,13 @@ fn kitty_bits(m: &TermMode) -> u8 {
 /// The escape bytes that move a terminal from `old` to `new` mode state.
 /// Pure and minimal: only CHANGED modes emit a sequence, so syncing a pane
 /// against itself is zero bytes (the server skips empty syncs entirely).
+///
+/// Mouse-reporting modes (1000/1002/1003/1005/1006/1007) are deliberately
+/// EXCLUDED (Phase 5, brief Locked 2): the client holds mouse capture on
+/// permanently and forwards every pane-rect event; the server routes by reading
+/// the pane's live modes directly (see `route_mouse`), never through this sync.
+/// Letting a focus change toggle the client terminal's mouse reporting would
+/// fight that capture, so it never crosses the wire.
 pub fn mode_diff(old: Modes, new: Modes) -> Vec<u8> {
     let mut out = Vec::new();
     let mut dec = |on: bool, was: bool, code: &str| {
@@ -577,13 +585,7 @@ pub fn mode_diff(old: Modes, new: Modes) -> Vec<u8> {
         }
     };
     dec(new.app_cursor, old.app_cursor, "1");
-    dec(new.mouse_click, old.mouse_click, "1000");
-    dec(new.mouse_drag, old.mouse_drag, "1002");
-    dec(new.mouse_motion, old.mouse_motion, "1003");
     dec(new.focus_in_out, old.focus_in_out, "1004");
-    dec(new.utf8_mouse, old.utf8_mouse, "1005");
-    dec(new.sgr_mouse, old.sgr_mouse, "1006");
-    dec(new.alternate_scroll, old.alternate_scroll, "1007");
     dec(new.bracketed_paste, old.bracketed_paste, "2004");
     if new.app_keypad != old.app_keypad {
         out.extend_from_slice(if new.app_keypad { b"\x1b=" } else { b"\x1b>" });
@@ -1178,14 +1180,22 @@ mod tests {
         );
         let to_vim = String::from_utf8(mode_diff(plain, vim)).unwrap();
         assert!(to_vim.contains("\x1b[?1h"), "{to_vim:?}");
-        assert!(to_vim.contains("\x1b[?1003h"), "{to_vim:?}");
-        assert!(to_vim.contains("\x1b[?1006h"), "{to_vim:?}");
         assert!(to_vim.contains("\x1b[?2004h"), "{to_vim:?}");
-        // The way back RESETS exactly what was set.
+        // Mouse-reporting modes are NOT synced to the client (Phase 5, Locked
+        // 2): the client keeps capture on permanently and the server routes.
+        assert!(
+            !to_vim.contains("\x1b[?1003h"),
+            "mouse mode must not sync: {to_vim:?}"
+        );
+        assert!(
+            !to_vim.contains("\x1b[?1006h"),
+            "mouse mode must not sync: {to_vim:?}"
+        );
+        // The way back RESETS exactly what was set (still excluding mouse).
         let to_plain = String::from_utf8(mode_diff(vim, plain)).unwrap();
         assert!(to_plain.contains("\x1b[?1l"), "{to_plain:?}");
-        assert!(to_plain.contains("\x1b[?1003l"), "{to_plain:?}");
         assert!(to_plain.contains("\x1b[?2004l"), "{to_plain:?}");
+        assert!(!to_plain.contains("\x1b[?1003l"), "{to_plain:?}");
         // Kitty flags use the stateless absolute-set form.
         let kitty = Modes {
             kitty_flags: 0b1011,

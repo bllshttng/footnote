@@ -60,7 +60,8 @@ use crate::tree::{Dir, Rect, TabId};
 /// routes by the pane's mouse mode (SGR-encode to the PTY, else mux-side
 /// scroll/focus/selection). `ServerMsg::Copy { text }` ships extracted
 /// selection text to the client's clipboard chain. `cell_flags::SELECTED`
-/// marks selected cells in a `Frame` so every co-viewer sees the highlight.
+/// marks selected cells in a `Frame` so every co-viewer sees the highlight;
+/// `Frame` gains `scroll_offset` so the client renders the `[+N]` indicator.
 pub const PROTO_VERSION: u32 = 7;
 
 /// The crate version, carried in the handshake purely for the error message.
@@ -485,6 +486,11 @@ pub struct Frame {
     pub cursor_row: u16,
     pub cursor_col: u16,
     pub cursor_visible: bool,
+    /// (v7) Lines this pane is scrolled above the live bottom; 0 = live. The
+    /// client renders a minimal `[+N]` indicator when non-zero (US1, AC1-UI);
+    /// broadcast in the frame so every co-viewer shows the same indicator.
+    #[serde(default)]
+    pub scroll_offset: u16,
 }
 
 impl Frame {
@@ -773,6 +779,7 @@ mod tests {
             cursor_row: 1,
             cursor_col: 2,
             cursor_visible: true,
+            scroll_offset: 4,
         }
     }
 
