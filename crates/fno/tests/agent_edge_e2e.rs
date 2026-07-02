@@ -261,3 +261,116 @@ fn agent_edge_watch_only_rows_match_squad_by_cwd_else_catch_all() {
     client.detach();
     kill_server(&scratch);
 }
+
+#[test]
+fn agent_edge_inject_vs_typing_interlock() {
+    // 4a-G3 (US3): while the relay holds a claimed agent pane, human Input
+    // bounces with the `busy: relay` notice and PaneSend lands unbroken;
+    // release (explicit or holder-death) lets typing resume. The pane runs
+    // `cat` so every byte that actually reaches the PTY echoes on the grid.
+    let scratch = Scratch::new("agent_edge_claim");
+    let dir = scratch.0.to_str().unwrap().to_string();
+
+    let run = pane(
+        &scratch,
+        &["run", "--claim", "--cwd", &dir, "--", "/bin/cat"],
+    );
+    assert!(
+        run.status.success(),
+        "run stderr: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let pane_id: u64 = stdout(&run).parse().unwrap();
+    let id = pane_id.to_string();
+
+    // The attach anchors to the squad's first tab, so Input targets the cat pane.
+    let mut client = FakeClient::attach(&scratch.main_sock(), 30, 100, &dir);
+    client.wait(10, "attach layout", |c| c.layout.as_ref().map(|_| ()));
+
+    // A real killable holder process.
+    let mut holder = Command::new("/bin/sleep").arg("300").spawn().unwrap();
+    let claim = pane(&scratch, &["claim", &id, "--pid", &holder.id().to_string()]);
+    assert!(
+        claim.status.success(),
+        "claim stderr: {:?}",
+        String::from_utf8_lossy(&claim.stderr)
+    );
+
+    // AC3-UI: the keystroke bounces - notice arrives, nothing echoes.
+    client.input(b"TYPED-DURING-CLAIM");
+    client.wait(10, "busy notice", |c| {
+        c.notices.iter().any(|n| n == "busy: relay").then_some(())
+    });
+
+    // The injection burst rides PaneSend and arrives unbroken.
+    let send = pane(&scratch, &["send", &id, "--text", "INJECTED-BYTES"]);
+    assert!(send.status.success());
+    let text = client.wait(10, "injected bytes on the grid", |c| {
+        c.frames
+            .get(&pane_id)
+            .map(fno::vt::frame_text)
+            .filter(|t| t.contains("INJECTED-BYTES"))
+    });
+    assert!(
+        !text.contains("TYPED-DURING-CLAIM"),
+        "bounced keystrokes must never reach the pane: {text:?}"
+    );
+
+    // A second live holder is refused; re-acquire by the same pid is not.
+    let steal = pane(
+        &scratch,
+        &["claim", &id, "--pid", &std::process::id().to_string()],
+    );
+    assert_eq!(steal.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&steal.stderr).contains("held by pid"),
+        "steal stderr: {:?}",
+        String::from_utf8_lossy(&steal.stderr)
+    );
+
+    // AC3-FR: holder death releases without any explicit release - typing
+    // resumes on the next contested keystroke.
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    client.input(b"TYPED-AFTER-DEATH");
+    client.wait(10, "typing resumes after holder death", |c| {
+        c.frames
+            .get(&pane_id)
+            .map(fno::vt::frame_text)
+            .filter(|t| t.contains("TYPED-AFTER-DEATH"))
+    });
+
+    // Explicit release path: claim again, release, type.
+    let claim2 = pane(
+        &scratch,
+        &["claim", &id, "--pid", &std::process::id().to_string()],
+    );
+    assert!(claim2.status.success());
+    let rel = pane(&scratch, &["release", &id]);
+    assert!(rel.status.success());
+    client.input(b"TYPED-AFTER-RELEASE");
+    client.wait(10, "typing resumes after release", |c| {
+        c.frames
+            .get(&pane_id)
+            .map(fno::vt::frame_text)
+            .filter(|t| t.contains("TYPED-AFTER-RELEASE"))
+    });
+
+    // AC3-EDGE: a general pane (no --claim) never consults the interlock.
+    let general = pane(&scratch, &["run", "--cwd", &dir, "--", "/bin/cat"]);
+    assert!(general.status.success());
+    let gid = stdout(&general);
+    let refused = pane(
+        &scratch,
+        &["claim", &gid, "--pid", &std::process::id().to_string()],
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("not claim-eligible"),
+        "general-pane claim stderr: {:?}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    client.detach();
+    kill_server(&scratch);
+}
