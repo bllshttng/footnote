@@ -172,6 +172,9 @@ struct LayoutView {
     active_squad: u64,
     panes: Vec<(u64, Rect)>,
     focus: u64,
+    /// The clamped content-area the rects were computed for; a client whose
+    /// own content area is larger letterboxes (3.5).
+    area: (u16, u16),
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -513,6 +516,7 @@ async fn attach_and_run(
             active_squad: 0,
             panes: Vec::new(),
             focus: 0,
+            area: (0, 0),
         },
     );
     let (c_rows, c_cols) = view.content_dims();
@@ -548,12 +552,14 @@ async fn attach_and_run(
                 active_squad,
                 panes,
                 focus,
+                area,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
                     active_squad,
                     panes,
                     focus,
+                    area,
                 });
                 break;
             }
@@ -574,7 +580,9 @@ async fn attach_and_run(
                 }
                 view.frames.insert(pane_id, frame);
             }
-            Ok(ServerMsg::Notice { .. }) => {}
+            // Info only ever answers a pre-Attach Query; on an attached
+            // connection it is stray - ignore rather than desync.
+            Ok(ServerMsg::Notice { .. }) | Ok(ServerMsg::Info { .. }) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
     }
@@ -652,8 +660,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area });
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -672,6 +680,7 @@ async fn attach_and_run(
                         break Err(format!("draw: {e}"));
                     }
                 }
+                Ok(ServerMsg::Info { .. }) => {} // pre-Attach-only answer; stray here
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
                 Err(ProtoError::Closed) => {
                     break Ok(exit_with_notice("session ended (server closed)".into()));
@@ -766,6 +775,28 @@ async fn handle_stdin(
                 write_msg(sock_w, &ClientMsg::Command(cmd))
                     .await
                     .map_err(|e| format!("command send failed: {e}"))?;
+            }
+            Event::SelectTabIdx(idx) => {
+                // Resolve the digit's index to a stable TabId against the
+                // last Layout; an out-of-range digit is a local BEL, never a
+                // wire message the server would refuse anyway.
+                let id = view
+                    .layout
+                    .squads
+                    .iter()
+                    .find(|s| s.id == view.layout.active_squad)
+                    .and_then(|s| s.tabs.get(idx))
+                    .map(|t| t.id);
+                match id {
+                    Some(id) => {
+                        write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(id)))
+                            .await
+                            .map_err(|e| format!("command send failed: {e}"))?;
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
             }
             Event::Detach => return Ok(StdinFlow::Detach),
             Event::OpenSelector => {
@@ -898,9 +929,12 @@ async fn selector_keys(
                                 .await
                                 .map_err(|e| format!("command send failed: {e}"))?;
                             }
-                            write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(t)))
-                                .await
-                                .map_err(|e| format!("command send failed: {e}"))?;
+                            write_msg(
+                                sock_w,
+                                &ClientMsg::Command(Command::SelectTab(s.tabs[t].id)),
+                            )
+                            .await
+                            .map_err(|e| format!("command send failed: {e}"))?;
                         }
                         _ => {
                             let _ = raw_out(b"\x07");
@@ -1049,6 +1083,7 @@ mod tests {
             canonical_cwd: format!("/code/{name}"),
             tabs: (1..=tabs)
                 .map(|i| TabMeta {
+                    id: (i - 1) as u64,
                     name: i.to_string(),
                 })
                 .collect(),
@@ -1104,6 +1139,7 @@ mod tests {
                     ),
                 ],
                 focus: 11,
+                area: (29, 72),
             },
         );
         view.frames.insert(10, text_frame(29, 35, 'a'));
@@ -1222,6 +1258,7 @@ mod tests {
                 },
             )],
             focus: 10,
+            area: (29, 72),
         });
         assert!(view.frames.contains_key(&10));
         assert!(
@@ -1275,6 +1312,7 @@ mod tests {
                 },
             )],
             focus: 20,
+            area: (29, 72),
         });
         assert_eq!(view.selector, Some(0), "cursor clamped to the live rows");
     }

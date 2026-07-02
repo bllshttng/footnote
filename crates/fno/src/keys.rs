@@ -32,6 +32,10 @@ pub const DETACH: u8 = 0x1C;
 pub enum Event {
     Forward(Vec<u8>),
     Cmd(Command),
+    /// Leader+digit: select the Nth tab of the viewed squad. The scanner
+    /// only knows the index; the client resolves it to a stable `TabId`
+    /// against its last `Layout` (v3: `SelectTab` names ids, not indices).
+    SelectTabIdx(usize),
     Detach,
     /// Open the sideline selector (leader+w). Selector-mode keys are
     /// interpreted by the client's view layer, not here.
@@ -140,7 +144,7 @@ fn chord(b: u8) -> Event {
         b'n' => Event::Cmd(Command::NextTab),
         b'p' => Event::Cmd(Command::PrevTab),
         b'&' => Event::Cmd(Command::CloseTab),
-        b'1'..=b'9' => Event::Cmd(Command::SelectTab((b - b'1') as usize)),
+        b'1'..=b'9' => Event::SelectTabIdx((b - b'1') as usize),
         b'w' => Event::OpenSelector,
         b'b' => Event::TogglePanel,
         b'd' => Event::Detach,
@@ -237,10 +241,7 @@ mod tests {
             vec![Event::Cmd(Command::ResizeDir(Dir::Up))]
         );
         assert_eq!(scan_all(&[b"\x02x"]), vec![Event::Cmd(Command::ClosePane)]);
-        assert_eq!(
-            scan_all(&[b"\x027"]),
-            vec![Event::Cmd(Command::SelectTab(6))]
-        );
+        assert_eq!(scan_all(&[b"\x027"]), vec![Event::SelectTabIdx(6)]);
         assert_eq!(scan_all(&[b"\x02&"]), vec![Event::Cmd(Command::CloseTab)]);
         assert_eq!(scan_all(&[b"\x02w"]), vec![Event::OpenSelector]);
         assert_eq!(scan_all(&[b"\x02b"]), vec![Event::TogglePanel]);

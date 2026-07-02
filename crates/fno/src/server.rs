@@ -387,9 +387,16 @@ impl Core {
                 id: s.id,
                 name,
                 canonical_cwd: s.canonical_cwd.clone(),
-                tabs: (1..=s.tabs.len())
-                    .map(|i| TabMeta {
-                        name: i.to_string(),
+                tabs: s
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| TabMeta {
+                        // Placeholder until 3.2 mints stable TabIds: the
+                        // index doubles as the id, matching the SelectTab
+                        // index interpretation below.
+                        id: i as u64,
+                        name: (i + 1).to_string(),
                     })
                     .collect(),
                 active_tab: s.active_tab,
@@ -400,6 +407,7 @@ impl Core {
             active_squad: self.session.active_squad.unwrap_or(0),
             panes: rects.to_vec(),
             focus,
+            area: self.viewport,
         }
     }
 
@@ -593,6 +601,8 @@ impl Core {
                 Flow::Continue
             }
             Command::SelectTab(i) => {
+                // Placeholder until 3.2: the wire id is still the tab index.
+                let i = i as usize;
                 let Some(squad) = self.session.active_mut() else {
                     return Flow::Continue;
                 };
@@ -944,11 +954,17 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
             }
-            // A second Attach on a live connection is a protocol violation:
-            // log it (this stderr is the session log) and close rather than
-            // acting on a confused stream.
-            Ok(ClientMsg::Attach { .. }) => {
-                eprintln!("fno mux: client {id} sent Attach on a live connection; dropping it");
+            // A second Attach (or a pre-Attach-only Query/KillServer) on a
+            // live connection is a protocol violation: log it (this stderr is
+            // the session log) and close rather than acting on a confused
+            // stream.
+            Ok(msg @ (ClientMsg::Attach { .. } | ClientMsg::Query | ClientMsg::KillServer)) => {
+                let name = match msg {
+                    ClientMsg::Attach { .. } => "Attach",
+                    ClientMsg::Query => "Query",
+                    _ => "KillServer",
+                };
+                eprintln!("fno mux: client {id} sent {name} on a live connection; dropping it");
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
             }

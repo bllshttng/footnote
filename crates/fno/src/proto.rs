@@ -31,7 +31,13 @@ use crate::tree::{Dir, Rect};
 /// v2 (Phase 2 layout): `Attach` gains `cwd`; `Frame`s are pane-tagged;
 /// `Command`/`Layout`/`ModeSync` added; the never-sent `ServerMsg::Cursor`
 /// variant is removed (the cursor rides INSIDE `Frame`).
-pub const PROTO_VERSION: u32 = 2;
+///
+/// v3 (Phase 3 multi-client/sessions): `TabMeta` gains a stable `id`;
+/// `Command::SelectTab` selects by that id (u64), not by index; `Layout`
+/// gains `area` (the clamped content-area its rects were computed for);
+/// pre-Attach `ClientMsg::{Query, KillServer}` + `ServerMsg::Info` added
+/// (wire-shape FROZEN - see the variants).
+pub const PROTO_VERSION: u32 = 3;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -82,12 +88,27 @@ pub enum ClientMsg {
     /// (keys.rs). Reliable; a refused command comes back as a one-line
     /// notice, never a dropped connection.
     Command(Command),
+    /// Sent INSTEAD of `Attach` as the first message on a fresh connection:
+    /// ask who this server is (`fno mux ls`). The server answers with one
+    /// [`ServerMsg::Info`] and closes; no client is registered.
+    ///
+    /// Wire shape FROZEN forever: pre-Attach messages bypass the version
+    /// handshake (Invariants, Phase 3 plan), so every past and future build
+    /// must parse this identically. Changing it means a NEW variant.
+    Query,
+    /// Sent INSTEAD of `Attach` as the first message on a fresh connection:
+    /// shut the session down (`fno mux kill-server`). The server Byes every
+    /// client, kills every pane child, and exits 0.
+    ///
+    /// Wire shape FROZEN forever: pre-Attach, bypasses the version handshake
+    /// (Invariants, Phase 3 plan). Changing it means a NEW variant.
+    KillServer,
 }
 
 /// Layout mutations the client can request. Interpreted (leader-key table)
 /// client-side; executed on the server's core loop, which owns the tree.
-/// `SelectTab` indexes into the active squad's tab list as shown in the last
-/// `Layout`; `SelectSquad` names a squad id from the same catalog - the
+/// `SelectTab` names a stable [`TabMeta::id`] from the last `Layout`'s
+/// catalog; `SelectSquad` names a squad id from the same catalog - the
 /// server rejects stale values fail-closed (BEL + notice), so a client racing
 /// a layout change can never corrupt state.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,7 +119,7 @@ pub enum Command {
     FocusDir(Dir),
     ResizeDir(Dir),
     NewTab,
-    SelectTab(usize),
+    SelectTab(u64),
     NextTab,
     PrevTab,
     CloseTab,
@@ -121,14 +142,18 @@ pub enum ServerMsg {
     /// grid (`vt::Pane`) does not know its mux pane id - the server's pane
     /// registry tags the frame at send time.
     Frame { pane_id: u64, frame: Frame },
-    /// The squad/tab catalog + computed rects for the active tab, relative
-    /// to the CONTENT AREA. The server sends rects, never the tree; the
-    /// client never runs the layout algorithm. Reliable.
+    /// The squad/tab catalog + computed rects for the receiving client's
+    /// viewed tab, relative to the CONTENT AREA. The server sends rects,
+    /// never the tree; the client never runs the layout algorithm. Reliable.
+    /// `area` is the clamped (rows, cols) the rects were computed for
+    /// (view-scoped smallest-client clamp); a client larger than `area`
+    /// letterboxes client-side without inferring the bound from the rects.
     Layout {
         squads: Vec<SquadMeta>,
         active_squad: u64,
         panes: Vec<(u64, Rect)>,
         focus: u64,
+        area: (u16, u16),
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -141,11 +166,25 @@ pub enum ServerMsg {
     /// The server is refusing or ending this connection; `reason` is
     /// human-facing (version skew, shutdown, session ended, ...).
     Bye { reason: String },
+    /// The answer to a pre-Attach [`ClientMsg::Query`] (`fno mux ls`).
+    ///
+    /// Wire shape FROZEN forever: pre-Attach traffic bypasses the version
+    /// handshake (Invariants, Phase 3 plan). Changing it means a NEW variant.
+    Info {
+        session: String,
+        clients: u32,
+        squads: u32,
+        panes: u32,
+    },
 }
 
-/// One tab's catalog entry inside [`ServerMsg::Layout`].
+/// One tab's catalog entry inside [`ServerMsg::Layout`]. `id` is the stable
+/// session-scoped tab identity (monotonic u64, never reused - Locked
+/// Decision 6 extended to tabs); `Command::SelectTab` names it, so a
+/// selection can never race a catalog change onto the wrong tab.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TabMeta {
+    pub id: u64,
     pub name: String,
 }
 
@@ -490,6 +529,8 @@ mod tests {
             ClientMsg::Command(Command::ResizeDir(Dir::Down)),
             ClientMsg::Command(Command::SelectTab(3)),
             ClientMsg::Command(Command::SelectSquad(42)),
+            ClientMsg::Query,
+            ClientMsg::KillServer,
         ] {
             let bytes = encode(&msg).unwrap();
             let mut cursor = std::io::Cursor::new(bytes);
@@ -499,16 +540,26 @@ mod tests {
     }
 
     #[test]
-    fn proto_v2_server_msgs_roundtrip() {
-        // Every new/changed v2 server message survives the codec (mirrors the
-        // Phase 1 roundtrip discipline for the shapes 2.3/2.5 depend on).
+    fn proto_v3_server_msgs_roundtrip() {
+        // Every new/changed v3 server message survives the codec (mirrors the
+        // Phase 1/2 roundtrip discipline): Layout carries `area`, TabMeta a
+        // stable `id`, and the pre-Attach `Info` answer parses back exactly.
         for msg in [
             ServerMsg::Layout {
                 squads: vec![SquadMeta {
                     id: 1,
                     name: "footnote".into(),
                     canonical_cwd: "/code/footnote/footnote".into(),
-                    tabs: vec![TabMeta { name: "1".into() }, TabMeta { name: "2".into() }],
+                    tabs: vec![
+                        TabMeta {
+                            id: 7,
+                            name: "1".into(),
+                        },
+                        TabMeta {
+                            id: 12,
+                            name: "2".into(),
+                        },
+                    ],
                     active_tab: 1,
                 }],
                 active_squad: 1,
@@ -533,6 +584,7 @@ mod tests {
                     ),
                 ],
                 focus: 9,
+                area: (24, 80),
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
@@ -542,6 +594,12 @@ mod tests {
             },
             ServerMsg::Bye {
                 reason: "session ended".into(),
+            },
+            ServerMsg::Info {
+                session: "work".into(),
+                clients: 2,
+                squads: 1,
+                panes: 3,
             },
         ] {
             let bytes = encode(&msg).unwrap();
@@ -606,6 +664,29 @@ mod tests {
         assert!(!f.geometry_ok(), "short cells vec must fail the check");
         f.cells.clear();
         assert!(!f.geometry_ok());
+    }
+
+    #[test]
+    fn proto_pre_attach_wire_shapes_are_frozen() {
+        // Query/KillServer/Info bypass the version handshake, so their JSON
+        // encodings are FROZEN forever (Invariants). This pins the exact
+        // bytes: if this test breaks, you changed a frozen shape - add a new
+        // variant instead.
+        assert_eq!(serde_json::to_string(&ClientMsg::Query).unwrap(), r#""Query""#);
+        assert_eq!(
+            serde_json::to_string(&ClientMsg::KillServer).unwrap(),
+            r#""KillServer""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMsg::Info {
+                session: "s".into(),
+                clients: 1,
+                squads: 2,
+                panes: 3,
+            })
+            .unwrap(),
+            r#"{"Info":{"session":"s","clients":1,"squads":2,"panes":3}}"#
+        );
     }
 
     #[test]

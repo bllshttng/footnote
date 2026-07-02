@@ -230,6 +230,7 @@ pub struct LayoutSnap {
     pub active_squad: u64,
     pub panes: Vec<(u64, Rect)>,
     pub focus: u64,
+    pub area: (u16, u16),
 }
 
 /// A raw wire client: sends `ClientMsg`s, absorbs everything the server
@@ -314,17 +315,21 @@ impl FakeClient {
                 active_squad,
                 panes,
                 focus,
+                area,
             } => {
                 self.layout = Some(LayoutSnap {
                     squads,
                     active_squad,
                     panes,
                     focus,
+                    area,
                 });
             }
             ServerMsg::ModeSync { bytes } => self.modesyncs.push(bytes),
             ServerMsg::Notice { text } => self.notices.push(text),
             ServerMsg::Bye { reason } => self.byes.push(reason),
+            // Answers a pre-Attach Query only; stray on an attached client.
+            ServerMsg::Info { .. } => {}
         }
     }
 
