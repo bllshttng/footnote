@@ -439,38 +439,62 @@ def _cost_check() -> int:
 def _cargo_installed_mux() -> Optional[Path]:
     """Path to the cargo-installed mux front-door binary (`fno`), or None.
 
-    Probes ``$CARGO_HOME/bin/fno`` - the location `fno update` installs the mux
-    to (the same --root as the fno-agents bins). A mux installed at a custom
-    --root is not seen here; the ``which("fno")`` resolution below still catches
-    it as the active front door in that case.
+    Thin wrapper around ``update._cargo_installed_mux`` (single source of truth,
+    shared with `fno update`'s install path) so this collector stays patchable.
+    Probes the default ``$CARGO_HOME/bin``; a custom-``--root`` install is caught
+    instead by the ``which("fno")`` + mux-verb probe in ``_mux_front_door_report``.
     """
-    cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
-    name = "fno.exe" if os.name == "nt" else "fno"
-    candidate = cargo_home / "bin" / name
-    return candidate if candidate.is_file() else None
+    from fno import update
+
+    return update._cargo_installed_mux()
+
+
+def _probe_is_mux(fno_path: str) -> bool:
+    """True if the `fno` at ``fno_path`` responds to a mux-only verb - i.e. it is
+    the Rust mux front door, not some other binary named `fno`. Runs
+    ``fno mux ls --json`` (read-only, no TTY; the Python CLI has no `mux`
+    subcommand and fails "No such command"). Bounded + best-effort: any error or
+    non-zero exit -> False, so it never cries wolf or hangs the doctor."""
+    try:
+        result = subprocess.run(
+            [fno_path, "mux", "ls", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _mux_front_door_report() -> dict[str, Any]:
     """Report whether the Rust mux binary owns `fno` on PATH (advisory only).
 
     ``mux_front_door`` is one of:
-    - ``active``: the mux binary is installed AND `fno` on PATH resolves to it.
-    - ``shadowed``: the mux is cargo-installed but `fno` on PATH resolves
-      elsewhere (a Python `fno`, another binary) or is not on PATH - so bare
-      `fno` will not launch the mux.
-    - ``not-installed``: the mux binary is not cargo-installed.
+    - ``active``: `fno` on PATH IS the mux - it either resolves to the
+      cargo-installed mux binary, or (custom ``--root`` / non-default
+      ``CARGO_HOME``) answers a mux-only verb.
+    - ``shadowed``: the mux is cargo-installed but `fno` on PATH is not it (a
+      Python binary, another `fno`) or is off PATH - so bare `fno` will not
+      launch the mux.
+    - ``not-installed``: no cargo-installed mux AND `fno` on PATH is not a mux.
 
     Never changes the verdict status or exit code: a front-door setup problem is
     distinct from source-vs-installed staleness.
     """
     mux = _cargo_installed_mux()
     path_fno = shutil.which("fno")
-    if mux is None:
-        state = "not-installed"
-    elif path_fno is not None and Path(path_fno).resolve() == mux.resolve():
+    path_is_mux = path_fno is not None and (
+        (mux is not None and Path(path_fno).resolve() == mux.resolve())
+        or _probe_is_mux(path_fno)
+    )
+    if path_is_mux:
         state = "active"
-    else:
+    elif mux is not None:
         state = "shadowed"
+    else:
+        state = "not-installed"
     return {
         "mux_binary": str(mux) if mux else None,
         "path_fno": path_fno,

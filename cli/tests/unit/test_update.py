@@ -685,6 +685,77 @@ def test_refresh_rust_bins_also_installs_mux_front_door(
     assert str(mux_crate) in cargo_paths, "the mux front door (crates/fno) must be installed too"
 
 
+def test_refresh_rust_bins_installs_mux_on_fresh_marker_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Marker fresh (agents bins current) but the mux binary ABSENT -> still
+    install the mux and return 'fresh'. This is the dead-end fix: a fresh-marker
+    `fno update` must self-heal a stranded front door (the fno->fno-py rename
+    lands fno-py while the mux was never installed), not no-op."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    mux_crate = source.parent / "crates" / "fno"
+    mux_crate.mkdir(parents=True)
+    subtree_rev = "a" * 40
+    marker_file = tmp_path / "installed-rust-rev"
+    marker_file.write_text(subtree_rev + "\n", encoding="utf-8")  # marker == subtree -> fresh
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
+
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)  # mux ABSENT
+
+    recorded: list[list[str]] = []
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        lambda cmd, **kw: (recorded.append(list(cmd)), types.SimpleNamespace(returncode=0))[1],
+    )
+
+    result = update._refresh_rust_bins(source)
+    assert result == "fresh"
+    mux_installs = [
+        c for c in recorded
+        if c[:2] == ["cargo", "install"] and str(mux_crate) in c
+    ]
+    assert mux_installs, "a fresh-marker update must install the mux when it is absent"
+
+
+def test_refresh_rust_bins_fresh_marker_mux_present_installs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Marker fresh AND the mux present -> the fast path stays fast: no cargo
+    install at all (the fresh-marker heal only fires when the mux is missing)."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    (source.parent / "crates" / "fno").mkdir(parents=True)
+    subtree_rev = "a" * 40
+    marker_file = tmp_path / "installed-rust-rev"
+    marker_file.write_text(subtree_rev + "\n", encoding="utf-8")
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
+
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
+    fake_mux = tmp_path / "fake-mux"
+    fake_mux.write_text("x")
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_mux)  # mux PRESENT
+
+    recorded: list[list[str]] = []
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        lambda cmd, **kw: (recorded.append(list(cmd)), types.SimpleNamespace(returncode=0))[1],
+    )
+
+    result = update._refresh_rust_bins(source)
+    assert result == "fresh"
+    assert not [c for c in recorded if c[:2] == ["cargo", "install"]], recorded
+
+
 # --- ab-703f2ed2: refreshed-no-marker outcome granularity ---
 
 def test_refresh_rust_bins_marker_write_failure_returns_no_marker(

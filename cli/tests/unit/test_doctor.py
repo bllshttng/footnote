@@ -839,6 +839,10 @@ def test_ac3_fr_fix_rust_only_stale_runs_refresh_never_raw_cargo(
         "run",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("doctor.py must never run cargo directly")),
     )
+    # The advisory mux front-door probe (`fno mux ls`) is a legit doctor
+    # subprocess, unrelated to the raw-cargo concern this tripwire guards; stub it
+    # so the tripwire isolates cargo, not the probe.
+    monkeypatch.setattr(doctor, "_probe_is_mux", lambda p: False)
 
     from fno import update
 
@@ -1017,23 +1021,31 @@ def test_emit_human_surfaces_binary_rev_match(capsys: pytest.CaptureFixture[str]
 
 
 @pytest.mark.parametrize(
-    "mux, which_fno, expected",
+    "mux, which_fno, probe, expected",
     [
-        (None, None, "not-installed"),
-        (None, "/home/x/.local/bin/fno", "not-installed"),
-        ("/home/x/.cargo/bin/fno", "/home/x/.cargo/bin/fno", "active"),
-        ("/home/x/.cargo/bin/fno", "/home/x/.local/bin/fno", "shadowed"),
-        ("/home/x/.cargo/bin/fno", None, "shadowed"),
+        (None, None, False, "not-installed"),
+        # `fno` on PATH but not a mux (probe says no) + no cargo mux -> not-installed
+        (None, "/home/x/.local/bin/fno", False, "not-installed"),
+        # custom --root mux: not at $CARGO_HOME/bin, but `fno` on PATH answers the
+        # mux verb -> active (this is the case the old code mislabeled not-installed)
+        (None, "/custom/root/bin/fno", True, "active"),
+        # `fno` on PATH IS the cargo mux -> active (matched by path, probe not needed)
+        ("/home/x/.cargo/bin/fno", "/home/x/.cargo/bin/fno", False, "active"),
+        # cargo mux installed but a non-mux `fno` wins PATH -> shadowed
+        ("/home/x/.cargo/bin/fno", "/home/x/.local/bin/fno", False, "shadowed"),
+        # cargo mux installed but off PATH -> shadowed
+        ("/home/x/.cargo/bin/fno", None, False, "shadowed"),
     ],
 )
 def test_mux_front_door_report_states(
-    monkeypatch: pytest.MonkeyPatch, mux, which_fno, expected
+    monkeypatch: pytest.MonkeyPatch, mux, which_fno, probe, expected
 ) -> None:
-    """The front-door state is active only when the mux is installed AND `fno` on
-    PATH resolves to it; shadowed when something else (or nothing) wins PATH;
-    not-installed when the cargo mux binary is absent."""
+    """Front-door state: active when `fno` on PATH is the mux (== cargo binary OR
+    answers the mux verb, catching custom --root); shadowed when a cargo mux
+    exists but isn't the `fno` on PATH; not-installed otherwise."""
     monkeypatch.setattr(doctor, "_cargo_installed_mux", lambda: Path(mux) if mux else None)
     monkeypatch.setattr(doctor.shutil, "which", lambda name: which_fno)
+    monkeypatch.setattr(doctor, "_probe_is_mux", lambda p: probe)
     report = doctor._mux_front_door_report()
     assert report["mux_front_door"] == expected
     assert report["mux_binary"] == (mux if mux else None)
