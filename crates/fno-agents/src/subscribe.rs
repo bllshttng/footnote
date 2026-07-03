@@ -64,6 +64,18 @@ pub fn classify(v: &Value) -> Option<Transition> {
             state: str_field("state").unwrap_or_default(),
             seq,
         }),
+        // Early-push flush: a report buffered before its row existed, applied at
+        // row creation. Carries {name, session_id, state, seq} and is the ONLY
+        // event for that transition, so a subscriber must surface it too.
+        "inside_leg_buffer_flushed" => Some(Transition {
+            kind: kind.to_string(),
+            category: "state",
+            authority: "hook",
+            agent: str_field("name"),
+            session_id: str_field("session_id"),
+            state: str_field("state").unwrap_or_default(),
+            seq,
+        }),
         // Ordered exit / turn-done teardown: {name, session_id, final_state, seq}.
         "inside_leg_completed" => Some(Transition {
             kind: kind.to_string(),
@@ -75,8 +87,11 @@ pub fn classify(v: &Value) -> Option<Transition> {
             seq,
         }),
         // Scrape verdict change: {name, state, rule, seq, cleared}. A cleared
-        // verdict (badge dropped) reads as idle.
+        // verdict (badge dropped) reads as idle. The scrape sweep ALSO emits this
+        // kind for a manifest PARSE ERROR ({provider, error}, no name/state) --
+        // that is not a row transition, so require `name` and skip otherwise.
         "screen_state_change" => {
+            let name = v.get("name").and_then(|x| x.as_str())?;
             let cleared = v.get("cleared").and_then(|c| c.as_bool()).unwrap_or(false);
             let state = if cleared {
                 "idle".to_string()
@@ -87,7 +102,7 @@ pub fn classify(v: &Value) -> Option<Transition> {
                 kind: kind.to_string(),
                 category: "state",
                 authority: "screen",
-                agent: str_field("name"),
+                agent: Some(name.to_string()),
                 session_id: None,
                 state,
                 seq,
@@ -104,6 +119,100 @@ fn resolve_name(reg: &Registry, session_id: &str) -> Option<String> {
         .iter()
         .find(|e| crate::daemon::entry_holds_session(e, session_id))
         .map(|e| e.name.clone())
+}
+
+/// Runtime filters for one subscribe stream.
+struct Filters {
+    agent: Option<String>,
+    want_state: bool,
+    want_exit: bool,
+}
+
+fn ino_of(m: std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    m.ino()
+}
+
+/// Classify one raw `events.jsonl` line, resolve its agent name, apply the
+/// filters, and emit one NDJSON transition. `reg` caches the registry for
+/// session_id->name resolution (refreshed on a miss); `last_state` tracks the
+/// prior state per agent so each emission carries `old_state`.
+fn process_line(
+    line: &str,
+    home: &AgentsHome,
+    filters: &Filters,
+    reg: &mut Option<Registry>,
+    last_state: &mut HashMap<String, String>,
+) {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    let Some(t) = classify(&v) else { return };
+    match t.category {
+        "state" if !filters.want_state => return,
+        "exit" if !filters.want_exit => return,
+        _ => {}
+    }
+    // Resolve the name (enrich a name-less hook report by session id).
+    let agent = match (t.agent.clone(), &t.session_id) {
+        (Some(name), _) => Some(name),
+        (None, Some(sid)) => {
+            let mut found = reg.as_ref().and_then(|r| resolve_name(r, sid));
+            if found.is_none() {
+                *reg = state::load_registry(&home.registry_json()).ok();
+                found = reg.as_ref().and_then(|r| resolve_name(r, sid));
+            }
+            found
+        }
+        (None, None) => None,
+    };
+    // --agent filter: an unresolved agent can't match.
+    if let Some(want) = &filters.agent {
+        if agent.as_deref() != Some(want.as_str()) {
+            return;
+        }
+    }
+    let old = agent.as_ref().and_then(|a| last_state.get(a).cloned());
+    let out_line = json!({
+        "agent": agent,
+        "event": t.category,
+        "state": t.state,
+        "old_state": old,
+        "authority": t.authority,
+        "seq": t.seq,
+        "kind": t.kind,
+    })
+    .to_string();
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{out_line}");
+    let _ = out.flush();
+    if let Some(a) = agent {
+        last_state.insert(a, t.state);
+    }
+}
+
+/// Drain every complete line currently readable from `file` (the fd we follow),
+/// feeding each to [`process_line`]. A trailing partial line is kept in `carry`.
+fn drain_fd(
+    file: &mut std::fs::File,
+    carry: &mut String,
+    home: &AgentsHome,
+    filters: &Filters,
+    reg: &mut Option<Registry>,
+    last_state: &mut HashMap<String, String>,
+) {
+    let mut buf = String::new();
+    if file.read_to_string(&mut buf).is_err() || buf.is_empty() {
+        return;
+    }
+    carry.push_str(&buf);
+    while let Some(nl) = carry.find('\n') {
+        let line: String = carry.drain(..=nl).collect();
+        let line = line.trim_end();
+        if !line.is_empty() {
+            process_line(line, home, filters, reg, last_state);
+        }
+    }
 }
 
 /// `fno-agents subscribe [--agent <name>] [--kinds state,exit] [--json]`
@@ -162,85 +271,56 @@ pub async fn run_subscribe(rest: &[String], home: &AgentsHome) -> i32 {
         return 2;
     }
 
+    let filters = Filters {
+        agent: agent_filter,
+        want_state,
+        want_exit,
+    };
     let path = home.events_jsonl();
-    // Start at EOF: subscribe is a PUSH stream of transitions after connect, not
-    // a history dump.
-    let mut pos: u64 = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let mut carry = String::new();
     let mut last_state: HashMap<String, String> = HashMap::new();
     // Cache the registry for session_id->name resolution; refresh on a miss.
     let mut reg: Option<Registry> = state::load_registry(&home.registry_json()).ok();
 
-    loop {
-        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        // Rotation/truncation (events.jsonl -> events.jsonl.1, active recreated):
-        // the file shrank, so re-read the fresh file from its start.
-        if len < pos {
-            pos = 0;
-            carry.clear();
+    // Follow by holding the fd open (tail -f semantics): reads continue on the
+    // CURRENT inode even after events.jsonl rotates to events.jsonl.1, so the
+    // rotated file's tail drains naturally and we only reopen when the active
+    // path resolves to a NEW inode. Start at EOF -- subscribe is a push stream of
+    // transitions after connect, not a history dump.
+    let mut file: Option<std::fs::File> = match std::fs::File::open(&path) {
+        Ok(mut f) => {
+            let _ = f.seek(SeekFrom::End(0));
+            Some(f)
         }
-        if len > pos {
-            if let Ok(mut f) = std::fs::File::open(&path) {
-                if f.seek(SeekFrom::Start(pos)).is_ok() {
-                    let mut buf = String::new();
-                    if let Ok(n) = f.read_to_string(&mut buf) {
-                        pos += n as u64;
-                        carry.push_str(&buf);
-                        while let Some(nl) = carry.find('\n') {
-                            let line: String = carry.drain(..=nl).collect();
-                            let line = line.trim_end();
-                            if line.is_empty() {
-                                continue;
-                            }
-                            let Ok(v) = serde_json::from_str::<Value>(line) else {
-                                continue;
-                            };
-                            let Some(t) = classify(&v) else { continue };
-                            // Category filter.
-                            match t.category {
-                                "state" if !want_state => continue,
-                                "exit" if !want_exit => continue,
-                                _ => {}
-                            }
-                            // Resolve the name (enrich inside_leg_report by sid).
-                            let agent = match (t.agent.clone(), &t.session_id) {
-                                (Some(name), _) => Some(name),
-                                (None, Some(sid)) => {
-                                    let mut found = reg.as_ref().and_then(|r| resolve_name(r, sid));
-                                    if found.is_none() {
-                                        reg = state::load_registry(&home.registry_json()).ok();
-                                        found = reg.as_ref().and_then(|r| resolve_name(r, sid));
-                                    }
-                                    found
-                                }
-                                (None, None) => None,
-                            };
-                            // --agent filter: an unresolved agent can't match.
-                            if let Some(want) = &agent_filter {
-                                if agent.as_deref() != Some(want.as_str()) {
-                                    continue;
-                                }
-                            }
-                            let old = agent.as_ref().and_then(|a| last_state.get(a).cloned());
-                            let out_line = json!({
-                                "agent": agent,
-                                "event": t.category,
-                                "state": t.state,
-                                "old_state": old,
-                                "authority": t.authority,
-                                "seq": t.seq,
-                                "kind": t.kind,
-                            })
-                            .to_string();
-                            let mut out = std::io::stdout().lock();
-                            let _ = writeln!(out, "{out_line}");
-                            let _ = out.flush();
-                            if let Some(a) = agent {
-                                last_state.insert(a, t.state);
-                            }
-                        }
-                    }
+        Err(_) => None,
+    };
+    let mut fd_ino: Option<u64> = file.as_ref().and_then(|f| f.metadata().ok()).map(ino_of);
+
+    loop {
+        // The file may not exist yet at startup; open it (from its start) once
+        // it appears -- there is no history to skip on a freshly created file.
+        if file.is_none() {
+            if let Ok(f) = std::fs::File::open(&path) {
+                fd_ino = f.metadata().ok().map(ino_of);
+                file = Some(f);
+            }
+        }
+        // Drain everything currently available on the fd we follow.
+        if let Some(f) = &mut file {
+            drain_fd(f, &mut carry, home, &filters, &mut reg, &mut last_state);
+        }
+        // Rotation: the active path now resolves to a different inode than our
+        // fd. We just drained our fd to the old inode's true EOF, so reopen and
+        // follow the new active file from its start (no event lost at the seam).
+        let path_ino = std::fs::metadata(&path).ok().map(ino_of);
+        if path_ino.is_some() && path_ino != fd_ino {
+            carry.clear();
+            match std::fs::File::open(&path) {
+                Ok(f) => {
+                    fd_ino = path_ino;
+                    file = Some(f);
                 }
+                Err(_) => file = None,
             }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -305,5 +385,31 @@ mod tests {
         assert!(classify(&json!({"kind": "agent_spawned", "name": "wkA"})).is_none());
         assert!(classify(&json!({"kind": "daemon_started", "pid": 1})).is_none());
         assert!(classify(&json!({"no_kind": true})).is_none());
+    }
+
+    #[test]
+    fn classifies_buffer_flush_as_hook_state() {
+        // The early-push flush is the ONLY event for that transition; it carries
+        // {name, session_id, state, seq}.
+        let t = classify(&json!({
+            "kind": "inside_leg_buffer_flushed", "name": "wkA",
+            "session_id": "sid-1", "state": "working", "seq": 4
+        }))
+        .unwrap();
+        assert_eq!(t.category, "state");
+        assert_eq!(t.authority, "hook");
+        assert_eq!(t.agent.as_deref(), Some("wkA"));
+        assert_eq!(t.state, "working");
+        assert_eq!(t.seq, Some(4));
+    }
+
+    #[test]
+    fn screen_state_parse_error_variant_is_ignored() {
+        // The scrape sweep emits screen_state_change for a manifest parse error
+        // with {provider, error} and no name -- not a row transition, must skip.
+        assert!(classify(&json!({
+            "kind": "screen_state_change", "provider": "codex", "error": "bad manifest"
+        }))
+        .is_none());
     }
 }
