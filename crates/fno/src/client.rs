@@ -1391,9 +1391,12 @@ async fn attach_and_run(
                     // matches: a BEL makes the empty result audible (AC1-ERR).
                     if let Some(sv) = view.search.as_mut() {
                         sv.result = Some((total, current));
-                    }
-                    if total == 0 {
-                        let _ = raw_out(b"\x07");
+                        // BEL only while the search is still open: a late
+                        // zero-result reply arriving after a local Esc must not
+                        // sound a confusing bell (gemini review, MEDIUM).
+                        if total == 0 {
+                            let _ = raw_out(b"\x07");
+                        }
                     }
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
@@ -1836,46 +1839,58 @@ async fn selector_keys(
 /// One folded search-input token (v12, x-e780). A printable/control byte for the
 /// query, or a bare Esc press. Complete arrow sequences are swallowed by the fold
 /// (cursor motion is discretionary polish, Discretion 4).
+#[derive(Debug, PartialEq, Eq)]
 enum SearchKey {
     Byte(u8),
     Esc,
 }
 
-/// Fold raw search-mode bytes, carrying escape state in `esc` ACROSS reads (the
-/// same split-arrow safety as [`fold_selector_keys`]: an ESC-prefixed sequence
-/// broken at a read boundary must neither exit the search nor leak its tail into
-/// the query). Arrow/CSI sequences are swallowed; a bare Esc surfaces as
-/// [`SearchKey::Esc`]; everything else is a [`SearchKey::Byte`]. A lone trailing
-/// ESC stays pending until the next byte disambiguates it (inheriting the
-/// selector's one-key-lag on an isolated Esc press).
+/// Fold raw search-mode bytes, carrying escape state in `esc` ACROSS reads so an
+/// ESC-prefixed sequence broken at a read boundary never exits the search or
+/// leaks its tail into the query. A whole CSI sequence (`ESC [ ` params `x`) is
+/// consumed up to and including its final byte (`0x40..=0x7e`) and swallowed, so
+/// a MULTI-byte sequence - PageUp `ESC [ 5 ~`, Ctrl-Arrow `ESC [ 1 ; 5 A` - never
+/// leaks its param/final tail into the typed query (gemini review, HIGH). A bare
+/// Esc surfaces as [`SearchKey::Esc`]; everything else is a [`SearchKey::Byte`].
+/// A lone trailing ESC stays pending until the next byte disambiguates it.
 fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKey> {
     let mut keys = Vec::new();
     for &b in bytes {
-        if !esc.is_empty() {
-            if esc.as_slice() == [0x1b] && b == b'[' {
-                esc.push(b);
-                continue;
+        match esc.as_slice() {
+            [] => {
+                if b == 0x1b {
+                    esc.push(0x1b);
+                } else {
+                    keys.push(SearchKey::Byte(b));
+                }
             }
-            if esc.as_slice() == [0x1b, b'['] {
-                // Complete arrow (or other CSI final byte): swallowed whole.
-                esc.clear();
-                continue;
+            [0x1b] => {
+                if b == b'[' {
+                    esc.push(b); // CSI introducer: start accumulating the sequence
+                } else {
+                    // A lone [ESC] then a non-'[' byte: that ESC was a bare Esc
+                    // press. Surface it, then reprocess `b`.
+                    esc.clear();
+                    keys.push(SearchKey::Esc);
+                    if b == 0x1b {
+                        esc.push(0x1b); // a new ESC just started
+                    } else {
+                        keys.push(SearchKey::Byte(b));
+                    }
+                }
             }
-            // Pending lone [ESC] + a non-'[' byte: that ESC was a bare Esc press.
-            esc.clear();
-            keys.push(SearchKey::Esc);
-            if b == 0x1b {
-                esc.push(0x1b); // and a new one just started
-            } else {
-                keys.push(SearchKey::Byte(b));
+            // Inside a CSI (`ESC [ ...`): keep eating param/intermediate bytes,
+            // swallowing the whole sequence at its final byte. Bounded so a
+            // pathological stream can never grow `esc` without limit.
+            // ponytail: 16-byte ceiling; real CSI sequences are far shorter.
+            _ => {
+                if (0x40..=0x7e).contains(&b) || esc.len() >= 16 {
+                    esc.clear();
+                } else {
+                    esc.push(b);
+                }
             }
-            continue;
         }
-        if b == 0x1b {
-            esc.push(0x1b);
-            continue;
-        }
-        keys.push(SearchKey::Byte(b));
     }
     keys
 }
@@ -2167,6 +2182,34 @@ mod tests {
     use super::*;
     use crate::proto::{AnswerOption, AnswerablePrompt, TabMeta};
     use crate::vt::frame_text;
+
+    #[test]
+    fn fold_search_input_swallows_multibyte_csi_without_leaking() {
+        // gemini review (HIGH): a multi-byte CSI must be consumed whole, never
+        // leak its param/final tail into the typed query.
+        let mut esc = Vec::new();
+        // Printables pass through 1:1.
+        assert_eq!(
+            fold_search_input(&mut esc, b"ab"),
+            vec![SearchKey::Byte(b'a'), SearchKey::Byte(b'b')]
+        );
+        assert!(esc.is_empty());
+        // Arrow (3-byte), PageUp (`ESC [ 5 ~`), Ctrl-Arrow (`ESC [ 1 ; 5 A`):
+        // fully swallowed, nothing reaches the query.
+        assert!(fold_search_input(&mut esc, b"\x1b[A").is_empty());
+        assert!(fold_search_input(&mut esc, b"\x1b[5~").is_empty());
+        assert!(fold_search_input(&mut esc, b"\x1b[1;5A").is_empty());
+        assert!(esc.is_empty(), "each CSI sequence consumed whole");
+        // Split across reads: the tail in the next chunk still never leaks.
+        assert!(fold_search_input(&mut esc, b"\x1b[").is_empty());
+        assert!(fold_search_input(&mut esc, b"5~").is_empty());
+        assert!(esc.is_empty());
+        // A bare Esc then a printable: Esc surfaces, the printable is NOT eaten.
+        assert_eq!(
+            fold_search_input(&mut esc, b"\x1bx"),
+            vec![SearchKey::Esc, SearchKey::Byte(b'x')]
+        );
+    }
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
         SquadMeta {
