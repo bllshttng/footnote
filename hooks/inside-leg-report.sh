@@ -111,14 +111,18 @@ is_pane_host() {
   [[ -z "${FNO_PANE_EPOCH:-}" || -z "$SESSION_ID" ]] && return 0
   # Rendezvous dir must be a real, self-owned directory. Prefer the per-user
   # runtime dir (XDG_RUNTIME_DIR, or macOS's per-user $TMPDIR); the shared /tmp
-  # last resort is symlink-guarded and ownership-checked so a hostile
-  # pre-created dir on a multi-user box cannot hijack the pin. Any anomaly
-  # degrades to the presence gate (return 0) rather than writing somewhere unsafe.
+  # last resort is hardened so a hostile pre-created dir on a multi-user box
+  # cannot hijack the pin. Any anomaly degrades to the presence gate (return 0)
+  # rather than writing somewhere unsafe.
   local base="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
   local dir="${base%/}/fno-turn-pins-${EUID:-0}"
-  [[ -L "$dir" ]] && return 0
-  mkdir -p "$dir" 2>/dev/null || return 0
-  [[ -O "$dir" ]] || return 0
+  # Atomic create: plain `mkdir` (no -p) fails if the path already exists, even
+  # as a symlink, so there is no check-then-create TOCTOU. On a pre-existing
+  # path, trust it only if it is a real, self-owned, non-symlink directory. The
+  # parent (base) always exists, so -p is unnecessary.
+  if ! mkdir "$dir" 2>/dev/null; then
+    [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] || return 0
+  fi
   chmod 700 "$dir" 2>/dev/null || true
   local pin="${dir}/${FNO_SESSION:-_}-${FNO_PANE}-${FNO_PANE_EPOCH}"
   # noclobber makes the create fail if the pin exists -> exactly one winner.
@@ -132,6 +136,11 @@ is_pane_host() {
   [[ -s "$pin" ]] || return 0
   [[ "$(cat "$pin" 2>/dev/null || true)" == "$SESSION_ID" ]]
 }
+
+# Repo root anchors the manifest check below (and the binary lookup further
+# down): resolve it from the git toplevel so a session launched in a subdir
+# still finds `.fno/target-state.md` deterministically, not relative to $PWD.
+REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 
 if [[ -n "${FNO_PANE:-}" ]] && is_pane_host; then
   case "$STATE" in
@@ -147,13 +156,12 @@ if [[ -n "${FNO_PANE:-}" ]] && is_pane_host; then
       # actually ends (the scanner no-ops it, finalized by the next C); precise
       # gating needs the stop hook's block/allow verdict, which races across
       # parallel Stop hooks -- not worth the plumbing.
-      [[ -f .fno/target-state.md ]] && emit_marker '\033]133;C\007'
+      [[ -f "$REPO_ROOT/.fno/target-state.md" ]] && emit_marker '\033]133;C\007'
       ;;
   esac
 fi
 
 # Resolve the fno-agents binary, most-local first (mirrors target-stop-hook.sh).
-REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 BIN=""
 if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
   BIN="$FNO_AGENTS_BIN"

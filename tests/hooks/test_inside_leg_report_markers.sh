@@ -31,7 +31,7 @@ command -v python3 >/dev/null 2>&1 || { printf '[inside-leg] SKIP: python3 not o
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 STUB="$TMP/fno-agents"; printf '#!/bin/sh\nexit 0\n' >"$STUB"; chmod +x "$STUB"
-RUNTIME="$TMP/run"   # isolated XDG_RUNTIME_DIR -> pin files land here
+RUNTIME="$TMP/run"; mkdir -p "$RUNTIME"   # isolated XDG_RUNTIME_DIR (parent must exist for the hook's no-`-p` mkdir)
 
 # run_hook <state> <session_id> [cwd] -> prints the captured marker bytes.
 # Reads FNO_PANE / FNO_PANE_EPOCH / FNO_SESSION from the environment.
@@ -89,6 +89,18 @@ mkdir -p "$RUNTIME/fno-turn-pins-${EUID:-0}"
 : >"$RUNTIME/fno-turn-pins-${EUID:-0}/main-7-7000"   # pre-seed an empty pin
 out="$(run_hook working host-7)"
 has '133;C' <<<"$out" && pass "T7 empty pin degrades to emit" || fail "T7 expected emit on empty pin"
+
+# T8: a symlinked rendezvous dir must be refused (mkdir fails on it, the
+# non-symlink check rejects it) -> degrade to emit, and the link target is never
+# created/written (no hijack). Isolated runtime so it can't disturb T1-T7's pins.
+RT2="$TMP/run2"; mkdir -p "$RT2"
+ln -s "$TMP/hijack-target" "$RT2/fno-turn-pins-${EUID:-0}"
+sink8="$TMP/sink8"
+( cd "$TMP" && printf '{"session_id":"host-8"}' | \
+    FNO_TURN_MARKER_TTY="$sink8" XDG_RUNTIME_DIR="$RT2" FNO_AGENTS_BIN="$STUB" \
+    FNO_PANE=8 FNO_PANE_EPOCH=8000 FNO_SESSION=main bash "$HOOK" working ) >/dev/null 2>&1
+{ has '133;C' <"$sink8" && [[ ! -e "$TMP/hijack-target" ]]; } \
+  && pass "T8 symlinked pin dir degrades to emit, no hijack" || fail "T8 expected degrade-emit + untouched link target"
 
 printf '[inside-leg] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
