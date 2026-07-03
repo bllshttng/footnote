@@ -31,6 +31,8 @@ Then open the Ubuntu shell and do everything from there: install `gh`, Python 3.
 fno --version          # prints a version
 ```
 
+If `fno` is "command not found", you have the Python CLI (`fno-py`) but not the Rust **`fno` front door** yet. `fno` (the mux + terminal front door) owns the `fno` command and bootstraps the Python CLI; install it with `cargo install fno` (or, from a clone, `fno update --rust`). A Claude Code session also reminds you when the front door is missing. Until it's installed, reach the CLI directly as `fno-py`.
+
 Inside Claude Code, type `/fno:` and you should see skill autocomplete (`target`, `think`, `blueprint`, ...).
 
 ```bash
