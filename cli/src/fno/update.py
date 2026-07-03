@@ -392,22 +392,16 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
 
     marker = _read_rust_marker()
     if not force and marker is not None and marker == subtree:
-        # The agents bins are current. But the mux front door (crates/fno ->
+        typer.echo(f"fno update: rust bins fresh (rev {subtree[:12]}); skipping cargo install")
+        # The agents bins are current, but the mux front door (crates/fno ->
         # `fno`) can still be ABSENT at a fresh marker: the fno->fno-py rename
         # lands fno-py while a fresh-marker `fno update` never installed the mux,
-        # stranding the front door (no `fno` on PATH at all). Self-heal by
-        # installing it if missing, so `fno doctor`'s "run fno update" hint is
-        # actually true rather than a dead-end. installed_bin is non-None here
-        # (we passed the `installed_bin is None and not force` gate above), so
-        # the install root is derivable.
+        # stranding the front door (no `fno` on PATH). Heal it additively if
+        # missing, so `fno doctor`'s "run fno update" hint is true rather than a
+        # dead-end. No-op when there is no crates/fno source. installed_bin is
+        # non-None here (passed the `installed_bin is None and not force` gate).
         if _cargo_installed_mux() is None:
-            typer.echo(
-                f"fno update: agents bins fresh (rev {subtree[:12]}), but the mux "
-                "front door is absent; installing it"
-            )
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
-        else:
-            typer.echo(f"fno update: rust bins fresh (rev {subtree[:12]}); skipping cargo install")
         return "fresh"
 
     if shutil.which("cargo") is None:
