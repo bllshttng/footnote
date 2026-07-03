@@ -3517,7 +3517,9 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
 /// (default `fno`); a spawn failure (notifier not on PATH) logs one warn and is
 /// dropped, and the registry write that called this has already succeeded.
 pub(crate) fn notify_transition(title: String, body: String) {
-    let fno = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    // var_os (not var) so a non-UTF-8 FNO_BIN passes through to Command
+    // unmangled, matching scrape::fno_bin (gemini MEDIUM on #161).
+    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
     // ponytail: reap on the detached thread; `fno notify` is a sub-second
     // osascript/notify-send call, so waiting on it here cannot realistically leak.
     std::thread::spawn(move || {
@@ -3531,7 +3533,10 @@ pub(crate) fn notify_transition(title: String, body: String) {
             Ok(mut child) => {
                 let _ = child.wait();
             }
-            Err(e) => eprintln!("fno-agents-daemon: badge notify skipped ({fno} notify): {e}"),
+            Err(e) => eprintln!(
+                "fno-agents-daemon: badge notify skipped ({} notify): {e}",
+                fno.to_string_lossy()
+            ),
         }
     });
 }
