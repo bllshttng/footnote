@@ -113,3 +113,5 @@
 | `config.model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7'). |
 | `config.model_routing.extra_env` | dict[str, str] | `{}` | never | Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides). |
 | `config.mux.shell_integration` | str | `mux-panes` | advanced | Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc. |
+| `config.mux.notify_on_blocked` | bool | `true` | advanced | Fire an OS notification when an agent badge enters 'blocked' (default on). |
+| `config.mux.notify_on_done` | bool | `false` | advanced | Also notify on a terminal 'done' hook transition (default off). |
