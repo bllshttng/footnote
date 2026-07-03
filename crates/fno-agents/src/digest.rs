@@ -151,11 +151,16 @@ pub fn fold(events_raw: &str, ledger_raw: &str, selector: &str, since: &str) -> 
                 if decision == Some("block") {
                     blocked_episodes += 1;
                     last_decision_blocked = true;
-                    // Prefer the concrete CI failure; fall back to the intent.
-                    last_block_reason = field(&v, "ci")
+                    // Name CI only when it's the actual blocker (a failure or a
+                    // pending run); a green/absent CI means the block was review
+                    // or promise related, so the intent is the informative reason
+                    // (avoids a misleading "blocked on SUCCESS").
+                    let ci_blocking = field(&v, "ci")
                         .and_then(|c| c.as_str())
-                        .filter(|c| *c != "none")
+                        .filter(|c| c.starts_with("FAILURE") || *c == "PENDING");
+                    last_block_reason = ci_blocking
                         .or_else(|| field(&v, "intent").and_then(|i| i.as_str()))
+                        .filter(|r| *r != "none")
                         .map(str::to_string);
                 } else if decision == Some("allow") {
                     if last_decision_blocked {
@@ -313,7 +318,7 @@ fn render_lines(s: &DigestSummary) -> Vec<String> {
     let mut lines = Vec::new();
 
     if s.blocked_episodes > 0 {
-        let reason = s.last_block_reason.as_deref().unwrap_or("unknown");
+        let reason = s.last_block_reason.as_deref().unwrap_or("gate");
         let resolution = if s.resolved { "resolved" } else { "UNRESOLVED" };
         let plural = if s.blocked_episodes == 1 { "" } else { "s" };
         lines.push(format!(
