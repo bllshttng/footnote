@@ -52,6 +52,7 @@ pub mod client;
 pub mod client_verbs;
 pub mod codex_ask;
 pub mod daemon;
+pub mod digest;
 pub mod drift;
 pub mod envelope;
 pub mod events;

@@ -258,6 +258,9 @@ struct View {
     /// Pending escape bytes in answer-overlay mode (same split-arrow safety as
     /// [`View::sel_esc`]).
     ans_esc: Vec<u8>,
+    /// Catch-up "while you were gone" digest lines (x-4e2d), set on attach after
+    /// an absence; the next keypress dismisses it (like [`View::overlay`]).
+    digest: Option<Vec<String>>,
     notice: Option<(String, Instant)>,
 }
 
@@ -277,6 +280,7 @@ impl View {
             sel_esc: Vec::new(),
             answers: None,
             ans_esc: Vec::new(),
+            digest: None,
             notice: None,
         }
     }
@@ -518,7 +522,11 @@ impl View {
         }
 
         self.draw_bottom_row(&mut cells, rows, cols);
-        if self.overlay {
+        if let Some(lines) = &self.digest {
+            // x-4e2d catch-up overlay: reuse the inverse-video chrome; any key
+            // dismisses (handled in handle_stdin, like the key-table overlay).
+            draw_lines_overlay(&mut cells, rows, cols, lines);
+        } else if self.overlay {
             draw_overlay(&mut cells, rows, cols);
         } else if let Some(sel) = self.answers {
             // x-c929 answer overlay: reuse the inverse-video overlay chrome with
@@ -533,7 +541,7 @@ impl View {
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
         // one place the cursor may sit (AC1-UI/AC5-UI).
         let (mut cur_r, mut cur_c, mut cur_vis) = (0u16, 0u16, false);
-        if self.selector.is_none() && self.answers.is_none() {
+        if self.selector.is_none() && self.answers.is_none() && self.digest.is_none() {
             if let Some((_, rect)) = self
                 .layout
                 .panes
@@ -1183,6 +1191,22 @@ async fn attach_and_run(
     // select loop - the loop keeps draining stdin/frames while the copy lands.
     let (copy_tx, mut copy_rx) =
         tokio::sync::mpsc::unbounded_channel::<(usize, crate::clipboard::CopyOutcome)>();
+
+    // x-4e2d: after an absence, fold a "while you were gone" digest for the
+    // focused pane's node and show it on the FIRST frame. Fully fail-open (a
+    // disabled knob, a too-recent detach, or a slow/absent `fno-agents` all
+    // leave `digest` None), so it can never break the attach. It runs before the
+    // first paint and is bounded by the 800ms shell-out timeout, so the worst
+    // case is first paint delayed by that budget - never an indefinite hang.
+    let focused_cwd = view
+        .layout
+        .squads
+        .iter()
+        .find(|s| s.id == view.layout.active_squad)
+        .map(|s| s.canonical_cwd.clone())
+        .unwrap_or_default();
+    view.digest = crate::digest_overlay::on_attach(&view.session, &focused_cwd).await;
+
     compositor
         .draw(&view.compose())
         .map_err(|e| format!("draw: {e}"))?;
@@ -1284,6 +1308,9 @@ async fn attach_and_run(
                             }
                         }
                         Ok(StdinFlow::Detach) => {
+                            // x-4e2d: stamp the detach time so the next attach can
+                            // gate the catch-up digest on how long we were away.
+                            crate::digest_overlay::record_detach(&view.session);
                             let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
                             break Ok(exit_with_notice("detached; run fno to reattach".into()));
                         }
@@ -1407,6 +1434,12 @@ async fn handle_stdin(
         }
     }
     if passthrough.is_empty() {
+        return Ok(StdinFlow::Continue);
+    }
+    if view.digest.is_some() {
+        // x-4e2d: any key dismisses the catch-up digest into the normal view.
+        // Same whole-chunk swallow as the key-table overlay below.
+        view.digest = None;
         return Ok(StdinFlow::Continue);
     }
     if view.overlay {

@@ -1826,6 +1826,17 @@ class MuxBlock(BaseModel):
     notify_on_blocked: bool = True
     # Also notify on a terminal `done` hook transition. Off by default.
     notify_on_done: bool = False
+    # Catch-up digest on attach (x-4e2d): when a client attaches to a session it
+    # last left more than `attach_digest_threshold_min` ago, render a
+    # "while you were gone" overlay (fold of events + ledger) instead of raw
+    # scrollback. Read straight from settings.yaml by the interactive Rust mux
+    # client (no Python launcher on the attach path), same split-brain as
+    # notify_on_blocked.
+    attach_digest: bool = True
+    # >= 1: a zero/negative threshold would make the overlay fire on every
+    # attach (and the Rust reader parses it as u64, silently rejecting negatives
+    # to the default), so pin the floor at 1 minute here.
+    attach_digest_threshold_min: int = Field(default=10, ge=1)
 
     @field_validator("shell_integration", mode="before")
     @classmethod

@@ -48,4 +48,6 @@ tokio = { version = "1", features = [
     "time",
     "macros",
     "signal",
+    # x-4e2d: bounded, fail-open shell-out to `fno-agents digest` on attach.
+    "process",
 ] }
