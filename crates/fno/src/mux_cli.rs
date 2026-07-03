@@ -377,8 +377,12 @@ impl Picker {
         if let Some(buf) = self.naming.as_mut() {
             return match key {
                 PickKey::Enter => {
+                    // Validate at the trust boundary: a name with `..` or `/`
+                    // is rejected by socket_path downstream, but catching it
+                    // here BELs and lets the user retype instead of exiting the
+                    // picker to a downstream launch error (gemini).
                     let name = buf.trim().to_string();
-                    if name.is_empty() {
+                    if name.is_empty() || proto::socket_path(&name).is_err() {
                         PickAction::Bell
                     } else {
                         PickAction::Attach(name)
@@ -451,13 +455,14 @@ fn render_picker(p: &Picker) -> String {
             Probe::Stale => format!("{}  (stale)", row.name),
             Probe::Unprobeable(_) => format!("{}  (unprobeable)", row.name),
         };
-        // Selected live row reverses; stale/unselectable rows dim (AC5-ERR).
-        let (pre, post) = if !row.is_live() {
-            ("\x1b[2m", "\x1b[0m")
-        } else if i == p.cursor {
-            ("\x1b[7m", "\x1b[0m")
-        } else {
-            ("", "")
+        // The cursor reverses; stale/unselectable rows dim (AC5-ERR). Check
+        // the cursor FIRST so it stays visible even when parked on a stale row
+        // (combined reverse+dim), rather than vanishing under the dim (gemini).
+        let (pre, post) = match (i == p.cursor, row.is_live()) {
+            (true, true) => ("\x1b[7m", "\x1b[0m"),
+            (true, false) => ("\x1b[7;2m", "\x1b[0m"),
+            (false, false) => ("\x1b[2m", "\x1b[0m"),
+            (false, true) => ("", ""),
         };
         out.push_str(&format!("{marker} {pre}{body}{post}\r\n"));
     }
@@ -1320,6 +1325,18 @@ mod tests {
         let mut p = Picker::new(vec![live("a"), live("b")]);
         p.step(PickKey::Char(b'n'));
         assert_eq!(p.step(PickKey::Enter), PickAction::Bell);
+        // An invalid name (path traversal) BELs at the trust boundary instead
+        // of exiting to a downstream launch error.
+        let mut p = Picker::new(vec![live("a"), live("b")]);
+        p.step(PickKey::Char(b'n'));
+        for c in b"../evil" {
+            p.step(PickKey::Char(*c));
+        }
+        assert_eq!(p.step(PickKey::Enter), PickAction::Bell);
+        assert!(
+            p.naming.is_some(),
+            "stays in naming mode to let the user retype"
+        );
         // Esc from naming returns to the list (a following q quits).
         p.step(PickKey::Char(b'n'));
         assert_eq!(p.step(PickKey::Esc), PickAction::Redraw);
@@ -1335,6 +1352,13 @@ mod tests {
         assert!(out.contains("dead  (stale)"));
         assert!(out.contains("\x1b[2m"), "stale row dimmed");
         assert!(out.contains("\x1b[7m"), "live cursor row reversed");
+        // Cursor parked on the stale row: reverse+dim so it stays visible.
+        p.step(PickKey::Down);
+        assert_eq!(p.cursor, 1);
+        assert!(
+            render_picker(&p).contains("\x1b[7;2m"),
+            "selected stale row keeps a visible cursor"
+        );
         // Naming mode renders the prompt.
         p.step(PickKey::Char(b'n'));
         p.step(PickKey::Char(b'x'));
