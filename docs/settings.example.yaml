@@ -265,3 +265,6 @@ config:
     roles: {}
     # Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides).
     extra_env: {}
+  mux:
+    # Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc.
+    shell_integration: mux-panes
