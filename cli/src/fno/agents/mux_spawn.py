@@ -91,6 +91,17 @@ def claude_argv_is_interactive(argv: list[str]) -> bool:
     return not any(tok in ("-p", "--print") for tok in argv)
 
 
+# Providers with an interactive-pane form below. This is the pane-hostable set -
+# a DISTINCT invariant from READABLE_PROVIDERS (which only means "the registry
+# loader tolerates this string in a row"). The two coincide today but diverge the
+# moment a readable-but-argvless provider is staged: opencode is bundled as a
+# manifest now and joins READABLE_PROVIDERS when x-51f6 hosts it, yet has no pane
+# argv until then. Gate the pane path on THIS, so opencode is refused with an
+# honest message rather than slipping to build_pane_argv's backstop raise.
+# Keep in sync with the branches in build_pane_argv (the round-trip test enforces it).
+PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini", "agy")
+
+
 def build_pane_argv(
     provider: str,
     message: str,
@@ -240,17 +251,15 @@ def dispatch_spawn_pane(
     5. registry row with ``mux: {session, pane_id}`` (create-after-spawn).
     """
     validate_spawn_name(name)
-    # x-8f7f: gate the PANE path on READABLE_PROVIDERS, not KNOWN_PROVIDERS. A
-    # pane host only needs an interactive argv (build_pane_argv) and a readable
-    # registry row - not a full Python dispatch adapter. agy is exactly that
-    # case (Rust-only provider, no Python adapter, but pane-hostable), so
-    # widening the global KNOWN_PROVIDERS would leak it into headless/bg Python
-    # dispatch that has no agy codepath. READABLE_PROVIDERS is the pane-hostable
-    # set; build_pane_argv is the backstop for a readable-but-argvless provider.
-    if provider not in READABLE_PROVIDERS:
+    # x-8f7f: gate the PANE path on PANE_HOSTABLE_PROVIDERS, not KNOWN_PROVIDERS.
+    # A pane host only needs an interactive argv (build_pane_argv) - not a full
+    # Python dispatch adapter. agy is exactly that case (Rust-only provider, no
+    # Python adapter, but pane-hostable), so widening the global KNOWN_PROVIDERS
+    # would leak it into headless/bg Python dispatch that has no agy codepath.
+    if provider not in PANE_HOSTABLE_PROVIDERS:
         raise DispatchAskError(
             f"unknown provider {provider!r}; pane-hostable providers: "
-            f"{', '.join(READABLE_PROVIDERS)}",
+            f"{', '.join(PANE_HOSTABLE_PROVIDERS)}",
             exit_code=2,
         )
 

@@ -234,6 +234,28 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     ]
 
 
+def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) -> None:
+    """x-8f7f: PANE_HOSTABLE_PROVIDERS is the pane gate's source of truth and MUST
+    match build_pane_argv's branches exactly - every listed provider builds argv,
+    and a readable-but-argvless provider (opencode, staged inert until x-51f6) does
+    NOT. This is the enforcement the borrowed READABLE_PROVIDERS list lacked."""
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import PANE_HOSTABLE_PROVIDERS, build_pane_argv
+    from fno.agents.providers import READABLE_PROVIDERS
+
+    for provider in PANE_HOSTABLE_PROVIDERS:
+        argv = build_pane_argv(provider, "", tmp_path, False, None)
+        assert argv and argv[0] == provider
+
+    # opencode is readable (its manifest is bundled) but NOT pane-hostable yet:
+    # the two sets are genuinely distinct, and the gate rides the correct one.
+    assert "opencode" not in PANE_HOSTABLE_PROVIDERS
+    for readable in READABLE_PROVIDERS:
+        if readable not in PANE_HOSTABLE_PROVIDERS:
+            with pytest.raises(DispatchAskError, match="no interactive pane form"):
+                build_pane_argv(readable, "", tmp_path, False, None)
+
+
 def test_ac1_host_pane_gate_admits_agy_rejects_unhosted(
     tmp_path: Path, monkeypatch
 ) -> None:
