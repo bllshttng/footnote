@@ -1172,42 +1172,46 @@ impl Core {
     /// command / a busy pane gets a one-line notice to the requester, never a
     /// silent no-op.
     fn block_nav(&mut self, client_id: u64, pane: u64, op: BlockNavOp) {
-        if !self.panes.contains_key(&pane) {
-            // The client's focus raced a pane close: visible, not a silent drop.
-            self.notice(client_id, "pane not found");
-            return;
-        }
+        // One pane lookup per branch; a missing pane (client focus raced a pane
+        // close) is a visible "pane not found", never a silent drop.
         match op {
             BlockNavOp::Jump(dir) => {
-                let outcome = self
-                    .panes
-                    .get_mut(&pane)
-                    .map(|e| e.vt.block_jump(dir))
-                    .expect("pane presence checked above");
-                match outcome {
-                    BlockJumpOutcome::Moved { .. } | BlockJumpOutcome::AtLive => {
+                match self.panes.get_mut(&pane).map(|e| e.vt.block_jump(dir)) {
+                    Some(BlockJumpOutcome::Moved { .. }) | Some(BlockJumpOutcome::AtLive) => {
                         self.broadcast_pane(pane)
                     }
-                    BlockJumpOutcome::NoBlocks => self.notice(client_id, "no command blocks"),
+                    Some(BlockJumpOutcome::NoBlocks) => self.notice(client_id, "no command blocks"),
+                    None => self.notice(client_id, "pane not found"),
                 }
             }
             BlockNavOp::Select(dir) => {
-                match self
-                    .panes
-                    .get_mut(&pane)
-                    .and_then(|e| e.vt.block_select(dir))
-                {
-                    Some(_) => self.broadcast_pane(pane),
-                    None => self.notice(client_id, "no command blocks"),
+                match self.panes.get_mut(&pane).map(|e| e.vt.block_select(dir)) {
+                    Some(Some(_)) => self.broadcast_pane(pane),
+                    Some(None) => self.notice(client_id, "no command blocks"),
+                    None => self.notice(client_id, "pane not found"),
                 }
             }
             BlockNavOp::Rerun => {
+                if !self.panes.contains_key(&pane) {
+                    self.notice(client_id, "pane not found");
+                    return;
+                }
                 // Idle guard FIRST (false-ready is the forbidden direction):
-                // refuse an agent pane that is not provably idle before touching
-                // the PTY.
+                // refuse an agent pane that is not provably idle before the PTY.
                 if let Err(reason) = self.pane_rerun_allowed(pane) {
                     self.notice(client_id, reason);
                     return;
+                }
+                // Rerun is human input, so honor the writer-claim interlock the
+                // same as CoreMsg::Input: a live relay holder bounces with the
+                // `busy: relay` notice (never inject into its in-flight write); a
+                // dead holder releases here (AC3-FR), so rerun resumes.
+                if let Some(&holder) = self.claims.get(&pane) {
+                    if pid_alive(holder) {
+                        self.notice(client_id, "busy: relay");
+                        return;
+                    }
+                    self.claims.remove(&pane);
                 }
                 let cmd = self.panes.get(&pane).and_then(|e| e.vt.rerun_command());
                 match cmd {

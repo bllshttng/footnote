@@ -248,7 +248,10 @@ fn persistence_malformed_frame_is_rejected_not_panicked() {
         }
     });
 
-    let mut h = ClientHarness::spawn(&scratch);
+    // Attach "main" directly: the fake server accepts exactly once, so the
+    // pre-attach picker's live/stale probe (bare `fno`) would consume it
+    // before the real attach. Naming the session bypasses the picker (AC5-FR).
+    let mut h = ClientHarness::spawn_session(&scratch, "main");
     let status = h.wait_exit(15);
     assert!(
         !status.success(),
@@ -284,7 +287,9 @@ fn persistence_client_relays_a_version_skew_refusal() {
         }
     });
 
-    let mut h = ClientHarness::spawn(&scratch);
+    // Direct attach to "main" (see the malformed-frame test): the fake
+    // server accepts once, so bypass the pre-attach picker's probe (AC5-FR).
+    let mut h = ClientHarness::spawn_session(&scratch, "main");
     let status = h.wait_exit(15);
     assert!(
         !status.success(),

@@ -165,8 +165,19 @@ fn main() {
         Role::MuxShellInit(shell) => std::process::exit(mux_cli::shell_init(shell.as_deref())),
         Role::MuxPane(rest) => std::process::exit(mux_cli::pane(&rest, env_session.as_deref())),
         Role::Client(flag) => {
-            let session = mux_cli::resolve_session(flag.as_deref(), env_session.as_deref());
-            run_client(&session);
+            let env = env_session.as_deref().filter(|s| !s.is_empty());
+            // Bare `fno` with nothing pinned: the pre-attach picker decides
+            // (Locked 8). `--session`/`mux attach`/`FNO_SESSION` all bypass it
+            // (AC5-FR) - they name a session outright.
+            if flag.is_none() && env.is_none() {
+                match mux_cli::pick_session() {
+                    Some(session) => run_client(&session),
+                    None => {} // picker quit: clean exit 0, no spawn
+                }
+            } else {
+                let session = mux_cli::resolve_session(flag.as_deref(), env);
+                run_client(&session);
+            }
         }
         Role::ServerSocket(p) => run_server(PathBuf::from(p)),
         Role::ServerSession(session) => match proto::socket_path(&session) {

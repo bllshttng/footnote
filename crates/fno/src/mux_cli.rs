@@ -91,21 +91,30 @@ fn probe(sock: &Path) -> Probe {
 }
 
 /// The zsh OSC 133 shell-integration snippet: `precmd` emits `D;<exit>` (the
-/// just-finished command) then `A` (new prompt); `preexec` emits `B`/`C` (the
-/// command is about to run). Idempotent (guarded + double-eval-safe), no
-/// absolute paths (AC4-UI). A pane that eval's this captures blocks (US1).
+/// just-finished command) then `A` (new prompt); `B` (command start) rides at
+/// the END of `PROMPT` so it fires when the prompt finishes drawing - the
+/// user's keystrokes are then echoed in the B..C window, which is what x-38c4's
+/// rerun byte-captures as the command line (emitting B in `preexec` alongside C
+/// leaves that window empty: readline has already echoed by then). `preexec`
+/// emits `C` (Enter pressed, output begins). Idempotent (guarded +
+/// double-eval-safe), no absolute paths (AC4-UI). A pane that eval's this
+/// captures blocks (US1) and their command lines (x-38c4).
 const ZSH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
   _FNO_OSC133=1
   autoload -Uz add-zsh-hook
   _fno_osc133_precmd() { local e=$?; printf '\033]133;D;%s\a\033]133;A\a' "$e" }
-  _fno_osc133_preexec() { printf '\033]133;B\a\033]133;C\a' }
+  _fno_osc133_preexec() { printf '\033]133;C\a' }
   add-zsh-hook precmd _fno_osc133_precmd
   add-zsh-hook preexec _fno_osc133_preexec
+  PROMPT="${PROMPT}%{"$'\033]133;B\a'"%}"
 fi
 "#;
 
 /// The bash OSC 133 snippet: `_fno_osc133_prompt` (LAST in `PROMPT_COMMAND`)
-/// emits `D;<exit>`/`A` and arms; the `DEBUG` trap emits `B`/`C` on the FIRST
+/// emits `D;<exit>`/`A` and arms; `B` (command start) rides at the END of `PS1`
+/// (`\[...\]` non-counting) so it fires when the prompt finishes drawing - the
+/// user's keystrokes then echo in the B..C window that x-38c4's rerun
+/// byte-captures as the command line. The `DEBUG` trap emits `C` on the FIRST
 /// command after the prompt, then disarms - so a pipeline emits it once, and
 /// the commands inside `PROMPT_COMMAND` (and a bare Enter) do not trip it. The
 /// `_fno_osc133_prompt` guard skips the trap firing on the hook itself.
@@ -124,12 +133,13 @@ const BASH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
     [ -n "$COMP_LINE" ] && return
     case "$BASH_COMMAND" in _fno_osc133_prompt) return ;; esac
     _fno_osc133_armed=""
-    printf '\033]133;B\a\033]133;C\a'
+    printf '\033]133;C\a'
   }
   case "$PROMPT_COMMAND" in
     *_fno_osc133_prompt*) ;;
     *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_fno_osc133_prompt" ;;
   esac
+  PS1="${PS1}"'\[\033]133;B\a\]'
   trap '_fno_osc133_preexec' DEBUG
 fi
 "#;
@@ -160,25 +170,30 @@ pub fn shell_init(shell: Option<&str>) -> i32 {
     }
 }
 
-/// `fno mux ls`: one row per `*.sock` in the mux dir. Read-only - a stale
-/// socket is REPORTED, never unlinked (kill-server owns removal). Exits 0
-/// even when every row is stale or unqueryable; only "no sessions" is
-/// distinguishable by text, not exit code, so scripts can `grep`.
-pub fn ls() -> i32 {
+/// One enumerated session: its name and what a probe learned. Shared by
+/// `ls` and the pre-attach picker (Locked 8) so both see the same live/stale
+/// verdict from the same code.
+struct SessionRow {
+    name: String,
+    probe: Probe,
+}
+
+impl SessionRow {
+    fn is_live(&self) -> bool {
+        matches!(self.probe, Probe::Live { .. })
+    }
+}
+
+/// Enumerate `*.sock` in the mux dir, probing each, sorted by name. `Err` is
+/// an unreadable dir the caller must distinguish from "no sessions" (a
+/// permissions/IO error must never read as empty); `NotFound` returns an
+/// empty list (no session ever started here).
+fn session_rows() -> Result<Vec<SessionRow>, String> {
     let dir = proto::mux_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        // A missing dir means no session ever started here. Any OTHER error
-        // (permissions, I/O) must not read as an empty listing - a script
-        // grepping "no sessions" would get a clean false negative.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("no sessions");
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("fno: cannot read {}: {e}", dir.display());
-            return 1;
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("cannot read {}: {e}", dir.display())),
     };
     let mut names: Vec<String> = entries
         .filter_map(|e| e.ok())
@@ -189,14 +204,35 @@ pub fn ls() -> i32 {
                 .flatten()
         })
         .collect();
-    if names.is_empty() {
+    names.sort();
+    Ok(names
+        .into_iter()
+        .map(|name| {
+            let sock = dir.join(format!("{name}.sock"));
+            let probe = probe(&sock);
+            SessionRow { name, probe }
+        })
+        .collect())
+}
+
+/// `fno mux ls`: one row per `*.sock` in the mux dir. Read-only - a stale
+/// socket is REPORTED, never unlinked (kill-server owns removal). Exits 0
+/// even when every row is stale or unqueryable; only "no sessions" is
+/// distinguishable by text, not exit code, so scripts can `grep`.
+pub fn ls() -> i32 {
+    let rows = match session_rows() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("fno: {e}");
+            return 1;
+        }
+    };
+    if rows.is_empty() {
         println!("no sessions");
         return 0;
     }
-    names.sort();
-    for name in names {
-        let sock = dir.join(format!("{name}.sock"));
-        match probe(&sock) {
+    for SessionRow { name, probe } in &rows {
+        match probe {
             Probe::Live {
                 clients,
                 squads,
@@ -208,6 +244,321 @@ pub fn ls() -> i32 {
         }
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// Pre-attach session picker (US5, Locked 8)
+// ---------------------------------------------------------------------------
+
+/// Which session bare `fno` should attach, decided BEFORE any terminal
+/// takeover. `None` means the user quit the picker - a clean exit 0, never a
+/// spawn. Only reached when neither `--session` nor `FNO_SESSION` pinned a
+/// session (those bypass the picker entirely, AC5-FR).
+///
+/// Zero live sessions -> attach the default (`connect_or_spawn` births it,
+/// today's behavior); exactly one -> attach it whatever its name, no picker
+/// and no implicit `main` (AC5-EDGE); two or more -> the interactive picker.
+/// Stale sockets never count as live (AC5-ERR) but are shown, dimmed.
+pub fn pick_session() -> Option<String> {
+    let rows = match session_rows() {
+        Ok(r) => r,
+        // An unreadable mux dir is not "no sessions": fall back to the
+        // default session rather than silently masking the error into a
+        // pick. connect_or_spawn surfaces any real problem.
+        Err(e) => {
+            eprintln!("fno: {e}");
+            return Some(DEFAULT_SESSION.to_string());
+        }
+    };
+    let live = rows.iter().filter(|r| r.is_live()).count();
+    match live {
+        0 => Some(DEFAULT_SESSION.to_string()),
+        1 => Some(
+            rows.iter()
+                .find(|r| r.is_live())
+                .map(|r| r.name.clone())
+                .unwrap(),
+        ),
+        _ => run_picker(rows),
+    }
+}
+
+/// A logical picker keystroke, folded from raw bytes (arrows -> Up/Down).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickKey {
+    Up,
+    Down,
+    Enter,
+    Esc,
+    Backspace,
+    Char(u8),
+}
+
+/// Fold raw stdin bytes into logical keys, carrying escape state in `esc`
+/// across reads so an arrow split at a read boundary still lands (and a
+/// bare-Esc close is never confused with the start of an arrow). Mirrors the
+/// client selector's fold; kept local because the key set differs.
+fn fold_pick_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<PickKey> {
+    let mut keys = Vec::new();
+    for &b in bytes {
+        if !esc.is_empty() {
+            if esc.as_slice() == [0x1b] && b == b'[' {
+                esc.push(b);
+                continue;
+            }
+            if esc.as_slice() == [0x1b, b'['] {
+                match b {
+                    b'A' => keys.push(PickKey::Up),
+                    b'B' => keys.push(PickKey::Down),
+                    _ => {} // unknown escape sequence: swallowed whole
+                }
+                esc.clear();
+                continue;
+            }
+            // Pending lone ESC + a non-'[' byte: that ESC was a real Esc press.
+            esc.clear();
+            keys.push(PickKey::Esc);
+            if b == 0x1b {
+                esc.push(0x1b);
+                continue;
+            }
+        } else if b == 0x1b {
+            esc.push(0x1b);
+            continue;
+        }
+        match b {
+            0x1b => unreachable!("ESC handled above"),
+            b'\r' | b'\n' => keys.push(PickKey::Enter),
+            0x7f | 0x08 => keys.push(PickKey::Backspace),
+            other => keys.push(PickKey::Char(other)),
+        }
+    }
+    keys
+}
+
+/// Fold one blocking-read chunk into keys, then flush a lone ESC left pending
+/// at the chunk boundary as [`PickKey::Esc`]. A bare Esc press delivers just
+/// `0x1b`; without this flush it lingers in `esc` (indistinguishable from the
+/// start of an arrow) until the next keystroke, so Esc-to-quit does nothing
+/// (codex P2). An arrow's `ESC [ A` arrives within a single read, so it is
+/// already resolved and never lingers. Residual (accepted): an arrow whose
+/// bytes are split across two reads reads the leading ESC as a quit - rare
+/// (terminals emit an arrow as one write) and low-stakes pre-attach.
+fn pick_keys_from_read(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<PickKey> {
+    let mut keys = fold_pick_keys(esc, bytes);
+    if esc.as_slice() == [0x1b] {
+        esc.clear();
+        keys.push(PickKey::Esc);
+    }
+    keys
+}
+
+/// Picker view state: the row list, the cursor, and (while naming a new
+/// session) the typed buffer. Pure - [`Picker::step`] is exhaustively
+/// unit-testable; the IO loop only renders and reads.
+struct Picker {
+    rows: Vec<SessionRow>,
+    cursor: usize,
+    naming: Option<String>,
+}
+
+/// What one keystroke asks the IO loop to do.
+#[derive(Debug, PartialEq, Eq)]
+enum PickAction {
+    Redraw,
+    Attach(String),
+    Quit,
+    Bell,
+}
+
+impl Picker {
+    fn new(rows: Vec<SessionRow>) -> Self {
+        // Anchor the cursor on the first LIVE row so the common Enter path
+        // never opens on an unselectable stale row.
+        let cursor = rows.iter().position(SessionRow::is_live).unwrap_or(0);
+        Picker {
+            rows,
+            cursor,
+            naming: None,
+        }
+    }
+
+    fn step(&mut self, key: PickKey) -> PickAction {
+        if let Some(buf) = self.naming.as_mut() {
+            return match key {
+                PickKey::Enter => {
+                    // Validate at the trust boundary: a name with `..` or `/`
+                    // is rejected by socket_path downstream, but catching it
+                    // here BELs and lets the user retype instead of exiting the
+                    // picker to a downstream launch error (gemini).
+                    let name = buf.trim().to_string();
+                    if name.is_empty() || proto::socket_path(&name).is_err() {
+                        PickAction::Bell
+                    } else {
+                        PickAction::Attach(name)
+                    }
+                }
+                PickKey::Esc => {
+                    self.naming = None;
+                    PickAction::Redraw
+                }
+                PickKey::Backspace => {
+                    buf.pop();
+                    PickAction::Redraw
+                }
+                // Printable ASCII only; control bytes are ignored so a stray
+                // escape tail cannot poison the name.
+                PickKey::Char(c) if (0x20..0x7f).contains(&c) => {
+                    buf.push(c as char);
+                    PickAction::Redraw
+                }
+                _ => PickAction::Bell,
+            };
+        }
+        match key {
+            PickKey::Down => {
+                if self.cursor + 1 < self.rows.len() {
+                    self.cursor += 1;
+                }
+                PickAction::Redraw
+            }
+            PickKey::Up => {
+                self.cursor = self.cursor.saturating_sub(1);
+                PickAction::Redraw
+            }
+            PickKey::Enter => match self.rows.get(self.cursor) {
+                // Only a live row attaches; a stale/unqueryable row BELs
+                // (AC5-ERR: stale is unselectable).
+                Some(r) if r.is_live() => PickAction::Attach(r.name.clone()),
+                _ => PickAction::Bell,
+            },
+            PickKey::Char(b'n') => {
+                self.naming = Some(String::new());
+                PickAction::Redraw
+            }
+            PickKey::Char(b'j') => self.step(PickKey::Down),
+            PickKey::Char(b'k') => self.step(PickKey::Up),
+            PickKey::Char(b'q') | PickKey::Esc => PickAction::Quit,
+            _ => PickAction::Bell,
+        }
+    }
+}
+
+/// Render the picker to plain-terminal text (ANSI styling inline). Pure, so
+/// the layout is unit-tested; the IO loop only writes what this returns.
+/// Each line ends `\r\n` because the terminal is in raw mode (no implicit CR).
+fn render_picker(p: &Picker) -> String {
+    let mut out = String::new();
+    out.push_str("fno sessions - \u{2191}\u{2193}/jk move, enter attach, n new, q quit\r\n");
+    for (i, row) in p.rows.iter().enumerate() {
+        let marker = if i == p.cursor { '>' } else { ' ' };
+        let body = match &row.probe {
+            Probe::Live {
+                clients,
+                squads,
+                panes,
+            } => format!(
+                "{}  ({clients} clients, {squads} squads, {panes} panes)",
+                row.name
+            ),
+            Probe::Unqueryable => format!("{}  (alive, unqueryable)", row.name),
+            Probe::Stale => format!("{}  (stale)", row.name),
+            Probe::Unprobeable(_) => format!("{}  (unprobeable)", row.name),
+        };
+        // The cursor reverses; stale/unselectable rows dim (AC5-ERR). Check
+        // the cursor FIRST so it stays visible even when parked on a stale row
+        // (combined reverse+dim), rather than vanishing under the dim (gemini).
+        let (pre, post) = match (i == p.cursor, row.is_live()) {
+            (true, true) => ("\x1b[7m", "\x1b[0m"),
+            (true, false) => ("\x1b[7;2m", "\x1b[0m"),
+            (false, false) => ("\x1b[2m", "\x1b[0m"),
+            (false, true) => ("", ""),
+        };
+        out.push_str(&format!("{marker} {pre}{body}{post}\r\n"));
+    }
+    if let Some(buf) = &p.naming {
+        out.push_str(&format!("new session name: {buf}\r\n"));
+    }
+    out
+}
+
+/// The interactive picker (2+ live sessions). Raw mode, NO alt screen (AC5-UI:
+/// a clean exit leaves the terminal exactly as found, no alt-screen residue).
+/// Returns the chosen/named session, or `None` on quit.
+fn run_picker(rows: Vec<SessionRow>) -> Option<String> {
+    use crossterm::terminal;
+    use std::io::{Read, Write};
+
+    // Restore raw mode on EVERY exit path, including the `?` early return.
+    struct RawGuard;
+    impl Drop for RawGuard {
+        fn drop(&mut self) {
+            let _ = terminal::disable_raw_mode();
+        }
+    }
+    if let Err(e) = terminal::enable_raw_mode() {
+        // No raw mode (piped stdin already screened out upstream): fall back
+        // to the default session rather than fail the launch - but say so,
+        // matching this file's failures-are-visible discipline. Silent here
+        // would spawn a `main` the user never picked with no explanation.
+        eprintln!(
+            "fno: terminal raw mode unavailable ({e}); attaching default session {DEFAULT_SESSION:?}"
+        );
+        return Some(DEFAULT_SESSION.to_string());
+    }
+    let _guard = RawGuard;
+
+    let mut picker = Picker::new(rows);
+    let mut esc: Vec<u8> = Vec::new();
+    let mut prev_lines = 0usize; // lines the last frame drew, to clear on redraw
+    let mut stdout = std::io::stdout();
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 64];
+
+    let redraw = |stdout: &mut std::io::Stdout, picker: &Picker, prev: &mut usize| {
+        if *prev > 0 {
+            // Move to the frame's top-left and clear it before repainting.
+            let _ = write!(stdout, "\r\x1b[{}A\x1b[J", *prev);
+        }
+        let frame = render_picker(picker);
+        *prev = frame.matches("\r\n").count();
+        let _ = stdout.write_all(frame.as_bytes());
+        let _ = stdout.flush();
+    };
+    redraw(&mut stdout, &picker, &mut prev_lines);
+
+    let result = loop {
+        let n = match stdin.read(&mut buf) {
+            Ok(0) => break None, // stdin closed: quit cleanly
+            Ok(n) => n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break None,
+        };
+        let mut action = PickAction::Redraw;
+        for key in pick_keys_from_read(&mut esc, &buf[..n]) {
+            action = picker.step(key);
+            match &action {
+                PickAction::Attach(_) | PickAction::Quit => break,
+                PickAction::Bell => {
+                    let _ = stdout.write_all(b"\x07");
+                    let _ = stdout.flush();
+                }
+                PickAction::Redraw => {}
+            }
+        }
+        match action {
+            PickAction::Attach(name) => break Some(name),
+            PickAction::Quit => break None,
+            _ => redraw(&mut stdout, &picker, &mut prev_lines),
+        }
+    };
+    // One clear on ANY exit path (attach or quit): nothing lingers above the
+    // prompt on quit, nor above the client's first frame on attach (gemini).
+    if prev_lines > 0 {
+        let _ = write!(stdout, "\r\x1b[{prev_lines}A\x1b[J");
+        let _ = stdout.flush();
+    }
+    result
 }
 
 /// `fno mux kill-server [<name>]`: shut one session down. A live server Byes
@@ -875,6 +1226,155 @@ mod tests {
         assert_eq!(resolve_session(None, Some("")), DEFAULT_SESSION);
     }
 
+    // -- pre-attach picker (US5) -------------------------------------------
+
+    fn live(name: &str) -> SessionRow {
+        SessionRow {
+            name: name.into(),
+            probe: Probe::Live {
+                clients: 1,
+                squads: 2,
+                panes: 3,
+            },
+        }
+    }
+
+    fn stale(name: &str) -> SessionRow {
+        SessionRow {
+            name: name.into(),
+            probe: Probe::Stale,
+        }
+    }
+
+    #[test]
+    fn mux_pick_fold_keys_arrows_and_bare_esc_split_across_reads() {
+        let mut esc = Vec::new();
+        // A plain Down arrow arriving one byte per read.
+        let mut got = Vec::new();
+        for chunk in [&b"\x1b"[..], &b"["[..], &b"B"[..]] {
+            got.extend(fold_pick_keys(&mut esc, chunk));
+        }
+        assert_eq!(got, vec![PickKey::Down]);
+        // A bare Esc (not followed by '[') resolves to Esc on the next byte.
+        let mut esc = Vec::new();
+        assert_eq!(
+            fold_pick_keys(&mut esc, b"\x1bq"),
+            vec![PickKey::Esc, PickKey::Char(b'q')]
+        );
+        // Enter, Backspace, printable.
+        let mut esc = Vec::new();
+        assert_eq!(
+            fold_pick_keys(&mut esc, b"a\r\x7f"),
+            vec![PickKey::Char(b'a'), PickKey::Enter, PickKey::Backspace]
+        );
+    }
+
+    #[test]
+    fn mux_pick_keys_from_read_flushes_a_lone_esc_as_quit() {
+        // codex P2: a bare Esc press (single 0x1b byte in a read) must surface
+        // as PickKey::Esc so Esc-to-quit works without a second keystroke.
+        let mut esc = Vec::new();
+        assert_eq!(
+            pick_keys_from_read(&mut esc, b"\x1b"),
+            vec![PickKey::Esc],
+            "lone ESC flushes as Esc at the read boundary"
+        );
+        assert!(esc.is_empty(), "no ESC left pending after the flush");
+        // An arrow arriving whole in one read is still Up, not a spurious quit.
+        let mut esc = Vec::new();
+        assert_eq!(pick_keys_from_read(&mut esc, b"\x1b[A"), vec![PickKey::Up]);
+        // A char after ESC in the same read: the fold already resolves the ESC.
+        let mut esc = Vec::new();
+        assert_eq!(
+            pick_keys_from_read(&mut esc, b"\x1bx"),
+            vec![PickKey::Esc, PickKey::Char(b'x')]
+        );
+    }
+
+    #[test]
+    fn mux_picker_anchors_cursor_on_first_live_row() {
+        // AC5-ERR: a leading stale row must not be where the cursor opens.
+        let p = Picker::new(vec![stale("old"), live("work"), live("play")]);
+        assert_eq!(p.cursor, 1);
+    }
+
+    #[test]
+    fn mux_picker_enter_attaches_live_bells_on_stale() {
+        let mut p = Picker::new(vec![live("work"), stale("dead")]);
+        // Cursor starts on the live row -> Enter attaches it.
+        assert_eq!(p.step(PickKey::Enter), PickAction::Attach("work".into()));
+        // Move onto the stale row -> Enter BELs (unselectable, AC5-ERR).
+        assert_eq!(p.step(PickKey::Down), PickAction::Redraw);
+        assert_eq!(p.step(PickKey::Enter), PickAction::Bell);
+        // Down clamps at the last row; Up returns.
+        assert_eq!(p.step(PickKey::Down), PickAction::Redraw);
+        assert_eq!(p.cursor, 1);
+    }
+
+    #[test]
+    fn mux_picker_quit_on_q_and_esc() {
+        let mut p = Picker::new(vec![live("a"), live("b")]);
+        assert_eq!(p.step(PickKey::Char(b'q')), PickAction::Quit);
+        assert_eq!(p.step(PickKey::Esc), PickAction::Quit);
+    }
+
+    #[test]
+    fn mux_picker_naming_flow_builds_and_attaches() {
+        // AC5 `n`: inline name prompt, printable chars accumulate, Enter
+        // attaches the trimmed name, Esc cancels back to the list.
+        let mut p = Picker::new(vec![live("a"), live("b")]);
+        assert_eq!(p.step(PickKey::Char(b'n')), PickAction::Redraw);
+        assert!(p.naming.is_some());
+        for c in b"work" {
+            assert_eq!(p.step(PickKey::Char(*c)), PickAction::Redraw);
+        }
+        assert_eq!(p.step(PickKey::Backspace), PickAction::Redraw); // "wor"
+        assert_eq!(p.step(PickKey::Char(b'k')), PickAction::Redraw); // "work"
+        assert_eq!(p.step(PickKey::Enter), PickAction::Attach("work".into()));
+        // Empty name BELs rather than attaching "".
+        let mut p = Picker::new(vec![live("a"), live("b")]);
+        p.step(PickKey::Char(b'n'));
+        assert_eq!(p.step(PickKey::Enter), PickAction::Bell);
+        // An invalid name (path traversal) BELs at the trust boundary instead
+        // of exiting to a downstream launch error.
+        let mut p = Picker::new(vec![live("a"), live("b")]);
+        p.step(PickKey::Char(b'n'));
+        for c in b"../evil" {
+            p.step(PickKey::Char(*c));
+        }
+        assert_eq!(p.step(PickKey::Enter), PickAction::Bell);
+        assert!(
+            p.naming.is_some(),
+            "stays in naming mode to let the user retype"
+        );
+        // Esc from naming returns to the list (a following q quits).
+        p.step(PickKey::Char(b'n'));
+        assert_eq!(p.step(PickKey::Esc), PickAction::Redraw);
+        assert!(p.naming.is_none());
+        assert_eq!(p.step(PickKey::Char(b'q')), PickAction::Quit);
+    }
+
+    #[test]
+    fn mux_render_picker_marks_cursor_and_dims_stale() {
+        let mut p = Picker::new(vec![live("work"), stale("dead")]);
+        let out = render_picker(&p);
+        assert!(out.contains("work  (1 clients, 2 squads, 3 panes)"));
+        assert!(out.contains("dead  (stale)"));
+        assert!(out.contains("\x1b[2m"), "stale row dimmed");
+        assert!(out.contains("\x1b[7m"), "live cursor row reversed");
+        // Cursor parked on the stale row: reverse+dim so it stays visible.
+        p.step(PickKey::Down);
+        assert_eq!(p.cursor, 1);
+        assert!(
+            render_picker(&p).contains("\x1b[7;2m"),
+            "selected stale row keeps a visible cursor"
+        );
+        // Naming mode renders the prompt.
+        p.step(PickKey::Char(b'n'));
+        p.step(PickKey::Char(b'x'));
+        assert!(render_picker(&p).contains("new session name: x"));
+    }
+
     #[test]
     fn mux_kill_server_missing_socket_is_no_server_exit_1() {
         // No env manipulation (unit tests share the process): a name no real
@@ -1113,6 +1613,17 @@ mod tests {
             }
             // Idempotent: guarded so a double-eval is a no-op (AC4-UI).
             assert!(snippet.contains("_FNO_OSC133"));
+            // x-38c4: `B` rides in the prompt (PROMPT/PS1), not adjacent to `C`
+            // in the run hook - else the B..C window is empty and rerun captures
+            // no command (readline has already echoed by preexec/DEBUG time).
+            assert!(
+                !snippet.contains("133;B\\a\\033]133;C"),
+                "B must not be emitted adjacent to C: {snippet:?}"
+            );
+            assert!(
+                snippet.contains("PROMPT") || snippet.contains("PS1"),
+                "B must ride in the prompt string: {snippet:?}"
+            );
             // No absolute paths (AC4-UI): nothing references a `/...` path.
             assert!(
                 !snippet.lines().any(|l| l.trim_start().starts_with('/')),

@@ -61,12 +61,26 @@ pub struct ClientHarness {
 
 impl ClientHarness {
     pub fn spawn(scratch: &Scratch) -> Self {
-        Self::spawn_with(scratch, &[])
+        Self::spawn_full(scratch, &[], &[])
     }
 
     /// Like [`ClientHarness::spawn`] with extra environment on the client
     /// process (the nested-guard cases need `FNO_SESSION` preset).
     pub fn spawn_with(scratch: &Scratch, envs: &[(&str, &str)]) -> Self {
+        Self::spawn_full(scratch, envs, &[])
+    }
+
+    /// Like [`ClientHarness::spawn`] but attaching an explicit `--session`.
+    /// Bare `fno` runs the pre-attach session picker (US5); a fake server
+    /// that `accept()`s only once is consumed by the picker's live/stale
+    /// probe before the real attach, so a test wanting a DIRECT attach names
+    /// the session outright and bypasses the picker (AC5-FR).
+    #[allow(dead_code)]
+    pub fn spawn_session(scratch: &Scratch, session: &str) -> Self {
+        Self::spawn_full(scratch, &[], &["--session", session])
+    }
+
+    fn spawn_full(scratch: &Scratch, envs: &[(&str, &str)], args: &[&str]) -> Self {
         // 60 columns: below the sideline's auto-hide threshold (panel 28 +
         // min content 40), so the panel stays hidden and Phase-1-era screen
         // assertions see bare content lines under the 1-row tab bar. The
@@ -82,6 +96,9 @@ impl ClientHarness {
             })
             .unwrap();
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_fno"));
+        for a in args {
+            cmd.arg(a);
+        }
         cmd.env("FNO_MUX_DIR", &scratch.0);
         cmd.env("SHELL", "/bin/sh");
         cmd.env("TERM", "xterm-256color");
@@ -152,17 +169,23 @@ impl ClientHarness {
         }
     }
 
-    /// Wait until the shell sits at a fresh prompt: the last non-empty screen
-    /// line ends with the pinned `PS1` (`$ `). Required after an interrupt
-    /// (^C) before typing again - until the shell regains the foreground, the
-    /// tty line discipline can flush/drop bytes typed at the dying process
-    /// (codex P1: consistently reproducible on Linux PTYs).
+    /// Wait until the shell sits at a fresh prompt: a fresh prompt line ends
+    /// with the pinned `PS1` (`$ `). Required after an interrupt (^C) before
+    /// typing again - until the shell regains the foreground, the tty line
+    /// discipline can flush/drop bytes typed at the dying process (codex P1:
+    /// consistently reproducible on Linux PTYs).
+    ///
+    /// Scans the last two non-empty lines rather than only the last: the
+    /// always-on status row (US4) is client-local chrome that renders as the
+    /// final non-empty line and never ends with `$`, so keying on the very
+    /// last line alone would never see the prompt sitting just above it.
     pub fn wait_prompt(&mut self, secs: u64) -> String {
         self.wait_screen(secs, |s| {
             s.lines()
                 .rev()
-                .find(|l| !l.trim().is_empty())
-                .is_some_and(|l| l.trim_end().ends_with('$'))
+                .filter(|l| !l.trim().is_empty())
+                .take(2)
+                .any(|l| l.trim_end().ends_with('$'))
         })
     }
 

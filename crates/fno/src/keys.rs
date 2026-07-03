@@ -10,10 +10,11 @@
 //! `%`/`"` split H/V · `h j k l` + arrows focus · `H J K L` + Ctrl-arrows
 //! resize · `x` close pane · `c` new tab · `n`/`p` cycle tabs · `1`-`9`
 //! select tab · `&` close tab · `w` panel selector · `b` toggle sideline ·
-//! `d` detach · `[`/`]` jump prev/next command block · `v` select block ·
-//! `y` copy selection · `r` rerun block (x-38c4) · leader-leader = one literal
-//! leader byte. Leader + anything unmapped is swallowed with BEL - a chord typo
-//! must never leak half a chord into the pane (AC2-UI's never-leak guarantee).
+//! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
+//! prev/next command block · `v` select block · `y` copy selection · `r` rerun
+//! block (x-38c4) · leader-leader = one literal leader byte. Leader + anything
+//! unmapped is swallowed with BEL - a chord typo must never leak half a chord
+//! into the pane (AC2-UI's never-leak guarantee).
 //!
 //! Detach is leader+d ONLY (Phase 3 Locked 11): the Phase 1/2 raw-0x1C
 //! match is gone, so Ctrl-\ forwards to the pane and SIGQUIT works again.
@@ -56,6 +57,11 @@ pub enum Event {
     OpenSelector,
     /// Show/hide the sideline (leader+b).
     TogglePanel,
+    /// Show/hide the status row (leader+s). Client-local (US4, AC4-FR).
+    ToggleStatus,
+    /// Show the full key-table overlay (leader+?). The next keypress
+    /// dismisses it (US4, AC4-EDGE).
+    ShowKeys,
     /// Jump the focused pane's shared scroll to the prev/next command block
     /// (leader+`[` / leader+`]`, x-38c4). The client resolves the focused pane.
     BlockJump(BlockDir),
@@ -181,6 +187,12 @@ impl Scanner {
         flush(&mut plain, &mut out);
         out
     }
+
+    /// A leader chord is mid-flight (US4): the client arms the which-key
+    /// hint timer while this holds and clears the hint when it stops.
+    pub fn leader_pending(&self) -> bool {
+        matches!(self.state, State::Leader | State::LeaderEsc(_))
+    }
 }
 
 fn flush(plain: &mut Vec<u8>, out: &mut Vec<Event>) {
@@ -211,6 +223,8 @@ fn chord(b: u8) -> Event {
         b'1'..=b'9' => Event::SelectTabIdx((b - b'1') as usize),
         b'w' => Event::OpenSelector,
         b'b' => Event::TogglePanel,
+        b's' => Event::ToggleStatus,
+        b'?' => Event::ShowKeys,
         b'd' => Event::Detach,
         // Block navigation (x-38c4). `[`/`]` follow tmux copy-mode muscle memory;
         // `x` stays ClosePane (block-select is `v`, vim-visual), `y` yanks the
@@ -330,7 +344,26 @@ mod tests {
         assert_eq!(scan_all(&[b"\x02&"]), vec![Event::Cmd(Command::CloseTab)]);
         assert_eq!(scan_all(&[b"\x02w"]), vec![Event::OpenSelector]);
         assert_eq!(scan_all(&[b"\x02b"]), vec![Event::TogglePanel]);
+        assert_eq!(scan_all(&[b"\x02s"]), vec![Event::ToggleStatus]);
+        assert_eq!(scan_all(&[b"\x02?"]), vec![Event::ShowKeys]);
         assert_eq!(scan_all(&[b"\x02d"]), vec![Event::Detach]);
+    }
+
+    #[test]
+    fn client_keys_leader_pending_tracks_chord_in_flight() {
+        // US4: the which-key timer arms exactly while a chord is mid-flight.
+        let mut s = Scanner::default();
+        s.scan(b"plain");
+        assert!(!s.leader_pending());
+        s.scan(b"\x02");
+        assert!(s.leader_pending(), "bare leader held");
+        s.scan(b"\x1b["); // partial leader-escape still pending
+        assert!(s.leader_pending(), "split escape chord still pending");
+        s.scan(b"C"); // resolves to FocusDir(Right)
+        assert!(!s.leader_pending(), "resolution clears pending");
+        // A paste never reads as a pending chord.
+        s.scan(b"\x1b[200~\x02");
+        assert!(!s.leader_pending());
     }
 
     #[test]

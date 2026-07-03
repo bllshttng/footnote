@@ -42,6 +42,14 @@ const PANEL_W: u16 = 28;
 const MIN_CONTENT_COLS: u16 = 40;
 /// The tab bar row.
 const TAB_BAR_ROWS: u16 = 1;
+/// The status row (US4): one always-on bottom line of client-local chrome.
+const STATUS_ROWS: u16 = 1;
+/// Below this many terminal rows the bottom chrome (status row + which-key
+/// hint) auto-hides and the content area recovers the line (AC4-ERR).
+const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
+/// How long a pending leader chord waits before the which-key hint paints
+/// (US4, AC4-HP). `leader+?` shows the full table instantly instead.
+const HINT_DELAY: Duration = Duration::from_millis(400);
 /// Transient notice lifetime on the tab bar.
 const NOTICE_TTL: Duration = Duration::from_secs(3);
 
@@ -211,10 +219,22 @@ struct SelRow {
 /// one full-terminal `Frame` the row-diffing `Compositor` draws.
 struct View {
     term: (u16, u16), // full terminal (rows, cols)
+    /// The session name, for the status row. Fixed for the connection's life
+    /// (sessions cannot rename), so the row can never go stale.
+    session: String,
     layout: LayoutView,
     frames: HashMap<u64, Frame>,
     /// Manual sideline toggle; narrow terminals override it (auto-hide).
     panel_on: bool,
+    /// Manual status-row toggle (leader+s). Client-local and deliberately
+    /// unpersisted: a reattach resets to on (AC4-FR).
+    status_on: bool,
+    /// The which-key hint line is painted over the bottom row (leader held
+    /// past [`HINT_DELAY`]); any chord resolution clears it (AC4-HP).
+    hint: bool,
+    /// The full key-table overlay (leader+?); the next keypress dismisses it
+    /// (AC4-EDGE).
+    overlay: bool,
     /// Caret expansion per squad id - client-local, instant (AC6-UI).
     expanded: HashSet<u64>,
     /// Selector cursor into [`View::sel_rows`], when open.
@@ -227,12 +247,16 @@ struct View {
 }
 
 impl View {
-    fn new(term: (u16, u16), layout: LayoutView) -> Self {
+    fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
         View {
             term,
+            session,
             layout,
             frames: HashMap::new(),
             panel_on: true,
+            status_on: true,
+            hint: false,
+            overlay: false,
             expanded: HashSet::new(),
             selector: None,
             sel_esc: Vec::new(),
@@ -252,11 +276,28 @@ impl View {
         }
     }
 
+    /// Whether the bottom row belongs to chrome. Geometry beats the toggle:
+    /// a too-short terminal recovers the line for content (AC4-ERR).
+    fn status_visible(&self) -> bool {
+        self.status_on && self.term.0 >= MIN_ROWS_FOR_STATUS
+    }
+
+    fn status_rows(&self) -> u16 {
+        if self.status_visible() {
+            STATUS_ROWS
+        } else {
+            0
+        }
+    }
+
     /// The CONTENT-AREA viewport reported to the server (terminal minus
     /// chrome). Never zero, so a degenerate terminal cannot wedge the server.
     fn content_dims(&self) -> (u16, u16) {
         (
-            self.term.0.saturating_sub(TAB_BAR_ROWS).max(1),
+            self.term
+                .0
+                .saturating_sub(TAB_BAR_ROWS + self.status_rows())
+                .max(1),
             self.term.1.saturating_sub(self.panel_w()).max(1),
         )
     }
@@ -432,6 +473,11 @@ impl View {
             }
         }
 
+        self.draw_bottom_row(&mut cells, rows, cols);
+        if self.overlay {
+            draw_overlay(&mut cells, rows, cols);
+        }
+
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
         // one place the cursor may sit (AC1-UI/AC5-UI).
         let (mut cur_r, mut cur_c, mut cur_vis) = (0u16, 0u16, false);
@@ -466,6 +512,89 @@ impl View {
             // per-pane indicator is drawn INTO the cells above from each pane
             // frame's own scroll_offset.
             scroll_offset: 0,
+        }
+    }
+
+    /// The bottom chrome line (US4). While a leader chord is pending past
+    /// [`HINT_DELAY`] it is the which-key hint (painted over whatever the row
+    /// held - even with the status row toggled off, discoverability does not
+    /// die with the toggle; tmux's message-line behavior). Otherwise it is
+    /// the status row (AC4-UI): session name, focused pane cwd, the focused
+    /// pane's scroll offset (the canonical `[+N]` home; the per-pane inline
+    /// indicator stays so a scrolled UNFOCUSED pane is still observable),
+    /// and `? for keys`. Too-short terminals draw neither (AC4-ERR).
+    fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
+        // Below minimum geometry BOTH the status row and the which-key hint
+        // auto-hide (AC4-ERR); the row is content and `content_dims` already
+        // handed it to the server.
+        if self.term.0 < MIN_ROWS_FOR_STATUS {
+            return;
+        }
+        // At adequate height the row is chrome only when the hint is up or the
+        // status row is toggled on. When neither owns it, it belongs to content:
+        // `content_dims` gave the server the full height (no status row
+        // subtracted), so a pane tiled into this row and the blit filled it -
+        // blanking here would erase it until the status row is re-enabled
+        // (codex P2).
+        if !self.hint && !self.status_on {
+            return;
+        }
+        let r = rows - 1;
+        // We own the row: blank it first so the divider-fill pass in `compose`
+        // (which treats this uncovered row as content and paints '─' glyphs)
+        // cannot bleed through the gaps between the segments below.
+        for c in 0..cols {
+            cells[r * cols + c] = Cell::default();
+        }
+        let put = |cells: &mut [Cell], c: usize, ch: char, flags: u8| {
+            if c < cols {
+                cells[r * cols + c] = Cell {
+                    c: ch,
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags,
+                };
+            }
+        };
+        if self.hint {
+            let text = " % \" split · hjkl focus · HJKL resize · x close · c tab \
+                        · n/p cycle · 1-9 tab · & close-tab · w select · b sideline \
+                        · s status · d detach · ? all keys";
+            for (i, ch) in text.chars().take(cols).enumerate() {
+                put(cells, i, ch, 0);
+            }
+            return;
+        }
+        let mut c = 0usize;
+        for ch in format!(" {} ", self.session).chars() {
+            put(cells, c, ch, cell_flags::BOLD);
+            c += 1;
+        }
+        let cwd = self
+            .layout
+            .squads
+            .iter()
+            .find(|s| s.id == self.layout.active_squad)
+            .map(|s| abbrev_home(&s.canonical_cwd))
+            .unwrap_or_default();
+        for ch in format!("│ {cwd} ").chars() {
+            put(cells, c, ch, cell_flags::DIM);
+            c += 1;
+        }
+        if let Some(f) = self.frames.get(&self.layout.focus) {
+            if f.scroll_offset != 0 {
+                for ch in format!("[+{}] ", f.scroll_offset).chars() {
+                    put(cells, c, ch, cell_flags::INVERSE);
+                    c += 1;
+                }
+            }
+        }
+        let help = "? for keys ";
+        let start = cols.saturating_sub(help.chars().count());
+        if start > c {
+            for (i, ch) in help.chars().enumerate() {
+                put(cells, start + i, ch, cell_flags::DIM);
+            }
         }
     }
 
@@ -669,6 +798,70 @@ enum DisplayRow<'a> {
     Header(&'static str),
 }
 
+/// Abbreviate `$HOME` to `~` for the status row; only at a path-component
+/// boundary so `/home/user2/...` never reads as `~2/...`.
+fn abbrev_home(p: &str) -> String {
+    // var_os, not var: HOME is a path, and the idiomatic read for a path env
+    // var avoids assuming UTF-8 up front. A non-UTF-8 HOME yields None and the
+    // path renders unabbreviated. Cached in a OnceLock: this runs on every
+    // frame compose (a hot path during output floods) and HOME is fixed for
+    // the process lifetime, so the env lookup + global env lock happens once
+    // (gemini).
+    static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| std::env::var_os("HOME").and_then(|s| s.into_string().ok()));
+    abbrev_home_in(p, home.as_deref())
+}
+
+fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
+    if let Some(h) = home.filter(|h| !h.is_empty()) {
+        if let Some(rest) = p.strip_prefix(h) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return format!("~{rest}");
+            }
+        }
+    }
+    p.to_string()
+}
+
+/// The full key table (leader+?), inverse-video over the content area's
+/// top-left. Any key dismisses it (AC4-EDGE). Cell-bounds-checked, so a tiny
+/// terminal shows a clipped table rather than nothing.
+const KEY_TABLE: &[&str] = &[
+    " fno keys · leader = Ctrl-b              ",
+    "  %  split horizontal   \"  split vertical ",
+    "  hjkl / arrows  focus  HJKL / C-arrows  resize ",
+    "  x  close pane         c  new tab        ",
+    "  n/p  cycle tabs       1-9  select tab   ",
+    "  &  close tab          w  panel selector ",
+    "  b  toggle sideline    s  toggle status  ",
+    "  [ ]  jump block       v  select block   ",
+    "  y  copy selection     r  rerun block    ",
+    "  d  detach             C-b C-b  literal  ",
+    " any key dismisses                        ",
+];
+
+fn draw_overlay(cells: &mut [Cell], rows: usize, cols: usize) {
+    let origin_r = TAB_BAR_ROWS as usize + 1;
+    for (i, line) in KEY_TABLE.iter().enumerate() {
+        let r = origin_r + i;
+        if r >= rows {
+            break;
+        }
+        for (j, ch) in line.chars().enumerate() {
+            let c = 2 + j;
+            if c >= cols {
+                break;
+            }
+            cells[r * cols + c] = Cell {
+                c: ch,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: cell_flags::INVERSE,
+            };
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Attach + main loop
 // ---------------------------------------------------------------------------
@@ -694,9 +887,15 @@ async fn attach_and_run(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     // Chrome is client-local: report the CONTENT area. A placeholder View
-    // computes it before any Layout exists.
+    // computes it before any Layout exists. The session name is the socket
+    // stem by construction (`proto::socket_path`).
+    let session = socket
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut view = View::new(
         (rows, cols),
+        session,
         LayoutView {
             squads: Vec::new(),
             active_squad: 0,
@@ -836,6 +1035,10 @@ async fn attach_and_run(
     }
     let mut compositor = Compositor::new();
     let mut scanner = Scanner::default();
+    // When the pending leader chord started, for the which-key hint timer
+    // (US4). Client-local; the scanner state is the single source of truth
+    // for WHETHER a chord is pending, this only remembers SINCE WHEN.
+    let mut leader_since: Option<Instant> = None;
     // Carries a partial SGR mouse report split across reads (mouse.rs).
     let mut mouse_carry: Vec<u8> = Vec::new();
     // Clipboard delivery runs on a blocking thread and reports its outcome back
@@ -850,6 +1053,12 @@ async fn attach_and_run(
     let exit: Result<i32, String> = loop {
         // Redraw-after-event; expiry of the transient notice needs a timer.
         let notice_deadline = view.notice.as_ref().map(|(_, d)| *d);
+        // The which-key hint fires once per pending chord (US4, AC4-HP).
+        let hint_deadline = if view.hint {
+            None
+        } else {
+            leader_since.map(|t| t + HINT_DELAY)
+        };
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -923,6 +1132,16 @@ async fn attach_and_run(
                 Some(bytes) => {
                     match handle_stdin(&mut view, &mut scanner, &mut mouse_carry, &bytes, &mut sock_w).await {
                         Ok(StdinFlow::Continue) => {
+                            // Sync the hint to the scanner: a chord pending
+                            // arms the timer once; anything else clears both
+                            // (resolving or abandoning clears the hint,
+                            // AC4-HP).
+                            if scanner.leader_pending() {
+                                leader_since.get_or_insert_with(Instant::now);
+                            } else {
+                                leader_since = None;
+                                view.hint = false;
+                            }
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
                             }
@@ -985,6 +1204,17 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            _ = async {
+                match hint_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if hint_deadline.is_some() => {
+                view.hint = true;
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
         }
     };
     drop(guard); // restore the terminal BEFORE printing the notice
@@ -1040,6 +1270,14 @@ async fn handle_stdin(
         }
     }
     if passthrough.is_empty() {
+        return Ok(StdinFlow::Continue);
+    }
+    if view.overlay {
+        // AC4-EDGE: one keypress dismisses the key table and does nothing
+        // else. The WHOLE chunk is swallowed - splitting it could leak the
+        // tail of an escape sequence into the pane, a worse bug than two
+        // coalesced keypresses both dying with the overlay.
+        view.overlay = false;
         return Ok(StdinFlow::Continue);
     }
     if view.selector.is_some() {
@@ -1098,6 +1336,18 @@ async fn handle_stdin(
                 write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
                     .await
                     .map_err(|e| format!("resize send failed: {e}"))?;
+            }
+            Event::ToggleStatus => {
+                view.status_on = !view.status_on;
+                // Same accounting as the sideline: the content area grew or
+                // shrank by one row.
+                let (r, c) = view.content_dims();
+                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                    .await
+                    .map_err(|e| format!("resize send failed: {e}"))?;
+            }
+            Event::ShowKeys => {
+                view.overlay = true;
             }
             Event::BlockJump(dir) => {
                 write_msg(
@@ -1427,10 +1677,11 @@ mod tests {
     }
 
     fn two_pane_view() -> View {
-        // 30x100 terminal, panel visible (100 >= 28+40). Content = 29x72.
-        // Two panes split H: 35 cols + divider + 36 cols.
+        // 30x100 terminal, panel visible (100 >= 28+40). Content = 28x72
+        // (tab bar + status row). Two panes split H: 35 + divider + 36 cols.
         let mut view = View::new(
             (30, 100),
+            "main".into(),
             LayoutView {
                 squads: vec![meta(1, "footnote", 2, 1), meta(2, "herdr", 1, 0)],
                 active_squad: 1,
@@ -1528,6 +1779,110 @@ mod tests {
         // start_c = origin_c(28) + rect.x(0) + rect.cols(35) - width("[+7]"=4).
         let seg: String = row1[59..63].iter().collect();
         assert_eq!(seg, "[+7]");
+    }
+
+    #[test]
+    fn client_compose_status_row_shows_session_cwd_and_help() {
+        // US4 AC4-UI: bottom row carries session name, active squad cwd, and
+        // the `? for keys` affordance; the focused pane's scroll offset joins
+        // it when non-zero (the canonical `[+N]` home).
+        let mut view = two_pane_view();
+        let text = frame_text(&view.compose());
+        let bottom = text.lines().last().unwrap().to_string();
+        assert!(bottom.contains("main"), "{bottom:?}");
+        assert!(bottom.contains("/code/footnote"), "{bottom:?}");
+        assert!(bottom.contains("? for keys"), "{bottom:?}");
+        assert!(!bottom.contains("[+"), "no stale indicator: {bottom:?}");
+        // The row is blanked first, so no divider glyphs bleed through the
+        // gaps between segments.
+        assert!(!bottom.contains('\u{2500}'), "no '─' bleed: {bottom:?}");
+        assert!(!bottom.contains('\u{253c}'), "no '┼' bleed: {bottom:?}");
+        // Focused pane (11) scrolled -> [+N] in the status row.
+        let mut f = text_frame(29, 36, 'b');
+        f.scroll_offset = 3;
+        view.frames.insert(11, f);
+        let text = frame_text(&view.compose());
+        assert!(text.lines().last().unwrap().contains("[+3]"));
+    }
+
+    #[test]
+    fn client_status_row_accounting_and_auto_hide() {
+        // AC4-ERR + the Domain Pitfall: the content area the server sees
+        // shrinks by exactly the status row, and a too-short terminal
+        // recovers the line (geometry beats the toggle).
+        let mut view = two_pane_view();
+        assert_eq!(view.content_dims(), (28, 72), "tab bar + status row");
+        view.status_on = false;
+        assert_eq!(view.content_dims(), (29, 72), "toggled off");
+        view.status_on = true;
+        view.term = (MIN_ROWS_FOR_STATUS - 1, 100);
+        assert!(!view.status_visible(), "auto-hidden below min height");
+        assert_eq!(view.content_dims(), (MIN_ROWS_FOR_STATUS - 2, 72));
+        // And the bottom row is NOT painted over content when hidden.
+        let text = frame_text(&view.compose());
+        assert!(!text.lines().last().unwrap().contains("? for keys"));
+    }
+
+    #[test]
+    fn client_status_off_leaves_bottom_row_as_content() {
+        // codex P2: with the status row toggled off and no hint pending, the
+        // bottom row belongs to content (content_dims gave the server the full
+        // height) - draw_bottom_row must NOT blank it. The fixture's panes are
+        // 29 rows tall from y=0, so pane content reaches the last terminal row.
+        let mut view = two_pane_view();
+        view.status_on = false;
+        let text = frame_text(&view.compose());
+        let bottom = text.lines().last().unwrap().to_string();
+        assert!(
+            bottom.contains('a') || bottom.contains('b'),
+            "bottom row must keep pane content when status is off: {bottom:?}"
+        );
+        // A pending hint still transiently paints over that content row.
+        view.hint = true;
+        let text = frame_text(&view.compose());
+        assert!(text.lines().last().unwrap().contains("hjkl focus"));
+    }
+
+    #[test]
+    fn client_compose_hint_paints_over_bottom_row() {
+        // AC4-HP: the which-key hint lists live chords on the bottom row,
+        // replacing the status content while a chord is pending - even with
+        // the status row toggled off (discoverability survives the toggle).
+        let mut view = two_pane_view();
+        view.hint = true;
+        let text = frame_text(&view.compose());
+        let bottom = text.lines().last().unwrap().to_string();
+        assert!(bottom.contains("hjkl focus"), "{bottom:?}");
+        assert!(!bottom.contains("? for keys"), "{bottom:?}");
+        view.status_on = false;
+        let text = frame_text(&view.compose());
+        assert!(text.lines().last().unwrap().contains("hjkl focus"));
+    }
+
+    #[test]
+    fn client_compose_overlay_renders_key_table() {
+        // AC4-EDGE: leader+? renders the full table over the content area.
+        let mut view = two_pane_view();
+        view.overlay = true;
+        let text = frame_text(&view.compose());
+        assert!(text.contains("fno keys"), "table header present");
+        assert!(text.contains("any key dismisses"));
+    }
+
+    #[test]
+    fn client_abbrev_home_only_at_component_boundary() {
+        assert_eq!(
+            abbrev_home_in("/home/u/code", Some("/home/u")),
+            "~/code".to_string()
+        );
+        assert_eq!(abbrev_home_in("/home/u", Some("/home/u")), "~".to_string());
+        // /home/u2 must never read as ~2.
+        assert_eq!(
+            abbrev_home_in("/home/u2/code", Some("/home/u")),
+            "/home/u2/code".to_string()
+        );
+        assert_eq!(abbrev_home_in("/code", None), "/code".to_string());
+        assert_eq!(abbrev_home_in("/code", Some("")), "/code".to_string());
     }
 
     #[test]
@@ -1637,7 +1992,8 @@ mod tests {
         // AC6-EDGE: 60 < 28 + 40 -> panel hidden, content takes full width.
         view.term = (30, 60);
         assert!(!view.panel_visible());
-        assert_eq!(view.content_dims(), (29, 60));
+        // 30 rows minus tab bar + status row (both visible at this height).
+        assert_eq!(view.content_dims(), (28, 60));
         let frame = view.compose();
         let text = frame_text(&frame);
         let row1 = text.lines().nth(1).unwrap();
@@ -1733,6 +2089,7 @@ mod tests {
         // and the cursor never enters the filler.
         let mut view = View::new(
             (30, 100),
+            "main".into(),
             LayoutView {
                 squads: vec![meta(1, "footnote", 1, 0)],
                 active_squad: 1,
