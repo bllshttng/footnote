@@ -102,5 +102,15 @@ sink8="$TMP/sink8"
 { has '133;C' <"$sink8" && [[ ! -e "$TMP/hijack-target" ]]; } \
   && pass "T8 symlinked pin dir degrades to emit, no hijack" || fail "T8 expected degrade-emit + untouched link target"
 
+# T9: a path-traversal FNO_SESSION is sanitized so the pin never escapes the
+# rendezvous dir. Without sanitization the pin would land at $TMP/escape-9-9000.
+RT3="$TMP/run3"; mkdir -p "$RT3"
+sink9="$TMP/sink9"
+( cd "$TMP" && printf '{"session_id":"host-9"}' | \
+    FNO_TURN_MARKER_TTY="$sink9" XDG_RUNTIME_DIR="$RT3" FNO_AGENTS_BIN="$STUB" \
+    FNO_PANE=9 FNO_PANE_EPOCH=9000 FNO_SESSION="../../escape" bash "$HOOK" working ) >/dev/null 2>&1
+{ has '133;C' <"$sink9" && [[ -z "$(find "$TMP" -maxdepth 1 -name '*escape*' 2>/dev/null)" ]]; } \
+  && pass "T9 traversal FNO_SESSION sanitized, pin stays contained" || fail "T9 expected contained pin (no escape at TMP root)"
+
 printf '[inside-leg] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

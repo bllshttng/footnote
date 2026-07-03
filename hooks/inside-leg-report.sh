@@ -120,11 +120,18 @@ is_pane_host() {
   # as a symlink, so there is no check-then-create TOCTOU. On a pre-existing
   # path, trust it only if it is a real, self-owned, non-symlink directory. The
   # parent (base) always exists, so -p is unnecessary.
-  if ! mkdir "$dir" 2>/dev/null; then
+  # Create atomically with restricted perms (-m 700), so there is no loose-perms
+  # window. On a pre-existing path, trust it only if it is a real, self-owned,
+  # non-symlink dir, and force 700 there since we did not create it.
+  if ! mkdir -m 700 "$dir" 2>/dev/null; then
     [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] || return 0
+    chmod 700 "$dir" 2>/dev/null || true
   fi
-  chmod 700 "$dir" 2>/dev/null || true
-  local pin="${dir}/${FNO_SESSION:-_}-${FNO_PANE}-${FNO_PANE_EPOCH}"
+  # Sanitize FNO_SESSION of any path-traversal (`/`, `.`) so a hostile env cannot
+  # steer the pin write outside the rendezvous dir. Deterministic, so a host and
+  # its nested claude still compute the same pin path.
+  local safe_session="${FNO_SESSION:-_}"; safe_session="${safe_session//[\/.]/_}"
+  local pin="${dir}/${safe_session}-${FNO_PANE}-${FNO_PANE_EPOCH}"
   # noclobber makes the create fail if the pin exists -> exactly one winner.
   if ( set -o noclobber; printf '%s\n' "$SESSION_ID" >"$pin" ) 2>/dev/null; then
     return 0
@@ -134,7 +141,10 @@ is_pane_host() {
   # host into permanent silence. A real nested claude always wrote a non-empty
   # id, so it still mismatches below and stays silent.
   [[ -s "$pin" ]] || return 0
-  [[ "$(cat "$pin" 2>/dev/null || true)" == "$SESSION_ID" ]]
+  # `read` builtin, not a `cat` subprocess: this runs on every turn boundary.
+  local pinned_id=""
+  read -r pinned_id <"$pin" 2>/dev/null || true
+  [[ "$pinned_id" == "$SESSION_ID" ]]
 }
 
 # Repo root anchors the manifest check below (and the binary lookup further
