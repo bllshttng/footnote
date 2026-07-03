@@ -266,6 +266,8 @@ pub struct FakeClient {
     pub modesyncs: Vec<Vec<u8>>,
     pub notices: Vec<String>,
     pub byes: Vec<String>,
+    /// Server-extracted copy payloads (v7, US2), newest last.
+    pub copies: Vec<String>,
     /// Every absorbed message's kind, chronologically.
     pub order: Vec<Absorbed>,
 }
@@ -298,6 +300,7 @@ impl FakeClient {
             modesyncs: Vec::new(),
             notices: Vec::new(),
             byes: Vec::new(),
+            copies: Vec::new(),
             order: Vec::new(),
         }
     }
@@ -359,6 +362,7 @@ impl FakeClient {
             ServerMsg::ModeSync { bytes } => self.modesyncs.push(bytes),
             ServerMsg::Notice { text } => self.notices.push(text),
             ServerMsg::Bye { reason } => self.byes.push(reason),
+            ServerMsg::Copy { text } => self.copies.push(text),
             // Answers a pre-Attach Query only; stray on an attached client.
             ServerMsg::Info { .. } => {}
             // v4 control-verb replies belong to one-shot `fno mux pane`

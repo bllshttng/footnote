@@ -125,7 +125,9 @@ def parse_short_id(stdout: str) -> str:
     return match.group(1)
 
 
-def _build_argv(name: str, message: str, use_stdin: bool) -> list[str]:
+def _build_argv(
+    name: str, message: str, use_stdin: bool, model: Optional[str] = None
+) -> list[str]:
     """Render the argv list for ``claude --bg``.
 
     When ``use_stdin`` is True, the message is read from stdin by claude
@@ -136,8 +138,14 @@ def _build_argv(name: str, message: str, use_stdin: bool) -> list[str]:
     suite reads stdin unconditionally when ``FAKE_CLAUDE_STDIN_DUMP`` is
     set, so the substrate is verified portably. The smoke-marker test
     (Locked Decision 4) catches real-CLI drift.
+
+    A truthy ``model`` (x-571f per-node pin) appends ``--model <m>`` between
+    ``--name`` and the message; unset/empty means today's argv byte-for-byte.
+    Kept identical to the Rust ``build_argv`` (AC2-FR cross-runtime parity).
     """
     argv = ["claude", "--bg", "--name", name]
+    if model:
+        argv += ["--model", model]
     if not use_stdin:
         argv.append(message)
     return argv
@@ -149,6 +157,7 @@ def bg_create(
     cwd: Path,
     timeout: Optional[int] = None,
     role: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> ProviderResult:
     """Invoke ``claude --bg`` for a brand-new supervisor session.
 
@@ -162,6 +171,10 @@ def bg_create(
             tidy / orient / consolidate) with a configured provider key routes
             the worker to a secondary provider via env overrides; ``None`` or a
             production role leaves the spawn env byte-for-byte as today.
+        model: Optional per-node model pin (x-571f). Truthy appends
+            ``--model <m>`` to the ``claude --bg`` argv; unset leaves it as
+            today. Orthogonal to ``role``: the argv pin beats a role's env
+            model, which is the right precedence (node pin is more specific).
 
     Returns:
         :class:`ProviderResult` with ``session_id_out`` set to the parsed
@@ -173,7 +186,7 @@ def bg_create(
     """
     msg_bytes = message.encode("utf-8")
     use_stdin = len(msg_bytes) > _ARGV_OVERFLOW_THRESHOLD
-    argv = _build_argv(name=name, message=message, use_stdin=use_stdin)
+    argv = _build_argv(name=name, message=message, use_stdin=use_stdin, model=model)
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
     # from inside the spawned agent attribute back to this parent.

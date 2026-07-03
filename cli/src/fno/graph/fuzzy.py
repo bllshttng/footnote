@@ -40,6 +40,7 @@ _BARE_HEX_RE = re.compile(r"[0-9a-f]{8}")
 _KNOWN_BRANCH_PREFIXES = (
     "feat/",
     "feature/",
+    "fno/",  # x-ff83 W3: dispatched branches are <prefix>/<slug>-<node> (default fno)
     "fix/",
     "hotfix/",
     "bugfix/",

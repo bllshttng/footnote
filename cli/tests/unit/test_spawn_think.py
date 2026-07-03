@@ -70,8 +70,8 @@ def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     spawn_calls: list[tuple] = []
     stamp_calls: list[tuple] = []
 
-    def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth", invocation_suffix=None):
-        spawn_calls.append((node_id, prompt, node_cwd, node_slug, reason, invocation_suffix))
+    def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth", invocation_suffix=None, model=None):
+        spawn_calls.append((node_id, prompt, node_cwd, node_slug, reason, invocation_suffix, model))
         return "deadbeef"
 
     monkeypatch.setattr(st, "_spawn_think_worker", fake_spawn)
@@ -340,15 +340,17 @@ def test_away_spawns_and_stamps_node(iso, monkeypatch, patch_spawn):
     assert len(stamp_calls) == 1
     nid, sess, root, output_path = stamp_calls[0]
     assert (nid, sess, root) == ("x-2222aaaa", "deadbeef", iso.parent.parent)
-    assert output_path and output_path.endswith("think-x-2222aaaa.md")
+    # x-ff83 W1: doc lands in plans-dir on the date-slug convention (not a briefs sidecar).
+    assert output_path and output_path.endswith("-born-with-why.md")
+    assert "plans" in output_path
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "think_spawned"
     assert evs[0]["data"]["think_session"] == "deadbeef"
 
 
 def test_away_prompt_carries_output_path(iso, monkeypatch, patch_spawn):
-    """AC3-HP (B, x-5d51): the headless worker is handed a briefs output path in
-    its prompt so its /think doc has a defined home, not nowhere."""
+    """AC1-HP/UI (x-ff83 W1): the headless worker is handed a plans-dir output
+    path in its prompt so its /think doc lands where /blueprint mutates it."""
     monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
     _resolved(monkeypatch, ok=True)
     spawn_calls, _ = patch_spawn
@@ -356,7 +358,7 @@ def test_away_prompt_carries_output_path(iso, monkeypatch, patch_spawn):
                          events_path=iso, project_root=iso.parent.parent)
     prompt = spawn_calls[0][1]
     assert "WRITE YOUR /think OUTPUT" in prompt
-    assert "think-x-2222aaaa.md" in prompt
+    assert "-born-with-why.md" in prompt
 
 
 def test_away_spawn_failure_skips_no_stamp(iso, monkeypatch, patch_spawn):
@@ -509,6 +511,63 @@ def test_parse_short_id_among_noise():
 
 def test_parse_short_id_absent():
     assert st._parse_short_id("no json here at all") == ""
+
+
+# ---------------------------------------------------------------------------
+# _think_output_path - plans-dir birth location (x-ff83 W1)
+# ---------------------------------------------------------------------------
+
+
+def test_think_output_path_honors_plansdirectory(monkeypatch, tmp_path):
+    """AC1-HP: settings.local.json plansDirectory wins; file is date-slug named."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    local = tmp_path / ".claude"
+    local.mkdir()
+    (local / "settings.local.json").write_text(json.dumps({"plansDirectory": "internal/fno/plans"}))
+    import re
+    out = st._think_output_path("x-2222aaaa", "my-slug")
+    assert str(tmp_path / "internal" / "fno" / "plans") in out
+    # date-slug named YYYY-MM-DD-<slug>.md
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}-my-slug\.md", Path(out).name)
+
+
+def test_think_output_path_falls_back_to_config_plans_dir(monkeypatch, tmp_path):
+    """AC1-HP: no settings.local -> config.plans_dir default, still in plans-dir."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    out = st._think_output_path("x-2222aaaa", "my-slug")
+    assert out.endswith("-my-slug.md")
+    assert "plans" in out
+
+
+def test_think_output_path_reuses_existing_doc_on_redispatch(monkeypatch, tmp_path):
+    """AC1-EDGE: a re-dispatch reuses this slug's existing doc, not a new date file."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    plans = tmp_path / ".fno" / "plans"
+    plans.mkdir(parents=True)
+    prior = plans / "2020-01-01-my-slug.md"
+    prior.write_text("# earlier dispatch\n")
+    # A different slug that merely ENDS with -my-slug must NOT be reused (gemini PR#149).
+    (plans / "2020-01-01-awesome-my-slug.md").write_text("# unrelated\n")
+    out = st._think_output_path("x-2222aaaa", "my-slug")
+    assert out == str(prior)  # reused, not a fresh today-dated file, not the over-match
+
+
+def test_think_output_path_empty_slug_uses_node_id(monkeypatch, tmp_path):
+    """AC3-ERR analogue: an empty slug degrades to the node id, never a bare date-.md."""
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    out = st._think_output_path("x-2222aaaa", "")
+    assert out.endswith("-x-2222aaaa.md")
+
+
+def test_think_output_path_unresolvable_falls_back_to_briefs(monkeypatch, tmp_path, capsys):
+    """AC1-ERR: an unresolvable plans dir degrades to briefs/ with a visible warning."""
+    def boom():
+        raise RuntimeError("no repo root")
+    monkeypatch.setattr(st, "_plans_output_dir", boom)
+    out = st._think_output_path("x-2222aaaa", "my-slug")
+    assert out.endswith("think-x-2222aaaa.md")
+    assert "briefs" in out
+    assert "plans dir unresolvable" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

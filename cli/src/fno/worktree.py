@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -18,6 +19,60 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# Branch naming (x-ff83 W3)
+# ---------------------------------------------------------------------------
+
+# The <slug> component is truncated on length; the node id is NEVER truncated -
+# it is the load-bearing round-trip token. 60 keeps the whole ref well under
+# git's ergonomic limit.
+_BRANCH_SLUG_MAX = 60
+# Drop everything but [a-z0-9_-]; dots are excluded so a slug can never produce
+# a `..` (which git rejects in a ref) or a leading-dot component (gemini PR#149).
+_REF_UNSAFE_RE = re.compile(r"[^a-z0-9_-]")
+
+
+def _branch_prefix() -> str:
+    """config.branch.prefix (default 'fno'); degrade to 'fno' if settings fail."""
+    try:
+        from fno.config import load_settings
+
+        return load_settings().config.branch.prefix or "fno"
+    except Exception:  # noqa: BLE001 - naming must never wedge on a settings read
+        return "fno"
+
+
+def _slug_for_node(node_id: str) -> str:
+    """Look up a node's immutable slug from the graph; "" if unresolvable."""
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+
+        for e in read_graph(graph_json()):
+            if e.get("id") == node_id:
+                return e.get("slug") or ""
+    except Exception:  # noqa: BLE001 - no graph => no slug => bare <prefix>/<node>
+        return ""
+    return ""
+
+
+def branch_name(
+    node_id: str, *, slug: Optional[str] = None, prefix: Optional[str] = None
+) -> str:
+    """Legible dispatch branch name ``<prefix>/<slug>-<node>`` (x-ff83 W3).
+
+    The full node id is preserved so the branch round-trips back to its node;
+    the slug is ref-sanitized and truncated on length, never the id. An empty or
+    unresolvable slug degrades to ``<prefix>/<node>`` (never ``<prefix>/-<node>``).
+    """
+    pfx = (prefix or _branch_prefix()).strip("/")
+    if slug is None:
+        slug = _slug_for_node(node_id)
+    s = re.sub(r"-+", "-", _REF_UNSAFE_RE.sub("-", (slug or "").lower())).strip("-")
+    s = s[:_BRANCH_SLUG_MAX].rstrip("-")
+    return f"{pfx}/{s}-{node_id}" if s else f"{pfx}/{node_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -185,9 +240,9 @@ class WorktreeManager:
 
     Each active node gets one worktree at:
         {base_dir}/{node_id}
-    with branch name:
-        feature/{branch_suffix}
-    where branch_suffix defaults to the last 8 characters of node_id.
+    with branch name (x-ff83 W3):
+        <config.branch.prefix>/<slug>-<node_id>   (default prefix "fno")
+    An explicit ``branch_suffix`` still produces the legacy ``feature/<suffix>``.
 
     Parameters
     ----------
@@ -290,8 +345,10 @@ class WorktreeManager:
         # Disk space check
         self.disk_pressure_check()
 
-        suffix = branch_suffix or node_id[-8:]
-        branch = f"feature/{suffix}"
+        # x-ff83 W3: default to the legible <prefix>/<slug>-<node> name (round-trip
+        # resolvable). An explicit branch_suffix override keeps the legacy feature/
+        # shape so existing callers that pin a suffix are unchanged.
+        branch = f"feature/{branch_suffix}" if branch_suffix else branch_name(node_id)
         wt_path = self.base_dir / node_id
         self.base_dir.mkdir(parents=True, exist_ok=True)
 

@@ -16,10 +16,10 @@
 //! Wave 0's smoke prototype (`cli/scripts/smoke/pty-survival/`) refuted the
 //! "direct daemon-owned PTY survives daemon restart" assertion: a child on a
 //! PTY whose master the supervisor owns is SIGHUP'd and dies the instant the
-//! master closes. The locked outcome (Outcome B) is a per-agent worker process
-//! that owns the master and outlives the daemon. The substrate in this crate
-//! is therefore written **worker-side**: [`pty::PtySession`] is what a worker
-//! owns; the daemon (Wave 3) reconnects to workers over their sockets.
+//! master closes. The locked outcome (Outcome B) was a per-agent worker process
+//! that owned the master and outlived the daemon. That daemon-owned PTY hosting
+//! was retired at G4: the mux is now the agent-PTY substrate, and this crate
+//! keeps the registry, inside-leg reports, and the claude stream-json adopt lane.
 //!
 //! Deliberately deferred (documented seams, not gaps):
 //! - `alacritty_terminal` grid wiring + per-CLI [`readiness::ReadinessDetector`]
@@ -53,14 +53,11 @@ pub mod client_verbs;
 pub mod codex_ask;
 pub mod daemon;
 pub mod drift;
-pub mod drive;
-pub mod drive_client;
 pub mod envelope;
 pub mod events;
 pub mod finalize;
 pub mod gc;
 pub mod gemini_ask;
-pub mod grid;
 pub mod kill_criteria;
 pub mod logs;
 pub mod logs_client;
@@ -76,7 +73,6 @@ pub mod osc;
 pub mod paths;
 pub mod protocol;
 pub mod provider;
-pub mod pty;
 pub mod readiness;
 pub mod scrape;
 pub mod screen;
@@ -85,7 +81,6 @@ pub mod stream_worker;
 pub mod subprocess_ask;
 pub mod supervisor;
 pub mod verify_evidence;
-pub mod worker;
 pub mod write_queue;
 
 use serde::{Deserialize, Serialize};

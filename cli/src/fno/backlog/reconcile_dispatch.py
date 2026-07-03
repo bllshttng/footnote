@@ -122,6 +122,9 @@ def _contract_dependents(closed_node_id: str) -> list[dict]:
             "project": e.get("project"),
             "slug": e.get("slug") or e.get("title"),
             "cwd": e.get("cwd"),
+            # x-571f: carry the model pin so the reconcile worker (a /target
+            # --reconcile build) honors it, not just advance's dependents.
+            "model": e.get("model"),
         })
     return out
 
@@ -192,7 +195,8 @@ def _dispatch_reconcile(
 
     try:
         short_id = _spawn_worker(
-            node_id, root, dep.get("slug"), reconcile_manifest=str(manifest_path)
+            node_id, root, dep.get("slug"),
+            reconcile_manifest=str(manifest_path), model=dep.get("model"),
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -326,7 +330,8 @@ def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceRe
         for e in read_graph(graph_json()):
             if isinstance(e, dict) and e.get("id") == node_id:
                 dep = {"id": node_id, "project": e.get("project"),
-                       "slug": e.get("slug") or e.get("title"), "cwd": e.get("cwd")}
+                       "slug": e.get("slug") or e.get("title"), "cwd": e.get("cwd"),
+                       "model": e.get("model")}
                 break
         if dep is None:
             dep = {"id": node_id, "cwd": str(root)}

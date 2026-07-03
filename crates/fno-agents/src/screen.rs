@@ -18,7 +18,7 @@
 //! `parking_lot`, `polling`, `rustix-openpty`, `regex-automata`, and a
 //! cfg-gated `windows-sys` (FFI, compiles to nothing off Windows) - no
 //! winit, no GUI stack. The richer cell model (`Flags`, `NamedColor`/`Rgb`,
-//! `Dimensions`) is exactly what the grid compositor ([`crate::grid::pane`])
+//! `Dimensions`) is exactly what the mux/agent surfaces
 //! needs, so the whole crate standardized on it (ab-3c063856 review).
 //!
 //! The [`crate::readiness::ReadinessDetector`] trait is unchanged: it still
@@ -42,9 +42,8 @@ pub const DEFAULT_COLS: u16 = 80;
 
 /// A `Dimensions` impl for constructing / resizing a headless alacritty
 /// [`Term`]. `screen_lines` is the visible viewport height; `total_lines`
-/// equals it because we keep zero scrollback (the readiness seam and the
-/// compositor render only the visible screen). Shared with
-/// [`crate::grid::pane`] so both surfaces size their grids identically.
+/// equals it because we keep zero scrollback (the readiness path renders only
+/// the visible screen), so sizing stays identical across surfaces.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GridSize {
     pub rows: usize,
@@ -69,19 +68,6 @@ impl Dimensions for GridSize {
 pub(crate) fn visible_only_config() -> Config {
     Config {
         scrolling_history: 0,
-        ..Config::default()
-    }
-}
-
-/// Build a config that retains `lines` of scrollback history. Used by grid
-/// panes (NOT the readiness seam) so the compositor's scrollback mode can
-/// scroll back through a pane's captured output. `Term::new` seeds the active
-/// grid's `max_scroll_limit` from `config.scrolling_history`, and alacritty
-/// grows the history (up to this bound) as lines scroll off the top - so this
-/// is a cap, not an upfront allocation.
-pub(crate) fn scrollback_config(lines: usize) -> Config {
-    Config {
-        scrolling_history: lines,
         ..Config::default()
     }
 }

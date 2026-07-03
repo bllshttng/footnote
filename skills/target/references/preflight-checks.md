@@ -49,7 +49,7 @@ Status semantics:
 **Warn conditions:**
 - Branch starts with: `release/`, `hotfix/`, `v[0-9]`
 
-**Pass:** Any other branch (feature/*, fix/*, personal branches, etc.)
+**Pass:** Any other branch (feature/*, fno/* dispatch branches, fix/*, personal branches, etc.)
 
 **Why it matters:** target creates commits and PRs. Running on `main` risks a direct push to the protected branch before the push gate fires.
 

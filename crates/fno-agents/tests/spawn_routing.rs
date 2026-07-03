@@ -331,6 +331,7 @@ fn spawn_claude_receipt_byte_shape() {
         false,
         None,
         &[("PATH", path.as_str())],
+        None,
     );
 
     assert_eq!(
@@ -394,6 +395,7 @@ fn spawn_claude_collision_exits_2() {
         false,
         None,
         &[],
+        None,
     );
 
     assert_eq!(
@@ -933,20 +935,16 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
     );
 }
 
-/// Q4 (sigma-review): `host` and `promote` also compile to method
-/// "agent.spawn", but ONLY the `spawn` verb may be intercepted client-side
-/// (the guard is `verb_owned == \"spawn\"`). Pin the fall-through: a `host`
-/// invocation whose name collides with an existing registry row must NOT hit
-/// maybe_run_spawn's exit-2 "already exists" arm - it goes to the daemon
-/// path instead. A refactor that moves the guard to `method == "agent.spawn"`
-/// would silently capture host/promote and fail this test.
+/// AC5-EDGE (x-f54c): `host` was retired at G4 (interactive daemon PTY hosting
+/// moved to the mux). The binary must intercept it with a one-line mux pointer
+/// and exit non-zero - never reach the daemon, never a silent no-op.
 #[test]
-fn client_host_bypasses_spawn_interception() {
-    let home_dir = tmpdir("cli-host-fallthrough-home");
+fn client_host_retired_prints_mux_pointer() {
+    let home_dir = tmpdir("cli-host-retired-home");
     let bin = find_client_bin();
     if !bin.exists() {
         eprintln!(
-            "skipping client_host_bypasses_spawn_interception: binary not found at {:?}",
+            "skipping client_host_retired_prints_mux_pointer: binary not found at {:?}",
             bin
         );
         return;
@@ -957,26 +955,23 @@ fn client_host_bypasses_spawn_interception() {
     let out = std::process::Command::new(&bin)
         .args(["host", "host-collide", "--provider", "codex"])
         .env("FNO_AGENTS_HOME", &home_dir)
-        // Point the daemon binary at /usr/bin/false so the lazy-start path
-        // fails fast and deterministically (no real daemon, no PTY worker).
         .env("FNO_AGENTS_DAEMON_BIN", "/usr/bin/false")
         .output()
         .expect("failed to run fno-agents");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // The load-bearing assertion: the client-side collision arm did NOT fire.
-    assert!(
-        !stderr.contains("already exists"),
-        "host must bypass maybe_run_spawn (no client-side collision error): {stderr}"
-    );
-    assert_ne!(
+    assert_eq!(
         out.status.code(),
         Some(2),
-        "host must not exit 2 via the spawn interception; stderr: {stderr}"
+        "retired host must exit 2; stderr: {stderr}"
     );
-    // And it demonstrably took the daemon path (lazy-start attempt/failure).
     assert!(
-        stderr.contains("daemon") || stderr.contains("lazy-starting"),
-        "host should surface a daemon-path error with no daemon available: {stderr}"
+        stderr.contains("retired at G4") && stderr.contains("fno agents spawn"),
+        "host must print the mux pointer: {stderr}"
+    );
+    // It must NOT have taken the daemon path.
+    assert!(
+        !stderr.contains("lazy-starting"),
+        "retired host must not reach the daemon: {stderr}"
     );
 }

@@ -76,13 +76,9 @@ RUST_CLIENT_VERBS = frozenset(
         # tick, on demand. Dispatched directly in client.rs before build_request
         # (operates on the registry under the shared flock; no daemon RPC).
         "reap",
-        "drive",
-        # Client-side TUI compositor (ab-3c063856). Like ``drive``, it owns
-        # the terminal and does not fit the one-shot RPC path; the verb is
-        # dispatched directly in ``bin/client.rs`` before ``build_request``.
-        # Auto-routes through :data:`AUTO_ROUTE_VERBS` (not in the Python
-        # PYTHON_AGENT_VERBS carve-out).
-        "grid",
+        # `drive` and `grid` (the WebSocket drive surface + the TUI compositor)
+        # were retired at G4 (x-f54c) when the mux became the agent-PTY
+        # substrate; the binary intercepts them with a mux pointer.
         "register-channel",
         "unregister-channel",
         "push-channel",
@@ -95,11 +91,8 @@ RUST_CLIENT_VERBS = frozenset(
         "resume",
         "attach",
         "logs",
-        # Interactive-drive agent type (ab-26b5fe82): both call agent.spawn with
-        # host_mode=interactive. `host` = fresh interactive codex/gemini; `promote
-        # --from <uuid>` = resume an existing session into a drivable TUI.
-        "host",
-        "promote",
+        # `host`/`promote` (interactive daemon PTY hosting) were retired at G4
+        # (x-f54c); spawn a mux-hosted pane with `spawn --substrate pane`.
         # Stop-hook decision verb (control-plane collapse wedge, ab-d0337fbc).
         # The bash shim in hooks/target-stop-hook.sh calls the binary DIRECTLY
         # (explicit resolution order, no Python routing); this entry exists so
@@ -224,10 +217,6 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "status": "Report daemon liveness and per-agent state.",
     "restart": "Restart a stale daemon (pick up a new build; PTY workers survive).",
     "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output.",
-    "drive": "Drive a spawned agent's TUI (--watch / --step / --paranoid).",
-    "grid": "Compose several agents into one multi-panel terminal view.",
-    "host": "Host a fresh interactive codex/gemini TUI in a drivable worker, or an interactive claude pane (--provider claude --mode interactive).",
-    "promote": "Promote an existing session (--from <uuid>) into a drivable codex/gemini TUI, or adopt a claude session as a stream-json thread (add --provider claude).",
     "register-channel": "Register a Claude Code session as an agent channel.",
     "unregister-channel": "Unregister an agent channel by id.",
     "push-channel": "Push a message to a registered agent channel.",
@@ -237,6 +226,21 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno phase kill-check`.",
     "verify-evidence": "Verify subagent/child-promise event evidence (folded from verify-event-evidence.sh); usually via `fno event verify-evidence`.",
     "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",
+}
+
+#: Verbs retired at G4 (x-f54c): the grid, the WebSocket ``drive`` surface, and
+#: the interactive daemon PTY hosting behind ``host``/``promote`` moved to the
+#: mux. They are NOT in :data:`RUST_CLIENT_VERBS` (no routable client verb) and
+#: NOT in :data:`RUST_ONLY_VERB_HELP` (not advertised in ``--help``), but
+#: ``get_command`` still resolves them to a one-line mux pointer that exits
+#: non-zero, so a script hitting a retired verb gets a helpful error instead of a
+#: bare "No such command" no-op (AC5-EDGE). The Rust binary carries the same
+#: pointers for a raw ``fno-agents <verb>`` / forced-rust call.
+RETIRED_VERB_POINTERS: dict[str, str] = {
+    "grid": "agent panes now live in the mux. Open `fno mux`, or script panes with `fno mux pane ls|read|run|send|wait|kill`.",
+    "drive": "drive an agent pane in the mux. Use `fno mux pane send <pane> ...`, or open `fno mux` and type into the pane.",
+    "host": "spawn a mux-hosted agent pane with `fno agents spawn <name> --substrate pane`.",
+    "promote": "the mux hosts agent panes; spawn one with `fno agents spawn <name> --substrate pane`.",
 }
 
 
@@ -493,6 +497,24 @@ def _make_rust_only_command(verb: str, help_text: str) -> "click.Command":
     return _placeholder
 
 
+def _make_retired_command(verb: str, pointer: str) -> "click.Command":
+    """A Click command for a verb retired at G4 (x-f54c): print a one-line mux
+    pointer to stderr and exit non-zero, never a silent no-op (AC5-EDGE)."""
+    import click
+
+    @click.command(
+        name=verb,
+        help=f"(retired at G4) {pointer}",
+        context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+        add_help_option=True,
+    )
+    def _retired() -> NoReturn:
+        print(f"fno agents {verb} was retired at G4: {pointer}", file=sys.stderr)
+        raise SystemExit(2)
+
+    return _retired
+
+
 def make_agents_group_cls() -> type:
     """Build the TyperGroup subclass that short-circuits to the Rust binary.
 
@@ -521,8 +543,7 @@ def make_agents_group_cls() -> type:
 
         Because that bare ``--help`` renders the *Python* group, it would list
         only the ``@agents_app.command`` verbs and silently omit every Rust-only
-        verb (``spawn``/``status``/``drive``/``grid``/``host``/``promote``/the
-        ``*-channel`` verbs). :meth:`list_commands` and :meth:`get_command` close
+        verb (``spawn``/``status``/the ``*-channel`` verbs). :meth:`list_commands` and :meth:`get_command` close
         that gap by injecting the :data:`RUST_ONLY_VERB_HELP` entries into the
         help listing (and into command resolution, for a legible fallback) without
         touching the routing decision in :meth:`make_context`.
@@ -551,6 +572,8 @@ def make_agents_group_cls() -> type:
                 return cmd
             if name in RUST_ONLY_VERB_HELP:
                 return _make_rust_only_command(name, RUST_ONLY_VERB_HELP[name])
+            if name in RETIRED_VERB_POINTERS:
+                return _make_retired_command(name, RETIRED_VERB_POINTERS[name])
             return None
 
         # Click's make_context signature carries precise Context types we do not

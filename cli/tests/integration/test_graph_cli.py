@@ -962,6 +962,67 @@ def test_priority_update_rejects_invalid(tmp_graph):
     assert "p0" in combined and "p1" in combined and "p2" in combined and "p3" in combined
 
 
+def test_model_pin_set_visible_and_cleared(tmp_graph):
+    """x-571f US2 AC1-UI: `backlog update <id> --model` sets the pin (visible in
+    `get`), and `--model null` clears it back to provider default."""
+    node_id = json.loads(_invoke("backlog", "add", "Pinme").output)["id"]
+
+    r = _invoke("backlog", "update", node_id, "--model", "fable")
+    assert r.exit_code == 0, r.output
+    got = json.loads(_invoke("backlog", "get", node_id).output)
+    assert got["model"] == "fable"
+
+    # 'null' clears (revert to default).
+    r = _invoke("backlog", "update", node_id, "--model", "null")
+    assert r.exit_code == 0, r.output
+    got = json.loads(_invoke("backlog", "get", node_id).output)
+    assert got["model"] is None
+
+
+def test_model_pin_rejects_whitespace_token(tmp_graph):
+    """x-571f US2 AC1-ERR: a whitespaced OR glob/shell-metacharacter model exits
+    non-zero and leaves the node unchanged (protects the unquoted MODEL_FLAG /
+    dispatch-node.sh spawn against word-splitting AND globbing; gemini review)."""
+    node_id = json.loads(_invoke("backlog", "add", "Nopin").output)["id"]
+
+    for bad_val in ("opus 4.8", "fo*", "a?b", "x[y]"):
+        bad = runner.invoke(
+            app,
+            ["backlog", "update", node_id, "--model", bad_val],
+            catch_exceptions=True,
+        )
+        assert bad.exit_code != 0, f"{bad_val!r} should be rejected"
+        combined = (bad.output or "") + (getattr(bad, "stderr", "") or "")
+        assert "single token" in combined
+        # Node unchanged: model still unset after every rejection.
+        got = json.loads(_invoke("backlog", "get", node_id).output)
+        assert got.get("model") is None
+
+    # A full provider-model id with dots/slashes/dashes/colons is accepted.
+    ok = _invoke("backlog", "update", node_id, "--model", "openai/gpt-4.1")
+    assert ok.exit_code == 0, ok.output
+    assert json.loads(_invoke("backlog", "get", node_id).output)["model"] == "openai/gpt-4.1"
+
+
+def test_model_pin_rides_in_ready_and_next_json(tmp_graph):
+    """x-571f US3: the model pin must ride in the `ready` and `next` JSON so the
+    lane-fill (`_ready_nodes`) and sequential-drain (`fno backlog next`)
+    dispatchers can thread it into the spawn they build (AC1-HP / AC2-HP)."""
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {"id": "ab-pinned00", "title": "Pinned", "priority": "p1",
+             "plan_path": "x.md", "_status": "ready", "model": "fable",
+             "created_at": "2026-01-01T00:00:00Z"},
+        ]
+    }))
+
+    listing = json.loads(_invoke("backlog", "ready", "--all").stdout)
+    assert listing[0]["model"] == "fable"
+
+    nxt = json.loads(_invoke("backlog", "next", "--all").stdout)
+    assert nxt["model"] == "fable"
+
+
 def test_priority_read_path_backfill(tmp_graph):
     """Read-only commands (`backlog ready`/`next`) sort correctly even before
     the first mutation triggers the on-disk backfill - `_apply_graph_defaults`

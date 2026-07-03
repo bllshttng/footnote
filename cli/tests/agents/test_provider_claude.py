@@ -303,3 +303,22 @@ def test_bg_create_argv_shape_overflow_message(
         assert len(token) < 200 * 1024
     # ... but it IS piped via stdin
     assert captured["input"] == big
+
+
+def test_build_argv_model_pin_parity() -> None:
+    """x-571f: a model pin appends ``--model <m>`` between --name and message;
+    empty/None is byte-identical to today. Must match the Rust ``build_argv``
+    cases in crates/fno-agents (AC2-FR cross-runtime parity, AC1-EDGE unset)."""
+    from fno.agents.providers.claude import _build_argv
+
+    assert _build_argv("a", "hi", False, "fable") == [
+        "claude", "--bg", "--name", "a", "--model", "fable", "hi",
+    ]
+    assert _build_argv("a", "hi", True, "fable") == [
+        "claude", "--bg", "--name", "a", "--model", "fable",
+    ]
+    # Empty/None pin == unset: byte-identical, no flag (AC1-EDGE).
+    assert _build_argv("a", "hi", False, "") == _build_argv("a", "hi", False, None)
+    assert _build_argv("a", "hi", False, None) == [
+        "claude", "--bg", "--name", "a", "hi",
+    ]

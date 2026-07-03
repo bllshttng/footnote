@@ -96,6 +96,13 @@ Pipelines that need PR cross-linking (cross-project) rely on the
 `feature/{slug}` convention being identical across repos. Don't override
 unless you know what you're doing.
 
+**Dispatched worktrees** (the megawalk walker, `WorktreeManager.create`) name
+their branch `<config.branch.prefix>/<slug>-<node>` (default prefix `fno`, e.g.
+`fno/plan-docs-in-plans-dir-status-consistency-x-ff83`) via
+`worktree.branch_name()` — legible and round-trip resolvable back to the node
+(the full node id, not a truncated hex). Only new branches use this; existing
+`feature/*` branches keep working. (x-ff83 W3)
+
 ## Verbs reference
 
 | Verb | Purpose |

@@ -448,10 +448,10 @@ def assemble_seed(node: dict) -> ThinkSeed:
     if source_node:
         why_lines.append(f"  origin node chain: {source_node}")
 
-    # B (x-5d51): give the headless worker a durable, known home for its output
-    # so the /think doc is never written nowhere. Reuses the existing briefs dir
-    # (the lazy choice); best-effort - an unresolvable path just omits the line.
-    output_path = _think_output_path(node_id)
+    # Give the headless worker a durable, known home for its output so the
+    # /think doc is written where /blueprint mutates it in place (plans-dir,
+    # date-slug named); best-effort - an unresolvable path just omits the line.
+    output_path = _think_output_path(node_id, slug)
 
     prompt = (
         f"/think {node_id}\n\n"
@@ -484,19 +484,54 @@ def assemble_seed(node: dict) -> ThinkSeed:
     )
 
 
-def _think_output_path(node_id: str) -> str:
-    """Resolve the durable sidecar the headless /think worker writes to (B, x-5d51).
+def _plans_output_dir() -> Path:
+    """The plans dir the /think doc lands in (x-ff83 W1); shared with W2's sweep.
 
-    ``briefs_dir()/think-<node-id>.md`` - reuses the existing briefs dir. Returns
-    "" on any resolution failure (settings unreadable); a missing path just omits
-    the write-instruction line rather than wedging the spawn.
+    Delegates to :func:`fno.paths.plans_content_dir` (settings.local
+    ``plansDirectory`` -> ``config.plans_dir``). Raises on an unresolvable
+    root so the caller can fall back to briefs.
     """
-    try:
-        from fno.paths import briefs_dir
+    from fno.paths import plans_content_dir
 
-        return str(briefs_dir() / f"think-{node_id}.md")
-    except Exception:  # noqa: BLE001 - best-effort; an unresolved path is non-fatal
-        return ""
+    return plans_content_dir()
+
+
+def _think_output_path(node_id: str, slug: str = "") -> str:
+    """Resolve where the headless /think worker writes its design doc (x-ff83 W1).
+
+    Writes ``<plans-dir>/YYYY-MM-DD-<slug>.md`` (matching interactive /think) so
+    ``/blueprint <that-path>`` mutates it in place - no manual relocate from a
+    briefs/ sidecar. Falls back to ``briefs_dir()/think-<node-id>.md`` with a
+    visible warning (AC1-ERR) when the plans dir is unresolvable, so a broken
+    settings lookup never wedges the spawn. Returns "" only if even briefs is
+    unresolvable (a missing path just omits the write-instruction line).
+    """
+    tail = (slug or node_id).strip("-") or node_id
+    from datetime import datetime, timezone
+
+    try:
+        pdir = _plans_output_dir()
+        # AC1-EDGE: a re-dispatch reuses this slug's existing date-slug doc
+        # rather than minting a second file under today's (different) date.
+        # Anchor to the YYYY-MM-DD- prefix so `slug` does not spuriously match a
+        # file whose slug merely ENDS with `-slug` (e.g. awesome-slug); gemini PR#149.
+        existing = sorted(pdir.glob(f"????-??-??-{tail}.md"))
+        if existing:
+            return str(existing[0])
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return str(pdir / f"{date}-{tail}.md")
+    except Exception as exc:  # noqa: BLE001 - degrade to briefs, never wedge the spawn
+        try:
+            from fno.paths import briefs_dir
+
+            print(
+                f"warn: plans dir unresolvable ({exc}); /think doc falls back to "
+                f"briefs/ - relocate before /blueprint",
+                file=sys.stderr,
+            )
+            return str(briefs_dir() / f"think-{node_id}.md")
+        except Exception:  # noqa: BLE001 - best-effort; an unresolved path is non-fatal
+            return ""
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +587,15 @@ def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REA
     return name
 
 
-def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None) -> str:
+def _spawn_think_worker(
+    node_id: str,
+    prompt: str,
+    node_cwd: Optional[str],
+    node_slug: Optional[str],
+    reason: str = REASON_BIRTH,
+    invocation_suffix: Optional[str] = None,
+    model: Optional[str] = None,
+) -> str:
     """Dispatch a fire-and-forget ``/think`` claude bg worker carrying the seed.
 
     Mirrors advance._spawn_worker: ``/think`` rides as the command prompt (NOT
@@ -570,6 +613,10 @@ def _spawn_think_worker(node_id: str, prompt: str, node_cwd: Optional[str], node
         cmd += ["--cwd", node_cwd]
     else:
         cmd += ["--fresh"]
+    # x-571f: a pinned node's /think worker also runs on the pin (US1 honors it
+    # on the claude/bg arm). Empty/None = provider default, unchanged.
+    if model:
+        cmd += ["--model", model]
     cmd += [agent_name, prompt]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -1079,7 +1126,15 @@ def maybe_spawn_think(
     node_cwd = node.get("_resolved_cwd") or node.get("cwd") or None
     node_slug = node.get("slug") or node.get("title")
     try:
-        short_id = _spawn_think_worker(node_id, seed.prompt, node_cwd, node_slug, reason, invocation_suffix)
+        short_id = _spawn_think_worker(
+            node_id,
+            seed.prompt,
+            node_cwd,
+            node_slug,
+            reason,
+            invocation_suffix,
+            model=node.get("model"),
+        )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder)
         return skip("already-claimed", presence=presence)

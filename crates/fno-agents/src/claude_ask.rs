@@ -390,14 +390,21 @@ fn head_chars(s: &str, n: usize) -> String {
 }
 
 /// Render the argv for `claude --bg` (`_build_argv`). When `use_stdin`, the
-/// message is omitted from argv and fed via stdin instead.
-pub fn build_argv(name: &str, message: &str, use_stdin: bool) -> Vec<String> {
+/// message is omitted from argv and fed via stdin instead. A non-empty `model`
+/// (x-571f per-node pin) appends `--model <m>` between `--name` and the
+/// message, scoping the pin to this session; empty/None means today's argv
+/// byte-for-byte (parity with Python's falsy-`model` check).
+pub fn build_argv(name: &str, message: &str, use_stdin: bool, model: Option<&str>) -> Vec<String> {
     let mut argv = vec![
         "claude".to_string(),
         "--bg".to_string(),
         "--name".to_string(),
         name.to_string(),
     ];
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        argv.push("--model".to_string());
+        argv.push(m.to_string());
+    }
     if !use_stdin {
         argv.push(message.to_string());
     }
@@ -929,11 +936,12 @@ pub fn bg_create(
     cwd: &Path,
     timeout: Option<Duration>,
     extra_env: &[(&str, &str)],
+    model: Option<&str>,
 ) -> Result<CreateResult, AskError> {
     use std::process::{Command, Stdio};
 
     let use_stdin = use_stdin_for(message);
-    let argv = build_argv(name, message, use_stdin);
+    let argv = build_argv(name, message, use_stdin, model);
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -1580,6 +1588,7 @@ pub fn dispatch_claude_spawn(
     yolo: bool,
     timeout: Option<Duration>,
     extra_env: &[(&str, &str)],
+    model: Option<&str>,
 ) -> AskOutcome {
     // spawn allows an empty initial message (Python dispatch_spawn parity).
     if let Err(msg) = validate_spawn_inputs(name, from_name) {
@@ -1647,6 +1656,7 @@ pub fn dispatch_claude_spawn(
         yolo,
         Some(spawn_create_timeout(timeout)),
         extra_env,
+        model,
     );
     if inner.exit_code != 0 {
         return inner;
@@ -2053,6 +2063,7 @@ fn create(
     yolo: bool,
     timeout: Option<Duration>,
     extra_env: &[(&str, &str)],
+    model: Option<&str>,
 ) -> AskOutcome {
     let mut pre_stderr = String::new();
     if yolo {
@@ -2063,7 +2074,7 @@ fn create(
     // Python passes the raw CLI timeout (None when --timeout unset) to
     // bg_create, so an unset timeout means NO SIGKILL deadline on the
     // claude --bg create. Pass it through unchanged (don't default to 600s).
-    let result = match bg_create(name, message, cwd, timeout, extra_env) {
+    let result = match bg_create(name, message, cwd, timeout, extra_env, model) {
         Ok(r) => r,
         Err(AskError::Subprocess { exit_code, stderr }) => {
             emit_event(
@@ -2429,12 +2440,32 @@ mod tests {
     #[test]
     fn build_argv_inline_vs_stdin() {
         assert_eq!(
-            build_argv("a", "hi", false),
+            build_argv("a", "hi", false, None),
             vec!["claude", "--bg", "--name", "a", "hi"]
         );
         assert_eq!(
-            build_argv("a", "hi", true),
+            build_argv("a", "hi", true, None),
             vec!["claude", "--bg", "--name", "a"]
+        );
+    }
+
+    // x-571f: a per-node model pin appends `--model <m>` between --name and the
+    // message; an empty/None pin is byte-identical to today (AC1-EDGE), and the
+    // argv must match Python's `_build_argv` (AC2-FR parity).
+    #[test]
+    fn build_argv_appends_model_pin() {
+        assert_eq!(
+            build_argv("a", "hi", false, Some("fable")),
+            vec!["claude", "--bg", "--name", "a", "--model", "fable", "hi"]
+        );
+        assert_eq!(
+            build_argv("a", "hi", true, Some("fable")),
+            vec!["claude", "--bg", "--name", "a", "--model", "fable"]
+        );
+        // Empty pin == unset: no flag, byte-identical to the None case.
+        assert_eq!(
+            build_argv("a", "hi", false, Some("")),
+            build_argv("a", "hi", false, None)
         );
     }
 

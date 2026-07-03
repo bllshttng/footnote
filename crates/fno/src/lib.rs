@@ -5,7 +5,9 @@
 pub mod agents_view;
 pub mod bootstrap;
 pub mod client;
+pub mod clipboard;
 pub mod keys;
+pub mod mouse;
 pub mod mux_cli;
 pub mod proto;
 pub mod pty;
