@@ -27,9 +27,9 @@ use tokio::sync::mpsc;
 
 use crate::keys::{Event, Scanner};
 use crate::proto::{
-    self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, BacklogCard, CardState, Cell,
-    ClientMsg, Color, Command, Frame, MouseEvent, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION,
-    PROTO_VERSION,
+    self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, BacklogCard, BlockDir, CardState,
+    Cell, ClientMsg, Color, Command, Frame, MouseEvent, ProtoError, ServerMsg, SquadMeta,
+    BUILD_VERSION, PROTO_VERSION,
 };
 use crate::tree::Rect;
 
@@ -267,6 +267,29 @@ struct View {
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
     notice: Option<(String, Instant)>,
+    /// (v12, x-e780) Active in-scrollback search (leader+/), when open. While
+    /// `Some`, stdin diverts to [`search_keys`] and the bottom chrome shows the
+    /// input line / counter. Client-local: opening never sends a message and
+    /// never reserves a row (no Resize -> no reflow -> no dropped highlight).
+    search: Option<SearchView>,
+    /// Pending escape bytes in search mode, carried ACROSS reads so a split
+    /// arrow sequence can never half-close the search or leak its tail into the
+    /// pane (same split-arrow safety as [`View::sel_esc`]).
+    search_esc: Vec<u8>,
+}
+
+/// Client-local in-scrollback search state (v12, x-e780).
+struct SearchView {
+    /// The pane the search opened on (captured so every step/clear targets it,
+    /// even if focus shifts server-side mid-search).
+    pane: u64,
+    /// The input buffer (ASCII printable; typed in typing mode).
+    query: String,
+    /// `false` while typing (Enter submits), `true` while browsing (n/N step).
+    submitted: bool,
+    /// Latest `(total, current)` from the server, `None` until the first
+    /// `SearchResult`. `total == 0` renders "no matches".
+    result: Option<(u32, u32)>,
 }
 
 impl View {
@@ -287,6 +310,8 @@ impl View {
             ans_esc: Vec::new(),
             digest: None,
             notice: None,
+            search: None,
+            search_esc: Vec::new(),
         }
     }
 
@@ -595,6 +620,13 @@ impl View {
         if self.term.0 < MIN_ROWS_FOR_STATUS {
             return;
         }
+        // Search line takes the bottom row when active (precedence: search >
+        // which-key hint > status row). It OVERLAYS whatever held the row - no
+        // reserved row, so opening search never triggered a Resize/reflow.
+        if let Some(sv) = &self.search {
+            self.draw_search_line(cells, rows, cols, sv);
+            return;
+        }
         // At adequate height the row is chrome only when the hint is up or the
         // status row is toggled on. When neither owns it, it belongs to content:
         // `content_dims` gave the server the full height (no status row
@@ -624,7 +656,7 @@ impl View {
         if self.hint {
             let text = " % \" split · hjkl focus · HJKL resize · x close · c tab \
                         · n/p cycle · 1-9 tab · & close-tab · w select · b sideline \
-                        · g grab · s status · d detach · ? all keys";
+                        · g grab · / search · s status · d detach · ? all keys";
             for (i, ch) in text.chars().take(cols).enumerate() {
                 put(cells, i, ch, 0);
             }
@@ -669,6 +701,31 @@ impl View {
             for (i, ch) in help.chars().enumerate() {
                 put(cells, start + i, ch, cell_flags::DIM);
             }
+        }
+    }
+
+    /// Paint the in-scrollback search line over the bottom row (v12, x-e780).
+    /// Blank first so the divider-fill pass cannot bleed through (x-5041 gotcha).
+    /// Typing shows `/query_`; browsing shows `[i/n] /query` or `/query - no
+    /// matches` (total 0).
+    fn draw_search_line(&self, cells: &mut [Cell], rows: usize, cols: usize, sv: &SearchView) {
+        let r = rows - 1;
+        for c in 0..cols {
+            cells[r * cols + c] = Cell::default();
+        }
+        let text = match sv.result {
+            Some((0, _)) => format!(" /{} - no matches", sv.query),
+            Some((total, current)) => format!(" [{current}/{total}] /{}", sv.query),
+            // Typing, or submitted but awaiting the first reply: show the input.
+            None => format!(" /{}_", sv.query),
+        };
+        for (i, ch) in text.chars().take(cols).enumerate() {
+            cells[r * cols + i] = Cell {
+                c: ch,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: cell_flags::BOLD,
+            };
         }
     }
 
@@ -942,6 +999,7 @@ const KEY_TABLE: &[&str] = &[
     "  [ ]  jump block       v  select block   ",
     "  y  copy selection     r  rerun block    ",
     "  g  grab work (dispatch next ready)     ",
+    "  /  search scrollback  n/N  next/prev   ",
     "  d  detach             C-b C-b  literal  ",
     " any key dismisses                        ",
 ];
@@ -1164,9 +1222,11 @@ async fn attach_and_run(
                 | ServerMsg::Ok
                 | ServerMsg::WaitDone { .. }
                 | ServerMsg::Err { .. }
-                // Copy answers a mouse-release, which can only follow attach:
-                // stray in the preamble, ignore rather than desync.
-                | ServerMsg::Copy { .. },
+                // Copy answers a mouse-release, and SearchResult answers a
+                // search - both can only follow attach: stray in the preamble,
+                // ignore rather than desync.
+                | ServerMsg::Copy { .. }
+                | ServerMsg::SearchResult { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -1321,6 +1381,23 @@ async fn attach_and_run(
                         let outcome = crate::clipboard::deliver(&text, raw_out);
                         let _ = tx.send((chars, outcome));
                     });
+                }
+                Ok(ServerMsg::SearchResult {
+                    total, current, ..
+                }) => {
+                    // Land the counter on the active search line. A lost reply
+                    // never wedges the client (Esc exits locally); a reply for a
+                    // search we already closed is simply dropped. Total 0 = no
+                    // matches: a BEL makes the empty result audible (AC1-ERR).
+                    if let Some(sv) = view.search.as_mut() {
+                        sv.result = Some((total, current));
+                    }
+                    if total == 0 {
+                        let _ = raw_out(b"\x07");
+                    }
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
                 }
                 Ok(ServerMsg::Bye { reason }) => break Ok(exit_with_notice(reason)),
                 Err(ProtoError::Closed) => {
@@ -1495,6 +1572,9 @@ async fn handle_stdin(
     if view.answers.is_some() {
         return answer_keys(view, &passthrough, sock_w).await;
     }
+    if view.search.is_some() {
+        return search_keys(view, &passthrough, sock_w).await;
+    }
     for event in scanner.scan(&passthrough) {
         match event {
             Event::Forward(chunk) => {
@@ -1607,6 +1687,20 @@ async fn handle_stdin(
                 write_msg(sock_w, &ClientMsg::DispatchNext)
                     .await
                     .map_err(|e| format!("dispatch-next send failed: {e}"))?;
+            }
+            Event::SearchOpen => {
+                // Enter client-local typing mode over the focused pane; keystrokes
+                // divert to search_keys on the next read (no message sent yet, no
+                // Resize - the input line overlays the bottom chrome). Break so no
+                // same-chunk bytes after the chord leak to the pane.
+                view.search = Some(SearchView {
+                    pane: view.layout.focus,
+                    query: String::new(),
+                    submitted: false,
+                    result: None,
+                });
+                view.search_esc.clear();
+                break;
             }
             Event::Bell => {
                 let _ = raw_out(b"\x07");
@@ -1734,6 +1828,128 @@ async fn selector_keys(
             }
             0x1b | b'q' => view.selector = None,
             _ => {}
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// One folded search-input token (v12, x-e780). A printable/control byte for the
+/// query, or a bare Esc press. Complete arrow sequences are swallowed by the fold
+/// (cursor motion is discretionary polish, Discretion 4).
+enum SearchKey {
+    Byte(u8),
+    Esc,
+}
+
+/// Fold raw search-mode bytes, carrying escape state in `esc` ACROSS reads (the
+/// same split-arrow safety as [`fold_selector_keys`]: an ESC-prefixed sequence
+/// broken at a read boundary must neither exit the search nor leak its tail into
+/// the query). Arrow/CSI sequences are swallowed; a bare Esc surfaces as
+/// [`SearchKey::Esc`]; everything else is a [`SearchKey::Byte`]. A lone trailing
+/// ESC stays pending until the next byte disambiguates it (inheriting the
+/// selector's one-key-lag on an isolated Esc press).
+fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKey> {
+    let mut keys = Vec::new();
+    for &b in bytes {
+        if !esc.is_empty() {
+            if esc.as_slice() == [0x1b] && b == b'[' {
+                esc.push(b);
+                continue;
+            }
+            if esc.as_slice() == [0x1b, b'['] {
+                // Complete arrow (or other CSI final byte): swallowed whole.
+                esc.clear();
+                continue;
+            }
+            // Pending lone [ESC] + a non-'[' byte: that ESC was a bare Esc press.
+            esc.clear();
+            keys.push(SearchKey::Esc);
+            if b == 0x1b {
+                esc.push(0x1b); // and a new one just started
+            } else {
+                keys.push(SearchKey::Byte(b));
+            }
+            continue;
+        }
+        if b == 0x1b {
+            esc.push(0x1b);
+            continue;
+        }
+        keys.push(SearchKey::Byte(b));
+    }
+    keys
+}
+
+/// Search-mode keys (v12, x-e780). Typing: printable append, Backspace pops,
+/// Enter submits (send [`ClientMsg::SearchOpen`]), Esc cancels locally. Browsing
+/// (post-submit): `n`/`N` send [`ClientMsg::SearchStep`] (older/newer), Esc sends
+/// [`ClientMsg::SearchClear`] and exits. Esc ALWAYS exits the mode locally even
+/// if the server never replied (AC1-FR: a lost `SearchResult` never wedges the
+/// input line). The mode is re-read per key so an Esc mid-chunk swallows the rest.
+async fn search_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.search_esc);
+    let keys = fold_search_input(&mut esc, bytes);
+    view.search_esc = esc;
+    for key in keys {
+        // Re-read the mode each key: an Esc mid-chunk closes it, and the rest of
+        // the chunk must be swallowed, never forwarded.
+        let Some(sv) = view.search.as_ref() else {
+            break;
+        };
+        let (pane, submitted) = (sv.pane, sv.submitted);
+        match key {
+            SearchKey::Esc => {
+                view.search = None;
+                view.search_esc.clear();
+                if submitted {
+                    // Browsing: drop the shared server-side highlight + state.
+                    write_msg(sock_w, &ClientMsg::SearchClear { pane })
+                        .await
+                        .map_err(|e| format!("search-clear send failed: {e}"))?;
+                }
+                break;
+            }
+            SearchKey::Byte(b) if !submitted => match b {
+                b'\r' | b'\n' => {
+                    let query = view.search.as_ref().unwrap().query.clone();
+                    view.search.as_mut().unwrap().submitted = true;
+                    write_msg(sock_w, &ClientMsg::SearchOpen { pane, query })
+                        .await
+                        .map_err(|e| format!("search-open send failed: {e}"))?;
+                }
+                0x7f | 0x08 => {
+                    view.search.as_mut().unwrap().query.pop();
+                }
+                // ASCII printable appends; other control bytes are ignored (the
+                // query is ASCII in v1, matching the ASCII-fold scan).
+                0x20..=0x7e => view.search.as_mut().unwrap().query.push(b as char),
+                _ => {}
+            },
+            SearchKey::Byte(b) => match b {
+                b'n' => write_msg(
+                    sock_w,
+                    &ClientMsg::SearchStep {
+                        pane,
+                        dir: BlockDir::Prev,
+                    },
+                )
+                .await
+                .map_err(|e| format!("search-step send failed: {e}"))?,
+                b'N' => write_msg(
+                    sock_w,
+                    &ClientMsg::SearchStep {
+                        pane,
+                        dir: BlockDir::Next,
+                    },
+                )
+                .await
+                .map_err(|e| format!("search-step send failed: {e}"))?,
+                _ => {}
+            },
         }
     }
     Ok(StdinFlow::Continue)

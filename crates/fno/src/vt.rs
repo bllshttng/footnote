@@ -107,6 +107,11 @@ pub struct Pane {
     /// The block seq the keyboard block-selection walk (leader+v) rests on.
     /// Cleared whenever the selection itself clears.
     selected_block: Option<u64>,
+    /// (v12, x-e780) The active in-scrollback search, or `None`. A snapshot: the
+    /// match list is captured at `search_open` and not re-scanned until the next
+    /// submit (Locked 1). Shared per-pane (Locked 2) - every co-viewer sees the
+    /// jump + highlight; only the initiator gets the `[i/n]` counter.
+    search: Option<SearchState>,
 }
 
 /// The B..C command-echo capture in flight (see [`Pane::pending_cmd`]).
@@ -116,6 +121,29 @@ struct PendingCmd {
     start_abs: i64,
     /// Command-echo bytes accumulating between `B` and `C`, tail-bounded.
     raw: Vec<u8>,
+}
+
+/// One free-text match, oldest -> newest (ascending `abs_row`). Columns are grid
+/// `Column` indices on the single rendered row (Locked 6: no cross-soft-wrap
+/// match), so the highlight span is width-correct for ASCII; the leading cell of
+/// a wide char is used, which is exact for the common case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchMatch {
+    /// [`Pane::anchor_row`]-scheme absolute row (`grid_line + history_size`).
+    abs_row: i64,
+    /// Grid column of the first matched cell.
+    col_start: usize,
+    /// Grid column of the last matched cell.
+    col_end: usize,
+}
+
+/// The per-pane active search (see [`Pane::search`]).
+#[derive(Debug, Clone)]
+struct SearchState {
+    /// Match snapshot, ascending `abs_row` (oldest -> newest).
+    matches: Vec<SearchMatch>,
+    /// Index into `matches` of the current (highlighted) match.
+    current: usize,
 }
 
 impl Pane {
@@ -168,6 +196,7 @@ impl Pane {
             max_retained_bytes: max_retained_bytes.max(1),
             pending_cmd: None,
             selected_block: None,
+            search: None,
         }
     }
 
@@ -231,6 +260,10 @@ impl Pane {
         // (AC2-UI). The display offset is clamped by alacritty's own resize.
         self.term.selection = None;
         self.selected_block = None;
+        // Reflow stales the stored match anchors too (v12, AC3-FR): drop the
+        // search snapshot so a later `search_step` no-ops rather than selecting
+        // a drifted span.
+        self.search = None;
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -509,6 +542,154 @@ impl Pane {
             .and_then(|seq| self.blocks.iter().find(|b| b.seq == seq))
             .or_else(|| self.blocks.back())?;
         target.cmd.clone()
+    }
+
+    // -- In-scrollback search (x-e780, v12) ------------------------------------
+
+    /// Scan the pane's whole retained buffer (history + live grid) for `query`
+    /// as a case-insensitive plain substring (Locked 6: no regex, single
+    /// rendered row), storing the match snapshot; jump the shared scroll to the
+    /// initial match and highlight it via `term.selection` (the v7 `SELECTED`
+    /// broadcast path). Returns `(total, current)` where `current` is 1-based and
+    /// `total == 0` means no matches (no scroll, highlight cleared - AC1-ERR).
+    /// An empty `query` is a clear (Boundaries), never a scan that matches every
+    /// row. A new call replaces any prior search (Invariants: last-writer-wins).
+    pub fn search_open(&mut self, query: &str) -> (u32, u32) {
+        let needle: Vec<char> = query.chars().collect();
+        if needle.is_empty() {
+            self.search_clear();
+            return (0, 0);
+        }
+        let matches = self.scan_matches(&needle);
+        if matches.is_empty() {
+            // No match: drop any prior highlight/state, do not move the viewport.
+            self.term.selection = None;
+            self.search = None;
+            return (0, 0);
+        }
+        // Initial: nearest match at/above the current viewport top scrolling up,
+        // else the newest (Discretion 2 recommended default).
+        let top = self.viewport_top_abs();
+        let current = matches
+            .iter()
+            .rposition(|m| m.abs_row <= top)
+            .unwrap_or(matches.len() - 1);
+        let total = matches.len() as u32;
+        self.search = Some(SearchState { matches, current });
+        self.apply_current_match();
+        (total, current as u32 + 1)
+    }
+
+    /// Walk the active search's snapshot: `Prev` toward older (smaller `abs_row`),
+    /// `Next` toward newer, resting at the ends (AC2-EDGE locked default). Re-jumps
+    /// and re-highlights. `None` when no search is active (the server replies a
+    /// no-op `Notice`, never a panic - AC "Errors").
+    pub fn search_step(&mut self, dir: BlockDir) -> Option<(u32, u32)> {
+        let s = self.search.as_mut()?;
+        if s.matches.is_empty() {
+            return None;
+        }
+        let last = s.matches.len() - 1;
+        s.current = match dir {
+            BlockDir::Prev => s.current.saturating_sub(1),
+            BlockDir::Next => (s.current + 1).min(last),
+        };
+        let total = s.matches.len() as u32;
+        let current = s.current as u32 + 1;
+        self.apply_current_match();
+        Some((total, current))
+    }
+
+    /// Drop the active search: clear the highlight and the snapshot. Idempotent
+    /// (a no-active-search clear is a harmless no-op the server still reports).
+    pub fn search_clear(&mut self) {
+        self.term.selection = None;
+        self.search = None;
+    }
+
+    /// Whether a search is active (non-empty snapshot). Lets the server reply a
+    /// no-op `Notice` for a `SearchStep`/`SearchClear` on a searchless pane.
+    pub fn has_search(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| !s.matches.is_empty())
+    }
+
+    /// Scroll to the current match and set `term.selection` over its span. Reads
+    /// the current index from `self.search`; a no-op if there is none.
+    fn apply_current_match(&mut self) {
+        let Some(m) = self
+            .search
+            .as_ref()
+            .and_then(|s| s.matches.get(s.current).copied())
+        else {
+            return;
+        };
+        // Clamp the stored anchor into the live grid (mirrors set_block_selection)
+        // so an evicted/drifted row selects a valid span, never an O.O.B. point.
+        let grid = self.term.grid();
+        let hist = grid.history_size() as i64;
+        let top = grid.topmost_line().0 as i64;
+        let bot = grid.bottommost_line().0 as i64;
+        let line = (m.abs_row - hist).clamp(top, bot) as i32;
+        let mut sel = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(line), Column(m.col_start)),
+            Side::Left,
+        );
+        sel.update(Point::new(Line(line), Column(m.col_end)), Side::Right);
+        self.term.selection = Some(sel);
+        self.scroll_to_abs(m.abs_row);
+    }
+
+    /// Scan every retained row for `needle`, case-insensitively, returning
+    /// non-overlapping matches oldest -> newest (ascending `abs_row`). Matches do
+    /// not cross rows (Locked 6). Case folding is ASCII-only.
+    // ponytail: ASCII case fold; Unicode fold (Turkish i, ß) deferred until asked.
+    fn scan_matches(&self, needle: &[char]) -> Vec<SearchMatch> {
+        let grid = self.term.grid();
+        let hist = grid.history_size() as i64;
+        let top = grid.topmost_line().0 as i64;
+        let bot = grid.bottommost_line().0 as i64;
+        let cols = self.cols as usize;
+        let nlen = needle.len();
+        let mut out = Vec::new();
+        let mut ln = top;
+        while ln <= bot {
+            let row = &grid[Line(ln as i32)];
+            // (char, grid column) for each visible cell, spacers skipped so the
+            // char stream and the column map stay aligned for wide chars.
+            let mut cells: Vec<(char, usize)> = Vec::with_capacity(cols);
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                    || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                let ch = if cell.flags.contains(Flags::HIDDEN) {
+                    ' '
+                } else {
+                    cell.c
+                };
+                cells.push((ch, c));
+            }
+            let abs_row = ln + hist;
+            let mut i = 0;
+            while i + nlen <= cells.len() {
+                let hit = (0..nlen).all(|k| cells[i + k].0.eq_ignore_ascii_case(&needle[k]));
+                if hit {
+                    out.push(SearchMatch {
+                        abs_row,
+                        col_start: cells[i].1,
+                        col_end: cells[i + nlen - 1].1,
+                    });
+                    i += nlen; // non-overlapping
+                } else {
+                    i += 1;
+                }
+            }
+            ln += 1;
+        }
+        out
     }
 
     // -- OSC 133 command blocks (Task 1.2) -------------------------------------
@@ -2054,5 +2235,116 @@ mod tests {
         pane.feed(b"$ \x1b]133;C\x07output\x1b]133;D;0\x07");
         assert!(pane.read_block(BlockSel::Last).is_ok());
         assert_eq!(pane.rerun_command(), None);
+    }
+
+    // -- In-scrollback search (x-e780, v12) ------------------------------------
+
+    #[test]
+    fn search_jumps_scrolls_and_highlights_case_insensitively() {
+        // AC1-HP + AC3-EDGE: the match is found case-insensitively and as a
+        // substring, the view scrolls back into history to reach it, and the
+        // highlight spans exactly the matched columns on the single row.
+        let mut pane = Pane::new(3, 40);
+        for i in 0..20 {
+            pane.feed(format!("filler {i}\r\n").as_bytes());
+        }
+        pane.feed(b"PostgreSQL Deadlock detected\r\n");
+        for i in 0..5 {
+            pane.feed(format!("more {i}\r\n").as_bytes());
+        }
+        let (total, current) = pane.search_open("deadlock");
+        assert_eq!((total, current), (1, 1), "one match, positioned first");
+        assert!(pane.display_offset() > 0, "scrolled up into history");
+        assert!(pane.has_selection());
+        assert_eq!(
+            pane.selection_text().unwrap_or_default(),
+            "Deadlock",
+            "highlight spans exactly the 8 matched columns"
+        );
+    }
+
+    #[test]
+    fn search_no_match_is_zero_and_does_not_move() {
+        // AC1-ERR: a query with no occurrence returns total 0, sets no selection,
+        // and leaves the viewport where it was (a visible signal, never a jump).
+        let mut pane = Pane::new(4, 40);
+        for i in 0..10 {
+            pane.feed(format!("line {i}\r\n").as_bytes());
+        }
+        let before = pane.display_offset();
+        assert_eq!(pane.search_open("zzznope"), (0, 0));
+        assert!(!pane.has_selection());
+        assert!(!pane.has_search());
+        assert_eq!(pane.display_offset(), before, "viewport did not move");
+    }
+
+    #[test]
+    fn search_step_walks_and_rests_at_both_ends() {
+        // AC2-HP + AC2-EDGE: n/N walk the matches and rest (do not wrap) at the
+        // oldest and newest, with the counter tracking the position. 12 rows each
+        // carry "error" - a match on the live tail and the oldest history row both
+        // count (Boundaries: no off-by-one at the ends).
+        let mut pane = Pane::new(3, 40);
+        for i in 0..12 {
+            pane.feed(format!("error {i}\r\n").as_bytes());
+        }
+        let (total, _) = pane.search_open("error");
+        assert_eq!(total, 12);
+
+        // Walk to the oldest; Prev rests at 1.
+        let mut c = 0;
+        for _ in 0..20 {
+            (_, c) = pane.search_step(BlockDir::Prev).unwrap();
+        }
+        assert_eq!(c, 1, "Prev rests on the oldest match");
+
+        // A single Next moves one newer.
+        let (_, c2) = pane.search_step(BlockDir::Next).unwrap();
+        assert_eq!(c2, 2);
+
+        // Walk to the newest; Next rests at 12.
+        for _ in 0..20 {
+            (_, c) = pane.search_step(BlockDir::Next).unwrap();
+        }
+        assert_eq!(c, 12, "Next rests on the newest match");
+    }
+
+    #[test]
+    fn search_empty_query_clears() {
+        // Boundaries: an empty query is a clear, not a scan that matches every row.
+        let mut pane = Pane::new(4, 40);
+        pane.feed(b"hello world\r\n");
+        pane.search_open("hello");
+        assert!(pane.has_selection());
+        assert_eq!(pane.search_open(""), (0, 0));
+        assert!(!pane.has_selection(), "empty query drops the highlight");
+        assert!(!pane.has_search());
+    }
+
+    #[test]
+    fn search_step_without_active_search_is_none() {
+        // Errors: a step on a pane with no active search is a clean None (the
+        // server maps it to a no-op Notice), never a panic.
+        let mut pane = Pane::new(4, 40);
+        pane.feed(b"nothing to find here\r\n");
+        assert_eq!(pane.search_step(BlockDir::Next), None);
+        assert_eq!(pane.search_step(BlockDir::Prev), None);
+        assert!(!pane.has_search());
+    }
+
+    #[test]
+    fn resize_clears_active_search() {
+        // AC3-FR: reflow stales the stored anchors, so a resize drops the search
+        // snapshot and its highlight; a later step no-ops rather than mis-jumping.
+        let mut pane = Pane::new(3, 20);
+        for i in 0..8 {
+            pane.feed(format!("match{i}\r\n").as_bytes());
+        }
+        pane.search_open("match");
+        assert!(pane.has_search());
+        pane.resize(3, 10);
+        assert!(!pane.has_search(), "resize drops the search snapshot");
+        assert!(!pane.has_selection());
+        assert_eq!(pane.search_step(BlockDir::Next), None);
     }
 }
