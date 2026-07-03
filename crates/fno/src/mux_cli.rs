@@ -118,7 +118,7 @@ fn probe(sock: &Path) -> Probe {
 /// emits `C` (Enter pressed, output begins). Idempotent (guarded +
 /// double-eval-safe), no absolute paths (AC4-UI). A pane that eval's this
 /// captures blocks (US1) and their command lines (x-38c4).
-const ZSH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
+pub(crate) const ZSH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
   _FNO_OSC133=1
   autoload -Uz add-zsh-hook
   _fno_osc133_precmd() { local e=$?; printf '\033]133;D;%s\a\033]133;A\a' "$e" }
@@ -139,7 +139,7 @@ fi
 /// `_fno_osc133_prompt` guard skips the trap firing on the hook itself.
 /// Idempotent, no absolute paths. (A pre-existing `PROMPT_COMMAND` entry plus a
 /// bare Enter is the one residual edge - a rare phantom block; zsh has none.)
-const BASH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
+pub(crate) const BASH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
   _FNO_OSC133=1
   _fno_osc133_armed=""
   _fno_osc133_prompt() {
