@@ -203,6 +203,12 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::subscribe::run_subscribe(&args[1..], &AgentsHome::from_env()).await;
     }
 
+    // `digest` (x-4e2d): read-only "while you were gone" fold over events.jsonl +
+    // ledger.json for a session. Never touches the daemon; exits 0 on empty.
+    if verb == "digest" {
+        return fno_agents::digest::run_digest(&args[1..], &AgentsHome::from_env()).await;
+    }
+
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to
     // describe it as up. A down daemon is exit 13 (AC10-ERR).
     if verb == "status" {
@@ -1878,6 +1884,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "report --session-id <uuid> --seq <n> --state working|blocked|done [--reason <text>] [--ttl-ms <n>]",
     "wait --agent <name> --state idle|blocked|done [--timeout-ms <n>] [--json]",
     "subscribe [--agent <name>] [--kinds state,exit] [--json]",
+    "digest --session <s> --since <ts> [--json]",
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`
@@ -2008,6 +2015,7 @@ mod tests {
             "report",
             "wait",
             "subscribe",
+            "digest",
         ];
         let listed: std::collections::HashSet<&str> = CLIENT_VERB_USAGE
             .iter()
