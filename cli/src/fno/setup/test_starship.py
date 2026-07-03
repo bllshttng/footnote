@@ -63,32 +63,74 @@ def test_missing_snippet_installs_nothing(tmp_path: Path) -> None:
 
 
 def test_default_snippet_resolves_colocated() -> None:
-    from fno.setup.starship import default_snippet_source
+    from fno.setup.starship import default_shell_snippet_source, default_snippet_source
 
     src = default_snippet_source()
     assert src is not None and src.is_file()
     assert _MODULE_MARKER in src.read_text()
 
+    # The portable shell renderer ships alongside it.
+    sh = default_shell_snippet_source()
+    assert sh is not None and sh.is_file()
+    assert "FNO_NODE" in sh.read_text() and "PS1" in sh.read_text()
 
-def test_wizard_capstone_opt_in(tmp_path: Path) -> None:
-    """The setup capstone prompts, default No; declined leaves the file absent
-    and prints the snippet path, accepted appends the module."""
-    from fno.setup_cli import offer_starship_module
 
-    snippet = _snippet(tmp_path)
-    tgt = tmp_path / "starship.toml"
+def test_shell_source_line_appends_and_is_idempotent(tmp_path: Path) -> None:
+    """The portable renderer adds one `source` line to the rc, idempotently, and
+    never rewrites existing content."""
+    from fno.setup.starship import install_shell_source_line
+
+    snippet = tmp_path / "prompt-fno.sh"
+    snippet.write_text("# portable\n")
+    rc = tmp_path / ".zshrc"
+    rc.write_text("export FOO=1")  # no trailing newline
+
+    first = install_shell_source_line(snippet, rc)
+    assert first.action == "appended"
+    body = rc.read_text()
+    assert "export FOO=1" in body and f'source "{snippet}"' in body
+
+    second = install_shell_source_line(snippet, rc)
+    assert second.action == "already"
+    assert rc.read_text().count(f'source "{snippet}"') == 1  # no duplicate
+
+
+def test_shell_source_line_missing_snippet(tmp_path: Path) -> None:
+    from fno.setup.starship import install_shell_source_line
+
+    res = install_shell_source_line(tmp_path / "nope.sh", tmp_path / ".zshrc")
+    assert res.action == "missing-snippet"
+    assert not (tmp_path / ".zshrc").exists()
+
+
+def test_wizard_capstone_offers_both_renderers(tmp_path: Path) -> None:
+    """The capstone prompts for each renderer (default No): declined leaves both
+    files absent and prints their paths; accepted installs both."""
+    from fno.setup_cli import offer_prompt_provenance
+
+    star = _snippet(tmp_path)
+    sh = tmp_path / "prompt-fno.sh"
+    sh.write_text("# portable\n")
+    toml_tgt = tmp_path / "starship.toml"
+    rc_tgt = tmp_path / ".zshrc"
     printed: list[str] = []
 
-    declined = offer_starship_module(
+    declined = offer_prompt_provenance(
         confirm_fn=lambda _m: False, echo_fn=printed.append,
-        snippet_path=snippet, target_toml=tgt,
+        snippet_path=star, target_toml=toml_tgt,
+        shell_snippet_path=sh, shell_rc=rc_tgt,
     )
-    assert declined["installed"] is False
-    assert not tgt.exists()
-    assert any(str(snippet) in line for line in printed)  # path printed for manual use
+    assert declined == {"starship": None, "shell": None}
+    assert not toml_tgt.exists() and not rc_tgt.exists()
+    assert any(str(star) in line for line in printed)
+    assert any(str(sh) in line for line in printed)
 
-    accepted = offer_starship_module(
-        confirm_fn=lambda _m: True, snippet_path=snippet, target_toml=tgt,
+    accepted = offer_prompt_provenance(
+        confirm_fn=lambda _m: True,
+        snippet_path=star, target_toml=toml_tgt,
+        shell_snippet_path=sh, shell_rc=rc_tgt,
     )
-    assert accepted["installed"] is True
-    assert _MODULE_MARKER in tgt.read_text()
+    assert accepted["starship"].action == "appended"
+    assert accepted["shell"].action == "appended"
+    assert _MODULE_MARKER in toml_tgt.read_text()
+    assert f'source "{sh}"' in rc_tgt.read_text()

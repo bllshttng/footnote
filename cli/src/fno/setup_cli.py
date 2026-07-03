@@ -322,40 +322,64 @@ def offer_recommended_rules(
     return {"installed": True, "results": results}
 
 
-def offer_starship_module(
+def offer_prompt_provenance(
     *,
     confirm_fn: Callable[[str], bool],
     echo_fn: Callable[[str], None] = lambda _m: None,
     snippet_path: Optional[Path] = None,
     target_toml: Optional[Path] = None,
+    shell_snippet_path: Optional[Path] = None,
+    shell_rc: Optional[Path] = None,
 ) -> dict:
-    """Opt-in offer to install footnote's starship provenance module (x-84a8).
+    """Opt-in offer to render fno pane provenance in the user's prompt (x-84a8).
 
-    Interactive-agnostic (the CLI passes typer confirm/echo). Prompts once,
-    default No; appends only on explicit yes. On No (or no snippet shipped) it
-    prints the snippet path for manual use and leaves starship.toml untouched.
-    Returns ``{"installed": bool, "result": StarshipResult | None}``."""
+    Two renderers, each prompted separately (default No), so the feature never
+    assumes starship: a starship custom module AND a portable bash/zsh ``$PS1``
+    segment. Both append idempotently and never rewrite the user's files. On
+    decline the snippet path is printed for manual use. (fno's own mux status
+    row is the config-free surface - a separate follow-up, not offered here.)
+    Interactive-agnostic (the CLI passes typer confirm/echo). Returns
+    ``{"starship": StarshipResult | None, "shell": StarshipResult | None}``."""
     from fno.setup.starship import (
+        default_shell_rc,
+        default_shell_snippet_source,
         default_snippet_source,
         default_starship_config,
+        install_shell_source_line,
         install_starship_module,
         summarize as starship_summarize,
+        summarize_shell,
     )
 
-    src = snippet_path or default_snippet_source()
-    if src is None or not Path(src).is_file():
-        return {"installed": False, "result": None}
+    out: dict = {"starship": None, "shell": None}
 
-    if not confirm_fn(
-        "Install footnote's starship provenance module into your starship.toml?"
-    ):
-        echo_fn(f"  starship: skipped - snippet at {src} (append it by hand to use it)")
-        return {"installed": False, "result": None}
+    # Starship users: append the custom module.
+    star_src = snippet_path or default_snippet_source()
+    if star_src is not None and Path(star_src).is_file():
+        if confirm_fn("Add fno provenance to your starship prompt (starship.toml)?"):
+            res = install_starship_module(
+                Path(star_src), Path(target_toml or default_starship_config())
+            )
+            echo_fn(starship_summarize(res))
+            out["starship"] = res
+        else:
+            echo_fn(f"  starship: skipped - module at {star_src}")
 
-    tgt = target_toml or default_starship_config()
-    result = install_starship_module(Path(src), Path(tgt))
-    echo_fn(starship_summarize(result))
-    return {"installed": True, "result": result}
+    # Everyone else: the portable shell-rc segment (no prompt engine).
+    sh_src = shell_snippet_path or default_shell_snippet_source()
+    if sh_src is not None and Path(sh_src).is_file():
+        if confirm_fn(
+            "Or add a portable provenance segment to your bash/zsh prompt (no starship)?"
+        ):
+            res = install_shell_source_line(
+                Path(sh_src), Path(shell_rc or default_shell_rc())
+            )
+            echo_fn(summarize_shell(res))
+            out["shell"] = res
+        else:
+            echo_fn(f"  shell prompt: skipped - snippet at {sh_src} (source it to use)")
+
+    return out
 
 
 @app.command("wizard")
@@ -426,10 +450,10 @@ def wizard_cmd(
 
     offer_recommended_rules(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
 
-    # Optional capstone: install the starship provenance module so fno panes
-    # render their backlog node in the prompt (x-84a8). Opt-in, default No;
-    # only appends to starship.toml on explicit yes.
-    offer_starship_module(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
+    # Optional capstone: render fno pane provenance in the prompt (x-84a8) via
+    # a starship module and/or a portable bash/zsh segment. Opt-in, default No;
+    # only appends on explicit yes. Engine-neutral - starship is not assumed.
+    offer_prompt_provenance(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
 
     # Optional capstone: wire the /fno:* slash commands into the agent CLIs on
     # PATH. A CLI-only install has the binary but not the slash commands; this

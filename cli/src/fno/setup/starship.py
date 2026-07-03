@@ -1,14 +1,19 @@
-"""Install footnote's starship provenance module into the user's starship.toml.
+"""Install footnote's prompt-provenance renderers into the user's shell.
 
 Opt-in only (wired into ``fno setup wizard``, mirrors ``recommended_rules.py``).
-fno-spawned panes export ``FNO_NODE``/``FNO_SLUG``/``FNO_PLAN`` (x-84a8); the
-shipped ``starship-fno.toml`` snippet renders the node in the pane's prompt,
-gated on ``FNO_NODE`` so it appears only inside an fno pane.
+fno-spawned panes export ``FNO_NODE``/``FNO_SLUG``/``FNO_PLAN`` (x-84a8); those
+env vars are prompt-engine-agnostic. This module ships two renderers so the
+feature does not assume the user runs starship (it is OSS):
 
-The installer APPENDS the snippet to ``~/.config/starship.toml`` and is
-idempotent: a second run detects the ``[custom.fno_node]`` header already present
-and skips. It never rewrites the user's existing config - only appends. On a
-bare ``pip install fno`` with no snippet shipped it installs nothing (clean).
+- ``starship-fno.toml`` - a starship custom module (for starship users).
+- ``prompt-fno.sh`` - a portable bash/zsh ``$PS1`` segment sourced from the
+  user's shell rc (no prompt engine required; the universal path).
+
+Both installers APPEND idempotently (starship: the ``[custom.fno_node]`` header;
+shell: the ``source`` line for our snippet) and never rewrite the user's config.
+fno's own mux status row is the config-free surface and is a separate follow-up;
+these two cover users who want provenance in their own prompt. On a bare ``pip
+install fno`` with no snippet shipped, each installer installs nothing (clean).
 """
 from __future__ import annotations
 
@@ -95,3 +100,57 @@ def summarize(result: StarshipResult) -> str:
         "missing-snippet": "starship snippet not found (nothing installed)",
     }.get(result.action, result.action)
     return f"  starship: {verb}"
+
+
+# --- Portable shell-rc renderer (the starship-free path) -------------------
+
+def default_shell_snippet_source() -> Optional[Path]:
+    """Resolve the shipped portable ``prompt-fno.sh`` (colocated package data,
+    same as the starship snippet). ``None`` if absent."""
+    try:
+        from importlib.resources import files
+
+        p = Path(str(files("fno") / "recommended_rules" / "prompt-fno.sh"))
+        return p if p.is_file() else None
+    except (ImportError, ModuleNotFoundError, TypeError, ValueError, OSError):
+        return None
+
+
+def default_shell_rc() -> Path:
+    """The user's shell rc, picked from ``$SHELL`` (zsh -> ``~/.zshrc``, else
+    ``~/.bashrc``). ``os.path.expanduser`` so an unset ``HOME`` degrades."""
+    home = Path(os.path.expanduser("~"))
+    return home / (".zshrc" if "zsh" in os.environ.get("SHELL", "") else ".bashrc")
+
+
+def install_shell_source_line(snippet_path: Path, rc_path: Path) -> StarshipResult:
+    """Append ``source "<snippet_path>"`` to ``rc_path`` (idempotent).
+
+    The snippet path itself is the idempotency marker, so a re-run (or an
+    already-hand-added line) is detected and skipped. Only a single ``source``
+    line is added - the user's rc is never rewritten. Missing snippet ->
+    ``missing-snippet``."""
+    snippet_path = Path(snippet_path)
+    rc_path = Path(rc_path)
+    if not snippet_path.is_file():
+        return StarshipResult("missing-snippet", rc_path)
+
+    line = f'source "{snippet_path}"'
+    existing = rc_path.read_text() if rc_path.exists() else ""
+    if str(snippet_path) in existing:
+        return StarshipResult("already", rc_path)
+
+    sep = "" if not existing else ("" if existing.endswith("\n") else "\n")
+    rc_path.parent.mkdir(parents=True, exist_ok=True)
+    with rc_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"{sep}# footnote pane provenance (portable prompt segment)\n{line}\n")
+    return StarshipResult("appended", rc_path)
+
+
+def summarize_shell(result: StarshipResult) -> str:
+    verb = {
+        "appended": f"added the provenance source line to {result.target}",
+        "already": f"already sourced in {result.target} (left as-is)",
+        "missing-snippet": "shell snippet not found (nothing installed)",
+    }.get(result.action, result.action)
+    return f"  shell prompt: {verb}"

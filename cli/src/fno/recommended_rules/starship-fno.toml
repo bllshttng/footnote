@@ -8,6 +8,10 @@
 #
 # Install: `fno setup wizard` offers to append this to your starship.toml, or
 # copy the block below into ~/.config/starship.toml by hand.
+#
+# Not a starship user? See prompt-fno.sh for a portable bash/zsh segment that
+# needs no prompt engine. (fno's own mux status row also shows the node with
+# zero config when you attach to a pane.)
 
 [custom.fno_node]
 description = "footnote pane provenance: backlog node (and PR when linked)"
