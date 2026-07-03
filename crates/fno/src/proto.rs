@@ -170,6 +170,20 @@ pub enum ClientMsg {
     /// PTY. Refused unless the pane is known-idle - a rerun injected into a busy
     /// agent corrupts its composer (false-ready is the forbidden direction).
     BlockRerun { pane: u64 },
+    /// (v9, x-c929) Answer a blocked prompt from the queue without focusing it.
+    /// `keystroke` is the exact bytes the daemon pinned for the chosen option
+    /// (never client-fabricated); `fingerprint`/`region_lines` name the region
+    /// snapshot the operator read. The server re-reads its live bottom-N grid,
+    /// re-hashes, and injects `keystroke` ONLY on a fingerprint match (else a
+    /// "prompt changed" notice - fail closed to focus). A pane under a foreign
+    /// writer-claim bounces with a "driven by relay" notice. The freshness
+    /// re-check is what makes a picked answer safe across the scrape lag.
+    PaneAnswer {
+        pane: u64,
+        fingerprint: [u8; 32],
+        region_lines: u16,
+        keystroke: Vec<u8>,
+    },
 }
 
 /// A block-navigation walk direction (v8). `Prev` moves toward older blocks,
