@@ -402,6 +402,22 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     return any(a == "--role" or a.startswith("--role=") for a in args)
 
 
+def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying ``--node``/``--slug``/``--plan`` (x-84a8).
+
+    Provenance flags are parsed only by the Python spawn verb (``cmd_spawn``
+    resolves them into the pane env). The Rust client does not know them, so a
+    ``spawn ... --node <id>`` auto-routed to the binary would exit ``unknown
+    flag: --node``. Keeping it Python covers every caller (direct CLI and the
+    /agent spawn.sh forward) in one place, not just the pane substrate. The
+    flags are unused on the Python bg/headless path (provenance rides the pane
+    wrapper only), so forcing Python is harmless there."""
+    if verb != "spawn":
+        return False
+    prov = ("--node", "--slug", "--plan")
+    return any(a in prov or a.startswith(tuple(f"{p}=" for p in prov)) for a in args)
+
+
 def route_to_rust(
     args: Sequence[str],
     *,
@@ -588,8 +604,13 @@ def make_agents_group_cls() -> type:
                 # A pane-substrate spawn (4a-G2, the default) is Python-only the
                 # same way: the mux-hosted back half lives in cmd_spawn, and the
                 # binary would route it to the retiring daemon PTY host.
-                py_spawn = _is_role_bearing_spawn(verb, args) or _is_pane_substrate_spawn(
-                    verb, args
+                # A provenance-bearing spawn (x-84a8, --node/--slug/--plan) is
+                # Python-only for the same reason as --role: the binary cannot
+                # parse those flags.
+                py_spawn = (
+                    _is_role_bearing_spawn(verb, args)
+                    or _is_pane_substrate_spawn(verb, args)
+                    or _is_provenance_bearing_spawn(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
                     route_to_rust(list(args))  # execs; does not return

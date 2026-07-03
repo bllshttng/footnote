@@ -1,0 +1,22 @@
+# footnote pane provenance - a starship custom module.
+#
+# fno-spawned panes export FNO_NODE (backlog node), FNO_SLUG, FNO_PLAN, and
+# FNO_PR (once a PR is linked). This module renders the node id (and PR when
+# present) in your prompt, so the pane itself says what it is working on. The
+# `when` guard means it appears ONLY inside an fno pane - a plain terminal shows
+# no fno segment.
+#
+# Install: `fno setup wizard` offers to append this to your starship.toml, or
+# copy the block below into ~/.config/starship.toml by hand.
+#
+# Not a starship user? See prompt-fno.sh for a portable bash/zsh segment that
+# needs no prompt engine. (fno's own mux status row also shows the node with
+# zero config when you attach to a pane.)
+
+[custom.fno_node]
+description = "footnote pane provenance: backlog node (and PR when linked)"
+when = '[ -n "$FNO_NODE" ]'
+command = 'printf "%s%s" "$FNO_NODE" "${FNO_PR:+ PR#$FNO_PR}"'
+format = '[⚑ $output]($style) '
+style = 'bold yellow'
+shell = ["sh"]

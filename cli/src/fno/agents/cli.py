@@ -354,6 +354,21 @@ def cmd_spawn(
             "codex/gemini and claude --headless ignore it."
         ),
     ),
+    node: str | None = typer.Option(
+        None, "--node",
+        help=(
+            "Backlog node id (or slug) this pane is working (x-84a8). Node-driven "
+            "pane spawns export FNO_NODE/FNO_SLUG/FNO_PLAN into the pane so the "
+            "prompt (starship) can render provenance. Ad-hoc spawns omit it. "
+            "FNO_SLUG/FNO_PLAN resolve from the graph unless --slug/--plan given."
+        ),
+    ),
+    slug: str | None = typer.Option(
+        None, "--slug", help="Provenance FNO_SLUG override (skips the graph read)."
+    ),
+    plan: str | None = typer.Option(
+        None, "--plan", help="Provenance FNO_PLAN override (skips the graph read)."
+    ),
 ) -> None:
     """Spawn a new agent.
 
@@ -393,7 +408,7 @@ def cmd_spawn(
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
     # it to --substrate headless): it always means a one-shot, never a pane.
     if substrate == "pane" and not once:
-        from fno.agents.mux_spawn import dispatch_spawn_pane
+        from fno.agents.mux_spawn import dispatch_spawn_pane, resolve_provenance
 
         try:
             pane_result = dispatch_spawn_pane(
@@ -403,6 +418,7 @@ def cmd_spawn(
                 cwd=workdir,
                 yolo=yolo,
                 role=role,
+                provenance=resolve_provenance(node, slug, plan),
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
