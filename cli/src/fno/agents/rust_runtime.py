@@ -125,6 +125,14 @@ RUST_CLIENT_VERBS = frozenset(
         # build_request (no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
         "report",
+        # Agent-state wait + event subscription (mux roadmap wave 2).
+        # Both dispatch DIRECTLY in client.rs before build_request (no daemon
+        # RPC): `wait` polls registry.json until a row reaches idle|blocked|done;
+        # `subscribe` follows the daemon's events.jsonl and streams state
+        # transitions + pane exits as NDJSON. These entries keep the
+        # client.rs<->router parity test in sync and provide the help lines.
+        "wait",
+        "subscribe",
     }
 )
 

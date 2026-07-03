@@ -1076,7 +1076,9 @@ fn derive_short_id(name: &str, registry: &state::Registry) -> String {
 }
 
 /// Whether `e` records `uuid` as its resume target (any provider id field).
-fn entry_holds_session(e: &RegistryEntry, uuid: &str) -> bool {
+/// `pub` so `subscribe` can resolve a hook report's `session_id` back to a row
+/// name using the daemon's own matching, never a forked lookup.
+pub fn entry_holds_session(e: &RegistryEntry, uuid: &str) -> bool {
     e.codex_session_id.as_deref() == Some(uuid)
         || e.gemini_session_id.as_deref() == Some(uuid)
         || e.session_id.as_deref() == Some(uuid)
