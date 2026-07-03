@@ -524,13 +524,25 @@ impl View {
     /// indicator stays so a scrolled UNFOCUSED pane is still observable),
     /// and `? for keys`. Too-short terminals draw neither (AC4-ERR).
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
+        // Below minimum geometry BOTH the status row and the which-key hint
+        // auto-hide (AC4-ERR); the row is content and `content_dims` already
+        // handed it to the server.
         if self.term.0 < MIN_ROWS_FOR_STATUS {
             return;
         }
+        // At adequate height the row is chrome only when the hint is up or the
+        // status row is toggled on. When neither owns it, it belongs to content:
+        // `content_dims` gave the server the full height (no status row
+        // subtracted), so a pane tiled into this row and the blit filled it -
+        // blanking here would erase it until the status row is re-enabled
+        // (codex P2).
+        if !self.hint && !self.status_on {
+            return;
+        }
         let r = rows - 1;
-        // Blank the whole row first: the divider-fill pass in `compose` treats
-        // this uncovered row as content and paints '─' glyphs into it, which
-        // would otherwise bleed through the gaps between the status segments.
+        // We own the row: blank it first so the divider-fill pass in `compose`
+        // (which treats this uncovered row as content and paints '─' glyphs)
+        // cannot bleed through the gaps between the segments below.
         for c in 0..cols {
             cells[r * cols + c] = Cell::default();
         }
@@ -551,9 +563,6 @@ impl View {
             for (i, ch) in text.chars().take(cols).enumerate() {
                 put(cells, i, ch, 0);
             }
-            return;
-        }
-        if !self.status_visible() {
             return;
         }
         let mut c = 0usize;
@@ -792,7 +801,11 @@ enum DisplayRow<'a> {
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
 /// boundary so `/home/user2/...` never reads as `~2/...`.
 fn abbrev_home(p: &str) -> String {
-    abbrev_home_in(p, std::env::var("HOME").ok().as_deref())
+    // var_os, not var: HOME is a path, and the idiomatic read for a path env
+    // var avoids assuming UTF-8 up front (gemini). A non-UTF-8 HOME simply
+    // yields None here and the path renders unabbreviated.
+    let home = std::env::var_os("HOME");
+    abbrev_home_in(p, home.as_deref().and_then(|s| s.to_str()))
 }
 
 fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
@@ -1770,6 +1783,26 @@ mod tests {
         // And the bottom row is NOT painted over content when hidden.
         let text = frame_text(&view.compose());
         assert!(!text.lines().last().unwrap().contains("? for keys"));
+    }
+
+    #[test]
+    fn client_status_off_leaves_bottom_row_as_content() {
+        // codex P2: with the status row toggled off and no hint pending, the
+        // bottom row belongs to content (content_dims gave the server the full
+        // height) - draw_bottom_row must NOT blank it. The fixture's panes are
+        // 29 rows tall from y=0, so pane content reaches the last terminal row.
+        let mut view = two_pane_view();
+        view.status_on = false;
+        let text = frame_text(&view.compose());
+        let bottom = text.lines().last().unwrap().to_string();
+        assert!(
+            bottom.contains('a') || bottom.contains('b'),
+            "bottom row must keep pane content when status is off: {bottom:?}"
+        );
+        // A pending hint still transiently paints over that content row.
+        view.hint = true;
+        let text = frame_text(&view.compose());
+        assert!(text.lines().last().unwrap().contains("hjkl focus"));
     }
 
     #[test]
