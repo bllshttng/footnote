@@ -40,6 +40,12 @@ path = "src/bin/worker.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# Cross-process region-text fingerprint for the answer queue (x-c929): the
+# daemon extractor hashes the blocked prompt's region text and the mux server
+# re-hashes its live grid to verify freshness before injecting a keystroke. A
+# std DefaultHasher is randomly seeded per-process, so the two sides would never
+# agree; blake3 is a stable, fast, dependency-light content hash.
+blake3 = "1"
 tracing = "0.1"
 libc = "0.2"
 # Cross-platform OS CSPRNG for minting interactive-claude session UUIDs

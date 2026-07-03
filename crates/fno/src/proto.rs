@@ -69,7 +69,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// re-sends the selected block's command line, guarded idle. `Command::
 /// CopySelection` copies the current selection over the keyboard (the block
 /// select -> copy composition). `BlockDir` names the walk direction.
-pub const PROTO_VERSION: u32 = 8;
+///
+/// v9 (blocked-prompt answer queue, x-c929): `AgentRow` gains `answerable`
+/// ([`AnswerablePrompt`]) - the daemon's extracted numbered menu riding the
+/// existing blocked badge; `ClientMsg::PaneAnswer { pane, fingerprint,
+/// region_lines, keystroke }` injects a picked option after the server
+/// re-verifies `fingerprint` against its live grid; `err_code` gains
+/// `STALE`/`BUSY`.
+pub const PROTO_VERSION: u32 = 9;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -163,6 +170,20 @@ pub enum ClientMsg {
     /// PTY. Refused unless the pane is known-idle - a rerun injected into a busy
     /// agent corrupts its composer (false-ready is the forbidden direction).
     BlockRerun { pane: u64 },
+    /// (v9, x-c929) Answer a blocked prompt from the queue without focusing it.
+    /// `keystroke` is the exact bytes the daemon pinned for the chosen option
+    /// (never client-fabricated); `fingerprint`/`region_lines` name the region
+    /// snapshot the operator read. The server re-reads its live bottom-N grid,
+    /// re-hashes, and injects `keystroke` ONLY on a fingerprint match (else a
+    /// "prompt changed" notice - fail closed to focus). A pane under a foreign
+    /// writer-claim bounces with a "driven by relay" notice. The freshness
+    /// re-check is what makes a picked answer safe across the scrape lag.
+    PaneAnswer {
+        pane: u64,
+        fingerprint: [u8; 32],
+        region_lines: u16,
+        keystroke: Vec<u8>,
+    },
 }
 
 /// A block-navigation walk direction (v8). `Prev` moves toward older blocks,
@@ -290,6 +311,45 @@ pub struct AgentRow {
     /// Pane-exit / registry-exited fact: renders dim + exit marker regardless
     /// of any live-TTL badge (fact beats report, structurally).
     pub exited: bool,
+    /// (v9, x-c929) The answerable-prompt payload when this row is `blocked` on
+    /// a numbered menu a manifest `[rule.answer]` grammar could enumerate;
+    /// `None` for any other state or a focus-only blocked prompt. A structural
+    /// twin of the daemon's `AnswerablePrompt` (the crates share no types - the
+    /// registry JSON is the contract), carried onto the badge for the client's
+    /// answer overlay. `#[serde(default)]` keeps a v8 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answerable: Option<AnswerablePrompt>,
+}
+
+/// One selectable option of an [`AnswerablePrompt`] (v9). Structural twin of the
+/// daemon's `manifest::AnswerOption`; the registry/wire JSON is the contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnswerOption {
+    /// The captured menu index the operator presses, e.g. "1".
+    pub idx: String,
+    /// The display label (untruncated; the client truncates for width).
+    pub label: String,
+    /// The exact PTY bytes to inject, pinned by the daemon's manifest `send`
+    /// mapping - the client relays these opaquely and never fabricates bytes.
+    pub keystroke: Vec<u8>,
+}
+
+/// A blocked prompt the operator can answer from the queue without focusing the
+/// pane (v9, x-c929). Extracted by the daemon, carried on the badge; the client
+/// renders `prompt` + `options` in the answer overlay and, on a pick, sends
+/// [`ClientMsg::PaneAnswer`] with `fingerprint`/`region_lines`/the option's
+/// `keystroke`, which the server re-verifies against its live grid before
+/// injecting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnswerablePrompt {
+    /// The lines above the first option, display-only.
+    pub prompt: String,
+    pub options: Vec<AnswerOption>,
+    /// blake3 of the region text the daemon read; the server's freshness key.
+    pub fingerprint: [u8; 32],
+    /// The N of `bottom_non_empty_lines(N)`, so the server re-reads the same
+    /// region window to re-hash.
+    pub region_lines: usize,
 }
 
 /// The inside-leg badge vocabulary (contract v2), as rendered in the sideline.
@@ -941,6 +1001,23 @@ mod tests {
                         badge: Some(AgentBadge::Blocked),
                         reason: Some("permission prompt".into()),
                         exited: false,
+                        answerable: Some(AnswerablePrompt {
+                            prompt: "Do you want to proceed?".into(),
+                            options: vec![
+                                AnswerOption {
+                                    idx: "1".into(),
+                                    label: "Yes".into(),
+                                    keystroke: b"1".to_vec(),
+                                },
+                                AnswerOption {
+                                    idx: "2".into(),
+                                    label: "No".into(),
+                                    keystroke: b"2".to_vec(),
+                                },
+                            ],
+                            fingerprint: [7u8; 32],
+                            region_lines: 8,
+                        }),
                     },
                     AgentRow {
                         squad: None,
@@ -949,6 +1026,7 @@ mod tests {
                         badge: None,
                         reason: None,
                         exited: true,
+                        answerable: None,
                     },
                 ],
             },

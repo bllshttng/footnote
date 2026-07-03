@@ -199,6 +199,17 @@ fn rerun_allowed(agents: &[RegistryAgent], session: &str, pane: u64) -> Result<(
     }
 }
 
+/// The last `n` non-empty lines of `text`, joined by `\n` - the mux-server twin
+/// of the daemon's `Region::BottomNonEmptyLines` extraction (x-c929). The crates
+/// share no code, so this is a focused copy (like `rfc3339_like_to_secs`); it
+/// must stay byte-identical to the daemon's so an answer's region fingerprint
+/// hashes the same on both sides.
+fn bottom_non_empty_lines(text: &str, n: usize) -> String {
+    let nonblank: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = nonblank.len().saturating_sub(n);
+    nonblank[start..].join("\n")
+}
+
 /// What connected clients register with the core loop.
 enum CoreMsg {
     Attach {
@@ -248,6 +259,16 @@ enum CoreMsg {
         id: u64,
         pane: u64,
         op: BlockNavOp,
+    },
+    /// (v9, x-c929) Answer a blocked prompt: re-verify the region fingerprint
+    /// against the live grid, then inject the daemon-pinned `keystroke`. `id`
+    /// is the requesting client (for the stale/busy/closed notice).
+    PaneAnswer {
+        id: u64,
+        pane: u64,
+        fingerprint: [u8; 32],
+        region_lines: u16,
+        keystroke: Vec<u8>,
     },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
@@ -1123,6 +1144,9 @@ impl Core {
                 badge: if exited { None } else { a.badge },
                 reason: if exited { None } else { a.reason.clone() },
                 exited,
+                // An exited pane is unanswerable; drop any stale payload with
+                // the badge (x-c929).
+                answerable: if exited { None } else { a.answerable.clone() },
             });
         }
         out
@@ -1284,6 +1308,62 @@ impl Core {
     /// [`rerun_allowed`].
     fn pane_rerun_allowed(&self, pane: u64) -> Result<(), &'static str> {
         rerun_allowed(&self.agents, &self.session_name, pane)
+    }
+
+    /// Answer a blocked prompt without focusing the pane (x-c929). The freshness
+    /// contract: re-read the pane's live bottom-N region, re-hash, and inject the
+    /// daemon-pinned `keystroke` ONLY when the hash matches the `fingerprint` the
+    /// operator read - so a picked answer can never land on a pane that advanced
+    /// since the scrape (fail closed to focus). A foreign live writer-claim
+    /// bounces (never inject under a relay's in-flight write). The re-read + send
+    /// is atomic on the serial core loop: no other input interleaves for this
+    /// pane between the hash check and the send (no in-server TOCTOU).
+    ///
+    /// Deliberately NOT the `rerun_allowed` idle-guard: that guard refuses a
+    /// `blocked` pane, which is exactly the pane we answer. The fingerprint match
+    /// IS the proof the pane is still at the prompt the human saw. The bytes sent
+    /// are only ever the daemon-pinned `keystroke` (Locked 2), never fabricated.
+    fn pane_answer(
+        &mut self,
+        client_id: u64,
+        pane: u64,
+        fingerprint: [u8; 32],
+        region_lines: u16,
+        keystroke: &[u8],
+    ) {
+        let Some(entry) = self.panes.get(&pane) else {
+            self.notice(client_id, "pane closed - answer not sent");
+            return;
+        };
+        // Re-read the SAME region the daemon fingerprinted: full grid text ->
+        // bottom_non_empty_lines(region_lines). The daemon's `mux pane read
+        // --json` returns this same frame_text, so the hashes agree iff the grid
+        // is unchanged. Empty keystroke or an unhostable region can never produce
+        // a match against a real prompt, so both fail closed here.
+        let live = frame_text(&entry.vt.frame());
+        let region = bottom_non_empty_lines(&live, region_lines as usize);
+        if keystroke.is_empty() || *blake3::hash(region.as_bytes()).as_bytes() != fingerprint {
+            self.notice(client_id, "prompt changed - focus to answer");
+            return;
+        }
+        // Writer-claim interlock (same as rerun/Input): a live relay holder
+        // bounces; a dead holder releases here so the answer resumes (AC3-FR).
+        // Single map lookup via Entry; the notice is deferred past the borrow.
+        let mut driven_by_relay = false;
+        if let std::collections::hash_map::Entry::Occupied(e) = self.claims.entry(pane) {
+            if pid_alive(*e.get()) {
+                driven_by_relay = true;
+            } else {
+                e.remove();
+            }
+        }
+        if driven_by_relay {
+            self.notice(client_id, "driven by relay - focus to answer");
+            return;
+        }
+        if let Some(entry) = self.panes.get(&pane) {
+            let _ = entry.pty.write_input(keystroke);
+        }
     }
 
     /// Live mode changes in a focused pane (vim toggling mouse reporting
@@ -1614,7 +1694,10 @@ impl Core {
             CoreMsg::Input { id, .. }
             | CoreMsg::Command { id, .. }
             | CoreMsg::Mouse { id, .. }
-            | CoreMsg::BlockNav { id, .. } => Some(*id),
+            | CoreMsg::BlockNav { id, .. }
+            // PaneAnswer injects a keystroke into a pane PTY (x-c929); a
+            // read-only observer must never reach it (same class as Input).
+            | CoreMsg::PaneAnswer { id, .. } => Some(*id),
             _ => None,
         };
         if let Some(id) = mutating_sender {
@@ -1711,6 +1794,16 @@ impl Core {
             }
             CoreMsg::BlockNav { id, pane, op } => {
                 self.block_nav(id, pane, op);
+                Flow::Continue
+            }
+            CoreMsg::PaneAnswer {
+                id,
+                pane,
+                fingerprint,
+                region_lines,
+                keystroke,
+            } => {
+                self.pane_answer(id, pane, fingerprint, region_lines, &keystroke);
                 Flow::Continue
             }
             CoreMsg::Query(reply) => {
@@ -2577,6 +2670,26 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                     break;
                 }
             }
+            Ok(ClientMsg::PaneAnswer {
+                pane,
+                fingerprint,
+                region_lines,
+                keystroke,
+            }) => {
+                if core_tx
+                    .send(CoreMsg::PaneAnswer {
+                        id,
+                        pane,
+                        fingerprint,
+                        region_lines,
+                        keystroke,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Ok(ClientMsg::Detach) => {
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
@@ -2828,6 +2941,7 @@ mod tests {
             badge,
             reason: None,
             mux: Some((sess.into(), pane)),
+            answerable: None,
         }
     }
 
@@ -3015,5 +3129,38 @@ mod tests {
             }),
             Flow::Continue
         ));
+    }
+
+    // -- Answer freshness (x-c929) ---------------------------------------------
+
+    #[test]
+    fn bottom_non_empty_lines_scopes_and_joins_like_the_daemon() {
+        // The server twin must reproduce the daemon's Region::extract: blank
+        // lines filtered, last N joined by '\n', line content untrimmed.
+        let grid = "scrollback\n\nDo you want to proceed?\n  ❯ 1. Yes\n  2. No\n";
+        assert_eq!(
+            bottom_non_empty_lines(grid, 8),
+            "scrollback\nDo you want to proceed?\n  ❯ 1. Yes\n  2. No"
+        );
+        // N smaller than the non-blank count scopes to the tail.
+        assert_eq!(bottom_non_empty_lines(grid, 2), "  ❯ 1. Yes\n  2. No");
+    }
+
+    // The freshness contract: a fingerprint over the daemon-side region verifies
+    // against the server's re-hash of the same grid (else every answer would
+    // fail closed as stale - a false negative that breaks the feature), and a
+    // grid that advanced hashes differently (the true-positive stale that keeps
+    // an answer off a moved-on pane).
+    #[test]
+    fn answer_fingerprint_matches_unchanged_grid_and_rejects_advanced() {
+        let grid = "scrollback\n\nDo you want to proceed?\n  ❯ 1. Yes\n  2. No\n";
+        let daemon_fp = *blake3::hash(bottom_non_empty_lines(grid, 8).as_bytes()).as_bytes();
+        // Server re-reads the identical grid -> same fingerprint (answer lands).
+        let server_fp = *blake3::hash(bottom_non_empty_lines(grid, 8).as_bytes()).as_bytes();
+        assert_eq!(daemon_fp, server_fp, "unchanged grid must verify");
+        // The pane advanced (a new line appended) -> different fingerprint.
+        let advanced = format!("{grid}Running the tool now...\n");
+        let advanced_fp = *blake3::hash(bottom_non_empty_lines(&advanced, 8).as_bytes()).as_bytes();
+        assert_ne!(daemon_fp, advanced_fp, "advanced grid must read stale");
     }
 }

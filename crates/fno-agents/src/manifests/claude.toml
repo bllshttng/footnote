@@ -108,6 +108,18 @@ gate = { all = [
   { any = [ { contains = "1. Yes" }, { contains = "1. yes" } ] },
 ] }
 
+# Answer grammar (x-c929): each numbered line ("  ❯ 1. Yes", "  2. No") is one
+# option; named captures `idx` (the digit to send) + `label` (display text).
+# `send = "digit"` maps a picked option to its single ASCII digit byte. The
+# extractor validates the indices form a contiguous 1..N run and fingerprints
+# the region text; the mux server re-verifies that fingerprint against its live
+# grid before injecting - a picked answer never lands on a moved-on pane. Only a
+# clean numbered menu is answerable; an arrow-only menu extracts to focus-only.
+# Single-quoted TOML so the backslashes reach the regex engine verbatim.
+[rule.answer]
+option = '^\s*\x{276f}?\s*(?P<idx>[0-9])\.\s+(?P<label>.+?)\s*$'
+send = "digit"
+
 # Last-resort idle signal: the idle window title starts with "✳ " (U+2733).
 [[rule]]
 id = "osc_title_idle"

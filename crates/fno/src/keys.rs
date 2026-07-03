@@ -55,6 +55,10 @@ pub enum Event {
     /// Open the sideline selector (leader+w). Selector-mode keys are
     /// interpreted by the client's view layer, not here.
     OpenSelector,
+    /// Open the answer overlay (leader+a, x-c929). Overlay-mode keys (a digit
+    /// answers, `n`/`N` cycle the blocked queue, Enter focuses, Esc closes) are
+    /// interpreted by the client's view layer, not here (like OpenSelector).
+    OpenAnswers,
     /// Show/hide the sideline (leader+b).
     TogglePanel,
     /// Show/hide the status row (leader+s). Client-local (US4, AC4-FR).
@@ -222,6 +226,7 @@ fn chord(b: u8) -> Event {
         b'&' => Event::Cmd(Command::CloseTab),
         b'1'..=b'9' => Event::SelectTabIdx((b - b'1') as usize),
         b'w' => Event::OpenSelector,
+        b'a' => Event::OpenAnswers,
         b'b' => Event::TogglePanel,
         b's' => Event::ToggleStatus,
         b'?' => Event::ShowKeys,
@@ -343,6 +348,7 @@ mod tests {
         assert_eq!(scan_all(&[b"\x027"]), vec![Event::SelectTabIdx(6)]);
         assert_eq!(scan_all(&[b"\x02&"]), vec![Event::Cmd(Command::CloseTab)]);
         assert_eq!(scan_all(&[b"\x02w"]), vec![Event::OpenSelector]);
+        assert_eq!(scan_all(&[b"\x02a"]), vec![Event::OpenAnswers]);
         assert_eq!(scan_all(&[b"\x02b"]), vec![Event::TogglePanel]);
         assert_eq!(scan_all(&[b"\x02s"]), vec![Event::ToggleStatus]);
         assert_eq!(scan_all(&[b"\x02?"]), vec![Event::ShowKeys]);

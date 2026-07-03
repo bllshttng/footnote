@@ -32,6 +32,11 @@ libc = "0.2"
 portable-pty = "0.9"
 # `pane wait --pattern RE`: regex over a pane's visible grid (script API).
 regex = "1"
+# Re-verify a picked answer's region fingerprint against the live grid before
+# injecting (x-c929). Must match the daemon's hash byte-for-byte across
+# processes, so the same content hash both sides use - not a per-process
+# DefaultHasher.
+blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

@@ -32,7 +32,7 @@ use std::process::Command;
 use serde_json::json;
 
 use crate::events::EventEmitter;
-use crate::manifest::{load_manifest, Manifest, Verdict};
+use crate::manifest::{load_manifest, AnswerablePrompt, Manifest, Verdict};
 use crate::paths::AgentsHome;
 use crate::readiness::ScreenView;
 use crate::state::{self, Registry, ScreenStateReport};
@@ -126,6 +126,7 @@ fn stamp_due_refresh(last: &ScreenStateReport, now_secs: u64) -> bool {
 pub fn decide(
     last: Option<&ScreenStateReport>,
     verdict: Option<Verdict<'_>>,
+    answerable: Option<AnswerablePrompt>,
     now_secs: u64,
     now_stamp: &str,
 ) -> Decision {
@@ -134,6 +135,8 @@ pub fn decide(
     };
     if v.skip_state_update {
         return match last {
+            // Hold: `..l.clone()` carries the prior answerable through a pager
+            // hold, so the queue keeps the last-good payload while state is held.
             Some(l) if stamp_due_refresh(l, now_secs) => Decision::Write(ScreenStateReport {
                 at: now_stamp.to_string(),
                 seq: l.seq + 1,
@@ -143,13 +146,23 @@ pub fn decide(
         };
     }
     match last {
-        Some(l) if l.state == v.state && !stamp_due_refresh(l, now_secs) => Decision::Hold,
+        // A changed answer payload (same blocked state, different options)
+        // rewrites too, so the queue reflects a re-prompt without waiting for the
+        // stamp refresh. The send-time fingerprint is still the safety authority.
+        Some(l)
+            if l.state == v.state
+                && l.answerable == answerable
+                && !stamp_due_refresh(l, now_secs) =>
+        {
+            Decision::Hold
+        }
         _ => Decision::Write(ScreenStateReport {
             state: v.state.to_string(),
             rule: v.rule_id.to_string(),
             seq: last.map_or(1, |l| l.seq + 1),
             at: now_stamp.to_string(),
             ttl_ms: Some(SCREEN_STATE_TTL_MS),
+            answerable,
         }),
     }
 }
@@ -326,12 +339,11 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter, notify_on_blocked
                     // progress; no bundled rule reads osc_progress today.
                     osc_progress: None,
                 };
-                decide(
-                    t.last.as_ref(),
-                    manifest.evaluate(&view),
-                    now_secs,
-                    &now_stamp,
-                )
+                let (verdict, answerable) = match manifest.evaluate_answerable(&view) {
+                    Some((v, a)) => (Some(v), a),
+                    None => (None, None),
+                };
+                decide(t.last.as_ref(), verdict, answerable, now_secs, &now_stamp)
             }
         };
         let expect_ref = (t.session.clone(), t.pane_id);
@@ -484,6 +496,7 @@ mod tests {
             seq,
             at: at.into(),
             ttl_ms: Some(SCREEN_STATE_TTL_MS),
+            answerable: None,
         }
     }
 
@@ -653,6 +666,7 @@ mod tests {
         let d = decide(
             None,
             verdict_from(&m, "esc to interrupt"),
+            None,
             now_secs(),
             NOW_STAMP,
         );
@@ -671,7 +685,13 @@ mod tests {
         // Same state, stamp 10s old (< refresh threshold): no write.
         let m = one_rule_manifest("working", "busy", false);
         let last = rep("working", "2026-07-02T00:09:50Z", 4);
-        let d = decide(Some(&last), verdict_from(&m, "busy"), now_secs(), NOW_STAMP);
+        let d = decide(
+            Some(&last),
+            verdict_from(&m, "busy"),
+            None,
+            now_secs(),
+            NOW_STAMP,
+        );
         assert_eq!(d, Decision::Hold);
     }
 
@@ -681,7 +701,13 @@ mod tests {
         // the reader-side TTL never lapses under a live daemon.
         let m = one_rule_manifest("working", "busy", false);
         let last = rep("working", "2026-07-02T00:00:00Z", 4);
-        let d = decide(Some(&last), verdict_from(&m, "busy"), now_secs(), NOW_STAMP);
+        let d = decide(
+            Some(&last),
+            verdict_from(&m, "busy"),
+            None,
+            now_secs(),
+            NOW_STAMP,
+        );
         let Decision::Write(new) = d else {
             panic!("expected refresh Write, got {d:?}");
         };
@@ -697,6 +723,7 @@ mod tests {
         let d = decide(
             Some(&last),
             verdict_from(&m, "Do you want to proceed?"),
+            None,
             now_secs(),
             NOW_STAMP,
         );
@@ -715,6 +742,7 @@ mod tests {
             decide(
                 Some(&last),
                 verdict_from(&m, "nothing here"),
+                None,
                 now_secs(),
                 NOW_STAMP
             ),
@@ -724,6 +752,7 @@ mod tests {
             decide(
                 None,
                 verdict_from(&m, "nothing here"),
+                None,
                 now_secs(),
                 NOW_STAMP
             ),
@@ -855,6 +884,7 @@ mod tests {
         let d = decide(
             Some(&held),
             verdict_from(&m, "Showing detailed transcript"),
+            None,
             now_secs(),
             NOW_STAMP,
         );
@@ -869,6 +899,7 @@ mod tests {
             decide(
                 Some(&fresh),
                 verdict_from(&m, "Showing detailed transcript"),
+                None,
                 now_secs(),
                 NOW_STAMP
             ),
@@ -878,6 +909,7 @@ mod tests {
             decide(
                 None,
                 verdict_from(&m, "Showing detailed transcript"),
+                None,
                 now_secs(),
                 NOW_STAMP
             ),
