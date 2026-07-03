@@ -886,8 +886,9 @@ fn socket_in_use(e: &std::io::Error) -> bool {
 }
 
 /// Connect bound for liveness probes at bind time. Generous next to a socket
-/// round-trip; three timed-out attempts still return within ~3s instead of
-/// hanging server startup forever on a wedged predecessor.
+/// round-trip; a wedged predecessor times out in ~1s and reads as alive on the
+/// first attempt (the refused-connect retry loop below only re-tries a dead
+/// socket), so server startup never hangs forever on it.
 const PROBE_ALIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Connect to an AF_UNIX SOCK_STREAM path with a bounded timeout. std's
@@ -895,6 +896,13 @@ const PROBE_ALIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// listener (dead accept loop, full backlog) blocks it indefinitely - the
 /// `fno restart --mux` hang. Nonblocking connect + `poll` for writability,
 /// then blocking mode restored so the caller's read/write timeouts apply.
+///
+/// The `ErrorKind::TimedOut` this returns means "wedged server" and callers
+/// match on it to keep a wedged server out of the "stale/dead" bucket. That
+/// signal is only sound for the CONNECT: a post-connect read/write timeout
+/// (a server that accepted then stopped answering) is a different state and
+/// must NOT be kind-matched against `TimedOut` here - callers treat those
+/// with a bare `Err(_)` arm instead.
 pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::FromRawFd;

@@ -131,16 +131,35 @@ fn proto_non_tty_bare_fno_prints_notice_and_exits_zero() {
 // Bounded client connects (x-2896): a wedged server (live listener, dead
 // accept loop, FULL backlog) must produce a bounded error, never a hang.
 
+/// How a saturated backlog manifests to a client connect. It differs by
+/// platform, and BOTH are bounded (the anti-hang guarantee) - only the error
+/// kind differs, which the call sites key on:
+/// - `Timeout`: Linux AF_UNIX blocks a connect to a full backlog; the
+///   nonblocking-connect + poll turns that into `TimedOut` (also the EAGAIN
+///   path). A wedged server reads as alive here.
+/// - `Refused`: macOS AF_UNIX refuses a connect to a full/zero backlog
+///   (`ECONNREFUSED`), indistinguishable from a dead server - so a wedged
+///   server IS clobberable there (pre-existing, and effectively fine: a
+///   full-backlog dead-accept-loop server is already unusable).
+#[derive(PartialEq, Debug)]
+enum WedgeKind {
+    Timeout,
+    Refused,
+}
+
 /// A listener that never accepts, with its backlog saturated: the wedged-
-/// server fixture. Holds the queued streams so they stay pending. Returns
-/// None if the platform's minimum backlog could not be saturated in 16 tries.
+/// server fixture. Holds the queued streams so they stay pending.
 struct WedgedServer {
     fd: std::os::fd::RawFd,
+    kind: WedgeKind,
     _queued: Vec<UnixStream>,
 }
 
 impl WedgedServer {
-    fn new(path: &std::path::Path) -> Option<Self> {
+    /// Build the fixture or FAIL the test - a fixture that cannot establish its
+    /// precondition (a saturated backlog) is a broken fixture, never a silent
+    /// skip that would let the primary regression pass vacuously.
+    fn new(path: &std::path::Path) -> Self {
         use std::os::unix::ffi::OsStrExt;
         let fd = unsafe {
             let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
@@ -164,22 +183,38 @@ impl WedgedServer {
             assert_eq!(libc::listen(fd, 0), 0, "listen() failed");
             fd
         };
-        // Saturate the queue: connects succeed (kernel-queued) until full.
+        // Saturate the queue: connects succeed (kernel-queued) until full,
+        // then the next connect either times out (Linux blocks) or is refused
+        // (macOS). Either is the wedge - record which so the tests can assert
+        // the platform-honest outcome. A backlog of 0 saturates within a
+        // couple of connects; 256 is far more headroom than any real kernel
+        // needs, so exhausting it means the fixture's assumption broke and the
+        // test MUST fail (not silently skip).
         let mut queued = Vec::new();
-        for _ in 0..16 {
+        for _ in 0..256 {
             match connect_unix_timeout(path, Duration::from_millis(250)) {
                 Ok(s) => queued.push(s),
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    return Some(WedgedServer {
+                Err(e) => {
+                    let kind = match e.kind() {
+                        std::io::ErrorKind::TimedOut => WedgeKind::Timeout,
+                        std::io::ErrorKind::ConnectionRefused => WedgeKind::Refused,
+                        other => {
+                            // Close fd before the panic unwinds - it is not yet
+                            // owned by a WedgedServer, so RAII would not reclaim it.
+                            unsafe { libc::close(fd) };
+                            panic!("unexpected error while saturating backlog: {other:?} ({e})");
+                        }
+                    };
+                    return WedgedServer {
                         fd,
+                        kind,
                         _queued: queued,
-                    });
+                    };
                 }
-                Err(e) => panic!("unexpected error while saturating backlog: {e}"),
             }
         }
         unsafe { libc::close(fd) };
-        None
+        panic!("backlog did not saturate in 256 connects - fixture assumption broke");
     }
 }
 
@@ -193,18 +228,23 @@ impl Drop for WedgedServer {
 fn connect_timeout_wedged_listener_bounded_error_not_hang() {
     let scratch = Scratch::new("wedged");
     let sock = scratch.path("s.sock");
-    let Some(_wedged) = WedgedServer::new(&sock) else {
-        return; // platform queues >16 unaccepted connects; nothing to assert
-    };
+    let wedged = WedgedServer::new(&sock);
+    // The anti-hang guarantee: a connect to a wedged server returns a BOUNDED
+    // error fast, never blocks. The exact kind is the platform's saturated-
+    // backlog manifestation (TimedOut on Linux, ConnectionRefused on macOS).
     let start = std::time::Instant::now();
     let err = connect_unix_timeout(&sock, Duration::from_millis(300))
         .expect_err("full backlog must not connect");
-    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "got: {err}");
     assert!(
         start.elapsed() < Duration::from_secs(2),
         "bounded connect took {:?}",
         start.elapsed()
     );
+    let expected = match wedged.kind {
+        WedgeKind::Timeout => std::io::ErrorKind::TimedOut,
+        WedgeKind::Refused => std::io::ErrorKind::ConnectionRefused,
+    };
+    assert_eq!(err.kind(), expected, "wedge={:?} got: {err}", wedged.kind);
 }
 
 #[test]
@@ -218,15 +258,31 @@ fn connect_timeout_stale_socket_fails_fast() {
         BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
     }
     assert!(sock.exists(), "socket file must survive listener drop");
+    // Converge to a fast refuse. macOS AF_UNIX has a brief teardown window
+    // after the listener closes where one connect can still land on a residual
+    // backlog slot; the invariant is that the socket QUICKLY settles to refused
+    // and never hangs, not that the very first connect refuses.
     let start = std::time::Instant::now();
-    let err =
-        connect_unix_timeout(&sock, Duration::from_secs(1)).expect_err("dead socket must refuse");
+    let mut last = None;
+    while start.elapsed() < Duration::from_secs(2) {
+        match connect_unix_timeout(&sock, Duration::from_secs(1)) {
+            Ok(residual) => {
+                drop(residual); // in-flight teardown accept; retry
+                continue;
+            }
+            Err(e) => {
+                last = Some(e);
+                break;
+            }
+        }
+    }
+    let err = last.expect("dead socket must settle to refused, never hang");
     assert_eq!(
         err.kind(),
         std::io::ErrorKind::ConnectionRefused,
         "got: {err}"
     );
-    assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(start.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
@@ -251,13 +307,25 @@ fn connect_timeout_live_listener_connects() {
 
 #[test]
 fn proto_wedged_server_reads_alive_not_clobbered() {
-    // A wedged-but-live server must read as AlreadyRunning at bind time:
-    // unlinking its socket would orphan it (running, unreachable by name).
+    // A wedged-but-live server must read as AlreadyRunning at bind time WHEN the
+    // platform surfaces the wedge as a connect TIMEOUT (Linux): unlinking its
+    // socket would orphan it (running, unreachable by name). Where the wedge
+    // surfaces as ConnectionRefused (macOS full/zero backlog), the server is
+    // indistinguishable from dead and the clobber is the accepted, pre-existing
+    // behavior - assert that explicitly rather than skip.
     let scratch = Scratch::new("wedged-bind");
     let sock = scratch.path("s.sock");
-    let Some(_wedged) = WedgedServer::new(&sock) else {
+    let wedged = WedgedServer::new(&sock);
+    if wedged.kind == WedgeKind::Refused {
+        match bind_or_probe(&sock).unwrap() {
+            // Refused reads as dead: the stale-socket takeover is correct here.
+            BindOutcome::Bound(_) => {}
+            BindOutcome::AlreadyRunning => {
+                panic!("refused wedge should read as dead and be taken over")
+            }
+        }
         return;
-    };
+    }
     match bind_or_probe(&sock).unwrap() {
         BindOutcome::AlreadyRunning => {}
         BindOutcome::Bound(_) => panic!("wedged-but-live socket was clobbered"),

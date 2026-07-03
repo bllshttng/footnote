@@ -675,6 +675,22 @@ pub fn kill_server(session: &str, json: bool) -> i32 {
                 }
             };
         }
+        // A bounded-connect timeout means the server holds the socket but
+        // never accepts: it is wedged. kill-server needs an ACCEPTED
+        // connection to send KillServer, so it cannot recover this - and it
+        // must NOT unlink (the socket may front a live-but-stuck server).
+        // Name the real remedy instead of a bare io::Error, since every other
+        // call site's advice points the operator here.
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            eprintln!(
+                "fno: session {session:?} is wedged (connect timed out); the server holds \
+                 {} but is not accepting. kill-server cannot recover it - kill the server \
+                 process directly (its log is at {}).",
+                sock.display(),
+                sock.with_extension("log").display()
+            );
+            return EXIT_ERROR;
+        }
         Err(e) => {
             eprintln!("fno: cannot connect to {}: {e}", sock.display());
             return EXIT_ERROR;

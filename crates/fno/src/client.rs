@@ -104,9 +104,11 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
         // bind race, so report instead - never hang, never clobber.
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
             return Err(format!(
-                "server at {} is not accepting connections (connect timed out); \
-                 it may be wedged - `fno mux kill-server` it and retry",
-                path.display()
+                "server at {} is not accepting connections (connect timed out); it is \
+                 wedged. kill-server needs an accepted connection and cannot recover it - \
+                 kill the server process directly (its log is at {}), then retry.",
+                path.display(),
+                log_path(path).display()
             ));
         }
         Err(_) => {}
