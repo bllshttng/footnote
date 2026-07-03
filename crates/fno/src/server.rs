@@ -362,6 +362,12 @@ struct Client {
     /// This client's own content-area (rows, cols) - one input to the
     /// view-scoped smallest-client clamp (Locked 1).
     dims: (u16, u16),
+    /// An observer client (attached with rows==0 && cols==0, e.g. the web
+    /// bridge): excluded from the smallest-client clamp so it never shrinks a
+    /// PTY, and its `visible` set is EVERY live pane so the browser can pick
+    /// any pane without an upstream message (x-6a14 read-only attach). Its
+    /// `Resize` is ignored and it never spawns a squad.
+    passive: bool,
 }
 
 struct PaneEntry {
@@ -494,7 +500,10 @@ impl Core {
         let clamp = self
             .clients
             .iter()
-            .filter(|c| c.view.1 == tid)
+            // An observer (passive) client never enters the clamp reduce, so
+            // a phone-sized viewer can never shrink a real client's PTY
+            // (x-6a14 Locked Decision 4 / AC1-EDGE).
+            .filter(|c| c.view.1 == tid && !c.passive)
             .map(|c| c.dims)
             .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)));
         clamp
@@ -721,6 +730,11 @@ impl Core {
         dirty: DirtyMap,
         notify: Arc<Notify>,
     ) {
+        // An observer (web bridge) attaches (0,0). It must never create a
+        // squad or a PTY (Locked Decision 5: read-only); it only watches. It
+        // anchors to any existing squad's MRU tab for a sane `active_squad`
+        // highlight - its frames come from `visible` = all panes, not `view`.
+        let passive = rows == 0 && cols == 0;
         let view = match self.session.find_by_cwd(&key) {
             Some(sid) => {
                 // Existing squad: the attach lands IN it (AC6-HP, worktree
@@ -735,6 +749,24 @@ impl Core {
                     .expect("a squad always has a tab")
                     .id;
                 (sid, tid)
+            }
+            None if passive => {
+                // Observer, no cwd match: anchor to the first squad's MRU tab,
+                // or a (0,0) sentinel when the session has no squads yet (an
+                // empty session - the browser shows its "no panes" placeholder;
+                // TabId 0 is never minted so it is a safe dangling view).
+                match self.session.squads.first() {
+                    Some(sq) => {
+                        let tid = sq
+                            .tabs
+                            .get(sq.active_tab)
+                            .or_else(|| sq.tabs.first())
+                            .expect("a squad always has a tab")
+                            .id;
+                        (sq.id, tid)
+                    }
+                    None => (0, 0),
+                }
             }
             None => {
                 // Fresh squad: PTY spawn FIRST (Locked 7), then the model.
@@ -776,6 +808,7 @@ impl Core {
             view,
             visible: HashSet::new(),
             dims: (rows, cols),
+            passive,
         });
         self.push_layout(true);
     }
@@ -786,6 +819,14 @@ impl Core {
             .iter()
             .find(|c| c.id == client_id)
             .map(|c| c.view)
+    }
+
+    /// Whether `client_id` attached as an observer (`Attach { rows: 0, cols: 0 }`).
+    /// A passive client is read-only at the server: any PTY/tree-mutating message
+    /// from it is dropped (x-6a14 defense-in-depth - the read-only guarantee holds
+    /// at the server, not only in the write-half-less web.rs bridge).
+    fn is_passive(&self, client_id: u64) -> bool {
+        self.clients.iter().any(|c| c.id == client_id && c.passive)
     }
 
     /// The tab a view names, when it is live.
@@ -922,6 +963,11 @@ impl Core {
             })
             .collect();
 
+        // An observer client sees EVERY pane (x-6a14): its `visible` set is
+        // all live panes so the browser can draw any pane the server broadcasts
+        // without an upstream `View`. Precomputed here so the send loop can
+        // hold `&mut self.clients` while reading it.
+        let all_pane_ids: Vec<u64> = self.panes.keys().copied().collect();
         let mut dead = Vec::new();
         for (c, (layout_msg, focused_modes, rects)) in self.clients.iter_mut().zip(per) {
             // ModeSync BEFORE the Layout that assumes it (brief ordering).
@@ -947,10 +993,17 @@ impl Core {
                 dead.push(c.id);
                 continue;
             }
-            c.visible = rects.iter().map(|(pid, _)| *pid).collect();
+            // An observer subscribes to all panes; a driving client to just
+            // its viewed tab's rects.
+            let frame_ids: Vec<u64> = if c.passive {
+                all_pane_ids.clone()
+            } else {
+                rects.iter().map(|(pid, _)| *pid).collect()
+            };
+            c.visible = frame_ids.iter().copied().collect();
             if reemit {
                 let mut d = c.dirty.lock().unwrap();
-                for (pid, _) in &rects {
+                for pid in &frame_ids {
                     if let Some(entry) = self.panes.get(pid) {
                         d.insert(*pid, entry.vt.frame());
                     }
@@ -1551,6 +1604,24 @@ impl Core {
     }
 
     fn handle(&mut self, msg: CoreMsg) -> Flow {
+        // Read-only enforcement at the server (x-6a14): drop any PTY/tree-mutating
+        // message from an observer (passive) client, whatever sends it. The web
+        // bridge holds no write half so it never sends these; this makes the
+        // guarantee hold for ANY (0,0) attacher, not by the bridge's discipline
+        // alone. Resize is already neutralized (its dims are ignored for a passive
+        // client); Detach/Gone/Query/etc. are not mutations and pass through.
+        let mutating_sender = match &msg {
+            CoreMsg::Input { id, .. }
+            | CoreMsg::Command { id, .. }
+            | CoreMsg::Mouse { id, .. }
+            | CoreMsg::BlockNav { id, .. } => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = mutating_sender {
+            if self.is_passive(id) {
+                return Flow::Continue;
+            }
+        }
         match msg {
             CoreMsg::Attach {
                 id,
@@ -1624,7 +1695,11 @@ impl Core {
                 // push recomputes every viewed tab's clamp (Locked 5's
                 // Resize event).
                 if let Some(c) = self.clients.iter_mut().find(|c| c.id == id) {
-                    c.dims = (rows, cols);
+                    // An observer never drives geometry: ignore its (never-sent)
+                    // Resize so it cannot enter the clamp (x-6a14 Invariant).
+                    if !c.passive {
+                        c.dims = (rows, cols);
+                    }
                 }
                 self.push_layout(true);
                 Flow::Continue
@@ -2809,5 +2884,136 @@ mod tests {
         // And a foreign busy row must not spuriously gate our plain-shell pane.
         let foreign_only = [agent_in("other", 5, Some(AgentBadge::Working), false)];
         assert_eq!(rerun_allowed(&foreign_only, "main", 5), Ok(()));
+    }
+
+    // -- Observer attach (x-6a14 web read-only bridge) --------------------------
+
+    fn empty_core() -> Core {
+        let (out_tx, _out_rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+        let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
+        Core {
+            session: Session::default(),
+            panes: HashMap::new(),
+            pane_watch: HashMap::new(),
+            clients: Vec::new(),
+            next_pane_id: 1,
+            next_squad_id: 1,
+            tab_areas: HashMap::new(),
+            session_name: "test".into(),
+            shells: Vec::new(),
+            out_tx,
+            exit_tx,
+            agents: Vec::new(),
+            claim_eligible: HashSet::new(),
+            claims: HashMap::new(),
+        }
+    }
+
+    fn client(id: u64, view_tab: TabId, dims: (u16, u16), passive: bool) -> Client {
+        Client {
+            id,
+            reliable_tx: mpsc::channel(1).0,
+            dirty: Arc::default(),
+            notify: Arc::new(Notify::new()),
+            synced_modes: Modes::default(),
+            view: (1, view_tab),
+            visible: HashSet::new(),
+            dims,
+            passive,
+        }
+    }
+
+    #[test]
+    fn observer_attach_excluded_from_clamp() {
+        // AC1-EDGE: a passive (web) viewer must never enter the smallest-client
+        // reduce, so it cannot shrink the driver's PTY - even with tiny dims.
+        let mut core = empty_core();
+        core.clients.push(client(1, 5, (24, 80), false)); // driving client
+        core.clients.push(client(2, 5, (10, 30), true)); // phone observer
+        assert_eq!(
+            core.tab_area(5),
+            (24, 80),
+            "a passive viewer must not lower the driver's clamp"
+        );
+    }
+
+    #[test]
+    fn observer_attach_sole_viewer_keeps_last_or_default() {
+        // AC1-EDGE: when the observer is the ONLY viewer, the tab keeps its
+        // last-applied size (or VT defaults if never sized), never the phone's.
+        let mut core = empty_core();
+        core.clients.push(client(1, 5, (10, 30), true));
+        assert_eq!(
+            core.tab_area(5),
+            (vt::DEFAULT_ROWS, vt::DEFAULT_COLS),
+            "sole observer -> VT defaults, never its own dims"
+        );
+        core.tab_areas.insert(5, (40, 120));
+        assert_eq!(
+            core.tab_area(5),
+            (40, 120),
+            "sole observer -> last-applied size, never reflows to the phone"
+        );
+    }
+
+    #[test]
+    fn observer_attach_never_spawns_a_pane() {
+        // Locked Decision 5: an observer (0,0) attach to a session it does not
+        // match must register read-only without ever creating a squad/PTY.
+        let mut core = empty_core();
+        let (tx, _rx) = mpsc::channel::<ServerMsg>(8);
+        core.attach(
+            1,
+            0,
+            0,
+            "/nowhere".into(),
+            "/nowhere".into(),
+            tx,
+            Arc::default(),
+            Arc::new(Notify::new()),
+        );
+        assert_eq!(
+            core.panes.len(),
+            0,
+            "observer attach must never spawn a PTY"
+        );
+        assert_eq!(core.clients.len(), 1);
+        assert!(core.clients[0].passive, "the (0,0) client is passive");
+    }
+
+    #[test]
+    fn is_passive_flags_only_observer_clients() {
+        let mut core = empty_core();
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.clients.push(client(2, 5, (0, 0), true));
+        assert!(!core.is_passive(1));
+        assert!(core.is_passive(2));
+        assert!(
+            !core.is_passive(999),
+            "an unknown id is not passive (its message is processed normally)"
+        );
+    }
+
+    #[test]
+    fn handle_drops_mutating_messages_from_a_passive_client() {
+        let mut core = empty_core();
+        core.clients.push(client(2, 5, (0, 0), true));
+        // Read-only at the server: an observer's PTY/tree-mutating messages are
+        // dropped by the guard before their handler body ever runs (x-6a14).
+        assert!(matches!(
+            core.handle(CoreMsg::Input {
+                id: 2,
+                bytes: vec![b'x']
+            }),
+            Flow::Continue
+        ));
+        assert!(matches!(
+            core.handle(CoreMsg::BlockNav {
+                id: 2,
+                pane: 1,
+                op: BlockNavOp::Rerun
+            }),
+            Flow::Continue
+        ));
     }
 }
