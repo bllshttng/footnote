@@ -20,7 +20,7 @@ impl Scratch {
     fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("fno-mouse-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        fno::proto::ensure_private_dir(&dir).unwrap();
         Scratch(dir)
     }
     fn sock(&self) -> PathBuf {
@@ -28,7 +28,7 @@ impl Scratch {
     }
     fn dir(&self, name: &str) -> PathBuf {
         let d = self.0.join(name);
-        std::fs::create_dir_all(&d).unwrap();
+        fno::proto::ensure_private_dir(&d).unwrap();
         d
     }
 }
