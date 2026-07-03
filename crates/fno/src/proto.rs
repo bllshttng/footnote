@@ -917,6 +917,16 @@ pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> std::io::Result<U
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        // Close-on-exec: std's UnixStream::connect sets it, so replacing that
+        // call must too - otherwise a raw fd leaks into every child the mux
+        // spawns (PTYs, the digest shell-out). fcntl(F_SETFD) is the portable
+        // path (macOS has no SOCK_CLOEXEC socket-type flag); the tiny
+        // create->set window is acceptable here (no fork+exec races on it).
+        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
         addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
         let bytes = c_path.as_bytes();
@@ -953,23 +963,40 @@ pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> std::io::Result<U
                     "connect timed out (accept backlog full)",
                 ));
             }
-            if err.raw_os_error() != Some(libc::EINPROGRESS) {
+            // A connect interrupted by a signal (EINTR) is NOT a failure: POSIX
+            // says the connection continues asynchronously, exactly like
+            // EINPROGRESS, so poll for its completion rather than reporting the
+            // signal as a dead server (which the bind path would unlink).
+            if err.raw_os_error() != Some(libc::EINPROGRESS)
+                && err.raw_os_error() != Some(libc::EINTR)
+            {
                 libc::close(fd);
                 return Err(err);
             }
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLOUT,
-                revents: 0,
+            // Poll against a deadline, retrying on EINTR with the remaining
+            // budget so a signal storm can neither abort the connect early nor
+            // let it outlast `timeout`.
+            let deadline = std::time::Instant::now() + timeout;
+            let writable = loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let ms = remaining.as_millis().min(i32::MAX as u128) as libc::c_int;
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let pr = libc::poll(&mut pfd, 1, ms);
+                if pr < 0 {
+                    let e = std::io::Error::last_os_error();
+                    if e.raw_os_error() == Some(libc::EINTR) {
+                        continue; // interrupted: re-poll with recomputed remaining
+                    }
+                    libc::close(fd);
+                    return Err(e);
+                }
+                break pr;
             };
-            let ms = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
-            let pr = libc::poll(&mut pfd, 1, ms);
-            if pr < 0 {
-                let e = std::io::Error::last_os_error();
-                libc::close(fd);
-                return Err(e);
-            }
-            if pr == 0 {
+            if writable == 0 {
                 libc::close(fd);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,

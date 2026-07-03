@@ -306,6 +306,27 @@ fn connect_timeout_live_listener_connects() {
 }
 
 #[test]
+fn connect_timeout_sets_close_on_exec() {
+    // Regression guard: the raw libc socket must carry FD_CLOEXEC (std's
+    // connect does), else the mux fd leaks into every child the client spawns.
+    use std::os::unix::io::AsRawFd;
+    let scratch = Scratch::new("cloexec");
+    let sock = scratch.path("s.sock");
+    let _l = match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(l) => l,
+        BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
+    };
+    let stream = connect_unix_timeout(&sock, Duration::from_secs(1)).expect("must connect");
+    let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFD) };
+    assert!(flags >= 0, "F_GETFD failed");
+    assert_ne!(
+        flags & libc::FD_CLOEXEC,
+        0,
+        "connect_unix_timeout must set FD_CLOEXEC"
+    );
+}
+
+#[test]
 fn proto_wedged_server_reads_alive_not_clobbered() {
     // A wedged-but-live server must read as AlreadyRunning at bind time WHEN the
     // platform surfaces the wedge as a connect TIMEOUT (Linux): unlinking its
