@@ -378,7 +378,13 @@ mod tests {
 
     #[test]
     fn mux_bool_absent_is_none() {
-        assert_eq!(read_mux_bool("config:\n  agents:\n    confirm: auto\n", "notify_on_blocked"), None);
+        assert_eq!(
+            read_mux_bool(
+                "config:\n  agents:\n    confirm: auto\n",
+                "notify_on_blocked"
+            ),
+            None
+        );
         assert_eq!(read_mux_bool("schema_version: 1\n", "notify_on_done"), None);
     }
 

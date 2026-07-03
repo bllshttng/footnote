@@ -67,6 +67,12 @@ pub struct DaemonOptions {
     /// (x-b1aa). Default 1h; the daemon entrypoint overrides it from
     /// `config.agents.dead_row_grace` (via `agents_config::dead_row_grace_secs`).
     pub dead_row_grace: Duration,
+    /// Fire an OS notification when a badge ENTERS `blocked` (x-dd84). Default
+    /// ON; overridden from `config.mux.notify_on_blocked` at startup.
+    pub notify_on_blocked: bool,
+    /// Also notify on a terminal `done` hook transition. Default OFF; overridden
+    /// from `config.mux.notify_on_done`.
+    pub notify_on_done: bool,
 }
 
 impl Default for DaemonOptions {
@@ -76,6 +82,8 @@ impl Default for DaemonOptions {
             worker_bin: resolve_worker_bin(),
             reconcile_on_start: true,
             dead_row_grace: Duration::from_secs(crate::agents_config::DEFAULT_DEAD_ROW_GRACE_SECS),
+            notify_on_blocked: true,
+            notify_on_done: false,
         }
     }
 }
@@ -839,8 +847,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     let flag = Arc::clone(&scrape_in_flight);
                     let home = ctx.home.clone();
                     let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    let notify_on_blocked = ctx.opts.notify_on_blocked;
                     tokio::task::spawn_blocking(move || {
-                        crate::scrape::scrape_sweep(&home, &emitter);
+                        crate::scrape::scrape_sweep(&home, &emitter, notify_on_blocked);
                         flag.store(false, std::sync::atomic::Ordering::SeqCst);
                     });
                 }
@@ -3455,6 +3464,11 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
         return;
     };
     let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
+    // Badge-transition notify intent (x-dd84): an early-push report is the row's
+    // first, so an initial `blocked`/`done` is an episode entry too. Captured
+    // before `rep` moves into the row; fired after the write.
+    let (rep_state, rep_reason) = (rep.state, rep.reason.clone());
+    let mut notify: Option<(String, String, bool)> = None;
     // Apply under the seq gate: a store-path report that landed on the row after
     // it became visible (but before this drain) set a >= seq; never regress it.
     let _ = state::update_registry(&ctx.home.registry_json(), |r| {
@@ -3465,16 +3479,61 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
         {
             let newer = e.inside_leg.as_ref().is_none_or(|cur| rep.seq > cur.seq);
             if newer {
+                let prev_state = e.inside_leg.as_ref().map(|r| r.state);
+                let body = rep_reason.clone().unwrap_or_else(|| state_str.to_string());
+                if state::enters(prev_state, rep_state, state::InsideLegState::Blocked) {
+                    notify = Some((name.to_string(), body, false));
+                } else if state::enters(prev_state, rep_state, state::InsideLegState::Done) {
+                    notify = Some((name.to_string(), body, true));
+                }
                 e.inside_leg = Some(rep);
                 // Capability flip (see handle_report): hook beats scrape.
                 e.screen_state = None;
             }
         }
     });
+    if let Some((title, body, is_done)) = notify {
+        let want = if is_done {
+            ctx.opts.notify_on_done
+        } else {
+            ctx.opts.notify_on_blocked
+        };
+        if want {
+            notify_transition(title, body);
+        }
+    }
     let _ = ctx.emitter.emit(
         "inside_leg_buffer_flushed",
         &json!({"name": name, "session_id": session_uuid, "state": state_str, "seq": seq}),
     );
+}
+
+/// Fire a fire-and-forget OS notification for a badge transition (x-dd84).
+///
+/// Detached to its own thread so a missing or slow `fno notify` can never stall
+/// the registry write that observed the transition - the same bounded/fail-open
+/// discipline as the external claim-status writer that once froze admit
+/// (memory project_grid_rail_drive_freeze). `FNO_BIN` selects the binary
+/// (default `fno`); a spawn failure (notifier not on PATH) logs one warn and is
+/// dropped, and the registry write that called this has already succeeded.
+pub(crate) fn notify_transition(title: String, body: String) {
+    let fno = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    // ponytail: reap on the detached thread; `fno notify` is a sub-second
+    // osascript/notify-send call, so waiting on it here cannot realistically leak.
+    std::thread::spawn(move || {
+        match std::process::Command::new(&fno)
+            .args(["notify", &title, &body])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                let _ = child.wait();
+            }
+            Err(e) => eprintln!("fno-agents-daemon: badge notify skipped ({fno} notify): {e}"),
+        }
+    });
 }
 
 fn handle_report(ctx: &Ctx, req: &Request) -> Response {
@@ -3535,6 +3594,10 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         Unknown,
     }
     let mut outcome = Outcome::Unknown;
+    // Badge-transition notify intent (x-dd84): (title, body, is_done). Captured
+    // UNDER the flock from prev-vs-new state; fired AFTER the write so a slow
+    // notifier can never stall ingestion.
+    let mut notify: Option<(String, String, bool)> = None;
     if let Err(e) = state::update_registry(&ctx.home.registry_json(), |r| {
         let Some(entry) = r
             .entries
@@ -3549,6 +3612,20 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                 outcome = Outcome::StaleSeq { last: prev.seq };
                 return;
             }
+        }
+        let prev_state = entry.inside_leg.as_ref().map(|r| r.state);
+        if state::enters(prev_state, state, state::InsideLegState::Blocked) {
+            let body = report_for_store
+                .reason
+                .clone()
+                .unwrap_or_else(|| state_label.clone());
+            notify = Some((entry.name.clone(), body, false));
+        } else if state::enters(prev_state, state, state::InsideLegState::Done) {
+            let body = report_for_store
+                .reason
+                .clone()
+                .unwrap_or_else(|| state_label.clone());
+            notify = Some((entry.name.clone(), body, true));
         }
         entry.inside_leg = Some(report_for_store);
         // Capability flip: the hook now owns this row's signal; a stale
@@ -3569,6 +3646,16 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                 "inside_leg_report",
                 &json!({"session_id": session_id, "seq": seq, "state": state_label}),
             );
+            if let Some((title, body, is_done)) = notify {
+                let want = if is_done {
+                    ctx.opts.notify_on_done
+                } else {
+                    ctx.opts.notify_on_blocked
+                };
+                if want {
+                    notify_transition(title, body);
+                }
+            }
             Response::ok(req.id, json!({"stored": true, "seq": seq}))
         }
         Outcome::StaleSeq { last } => {
@@ -4931,6 +5018,9 @@ mod tests {
                 worker_bin,
                 reconcile_on_start: true,
                 dead_row_grace: Duration::from_secs(3600),
+                // Off in tests: a unit test must never spawn a real `fno notify`.
+                notify_on_blocked: false,
+                notify_on_done: false,
             },
             started_at: std::time::Instant::now(),
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
@@ -4951,6 +5041,9 @@ mod tests {
                 worker_bin,
                 reconcile_on_start: true,
                 dead_row_grace: Duration::from_secs(3600),
+                // Off in tests: a unit test must never spawn a real `fno notify`.
+                notify_on_blocked: false,
+                notify_on_done: false,
             },
             started_at: std::time::Instant::now(),
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
