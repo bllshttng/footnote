@@ -71,9 +71,7 @@ fn fill_history(c: &mut FakeClient, pane: u64) {
     // line already carries "filled#" the instant it is typed, so keying on it
     // would return before the loop produced any scrollback. "hist-59" only
     // exists once the loop's last iteration ran.
-    c.wait_pane_text(15, pane, |t| {
-        t.contains("hist-59") && t.contains("filled#")
-    });
+    c.wait_pane_text(15, pane, |t| t.contains("hist-59") && t.contains("filled#"));
 }
 
 // -- AC1-HP + AC-EDGE: wheel scroll is shared state every co-viewer sees ------
