@@ -62,6 +62,18 @@ def test_missing_snippet_installs_nothing(tmp_path: Path) -> None:
     assert not (tmp_path / "starship.toml").exists()
 
 
+def test_non_utf8_target_degrades_to_missing(tmp_path: Path) -> None:
+    """A target starship.toml with non-UTF-8 bytes must not crash the wizard:
+    the read is caught and reported as missing-snippet."""
+    snippet = _snippet(tmp_path)
+    tgt = tmp_path / "starship.toml"
+    tgt.write_bytes(b"\xff\xfe\x00\x01")  # invalid UTF-8
+
+    result = install_starship_module(snippet, tgt)
+
+    assert result.action == "missing-snippet"
+
+
 def test_default_snippet_resolves_colocated() -> None:
     from fno.setup.starship import default_shell_snippet_source, default_snippet_source
 
@@ -101,6 +113,19 @@ def test_shell_source_line_missing_snippet(tmp_path: Path) -> None:
     res = install_shell_source_line(tmp_path / "nope.sh", tmp_path / ".zshrc")
     assert res.action == "missing-snippet"
     assert not (tmp_path / ".zshrc").exists()
+
+
+def test_shell_source_line_non_utf8_rc_degrades(tmp_path: Path) -> None:
+    """A shell rc with non-UTF-8 bytes degrades to missing-snippet, no crash."""
+    from fno.setup.starship import install_shell_source_line
+
+    snippet = tmp_path / "prompt-fno.sh"
+    snippet.write_text("# portable\n")
+    rc = tmp_path / ".zshrc"
+    rc.write_bytes(b"\xff\xfe\x00\x01")  # invalid UTF-8
+
+    res = install_shell_source_line(snippet, rc)
+    assert res.action == "missing-snippet"
 
 
 def test_wizard_capstone_offers_both_renderers(tmp_path: Path) -> None:

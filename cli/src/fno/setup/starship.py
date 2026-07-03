@@ -71,8 +71,14 @@ def install_starship_module(
     if not snippet_path.is_file():
         return StarshipResult("missing-snippet", target_toml)
 
-    snippet = snippet_path.read_text()
-    existing = target_toml.read_text() if target_toml.exists() else ""
+    # Explicit UTF-8 (not the platform default) + catch a non-UTF-8/unreadable
+    # config so a corrupt file degrades to "nothing installed" instead of
+    # crashing the opt-in wizard. The write side already pins encoding="utf-8".
+    try:
+        snippet = snippet_path.read_text(encoding="utf-8")
+        existing = target_toml.read_text(encoding="utf-8") if target_toml.exists() else ""
+    except (OSError, UnicodeDecodeError):
+        return StarshipResult("missing-snippet", target_toml)
     if _MODULE_MARKER in existing:
         return StarshipResult("already", target_toml)
 
@@ -136,7 +142,10 @@ def install_shell_source_line(snippet_path: Path, rc_path: Path) -> StarshipResu
         return StarshipResult("missing-snippet", rc_path)
 
     line = f'source "{snippet_path}"'
-    existing = rc_path.read_text() if rc_path.exists() else ""
+    try:
+        existing = rc_path.read_text(encoding="utf-8") if rc_path.exists() else ""
+    except (OSError, UnicodeDecodeError):
+        return StarshipResult("missing-snippet", rc_path)
     if str(snippet_path) in existing:
         return StarshipResult("already", rc_path)
 
