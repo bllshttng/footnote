@@ -223,6 +223,34 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     # Bare interactive session: no -i without a message.
     assert "-i" not in build_pane_argv("gemini", "", tmp_path, False, None)
 
+    # x-8f7f US1: agy is never-prompt, stateless (no --session-id), message as
+    # trailing positional; never `-p` (that is agy's headless/print form).
+    agy = build_pane_argv("agy", "task", tmp_path, False, "ignored-uuid")
+    assert agy == ["agy", "--dangerously-skip-permissions", "task"]
+    assert "-p" not in agy and "--session-id" not in agy
+    assert build_pane_argv("agy", "", tmp_path, False, None) == [
+        "agy",
+        "--dangerously-skip-permissions",
+    ]
+
+
+def test_ac1_host_pane_gate_admits_agy_rejects_unhosted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-8f7f US1/US3: the pane gate is READABLE_PROVIDERS, not KNOWN_PROVIDERS.
+    agy (readable, pane-hostable) is admitted and produces a mux-hosted row;
+    opencode (not readable until x-51f6) is rejected at the gate."""
+    from fno.agents.dispatch import DispatchAskError
+
+    # agy spawns a real (faked) mux pane -> a row lands.
+    result, runner = _spawn(monkeypatch, tmp_path, provider="agy")
+    assert result.provider == "agy"
+    assert runner.calls[0][1:4] == ["mux", "pane", "run"]
+
+    # opencode is not pane-hostable yet -> refused before any mux subprocess.
+    with pytest.raises(DispatchAskError, match="unknown provider 'opencode'"):
+        _spawn(monkeypatch, tmp_path, provider="opencode", name="oc")
+
 
 def test_unparseable_pane_id_is_a_loud_error(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.dispatch import DispatchAskError

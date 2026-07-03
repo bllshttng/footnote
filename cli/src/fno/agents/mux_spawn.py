@@ -34,9 +34,9 @@ from fno import paths
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
-    _check_known_provider,
     validate_spawn_name,
 )
+from fno.agents.providers import READABLE_PROVIDERS
 from fno.agents.lock import hold_agent_lock
 from fno.agents.registry import (
     AgentEntry,
@@ -129,6 +129,20 @@ def build_pane_argv(
         if message:
             argv += ["-i", message]
         argv += ["--yolo"] if yolo else ["--approval-mode", "default"]
+        return argv
+    if provider == "agy":
+        # agy (Antigravity) interactive pane (x-8f7f US1). Mirrors AgyProvider in
+        # provider.rs: `--dangerously-skip-permissions` is the never-prompt lane
+        # so an unattended pane can't wedge on its first approval. agy is
+        # stateless (no session id, no JSON envelope), so no --session-id pin;
+        # `-p`/`--print` is agy's HEADLESS form (exits after printing) and must
+        # NOT be used for a pane. A message rides as the trailing positional,
+        # matching claude's interactive form.
+        # ponytail: argv unvalidated against a live agy TUI (agy is closed-source);
+        # pin it via capture-readiness-grid.sh when the manifest is validated.
+        argv = ["agy", "--dangerously-skip-permissions"]
+        if message:
+            argv.append(message)
         return argv
     raise DispatchAskError(
         f"provider {provider!r} has no interactive pane form", exit_code=2
@@ -226,10 +240,19 @@ def dispatch_spawn_pane(
     5. registry row with ``mux: {session, pane_id}`` (create-after-spawn).
     """
     validate_spawn_name(name)
-    try:
-        _check_known_provider(provider)
-    except ValueError as exc:
-        raise DispatchAskError(str(exc), exit_code=2) from exc
+    # x-8f7f: gate the PANE path on READABLE_PROVIDERS, not KNOWN_PROVIDERS. A
+    # pane host only needs an interactive argv (build_pane_argv) and a readable
+    # registry row - not a full Python dispatch adapter. agy is exactly that
+    # case (Rust-only provider, no Python adapter, but pane-hostable), so
+    # widening the global KNOWN_PROVIDERS would leak it into headless/bg Python
+    # dispatch that has no agy codepath. READABLE_PROVIDERS is the pane-hostable
+    # set; build_pane_argv is the backstop for a readable-but-argvless provider.
+    if provider not in READABLE_PROVIDERS:
+        raise DispatchAskError(
+            f"unknown provider {provider!r}; pane-hostable providers: "
+            f"{', '.join(READABLE_PROVIDERS)}",
+            exit_code=2,
+        )
 
     session = resolve_mux_session(session)
     session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
