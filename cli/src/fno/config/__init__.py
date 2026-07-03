@@ -1795,15 +1795,19 @@ class BranchBlock(BaseModel):
 class MuxBlock(BaseModel):
     """fno mux (terminal multiplexer) settings (nested under 'config.mux').
 
-    ``shell_integration`` controls whether the mux auto-injects the
+    ``shell_integration`` (x-b63b) controls whether the mux auto-injects the
     OSC 133 block-marker snippet into the shells it spawns, so command-block
     capture works with zero user config and WITHOUT touching the user's global
     shell rc. The injection happens ONLY in mux-spawned pane shells (temp
-    ``ZDOTDIR`` / ``--rcfile``), never in ``~/.zshrc`` / ``~/.bashrc``.
+    ``ZDOTDIR`` / ``--rcfile``), never in ``~/.zshrc`` / ``~/.bashrc``. Consumed
+    by the Rust mux via ``FNO_MUX_SHELL_INTEGRATION``; absent env reads as
+    ``mux-panes`` (the Rust default is on).
 
-    Consumed by the Rust mux via the ``FNO_MUX_SHELL_INTEGRATION`` env; the
-    settings loader is Python-only, so the spawn front-half translates this key
-    to that env. Absent env reads as ``mux-panes`` (the Rust default is on).
+    ``notify_on_blocked`` / ``notify_on_done`` (x-dd84) fire an OS notification
+    when a badge enters blocked / done. The Rust daemon reads these straight from
+    settings.yaml (``agents_config.rs``, the same split-brain as
+    ``config.agents.dead_row_grace``); modeling them here keeps every mux key
+    discoverable via ``fno config get/set``, the wizard, and the generated docs.
 
     Fields
     ------
@@ -1817,6 +1821,11 @@ class MuxBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     shell_integration: str = "mux-panes"
+    # Fire an OS notification when a badge ENTERS `blocked` (any authority: hook
+    # report or screen-manifest verdict). Episode-gated: once per blocked spell.
+    notify_on_blocked: bool = True
+    # Also notify on a terminal `done` hook transition. Off by default.
+    notify_on_done: bool = False
 
     @field_validator("shell_integration", mode="before")
     @classmethod

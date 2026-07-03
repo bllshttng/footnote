@@ -268,3 +268,7 @@ config:
   mux:
     # Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc.
     shell_integration: mux-panes
+    # Fire an OS notification when an agent badge enters 'blocked' (default on).
+    notify_on_blocked: true
+    # Also notify on a terminal 'done' hook transition (default off).
+    notify_on_done: false

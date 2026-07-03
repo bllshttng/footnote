@@ -179,6 +179,8 @@ FIELD_META: dict[str, Meta] = {
         "Auto-inject OSC 133 block markers into mux-spawned shells: "
         "mux-panes (default) | off. Never edits your global shell rc.",
     ),
+    "config.mux.notify_on_blocked": Meta("advanced", "Fire an OS notification when an agent badge enters 'blocked' (default on).", default_source="default"),
+    "config.mux.notify_on_done": Meta("advanced", "Also notify on a terminal 'done' hook transition (default off).", default_source="default"),
     # --- config.parallel.* ---
     "config.parallel.max_lanes": Meta(
         "advanced",

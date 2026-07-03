@@ -248,7 +248,11 @@ fn write_disposition(e: &state::RegistryEntry, expect_ref: &(String, u64)) -> Wr
 /// changed rows into one locked registry write. Synchronous by design (file
 /// IO + subprocesses); the daemon runs it under `spawn_blocking` off the
 /// idle tick, gated so at most one sweep is in flight.
-pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter) {
+///
+/// `notify_on_blocked` (config.mux.notify_on_blocked, x-dd84) fires one OS
+/// notification when a scraped verdict ENTERS `blocked`; the manifest path has
+/// no `done`, so notify_on_done is not plumbed here.
+pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter, notify_on_blocked: bool) {
     let Ok(reg) = state::load_registry(&home.registry_json()) else {
         return;
     };
@@ -340,12 +344,29 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter) {
     if changes.is_empty() {
         return;
     }
+    // Badge-transition notify intents (x-dd84): (agent name, matched rule).
+    // Captured under the flock from prev-vs-new screen_state; fired after the
+    // write so a slow notifier can never stall the sweep.
+    let mut blocked_notifs: Vec<(String, String)> = Vec::new();
     let write = state::update_registry(&home.registry_json(), |r| {
         for (name, expect_ref, rep) in &changes {
             if let Some(e) = r.find_mut(name) {
                 match write_disposition(e, expect_ref) {
                     WriteDisposition::HookFlip => e.screen_state = None,
-                    WriteDisposition::Apply => e.screen_state = rep.clone(),
+                    WriteDisposition::Apply => {
+                        if notify_on_blocked {
+                            if let Some(new_rep) = rep {
+                                let prev_blocked = e
+                                    .screen_state
+                                    .as_ref()
+                                    .is_some_and(|s| s.state == "blocked");
+                                if new_rep.state == "blocked" && !prev_blocked {
+                                    blocked_notifs.push((name.clone(), new_rep.rule.clone()));
+                                }
+                            }
+                        }
+                        e.screen_state = rep.clone();
+                    }
                     WriteDisposition::Skip => {}
                 }
             }
@@ -353,6 +374,9 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter) {
     });
     if write.is_err() {
         return; // nothing published; next sweep retries
+    }
+    for (name, rule) in blocked_notifs {
+        crate::daemon::notify_transition(name, rule);
     }
     for (name, _, rep) in &changes {
         let _ = emitter.emit(
@@ -788,14 +812,14 @@ mod tests {
         std::fs::write(&read_path, r#"{"pane_id":7,"text":"some scrollback\n› "}"#).unwrap();
         let emitter = EventEmitter::new(home.events_jsonl(), "test");
 
-        scrape_sweep(&home, &emitter);
+        scrape_sweep(&home, &emitter, false);
         let reg = state::load_registry(&home.registry_json()).unwrap();
         let v = reg.entries[0].screen_state.clone().expect("verdict stored");
         assert_eq!(v.state, "idle");
         assert_eq!(v.seq, 1);
 
         // Unchanged screen, fresh stamp: no write (seq stays).
-        scrape_sweep(&home, &emitter);
+        scrape_sweep(&home, &emitter, false);
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(reg.entries[0].screen_state.as_ref().unwrap().seq, 1);
 
@@ -805,7 +829,7 @@ mod tests {
             r#"{"pane_id":7,"text":"Working (3s • esc to interrupt)"}"#,
         )
         .unwrap();
-        scrape_sweep(&home, &emitter);
+        scrape_sweep(&home, &emitter, false);
         let reg = state::load_registry(&home.registry_json()).unwrap();
         let v = reg.entries[0].screen_state.clone().expect("verdict kept");
         assert_eq!(v.state, "working");
@@ -814,7 +838,7 @@ mod tests {
         // Pane vanishes from the listing: verdict cleared (degrade to
         // liveness, never a stale badge).
         std::fs::write(&ls_path, "[]").unwrap();
-        scrape_sweep(&home, &emitter);
+        scrape_sweep(&home, &emitter, false);
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(reg.entries[0].screen_state, None);
 

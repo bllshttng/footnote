@@ -206,6 +206,16 @@ impl InsideLegReport {
     }
 }
 
+/// True when a badge report ENTERS `target` from a different prior state (x-dd84).
+/// This is the whole episode gate for the OS-notification wire: firing only on
+/// the edge INTO `blocked`/`done` means a repeat report at `target` (prev already
+/// `target`) does not re-fire, and a return to `working` then back to `blocked`
+/// fires once more - "once per blocked episode" with no per-row bookkeeping. A
+/// missing prior report (`None`) counts as entering.
+pub fn enters(prev: Option<InsideLegState>, new: InsideLegState, target: InsideLegState) -> bool {
+    new == target && prev != Some(target)
+}
+
 /// Parse the fixed `YYYY-MM-DDThh:mm:ssZ` UTC stamp the registry writes
 /// (`now_rfc3339_like`) back to epoch seconds. Inverse of the daemon's `civil`
 /// (epoch -> civil) helper, using Howard Hinnant's days-from-civil. Returns
@@ -896,6 +906,29 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enters_fires_once_per_episode() {
+        use InsideLegState::{Blocked, Done, Working};
+        // Walk working -> blocked -> blocked -> blocked -> working -> blocked.
+        // `enters(.., Blocked)` must be true ONLY on the two edges into blocked
+        // (positions 2 and 6), not on the repeats within an episode.
+        let seq = [Working, Blocked, Blocked, Blocked, Working, Blocked];
+        let fired: Vec<bool> = seq
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| {
+                let prev = if i == 0 { None } else { Some(seq[i - 1]) };
+                enters(prev, s, Blocked)
+            })
+            .collect();
+        assert_eq!(fired, [false, true, false, false, false, true]);
+        // A first-ever report of blocked (prev None) counts as entering.
+        assert!(enters(None, Blocked, Blocked));
+        // Done is its own episode axis, independent of blocked.
+        assert!(enters(Some(Working), Done, Done));
+        assert!(!enters(Some(Done), Done, Done));
+    }
 
     fn tmpdir(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();

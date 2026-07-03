@@ -41,6 +41,10 @@ fn main() {
     let grace_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     opts.dead_row_grace =
         Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(&grace_cwd));
+    // Badge -> OS notification knobs (x-dd84): config.mux.notify_on_blocked
+    // (default ON) / notify_on_done (default OFF), read from the same cwd.
+    opts.notify_on_blocked = fno_agents::agents_config::notify_on_blocked_enabled(&grace_cwd);
+    opts.notify_on_done = fno_agents::agents_config::notify_on_done_enabled(&grace_cwd);
     // Opt out of the startup reconcile sweep for the fastest cold start
     // (Architecture B, plan ab-70faa65b). Any non-empty value disables it.
     if std::env::var("FNO_AGENTS_NO_STARTUP_RECONCILE")
