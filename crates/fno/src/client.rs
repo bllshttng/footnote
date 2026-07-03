@@ -1965,23 +1965,27 @@ async fn search_keys(
             }
             SearchKey::Byte(b) if !submitted => match b {
                 b'\r' | b'\n' => {
-                    let query = view.search.as_ref().unwrap().query.clone();
-                    view.search.as_mut().unwrap().submitted = true;
-                    write_msg(sock_w, &ClientMsg::SearchOpen { pane, query })
-                        .await
-                        .map_err(|e| format!("search-open send failed: {e}"))?;
+                    if let Some(sv) = view.search.as_mut() {
+                        sv.submitted = true;
+                        let query = sv.query.clone();
+                        write_msg(sock_w, &ClientMsg::SearchOpen { pane, query })
+                            .await
+                            .map_err(|e| format!("search-open send failed: {e}"))?;
+                    }
                 }
                 0x7f | 0x08 => {
-                    view.search.as_mut().unwrap().query.pop();
+                    if let Some(sv) = view.search.as_mut() {
+                        sv.query.pop();
+                    }
                 }
-                // ASCII printable appends; other control bytes are ignored (the
-                // query is ASCII in v1, matching the ASCII-fold scan). Capped so
-                // a held key / paste can't grow the query unbounded and drive an
-                // O(len * scrollback) server scan. (gemini review, MEDIUM)
+                // ASCII printable appends (other control bytes ignored; query is
+                // ASCII in v1). Capped so a held key / paste can't grow it unbounded
+                // and drive an O(len * scrollback) server scan.
                 0x20..=0x7e => {
-                    let q = &mut view.search.as_mut().unwrap().query;
-                    if q.len() < MAX_SEARCH_QUERY {
-                        q.push(b as char);
+                    if let Some(sv) = view.search.as_mut() {
+                        if sv.query.len() < MAX_SEARCH_QUERY {
+                            sv.query.push(b as char);
+                        }
                     }
                 }
                 _ => {}
