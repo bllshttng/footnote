@@ -1,0 +1,56 @@
+# qodercli readiness manifest (x-83e7) - full-roster parity port from
+# the reference manifest for qodercli per ADAPTING.md.
+#
+# UNVALIDATED + INERT: qodercli has no fno provider host (no build_pane_argv arm
+# / provider impl), so scrape_targets never selects it and this manifest is
+# bundled-but-dormant (like opencode). Markers are reference-derived, NOT pinned
+# against a live qodercli TUI. Our engine is case-sensitive and the reference engine is not,
+# so these lowercase needles under-fire until smoke-pinned - the conservative
+# never-false-ready direction (readiness OQ#9). State vocab + arbitration: see
+# codex.toml.
+#
+# Priority (highest wins): 300 confirmation_or_input (blocked) > 100 cancel_hint
+# > 90 spinner (working).
+
+min_engine_version = 1
+
+[[rule]]
+id = "confirmation_or_input_blocker"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+gate = { any = [
+  { all = [
+    { contains = "waiting for user confirmation" },
+    { any = [
+      { contains = "yes" },
+      { contains = "no" },
+      { contains = "allow" },
+      { contains = "reject" },
+    ] },
+  ] },
+  { all = [
+    { contains = "awaiting approval" },
+    { any = [ { contains = "allow" }, { contains = "reject" } ] },
+  ] },
+  { contains = "permission required" },
+  { contains = "allow once or always?" },
+  { contains = "asking user" },
+  { contains = "enter your response" },
+  { contains = "review your answers:" },
+  { contains = "shell awaiting input" },
+] }
+
+[[rule]]
+id = "cancel_hint_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+gate = { contains = "(esc to cancel," }
+
+[[rule]]
+id = "spinner_working"
+state = "working"
+priority = 90
+region = "whole_recent"
+gate = { line_regex = '^\s*[\x{2800}-\x{28FF}]\s+.*\p{Alphabetic}' }

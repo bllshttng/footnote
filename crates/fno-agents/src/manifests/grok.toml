@@ -1,0 +1,42 @@
+# grok readiness manifest (x-83e7) - full-roster parity port from
+# the reference manifest for grok per ADAPTING.md.
+#
+# UNVALIDATED + INERT: grok has no fno provider host (no build_pane_argv arm /
+# provider impl), so scrape_targets never selects it and this manifest is
+# bundled-but-dormant (like opencode). Markers are reference-derived, NOT pinned
+# against a live grok TUI. Our engine is case-sensitive and the reference engine is not, so
+# these lowercase needles under-fire until smoke-pinned - the conservative
+# never-false-ready direction (readiness OQ#9). State vocab + arbitration: see
+# codex.toml.
+#
+# Priority (highest wins): 300 permission_scope (blocked) > 120 waiting (working).
+
+min_engine_version = 1
+
+[[rule]]
+id = "permission_scope_selector"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+gate = { all = [
+  { contains = "yes, proceed" },
+  { contains = "no, reject" },
+  { any = [
+    { contains = "use ← → to choose permission whitelist scope" },
+    { contains = "←/→:scope" },
+  ] },
+] }
+
+[[rule]]
+id = "waiting_tool_working"
+state = "working"
+priority = 120
+region = "whole_recent"
+gate = { any = [
+  { all = [
+    { contains = "ctrl+c:cancel" },
+    { contains = "ctrl+enter:interject" },
+    { contains = "waiting" },
+  ] },
+  { line_regex = '^\s*[\x{2800}-\x{28FF}]\s+(Run|Read|Search|List)\b' },
+] }

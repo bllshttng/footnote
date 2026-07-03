@@ -1,0 +1,55 @@
+# droid readiness manifest (x-83e7) - full-roster parity port from
+# the reference manifest for droid per ADAPTING.md.
+#
+# UNVALIDATED + INERT: droid has no fno provider host (no build_pane_argv arm /
+# provider impl), so scrape_targets never selects it and this manifest is
+# bundled-but-dormant (like opencode). Markers are reference-derived, NOT pinned
+# against a live droid TUI. Our engine is case-sensitive and the reference engine is not, so
+# these lowercase needles under-fire until smoke-pinned - the conservative
+# never-false-ready direction (readiness OQ#9). State vocab + arbitration: see
+# codex.toml.
+#
+# Priority (highest wins): 300 execute_selection > 290 selection_menu (blocked)
+# > 110 spinner_stop > 100 stop_hint (working).
+
+min_engine_version = 1
+
+[[rule]]
+id = "execute_selection_blocker"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+gate = { all = [
+  { contains = "enter to select" },
+  { contains = "esc to cancel" },
+  { any = [ { contains = "↑↓ to navigate" }, { contains = "use ↑↓ to navigate" } ] },
+  { any = [ { contains = "> yes, allow" }, { contains = "> no, cancel" } ] },
+] }
+
+[[rule]]
+id = "selection_menu_blocker"
+state = "blocked"
+priority = 290
+region = "bottom_non_empty_lines(8)"
+gate = { all = [
+  { contains = "enter select" },
+  { contains = "esc cancel" },
+  { any = [ { contains = "↑/↓ navigate" }, { contains = "↑↓ navigate" } ] },
+] }
+
+[[rule]]
+id = "spinner_stop_working"
+state = "working"
+priority = 110
+region = "whole_recent"
+gate = { all = [
+  { contains = "esc to stop" },
+  { line_regex = '^\s*[\x{2800}-\x{28FF}]' },
+] }
+
+[[rule]]
+id = "stop_hint_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+gate = { contains = "esc to stop" }

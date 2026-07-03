@@ -1,0 +1,44 @@
+# kilo readiness manifest (x-83e7) - full-roster parity port from
+# the reference manifest for kilo per ADAPTING.md. kilo shares
+# opencode's TUI chrome, so opencode_permission mirrors opencode.toml's rule.
+#
+# UNVALIDATED + INERT: kilo has no fno provider host (no build_pane_argv arm /
+# provider impl), so scrape_targets never selects it and this manifest is
+# bundled-but-dormant (like opencode). Markers are reference-derived, NOT pinned
+# against a live kilo TUI. Our engine is case-sensitive and the reference engine is not, so
+# these lowercase needles under-fire until smoke-pinned - the conservative
+# never-false-ready direction (readiness OQ#9). State vocab + arbitration: see
+# codex.toml.
+#
+# Priority (highest wins): 300 opencode_permission (blocked) > 100 esc_interrupt
+# (working).
+
+min_engine_version = 1
+
+[[rule]]
+id = "opencode_permission"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+gate = { any = [
+  { contains = "△ Permission required" },
+  { all = [
+    { contains = "esc dismiss" },
+    { any = [
+      { contains = "enter confirm" },
+      { contains = "enter submit" },
+      { contains = "enter toggle" },
+    ] },
+    { any = [
+      { contains = "↑↓ select" },
+      { contains = "⇆ tab" },
+    ] },
+  ] },
+] }
+
+[[rule]]
+id = "esc_interrupt_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+gate = { contains = "esc interrupt" }
