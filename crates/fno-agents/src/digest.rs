@@ -189,6 +189,10 @@ fn fold_since(
                 if decision == Some("block") {
                     blocked_episodes += 1;
                     last_decision_blocked = true;
+                    // A fresh block is unresolved until a following allow; reset
+                    // so `resolved` reflects the LAST episode, not any earlier one
+                    // (block -> allow -> block again must read UNRESOLVED).
+                    resolved = false;
                     // Name CI only when it's the actual blocker (a failure or a
                     // pending run); a green/absent CI means the block was review
                     // or promise related, so the intent is the informative reason
@@ -715,6 +719,48 @@ mod tests {
             "events found via the resolved session id"
         );
         assert_eq!(d.blocked_episodes, 1);
+    }
+
+    #[test]
+    fn reblock_after_resolve_reads_unresolved() {
+        // block -> allow (resolved) -> block again, still blocked at the end.
+        // `resolved` must reflect the LAST episode (unresolved), not the earlier
+        // resolution (gemini high-priority finding).
+        let events = [
+            loop_check(
+                "2026-07-03T01:00:00Z",
+                "s",
+                "a",
+                "OPEN",
+                "FAILURE:x",
+                false,
+                "block",
+            ),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "s",
+                "b",
+                "OPEN",
+                "SUCCESS",
+                true,
+                "allow",
+            ),
+            loop_check(
+                "2026-07-03T03:00:00Z",
+                "s",
+                "c",
+                "OPEN",
+                "FAILURE:y",
+                false,
+                "block",
+            ),
+        ]
+        .join("\n");
+        let d = fold(&events, "", "s", "");
+        assert_eq!(d.blocked_episodes, 2);
+        assert!(!d.resolved, "the current (last) block is unresolved");
+        assert_eq!(d.state, "blocked");
+        assert!(d.lines.iter().any(|l| l.contains("UNRESOLVED")));
     }
 
     #[test]

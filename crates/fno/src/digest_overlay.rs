@@ -90,7 +90,8 @@ pub fn threshold_secs(cwd: &Path) -> u64 {
     mux_str(cwd, "attach_digest_threshold_min")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_THRESHOLD_MIN)
-        * 60
+        // saturating: an absurd configured minutes value must not overflow.
+        .saturating_mul(60)
 }
 
 fn non_empty_env(key: &str) -> Option<String> {
