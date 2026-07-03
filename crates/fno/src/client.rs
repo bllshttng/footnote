@@ -1409,14 +1409,19 @@ async fn attach_and_run(
                     // never wedges the client (Esc exits locally); a reply for a
                     // search we already closed is simply dropped. Total 0 = no
                     // matches: a BEL makes the empty result audible (AC1-ERR).
-                    // Filter on pane_id: after Esc-then-new-search-on-another-
-                    // pane, the superseded pane's late reply must not paint its
-                    // counter (or a spurious zero-match BEL) onto the new search.
-                    if let Some(sv) = view.search.as_mut().filter(|sv| sv.pane == pane_id) {
+                    // Filter on pane_id AND submitted: results only answer a
+                    // submit/step, so a stale reply from a superseded search must
+                    // not paint its counter (or a zero-match BEL) onto a different
+                    // pane's search, nor onto a new query still being typed.
+                    if let Some(sv) = view
+                        .search
+                        .as_mut()
+                        .filter(|sv| sv.pane == pane_id && sv.submitted)
+                    {
                         sv.result = Some((total, current));
                         // BEL only while the search is still open: a late
                         // zero-result reply arriving after a local Esc must not
-                        // sound a confusing bell (gemini review, MEDIUM).
+                        // sound a confusing bell.
                         if total == 0 {
                             let _ = raw_out(b"\x07");
                         }
