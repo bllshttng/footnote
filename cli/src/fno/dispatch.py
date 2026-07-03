@@ -41,7 +41,7 @@ def _dispatch_callback() -> None:
 @dispatch_app.command("one")
 def cmd_one(
     session: str = typer.Option(
-        ..., "--session", help="Mux session to spawn the pane into (FNO_SESSION)."
+        ..., "--mux-session", help="Mux session to spawn the pane into (FNO_SESSION)."
     ),
     node: Optional[str] = typer.Option(
         None, "--node", help="Dispatch this node id/slug (default: fno backlog next)."

@@ -586,7 +586,7 @@ async fn run_dispatch_one(session: &str) -> String {
     // open to a notice rather than wedging.
     const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
     let fut = tokio::process::Command::new(fno_bin())
-        .args(["dispatch", "one", "--session", session, "--json"])
+        .args(["dispatch", "one", "--mux-session", session, "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
