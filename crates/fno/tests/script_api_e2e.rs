@@ -380,3 +380,42 @@ fn script_api_concurrent_runs_land_three_panes_in_one_squad() {
     );
     kill_server(&scratch);
 }
+
+#[test]
+fn script_api_pane_run_self_spawns_into_nonexistent_mux_dir() {
+    // Regression: pane run's self-spawn path opens the server log
+    // inside the mux dir. On a fresh machine with no ~/.fno/mux the spawn must
+    // still succeed, because connect_or_spawn now ensures the dir first. Every
+    // other test missed this by pointing FNO_MUX_DIR at a pre-created tempdir,
+    // so here we deliberately aim it at a dir that does NOT exist yet.
+    // Remove the scratch dir Scratch::new just created so FNO_MUX_DIR points at
+    // a path that does not exist - but keep it at the same depth as every other
+    // test (nesting a deeper subdir would blow the AF_UNIX sun_path limit under
+    // macOS's long temp dir, not the bug under test).
+    let scratch = Scratch::new("ens");
+    let mux_dir = scratch.0.clone();
+    std::fs::remove_dir_all(&mux_dir).unwrap();
+    assert!(
+        !mux_dir.exists(),
+        "precondition: mux dir must not exist yet"
+    );
+
+    let run = Command::new(env!("CARGO_BIN_EXE_fno"))
+        .args(["mux", "pane", "run", "--", "/bin/sh", "-c", "sleep 30"])
+        .env("FNO_MUX_DIR", &mux_dir)
+        .env("SHELL", "/bin/sh")
+        .output()
+        .expect("fno binary runs");
+    assert!(
+        run.status.success(),
+        "self-spawn into a nonexistent mux dir must succeed; stderr: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(mux_dir.exists(), "connect_or_spawn must create the mux dir");
+
+    // Tidy up the detached server this test spawned.
+    let _ = Command::new(env!("CARGO_BIN_EXE_fno"))
+        .args(["mux", "kill-server"])
+        .env("FNO_MUX_DIR", &mux_dir)
+        .output();
+}
