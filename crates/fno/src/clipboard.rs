@@ -143,9 +143,56 @@ fn base64(input: &[u8]) -> String {
     out
 }
 
+/// The first clipboard tool present on `PATH`, or `None` when copy would fall
+/// back to the unverifiable OSC 52 path. `fno mux doctor` calls this to flag
+/// copy as degraded BEFORE a user hits AC2-ERR in anger (US6 AC6-EDGE). Names
+/// come from [`TOOLS`] so the doctor list can never drift from the copy list.
+/// Read-only: it inspects PATH entries and never execs a tool ("touches
+/// nothing").
+pub fn available_tool() -> Option<&'static str> {
+    available_tool_with(on_path)
+}
+
+/// [`available_tool`] with the PATH predicate injected, so the preference-order
+/// and none-present branches are testable without depending on the host's tools.
+fn available_tool_with(on_path: impl Fn(&str) -> bool) -> Option<&'static str> {
+    TOOLS
+        .iter()
+        .map(|(name, _)| *name)
+        .find(|name| on_path(name))
+}
+
+/// Is `name` a regular file in some `PATH` directory? Pure filesystem lookup, no
+/// spawn. ponytail: `is_file` not a full x-bit check - a non-executable name
+/// collision on PATH is vanishingly rare and doctor is advisory, not a gate.
+fn on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn available_tool_none_when_path_empty() {
+        // AC6-EDGE: no clipboard tool -> copy is degraded (doctor flags it).
+        assert_eq!(available_tool_with(|_| false), None);
+    }
+
+    #[test]
+    fn available_tool_returns_first_in_preference_order() {
+        // Every tool present -> the macOS-first preference order wins.
+        assert_eq!(available_tool_with(|_| true), Some("pbcopy"));
+    }
+
+    #[test]
+    fn available_tool_skips_absent_prefers_present() {
+        // Only xclip on PATH: pbcopy/wl-copy skipped, xclip found.
+        assert_eq!(available_tool_with(|n| n == "xclip"), Some("xclip"));
+    }
 
     #[test]
     fn base64_matches_known_vectors() {
