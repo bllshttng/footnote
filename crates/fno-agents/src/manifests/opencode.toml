@@ -1,0 +1,66 @@
+# opencode readiness manifest (x-8f7f) - adapted from herdr's
+# src/detect/manifests/opencode.toml per manifests/ADAPTING.md.
+#
+# STAGED / INERT (AC2-FR): opencode is not a hosted fno provider yet (its
+# buildout is node x-51f6: READABLE_PROVIDERS membership + provider impl +
+# readiness detector + mux-pane argv). Until x-51f6 lands, `scrape_targets`
+# selects no opencode row, so this manifest parses and is bundled but never
+# fires. It is staged here so the badge derives with zero further change to
+# this node's files the moment opencode becomes mux-hostable.
+#
+# Translation notes (herdr -> ours):
+#   - dropped herdr metadata (id/version/updated_at/aliases/visible_*); kept
+#     min_engine_version (we support it).
+#   - rule-level predicates (any/regex/line_regex) moved under a single `gate`.
+#   - `contains = ["x"]` (herdr "any of") expanded to a plain `contains = "x"`
+#     for a single element; the multi-key AND rule wraps its keys under `all`.
+#   - opencode's screens are groundable from source (~/code/tools/opencode +
+#     ctx7 `opencode`); markers mirror herdr's, still to be pinned against a
+#     live opencode TUI when it is hosted (capture-readiness-grid.sh).
+#
+# State vocabulary + arbitration (same contract as codex.toml):
+#   permission_required (300, blocked) > interrupt_hint (110) > progress_bar (100)
+
+min_engine_version = 1
+
+[[rule]]
+id = "permission_required"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+gate = { any = [
+  { contains = "△ Permission required" },
+  { all = [
+    { contains = "esc dismiss" },
+    { any = [
+      { contains = "enter confirm" },
+      { contains = "enter submit" },
+      { contains = "enter toggle" },
+    ] },
+    { all = [
+      { any = [
+        { contains = "↑↓ select" },
+        { contains = "⇆ tab" },
+      ] },
+    ] },
+  ] },
+] }
+
+[[rule]]
+id = "interrupt_hint_working"
+state = "working"
+priority = 110
+region = "whole_recent"
+gate = { any = [
+  { contains = "esc to interrupt" },
+  { contains = "ctrl+c to interrupt" },
+  { contains = "press esc to interrupt" },
+  { line_regex = '(?i).*opencode.*esc (again to )?interrupt' },
+] }
+
+[[rule]]
+id = "progress_bar_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+gate = { regex = '(■|⬝){4,}' }
