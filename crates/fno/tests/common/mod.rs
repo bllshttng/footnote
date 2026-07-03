@@ -374,6 +374,7 @@ impl FakeClient {
                 area,
                 agents,
                 focus_node,
+                .. // backlog (x-6f77): the e2e harness asserts nothing on it
             } => {
                 self.layout = Some(LayoutSnap {
                     squads,

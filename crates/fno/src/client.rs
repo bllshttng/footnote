@@ -27,8 +27,9 @@ use tokio::sync::mpsc;
 
 use crate::keys::{Event, Scanner};
 use crate::proto::{
-    self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, Cell, ClientMsg, Color, Command,
-    Frame, MouseEvent, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
+    self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, BacklogCard, CardState, Cell,
+    ClientMsg, Color, Command, Frame, MouseEvent, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION,
+    PROTO_VERSION,
 };
 use crate::tree::Rect;
 
@@ -209,6 +210,10 @@ struct LayoutView {
     /// (v10) The focused pane's `FNO_NODE` provenance, for the status-row
     /// `⚑ <node>` cell (x-66e8). `None` for an ad-hoc pane.
     focus_node: Option<String>,
+    /// (v11, x-6f77) Board-ordered work-queue cards for the sideline backlog
+    /// lane; empty when the graph is unreadable or has no ready/blocked/in-flight
+    /// work (the lane then renders nothing - the agents section is unaffected).
+    backlog: Vec<BacklogCard>,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -619,7 +624,7 @@ impl View {
         if self.hint {
             let text = " % \" split · hjkl focus · HJKL resize · x close · c tab \
                         · n/p cycle · 1-9 tab · & close-tab · w select · b sideline \
-                        · s status · d detach · ? all keys";
+                        · g grab · s status · d detach · ? all keys";
             for (i, ch) in text.chars().take(cols).enumerate() {
                 put(cells, i, ch, 0);
             }
@@ -766,6 +771,13 @@ impl View {
             out.push(DisplayRow::Header("~ agents"));
             out.extend(orphans.into_iter().map(DisplayRow::Agent));
         }
+        // The work-queue lane (x-6f77): board-ordered ready/blocked/in-flight
+        // cards under their own header. Empty (unreadable/no-work graph) renders
+        // nothing - the agents section above is unaffected (AC-edge fail-open).
+        if !self.layout.backlog.is_empty() {
+            out.push(DisplayRow::Header("~ work queue"));
+            out.extend(self.layout.backlog.iter().map(DisplayRow::Card));
+        }
         out
     }
 
@@ -826,6 +838,24 @@ impl View {
                     let flags = if a.exited { cell_flags::DIM } else { 0 };
                     (text, flags, false)
                 }
+                DisplayRow::Card(c) => {
+                    // Ready hollow, in-flight filled, blocked triangle - a glyph
+                    // vocabulary distinct from the agent badges above.
+                    let glyph = match c.state {
+                        CardState::Ready => '○',
+                        CardState::InFlight => '●',
+                        CardState::Blocked => '▲',
+                    };
+                    let label = if c.slug.is_empty() { &c.id } else { &c.slug };
+                    // Blocked cards read dim; ready/in-flight are the actionable
+                    // foreground of the queue.
+                    let flags = if c.state == CardState::Blocked {
+                        cell_flags::DIM
+                    } else {
+                        0
+                    };
+                    (format!("  {glyph} {label} {}", c.priority), flags, false)
+                }
                 DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM, false),
             };
             if selected {
@@ -862,8 +892,13 @@ impl View {
 /// [`View::sel_rows`] index so the selector highlight follows selection), a
 /// display-only agent row, or the catch-all section header.
 enum DisplayRow<'a> {
-    Sel { idx: usize, row: SelRow },
+    Sel {
+        idx: usize,
+        row: SelRow,
+    },
     Agent(&'a AgentRow),
+    /// A work-queue backlog card (x-6f77), display-only in v1.
+    Card(&'a BacklogCard),
     Header(&'static str),
 }
 
@@ -906,6 +941,7 @@ const KEY_TABLE: &[&str] = &[
     "  s  toggle status      ?  this key table  ",
     "  [ ]  jump block       v  select block   ",
     "  y  copy selection     r  rerun block    ",
+    "  g  grab work (dispatch next ready)     ",
     "  d  detach             C-b C-b  literal  ",
     " any key dismisses                        ",
 ];
@@ -1046,6 +1082,7 @@ async fn attach_and_run(
             area: (0, 0),
             agents: Vec::new(),
             focus_node: None,
+            backlog: Vec::new(),
         },
     );
     let (c_rows, c_cols) = view.content_dims();
@@ -1084,6 +1121,7 @@ async fn attach_and_run(
                 area,
                 agents,
                 focus_node,
+                backlog,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -1093,6 +1131,7 @@ async fn attach_and_run(
                     area,
                     agents,
                     focus_node,
+                    backlog,
                 });
                 break;
             }
@@ -1239,8 +1278,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog });
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -1563,6 +1602,11 @@ async fn handle_stdin(
                 )
                 .await
                 .map_err(|e| format!("block-rerun send failed: {e}"))?;
+            }
+            Event::DispatchNext => {
+                write_msg(sock_w, &ClientMsg::DispatchNext)
+                    .await
+                    .map_err(|e| format!("dispatch-next send failed: {e}"))?;
             }
             Event::Bell => {
                 let _ = raw_out(b"\x07");
@@ -1976,6 +2020,7 @@ mod tests {
                 area: (29, 72),
                 agents: vec![],
                 focus_node: None,
+                backlog: Vec::new(),
             },
         );
         view.frames.insert(10, text_frame(29, 35, 'a'));
@@ -2255,6 +2300,7 @@ mod tests {
                 },
             ],
             focus_node: None,
+            backlog: Vec::new(),
         });
         let frame = view.compose();
         let text = frame_text(&frame);
@@ -2378,6 +2424,7 @@ mod tests {
             area: (29, 72),
             agents: vec![],
             focus_node: None,
+            backlog: Vec::new(),
         });
         assert!(view.frames.contains_key(&10));
         assert!(
@@ -2410,6 +2457,7 @@ mod tests {
                 area: (20, 50),
                 agents: vec![],
                 focus_node: None,
+                backlog: Vec::new(),
             },
         );
         view.frames.insert(10, text_frame(20, 50, 'a'));
@@ -2476,6 +2524,7 @@ mod tests {
             area: (29, 72),
             agents: vec![],
             focus_node: None,
+            backlog: Vec::new(),
         });
         assert_eq!(view.selector, Some(0), "cursor clamped to the live rows");
     }
@@ -2581,6 +2630,7 @@ mod tests {
             area: v.layout.area,
             agents: vec![blocked_row("a", 1, None)],
             focus_node: None,
+            backlog: Vec::new(),
         });
         assert_eq!(v.answers, Some(0));
         // The queue empties -> the overlay closes (AC2-ERR).
@@ -2592,6 +2642,7 @@ mod tests {
             area: v.layout.area,
             agents: vec![],
             focus_node: None,
+            backlog: Vec::new(),
         });
         assert_eq!(v.answers, None);
     }

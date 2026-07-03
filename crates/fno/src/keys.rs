@@ -73,6 +73,10 @@ pub enum Event {
     BlockSelect(BlockDir),
     /// Rerun the focused pane's selected block command (leader+r, x-38c4).
     BlockRerun,
+    /// Dispatch the next ready backlog node into a new pane (leader+g, "grab
+    /// work", x-6f77). The server shells the Python porcelain; no-work /
+    /// lanes-full comes back as a one-line notice.
+    DispatchNext,
     /// Swallowed unmapped chord: the client sounds BEL.
     Bell,
 }
@@ -239,6 +243,8 @@ fn chord(b: u8) -> Event {
         b'v' => Event::BlockSelect(BlockDir::Prev),
         b'y' => Event::Cmd(Command::CopySelection),
         b'r' => Event::BlockRerun,
+        // leader+n is NextTab (tmux muscle memory); "grab work" is leader+g.
+        b'g' => Event::DispatchNext,
         _ => Event::Bell,
     }
 }

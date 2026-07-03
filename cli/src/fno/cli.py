@@ -90,6 +90,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "update":        ("fno.update:update_command",         "Reinstall fno from its source directory."),
     "upgrade":       ("fno.update:update_command",         "Reinstall fno from its source directory.", {"hidden": True}),
     "restart":       ("fno.restart:restart_command",       "Restart running fno processes (agents daemon; mux with --mux) onto fresh builds."),
+    "dispatch":      ("fno.dispatch:dispatch_app",         "Grab one ready node into a mux pane (mux leader+g shells `dispatch one`)."),
 }
 
 
