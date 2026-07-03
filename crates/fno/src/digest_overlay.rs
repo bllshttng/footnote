@@ -247,6 +247,9 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
         ])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        // On timeout the future is dropped; kill_on_drop reaps the child so a
+        // slow `fno-agents` can't leave an orphan behind on each attach.
+        .kill_on_drop(true)
         .output();
     let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
         .await

@@ -95,7 +95,7 @@ impl Since<'_> {
     fn includes(&self, ts: &str) -> bool {
         match self {
             Since::Str(s) => ts >= *s,
-            Since::Epoch(e) => crate::state::rfc3339_like_to_secs(ts).is_none_or(|secs| secs >= *e),
+            Since::Epoch(e) => to_epoch_lenient(ts).is_none_or(|secs| secs >= *e),
         }
     }
 
@@ -105,6 +105,20 @@ impl Since<'_> {
             Since::Epoch(e) => format!("epoch:{e}"),
         }
     }
+}
+
+/// Parse an RFC3339-ish timestamp to epoch seconds, tolerating the ledger's
+/// non-strict forms. `rfc3339_like_to_secs` requires exactly `...SSZ` (20 bytes,
+/// trailing Z), but ledger `completed`/`timestamp` are Python
+/// `datetime.now().isoformat()` (`2026-07-02T17:11:14.397919`, no Z, fractional
+/// seconds). Truncating to the second and appending `Z` reuses the same strict
+/// parser, so the `--since-epoch` bound actually filters ledger rows instead of
+/// letting every row through as unparseable.
+fn to_epoch_lenient(ts: &str) -> Option<u64> {
+    crate::state::rfc3339_like_to_secs(ts).or_else(|| {
+        let secs = ts.get(..19)?;
+        crate::state::rfc3339_like_to_secs(&format!("{secs}Z"))
+    })
 }
 
 /// Does this event's session id fall in `set`? Branch A carries
@@ -146,6 +160,11 @@ fn fold_since(
     let mut resolved = false;
     let mut terminated = false;
     let mut last_decision_blocked = false;
+    // The same event can be mirrored into more than one source (project +
+    // global events.jsonl), so an exact-duplicate matched line is folded once -
+    // else a mirrored block spell would double the episode count and the commit
+    // transitions. Only session-matched lines are held, so this stays small.
+    let mut seen_lines: HashSet<&str> = HashSet::new();
 
     for line in events_raw.lines() {
         if line.trim().is_empty() {
@@ -160,6 +179,9 @@ fn fold_since(
         }
         if !since.includes(event_ts(&v)) {
             continue;
+        }
+        if !seen_lines.insert(line) {
+            continue; // exact duplicate of an already-folded event
         }
         match event_kind(&v) {
             Some("loop_check") => {
@@ -187,12 +209,17 @@ fn fold_since(
                 }
                 let decision = field(&v, "decision").and_then(|d| d.as_str());
                 if decision == Some("block") {
-                    blocked_episodes += 1;
+                    // Count EPISODES (transitions into blocked), not rows: a
+                    // stop-hook fires loop_check repeatedly through one block
+                    // spell, so only the first block after a non-block decision
+                    // starts a new episode. A fresh episode is unresolved until a
+                    // following allow (reset so `resolved` reflects the LAST
+                    // episode: block -> allow -> block again reads UNRESOLVED).
+                    if !last_decision_blocked {
+                        blocked_episodes += 1;
+                        resolved = false;
+                    }
                     last_decision_blocked = true;
-                    // A fresh block is unresolved until a following allow; reset
-                    // so `resolved` reflects the LAST episode, not any earlier one
-                    // (block -> allow -> block again must read UNRESOLVED).
-                    resolved = false;
                     // Name CI only when it's the actual blocker (a failure or a
                     // pending run); a green/absent CI means the block was review
                     // or promise related, so the intent is the informative reason
@@ -355,8 +382,25 @@ fn resolve_from_ledger(ledger_raw: &str, selector: &str, since: Since<'_>) -> Le
     out
 }
 
-/// Ranked short lines, attention (blocked) first. Empty digest → one calm line.
+/// True when nothing worth interrupting an attach for happened in the window:
+/// no commits, no PR, no blocks, no cost, and not terminated. Such a fold
+/// renders zero lines, so the client shows no overlay (a long absence with no
+/// activity is silent, not a "no PR yet / 0 commits" nag).
+fn is_empty_digest(s: &DigestSummary) -> bool {
+    s.commits == 0
+        && s.pr_number.is_none()
+        && s.blocked_episodes == 0
+        && s.cost_usd == 0.0
+        && s.state != "done"
+        && s.state != "blocked"
+}
+
+/// Ranked short lines, attention (blocked) first. An empty digest renders
+/// nothing (the caller suppresses the overlay).
 fn render_lines(s: &DigestSummary) -> Vec<String> {
+    if is_empty_digest(s) {
+        return Vec::new();
+    }
     let mut lines = Vec::new();
 
     if s.blocked_episodes > 0 {
@@ -582,7 +626,8 @@ mod tests {
         let d = fold(&events, ledger, "sess-A", "2026-07-03T00:00:00Z");
         assert_eq!(d.pr_number, Some(42), "PR named");
         assert_eq!(d.commits, 2, "base->c1->c2 = 2 commits");
-        assert_eq!(d.blocked_episodes, 2);
+        // Two consecutive block rows are ONE spell (episode), then resolved.
+        assert_eq!(d.blocked_episodes, 1);
         assert!(d.resolved, "a later allow resolved the block");
         assert_eq!(d.cost_usd, 1.5);
         assert!(d.reviewed);
@@ -636,8 +681,13 @@ mod tests {
         assert_eq!(d.blocked_episodes, 0);
         assert!(d.pr_state.is_none());
         assert_eq!(d.cost_usd, 0.0);
-        // Still renders a calm "no PR yet" line, exit path stays 0.
-        assert!(d.lines.iter().any(|l| l.contains("no PR yet")));
+        // Nothing happened in-window -> an empty digest renders no lines, so the
+        // client shows no overlay (a long, quiet absence is silent).
+        assert!(
+            d.lines.is_empty(),
+            "empty digest renders nothing: {:?}",
+            d.lines
+        );
     }
 
     #[test]
@@ -719,6 +769,78 @@ mod tests {
             "events found via the resolved session id"
         );
         assert_eq!(d.blocked_episodes, 1);
+    }
+
+    #[test]
+    fn mirrored_events_are_folded_once() {
+        // The same block spell mirrored into both event sources (project +
+        // global, concatenated) must not double the episode count.
+        let one = loop_check(
+            "2026-07-03T01:00:00Z",
+            "s",
+            "a",
+            "OPEN",
+            "FAILURE:x",
+            false,
+            "block",
+        );
+        let events = [one.clone(), one].join("\n");
+        let d = fold(&events, "", "s", "");
+        assert_eq!(d.blocked_episodes, 1, "the duplicate line is folded once");
+    }
+
+    #[test]
+    fn repeated_block_rows_are_one_episode() {
+        // A stop-hook fires loop_check repeatedly through one block spell.
+        let events = [
+            loop_check(
+                "2026-07-03T01:00:00Z",
+                "s",
+                "a",
+                "OPEN",
+                "FAILURE:x",
+                false,
+                "block",
+            ),
+            loop_check(
+                "2026-07-03T01:05:00Z",
+                "s",
+                "a",
+                "OPEN",
+                "FAILURE:x",
+                false,
+                "block",
+            ),
+            loop_check(
+                "2026-07-03T01:10:00Z",
+                "s",
+                "a",
+                "OPEN",
+                "FAILURE:x",
+                false,
+                "block",
+            ),
+        ]
+        .join("\n");
+        let d = fold(&events, "", "s", "");
+        assert_eq!(
+            d.blocked_episodes, 1,
+            "three block rows, one unresolved spell"
+        );
+    }
+
+    #[test]
+    fn ledger_epoch_filter_parses_non_z_microsecond_ts() {
+        // Ledger `completed` is Python isoformat (no Z, fractional). The epoch
+        // bound must still parse it, or the since-window would leak old rows.
+        let ledger =
+            r#"[{"session_id":"s","cost_usd":5.0,"completed":"2026-07-01T00:00:00.123456"}]"#;
+        let after = crate::state::rfc3339_like_to_secs("2026-07-02T00:00:00Z").unwrap();
+        let l = resolve_from_ledger(ledger, "s", Since::Epoch(after));
+        assert_eq!(
+            l.cost_usd, 0.0,
+            "the pre-window microsecond-ts row is excluded"
+        );
     }
 
     #[test]
