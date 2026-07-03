@@ -8,7 +8,9 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use fno::proto::{bind_or_probe, BindOutcome};
+use std::time::Duration;
+
+use fno::proto::{bind_or_probe, connect_unix_timeout, BindOutcome};
 
 /// A unique short-lived scratch dir. No tempfile dep: pid + test name is
 /// unique enough for a test process, and the dir is removed on drop.
@@ -123,4 +125,145 @@ fn proto_non_tty_bare_fno_prints_notice_and_exits_zero() {
     assert!(out.status.success(), "must exit 0, got {:?}", out.status);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("not a tty"), "notice missing: {stdout:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Bounded client connects (x-2896): a wedged server (live listener, dead
+// accept loop, FULL backlog) must produce a bounded error, never a hang.
+
+/// A listener that never accepts, with its backlog saturated: the wedged-
+/// server fixture. Holds the queued streams so they stay pending. Returns
+/// None if the platform's minimum backlog could not be saturated in 16 tries.
+struct WedgedServer {
+    fd: std::os::fd::RawFd,
+    _queued: Vec<UnixStream>,
+}
+
+impl WedgedServer {
+    fn new(path: &std::path::Path) -> Option<Self> {
+        use std::os::unix::ffi::OsStrExt;
+        let fd = unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            assert!(fd >= 0, "socket() failed");
+            let mut addr: libc::sockaddr_un = std::mem::zeroed();
+            addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            let bytes = path.as_os_str().as_bytes();
+            assert!(bytes.len() < std::mem::size_of_val(&addr.sun_path));
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr() as *const libc::c_char,
+                addr.sun_path.as_mut_ptr(),
+                bytes.len(),
+            );
+            let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            assert_eq!(
+                libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len),
+                0,
+                "bind() failed"
+            );
+            // Smallest possible accept queue, and never call accept().
+            assert_eq!(libc::listen(fd, 0), 0, "listen() failed");
+            fd
+        };
+        // Saturate the queue: connects succeed (kernel-queued) until full.
+        let mut queued = Vec::new();
+        for _ in 0..16 {
+            match connect_unix_timeout(path, Duration::from_millis(250)) {
+                Ok(s) => queued.push(s),
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    return Some(WedgedServer {
+                        fd,
+                        _queued: queued,
+                    });
+                }
+                Err(e) => panic!("unexpected error while saturating backlog: {e}"),
+            }
+        }
+        unsafe { libc::close(fd) };
+        None
+    }
+}
+
+impl Drop for WedgedServer {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.fd) };
+    }
+}
+
+#[test]
+fn connect_timeout_wedged_listener_bounded_error_not_hang() {
+    let scratch = Scratch::new("wedged");
+    let sock = scratch.path("s.sock");
+    let Some(_wedged) = WedgedServer::new(&sock) else {
+        return; // platform queues >16 unaccepted connects; nothing to assert
+    };
+    let start = std::time::Instant::now();
+    let err = connect_unix_timeout(&sock, Duration::from_millis(300))
+        .expect_err("full backlog must not connect");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "got: {err}");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "bounded connect took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn connect_timeout_stale_socket_fails_fast() {
+    let scratch = Scratch::new("stale-fast");
+    let sock = scratch.path("s.sock");
+    // A leftover socket file from a dead server: bind then close the
+    // listener without unlinking.
+    match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(l) => drop(l),
+        BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
+    }
+    assert!(sock.exists(), "socket file must survive listener drop");
+    let start = std::time::Instant::now();
+    let err =
+        connect_unix_timeout(&sock, Duration::from_secs(1)).expect_err("dead socket must refuse");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionRefused,
+        "got: {err}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn connect_timeout_missing_path_fails_fast() {
+    let scratch = Scratch::new("missing");
+    let sock = scratch.path("never-created.sock");
+    let err =
+        connect_unix_timeout(&sock, Duration::from_secs(1)).expect_err("missing path must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err}");
+}
+
+#[test]
+fn connect_timeout_live_listener_connects() {
+    let scratch = Scratch::new("live-connect");
+    let sock = scratch.path("s.sock");
+    let _l = match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(l) => l,
+        BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
+    };
+    connect_unix_timeout(&sock, Duration::from_secs(1)).expect("live listener must accept");
+}
+
+#[test]
+fn proto_wedged_server_reads_alive_not_clobbered() {
+    // A wedged-but-live server must read as AlreadyRunning at bind time:
+    // unlinking its socket would orphan it (running, unreachable by name).
+    let scratch = Scratch::new("wedged-bind");
+    let sock = scratch.path("s.sock");
+    let Some(_wedged) = WedgedServer::new(&sock) else {
+        return;
+    };
+    match bind_or_probe(&sock).unwrap() {
+        BindOutcome::AlreadyRunning => {}
+        BindOutcome::Bound(_) => panic!("wedged-but-live socket was clobbered"),
+    }
+    assert!(
+        sock.exists(),
+        "wedged server's socket must survive the probe"
+    );
 }

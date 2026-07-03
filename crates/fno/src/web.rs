@@ -50,6 +50,11 @@ const MAX_SNAPSHOT_PANES: usize = 128;
 /// Reconnect backoff bounds (Errors: preserve the view on upstream EOF).
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
+
+/// Connect bound for the upstream attach. A wedged server (never accepts)
+/// turns into a reconnect-with-backoff instead of blocking the bridge task
+/// forever mid-loop.
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A connection must stay up at least this long before its drop resets the
 /// backoff. An accept-then-EOF flap stays below it, so the backoff keeps growing
 /// (and each quick drop logs) instead of spinning a silent 250ms reconnect loop.
@@ -246,12 +251,20 @@ async fn upstream_loop(
 /// first reply. A `Bye` here is a refused/skewed attach (`Err`); anything else
 /// means the attach took, and the message is returned as preamble to forward.
 async fn connect_attach(socket: &Path) -> Result<(OwnedReadHalf, ServerMsg), String> {
-    let stream = UnixStream::connect(socket).await.map_err(|e| {
-        format!(
-            "cannot connect to session socket {}: {e}\n  is the mux server running? list sessions with `fno mux ls`.",
-            socket.display()
-        )
-    })?;
+    let stream = tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, UnixStream::connect(socket))
+        .await
+        .map_err(|_| {
+            format!(
+                "cannot connect to session socket {}: connect timed out (wedged server?)",
+                socket.display()
+            )
+        })?
+        .map_err(|e| {
+            format!(
+                "cannot connect to session socket {}: {e}\n  is the mux server running? list sessions with `fno mux ls`.",
+                socket.display()
+            )
+        })?;
     let (reader, mut writer) = stream.into_split();
 
     let cwd = std::env::current_dir()
