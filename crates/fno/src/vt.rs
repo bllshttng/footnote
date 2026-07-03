@@ -2155,4 +2155,36 @@ mod tests {
         assert_eq!(pane.block_select(BlockDir::Prev), Some(0));
         assert_eq!(pane.rerun_command().as_deref(), Some("ls"));
     }
+
+    #[test]
+    fn unbalanced_turn_markers_degrade_never_corrupt() {
+        // The hook's known v1 limits all reduce to unbalanced marker streams;
+        // the store must CONTAIN them. A C while a turn is open (nested claude,
+        // or an interrupted turn's next prompt) finalizes the prior block with
+        // unknown exit; a D with no open block (a blocked-Stop's later legs)
+        // is a no-op, not a phantom block.
+        let mut pane = Pane::new(6, 40);
+        pane.feed(b"\x1b]133;C\x07outer-turn\r\n");
+        pane.feed(b"\x1b]133;C\x07inner-spray\r\n"); // C-while-open
+        pane.feed(b"\x1b]133;D;0\x07");
+
+        let outer = pane.read_block(BlockSel::Seq(0)).unwrap();
+        assert_eq!(outer.text, "outer-turn\r\n");
+        assert_eq!(outer.exit, None, "early-finalized turn has unknown exit");
+        assert!(outer.complete);
+        let inner = pane.read_block(BlockSel::Seq(1)).unwrap();
+        assert_eq!(
+            (inner.text.as_str(), inner.exit),
+            ("inner-spray\r\n", Some(0))
+        );
+
+        // Orphan D;0s (loop continuations re-attempting Stop): no open block,
+        // no new block, no panic.
+        pane.feed(b"loop continuation output\r\n\x1b]133;D;0\x07\x1b]133;D;0\x07");
+        assert!(
+            pane.read_block(BlockSel::Seq(2)).is_err(),
+            "no phantom block"
+        );
+        assert_eq!(pane.read_block(BlockSel::Last).unwrap().seq, Some(1));
+    }
 }

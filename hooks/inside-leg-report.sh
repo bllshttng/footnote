@@ -39,6 +39,19 @@
 # marker-write failure is silent and never blocks the turn or the report.
 # Exit is always 0 in v1: the Stop payload carries no cheap error signal, and
 # the turn's on-screen content is its label -- no custom param vocabulary.
+#
+# Known v1 limits (accepted; the scanner CONTAINS all of them -- a stray C
+# finalizes the prior block with unknown exit, a D with no open block is a
+# no-op, so segmentation degrades, never corrupts):
+#   - A NESTED claude (e.g. `claude -p` spawned from the pane session via
+#     Bash) inherits FNO_PANE + the controlling tty, so its hooks also emit,
+#     splitting the outer turn early. The gate is env-presence, not
+#     session-identity.
+#   - A BLOCKED Stop (the /target loop) emits D;0 while the leg continues;
+#     no C re-opens until the next user prompt, so loop continuations sit
+#     outside any block.
+#   - A user interrupt fires no Stop, so that turn's block stays open until
+#     the next turn's C finalizes it.
 
 set -uo pipefail
 
@@ -50,7 +63,9 @@ esac
 
 # Turn boundary -> OSC 133 marker, mux panes only. Redirect-open of /dev/tty
 # fails silently when there is no controlling terminal (headless), hence the
-# stderr silence BEFORE the tty redirect and the || true.
+# stderr silence BEFORE the tty redirect and the || true. A write to a pane
+# whose master-side reader has stalled can block rather than fail; accepted --
+# that pane is frozen anyway, and the hook's own timeout bounds it.
 if [[ -n "${FNO_PANE:-}" ]]; then
   case "$STATE" in
     working) { printf '\033]133;C\007' >/dev/tty; } 2>/dev/null || true ;;
