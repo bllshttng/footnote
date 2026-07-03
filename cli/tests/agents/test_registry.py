@@ -268,8 +268,8 @@ def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> No
         load_registry(path=registry_path)
 
     msg = str(exc_info.value)
-    assert "7" in msg  # read version present
-    assert "6" in msg  # expected version present
+    assert "8" in msg  # read version present
+    assert "7" in msg  # expected version present
 
 
 def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatch) -> None:
