@@ -381,6 +381,18 @@ fn script_api_concurrent_runs_land_three_panes_in_one_squad() {
     kill_server(&scratch);
 }
 
+/// Kill the detached server a test spawned on scope exit, so a panicking
+/// assertion cannot leak the server and its background process.
+struct KillServerOnDrop(std::path::PathBuf);
+impl Drop for KillServerOnDrop {
+    fn drop(&mut self) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_fno"))
+            .args(["mux", "kill-server"])
+            .env("FNO_MUX_DIR", &self.0)
+            .output();
+    }
+}
+
 #[test]
 fn script_api_pane_run_self_spawns_into_nonexistent_mux_dir() {
     // Regression: pane run's self-spawn path opens the server log
@@ -406,16 +418,12 @@ fn script_api_pane_run_self_spawns_into_nonexistent_mux_dir() {
         .env("SHELL", "/bin/sh")
         .output()
         .expect("fno binary runs");
+    // Reap the spawned server on any exit path, including a failing assertion.
+    let _killer = KillServerOnDrop(mux_dir.clone());
     assert!(
         run.status.success(),
         "self-spawn into a nonexistent mux dir must succeed; stderr: {:?}",
         String::from_utf8_lossy(&run.stderr)
     );
     assert!(mux_dir.exists(), "connect_or_spawn must create the mux dir");
-
-    // Tidy up the detached server this test spawned.
-    let _ = Command::new(env!("CARGO_BIN_EXE_fno"))
-        .args(["mux", "kill-server"])
-        .env("FNO_MUX_DIR", &mux_dir)
-        .output();
 }
