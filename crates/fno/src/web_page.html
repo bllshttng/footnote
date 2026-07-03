@@ -64,7 +64,8 @@
         picker = $("picker"), term = $("term"), overlay = $("overlay");
 
   // ---- state ----
-  const frames = new Map();   // pane_id -> latest Frame
+  const frames = new Map();   // pane_id -> latest Frame (insertion order = LRU)
+  const MAX_PANES = 128;      // LRU cap; mirrors the bridge snapshot bound
   let squads = [];            // from Layout
   let agents = [];            // from Layout
   let current = null;         // selected pane_id
@@ -194,17 +195,35 @@
     if (obj.Frame) {
       const { pane_id, frame } = obj.Frame;
       if (frame.cells.length !== frame.rows * frame.cols) return; // drop malformed
-      frames.set(pane_id, frame);
+      let dirtyPicker = !frames.has(pane_id);
+      frames.delete(pane_id); frames.set(pane_id, frame); // LRU touch: move to newest
+      if (frames.size > MAX_PANES) {
+        const oldest = frames.keys().next().value; // least-recently-updated
+        frames.delete(oldest);
+        if (oldest === current) current = null;
+        dirtyPicker = true;
+      }
       if (upstreamUp) setBar("live", "live");
-      if (current == null) { current = pane_id; renderPicker(); }
+      if (current == null) { current = pane_id; dirtyPicker = true; }
+      if (dirtyPicker) renderPicker();
       if (pane_id === current) draw();
-      else if (!picker.children.length || ![...frames.keys()].every((k) => k <= pane_id)) renderPicker();
       return;
     }
     if (obj.Layout) {
       squads = obj.Layout.squads || [];
       agents = obj.Layout.agents || [];
+      // An exited agent row is the one pane-death signal on the wire: drop its
+      // cached frame so a dead agent stops rendering as a live grid and leaves
+      // the picker (a plain non-agent pane's death is invisible without a proto
+      // signal, so it ages out via the LRU cap instead).
+      for (const a of agents) {
+        if (a.exited && a.pane_id != null && frames.has(a.pane_id)) {
+          frames.delete(a.pane_id);
+          if (a.pane_id === current) current = null;
+        }
+      }
       renderPicker();
+      draw();
       return;
     }
     if (obj.Bye) { setBar("ended", "session ended", obj.Bye.reason || ""); showOverlay("session ended\n" + (obj.Bye.reason || "")); return; }

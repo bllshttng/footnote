@@ -19,11 +19,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -41,9 +41,19 @@ const INBOUND_WS_CAP: usize = 64 * 1024;
 /// Per-subscriber buffered frames before a slow phone starts lag-dropping stale
 /// ones (each browser drops independently; one slow viewer never blocks another).
 const BROADCAST_CAP: usize = 256;
+/// Max panes retained in the replay snapshot. Pane ids are monotonic and never
+/// reused, and the wire has no "pane closed" signal, so a dead pane's last frame
+/// would otherwise linger forever. Bounded by evicting the least-recently-updated
+/// pane - a dead pane stops updating, so it ages out first (ponytail: fixed cap;
+/// a proto-level pane-closed signal is the real fix, deferred with Locked 4).
+const MAX_SNAPSHOT_PANES: usize = 128;
 /// Reconnect backoff bounds (Errors: preserve the view on upstream EOF).
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// A connection must stay up at least this long before its drop resets the
+/// backoff. An accept-then-EOF flap stays below it, so the backoff keeps growing
+/// (and each quick drop logs) instead of spinning a silent 250ms reconnect loop.
+const MIN_HEALTHY_UPTIME: Duration = Duration::from_secs(2);
 
 /// Parsed `fno mux serve --web` arguments.
 #[derive(Debug, PartialEq, Eq)]
@@ -72,8 +82,10 @@ struct Snapshot {
     upstream_up: bool,
     /// Latest `Layout` JSON (the pane/agent catalog for the picker).
     layout: Option<String>,
-    /// pane_id -> latest `Frame` JSON.
-    frames: HashMap<u64, String>,
+    /// pane_id -> (update seq, latest `Frame` JSON). The seq drives LRU eviction
+    /// so a dead pane (which stops updating) ages out of the replay set first.
+    frames: HashMap<u64, (u64, String)>,
+    frame_seq: u64,
 }
 
 #[derive(Clone)]
@@ -190,7 +202,7 @@ async fn upstream_loop(
     loop {
         match connect_attach(&socket).await {
             Ok((reader, preamble)) => {
-                backoff = BACKOFF_START;
+                let started = Instant::now();
                 if let Some(rt) = ready_tx.take() {
                     let _ = rt.send(Ok(()));
                 }
@@ -202,6 +214,17 @@ async fn upstream_loop(
                 // banner is never presented as live (Errors invariant).
                 snap.lock().unwrap().upstream_up = false;
                 let _ = tx.send(bridge_status("disconnected"));
+                // Only a session that stayed up a while resets the backoff; a
+                // quick accept-then-EOF flap keeps growing it and logs, so a
+                // misbehaving server never spins a silent tight reconnect loop.
+                if started.elapsed() >= MIN_HEALTHY_UPTIME {
+                    backoff = BACKOFF_START;
+                } else {
+                    eprintln!(
+                        "fno mux serve --web: upstream dropped after {:?}; backing off",
+                        started.elapsed()
+                    );
+                }
             }
             Err(e) => {
                 // First attempt failing is a startup error the caller reports and
@@ -302,7 +325,21 @@ fn forward(msg: ServerMsg, tx: &broadcast::Sender<String>, snap: &Arc<Mutex<Snap
         let mut s = snap.lock().unwrap();
         match &msg {
             ServerMsg::Frame { pane_id, .. } => {
-                s.frames.insert(*pane_id, json.clone());
+                s.frame_seq += 1;
+                let seq = s.frame_seq;
+                s.frames.insert(*pane_id, (seq, json.clone()));
+                if s.frames.len() > MAX_SNAPSHOT_PANES {
+                    // Evict the least-recently-updated pane (lowest seq = the one
+                    // that has gone quiet longest - a dead pane).
+                    if let Some(oldest) = s
+                        .frames
+                        .iter()
+                        .min_by_key(|(_, (seq, _))| *seq)
+                        .map(|(&pid, _)| pid)
+                    {
+                        s.frames.remove(&oldest);
+                    }
+                }
             }
             ServerMsg::Layout { .. } => s.layout = Some(json.clone()),
             _ => {}
@@ -340,9 +377,21 @@ async fn ws_handler(
         q.t.as_deref()
             .is_some_and(|t| constant_time_eq(t.as_bytes(), st.token.as_bytes()));
     if !ok {
-        // AC4-ERR: refuse before any frame is ever sent. 401 on the HTTP upgrade;
-        // the browser maps a 1008/close to the auth-failed banner.
-        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+        // AC4-ERR. A browser cannot read the HTTP status of a FAILED WebSocket
+        // handshake: `onclose` fires 1006 for any handshake failure, so a
+        // 401-at-upgrade is indistinguishable from a network drop and would
+        // retry forever instead of painting the auth-failed banner. Complete the
+        // upgrade, then immediately close with 1008 (policy violation) + reason,
+        // so the browser's `onclose.code === 1008` fires reliably. No ServerMsg
+        // frame is ever sent, so "no frame on a bad token" still holds.
+        return ws.on_upgrade(|mut socket| async move {
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: close_code::POLICY,
+                    reason: "invalid token".into(),
+                })))
+                .await;
+        });
     }
     ws.max_message_size(INBOUND_WS_CAP)
         .on_upgrade(move |socket| ws_conn(socket, st))
@@ -365,7 +414,7 @@ async fn ws_conn(mut socket: WebSocket, st: AppState) {
             if let Some(l) = &s.layout {
                 p.push(l.clone());
             }
-            p.extend(s.frames.values().cloned());
+            p.extend(s.frames.values().map(|(_, j)| j.clone()));
             p
         };
         for m in preamble {
@@ -460,5 +509,86 @@ mod tests {
         let a = WebArgs::default();
         assert_eq!(a.bind, "127.0.0.1");
         assert_eq!(a.session, proto::DEFAULT_SESSION);
+    }
+
+    fn tiny_frame() -> proto::Frame {
+        proto::Frame {
+            rows: 1,
+            cols: 1,
+            cells: vec![proto::Cell::default()],
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: false,
+            scroll_offset: 0,
+        }
+    }
+
+    fn feed(snap: &Arc<Mutex<Snapshot>>, pane_id: u64) {
+        let (tx, _rx) = broadcast::channel::<String>(16);
+        forward(
+            ServerMsg::Frame {
+                pane_id,
+                frame: tiny_frame(),
+            },
+            &tx,
+            snap,
+        );
+    }
+
+    #[test]
+    fn forward_drops_a_malformed_frame() {
+        let (tx, _rx) = broadcast::channel::<String>(16);
+        let snap = Arc::new(Mutex::new(Snapshot::default()));
+        // rows*cols == 4 but only one cell: geometry_ok() is false.
+        let bad = proto::Frame {
+            rows: 2,
+            cols: 2,
+            cells: vec![proto::Cell::default()],
+            ..tiny_frame()
+        };
+        forward(
+            ServerMsg::Frame {
+                pane_id: 7,
+                frame: bad,
+            },
+            &tx,
+            &snap,
+        );
+        assert!(
+            snap.lock().unwrap().frames.is_empty(),
+            "a geometry-inconsistent frame is dropped, never stored"
+        );
+    }
+
+    #[test]
+    fn snapshot_bounds_to_the_cap_evicting_stalest() {
+        let snap = Arc::new(Mutex::new(Snapshot::default()));
+        for pid in 0..(MAX_SNAPSHOT_PANES as u64 + 5) {
+            feed(&snap, pid);
+        }
+        let s = snap.lock().unwrap();
+        assert_eq!(s.frames.len(), MAX_SNAPSHOT_PANES, "bounded to the cap");
+        assert!(!s.frames.contains_key(&0), "the stalest pane was evicted");
+        assert!(
+            s.frames.contains_key(&(MAX_SNAPSHOT_PANES as u64 + 4)),
+            "the newest pane is retained"
+        );
+    }
+
+    #[test]
+    fn snapshot_retains_a_pane_that_keeps_updating() {
+        let snap = Arc::new(Mutex::new(Snapshot::default()));
+        feed(&snap, 0);
+        for pid in 1..(MAX_SNAPSHOT_PANES as u64) {
+            feed(&snap, pid);
+        }
+        feed(&snap, 0); // touch pane 0 again -> now the freshest
+        for pid in MAX_SNAPSHOT_PANES as u64..(MAX_SNAPSHOT_PANES as u64 + 5) {
+            feed(&snap, pid);
+        }
+        assert!(
+            snap.lock().unwrap().frames.contains_key(&0),
+            "a pane that keeps updating survives the eviction sweep"
+        );
     }
 }

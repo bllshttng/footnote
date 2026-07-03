@@ -821,6 +821,14 @@ impl Core {
             .map(|c| c.view)
     }
 
+    /// Whether `client_id` attached as an observer (`Attach { rows: 0, cols: 0 }`).
+    /// A passive client is read-only at the server: any PTY/tree-mutating message
+    /// from it is dropped (x-6a14 defense-in-depth - the read-only guarantee holds
+    /// at the server, not only in the write-half-less web.rs bridge).
+    fn is_passive(&self, client_id: u64) -> bool {
+        self.clients.iter().any(|c| c.id == client_id && c.passive)
+    }
+
     /// The tab a view names, when it is live.
     fn viewed_tab(&self, view: (u64, TabId)) -> Option<&Tab> {
         self.session
@@ -1596,6 +1604,24 @@ impl Core {
     }
 
     fn handle(&mut self, msg: CoreMsg) -> Flow {
+        // Read-only enforcement at the server (x-6a14): drop any PTY/tree-mutating
+        // message from an observer (passive) client, whatever sends it. The web
+        // bridge holds no write half so it never sends these; this makes the
+        // guarantee hold for ANY (0,0) attacher, not by the bridge's discipline
+        // alone. Resize is already neutralized (its dims are ignored for a passive
+        // client); Detach/Gone/Query/etc. are not mutations and pass through.
+        let mutating_sender = match &msg {
+            CoreMsg::Input { id, .. }
+            | CoreMsg::Command { id, .. }
+            | CoreMsg::Mouse { id, .. }
+            | CoreMsg::BlockNav { id, .. } => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = mutating_sender {
+            if self.is_passive(id) {
+                return Flow::Continue;
+            }
+        }
         match msg {
             CoreMsg::Attach {
                 id,
@@ -2953,5 +2979,41 @@ mod tests {
         );
         assert_eq!(core.clients.len(), 1);
         assert!(core.clients[0].passive, "the (0,0) client is passive");
+    }
+
+    #[test]
+    fn is_passive_flags_only_observer_clients() {
+        let mut core = empty_core();
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.clients.push(client(2, 5, (0, 0), true));
+        assert!(!core.is_passive(1));
+        assert!(core.is_passive(2));
+        assert!(
+            !core.is_passive(999),
+            "an unknown id is not passive (its message is processed normally)"
+        );
+    }
+
+    #[test]
+    fn handle_drops_mutating_messages_from_a_passive_client() {
+        let mut core = empty_core();
+        core.clients.push(client(2, 5, (0, 0), true));
+        // Read-only at the server: an observer's PTY/tree-mutating messages are
+        // dropped by the guard before their handler body ever runs (x-6a14).
+        assert!(matches!(
+            core.handle(CoreMsg::Input {
+                id: 2,
+                bytes: vec![b'x']
+            }),
+            Flow::Continue
+        ));
+        assert!(matches!(
+            core.handle(CoreMsg::BlockNav {
+                id: 2,
+                pane: 1,
+                op: BlockNavOp::Rerun
+            }),
+            Flow::Continue
+        ));
     }
 }
