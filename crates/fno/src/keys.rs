@@ -10,10 +10,11 @@
 //! `%`/`"` split H/V · `h j k l` + arrows focus · `H J K L` + Ctrl-arrows
 //! resize · `x` close pane · `c` new tab · `n`/`p` cycle tabs · `1`-`9`
 //! select tab · `&` close tab · `w` panel selector · `b` toggle sideline ·
-//! `s` toggle status row · `?` key-table overlay · `d` detach ·
-//! leader-leader = one literal leader byte. Leader + anything
-//! unmapped is swallowed with BEL - a chord typo must never leak half a
-//! chord into the pane (AC2-UI's never-leak guarantee).
+//! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
+//! prev/next command block · `v` select block · `y` copy selection · `r` rerun
+//! block (x-38c4) · leader-leader = one literal leader byte. Leader + anything
+//! unmapped is swallowed with BEL - a chord typo must never leak half a chord
+//! into the pane (AC2-UI's never-leak guarantee).
 //!
 //! Detach is leader+d ONLY (Phase 3 Locked 11): the Phase 1/2 raw-0x1C
 //! match is gone, so Ctrl-\ forwards to the pane and SIGQUIT works again.
@@ -30,7 +31,7 @@
 //! disable chords at worst, never brick input (AC5-FR). Unbracketed paste
 //! can still trigger leader chords - the tmux-class residual (Locked 11).
 
-use crate::proto::Command;
+use crate::proto::{BlockDir, Command};
 use crate::tree::Dir;
 
 /// The leader byte: Ctrl-b (0x02).
@@ -61,6 +62,13 @@ pub enum Event {
     /// Show the full key-table overlay (leader+?). The next keypress
     /// dismisses it (US4, AC4-EDGE).
     ShowKeys,
+    /// Jump the focused pane's shared scroll to the prev/next command block
+    /// (leader+`[` / leader+`]`, x-38c4). The client resolves the focused pane.
+    BlockJump(BlockDir),
+    /// Move the focused pane's block selection (leader+v walks older, x-38c4).
+    BlockSelect(BlockDir),
+    /// Rerun the focused pane's selected block command (leader+r, x-38c4).
+    BlockRerun,
     /// Swallowed unmapped chord: the client sounds BEL.
     Bell,
 }
@@ -218,6 +226,14 @@ fn chord(b: u8) -> Event {
         b's' => Event::ToggleStatus,
         b'?' => Event::ShowKeys,
         b'd' => Event::Detach,
+        // Block navigation (x-38c4). `[`/`]` follow tmux copy-mode muscle memory;
+        // `x` stays ClosePane (block-select is `v`, vim-visual), `y` yanks the
+        // selection, `r` reruns.
+        b'[' => Event::BlockJump(BlockDir::Prev),
+        b']' => Event::BlockJump(BlockDir::Next),
+        b'v' => Event::BlockSelect(BlockDir::Prev),
+        b'y' => Event::Cmd(Command::CopySelection),
+        b'r' => Event::BlockRerun,
         _ => Event::Bell,
     }
 }
@@ -348,6 +364,43 @@ mod tests {
         // A paste never reads as a pending chord.
         s.scan(b"\x1b[200~\x02");
         assert!(!s.leader_pending());
+    }
+
+    #[test]
+    fn client_keys_block_navigation_chords_map_and_never_leak() {
+        // AC-HP (Change 3): the x-38c4 chords produce their events and the chord
+        // bytes never reach the pane. `x` stays ClosePane (block-select is `v`).
+        assert_eq!(
+            scan_all(&[b"\x02["]),
+            vec![Event::BlockJump(BlockDir::Prev)]
+        );
+        assert_eq!(
+            scan_all(&[b"\x02]"]),
+            vec![Event::BlockJump(BlockDir::Next)]
+        );
+        assert_eq!(
+            scan_all(&[b"\x02v"]),
+            vec![Event::BlockSelect(BlockDir::Prev)]
+        );
+        assert_eq!(
+            scan_all(&[b"\x02y"]),
+            vec![Event::Cmd(Command::CopySelection)]
+        );
+        assert_eq!(scan_all(&[b"\x02r"]), vec![Event::BlockRerun]);
+        assert_eq!(scan_all(&[b"\x02x"]), vec![Event::Cmd(Command::ClosePane)]);
+    }
+
+    #[test]
+    fn client_keys_block_chord_bytes_are_verbatim_inside_a_paste() {
+        // AC-EDGE (Change 3): a `[` / `]` arriving inside a bracketed paste is
+        // pane content, not a chord - it forwards verbatim (same invariant the
+        // existing table tests assert for leader bytes).
+        let mut input = Vec::new();
+        input.extend_from_slice(PASTE_OPEN);
+        input.extend_from_slice(b"arr[0] = x\x02[\x02]");
+        input.extend_from_slice(PASTE_CLOSE);
+        let events = scan_all(&[&input]);
+        assert_eq!(forwarded_only(&events), input);
     }
 
     #[test]

@@ -62,7 +62,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// selection text to the client's clipboard chain. `cell_flags::SELECTED`
 /// marks selected cells in a `Frame` so every co-viewer sees the highlight;
 /// `Frame` gains `scroll_offset` so the client renders the `[+N]` indicator.
-pub const PROTO_VERSION: u32 = 7;
+///
+/// v8 (Phase 6 block navigation): `ClientMsg::BlockJump`/`BlockSelect { pane,
+/// dir }` walk the OSC 133 block store server-side (jump the shared scroll,
+/// or move the block-scoped selection); `ClientMsg::BlockRerun { pane }`
+/// re-sends the selected block's command line, guarded idle. `Command::
+/// CopySelection` copies the current selection over the keyboard (the block
+/// select -> copy composition). `BlockDir` names the walk direction.
+pub const PROTO_VERSION: u32 = 8;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -145,6 +152,25 @@ pub enum ClientMsg {
     /// Shift-modified events are the native-selection escape hatch and are
     /// never captured, so they never reach this variant (AC3-EDGE).
     Mouse { pane: u64, event: MouseEvent },
+    /// (v8) Walk the pane's OSC 133 command blocks, moving the shared per-pane
+    /// scroll so `dir`'s adjacent block anchors at the viewport top. A pane with
+    /// no blocks replies with a `Notice` and no scroll change.
+    BlockJump { pane: u64, dir: BlockDir },
+    /// (v8) Move the block-scoped selection to `dir`'s adjacent block (the whole
+    /// command + output span), so the existing copy chain (leader+y) yanks it.
+    BlockSelect { pane: u64, dir: BlockDir },
+    /// (v8) Re-send the selected (else newest) block's command line to the pane
+    /// PTY. Refused unless the pane is known-idle - a rerun injected into a busy
+    /// agent corrupts its composer (false-ready is the forbidden direction).
+    BlockRerun { pane: u64 },
+}
+
+/// A block-navigation walk direction (v8). `Prev` moves toward older blocks,
+/// `Next` toward newer / the live tail.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BlockDir {
+    Prev,
+    Next,
 }
 
 /// One mouse event forwarded from a client (v7, brief US1/US2/US3). Coordinates
@@ -294,6 +320,10 @@ pub enum Command {
     PrevTab,
     CloseTab,
     SelectSquad(u64),
+    /// (v8) Copy the focused pane's current selection over the keyboard (the
+    /// block-select -> leader+y composition; the mouse path copies on release).
+    /// A no-op `Notice` when nothing is selected.
+    CopySelection,
 }
 
 /// Server -> client.
@@ -839,6 +869,16 @@ mod tests {
                     kind: MouseKind::Drag(MouseButton::Left),
                 },
             },
+            ClientMsg::BlockJump {
+                pane: 3,
+                dir: BlockDir::Prev,
+            },
+            ClientMsg::BlockSelect {
+                pane: 3,
+                dir: BlockDir::Next,
+            },
+            ClientMsg::BlockRerun { pane: 5 },
+            ClientMsg::Command(Command::CopySelection),
         ] {
             let bytes = encode(&msg).unwrap();
             let mut cursor = std::io::Cursor::new(bytes);

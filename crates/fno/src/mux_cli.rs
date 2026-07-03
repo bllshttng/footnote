@@ -91,21 +91,30 @@ fn probe(sock: &Path) -> Probe {
 }
 
 /// The zsh OSC 133 shell-integration snippet: `precmd` emits `D;<exit>` (the
-/// just-finished command) then `A` (new prompt); `preexec` emits `B`/`C` (the
-/// command is about to run). Idempotent (guarded + double-eval-safe), no
-/// absolute paths (AC4-UI). A pane that eval's this captures blocks (US1).
+/// just-finished command) then `A` (new prompt); `B` (command start) rides at
+/// the END of `PROMPT` so it fires when the prompt finishes drawing - the
+/// user's keystrokes are then echoed in the B..C window, which is what x-38c4's
+/// rerun byte-captures as the command line (emitting B in `preexec` alongside C
+/// leaves that window empty: readline has already echoed by then). `preexec`
+/// emits `C` (Enter pressed, output begins). Idempotent (guarded +
+/// double-eval-safe), no absolute paths (AC4-UI). A pane that eval's this
+/// captures blocks (US1) and their command lines (x-38c4).
 const ZSH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
   _FNO_OSC133=1
   autoload -Uz add-zsh-hook
   _fno_osc133_precmd() { local e=$?; printf '\033]133;D;%s\a\033]133;A\a' "$e" }
-  _fno_osc133_preexec() { printf '\033]133;B\a\033]133;C\a' }
+  _fno_osc133_preexec() { printf '\033]133;C\a' }
   add-zsh-hook precmd _fno_osc133_precmd
   add-zsh-hook preexec _fno_osc133_preexec
+  PROMPT="${PROMPT}%{"$'\033]133;B\a'"%}"
 fi
 "#;
 
 /// The bash OSC 133 snippet: `_fno_osc133_prompt` (LAST in `PROMPT_COMMAND`)
-/// emits `D;<exit>`/`A` and arms; the `DEBUG` trap emits `B`/`C` on the FIRST
+/// emits `D;<exit>`/`A` and arms; `B` (command start) rides at the END of `PS1`
+/// (`\[...\]` non-counting) so it fires when the prompt finishes drawing - the
+/// user's keystrokes then echo in the B..C window that x-38c4's rerun
+/// byte-captures as the command line. The `DEBUG` trap emits `C` on the FIRST
 /// command after the prompt, then disarms - so a pipeline emits it once, and
 /// the commands inside `PROMPT_COMMAND` (and a bare Enter) do not trip it. The
 /// `_fno_osc133_prompt` guard skips the trap firing on the hook itself.
@@ -124,12 +133,13 @@ const BASH_SHELL_INIT: &str = r#"if [ -z "${_FNO_OSC133:-}" ]; then
     [ -n "$COMP_LINE" ] && return
     case "$BASH_COMMAND" in _fno_osc133_prompt) return ;; esac
     _fno_osc133_armed=""
-    printf '\033]133;B\a\033]133;C\a'
+    printf '\033]133;C\a'
   }
   case "$PROMPT_COMMAND" in
     *_fno_osc133_prompt*) ;;
     *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_fno_osc133_prompt" ;;
   esac
+  PS1="${PS1}"'\[\033]133;B\a\]'
   trap '_fno_osc133_preexec' DEBUG
 fi
 "#;
@@ -1603,6 +1613,17 @@ mod tests {
             }
             // Idempotent: guarded so a double-eval is a no-op (AC4-UI).
             assert!(snippet.contains("_FNO_OSC133"));
+            // x-38c4: `B` rides in the prompt (PROMPT/PS1), not adjacent to `C`
+            // in the run hook - else the B..C window is empty and rerun captures
+            // no command (readline has already echoed by preexec/DEBUG time).
+            assert!(
+                !snippet.contains("133;B\\a\\033]133;C"),
+                "B must not be emitted adjacent to C: {snippet:?}"
+            );
+            assert!(
+                snippet.contains("PROMPT") || snippet.contains("PS1"),
+                "B must ride in the prompt string: {snippet:?}"
+            );
             // No absolute paths (AC4-UI): nothing references a `/...` path.
             assert!(
                 !snippet.lines().any(|l| l.trim_start().starts_with('/')),

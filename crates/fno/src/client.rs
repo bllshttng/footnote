@@ -834,6 +834,8 @@ const KEY_TABLE: &[&str] = &[
     "  n/p  cycle tabs       1-9  select tab   ",
     "  &  close tab          w  panel selector ",
     "  b  toggle sideline    s  toggle status  ",
+    "  [ ]  jump block       v  select block   ",
+    "  y  copy selection     r  rerun block    ",
     "  d  detach             C-b C-b  literal  ",
     " any key dismisses                        ",
 ];
@@ -1346,6 +1348,38 @@ async fn handle_stdin(
             }
             Event::ShowKeys => {
                 view.overlay = true;
+            }
+            Event::BlockJump(dir) => {
+                write_msg(
+                    sock_w,
+                    &ClientMsg::BlockJump {
+                        pane: view.layout.focus,
+                        dir,
+                    },
+                )
+                .await
+                .map_err(|e| format!("block-jump send failed: {e}"))?;
+            }
+            Event::BlockSelect(dir) => {
+                write_msg(
+                    sock_w,
+                    &ClientMsg::BlockSelect {
+                        pane: view.layout.focus,
+                        dir,
+                    },
+                )
+                .await
+                .map_err(|e| format!("block-select send failed: {e}"))?;
+            }
+            Event::BlockRerun => {
+                write_msg(
+                    sock_w,
+                    &ClientMsg::BlockRerun {
+                        pane: view.layout.focus,
+                    },
+                )
+                .await
+                .map_err(|e| format!("block-rerun send failed: {e}"))?;
             }
             Event::Bell => {
                 let _ = raw_out(b"\x07");
