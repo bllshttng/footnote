@@ -394,6 +394,32 @@ struct Client {
 struct PaneEntry {
     pty: PtyShell,
     vt: vt::Pane,
+    /// The pane's `FNO_NODE` provenance (x-84a8), parsed from the `env(1)`
+    /// wrapper prefix in the pane-run argv at spawn. `None` for a shell pane or
+    /// an ad-hoc `pane run` with no `FNO_NODE=` token. Surfaced to the client
+    /// status row via `Layout::focus_node`.
+    node: Option<String>,
+}
+
+/// Extract the `FNO_NODE` value from a pane-run `argv`. The `_mesh_env_wrapper`
+/// (mux_spawn.py) prefixes the command with `env FNO_NODE=<id> ...`, so the id
+/// is already in the argv the server receives - no new IPC from the pane. An
+/// ad-hoc pane (no such token) yields `None`.
+///
+/// Anchored to the `env(1)` wrapper to avoid false positives: only a leading
+/// `env` followed by its `NAME=VALUE` assignment run is scanned, stopping at
+/// the actual command. So a real command that merely mentions `FNO_NODE=` in
+/// its own args (e.g. `grep FNO_NODE=x file`) is never mistaken for provenance.
+fn node_from_argv(argv: &[String]) -> Option<String> {
+    if argv.first().map(String::as_str) != Some("env") {
+        return None;
+    }
+    argv.iter()
+        .skip(1)
+        .take_while(|a| a.contains('='))
+        .find_map(|a| a.strip_prefix("FNO_NODE="))
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
 }
 
 /// Whether an event ended the session.
@@ -560,7 +586,8 @@ impl Core {
             self.exit_tx.clone(),
         )
         .map_err(|e| e.to_string())?;
-        self.register_pane(id, pty, rows, cols);
+        // A shell pane carries no node provenance (no wrapper argv).
+        self.register_pane(id, pty, rows, cols, None);
         Ok(id)
     }
 
@@ -578,6 +605,7 @@ impl Core {
         if argv.is_empty() {
             return Err("pane run needs a command (empty argv)".into());
         }
+        let node = node_from_argv(argv);
         let id = self.next_pane_id;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn_cmd(
@@ -591,20 +619,28 @@ impl Core {
             self.exit_tx.clone(),
         )
         .map_err(|e| e.to_string())?;
-        self.register_pane(id, pty, rows, cols);
+        self.register_pane(id, pty, rows, cols, node);
         Ok(id)
     }
 
     /// Record a freshly-spawned pane: bump the id, insert its VT grid, and
     /// arm its output watch (dropped receiver, so the watch costs nothing
     /// until a `PaneWait` subscribes).
-    fn register_pane(&mut self, id: u64, pty: PtyShell, rows: u16, cols: u16) {
+    fn register_pane(
+        &mut self,
+        id: u64,
+        pty: PtyShell,
+        rows: u16,
+        cols: u16,
+        node: Option<String>,
+    ) {
         self.next_pane_id += 1;
         self.panes.insert(
             id,
             PaneEntry {
                 pty,
                 vt: vt::Pane::new(rows, cols),
+                node,
             },
         );
         let (tx, _rx) = watch::channel(WaitTick::default());
@@ -1096,6 +1132,9 @@ impl Core {
             focus,
             area,
             agents: self.agent_rows(),
+            // The focused pane's provenance for the status row (x-66e8). Re-sent
+            // whenever `focus` changes, so the cell tracks focus for free.
+            focus_node: self.panes.get(&focus).and_then(|e| e.node.clone()),
         }
     }
 
@@ -2798,6 +2837,40 @@ async fn client_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_from_argv_reads_the_wrapper_token() {
+        // env(1) wrapper prefix: `env FNO_AGENT_SELF=... FNO_NODE=x-66e8 ... claude`.
+        let argv: Vec<String> = [
+            "env",
+            "FNO_AGENT_SELF=peer",
+            "FNO_NODE=x-66e8",
+            "FNO_SLUG=some-slug",
+            "claude",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(node_from_argv(&argv), Some("x-66e8".to_string()));
+    }
+
+    #[test]
+    fn node_from_argv_is_none_for_ad_hoc_pane() {
+        let ad_hoc =
+            |a: &[&str]| node_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        // A plain `pane run htop` (no wrapper) has no provenance.
+        assert_eq!(ad_hoc(&["htop"]), None);
+        // An empty-valued token is treated as absent (no empty-string exports).
+        assert_eq!(ad_hoc(&["env", "FNO_NODE=", "sh"]), None);
+        // A command that merely MENTIONS FNO_NODE= in its own args is not
+        // provenance: scanning stops at the command (first non-`NAME=` token).
+        assert_eq!(
+            ad_hoc(&["env", "FOO=1", "grep", "FNO_NODE=x", "file"]),
+            None
+        );
+        // No `env` wrapper at all -> never scanned, even with a bare token.
+        assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
+    }
 
     #[test]
     fn server_control_dead_pane_err_carries_the_code_and_id() {
