@@ -36,7 +36,6 @@ from fno.agents.dispatch import (
     _capture_parent_edge,
     validate_spawn_name,
 )
-from fno.agents.providers import READABLE_PROVIDERS
 from fno.agents.lock import hold_agent_lock
 from fno.agents.registry import (
     AgentEntry,
