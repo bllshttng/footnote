@@ -26,6 +26,19 @@
 # ponytail: fires for every claude session; the daemon-presence + unknown-session
 # drop is the gate. A per-session opt-in lands if the dropped-report noise ever
 # matters.
+#
+# Turn-block markers (additive, mux panes only): inside a mux pane this hook
+# ALSO writes OSC 133 to /dev/tty so the mux block scanner segments the pane's
+# history by agent TURNS -- `133;C` when a turn starts (working), `133;D;0`
+# when it ends (done). The pane PTY is this process's controlling terminal, so
+# the bytes enter the exact stream vt.rs scans; hook-emitted markers are
+# indistinguishable from shell-emitted ones (blocks open on C, finalize on D;
+# A/B are boundary no-ops for the block store). Emission is gated on FNO_PANE
+# (set by pty.rs in every pane child env) so a non-pane terminal never sees
+# invisible OSC spray, and it inherits the fire-and-forget contract: a
+# marker-write failure is silent and never blocks the turn or the report.
+# Exit is always 0 in v1: the Stop payload carries no cheap error signal, and
+# the turn's on-screen content is its label -- no custom param vocabulary.
 
 set -uo pipefail
 
@@ -34,6 +47,16 @@ case "$STATE" in
   working | blocked | done) ;;
   *) STATE="working" ;;
 esac
+
+# Turn boundary -> OSC 133 marker, mux panes only. Redirect-open of /dev/tty
+# fails silently when there is no controlling terminal (headless), hence the
+# stderr silence BEFORE the tty redirect and the || true.
+if [[ -n "${FNO_PANE:-}" ]]; then
+  case "$STATE" in
+    working) { printf '\033]133;C\007' >/dev/tty; } 2>/dev/null || true ;;
+    done) { printf '\033]133;D;0\007' >/dev/tty; } 2>/dev/null || true ;;
+  esac
+fi
 
 INPUT=$(cat)
 
