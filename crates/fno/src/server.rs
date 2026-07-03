@@ -1823,13 +1823,17 @@ impl Core {
                 Flow::Continue
             }
             Command::CopySelection => {
-                // The keyboard copy path (leader+y), the block-select composition
-                // (x-38c4): copy the sender's focused pane selection. Reuses the
-                // mouse-release copy channel; nothing selected is a plain notice.
+                // Keyboard copy (leader+y): the focused pane's selection, else the
+                // newest completed block (precedence + refusals in copy_source).
+                // Nothing to copy is a plain notice; reuses the mouse-release channel.
                 let text = self
                     .viewed_tab(view)
                     .and_then(|tab| self.panes.get(&tab.focus))
-                    .and_then(|e| e.vt.selection_text());
+                    .and_then(|e| {
+                        // block read is deferred: skipped entirely when a
+                        // selection wins (it can clone up to a 256 KiB block).
+                        copy_source(e.vt.selection_text(), || e.vt.read_block(BlockSel::Last))
+                    });
                 match text {
                     Some(text) => self.send_copy(client_id, text),
                     None => self.notice(client_id, "nothing selected"),
@@ -2226,6 +2230,21 @@ fn dead_pane(pane: u64) -> ServerMsg {
         code: err_code::DEAD_PANE,
         msg: format!("no such pane: {pane}"),
     }
+}
+
+/// The leader+y copy source precedence (epic Locked 6 / cv-4ac072b6): the active
+/// `selection`, else the newest completed OSC 133 `block`. An open (still
+/// streaming), truncated/evicted, or markerless-implicit block never copies -
+/// `None` here makes the caller show the "nothing selected" notice rather than
+/// land partial or wrong text. Both inputs are already validated by vt.
+fn copy_source<F>(selection: Option<String>, block: F) -> Option<String>
+where
+    F: FnOnce() -> Result<vt::BlockRead, ()>,
+{
+    selection.or_else(|| match block() {
+        Ok(b) if b.complete && !b.truncated && !b.implicit => Some(b.text),
+        _ => None,
+    })
 }
 
 /// The `--command-done` arm of a wait: resolve when the pane's last-completed
@@ -3451,6 +3470,52 @@ mod tests {
         assert_eq!(
             dispatch_notice(r#"{"outcome":"???"}"#),
             "grab work: dispatch failed"
+        );
+    }
+
+    fn block(complete: bool, truncated: bool, implicit: bool, text: &str) -> vt::BlockRead {
+        vt::BlockRead {
+            seq: Some(0),
+            exit: Some(0),
+            complete,
+            truncated,
+            implicit,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn copy_source_precedence_selection_then_block_then_none() {
+        // AC-happy: an active selection wins even when a completed block exists.
+        assert_eq!(
+            copy_source(Some("sel".into()), || Ok(block(true, false, false, "blk"))),
+            Some("sel".into())
+        );
+        // AC-happy: no selection -> the newest completed block copies.
+        assert_eq!(
+            copy_source(None, || Ok(block(true, false, false, "blk"))),
+            Some("blk".into())
+        );
+        // AC-error: no selection and no block (BLOCK_UNAVAILABLE) -> notice.
+        assert_eq!(copy_source(None, || Err(())), None);
+    }
+
+    #[test]
+    fn copy_source_refuses_open_truncated_and_implicit_blocks() {
+        // The open (still-running) block never copies.
+        assert_eq!(
+            copy_source(None, || Ok(block(false, false, false, "partial"))),
+            None
+        );
+        // AC-edge: a truncated (head-evicted) block refuses rather than copy wrong text.
+        assert_eq!(
+            copy_source(None, || Ok(block(true, true, false, "trunc"))),
+            None
+        );
+        // A markerless pane's implicit whole-output block keeps the old notice.
+        assert_eq!(
+            copy_source(None, || Ok(block(true, false, true, "whole"))),
+            None
         );
     }
 }
