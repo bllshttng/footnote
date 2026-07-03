@@ -1,14 +1,16 @@
 //! The scriptable `fno mux` verbs: `ls`, `kill-server`, `shell-init`, `doctor`,
-//! and the `pane` control-verb family. Plain client-process code - they run and
-//! exit, no TUI, no raw mode, no attach - so every probe is bounded by a
-//! read/write timeout and a bad session can never hang the listing (AC4-ERR).
+//! the `pane` control-verb family, and the `block` porcelain (`block pipe`).
+//! Plain client-process code - they run and exit, no TUI, no raw mode, no
+//! attach - so every probe is bounded by a read/write timeout and a bad
+//! session can never hang the listing (AC4-ERR).
 //!
 //! ## Exit-code table (US6, the one authority; asserted by tests)
 //!
 //! Every verb returns one of [`EXIT_OK`] (0), [`EXIT_ERROR`] (1, an io/dead/skew
-//! failure), [`EXIT_USAGE`] (2, malformed args), or - for `pane wait`/`read` -
-//! the distinct `EXIT_WAIT_*`/`EXIT_BLOCK_UNAVAILABLE` codes (10-14). The
-//! constants below carry the canonical comment per code.
+//! failure), [`EXIT_USAGE`] (2, malformed args), or - for `pane wait`/`read`
+//! and `block pipe` - the distinct `EXIT_WAIT_*`/`EXIT_BLOCK_UNAVAILABLE`/
+//! [`EXIT_TARGET_NOT_IDLE`] codes (10-15). The constants below carry the
+//! canonical comment per code.
 //!
 //! ## `--json` envelope (US6; every verb accepts `--json`)
 //!
@@ -28,9 +30,10 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::agents_view::{derive_rows, registry_path, RegistryAgent};
 use crate::proto::{
-    self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, ServerMsg,
-    WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
+    self, err_code, read_msg_sync, write_msg_sync, AgentBadge, BlockSel, ClientMsg, ControlVerb,
+    ServerMsg, WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
 };
 
 /// Bound every probe: a wedged server counts as alive-but-unqueryable, never
@@ -1048,6 +1051,7 @@ pub const EXIT_WAIT_TIMEOUT: i32 = 11; // wait: deadline elapsed
 pub const EXIT_WAIT_EXITED: i32 = 12; // wait: the pane's child exited
 pub const EXIT_WAIT_COMMAND_DONE: i32 = 13; // wait: --command-done, OSC 133 D fired (v6)
 pub const EXIT_BLOCK_UNAVAILABLE: i32 = 14; // read --block: evicted/nonexistent/markerless (v6)
+pub const EXIT_TARGET_NOT_IDLE: i32 = 15; // block pipe: receiving agent not idle (guard refused)
 
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
@@ -1605,6 +1609,246 @@ fn render_reply(reply: ServerMsg, json: bool, command_done_requested: bool) -> i
     }
 }
 
+// ---------------------------------------------------------------------------
+// `fno mux block pipe` - cross-pane block piping porcelain (x-fe8f)
+// ---------------------------------------------------------------------------
+
+/// A parsed `block pipe` invocation. Pure-parse struct, mirrors [`ParsedPane`].
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedBlockPipe {
+    session: Option<String>,
+    json: bool,
+    from: u64,
+    to: u64,
+    block: BlockSel,
+    force: bool,
+}
+
+/// Parse the tokens after `mux block` into a [`ParsedBlockPipe`]. Pure, so the
+/// grammar is unit-testable without a socket. `pipe` is the only block verb.
+fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
+    let verb = args
+        .first()
+        .and_then(|a| a.to_str())
+        .ok_or_else(|| "block needs a verb: pipe".to_string())?;
+    if verb != "pipe" {
+        return Err(format!("unknown block verb: {verb} (pipe)"));
+    }
+    let mut session = None;
+    let mut json = false;
+    let mut force = false;
+    let mut from = None;
+    let mut to = None;
+    let mut block = BlockSel::Last;
+    let mut i = 1;
+    while i < args.len() {
+        let tok = args[i]
+            .to_str()
+            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
+        match tok {
+            "--json" => json = true,
+            "--force" => force = true,
+            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--from" => from = Some(parse_u64(&flag_value(args, &mut i, "--from")?, "--from")?),
+            "--to" => to = Some(parse_u64(&flag_value(args, &mut i, "--to")?, "--to")?),
+            "--block" => block = parse_block_sel(&flag_value(args, &mut i, "--block")?)?,
+            other => return Err(format!("unknown argument: {other}")),
+        }
+        i += 1;
+    }
+    Ok(ParsedBlockPipe {
+        session,
+        json,
+        from: from.ok_or("block pipe needs --from <pane>")?,
+        to: to.ok_or("block pipe needs --to <pane>")?,
+        block,
+        force,
+    })
+}
+
+/// The receive-side idle guard (x-fe8f, same fail-closed discipline as the
+/// block-rerun guard): never inject into a working agent's composer. Decides
+/// from the registry rows [`derive_rows`] folded (in-TTL hook > fresh screen >
+/// liveness), scoped to THIS mux session - pane ids collide across sessions.
+///
+/// - `rows: None` (malformed registry) -> refuse: the target's state is
+///   unknown and the default fails closed.
+/// - no row for (session, pane) -> proceed: a plain shell pane is not an
+///   agent; the guard protects agents' composers, not shells.
+/// - exited row -> proceed: the agent is gone, there is no composer left.
+/// - any live badge (working/blocked/done) -> refuse with a typed reason.
+fn pipe_guard(rows: Option<&[RegistryAgent]>, session: &str, pane: u64) -> Result<(), String> {
+    let Some(rows) = rows else {
+        return Err("agents registry unreadable - target agent state unknown".to_string());
+    };
+    let Some(row) = rows.iter().find(|r| {
+        r.mux
+            .as_ref()
+            .is_some_and(|(s, p)| s == session && *p == pane)
+    }) else {
+        return Ok(());
+    };
+    if row.exited {
+        return Ok(());
+    }
+    if let Some(badge) = row.badge {
+        let state = match badge {
+            AgentBadge::Working => "working",
+            AgentBadge::Blocked => "blocked",
+            AgentBadge::Done => "done",
+        };
+        let hint = row
+            .reason
+            .as_deref()
+            .map(|r| format!(": {r}"))
+            .unwrap_or_default();
+        return Err(format!(
+            "target pane {pane} not idle (agent {name:?} {state}{hint})",
+            name = row.name
+        ));
+    }
+    Ok(())
+}
+
+/// One control round-trip on a fresh one-shot connection (the pane verbs'
+/// connect + [`send_control`], factored so `block pipe` can do two in a row).
+fn control_roundtrip(sock: &Path, session: &str, verb: ControlVerb) -> Result<ServerMsg, String> {
+    let stream = std::os::unix::net::UnixStream::connect(sock)
+        .map_err(|e| format!("cannot reach session {session:?}: {e}"))?;
+    send_control(stream, verb, CONTROL_TIMEOUT)
+}
+
+/// `fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json]
+/// [--force]`: read a COMPLETED block from the source pane and land its text
+/// in the target pane's input. Porcelain over `pane read --block` + `pane
+/// send` - no new capability, one verb. Trailing newlines are stripped so the
+/// pipe fills the input line and never submits it.
+pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
+    let parsed = match parse_block_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let session = resolve_session(parsed.session.as_deref(), env_session);
+    let sock = match proto::socket_path(&session) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_USAGE;
+        }
+    };
+
+    // 1. Read the source block. EXIT_BLOCK_UNAVAILABLE propagates verbatim -
+    //    an evicted/nonexistent block must never pipe wrong or truncated text.
+    let (text, seq) = match control_roundtrip(
+        &sock,
+        &session,
+        ControlVerb::PaneRead {
+            pane: parsed.from,
+            lines: None,
+            block: Some(parsed.block),
+        },
+    ) {
+        Ok(ServerMsg::PaneText { text, block, .. }) => (text, block.and_then(|m| m.seq)),
+        Ok(ServerMsg::Err { code, msg }) => {
+            eprintln!("fno mux block: {msg}");
+            return if code == err_code::BLOCK_UNAVAILABLE {
+                EXIT_BLOCK_UNAVAILABLE
+            } else {
+                EXIT_ERROR
+            };
+        }
+        Ok(other) => {
+            eprintln!("fno mux block: unexpected server reply: {other:?}");
+            return EXIT_ERROR;
+        }
+        Err(e) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_ERROR;
+        }
+    };
+
+    // 2. Receive-side idle guard. A missing registry FILE means no daemon and
+    //    no agents (proceed); an unreadable/malformed one means unknown state
+    //    (refuse). `--force` is the human override; the default fails closed.
+    if parsed.force {
+        eprintln!("fno mux block: --force: skipping the receive-side idle guard");
+    } else {
+        let verdict = match std::fs::read_to_string(registry_path()) {
+            Ok(raw) => pipe_guard(
+                derive_rows(&raw, epoch_secs()).as_deref(),
+                &session,
+                parsed.to,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!(
+                "agents registry unreadable ({e}) - target agent state unknown"
+            )),
+        };
+        if let Err(why) = verdict {
+            eprintln!("fno mux block: {why} - rerun with --force to override");
+            return EXIT_TARGET_NOT_IDLE;
+        }
+    }
+
+    // 3. Land the text in the target's input.
+    let bytes = text.trim_end_matches(['\r', '\n']).as_bytes().to_vec();
+    let sent = bytes.len();
+    match control_roundtrip(
+        &sock,
+        &session,
+        ControlVerb::PaneSend {
+            pane: parsed.to,
+            bytes,
+        },
+    ) {
+        Ok(ServerMsg::Ok) => {}
+        Ok(ServerMsg::Err { msg, .. }) => {
+            eprintln!("fno mux block: {msg}");
+            return EXIT_ERROR;
+        }
+        Ok(other) => {
+            eprintln!("fno mux block: unexpected server reply: {other:?}");
+            return EXIT_ERROR;
+        }
+        Err(e) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_ERROR;
+        }
+    }
+
+    if parsed.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "from": parsed.from,
+                "to": parsed.to,
+                "block_seq": seq,
+                "bytes": sent,
+                "forced": parsed.force,
+            })
+        );
+    } else {
+        let seq_s = seq.map(|s| format!("#{s}")).unwrap_or_else(|| "?".into());
+        println!(
+            "piped block {seq_s} ({sent} bytes) pane {} -> pane {}",
+            parsed.from, parsed.to
+        );
+    }
+    EXIT_OK
+}
+
+/// Wall-clock epoch seconds for the guard's TTL fold (matches the sideline
+/// reader's `now_secs` feeding [`derive_rows`]).
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2141,5 +2385,129 @@ mod tests {
         assert_eq!(Verdict::Ok.word(), "ok");
         assert_eq!(Verdict::Fail.word(), "fail");
         assert_eq!(Verdict::Na.word(), "n/a");
+    }
+
+    // -- block pipe (x-fe8f) -------------------------------------------------
+
+    #[test]
+    fn block_pipe_parses_flags_and_defaults_to_last() {
+        assert_eq!(
+            parse_block_args(&os(&["pipe", "--from", "4", "--to", "2"])),
+            Ok(ParsedBlockPipe {
+                session: None,
+                json: false,
+                from: 4,
+                to: 2,
+                block: BlockSel::Last,
+                force: false,
+            })
+        );
+        assert_eq!(
+            parse_block_args(&os(&[
+                "pipe",
+                "--from",
+                "4",
+                "--to",
+                "2",
+                "--block",
+                "7",
+                "--session",
+                "work",
+                "--json",
+                "--force",
+            ])),
+            Ok(ParsedBlockPipe {
+                session: Some("work".into()),
+                json: true,
+                from: 4,
+                to: 2,
+                block: BlockSel::Seq(7),
+                force: true,
+            })
+        );
+    }
+
+    #[test]
+    fn block_pipe_usage_errors() {
+        // Missing --from / --to, an unknown flag, and an unknown verb are all
+        // parse errors (exit 2 at the verb), never a partial pipe.
+        assert!(parse_block_args(&os(&["pipe", "--to", "2"])).is_err());
+        assert!(parse_block_args(&os(&["pipe", "--from", "4"])).is_err());
+        assert!(parse_block_args(&os(&["pipe", "--from", "4", "--to", "2", "--oops"])).is_err());
+        assert!(parse_block_args(&os(&["rerun"])).is_err());
+        assert!(parse_block_args(&os(&["pipe", "--from", "x", "--to", "2"])).is_err());
+    }
+
+    /// A registry row fixture for the guard matrix.
+    fn agent_row(
+        name: &str,
+        mux: Option<(&str, u64)>,
+        badge: Option<AgentBadge>,
+        exited: bool,
+    ) -> RegistryAgent {
+        RegistryAgent {
+            name: name.into(),
+            cwd: "/w".into(),
+            exited,
+            badge,
+            reason: (badge == Some(AgentBadge::Working)).then(|| "building".into()),
+            mux: mux.map(|(s, p)| (s.to_string(), p)),
+            answerable: None,
+        }
+    }
+
+    #[test]
+    fn block_pipe_guard_refuses_any_live_badge() {
+        // AC-ERR: a working target refuses; blocked and done fail closed too.
+        for badge in [AgentBadge::Working, AgentBadge::Blocked, AgentBadge::Done] {
+            let rows = [agent_row("a", Some(("main", 2)), Some(badge), false)];
+            let err = pipe_guard(Some(&rows), "main", 2).unwrap_err();
+            assert!(err.contains("not idle"), "{badge:?}: {err}");
+        }
+        // The refusal names the state and carries the reason hint when present.
+        let rows = [agent_row(
+            "a",
+            Some(("main", 2)),
+            Some(AgentBadge::Working),
+            false,
+        )];
+        let err = pipe_guard(Some(&rows), "main", 2).unwrap_err();
+        assert!(err.contains("working: building"), "{err}");
+    }
+
+    #[test]
+    fn block_pipe_guard_passes_idle_shell_and_exited() {
+        // Idle agent (row, no live badge) -> send.
+        let rows = [agent_row("a", Some(("main", 2)), None, false)];
+        assert_eq!(pipe_guard(Some(&rows), "main", 2), Ok(()));
+        // AC-EDGE: no registry row for the pane -> a plain shell pane, send.
+        assert_eq!(pipe_guard(Some(&[]), "main", 2), Ok(()));
+        // An exited agent left no composer to protect -> send.
+        let rows = [agent_row(
+            "a",
+            Some(("main", 2)),
+            Some(AgentBadge::Working),
+            true,
+        )];
+        assert_eq!(pipe_guard(Some(&rows), "main", 2), Ok(()));
+    }
+
+    #[test]
+    fn block_pipe_guard_is_session_scoped() {
+        // Pane ids collide across sessions (the x-38c4 rerun-guard lesson):
+        // a working agent on pane 2 of ANOTHER session must not veto this one.
+        let rows = [agent_row(
+            "a",
+            Some(("other", 2)),
+            Some(AgentBadge::Working),
+            false,
+        )];
+        assert_eq!(pipe_guard(Some(&rows), "main", 2), Ok(()));
+    }
+
+    #[test]
+    fn block_pipe_guard_fails_closed_on_malformed_registry() {
+        // derive_rows(None) == a torn/malformed document: state unknown, refuse.
+        assert!(pipe_guard(None, "main", 2).is_err());
     }
 }

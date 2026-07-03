@@ -46,6 +46,9 @@ enum Role {
     /// `mux pane` verbatim; `mux_cli::pane` parses the verb + flags. No TTY
     /// needed (control verbs are scriptable one-shots).
     MuxPane(Vec<OsString>),
+    /// `mux block <verb> ...`: block porcelain (`block pipe`, x-fe8f). Same
+    /// carry-verbatim shape as `MuxPane`; `mux_cli::block` parses.
+    MuxBlock(Vec<OsString>),
     /// `mux shell-init <zsh|bash> [--json]`: print the OSC 133 shell-integration
     /// snippet (v6). `None` / an unsupported shell is an error in the verb.
     MuxShellInit(Option<String>, bool),
@@ -157,6 +160,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             // a bare `mux pane` (no verb) falls through to MuxUsage. Nothing
             // under `mux pane` ever forwards to Python (AC).
             Some("pane") if args.len() > 2 => Role::MuxPane(args[2..].to_vec()),
+            // `mux block <verb> ...`: block porcelain; a bare `mux block`
+            // falls through to MuxUsage. Never forwards to Python.
+            Some("block") if args.len() > 2 => Role::MuxBlock(args[2..].to_vec()),
             // ls / doctor take no positional, an optional `--json` (US6).
             Some("ls") => match split_json(&args[2..]) {
                 Some((pos, json)) if pos.is_empty() => Role::MuxLs(json),
@@ -223,7 +229,8 @@ fn main() {
                  | fno mux kill-server [<name>] [--json] \
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
                  | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
-                 | fno mux pane ls|read|run|send|wait|kill|claim|release ..."
+                 | fno mux pane ls|read|run|send|wait|kill|claim|release ... \
+                 | fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--force]"
             );
             std::process::exit(2);
         }
@@ -238,6 +245,7 @@ fn main() {
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::MuxWeb(web_args) => std::process::exit(fno::web::serve(web_args)),
         Role::MuxPane(rest) => std::process::exit(mux_cli::pane(&rest, env_session.as_deref())),
+        Role::MuxBlock(rest) => std::process::exit(mux_cli::block(&rest, env_session.as_deref())),
         Role::Client(flag) => {
             let env = env_session.as_deref().filter(|s| !s.is_empty());
             // Bare `fno` with nothing pinned: the pre-attach picker decides
@@ -447,6 +455,19 @@ mod tests {
             Role::MuxPane(os(&["run", "--cwd", "/x", "--", "claude"]))
         );
         assert_eq!(decide_role(&os(&["mux", "pane"]), false), Role::MuxUsage);
+    }
+
+    #[test]
+    fn proto_role_mux_block_routes_to_the_verb_family() {
+        // Same carry-verbatim shape as `mux pane`; a bare `mux block` is usage.
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "block", "pipe", "--from", "4", "--to", "2"]),
+                false
+            ),
+            Role::MuxBlock(os(&["pipe", "--from", "4", "--to", "2"]))
+        );
+        assert_eq!(decide_role(&os(&["mux", "block"]), false), Role::MuxUsage);
     }
 
     #[test]

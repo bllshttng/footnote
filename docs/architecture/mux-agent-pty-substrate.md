@@ -12,7 +12,7 @@ The `fno` mux hosts agent PTYs. The `fno-agents` daemon keeps the registry (the 
 
 An interactive agent used to be a daemon-owned PTY worker (`fno-agents-worker`), observed and driven over a WebSocket (`fno agents grid` / `fno agents drive`). That whole surface was deleted:
 
-- **Grid + drive** — the TUI compositor and the WebSocket drive/watch surface. Agent panes now live in the mux; observe them in the sideline and script them with `fno mux pane ls|read|run|send|wait|kill`.
+- **Grid + drive** — the TUI compositor and the WebSocket drive/watch surface. Agent panes now live in the mux; observe them in the sideline and script them with `fno mux pane ls|read|run|send|wait|kill`. `fno mux block pipe --from <pane> --to <pane> [--block last|<seq>]` composes two of those into cross-pane block piping: read a completed, typed block from the source pane and land its text in the target pane's input (trailing newlines stripped — it fills the input line, never submits). A receive-side idle guard refuses when the target pane hosts an agent whose registry badge is working/blocked/done (fail-closed, session-scoped; a plain shell pane has no registry row and always receives); `--force` overrides, and the refusal exits 15 so scripts can tell it from an error.
 - **Daemon PTY hosting** — the `handle_spawn` PTY back-half, the PTY worker (`worker.rs` + `pty.rs`), the `agent.deliver` PTY inject lane, and the injection gate.
 - **`host` / `promote` / `grid` / `drive`** — retired verbs. Each prints a one-line pointer to the mux and exits non-zero rather than silently doing nothing.
 
