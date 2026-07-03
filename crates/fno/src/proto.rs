@@ -222,8 +222,10 @@ pub enum ClientMsg {
     /// active search no-ops with a `Notice`, never a panic.
     SearchStep { pane: u64, dir: BlockDir },
     /// (v12, x-e780) Clear the active search: drop the highlight (selection) and
-    /// the per-pane search state, then broadcast a `Frame`. A no-op `Notice` when
-    /// no search is active.
+    /// the per-pane search state, then broadcast a `Frame`. Idempotent: clearing
+    /// with nothing active still clears + broadcasts (the client sends this on
+    /// every search exit, and a no-match search_open has already dropped the
+    /// state server-side).
     SearchClear { pane: u64 },
 }
 

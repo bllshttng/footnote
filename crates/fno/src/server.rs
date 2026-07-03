@@ -1483,9 +1483,9 @@ impl Core {
     /// Apply one in-scrollback search op to `pane` (v12, x-e780). Open/step mutate
     /// the shared scroll + highlight (broadcast so every co-viewer tracks, tmux
     /// precedent) and reply a `SearchResult` counter to the initiator ONLY; clear
-    /// drops the highlight for all. A missing pane, or a step/clear with no active
-    /// search, gets a one-line notice to the requester, never a silent no-op or a
-    /// panic. Only match counts + coordinates ever leave the server.
+    /// (idempotent) drops the highlight for all. A missing pane, or a step with no
+    /// active search, gets a one-line notice to the requester, never a silent
+    /// no-op or a panic. Only match counts + coordinates ever leave the server.
     fn search_nav(&mut self, client_id: u64, pane: u64, op: SearchOp) {
         match op {
             SearchOp::Open(query) => {
@@ -1505,14 +1505,14 @@ impl Core {
                 Some(None) => self.notice(client_id, "no active search"),
                 None => self.notice(client_id, "pane not found"),
             },
+            // Idempotent: a no-match search_open already dropped the state while
+            // the client still sends Clear on Esc, so guarding on has_search here
+            // would misfire "no active search" on the common no-match-then-Esc.
             SearchOp::Clear => match self.panes.get_mut(&pane) {
-                Some(e) if e.vt.has_search() => {
+                Some(e) => {
                     e.vt.search_clear();
                     self.broadcast_pane(pane);
                 }
-                // Honor the documented no-op: clearing with nothing active is a
-                // notice, not a stray broadcast (matches the Step arm).
-                Some(_) => self.notice(client_id, "no active search"),
                 None => self.notice(client_id, "pane not found"),
             },
         }

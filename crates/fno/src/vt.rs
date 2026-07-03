@@ -563,8 +563,7 @@ impl Pane {
         let matches = self.scan_matches(&needle);
         if matches.is_empty() {
             // No match: drop any prior highlight/state, do not move the viewport.
-            self.term.selection = None;
-            self.search = None;
+            self.search_clear();
             return (0, 0);
         }
         // Initial: nearest match at/above the current viewport top scrolling up,
@@ -605,6 +604,9 @@ impl Pane {
     pub fn search_clear(&mut self) {
         self.term.selection = None;
         self.search = None;
+        // search and block-select share term.selection; releasing it must not
+        // leave a stale rerun target.
+        self.selected_block = None;
     }
 
     /// Whether a search is active (non-empty snapshot). Lets the server reply a
@@ -637,6 +639,7 @@ impl Pane {
         );
         sel.update(Point::new(Line(line), Column(m.col_end)), Side::Right);
         self.term.selection = Some(sel);
+        self.selected_block = None; // search now owns the shared selection
         self.scroll_to_abs(m.abs_row);
     }
 
@@ -2228,6 +2231,33 @@ mod tests {
         );
         // The stale selected_block=0 no longer resolves; heal to the newest.
         assert_eq!(pane.rerun_command().as_deref(), Some("cmd5"));
+    }
+
+    #[test]
+    fn search_releases_the_block_selection_for_rerun() {
+        // Search and block-select share term.selection, so a search must not leave
+        // a stale selected_block as the rerun target (incl. a co-viewer's rerun).
+        let mut pane = three_blocks();
+        pane.block_select(BlockDir::Prev); // newest (block 2)
+        pane.block_select(BlockDir::Prev); // block 1
+        assert_eq!(pane.rerun_command().as_deref(), Some("echo two"));
+        // A matching search takes over the shared selection (apply_current_match):
+        // rerun falls back to the newest block, not the now-invisible block 1.
+        let (total, _) = pane.search_open("echo");
+        assert!(total > 0, "precondition: 'echo' matches in scrollback");
+        assert_eq!(
+            pane.selected_block, None,
+            "search released the block target"
+        );
+        assert_eq!(pane.rerun_command().as_deref(), Some("echo three"));
+        // The no-match path (which drops the highlight via search_clear) also
+        // releases the block target.
+        pane.block_select(BlockDir::Prev);
+        pane.block_select(BlockDir::Prev);
+        assert_eq!(pane.rerun_command().as_deref(), Some("echo two"));
+        assert_eq!(pane.search_open("zz-no-such-token"), (0, 0));
+        assert_eq!(pane.selected_block, None);
+        assert_eq!(pane.rerun_command().as_deref(), Some("echo three"));
     }
 
     #[test]
