@@ -81,7 +81,10 @@ use crate::tree::{Dir, Rect, TabId};
 /// pane's `FNO_NODE` provenance (x-84a8), parsed server-side from the pane-run
 /// argv, so the client status row shows `⚑ <node>` config-free. `None` for an
 /// ad-hoc pane.
-pub const PROTO_VERSION: u32 = 10;
+///
+/// v11 (work-queue dispatch, x-6f77): a new `DispatchNext` client verb (leader+g
+/// "grab work") - a wire-shape change, so the shared counter bumps.
+pub const PROTO_VERSION: u32 = 11;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -175,6 +178,12 @@ pub enum ClientMsg {
     /// PTY. Refused unless the pane is known-idle - a rerun injected into a busy
     /// agent corrupts its composer (false-ready is the forbidden direction).
     BlockRerun { pane: u64 },
+    /// (v11, x-6f77) "Grab work" (leader+g): dispatch the next ready backlog
+    /// node into a new pane in this session. Server-wide (no pane field): the
+    /// server shells the Python porcelain off the core loop, and the outcome
+    /// (no ready work / lanes full / failure) returns as a one-line `Notice`.
+    /// A read-only observer client is refused at the core (mutating_sender).
+    DispatchNext,
     /// (v9, x-c929) Answer a blocked prompt from the queue without focusing it.
     /// `keystroke` is the exact bytes the daemon pinned for the chosen option
     /// (never client-fabricated); `fingerprint`/`region_lines` name the region

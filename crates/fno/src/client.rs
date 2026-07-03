@@ -1564,6 +1564,11 @@ async fn handle_stdin(
                 .await
                 .map_err(|e| format!("block-rerun send failed: {e}"))?;
             }
+            Event::DispatchNext => {
+                write_msg(sock_w, &ClientMsg::DispatchNext)
+                    .await
+                    .map_err(|e| format!("dispatch-next send failed: {e}"))?;
+            }
             Event::Bell => {
                 let _ = raw_out(b"\x07");
             }

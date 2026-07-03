@@ -270,6 +270,21 @@ enum CoreMsg {
         region_lines: u16,
         keystroke: Vec<u8>,
     },
+    /// (v11, x-6f77) "Grab work" (leader+g): dispatch the next ready node into a
+    /// new pane. `id` is the requesting client (for the outcome notice). The
+    /// spawn runs OFF the core loop in a detached task (it shells `fno dispatch
+    /// one`); the pane appears via the existing registry reader, and only the
+    /// no-work / lanes-full / failure outcomes come back as `DispatchResult`.
+    DispatchNext {
+        id: u64,
+    },
+    /// The off-loop dispatch task's outcome, routed back so the notice is sent
+    /// from the core loop (which owns `clients`). `notice` empty = say nothing
+    /// (the launched pane speaks for itself via the layout push).
+    DispatchResult {
+        id: u64,
+        notice: String,
+    },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
     Query(tokio::sync::oneshot::Sender<ServerMsg>),
@@ -514,6 +529,11 @@ struct Core {
     shells: Vec<OsString>,
     out_tx: mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: mpsc::Sender<u64>,
+    /// A clone of the core channel so an off-loop task (the leader+g dispatch
+    /// shell-out) can route its outcome back as a `CoreMsg::DispatchResult`
+    /// (x-6f77), the same off-loop-work-feeds-the-loop shape as the registry
+    /// reader.
+    self_tx: mpsc::Sender<CoreMsg>,
     /// Latest registry-derived agent rows (4a-G2), stored raw; the pane-exit
     /// fact and squad assignment are joined at layout time, where the live
     /// pane set and the squad catalog live.
@@ -536,6 +556,63 @@ fn pid_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) performs no signal delivery, only validation.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
     rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Resolve the `fno` binary: `$FNO_BIN`, else the running executable itself (the
+/// mux server IS the `fno` binary - it forwards non-native verbs like `dispatch`
+/// to Python), else bare `fno` on PATH.
+fn fno_bin() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_BIN") {
+        return PathBuf::from(v);
+    }
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fno"))
+}
+
+/// Shell `fno dispatch one --session <s> --json`, bounded + fail-open (the
+/// digest_overlay idiom), and turn its verdict into the client notice. An empty
+/// return says nothing (the launched pane speaks for itself); every error path
+/// yields a visible notice rather than a silent no-op (x-6f77).
+async fn run_dispatch_one(session: &str) -> String {
+    // Selection + spawn crosses a subprocess and a mux socket round-trip, so the
+    // budget is seconds, not the digest's 800ms; a hung dispatch still fails
+    // open to a notice rather than wedging.
+    const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
+    let fut = tokio::process::Command::new(fno_bin())
+        .args(["dispatch", "one", "--session", session, "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(DISPATCH_TIMEOUT, fut).await {
+        Err(_) => "grab work: timed out".to_string(),
+        Ok(Err(_)) => "grab work: dispatch unavailable".to_string(),
+        Ok(Ok(o)) if !o.status.success() => "grab work: dispatch failed".to_string(),
+        Ok(Ok(o)) => dispatch_notice(&String::from_utf8_lossy(&o.stdout)),
+    }
+}
+
+/// Map a `fno dispatch one --json` verdict to the one-line client notice.
+/// Unparseable / unknown output fails open to a generic failure notice (never
+/// silent on an error).
+fn dispatch_notice(stdout: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(stdout.trim()) {
+        Ok(v) => v,
+        Err(_) => return "grab work: dispatch failed".to_string(),
+    };
+    let node = v.get("node").and_then(|n| n.as_str()).unwrap_or("");
+    let slug = v.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+    let label = if slug.is_empty() { node } else { slug };
+    match v.get("outcome").and_then(|o| o.as_str()) {
+        Some("launched") if label.is_empty() => String::new(),
+        Some("launched") => format!("dispatched {label}"),
+        Some("no-work") => "no ready work".to_string(),
+        Some("lanes-full") => "lanes full".to_string(),
+        Some("failed") => match v.get("detail").and_then(|d| d.as_str()) {
+            Some(d) if !d.is_empty() => format!("grab work failed: {d}"),
+            _ => "grab work: dispatch failed".to_string(),
+        },
+        _ => "grab work: dispatch failed".to_string(),
+    }
 }
 
 impl Core {
@@ -773,6 +850,21 @@ impl Core {
                 .reliable_tx
                 .try_send(ServerMsg::Notice { text: text.into() });
         }
+    }
+
+    /// "Grab work" (leader+g, x-6f77): dispatch the next ready backlog node into
+    /// a new pane. Selection + claim + spawn is the Python porcelain's job (`fno
+    /// dispatch one`), shelled OFF the core loop in a detached task so a slow
+    /// backlog read never stalls a pane. The launched pane appears through the
+    /// existing registry reader; the outcome (dispatched / no-work / lanes-full
+    /// / failure) routes back as `DispatchResult` for a one-line notice.
+    fn dispatch_next(&self, id: u64) {
+        let session = self.session_name.clone();
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_dispatch_one(&session).await;
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1736,7 +1828,12 @@ impl Core {
             | CoreMsg::BlockNav { id, .. }
             // PaneAnswer injects a keystroke into a pane PTY (x-c929); a
             // read-only observer must never reach it (same class as Input).
-            | CoreMsg::PaneAnswer { id, .. } => Some(*id),
+            | CoreMsg::PaneAnswer { id, .. }
+            // DispatchNext spawns a real worker pane (x-6f77); a passive
+            // web-bridge observer must never start work (x-6a14 Invariant).
+            // DispatchResult is NOT gated here - it originates from the trusted
+            // off-loop task, not a client.
+            | CoreMsg::DispatchNext { id, .. } => Some(*id),
             _ => None,
         };
         if let Some(id) = mutating_sender {
@@ -1843,6 +1940,16 @@ impl Core {
                 keystroke,
             } => {
                 self.pane_answer(id, pane, fingerprint, region_lines, &keystroke);
+                Flow::Continue
+            }
+            CoreMsg::DispatchNext { id } => {
+                self.dispatch_next(id);
+                Flow::Continue
+            }
+            CoreMsg::DispatchResult { id, notice } => {
+                if !notice.is_empty() {
+                    self.notice(id, notice);
+                }
                 Flow::Continue
             }
             CoreMsg::Query(reply) => {
@@ -2202,6 +2309,7 @@ async fn serve(
         shells: shell_candidates(std::env::var_os("SHELL").as_deref()),
         out_tx,
         exit_tx,
+        self_tx: core_tx.clone(),
         agents: Vec::new(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
@@ -2729,6 +2837,11 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                     break;
                 }
             }
+            Ok(ClientMsg::DispatchNext) => {
+                if core_tx.send(CoreMsg::DispatchNext { id }).await.is_err() {
+                    break;
+                }
+            }
             Ok(ClientMsg::Detach) => {
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
@@ -3078,6 +3191,7 @@ mod tests {
     fn empty_core() -> Core {
         let (out_tx, _out_rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
         let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
+        let (self_tx, _self_rx) = mpsc::channel::<CoreMsg>(8);
         Core {
             session: Session::default(),
             panes: HashMap::new(),
@@ -3090,6 +3204,7 @@ mod tests {
             shells: Vec::new(),
             out_tx,
             exit_tx,
+            self_tx,
             agents: Vec::new(),
             claim_eligible: HashSet::new(),
             claims: HashMap::new(),
@@ -3235,5 +3350,31 @@ mod tests {
         let advanced = format!("{grid}Running the tool now...\n");
         let advanced_fp = *blake3::hash(bottom_non_empty_lines(&advanced, 8).as_bytes()).as_bytes();
         assert_ne!(daemon_fp, advanced_fp, "advanced grid must read stale");
+    }
+
+    #[test]
+    fn dispatch_notice_maps_each_verdict() {
+        // Launched shows the friendly slug; the pane itself is the real feedback.
+        assert_eq!(
+            dispatch_notice(r#"{"outcome":"launched","node":"x-1","slug":"feat"}"#),
+            "dispatched feat"
+        );
+        // No slug -> fall back to the node id.
+        assert_eq!(
+            dispatch_notice(r#"{"outcome":"launched","node":"x-1","slug":""}"#),
+            "dispatched x-1"
+        );
+        assert_eq!(dispatch_notice(r#"{"outcome":"no-work"}"#), "no ready work");
+        assert_eq!(dispatch_notice(r#"{"outcome":"lanes-full"}"#), "lanes full");
+        assert_eq!(
+            dispatch_notice(r#"{"outcome":"failed","detail":"boom"}"#),
+            "grab work failed: boom"
+        );
+        // Garbage / unknown outcome fails open to a visible notice, never silent.
+        assert_eq!(dispatch_notice("not json"), "grab work: dispatch failed");
+        assert_eq!(
+            dispatch_notice(r#"{"outcome":"???"}"#),
+            "grab work: dispatch failed"
+        );
     }
 }
