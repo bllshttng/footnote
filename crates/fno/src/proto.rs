@@ -335,6 +335,28 @@ pub struct AgentRow {
     pub answerable: Option<AnswerablePrompt>,
 }
 
+/// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
+/// read-only from `~/.fno/graph.json` (backlog_view). The mux needs four fields
+/// per node, not the whole graph model; the FILE is the contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BacklogCard {
+    pub id: String,
+    pub slug: String,
+    /// `p0`..`p3` (the raw string; the sideline shows it verbatim).
+    pub priority: String,
+    pub state: CardState,
+}
+
+/// The queue state a card renders as. Classified from `_status` alone
+/// (backlog_view::classify): a claimed node with a stale `blocked_by` is
+/// in-flight, not blocked.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CardState {
+    Ready,
+    Blocked,
+    InFlight,
+}
+
 /// One selectable option of an [`AnswerablePrompt`] (v9). Structural twin of the
 /// daemon's `manifest::AnswerOption`; the registry/wire JSON is the contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -438,6 +460,12 @@ pub enum ServerMsg {
         /// changes, mirroring how `SquadMeta::canonical_cwd` reaches the client.
         #[serde(default)]
         focus_node: Option<String>,
+        /// (v11, x-6f77) Board-ordered work-queue cards for the sideline backlog
+        /// lane (backlog_view). Empty when the graph is unreadable or has no
+        /// ready/blocked/in-flight work; `#[serde(default)]` keeps a v10 reader
+        /// wire-tolerant.
+        #[serde(default)]
+        backlog: Vec<BacklogCard>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -1050,6 +1078,20 @@ mod tests {
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
+                backlog: vec![
+                    BacklogCard {
+                        id: "x-6f77".into(),
+                        slug: "work-queue-sideline".into(),
+                        priority: "p1".into(),
+                        state: CardState::InFlight,
+                    },
+                    BacklogCard {
+                        id: "ab-53c0".into(),
+                        slug: "sync-wiki".into(),
+                        priority: "p2".into(),
+                        state: CardState::Ready,
+                    },
+                ],
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),

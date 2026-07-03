@@ -33,10 +33,11 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::agents_view::{self, RegistryAgent};
+use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
-    BindOutcome, BlockDir, BlockSel, ClientMsg, Command, ControlVerb, Frame, MouseButton,
-    MouseEvent, MouseKind, PaneInfo, ServerMsg, SquadMeta, TabMeta, WaitOutcome,
+    BacklogCard, BindOutcome, BlockDir, BlockSel, ClientMsg, Command, ControlVerb, Frame,
+    MouseButton, MouseEvent, MouseKind, PaneInfo, ServerMsg, SquadMeta, TabMeta, WaitOutcome,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, RemoveOutcome, Resolver, Session};
@@ -349,6 +350,10 @@ enum CoreMsg {
     /// (4a-G2). Sent only when the set changed; the core stores it and
     /// re-pushes layouts (rects unchanged, so no frame re-emit).
     AgentRows(Vec<RegistryAgent>),
+    /// (x-6f77) A fresh board-ordered work-queue card set from the off-loop graph
+    /// reader. Sent only when the set changed; the core stores it and re-pushes
+    /// layouts so the sideline backlog lane tracks claims/closes.
+    BacklogCards(Vec<BacklogCard>),
 }
 
 /// The per-pane signal an off-loop `PaneWait` watcher observes. The core loop
@@ -538,6 +543,9 @@ struct Core {
     /// fact and squad assignment are joined at layout time, where the live
     /// pane set and the squad catalog live.
     agents: Vec<RegistryAgent>,
+    /// Latest board-ordered work-queue cards (x-6f77), from the off-loop graph
+    /// reader; packed into every `Layout` for the sideline backlog lane.
+    backlog: Vec<BacklogCard>,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
@@ -1227,6 +1235,8 @@ impl Core {
             // The focused pane's provenance for the status row (x-66e8). Re-sent
             // whenever `focus` changes, so the cell tracks focus for free.
             focus_node: self.panes.get(&focus).and_then(|e| e.node.clone()),
+            // The work-queue lane (x-6f77); already board-ordered by the reader.
+            backlog: self.backlog.clone(),
         }
     }
 
@@ -2175,6 +2185,13 @@ impl Core {
                 self.push_layout(false);
                 Flow::Continue
             }
+            CoreMsg::BacklogCards(cards) => {
+                // Same as AgentRows: only sideline data moved, so push the
+                // Layout without a frame re-emit (x-6f77).
+                self.backlog = cards;
+                self.push_layout(false);
+                Flow::Continue
+            }
         }
     }
 
@@ -2311,6 +2328,7 @@ async fn serve(
         exit_tx,
         self_tx: core_tx.clone(),
         agents: Vec::new(),
+        backlog: Vec::new(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
     };
@@ -2358,6 +2376,48 @@ async fn serve(
                     .unwrap_or(0);
                 if let Some(rows) = state.tick(stamp, move || raw, now) {
                     if core_tx.send(CoreMsg::AgentRows(rows)).await.is_err() {
+                        return; // core loop gone; the server is shutting down
+                    }
+                }
+            }
+        });
+    }
+
+    // The off-loop work-queue reader (x-6f77): the same 1s mtime-gated shape as
+    // the registry reader above, over ~/.fno/graph.json. graph.json's mtime
+    // bumps on every backlog mutation (claim/close), so a card flips to
+    // in-flight on the next tick with no separate subscribe stream. The 4M read
+    // is skipped whenever the stamp is unchanged.
+    {
+        let core_tx = core_tx.clone();
+        let path = backlog_view::graph_path();
+        tokio::spawn(async move {
+            let mut state = backlog_view::ReaderState::default();
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let stat_path = path.clone();
+                let stamp = tokio::task::spawn_blocking(move || {
+                    std::fs::metadata(&stat_path)
+                        .ok()
+                        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
+                })
+                .await
+                .ok()
+                .flatten();
+                let read_path = path.clone();
+                let changed = stamp != state.cached_stamp();
+                let raw = if changed {
+                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&read_path).ok())
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                if let Some(cards) = state.tick(stamp, move || raw) {
+                    if core_tx.send(CoreMsg::BacklogCards(cards)).await.is_err() {
                         return; // core loop gone; the server is shutting down
                     }
                 }
@@ -3206,6 +3266,7 @@ mod tests {
             exit_tx,
             self_tx,
             agents: Vec::new(),
+            backlog: Vec::new(),
             claim_eligible: HashSet::new(),
             claims: HashMap::new(),
         }

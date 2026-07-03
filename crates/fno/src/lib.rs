@@ -3,6 +3,7 @@
 //! runs. The binary (`main.rs`) is a thin role-select over these modules.
 
 pub mod agents_view;
+pub mod backlog_view;
 pub mod bootstrap;
 pub mod client;
 pub mod clipboard;
