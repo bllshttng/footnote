@@ -18,7 +18,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{viewport_to_point, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
 
-use crate::proto::{cell_flags, BlockMeta, BlockSel, Cell, Color, Frame};
+use crate::proto::{cell_flags, BlockDir, BlockMeta, BlockSel, Cell, Color, Frame};
 
 /// Default grid until the first client reports its real size. 24x80 is the
 /// historical terminal default (matches the fno-agents drive fallback).
@@ -99,6 +99,23 @@ pub struct Pane {
     /// Total retained-block-text budget across the pane; oldest blocks front-drop
     /// until under it.
     max_retained_bytes: usize,
+    /// Between `B` (command start) and `C` (output start): the block's start
+    /// anchor row (see [`Pane::anchor_row`]) plus the command echo bytes, so the
+    /// command line is byte-captured (not grid-scraped, which x-122e retired) for
+    /// rerun. `None` outside that window.
+    pending_cmd: Option<PendingCmd>,
+    /// The block seq the keyboard block-selection walk (leader+v) rests on.
+    /// Cleared whenever the selection itself clears.
+    selected_block: Option<u64>,
+}
+
+/// The B..C command-echo capture in flight (see [`Pane::pending_cmd`]).
+#[derive(Debug, Clone)]
+struct PendingCmd {
+    /// Start anchor row of the block (the command line), taken at `B`.
+    start_abs: i64,
+    /// Command-echo bytes accumulating between `B` and `C`, tail-bounded.
+    raw: Vec<u8>,
 }
 
 impl Pane {
@@ -149,6 +166,8 @@ impl Pane {
             retained_bytes: 0,
             max_block_bytes: max_block_bytes.max(1),
             max_retained_bytes: max_retained_bytes.max(1),
+            pending_cmd: None,
+            selected_block: None,
         }
     }
 
@@ -180,6 +199,14 @@ impl Pane {
                             open.raw.drain(..cut);
                             open.truncated = true;
                         }
+                    } else if let Some(p) = self.pending_cmd.as_mut() {
+                        // Between `B` and `C`: byte-capture the command echo,
+                        // same tail-bound as the output span.
+                        p.raw.extend_from_slice(&b);
+                        if p.raw.len() > self.max_block_bytes.saturating_mul(2) {
+                            let cut = p.raw.len() - self.max_block_bytes;
+                            p.raw.drain(..cut);
+                        }
                     }
                     self.processor.advance(&mut self.term, &b);
                 }
@@ -203,6 +230,7 @@ impl Pane {
         // selection rather than render a highlight over the wrong cells
         // (AC2-UI). The display offset is clamped by alacritty's own resize.
         self.term.selection = None;
+        self.selected_block = None;
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -309,6 +337,7 @@ impl Pane {
     /// Drop any selection (release-with-no-drag, resize, pane close - AC2-UI).
     pub fn selection_clear(&mut self) {
         self.term.selection = None;
+        self.selected_block = None;
     }
 
     /// The selected text, joining soft-wrapped lines per alacritty's semantic
@@ -330,6 +359,158 @@ impl Pane {
         viewport_to_point(self.display_offset(), Point::new(row, Column(col)))
     }
 
+    // -- Block navigation (x-38c4) ---------------------------------------------
+
+    /// A grid row as an offset from the TOP of retained scrollback:
+    /// `grid_line + history_size`. This is the block navigation anchor. It is
+    /// STABLE while history is unsaturated - as new output scrolls a fixed
+    /// content line upward, its grid index drops by exactly the amount history
+    /// grows, so the sum holds - and drifts only once the scrollback cap starts
+    /// dropping lines. Navigation is best-effort by contract (the brief): every
+    /// resolution clamps into the live window, so a drifted anchor lands on a
+    /// nearby row, never a panic and never a wrong-text read (block text/command
+    /// come from the byte-captured store, not these rows).
+    fn anchor_row(&self) -> i64 {
+        let grid = self.term.grid();
+        grid.cursor.point.line.0 as i64 + grid.history_size() as i64
+    }
+
+    /// The [`anchor_row`](Self::anchor_row) currently at the viewport top.
+    fn viewport_top_abs(&self) -> i64 {
+        self.term.grid().history_size() as i64 - self.display_offset() as i64
+    }
+
+    /// Scroll so `abs_row` sits at the viewport top, clamped into the live window
+    /// (an evicted/oldest target lands on the oldest retained line, never a stale
+    /// row). Returns the resulting display offset.
+    fn scroll_to_abs(&mut self, abs_row: i64) -> usize {
+        let hist = self.term.grid().history_size() as i64;
+        let target = (hist - abs_row).clamp(0, hist);
+        let cur = self.display_offset() as i64;
+        self.term
+            .scroll_display(Scroll::Delta((target - cur) as i32));
+        self.display_offset()
+    }
+
+    /// The block start anchors oldest -> newest: every retained block, then the
+    /// still-open block (the newest boundary for a `Next` walk). Jump INCLUDES
+    /// the open block (you can scroll to a streaming command); `block_select` /
+    /// `rerun_command` deliberately do NOT (you cannot copy/rerun output that has
+    /// not finished) - they iterate `self.blocks` only.
+    fn block_anchors(&self) -> Vec<(i64, u64)> {
+        let mut anchors: Vec<(i64, u64)> =
+            self.blocks.iter().map(|b| (b.start_abs, b.seq)).collect();
+        if let Some(o) = &self.open {
+            anchors.push((o.start_abs, o.seq));
+        }
+        anchors
+    }
+
+    /// Move the shared scroll to the `dir`-adjacent command block's first row.
+    /// From the live tail a `Prev` jumps to the newest block; each subsequent
+    /// `Prev` steps one block older, clamping at the oldest retained (AC1-EDGE).
+    /// `Next` steps newer and snaps to the live bottom past the newest.
+    pub fn block_jump(&mut self, dir: BlockDir) -> BlockJumpOutcome {
+        let anchors = self.block_anchors();
+        if anchors.is_empty() {
+            return BlockJumpOutcome::NoBlocks;
+        }
+        let scrolled = self.display_offset() > 0;
+        let top = self.viewport_top_abs();
+        let target = match dir {
+            // Live view: reference is +inf so the newest block is "prev".
+            BlockDir::Prev => {
+                let reference = if scrolled { top } else { i64::MAX };
+                anchors
+                    .iter()
+                    .filter(|(a, _)| *a < reference)
+                    .max_by_key(|(a, _)| *a)
+                    .copied()
+                    // Already at/above the oldest: rest on it (idempotent).
+                    .or_else(|| anchors.first().copied())
+            }
+            BlockDir::Next if !scrolled => None, // already live
+            BlockDir::Next => anchors
+                .iter()
+                .filter(|(a, _)| *a > top)
+                .min_by_key(|(a, _)| *a)
+                .copied(),
+        };
+        match target {
+            Some((abs, seq)) => {
+                self.scroll_to_abs(abs);
+                BlockJumpOutcome::Moved { seq, abs_row: abs }
+            }
+            None => {
+                // Nothing newer (or already live): return to the live bottom.
+                self.scroll_to_bottom();
+                BlockJumpOutcome::AtLive
+            }
+        }
+    }
+
+    /// Move the block-scoped selection to the `dir`-adjacent block (the whole
+    /// command + output span) and bring it into view, so the existing copy chain
+    /// (leader+y) yanks it. First press (no current block) selects the newest;
+    /// repeated presses walk. Returns the now-selected block's seq, or `None`
+    /// when the pane has no retained blocks.
+    pub fn block_select(&mut self, dir: BlockDir) -> Option<u64> {
+        let seqs: Vec<u64> = self.blocks.iter().map(|b| b.seq).collect();
+        let &newest = seqs.last()?;
+        let target = match self
+            .selected_block
+            .and_then(|c| seqs.iter().position(|&s| s == c))
+        {
+            // No live selection (or the selected block was evicted): start newest.
+            None => newest,
+            Some(i) => match dir {
+                BlockDir::Prev => seqs[i.saturating_sub(1)],
+                BlockDir::Next => seqs[(i + 1).min(seqs.len() - 1)],
+            },
+        };
+        self.set_block_selection(target);
+        self.selected_block = Some(target);
+        Some(target)
+    }
+
+    /// Set the grid selection to span block `seq` (command line through output
+    /// end) and scroll it into view. Rows clamp into the live grid so an
+    /// evicted/drifted anchor selects a valid span, never an O.O.B. point.
+    fn set_block_selection(&mut self, seq: u64) {
+        let Some(b) = self.blocks.iter().find(|b| b.seq == seq) else {
+            return;
+        };
+        let (start_abs, end_abs) = (b.start_abs, b.end_abs);
+        let grid = self.term.grid();
+        let hist = grid.history_size() as i64;
+        let top = grid.topmost_line().0 as i64;
+        let bot = grid.bottommost_line().0 as i64;
+        let sl = (start_abs - hist).clamp(top, bot) as i32;
+        let el = (end_abs - hist).clamp(top, bot) as i32;
+        let last_col = Column(self.cols.saturating_sub(1) as usize);
+        let mut sel = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(sl), Column(0)),
+            Side::Left,
+        );
+        sel.update(Point::new(Line(el), last_col), Side::Right);
+        self.term.selection = Some(sel);
+        self.scroll_to_abs(start_abs);
+    }
+
+    /// The command line to re-send for the selected block, else the newest
+    /// block's. `None` when there is no block or the target block captured no
+    /// command (a bare-`C` emitter with no `B` marker). A `selected_block` that
+    /// was evicted since selection heals to the newest (same repair as
+    /// `block_select`), rather than reporting "nothing to rerun" on a stale ref.
+    pub fn rerun_command(&self) -> Option<String> {
+        let target = self
+            .selected_block
+            .and_then(|seq| self.blocks.iter().find(|b| b.seq == seq))
+            .or_else(|| self.blocks.back())?;
+        target.cmd.clone()
+    }
+
     // -- OSC 133 command blocks (Task 1.2) -------------------------------------
 
     /// Drive the block store from a recognized marker at the Term's current row.
@@ -344,16 +525,35 @@ impl Pane {
                 if self.open.is_some() {
                     self.finalize_open(None);
                 }
+                // The command echo was byte-captured between `B` and here (same
+                // discipline as the output span: never grid-scraped). Absent `B`
+                // (a bare-C emitter), the block anchors at `C` with no command.
+                let (start_abs, cmd) = match self.pending_cmd.take() {
+                    Some(p) => {
+                        let (text, _) = capped_text(&p.raw, self.max_block_bytes);
+                        let cmd = text.trim().to_string();
+                        (p.start_abs, (!cmd.is_empty()).then_some(cmd))
+                    }
+                    None => (self.anchor_row(), None),
+                };
                 let seq = self.next_seq;
                 self.next_seq += 1;
                 self.open = Some(OpenBlock {
                     seq,
                     raw: Vec::new(),
                     truncated: false,
+                    start_abs,
+                    cmd,
                 });
             }
             Osc133::CmdDone { exit } => self.finalize_open(exit),
-            Osc133::PromptStart | Osc133::CmdStart => {}
+            Osc133::CmdStart => {
+                self.pending_cmd = Some(PendingCmd {
+                    start_abs: self.anchor_row(),
+                    raw: Vec::new(),
+                })
+            }
+            Osc133::PromptStart => {}
         }
     }
 
@@ -364,11 +564,18 @@ impl Pane {
         let Some(open) = self.open.take() else { return };
         let (text, capped) = capped_text(&open.raw, self.max_block_bytes);
         self.retained_bytes += text.len();
+        // Content end: at `D` the cursor sits where the next prompt draws - one
+        // row past the output when it ended in a newline (col 0). Never above the
+        // start row.
+        let end_abs = self.anchor_row().max(open.start_abs);
         self.blocks.push_back(Block {
             seq: open.seq,
             exit,
             truncated: open.truncated || capped,
             text,
+            start_abs: open.start_abs,
+            end_abs,
+            cmd: open.cmd,
         });
         // Front-drop oldest until within BOTH the count and byte budgets. Always
         // keep at least the block just pushed (a single over-budget block is
@@ -817,6 +1024,17 @@ struct Block {
     exit: Option<i32>,
     truncated: bool,
     text: String,
+    /// Absolute rows (see [`Pane::cursor_abs`]) of the block's command line and
+    /// output end - the navigation anchors (jump/select). Unlike `text` these
+    /// are grid-derived and BEST-EFFORT: reflow and scrollback saturation drift
+    /// them, and every resolution clamps into the retained window, so a stale
+    /// anchor degrades to a nearby row, never a panic or wrong text.
+    start_abs: i64,
+    end_abs: i64,
+    /// The command line, byte-captured between `B` and `C` and ANSI-stripped.
+    /// `None` when the emitter sent no `B`. Best-effort for rerun (a readline
+    /// redraw is captured raw); the idle guard + user confirmation cover the rest.
+    cmd: Option<String>,
 }
 
 /// A block whose `C` was seen but not yet its `D`: its output bytes accumulate
@@ -830,6 +1048,10 @@ struct OpenBlock {
     /// Head bytes were dropped by the per-block cap (this block only, decoupled
     /// from the pane's scrollback fullness).
     truncated: bool,
+    /// Absolute row of the command line (the `B` point, else the `C` point).
+    start_abs: i64,
+    /// See [`Block::cmd`].
+    cmd: Option<String>,
 }
 
 /// A block read result: text plus the metadata `--json` surfaces. Degradations
@@ -844,6 +1066,16 @@ pub struct BlockRead {
     pub truncated: bool,
     pub implicit: bool,
     pub text: String,
+}
+
+/// The result of a [`Pane::block_jump`]. `Moved` carries the landed block's seq
+/// and its first-row anchor (the row navigation resolved to); `NoBlocks` and
+/// `AtLive` are the visible edge cases the client renders as a one-line notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockJumpOutcome {
+    Moved { seq: u64, abs_row: i64 },
+    NoBlocks,
+    AtLive,
 }
 
 impl BlockRead {
@@ -1655,5 +1887,172 @@ mod tests {
         assert!(pane.has_selection());
         pane.resize(2, 10);
         assert!(!pane.has_selection(), "selection cleared on resize");
+    }
+
+    // -- Block navigation (x-38c4) ---------------------------------------------
+
+    /// Feed one full command WITH a command echo between `B` and `C` (so the
+    /// block captures a rerun-able command line), then multi-line output tall
+    /// enough to push history on a short pane.
+    fn run_named(pane: &mut Pane, cmd: &str, output: &str, exit: i32) {
+        pane.feed(b"\x1b]133;A\x07$ ");
+        pane.feed(format!("\x1b]133;B\x07{cmd}\r\n\x1b]133;C\x07").as_bytes());
+        for line in output.lines() {
+            pane.feed(format!("{line}\r\n").as_bytes());
+        }
+        pane.feed(format!("\x1b]133;D;{exit}\x07").as_bytes());
+    }
+
+    fn three_blocks() -> Pane {
+        // Short pane so three multi-line blocks scroll into history.
+        let mut pane = Pane::new(4, 40);
+        run_named(&mut pane, "echo one", "a\nb\nc", 0);
+        run_named(&mut pane, "echo two", "d\ne\nf", 0);
+        run_named(&mut pane, "echo three", "g\nh\ni", 0);
+        pane
+    }
+
+    #[test]
+    fn block_jump_walks_prev_then_next_across_blocks() {
+        // AC1-HP (Change 1/2): from the live tail, prev lands on the newest
+        // block, then steps older; next steps newer and returns to live.
+        let mut pane = three_blocks();
+        assert_eq!(pane.display_offset(), 0, "starts at the live tail");
+
+        // Prev walks newest -> oldest (seqs 2, 1, 0), and the returned anchor row
+        // is the landed block's first row: the view is scrolled so that row sits
+        // at the viewport top (AC1-HP: "the returned row is block N's first row").
+        let seqs: Vec<u64> = (0..3)
+            .map(|_| match pane.block_jump(BlockDir::Prev) {
+                BlockJumpOutcome::Moved { seq, abs_row } => {
+                    assert_eq!(pane.viewport_top_abs(), abs_row, "block anchored at top");
+                    seq
+                }
+                other => panic!("expected Moved, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(seqs, vec![2, 1, 0]);
+        assert!(pane.display_offset() > 0, "scrolled into history");
+
+        // Past the oldest, prev clamps on block 0 (AC1-EDGE: never a stale row).
+        assert!(matches!(
+            pane.block_jump(BlockDir::Prev),
+            BlockJumpOutcome::Moved { seq: 0, .. }
+        ));
+
+        // Next steps back down newer, then snaps to the live bottom.
+        assert!(matches!(
+            pane.block_jump(BlockDir::Next),
+            BlockJumpOutcome::Moved { seq: 1, .. }
+        ));
+        assert!(matches!(
+            pane.block_jump(BlockDir::Next),
+            BlockJumpOutcome::Moved { seq: 2, .. }
+        ));
+        assert_eq!(pane.block_jump(BlockDir::Next), BlockJumpOutcome::AtLive);
+        assert_eq!(pane.display_offset(), 0, "back at the live tail");
+    }
+
+    #[test]
+    fn block_jump_on_markerless_pane_reports_no_blocks() {
+        // AC-ERR (Change 2): a pane that never emitted OSC 133 has no blocks; the
+        // jump is a visible NoBlocks, never a crash or silent no-op.
+        let mut pane = Pane::new(6, 40);
+        pane.feed(b"plain shell output\r\nno markers here\r\n");
+        assert_eq!(pane.block_jump(BlockDir::Prev), BlockJumpOutcome::NoBlocks);
+        assert_eq!(pane.block_jump(BlockDir::Next), BlockJumpOutcome::NoBlocks);
+    }
+
+    #[test]
+    fn block_jump_clamps_when_oldest_blocks_evicted() {
+        // AC1-EDGE: with a tiny retained-byte budget the oldest blocks front-drop;
+        // walking prev past the retained window clamps on the oldest RETAINED
+        // block (never a dropped/stale row), no panic.
+        let mut pane = Pane::with_limits(4, 40, 10_000, 8, 16);
+        for i in 0..6 {
+            run_named(&mut pane, &format!("cmd{i}"), &format!("out{i}\nx\ny"), 0);
+        }
+        // At most a couple of blocks survive the 16-byte retained cap.
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            if let BlockJumpOutcome::Moved { seq, .. } = pane.block_jump(BlockDir::Prev) {
+                seen.push(seq);
+            }
+        }
+        assert!(!seen.is_empty(), "walked at least one retained block");
+        // The walk floors at the oldest retained seq and never yields an evicted
+        // one (all retained seqs are the highest few).
+        let oldest = *seen.iter().min().unwrap();
+        assert!(oldest >= 4, "evicted blocks are not navigable: {seen:?}");
+    }
+
+    #[test]
+    fn block_select_walks_and_feeds_the_copy_chain() {
+        // AC (Change 3): block-select sets a real selection whose text is the
+        // whole block; walking prev moves to the older block; clear resets it.
+        let mut pane = three_blocks();
+        let newest = pane.block_select(BlockDir::Prev).unwrap();
+        assert_eq!(newest, 2);
+        let sel = pane.selection_text().unwrap_or_default();
+        assert!(
+            sel.contains("echo three"),
+            "selection spans command: {sel:?}"
+        );
+        assert!(
+            sel.contains('g') && sel.contains('i'),
+            "and output: {sel:?}"
+        );
+
+        // Walk older.
+        assert_eq!(pane.block_select(BlockDir::Prev), Some(1));
+        let sel = pane.selection_text().unwrap_or_default();
+        assert!(sel.contains("echo two"), "walked to block 1: {sel:?}");
+
+        pane.selection_clear();
+        assert!(!pane.has_selection());
+        // After a clear the walk restarts at the newest.
+        assert_eq!(pane.block_select(BlockDir::Prev), Some(2));
+    }
+
+    #[test]
+    fn rerun_command_targets_selected_else_newest() {
+        // AC-HP (Change 4): rerun resolves the command line to re-send - the
+        // selected block's, else the newest.
+        let mut pane = three_blocks();
+        assert_eq!(pane.rerun_command().as_deref(), Some("echo three"));
+        pane.block_select(BlockDir::Prev); // newest (2)
+        pane.block_select(BlockDir::Prev); // block 1
+        assert_eq!(pane.rerun_command().as_deref(), Some("echo two"));
+    }
+
+    #[test]
+    fn rerun_command_heals_a_selected_block_evicted_since_selection() {
+        // Select a block, then evict it under a tiny retained budget: rerun must
+        // fall back to the newest command, not report "nothing to rerun" on the
+        // stale ref.
+        let mut pane = Pane::with_limits(4, 40, 10_000, 8, 16);
+        run_named(&mut pane, "first", "aaa", 0);
+        pane.block_select(BlockDir::Prev); // selects block 0 (the only one)
+        assert_eq!(pane.selected_block, Some(0));
+        // Push enough blocks to front-drop block 0 from the retained window.
+        for i in 1..6 {
+            run_named(&mut pane, &format!("cmd{i}"), "outputoutput\ncc\ndd", 0);
+        }
+        assert!(
+            pane.read_block(BlockSel::Seq(0)).is_err(),
+            "block 0 evicted precondition"
+        );
+        // The stale selected_block=0 no longer resolves; heal to the newest.
+        assert_eq!(pane.rerun_command().as_deref(), Some("cmd5"));
+    }
+
+    #[test]
+    fn rerun_command_is_none_for_a_bare_c_block() {
+        // A block from a bare-`C` emitter (no `B`, no captured command) has
+        // nothing to rerun - None, so the server refuses rather than sending garbage.
+        let mut pane = Pane::new(6, 40);
+        pane.feed(b"$ \x1b]133;C\x07output\x1b]133;D;0\x07");
+        assert!(pane.read_block(BlockSel::Last).is_ok());
+        assert_eq!(pane.rerun_command(), None);
     }
 }

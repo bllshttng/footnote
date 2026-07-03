@@ -1099,6 +1099,38 @@ async fn handle_stdin(
                     .await
                     .map_err(|e| format!("resize send failed: {e}"))?;
             }
+            Event::BlockJump(dir) => {
+                write_msg(
+                    sock_w,
+                    &ClientMsg::BlockJump {
+                        pane: view.layout.focus,
+                        dir,
+                    },
+                )
+                .await
+                .map_err(|e| format!("block-jump send failed: {e}"))?;
+            }
+            Event::BlockSelect(dir) => {
+                write_msg(
+                    sock_w,
+                    &ClientMsg::BlockSelect {
+                        pane: view.layout.focus,
+                        dir,
+                    },
+                )
+                .await
+                .map_err(|e| format!("block-select send failed: {e}"))?;
+            }
+            Event::BlockRerun => {
+                write_msg(
+                    sock_w,
+                    &ClientMsg::BlockRerun {
+                        pane: view.layout.focus,
+                    },
+                )
+                .await
+                .map_err(|e| format!("block-rerun send failed: {e}"))?;
+            }
             Event::Bell => {
                 let _ = raw_out(b"\x07");
             }

@@ -34,13 +34,14 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::agents_view::{self, RegistryAgent};
 use crate::proto::{
-    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentRow, BindOutcome,
-    BlockSel, ClientMsg, Command, ControlVerb, Frame, MouseButton, MouseEvent, MouseKind, PaneInfo,
-    ServerMsg, SquadMeta, TabMeta, WaitOutcome,
+    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
+    BindOutcome, BlockDir, BlockSel, ClientMsg, Command, ControlVerb, Frame, MouseButton,
+    MouseEvent, MouseKind, PaneInfo, ServerMsg, SquadMeta, TabMeta, WaitOutcome,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, RemoveOutcome, Resolver, Session};
 use crate::tree::{self, Axis, Node, Rect, Tab, TabId};
+use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
 /// A control connection's reply channel: exactly one [`ServerMsg`], then close.
@@ -157,6 +158,47 @@ fn button_code(b: MouseButton) -> u32 {
     }
 }
 
+/// One block-navigation operation the core applies to a pane's OSC 133 store
+/// (v8, x-38c4). Jump/select carry a walk direction; rerun re-sends the
+/// selected block's command line under the idle guard.
+#[derive(Debug, Clone, Copy)]
+enum BlockNavOp {
+    Jump(BlockDir),
+    Select(BlockDir),
+    Rerun,
+}
+
+/// The rerun idle guard (x-38c4), pure over the registry rows so the routing
+/// (the safety-critical bit) is unit-testable without a Core. A pane with no
+/// agent row is a plain shell - always safe. An agent pane must prove idle: a
+/// `Done`/exited badge allows; a `Working`/`Blocked` badge refuses (busy); an
+/// unknown badge (liveness-only, no fresh hook report / manifest verdict)
+/// refuses fail-closed - injecting a command mid-turn corrupts an agent's
+/// composer, and false-ready is the forbidden direction.
+///
+/// `agents` is the WHOLE cross-session registry, so the row match is scoped to
+/// `session` on the FULL `(session, pane)` ref (the same filter `agent_rows`
+/// applies): pane ids are minted per-server and collide across sessions, so a
+/// pane-only match could read a foreign session's idle badge and let a rerun
+/// into THIS session's busy agent (the exact forbidden write).
+fn rerun_allowed(agents: &[RegistryAgent], session: &str, pane: u64) -> Result<(), &'static str> {
+    match agents.iter().find(|a| {
+        a.mux
+            .as_ref()
+            .is_some_and(|(s, p)| s == session && *p == pane)
+    }) {
+        None => Ok(()),
+        Some(a) if a.exited => Ok(()),
+        Some(a) => match a.badge {
+            Some(AgentBadge::Done) => Ok(()),
+            Some(AgentBadge::Working) | Some(AgentBadge::Blocked) => {
+                Err("pane busy - rerun blocked")
+            }
+            None => Err("pane state unknown - rerun blocked"),
+        },
+    }
+}
+
 /// What connected clients register with the core loop.
 enum CoreMsg {
     Attach {
@@ -197,6 +239,15 @@ enum CoreMsg {
         id: u64,
         pane: u64,
         event: MouseEvent,
+    },
+    /// (v8) Walk a pane's OSC 133 blocks: jump the shared scroll or move the
+    /// block-scoped selection. `id` is the requesting client (for a "no blocks"
+    /// notice); the scroll/selection is shared, so the broadcast reaches every
+    /// co-viewer.
+    BlockNav {
+        id: u64,
+        pane: u64,
+        op: BlockNavOp,
     },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
@@ -1114,6 +1165,70 @@ impl Core {
         }
     }
 
+    /// Apply one block-navigation op to `pane` (v8, x-38c4). Jump moves the
+    /// shared scroll and select moves the shared block selection - both broadcast
+    /// so every co-viewer tracks (tmux precedent, brief). Rerun re-sends the
+    /// selected block's command line, guarded idle. A pane with no blocks / no
+    /// command / a busy pane gets a one-line notice to the requester, never a
+    /// silent no-op.
+    fn block_nav(&mut self, client_id: u64, pane: u64, op: BlockNavOp) {
+        if !self.panes.contains_key(&pane) {
+            // The client's focus raced a pane close: visible, not a silent drop.
+            self.notice(client_id, "pane not found");
+            return;
+        }
+        match op {
+            BlockNavOp::Jump(dir) => {
+                let outcome = self
+                    .panes
+                    .get_mut(&pane)
+                    .map(|e| e.vt.block_jump(dir))
+                    .expect("pane presence checked above");
+                match outcome {
+                    BlockJumpOutcome::Moved { .. } | BlockJumpOutcome::AtLive => {
+                        self.broadcast_pane(pane)
+                    }
+                    BlockJumpOutcome::NoBlocks => self.notice(client_id, "no command blocks"),
+                }
+            }
+            BlockNavOp::Select(dir) => {
+                match self
+                    .panes
+                    .get_mut(&pane)
+                    .and_then(|e| e.vt.block_select(dir))
+                {
+                    Some(_) => self.broadcast_pane(pane),
+                    None => self.notice(client_id, "no command blocks"),
+                }
+            }
+            BlockNavOp::Rerun => {
+                // Idle guard FIRST (false-ready is the forbidden direction):
+                // refuse an agent pane that is not provably idle before touching
+                // the PTY.
+                if let Err(reason) = self.pane_rerun_allowed(pane) {
+                    self.notice(client_id, reason);
+                    return;
+                }
+                let cmd = self.panes.get(&pane).and_then(|e| e.vt.rerun_command());
+                match cmd {
+                    Some(mut line) => {
+                        line.push('\r');
+                        if let Some(entry) = self.panes.get(&pane) {
+                            let _ = entry.pty.write_input(line.as_bytes());
+                        }
+                    }
+                    None => self.notice(client_id, "block has no command to rerun"),
+                }
+            }
+        }
+    }
+
+    /// Whether a rerun may write to `pane` (x-38c4 idle guard); see
+    /// [`rerun_allowed`].
+    fn pane_rerun_allowed(&self, pane: u64) -> Result<(), &'static str> {
+        rerun_allowed(&self.agents, &self.session_name, pane)
+    }
+
     /// Live mode changes in a focused pane (vim toggling mouse reporting
     /// mid-session) must reach the terminals of that pane's VIEWERS now, not
     /// at the next focus change. Cheap: a flag read per output burst, bytes
@@ -1414,6 +1529,20 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::CopySelection => {
+                // The keyboard copy path (leader+y), the block-select composition
+                // (x-38c4): copy the sender's focused pane selection. Reuses the
+                // mouse-release copy channel; nothing selected is a plain notice.
+                let text = self
+                    .viewed_tab(view)
+                    .and_then(|tab| self.panes.get(&tab.focus))
+                    .and_then(|e| e.vt.selection_text());
+                match text {
+                    Some(text) => self.send_copy(client_id, text),
+                    None => self.notice(client_id, "nothing selected"),
+                }
+                Flow::Continue
+            }
         }
     }
 
@@ -1499,6 +1628,10 @@ impl Core {
             CoreMsg::Command { id, cmd } => self.command(id, cmd),
             CoreMsg::Mouse { id, pane, event } => {
                 self.mouse(id, pane, event);
+                Flow::Continue
+            }
+            CoreMsg::BlockNav { id, pane, op } => {
+                self.block_nav(id, pane, op);
                 Flow::Continue
             }
             CoreMsg::Query(reply) => {
@@ -2326,6 +2459,45 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                     break;
                 }
             }
+            Ok(ClientMsg::BlockJump { pane, dir }) => {
+                if core_tx
+                    .send(CoreMsg::BlockNav {
+                        id,
+                        pane,
+                        op: BlockNavOp::Jump(dir),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMsg::BlockSelect { pane, dir }) => {
+                if core_tx
+                    .send(CoreMsg::BlockNav {
+                        id,
+                        pane,
+                        op: BlockNavOp::Select(dir),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMsg::BlockRerun { pane }) => {
+                if core_tx
+                    .send(CoreMsg::BlockNav {
+                        id,
+                        pane,
+                        op: BlockNavOp::Rerun,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Ok(ClientMsg::Detach) => {
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
@@ -2565,5 +2737,73 @@ mod tests {
             kind: MouseKind::WheelUp,
         });
         assert_eq!(wheel, b"\x1b[<64;4;3M");
+    }
+
+    // -- Rerun idle guard (x-38c4) ---------------------------------------------
+
+    fn agent_in(sess: &str, pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
+        RegistryAgent {
+            name: "w".into(),
+            cwd: "/w".into(),
+            exited,
+            badge,
+            reason: None,
+            mux: Some((sess.into(), pane)),
+        }
+    }
+
+    fn agent(pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
+        agent_in("main", pane, badge, exited)
+    }
+
+    #[test]
+    fn rerun_allowed_on_a_plain_shell_pane() {
+        // AC-HP: a pane with no agent row is a shell - rerun is always safe.
+        assert_eq!(rerun_allowed(&[], "main", 7), Ok(()));
+        // Another agent on a different pane does not gate this one.
+        assert_eq!(
+            rerun_allowed(&[agent(9, Some(AgentBadge::Working), false)], "main", 7),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rerun_refused_for_a_busy_or_unknown_agent_pane() {
+        // AC-ERR: false-ready is the forbidden direction - a working/blocked
+        // agent pane refuses, and an unknown (liveness-only) badge fails closed.
+        assert!(rerun_allowed(&[agent(7, Some(AgentBadge::Working), false)], "main", 7).is_err());
+        assert!(rerun_allowed(&[agent(7, Some(AgentBadge::Blocked), false)], "main", 7).is_err());
+        assert!(rerun_allowed(&[agent(7, None, false)], "main", 7).is_err());
+    }
+
+    #[test]
+    fn rerun_allowed_for_an_idle_or_exited_agent_pane() {
+        // A done agent (idle) or an exited one (the pane is a shell again) allows.
+        assert_eq!(
+            rerun_allowed(&[agent(7, Some(AgentBadge::Done), false)], "main", 7),
+            Ok(())
+        );
+        assert_eq!(
+            rerun_allowed(&[agent(7, Some(AgentBadge::Working), true)], "main", 7),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rerun_guard_is_scoped_to_the_current_session() {
+        // Pane ids collide across sessions: a FOREIGN session's idle (Done) agent
+        // on the same pane number must NOT clear the guard for THIS session's busy
+        // agent - that would be the forbidden write into a working composer.
+        let rows = [
+            agent_in("other", 5, Some(AgentBadge::Done), false),
+            agent_in("main", 5, Some(AgentBadge::Working), false),
+        ];
+        assert!(
+            rerun_allowed(&rows, "main", 5).is_err(),
+            "our busy agent must gate regardless of a foreign idle row on pane 5"
+        );
+        // And a foreign busy row must not spuriously gate our plain-shell pane.
+        let foreign_only = [agent_in("other", 5, Some(AgentBadge::Working), false)];
+        assert_eq!(rerun_allowed(&foreign_only, "main", 5), Ok(()));
     }
 }
