@@ -464,9 +464,14 @@ fn run_picker(rows: Vec<SessionRow>) -> Option<String> {
             let _ = terminal::disable_raw_mode();
         }
     }
-    if terminal::enable_raw_mode().is_err() {
+    if let Err(e) = terminal::enable_raw_mode() {
         // No raw mode (piped stdin already screened out upstream): fall back
-        // to the default session rather than fail the launch.
+        // to the default session rather than fail the launch - but say so,
+        // matching this file's failures-are-visible discipline. Silent here
+        // would spawn a `main` the user never picked with no explanation.
+        eprintln!(
+            "fno: terminal raw mode unavailable ({e}); attaching default session {DEFAULT_SESSION:?}"
+        );
         return Some(DEFAULT_SESSION.to_string());
     }
     let _guard = RawGuard;
