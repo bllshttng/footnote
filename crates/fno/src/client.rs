@@ -243,6 +243,12 @@ struct View {
     /// split arrow sequence can never half-close the selector and leak its
     /// tail into the pane (gemini medium).
     sel_esc: Vec<u8>,
+    /// Answer-overlay cursor into [`View::blocked_queue`] (x-c929), when open;
+    /// the index of the selected blocked pane in `Layout.agents` order.
+    answers: Option<usize>,
+    /// Pending escape bytes in answer-overlay mode (same split-arrow safety as
+    /// [`View::sel_esc`]).
+    ans_esc: Vec<u8>,
     notice: Option<(String, Instant)>,
 }
 
@@ -260,8 +266,24 @@ impl View {
             expanded: HashSet::new(),
             selector: None,
             sel_esc: Vec::new(),
+            answers: None,
+            ans_esc: Vec::new(),
             notice: None,
         }
+    }
+
+    /// The blocked-pane queue for the answer overlay (x-c929): live rows badged
+    /// `blocked`, in `Layout.agents` order (the documented, deterministic cycle
+    /// order - AC2-UI). Owned clones so a per-key mutation of `answers` does not
+    /// alias the borrow (the same reason the selector reads owned `sel_rows`);
+    /// blocked panes are few, so the clone is cheap.
+    fn blocked_queue(&self) -> Vec<AgentRow> {
+        self.layout
+            .agents
+            .iter()
+            .filter(|a| !a.exited && a.badge == Some(AgentBadge::Blocked))
+            .cloned()
+            .collect()
     }
 
     fn panel_visible(&self) -> bool {
@@ -333,6 +355,14 @@ impl View {
         if let Some(cur) = self.selector {
             let n = self.sel_rows().len();
             self.selector = if n == 0 { None } else { Some(cur.min(n - 1)) };
+        }
+        // Answer overlay re-clamps when a scrape tick drops the selected blocked
+        // pane (x-c929, AC2-EDGE): stay in place if a later entry now occupies
+        // the slot, move to the new last entry if the removed one was last, and
+        // close when the queue empties (AC2-ERR).
+        if let Some(cur) = self.answers {
+            let n = self.blocked_queue().len();
+            self.answers = if n == 0 { None } else { Some(cur.min(n - 1)) };
         }
     }
 
@@ -476,12 +506,20 @@ impl View {
         self.draw_bottom_row(&mut cells, rows, cols);
         if self.overlay {
             draw_overlay(&mut cells, rows, cols);
+        } else if let Some(sel) = self.answers {
+            // x-c929 answer overlay: reuse the inverse-video overlay chrome with
+            // computed lines (blocked queue + the selected pane's prompt/options).
+            let blocked = self.blocked_queue();
+            if !blocked.is_empty() {
+                let lines = answer_overlay_lines(&blocked, sel.min(blocked.len() - 1));
+                draw_lines_overlay(&mut cells, rows, cols, &lines);
+            }
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
         // one place the cursor may sit (AC1-UI/AC5-UI).
         let (mut cur_r, mut cur_c, mut cur_vis) = (0u16, 0u16, false);
-        if self.selector.is_none() {
+        if self.selector.is_none() && self.answers.is_none() {
             if let Some((_, rect)) = self
                 .layout
                 .panes
@@ -833,21 +871,25 @@ const KEY_TABLE: &[&str] = &[
     "  x  close pane         c  new tab        ",
     "  n/p  cycle tabs       1-9  select tab   ",
     "  &  close tab          w  panel selector ",
-    "  b  toggle sideline    s  toggle status  ",
+    "  a  answer queue       b  toggle sideline ",
+    "  s  toggle status      ?  this key table  ",
     "  [ ]  jump block       v  select block   ",
     "  y  copy selection     r  rerun block    ",
     "  d  detach             C-b C-b  literal  ",
     " any key dismisses                        ",
 ];
 
-fn draw_overlay(cells: &mut [Cell], rows: usize, cols: usize) {
+/// Draw inverse-video overlay lines at the content area's top-left, one line
+/// per row, cell-bounds-checked (a tiny terminal clips rather than panics).
+/// Shared by the key-table overlay and the x-c929 answer overlay.
+fn draw_lines_overlay<S: AsRef<str>>(cells: &mut [Cell], rows: usize, cols: usize, lines: &[S]) {
     let origin_r = TAB_BAR_ROWS as usize + 1;
-    for (i, line) in KEY_TABLE.iter().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         let r = origin_r + i;
         if r >= rows {
             break;
         }
-        for (j, ch) in line.chars().enumerate() {
+        for (j, ch) in line.as_ref().chars().enumerate() {
             let c = 2 + j;
             if c >= cols {
                 break;
@@ -859,6 +901,75 @@ fn draw_overlay(cells: &mut [Cell], rows: usize, cols: usize) {
                 flags: cell_flags::INVERSE,
             };
         }
+    }
+}
+
+fn draw_overlay(cells: &mut [Cell], rows: usize, cols: usize) {
+    draw_lines_overlay(cells, rows, cols, KEY_TABLE);
+}
+
+/// The answer-overlay content width; lines truncate to it (AC3-UI: a long
+/// option label truncates for display while the daemon fingerprints the full
+/// region text) and pad to it so the inverse block is a clean rectangle.
+const ANSWER_OVERLAY_W: usize = 54;
+
+/// Build the answer-overlay lines from the blocked-pane queue + the selected
+/// pane's prompt/options (x-c929). `sel` is pre-clamped by the caller. A `▸`
+/// marks the selected row (AC1-UI); an answerable row lists its numbered
+/// options, a focus-only row shows the "⏎ to focus" affordance (AC1-EDGE).
+fn answer_overlay_lines(blocked: &[AgentRow], sel: usize) -> Vec<String> {
+    let mut lines = vec![pad_to(
+        " answer queue · digit answers · n/N cycle · ⏎ focus · esc close",
+        ANSWER_OVERLAY_W,
+    )];
+    for (i, a) in blocked.iter().enumerate() {
+        let marker = if i == sel { '▸' } else { ' ' };
+        let tag = if a.answerable.is_some() {
+            ""
+        } else {
+            "  ⚠ focus"
+        };
+        lines.push(pad_to(
+            &format!(" {marker} {}{}", a.name, tag),
+            ANSWER_OVERLAY_W,
+        ));
+    }
+    lines.push(pad_to("", ANSWER_OVERLAY_W)); // divider row
+    if let Some(a) = blocked.get(sel) {
+        match &a.answerable {
+            Some(ans) => {
+                if !ans.prompt.is_empty() {
+                    lines.push(pad_to(
+                        &format!("   {}", ans.prompt.replace('\n', " ")),
+                        ANSWER_OVERLAY_W,
+                    ));
+                }
+                for o in &ans.options {
+                    lines.push(pad_to(
+                        &format!("     {}. {}", o.idx, o.label),
+                        ANSWER_OVERLAY_W,
+                    ));
+                }
+            }
+            None => lines.push(pad_to("   ⚠ needs you — ⏎ to focus", ANSWER_OVERLAY_W)),
+        }
+    }
+    lines
+}
+
+/// Truncate `s` to `w` display chars (ellipsizing) and pad with spaces to `w`,
+/// so an overlay line is a fixed-width inverse block that fully overwrites the
+/// content beneath it.
+fn pad_to(s: &str, w: usize) -> String {
+    let count = s.chars().count();
+    if count > w {
+        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    } else {
+        let mut t = s.to_string();
+        t.push_str(&" ".repeat(w - count));
+        t
     }
 }
 
@@ -1283,6 +1394,9 @@ async fn handle_stdin(
     if view.selector.is_some() {
         return selector_keys(view, &passthrough, sock_w).await;
     }
+    if view.answers.is_some() {
+        return answer_keys(view, &passthrough, sock_w).await;
+    }
     for event in scanner.scan(&passthrough) {
         match event {
             Event::Forward(chunk) => {
@@ -1326,6 +1440,16 @@ async fn handle_stdin(
                     view.panel_on = true;
                     view.selector = Some(0);
                     view.sel_esc.clear();
+                }
+            }
+            Event::OpenAnswers => {
+                // Nothing blocked -> a local BEL, the overlay never opens on an
+                // empty queue (AC2-ERR).
+                if view.blocked_queue().is_empty() {
+                    let _ = raw_out(b"\x07");
+                } else {
+                    view.answers = Some(0);
+                    view.ans_esc.clear();
                 }
             }
             Event::TogglePanel => {
@@ -1512,6 +1636,90 @@ async fn selector_keys(
     Ok(StdinFlow::Continue)
 }
 
+/// Answer-overlay keys (x-c929): a digit answers the selected blocked pane
+/// (sending [`ClientMsg::PaneAnswer`] with the daemon-pinned option keystroke -
+/// focus unchanged), `n`/`N` (and j/k/arrows) cycle the blocked queue, Enter
+/// focuses+closes, Esc/q closes. The blocked queue is re-read per key so a
+/// scrape tick that drops the selected pane re-clamps instead of indexing a
+/// dropped row (AC2-EDGE); an emptied queue closes the overlay (AC2-ERR).
+async fn answer_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.ans_esc);
+    let keys = fold_selector_keys(&mut esc, bytes); // arrows -> hjkl twins
+    view.ans_esc = esc;
+    for &k in &keys {
+        let blocked = view.blocked_queue();
+        if blocked.is_empty() {
+            view.answers = None; // drained mid-chunk: close, swallow the rest
+            break;
+        }
+        let Some(cur0) = view.answers else {
+            break; // closed mid-chunk
+        };
+        let cur = cur0.min(blocked.len() - 1);
+        view.answers = Some(cur);
+        match k {
+            // Cycle: n/N are the documented keys; j/k and folded arrows too.
+            // Wraps deterministically in Layout.agents order (AC2-UI).
+            b'n' | b'j' => view.answers = Some((cur + 1) % blocked.len()),
+            b'N' | b'k' => view.answers = Some((cur + blocked.len() - 1) % blocked.len()),
+            b'0'..=b'9' => {
+                let sel = &blocked[cur];
+                let picked = sel
+                    .answerable
+                    .as_ref()
+                    .and_then(|a| {
+                        a.options
+                            .iter()
+                            .find(|o| o.idx.as_bytes().first() == Some(&k))
+                            .map(|o| (a, o))
+                    })
+                    .zip(sel.pane_id);
+                match picked {
+                    Some(((ans, o), pane)) => {
+                        // Only ever the daemon-pinned keystroke; focus unchanged.
+                        // The answered pane drops from the queue on the next
+                        // scrape tick; the overlay stays open to cycle onward.
+                        write_msg(
+                            sock_w,
+                            &ClientMsg::PaneAnswer {
+                                pane,
+                                fingerprint: ans.fingerprint,
+                                region_lines: ans.region_lines as u16,
+                                keystroke: o.keystroke.clone(),
+                            },
+                        )
+                        .await
+                        .map_err(|e| format!("answer send failed: {e}"))?;
+                    }
+                    // AC1-ERR: a digit with no matching option (or a focus-only
+                    // row) is a local BEL, never a stray key sent to any pane.
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
+            b'\r' | b'\n' => {
+                // Focus affordance (AC1-EDGE, best-effort v1): navigate to the
+                // pane's squad, then close. Pinning focus to the exact pane needs
+                // a FocusPane(id) primitive that does not exist yet (carveout).
+                if let Some(squad) = blocked[cur].squad {
+                    write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(squad)))
+                        .await
+                        .map_err(|e| format!("command send failed: {e}"))?;
+                }
+                view.answers = None;
+            }
+            0x1b | b'q' => view.answers = None,
+            _ => {}
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
 /// Write raw bytes (BEL, ModeSync escapes) straight to the terminal.
 fn raw_out(bytes: &[u8]) -> std::io::Result<()> {
     let mut out = std::io::stdout().lock();
@@ -1638,7 +1846,7 @@ fn map_color(c: Color) -> CtColor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::TabMeta;
+    use crate::proto::{AnswerOption, AnswerablePrompt, TabMeta};
     use crate::vt::frame_text;
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
@@ -2175,5 +2383,187 @@ mod tests {
             agents: vec![],
         });
         assert_eq!(view.selector, Some(0), "cursor clamped to the live rows");
+    }
+
+    // ---- x-c929: answer overlay + next-blocked cycle ----
+
+    fn answerable(idx_labels: &[(&str, &str)], fp: u8) -> AnswerablePrompt {
+        AnswerablePrompt {
+            prompt: "Do you want to proceed?".into(),
+            options: idx_labels
+                .iter()
+                .map(|(i, l)| AnswerOption {
+                    idx: (*i).into(),
+                    label: (*l).into(),
+                    keystroke: i.as_bytes().to_vec(),
+                })
+                .collect(),
+            fingerprint: [fp; 32],
+            region_lines: 8,
+        }
+    }
+
+    fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
+        AgentRow {
+            squad: Some(1),
+            name: name.into(),
+            pane_id: Some(pane),
+            badge: Some(AgentBadge::Blocked),
+            reason: None,
+            exited: false,
+            answerable: ans,
+        }
+    }
+
+    fn view_with_agents(agents: Vec<AgentRow>) -> View {
+        let mut v = two_pane_view();
+        v.layout.agents = agents;
+        v
+    }
+
+    #[test]
+    fn xc929_pad_to_truncates_and_pads() {
+        assert_eq!(pad_to("hi", 5), "hi   ");
+        assert_eq!(pad_to("hello", 5), "hello");
+        assert_eq!(pad_to("hello world", 5), "hell…");
+    }
+
+    // AC1-UI + AC1-EDGE: the selected row is marked, an answerable row lists its
+    // numbered options, a focus-only row shows the "⏎ to focus" affordance.
+    #[test]
+    fn xc929_answer_overlay_lines_marks_selection_and_renders_focus_only() {
+        let rows = vec![
+            blocked_row("peer", 4, Some(answerable(&[("1", "Yes"), ("2", "No")], 7))),
+            blocked_row("other", 5, None),
+        ];
+        let lines = answer_overlay_lines(&rows, 0);
+        assert!(
+            lines[1].trim_start().starts_with("▸ peer"),
+            "{:?}",
+            lines[1]
+        );
+        assert!(lines[2].contains("other") && lines[2].contains("⚠ focus"));
+        assert!(lines.iter().any(|l| l.contains("1. Yes")));
+        assert!(lines.iter().any(|l| l.contains("2. No")));
+        // Selecting the focus-only row shows the affordance, no digits.
+        let lines = answer_overlay_lines(&rows, 1);
+        assert!(lines.iter().any(|l| l.contains("needs you")));
+        assert!(!lines.iter().any(|l| l.contains("1. Yes")));
+    }
+
+    #[test]
+    fn xc929_blocked_queue_filters_to_live_blocked_rows() {
+        let mut working = blocked_row("working", 2, None);
+        working.badge = Some(AgentBadge::Working);
+        let mut dead = blocked_row("dead", 3, None);
+        dead.exited = true;
+        let v = view_with_agents(vec![
+            blocked_row("a", 1, None),
+            working,
+            dead,
+            blocked_row("b", 4, None),
+        ]);
+        let q = v.blocked_queue();
+        assert_eq!(
+            q.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "only live blocked rows, in Layout.agents order"
+        );
+    }
+
+    // AC2-EDGE: a scrape tick that drops the selected pane re-clamps the overlay
+    // cursor instead of indexing a dropped row; an emptied queue closes it.
+    #[test]
+    fn xc929_answers_reclamp_and_close_on_layout_change() {
+        let mut v = view_with_agents(vec![blocked_row("a", 1, None), blocked_row("b", 2, None)]);
+        v.answers = Some(1);
+        // The last blocked pane drops -> cursor clamps to the new last (0).
+        v.set_layout(LayoutView {
+            squads: v.layout.squads.clone(),
+            active_squad: 1,
+            panes: v.layout.panes.clone(),
+            focus: v.layout.focus,
+            area: v.layout.area,
+            agents: vec![blocked_row("a", 1, None)],
+        });
+        assert_eq!(v.answers, Some(0));
+        // The queue empties -> the overlay closes (AC2-ERR).
+        v.set_layout(LayoutView {
+            squads: v.layout.squads.clone(),
+            active_squad: 1,
+            panes: v.layout.panes.clone(),
+            focus: v.layout.focus,
+            area: v.layout.area,
+            agents: vec![],
+        });
+        assert_eq!(v.answers, None);
+    }
+
+    // AC1-HP: a digit on an answerable pane sends PaneAnswer with the exact
+    // daemon-pinned keystroke/fingerprint/region_lines; the overlay stays open.
+    #[tokio::test]
+    async fn xc929_answer_keys_digit_sends_pinned_paneanswer() {
+        let mut v = view_with_agents(vec![blocked_row(
+            "peer",
+            4,
+            Some(answerable(&[("1", "Yes"), ("2", "No")], 9)),
+        )]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"1", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        match msg {
+            ClientMsg::PaneAnswer {
+                pane,
+                fingerprint,
+                region_lines,
+                keystroke,
+            } => {
+                assert_eq!(pane, 4);
+                assert_eq!(fingerprint, [9u8; 32]);
+                assert_eq!(region_lines, 8);
+                assert_eq!(keystroke, b"1");
+            }
+            other => panic!("expected PaneAnswer, got {other:?}"),
+        }
+        assert_eq!(v.answers, Some(0), "overlay stays open to cycle onward");
+    }
+
+    // AC1-ERR: a digit with no matching option never sends a keystroke.
+    #[tokio::test]
+    async fn xc929_answer_keys_no_matching_option_sends_nothing() {
+        let mut v = view_with_agents(vec![blocked_row(
+            "peer",
+            4,
+            Some(answerable(&[("1", "Yes"), ("2", "No")], 9)),
+        )]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"7", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "no-such-option sends nothing (AC1-ERR)");
+    }
+
+    // AC2-HP + AC2-UI: n/N cycle the blocked queue and wrap deterministically;
+    // Esc closes.
+    #[tokio::test]
+    async fn xc929_answer_keys_cycle_wraps_and_esc_closes() {
+        let mut v = view_with_agents(vec![blocked_row("a", 1, None), blocked_row("b", 2, None)]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"n", &mut buf).await.unwrap();
+        assert_eq!(v.answers, Some(1));
+        answer_keys(&mut v, b"n", &mut buf).await.unwrap();
+        assert_eq!(v.answers, Some(0), "n wraps to the first");
+        answer_keys(&mut v, b"N", &mut buf).await.unwrap();
+        assert_eq!(v.answers, Some(1), "N wraps backward to the last");
+        // `q` closes instantly (a lone Esc pends until the next byte, the shared
+        // fold_selector_keys behavior; `q` is the unambiguous close).
+        answer_keys(&mut v, b"q", &mut buf).await.unwrap();
+        assert_eq!(v.answers, None, "q closes");
+        assert!(
+            buf.is_empty(),
+            "cycling and closing send nothing to the pane"
+        );
     }
 }
