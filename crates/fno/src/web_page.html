@@ -1,0 +1,238 @@
+<!doctype html>
+<!--
+  fno mux read-only web attach (x-6a14). Served inline by `fno mux serve --web`
+  via include_str! - no CDN, no external resource of any kind, so the strict CSP
+  below (default-src 'none') can hold and the page works offline / airgapped.
+
+  Renders one pane at a time. Cells arrive already structured (char + fg/bg +
+  style flags) in each ServerMsg::Frame, so we paint them straight to a <pre> of
+  styled <span> runs - no ANSI reconstruction, no xterm.js. Read-only: the page
+  never sends a byte upstream; pane selection only changes which cached frame we
+  draw locally.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>fno mux (read-only)</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0e14; color: #c5cdd9;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  body { display: flex; flex-direction: column; }
+  #bar { flex: 0 0 auto; padding: 6px 10px; font-size: 13px; display: flex;
+    align-items: center; gap: 10px; border-bottom: 1px solid #1c2230; }
+  #bar.connecting { background: #1a2030; color: #8a93a6; }
+  #bar.live { background: #0b0e14; }
+  #bar.disconnected { background: #4a3a12; color: #f0c674; }
+  #bar.ended { background: #4a1616; color: #f08a8a; }
+  #bar.authfailed { background: #4a1616; color: #f08a8a; }
+  #status { font-weight: 600; }
+  #picker { flex: 0 0 auto; display: flex; gap: 6px; overflow-x: auto;
+    padding: 6px 10px; border-bottom: 1px solid #1c2230; white-space: nowrap; }
+  #picker button { font: inherit; font-size: 12px; cursor: pointer;
+    background: #141a26; color: #9aa4b6; border: 1px solid #232b3a;
+    border-radius: 5px; padding: 3px 9px; }
+  #picker button.active { background: #24406b; color: #fff; border-color: #3763ac; }
+  #picker button .dot { display: inline-block; width: 7px; height: 7px;
+    border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+  .b-working { background: #6cc04a; } .b-blocked { background: #f0c674; }
+  .b-done { background: #4a90d9; } .b-idle { background: #4a5568; }
+  #screen { flex: 1 1 auto; overflow: auto; }
+  pre#term { margin: 0; padding: 8px 10px; font-size: 13px; line-height: 1.15;
+    white-space: pre; }
+  .cur { outline: 1px solid #c5cdd9; }
+  #overlay { position: fixed; inset: 0; display: none; align-items: center;
+    justify-content: center; background: rgba(11,14,20,.85); font-size: 15px;
+    text-align: center; padding: 24px; }
+  #overlay.show { display: flex; }
+</style>
+</head>
+<body>
+  <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span></div>
+  <div id="picker"></div>
+  <div id="screen"><pre id="term"></pre></div>
+  <div id="overlay"></div>
+<script>
+"use strict";
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const bar = $("bar"), statusEl = $("status"), subEl = $("sub"),
+        picker = $("picker"), term = $("term"), overlay = $("overlay");
+
+  // ---- state ----
+  const frames = new Map();   // pane_id -> latest Frame
+  let squads = [];            // from Layout
+  let agents = [];            // from Layout
+  let current = null;         // selected pane_id
+  let upstreamUp = true;
+
+  // ---- xterm 256-color palette -> css ----
+  const base16 = ["#000000","#cd0000","#00cd00","#cdcd00","#0000ee","#cd00cd",
+    "#00cdcd","#e5e5e5","#7f7f7f","#ff0000","#00ff00","#ffff00","#5c5cff",
+    "#ff00ff","#00ffff","#ffffff"];
+  const cube = [0,95,135,175,215,255];
+  function idxColor(n) {
+    if (n < 16) return base16[n];
+    if (n < 232) { n -= 16; return `rgb(${cube[(n/36|0)%6]},${cube[(n/6|0)%6]},${cube[n%6]})`; }
+    const v = 8 + (n - 232) * 10; return `rgb(${v},${v},${v})`;
+  }
+  function css(color, isFg) {
+    if (color === "Default" || color == null) return isFg ? "#c5cdd9" : "#0b0e14";
+    if (color.Indexed != null) return idxColor(color.Indexed);
+    if (color.Rgb) return `rgb(${color.Rgb[0]},${color.Rgb[1]},${color.Rgb[2]})`;
+    return isFg ? "#c5cdd9" : "#0b0e14";
+  }
+  const esc = (s) => s.replace(/[&<>]/g, (c) => c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;");
+
+  // flags (mirror proto::cell_flags)
+  const BOLD=1, ITALIC=2, UNDERLINE=4, INVERSE=8, DIM=16, WIDE_SPACER=32, SELECTED=64;
+
+  function cellStyle(cell) {
+    let fg = css(cell.fg, true), bg = css(cell.bg, false);
+    const f = cell.flags | 0;
+    if (f & (INVERSE | SELECTED)) { const t = fg; fg = bg; bg = t; }
+    let s = `color:${fg};background:${bg};`;
+    if (f & BOLD) s += "font-weight:bold;";
+    if (f & DIM) s += "opacity:.6;";
+    if (f & ITALIC) s += "font-style:italic;";
+    if (f & UNDERLINE) s += "text-decoration:underline;";
+    return s;
+  }
+  // Two cells share a run only if they render identically.
+  const sameStyle = (a, b) =>
+    a.flags === b.flags &&
+    JSON.stringify(a.fg) === JSON.stringify(b.fg) &&
+    JSON.stringify(a.bg) === JSON.stringify(b.bg);
+
+  function draw() {
+    const fr = current != null ? frames.get(current) : null;
+    if (!fr) { term.textContent = current == null ? "" : "…"; return; }
+    // Defensive re-guard: never draw a geometry-inconsistent grid (AC5-FR twin).
+    if (fr.cells.length !== fr.rows * fr.cols) return;
+    const showCur = fr.cursor_visible;
+    let html = "";
+    for (let r = 0; r < fr.rows; r++) {
+      let run = "", runStyle = null, runFlags = null;
+      const flush = () => {
+        if (run) html += `<span style="${runStyle}">${esc(run)}</span>`;
+        run = "";
+      };
+      for (let cx = 0; cx < fr.cols; cx++) {
+        const cell = fr.cells[r * fr.cols + cx];
+        if ((cell.flags | 0) & WIDE_SPACER) continue; // right half of a wide glyph
+        const isCur = showCur && r === fr.cursor_row && cx === fr.cursor_col;
+        if (isCur) {
+          flush(); runFlags = null;
+          html += `<span class="cur" style="${cellStyle(cell)}">${esc(cell.c)}</span>`;
+          continue;
+        }
+        if (runFlags === null || !sameStyle(cell, runFlags)) {
+          flush(); runFlags = cell; runStyle = cellStyle(cell);
+        }
+        run += cell.c;
+      }
+      flush();
+      html += "\n";
+    }
+    term.innerHTML = html;
+  }
+
+  function badgeClass(a) {
+    if (a.exited) return "b-idle";
+    if (a.badge === "Working") return "b-working";
+    if (a.badge === "Blocked") return "b-blocked";
+    if (a.badge === "Done") return "b-done";
+    return "b-idle";
+  }
+
+  function renderPicker() {
+    // One button per pane we have a frame for, labelled by its agent row when
+    // one exists, else "pane N". Selection is local (never sent upstream).
+    const byPane = new Map();
+    for (const a of agents) if (a.pane_id != null) byPane.set(a.pane_id, a);
+    const ids = [...new Set([...frames.keys(), ...byPane.keys()])].sort((x, y) => x - y);
+    if (current == null && ids.length) current = ids[0];
+    picker.innerHTML = "";
+    if (!ids.length) {
+      const span = document.createElement("span");
+      span.textContent = "no panes"; span.style.color = "#5c6577"; span.style.fontSize = "12px";
+      picker.appendChild(span); return;
+    }
+    for (const id of ids) {
+      const a = byPane.get(id);
+      const btn = document.createElement("button");
+      if (id === current) btn.className = "active";
+      const label = a ? a.name : `pane ${id}`;
+      btn.innerHTML = a ? `<span class="dot ${badgeClass(a)}"></span>${esc(label)}` : esc(label);
+      btn.onclick = () => { current = id; renderPicker(); draw(); };
+      picker.appendChild(btn);
+    }
+  }
+
+  // ---- connection banner state machine ----
+  function setBar(state, text, sub) {
+    bar.className = state; statusEl.textContent = text; subEl.textContent = sub || "";
+  }
+  function showOverlay(text) { overlay.textContent = text; overlay.classList.add("show"); }
+
+  // ---- message handling ----
+  function onMsg(obj) {
+    if (obj._bridge) {
+      // Bridge-injected upstream status (not a ServerMsg).
+      if (obj._bridge.state === "disconnected") {
+        upstreamUp = false;
+        setBar("disconnected", "reconnecting…", "showing last frame");
+      } else if (obj._bridge.state === "connected") {
+        upstreamUp = true; setBar("live", "live");
+      }
+      return;
+    }
+    if (obj.Frame) {
+      const { pane_id, frame } = obj.Frame;
+      if (frame.cells.length !== frame.rows * frame.cols) return; // drop malformed
+      frames.set(pane_id, frame);
+      if (upstreamUp) setBar("live", "live");
+      if (current == null) { current = pane_id; renderPicker(); }
+      if (pane_id === current) draw();
+      else if (!picker.children.length || ![...frames.keys()].every((k) => k <= pane_id)) renderPicker();
+      return;
+    }
+    if (obj.Layout) {
+      squads = obj.Layout.squads || [];
+      agents = obj.Layout.agents || [];
+      renderPicker();
+      return;
+    }
+    if (obj.Bye) { setBar("ended", "session ended", obj.Bye.reason || ""); showOverlay("session ended\n" + (obj.Bye.reason || "")); return; }
+    // Notice / ModeSync / control replies: irrelevant to a read-only viewer.
+  }
+
+  // ---- websocket ----
+  const token = new URLSearchParams(location.search).get("t") || "";
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+    ws.onopen = () => setBar("connecting", "connecting…", "waiting for first frame");
+    ws.onmessage = (ev) => { try { onMsg(JSON.parse(ev.data)); } catch (_) {} };
+    ws.onclose = (ev) => {
+      // 1008 = policy violation: our token check refused the upgrade. A normal
+      // socket close (server/bridge gone) just retries.
+      if (ev.code === 1008 || ev.code === 4401) {
+        setBar("authfailed", "invalid token", "");
+        showOverlay("invalid or missing token");
+        return; // do not retry a bad token
+      }
+      setBar("disconnected", "reconnecting…", "connection lost");
+      setTimeout(connect, 1500);
+    };
+    ws.onerror = () => ws.close();
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

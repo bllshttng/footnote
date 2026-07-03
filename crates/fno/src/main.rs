@@ -49,6 +49,10 @@ enum Role {
     /// `mux shell-init <zsh|bash> [--json]`: print the OSC 133 shell-integration
     /// snippet (v6). `None` / an unsupported shell is an error in the verb.
     MuxShellInit(Option<String>, bool),
+    /// `mux serve --web [--session <name>] [--bind <addr>] [--port <n>]`: the
+    /// read-only web bridge (x-6a14). Attaches to a session as an observer and
+    /// serves its frame stream to browsers over HTTP+WebSocket. No TTY needed.
+    MuxWeb(fno::web::WebArgs),
     /// A malformed mux/server invocation: print usage, exit 2.
     MuxUsage,
     /// Any other args: the Python-CLI forwarding path.
@@ -81,6 +85,25 @@ fn split_json(rest: &[OsString]) -> Option<(Vec<&str>, bool)> {
         }
     }
     Some((positionals, json))
+}
+
+/// Parse `serve` flags into [`fno::web::WebArgs`]. `--web` is required; a missing
+/// flag value, an unknown flag, a non-UTF-8 arg, or a bad `--port` is `None`
+/// (the caller maps that to `MuxUsage`, exit 2).
+fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
+    let mut web = false;
+    let mut args = fno::web::WebArgs::default();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.to_str()? {
+            "--web" => web = true,
+            "--session" => args.session = it.next()?.to_str()?.to_string(),
+            "--bind" => args.bind = it.next()?.to_str()?.to_string(),
+            "--port" => args.port = it.next()?.to_str()?.parse().ok()?,
+            _ => return None,
+        }
+    }
+    web.then_some(args)
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
@@ -124,6 +147,12 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 }
                 Role::ServerSession(session)
             }
+            // `mux serve --web ...`: the read-only web bridge (x-6a14). `--web`
+            // is required (the `serve` verb reserves room for future modes).
+            Some("serve") => match parse_web_args(&args[2..]) {
+                Some(w) => Role::MuxWeb(w),
+                None => Role::MuxUsage,
+            },
             // `mux pane <verb> ...`: hand the rest to the pane verb family;
             // a bare `mux pane` (no verb) falls through to MuxUsage. Nothing
             // under `mux pane` ever forwards to Python (AC).
@@ -193,6 +222,7 @@ fn main() {
                  | fno mux ls [--json] | fno mux attach <name> \
                  | fno mux kill-server [<name>] [--json] \
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
+                 | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
                  | fno mux pane ls|read|run|send|wait|kill|claim|release ..."
             );
             std::process::exit(2);
@@ -206,6 +236,7 @@ fn main() {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
         }
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
+        Role::MuxWeb(web_args) => std::process::exit(fno::web::serve(web_args)),
         Role::MuxPane(rest) => std::process::exit(mux_cli::pane(&rest, env_session.as_deref())),
         Role::Client(flag) => {
             let env = env_session.as_deref().filter(|s| !s.is_empty());

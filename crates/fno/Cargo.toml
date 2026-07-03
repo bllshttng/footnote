@@ -21,6 +21,10 @@ name = "fno"
 path = "src/main.rs"
 
 [dependencies]
+# `fno mux serve --web` (x-6a14): the read-only web bridge's HTTP + WebSocket
+# surface. axum handles the untrusted-input HTTP parsing and WS handshake so
+# the web-facing bridge does not hand-roll that security-sensitive code.
+axum = { version = "0.8", features = ["ws"] }
 # Same major versions as crates/fno-agents, which already builds this stack.
 alacritty_terminal = "0.26"
 crossterm = { version = "0.29", features = ["event-stream"] }

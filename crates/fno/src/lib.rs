@@ -15,3 +15,4 @@ pub mod server;
 pub mod squad;
 pub mod tree;
 pub mod vt;
+pub mod web;
