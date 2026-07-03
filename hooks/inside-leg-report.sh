@@ -109,8 +109,17 @@ emit_marker() { { printf '%b' "$1" >>"$TTY_SINK"; } 2>/dev/null || true; }
 # key carries FNO_PANE_EPOCH because pane ids recycle across server restarts.
 is_pane_host() {
   [[ -z "${FNO_PANE_EPOCH:-}" || -z "$SESSION_ID" ]] && return 0
-  local dir="${XDG_RUNTIME_DIR:-/tmp}/fno-turn-pins-${EUID:-0}"
+  # Rendezvous dir must be a real, self-owned directory. Prefer the per-user
+  # runtime dir (XDG_RUNTIME_DIR, or macOS's per-user $TMPDIR); the shared /tmp
+  # last resort is symlink-guarded and ownership-checked so a hostile
+  # pre-created dir on a multi-user box cannot hijack the pin. Any anomaly
+  # degrades to the presence gate (return 0) rather than writing somewhere unsafe.
+  local base="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+  local dir="${base%/}/fno-turn-pins-${EUID:-0}"
+  [[ -L "$dir" ]] && return 0
   mkdir -p "$dir" 2>/dev/null || return 0
+  [[ -O "$dir" ]] || return 0
+  chmod 700 "$dir" 2>/dev/null || true
   local pin="${dir}/${FNO_SESSION:-_}-${FNO_PANE}-${FNO_PANE_EPOCH}"
   # noclobber makes the create fail if the pin exists -> exactly one winner.
   if ( set -o noclobber; printf '%s\n' "$SESSION_ID" >"$pin" ) 2>/dev/null; then
@@ -121,7 +130,7 @@ is_pane_host() {
   # host into permanent silence. A real nested claude always wrote a non-empty
   # id, so it still mismatches below and stays silent.
   [[ -s "$pin" ]] || return 0
-  [[ "$(cat "$pin" 2>/dev/null)" == "$SESSION_ID" ]]
+  [[ "$(cat "$pin" 2>/dev/null || true)" == "$SESSION_ID" ]]
 }
 
 if [[ -n "${FNO_PANE:-}" ]] && is_pane_host; then
