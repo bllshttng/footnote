@@ -70,6 +70,27 @@ def _fno_bin() -> str:
     return os.environ.get("FNO_BIN") or "fno"
 
 
+def _shell_integration() -> str:
+    """``config.mux.shell_integration`` -> the value the Rust mux reads from
+    ``FNO_MUX_SHELL_INTEGRATION``. The settings loader is Python-only,
+    so the spawn front-half is the config->env bridge: set on the ``pane run``
+    subprocess env, which self-spawns the mux server, so the server (which reads
+    the knob when it wraps pane shells) inherits it. Fail-safe to the default
+    (never break a spawn on a config read); the Rust side treats absent/anything
+    but ``off`` as on regardless.
+
+    ponytail: an interactive `fno mux` server (born from the Rust client, no
+    Python) reads the default (on) unless the user exports the env - the plan
+    de-scoped Rust reading settings.yaml.
+    """
+    try:
+        from fno.config import load_settings
+
+        return load_settings().config.mux.shell_integration
+    except Exception:
+        return "mux-panes"
+
+
 def resolve_mux_session(explicit: Optional[str] = None) -> str:
     """flag > FNO_SESSION > "main" (Locked 7, mirrors mux_cli resolve_session).
 
@@ -228,7 +249,9 @@ def resolve_provenance(
 
 
 def _run_mux(
-    args: list[str], runner: Callable[..., "subprocess.CompletedProcess[str]"]
+    args: list[str],
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    env: Optional[dict[str, str]] = None,
 ) -> "subprocess.CompletedProcess[str]":
     try:
         return runner(
@@ -236,6 +259,7 @@ def _run_mux(
             capture_output=True,
             text=True,
             timeout=_MUX_SUBPROCESS_TIMEOUT_S,
+            **({"env": env} if env is not None else {}),
         )
     except FileNotFoundError as exc:
         raise DispatchAskError(
@@ -344,6 +368,12 @@ def dispatch_spawn_pane(
 
         # --claim marks the pane writer-claim eligible (agent panes only);
         # mail's live inject holds it around each burst.
+        #
+        # FNO_MUX_SHELL_INTEGRATION rides the pane-run ENV: the mux server that
+        # spawns pane shells reads it, and this pane-run process is
+        # what self-spawns the server when absent (client.rs), so the server
+        # inherits the config-derived knob. Latched at server birth - an
+        # already-running server keeps its value.
         proc = _run_mux(
             [
                 "mux",
@@ -358,6 +388,7 @@ def dispatch_spawn_pane(
                 *wrapped,
             ],
             runner,
+            env={**os.environ, "FNO_MUX_SHELL_INTEGRATION": _shell_integration()},
         )
         if proc.returncode != 0:
             # G1 contract: non-zero exit == no pane was created, so refusing

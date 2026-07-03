@@ -9,9 +9,12 @@
 //! the kernel PTY buffer - bounded memory, never an unbounded server-side
 //! queue (AC2-EDGE).
 
+use crate::mux_cli::{BASH_SHELL_INIT, ZSH_SHELL_INIT};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +67,9 @@ pub struct PtyShell {
     // (fail-closed, same policy as input-after-exit) - never unbounded memory.
     input_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    // Shell-integration rc temp dir, held purely for cleanup (RAII): dropped
+    // when the pane closes / the server exits. `None` for non-shell / off panes.
+    _shell_rc: Option<ShellRc>,
 }
 
 impl PtyShell {
@@ -88,18 +94,22 @@ impl PtyShell {
         let pair = open_pty(rows, cols)?;
         let mut errors = Vec::new();
         let mut child = None;
+        let mut shell_rc = None;
         for cand in candidates {
-            let cmd = base_command(cand, cwd, session, pane_id);
+            let mut cmd = base_command(cand, cwd, session, pane_id);
+            let rc = apply_shell_integration(&mut cmd, cand, session, pane_id);
             match pair.slave.spawn_command(cmd) {
                 Ok(c) => {
                     child = Some(c);
+                    shell_rc = rc;
                     break;
                 }
+                // rc drops here on failure -> its temp dir is removed.
                 Err(e) => errors.push(format!("{}: {e}", cand.to_string_lossy())),
             }
         }
         let child = child.ok_or_else(|| PtyError::Spawn(errors.join("; ")))?;
-        wire(pair, child, pane_id, out_tx, exit_tx)
+        wire(pair, child, pane_id, out_tx, exit_tx, shell_rc)
     }
 
     /// Spawn an explicit command (`argv[0]` + args) as a pane - the
@@ -121,6 +131,10 @@ impl PtyShell {
             .ok_or_else(|| PtyError::Spawn("empty argv".into()))?;
         let pair = open_pty(rows, cols)?;
         let mut cmd = base_command(OsStr::new(program), cwd, session, pane_id);
+        // A bare shell argv (`pane run -- zsh`) is wrapped; a non-shell argv (an
+        // agent TUI) passes through untouched. Wrap before the caller's args so
+        // bash's `--rcfile` leads.
+        let shell_rc = apply_shell_integration(&mut cmd, OsStr::new(program), session, pane_id);
         for a in args {
             cmd.arg(a);
         }
@@ -128,7 +142,7 @@ impl PtyShell {
             .slave
             .spawn_command(cmd)
             .map_err(|e| PtyError::Spawn(format!("{program}: {e}")))?;
-        wire(pair, child, pane_id, out_tx, exit_tx)
+        wire(pair, child, pane_id, out_tx, exit_tx, shell_rc)
     }
 
     /// The child's OS process id, when the platform reported one. Read for
@@ -232,6 +246,121 @@ fn base_command(
     cmd
 }
 
+/// A shell the mux knows how to inject OSC 133 block markers into.
+enum ShellKind {
+    Zsh,
+    Bash,
+}
+
+/// Map the basename of `program` to a known shell. `None` for an agent TUI or
+/// any non-shell argv, which passes through un-wrapped.
+fn shell_kind(program: &OsStr) -> Option<ShellKind> {
+    match std::path::Path::new(program).file_name()?.to_str()? {
+        "zsh" => Some(ShellKind::Zsh),
+        "bash" => Some(ShellKind::Bash),
+        _ => None,
+    }
+}
+
+/// The knob's only off-switch: `FNO_MUX_SHELL_INTEGRATION=off`. Anything else
+/// (absent, `mux-panes`, garbage) reads as on - the feature's default.
+fn integration_disabled(knob: Option<&OsStr>) -> bool {
+    knob == Some(OsStr::new("off"))
+}
+
+/// The temp `.zshenv`: source the user's real `.zshenv` by explicit path, and
+/// deliberately do NOT restore `ZDOTDIR` (that stays pointed at the temp dir so
+/// zsh reads OUR `.zshrc` next, not the user's).
+const ZSH_ZSHENV: &str =
+    "[ -f \"${USER_ZDOTDIR:-$HOME}/.zshenv\" ] && . \"${USER_ZDOTDIR:-$HOME}/.zshenv\"\n";
+
+/// The temp `.zshrc`: restore `ZDOTDIR` for the user rc + subshells, source the
+/// user's real `.zshrc`, then eval the snippet LAST so it wins the prompt.
+fn zsh_zshrc() -> String {
+    format!(
+        "ZDOTDIR=\"${{USER_ZDOTDIR:-$HOME}}\"\n\
+         [ -f \"$ZDOTDIR/.zshrc\" ] && . \"$ZDOTDIR/.zshrc\"\n\
+         {ZSH_SHELL_INIT}"
+    )
+}
+
+/// The temp bash `--rcfile`: source the user's `~/.bashrc` then the snippet.
+fn bash_rcfile_body() -> String {
+    format!("[ -f \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"\n{BASH_SHELL_INIT}")
+}
+
+/// A per-pane temp dir holding the shell-integration rc file(s). Held by the
+/// owning `PtyShell` only for cleanup: the rc is read once at shell startup, so
+/// it just has to outlive the child's first few ms, which the pane always does.
+/// Dropped -> removed when the pane closes / the server exits.
+struct ShellRc {
+    dir: PathBuf,
+}
+
+impl Drop for ShellRc {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Inject the OSC 133 snippet into a mux-spawned shell, and ONLY that shell -
+/// never the user's global rc. zsh: a temp `ZDOTDIR` whose `.zshenv` /
+/// `.zshrc` source the user's real files (`USER_ZDOTDIR`, or `$HOME` when
+/// unset) then eval the snippet LAST, so a prompt owner (starship/p10k) runs
+/// first and our `B` marker is appended after. bash: a temp `--rcfile` that
+/// sources `~/.bashrc` then the snippet. The snippet's `_FNO_OSC133` guard makes
+/// a shell that already emits OSC 133 a no-op, and the scanner is
+/// emitter-agnostic. Off when `FNO_MUX_SHELL_INTEGRATION=off`; absent reads as
+/// on (`mux-panes`). Fail-open: a temp-write error skips integration rather than
+/// failing the pane spawn.
+///
+/// ponytail: a user whose own `.zshenv` sets `ZDOTDIR` defeats the temp-dir hop
+/// (zsh then reads their `.zshrc`, not ours) - the same known limit as VS Code's
+/// scheme; the manual `fno mux shell-init` eval is the upgrade path there.
+fn apply_shell_integration(
+    cmd: &mut CommandBuilder,
+    program: &OsStr,
+    session: &str,
+    pane_id: u64,
+) -> Option<ShellRc> {
+    if integration_disabled(std::env::var_os("FNO_MUX_SHELL_INTEGRATION").as_deref()) {
+        return None;
+    }
+    let kind = shell_kind(program)?;
+    // Under the per-user 0700 mux dir, NOT world-writable /tmp: a shell that
+    // sources these rc files is an RCE surface, so a predictable path in a
+    // shared temp dir (where an attacker could pre-create the dir and swap the
+    // rc) is CWE-377. `ensure_private_dir` forces 0700 on both levels, and no
+    // other uid can enter the parent, so the per-pane name being predictable is
+    // safe. Unique per pane (session + id); a crashed server's leftover of the
+    // same name is removed first, never appended to.
+    let dir = crate::proto::mux_dir()
+        .join("shell-rc")
+        .join(format!("fno-mux-{session}-{pane_id}"));
+    let _ = fs::remove_dir_all(&dir);
+    crate::proto::ensure_private_dir(&dir).ok()?;
+    let rc = ShellRc { dir };
+    match kind {
+        ShellKind::Zsh => {
+            fs::write(rc.dir.join(".zshenv"), ZSH_ZSHENV).ok()?;
+            fs::write(rc.dir.join(".zshrc"), zsh_zshrc()).ok()?;
+            cmd.env("ZDOTDIR", &rc.dir);
+            // Preserve the user's real ZDOTDIR for the temp rc to source; unset
+            // -> the in-shell `${USER_ZDOTDIR:-$HOME}` falls back to $HOME.
+            if let Some(z) = std::env::var_os("ZDOTDIR") {
+                cmd.env("USER_ZDOTDIR", z);
+            }
+        }
+        ShellKind::Bash => {
+            let rcfile = rc.dir.join("bashrc");
+            fs::write(&rcfile, bash_rcfile_body()).ok()?;
+            cmd.arg("--rcfile");
+            cmd.arg(rcfile);
+        }
+    }
+    Some(rc)
+}
+
 /// Wire a spawned child's PTY into the mux: drop the slave (only the child
 /// holds it), start the reader + writer threads, and hand back the owning
 /// [`PtyShell`]. Shared by [`PtyShell::spawn`] and [`PtyShell::spawn_cmd`].
@@ -241,6 +370,7 @@ fn wire(
     pane_id: u64,
     out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
+    shell_rc: Option<ShellRc>,
 ) -> Result<PtyShell, PtyError> {
     // Standard pattern: drop the slave so only the child holds it.
     drop(pair.slave);
@@ -258,6 +388,7 @@ fn wire(
         master: pair.master,
         input_tx,
         child: Mutex::new(child),
+        _shell_rc: shell_rc,
     })
 }
 
@@ -353,6 +484,54 @@ mod tests {
             shell_candidates(Some(OsStr::new("/bin/sh"))),
             vec![OsString::from("/bin/sh")]
         );
+    }
+
+    #[test]
+    fn shell_integration_detects_only_known_shells() {
+        // basename maps zsh/bash (bare or full-path); everything else is a
+        // non-shell argv that passes through un-wrapped.
+        assert!(matches!(
+            shell_kind(OsStr::new("zsh")),
+            Some(ShellKind::Zsh)
+        ));
+        assert!(matches!(
+            shell_kind(OsStr::new("/bin/zsh")),
+            Some(ShellKind::Zsh)
+        ));
+        assert!(matches!(
+            shell_kind(OsStr::new("/usr/local/bin/bash")),
+            Some(ShellKind::Bash)
+        ));
+        assert!(shell_kind(OsStr::new("claude")).is_none());
+        assert!(shell_kind(OsStr::new("/usr/bin/nvim")).is_none());
+        assert!(shell_kind(OsStr::new("fish")).is_none());
+    }
+
+    #[test]
+    fn shell_integration_off_knob_only_matches_off() {
+        // Only the literal "off" disables; absent / mux-panes / garbage read on.
+        assert!(integration_disabled(Some(OsStr::new("off"))));
+        assert!(!integration_disabled(None));
+        assert!(!integration_disabled(Some(OsStr::new("mux-panes"))));
+        assert!(!integration_disabled(Some(OsStr::new(""))));
+        assert!(!integration_disabled(Some(OsStr::new("on"))));
+    }
+
+    #[test]
+    fn shell_integration_rc_embeds_snippet_and_sources_user_rc() {
+        // zsh: restore ZDOTDIR first, source the user's .zshrc, snippet LAST.
+        let zshrc = zsh_zshrc();
+        assert!(zshrc.starts_with("ZDOTDIR=\"${USER_ZDOTDIR:-$HOME}\""));
+        assert!(zshrc.contains("$ZDOTDIR/.zshrc"));
+        assert!(zshrc.contains("_FNO_OSC133"));
+        assert!(zshrc.trim_end().ends_with(ZSH_SHELL_INIT.trim_end()));
+        // .zshenv must NOT restore ZDOTDIR (keeps zsh reading our .zshrc next).
+        assert!(!ZSH_ZSHENV.contains("ZDOTDIR="));
+        assert!(ZSH_ZSHENV.contains(".zshenv"));
+        // bash: source the user's ~/.bashrc then the snippet.
+        let bashrc = bash_rcfile_body();
+        assert!(bashrc.contains("$HOME/.bashrc"));
+        assert!(bashrc.contains("_FNO_OSC133"));
     }
 
     #[tokio::test]

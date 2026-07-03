@@ -173,6 +173,12 @@ FIELD_META: dict[str, Meta] = {
     "config.active_backlog.mission": Meta(
         "never", "Scope the drain daemon to a single mission's nodes."
     ),
+    # --- config.mux.* ---
+    "config.mux.shell_integration": Meta(
+        "advanced",
+        "Auto-inject OSC 133 block markers into mux-spawned shells: "
+        "mux-panes (default) | off. Never edits your global shell rc.",
+    ),
     # --- config.parallel.* ---
     "config.parallel.max_lanes": Meta(
         "advanced",

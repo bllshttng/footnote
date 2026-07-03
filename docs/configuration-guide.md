@@ -112,3 +112,4 @@
 | `config.model_routing.providers` | dict[str, ModelProvider] | `{}` | never | Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file}); 'zai' is built in. |
 | `config.model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7'). |
 | `config.model_routing.extra_env` | dict[str, str] | `{}` | never | Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides). |
+| `config.mux.shell_integration` | str | `mux-panes` | advanced | Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc. |

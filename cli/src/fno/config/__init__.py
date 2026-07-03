@@ -1792,6 +1792,47 @@ class BranchBlock(BaseModel):
         return v
 
 
+class MuxBlock(BaseModel):
+    """fno mux (terminal multiplexer) settings (nested under 'config.mux').
+
+    ``shell_integration`` controls whether the mux auto-injects the
+    OSC 133 block-marker snippet into the shells it spawns, so command-block
+    capture works with zero user config and WITHOUT touching the user's global
+    shell rc. The injection happens ONLY in mux-spawned pane shells (temp
+    ``ZDOTDIR`` / ``--rcfile``), never in ``~/.zshrc`` / ``~/.bashrc``.
+
+    Consumed by the Rust mux via the ``FNO_MUX_SHELL_INTEGRATION`` env; the
+    settings loader is Python-only, so the spawn front-half translates this key
+    to that env. Absent env reads as ``mux-panes`` (the Rust default is on).
+
+    Fields
+    ------
+    shell_integration:
+        ``mux-panes`` (default): inject into mux-spawned pane shells only.
+        ``off``: never inject (the manual ``fno mux shell-init`` eval still
+        works). Any other value coerces to ``mux-panes`` - only ``off`` is off,
+        matching the Rust ``integration_disabled`` semantics.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    shell_integration: str = "mux-panes"
+
+    @field_validator("shell_integration", mode="before")
+    @classmethod
+    def _coerce_shell_integration(cls, v: object) -> object:
+        """Only ``off`` disables; anything else is ``mux-panes``.
+
+        YAML 1.1 (PyYAML's default) parses an unquoted ``off``/``no``/``false``
+        as boolean ``False``, so ``shell_integration: off`` reaches here as
+        ``False``, not ``"off"`` - treat that as off too, else the user's
+        disable is silently ignored.
+        """
+        if v is False:
+            return "off"
+        return "off" if isinstance(v, str) and v.strip() == "off" else "mux-panes"
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -1823,6 +1864,7 @@ class ConfigBlock(BaseModel):
     collision: CollisionBlock = Field(default_factory=CollisionBlock)
     work: WorkBlock = Field(default_factory=WorkBlock)
     model_routing: ModelRoutingBlock = Field(default_factory=ModelRoutingBlock)
+    mux: MuxBlock = Field(default_factory=MuxBlock)
 
     @field_validator("model_routing", mode="before")
     @classmethod
@@ -1834,6 +1876,20 @@ class ConfigBlock(BaseModel):
         settings load. A dict passes through so the inner coercers still run.
         """
         if isinstance(v, (dict, ModelRoutingBlock)):
+            return v
+        return {}
+
+    @field_validator("mux", mode="before")
+    @classmethod
+    def _coerce_mux(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``mux:`` degrades to defaults.
+
+        Mirrors ``_coerce_model_routing``: ``mux: off`` (a scalar, list, or
+        null) cannot build the block; fall back to defaults rather than raising
+        out of the whole settings load (which would break every `fno` command).
+        A dict passes through so the inner ``shell_integration`` coercer runs.
+        """
+        if isinstance(v, (dict, MuxBlock)):
             return v
         return {}
 

@@ -127,7 +127,30 @@ scaffold rather than guessing:
 fno setup post-merge
 ```
 
-## Step 5: Confirm
+## Step 4b: Offer global shell integration (OPTIONAL, consent-gated)
+
+The mux (`fno mux`) auto-injects OSC 133 command-block markers into the shells
+IT spawns (`config.mux.shell_integration: mux-panes`, on by default), so blocks
+"just work" in mux panes with zero config and WITHOUT touching the user's rc.
+
+Blocks in the user's OTHER terminals (iTerm, Terminal.app, a non-mux tab) need
+the markers too. Offer to add ONE eval line to their shell rc - never silently,
+always reversible:
+
+```bash
+# Detect their shell, then OFFER (ask [y/N], default no):
+#   "Add OSC 133 block markers to your global <zsh|bash> rc so blocks work in
+#    every terminal, not just mux panes? This appends one commented line to
+#    ~/.zshrc (or ~/.bashrc). [y/N]"
+# On y ONLY, append (idempotent - skip if _FNO_OSC133 already present):
+grep -q _FNO_OSC133 ~/.zshrc 2>/dev/null || {
+  printf '\n# fno OSC 133 block markers (remove this line + the next to undo)\n' >> ~/.zshrc
+  echo 'eval "$(fno mux shell-init zsh)"' >> ~/.zshrc
+}
+```
+
+Never edit the global rc without an explicit yes. `off` in `config.mux.shell_integration`
+disables the mux-pane injection too; the manual `fno mux shell-init` eval always works.
 
 Show the resulting config and validate:
 
