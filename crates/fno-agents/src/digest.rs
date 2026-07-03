@@ -378,12 +378,12 @@ fn parse_args(rest: &[String]) -> Result<DigestArgs, String> {
             "--since" => since = it.next().ok_or("--since needs a value")?,
             "--json" | "-J" => json = true,
             // Hidden test hooks: point the fold at fixture files.
-            "--events" => events_override.push(PathBuf::from(
-                it.next().ok_or("--events needs a path")?,
-            )),
-            "--ledger" => ledger_override = Some(PathBuf::from(
-                it.next().ok_or("--ledger needs a path")?,
-            )),
+            "--events" => {
+                events_override.push(PathBuf::from(it.next().ok_or("--events needs a path")?))
+            }
+            "--ledger" => {
+                ledger_override = Some(PathBuf::from(it.next().ok_or("--ledger needs a path")?))
+            }
             other => return Err(format!("unknown digest flag: {other}")),
         }
     }
@@ -466,7 +466,15 @@ mod tests {
     use super::*;
 
     // A loop_check line in the Python (Branch A) envelope.
-    fn loop_check(ts: &str, session: &str, head: &str, pr: &str, ci: &str, reviewed: bool, decision: &str) -> String {
+    fn loop_check(
+        ts: &str,
+        session: &str,
+        head: &str,
+        pr: &str,
+        ci: &str,
+        reviewed: bool,
+        decision: &str,
+    ) -> String {
         format!(
             r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{session}","fingerprint":"{head}|{pr}|{ci}|none","pr_state":"{pr}","ci":"{ci}","reviewed":{reviewed},"decision":"{decision}","intent":"promise"}}}}"#
         )
@@ -477,9 +485,33 @@ mod tests {
         // Agent committed twice (base -> c1 -> c2 = 2 transitions), opened PR#42,
         // blocked once then resolved.
         let events = [
-            loop_check("2026-07-03T01:00:00Z", "sess-A", "base", "none", "PENDING", false, "block"),
-            loop_check("2026-07-03T02:00:00Z", "sess-A", "c1", "OPEN", "PENDING", false, "block"),
-            loop_check("2026-07-03T03:00:00Z", "sess-A", "c2", "OPEN", "SUCCESS", true, "allow"),
+            loop_check(
+                "2026-07-03T01:00:00Z",
+                "sess-A",
+                "base",
+                "none",
+                "PENDING",
+                false,
+                "block",
+            ),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "sess-A",
+                "c1",
+                "OPEN",
+                "PENDING",
+                false,
+                "block",
+            ),
+            loop_check(
+                "2026-07-03T03:00:00Z",
+                "sess-A",
+                "c2",
+                "OPEN",
+                "SUCCESS",
+                true,
+                "allow",
+            ),
         ]
         .join("\n");
         let ledger = r#"{"entries":[{"session_id":"sess-A","cost_usd":1.5,"pr_number":42,"pr_url":"https://x/pull/42","completed":"2026-07-03T03:00:00Z"}]}"#;
@@ -493,14 +525,29 @@ mod tests {
         assert!(d.reviewed);
         assert_eq!(d.skipped_lines, 0);
         // The rendered lines carry the PR and the block.
-        assert!(d.lines.iter().any(|l| l.contains("#42")), "lines name the PR: {:?}", d.lines);
-        assert!(d.lines.iter().any(|l| l.contains("block")), "lines name the block");
+        assert!(
+            d.lines.iter().any(|l| l.contains("#42")),
+            "lines name the PR: {:?}",
+            d.lines
+        );
+        assert!(
+            d.lines.iter().any(|l| l.contains("block")),
+            "lines name the block"
+        );
     }
 
     #[test]
     fn corrupt_line_is_skipped_and_counted() {
         let events = [
-            loop_check("2026-07-03T02:00:00Z", "sess-A", "c1", "OPEN", "SUCCESS", true, "allow"),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "sess-A",
+                "c1",
+                "OPEN",
+                "SUCCESS",
+                true,
+                "allow",
+            ),
             "{ this is not valid json".to_string(),
             "".to_string(),
         ]
@@ -512,7 +559,15 @@ mod tests {
 
     #[test]
     fn since_in_future_is_empty() {
-        let events = loop_check("2026-07-03T02:00:00Z", "sess-A", "c1", "OPEN", "SUCCESS", true, "allow");
+        let events = loop_check(
+            "2026-07-03T02:00:00Z",
+            "sess-A",
+            "c1",
+            "OPEN",
+            "SUCCESS",
+            true,
+            "allow",
+        );
         let d = fold(&events, "", "sess-A", "2099-01-01T00:00:00Z");
         assert_eq!(d.commits, 0);
         assert_eq!(d.blocked_episodes, 0);
@@ -525,12 +580,32 @@ mod tests {
     #[test]
     fn other_session_ignored() {
         let events = [
-            loop_check("2026-07-03T02:00:00Z", "sess-A", "c1", "OPEN", "SUCCESS", true, "allow"),
-            loop_check("2026-07-03T02:00:00Z", "sess-B", "z9", "MERGED", "SUCCESS", true, "allow"),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "sess-A",
+                "c1",
+                "OPEN",
+                "SUCCESS",
+                true,
+                "allow",
+            ),
+            loop_check(
+                "2026-07-03T02:00:00Z",
+                "sess-B",
+                "z9",
+                "MERGED",
+                "SUCCESS",
+                true,
+                "allow",
+            ),
         ]
         .join("\n");
         let d = fold(&events, "", "sess-A", "");
-        assert_eq!(d.pr_state.as_deref(), Some("OPEN"), "sess-B's MERGED must not leak in");
+        assert_eq!(
+            d.pr_state.as_deref(),
+            Some("OPEN"),
+            "sess-B's MERGED must not leak in"
+        );
     }
 
     #[test]
@@ -547,7 +622,10 @@ mod tests {
     fn ledger_cost_respects_since() {
         let ledger = r#"[{"session_id":"sess-A","cost_usd":9.0,"timestamp":"2026-07-01T00:00:00Z"},{"session_id":"sess-A","cost_usd":1.0,"timestamp":"2026-07-03T00:00:00Z"}]"#;
         let l = resolve_from_ledger(ledger, "sess-A", "2026-07-02T00:00:00Z");
-        assert_eq!(l.cost_usd, 1.0, "the pre-since entry is excluded from the delta");
+        assert_eq!(
+            l.cost_usd, 1.0,
+            "the pre-since entry is excluded from the delta"
+        );
     }
 
     #[test]
@@ -556,17 +634,35 @@ mod tests {
         // The ledger row maps the node -> its fno session id, which then finds
         // the loop_check events.
         let ledger = r#"[{"graph_node_id":"x-4e2d","worktree":"/w/footnote/x-4e2d","session_id":"20260703T-abc","cost_usd":2.0,"pr_number":99,"pr_url":"https://x/pull/99","completed":"2026-07-03T03:00:00Z"}]"#;
-        let events = loop_check("2026-07-03T02:00:00Z", "20260703T-abc", "c1", "OPEN", "SUCCESS", true, "block");
+        let events = loop_check(
+            "2026-07-03T02:00:00Z",
+            "20260703T-abc",
+            "c1",
+            "OPEN",
+            "SUCCESS",
+            true,
+            "block",
+        );
         let d = fold(&events, ledger, "x-4e2d", "");
-        assert_eq!(d.pr_number, Some(99), "PR resolved from the ledger by node id");
+        assert_eq!(
+            d.pr_number,
+            Some(99),
+            "PR resolved from the ledger by node id"
+        );
         assert_eq!(d.cost_usd, 2.0);
-        assert_eq!(d.pr_state.as_deref(), Some("OPEN"), "events found via the resolved session id");
+        assert_eq!(
+            d.pr_state.as_deref(),
+            Some("OPEN"),
+            "events found via the resolved session id"
+        );
         assert_eq!(d.blocked_episodes, 1);
     }
 
     #[test]
     fn worktree_basename_selector_matches() {
-        let entry: Value = serde_json::from_str(r#"{"worktree":"/Users/x/conductor/workspaces/footnote/x-4e2d"}"#).unwrap();
+        let entry: Value =
+            serde_json::from_str(r#"{"worktree":"/Users/x/conductor/workspaces/footnote/x-4e2d"}"#)
+                .unwrap();
         assert!(ledger_entry_matches(&entry, "x-4e2d"));
         assert!(!ledger_entry_matches(&entry, "footnote"));
     }

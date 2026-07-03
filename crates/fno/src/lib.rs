@@ -6,6 +6,7 @@ pub mod agents_view;
 pub mod bootstrap;
 pub mod client;
 pub mod clipboard;
+pub mod digest_overlay;
 pub mod keys;
 pub mod mouse;
 pub mod mux_cli;
