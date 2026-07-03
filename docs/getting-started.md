@@ -31,6 +31,8 @@ Then open the Ubuntu shell and do everything from there: install `gh`, Python 3.
 fno --version          # prints a version
 ```
 
+If `fno` is "command not found", you have the Python CLI (`fno-py`) but not the Rust **`fno` front door** yet. `fno` (the mux + terminal front door) owns the `fno` command and bootstraps the Python CLI. Install it with `cargo install fno`, or from a clone `fno update --rust` - both build the Rust binary, so they need a **Rust toolchain** (`rustup`); a Python-only machine (installed via `uv`/`pip`) has to add Rust first. A Claude Code session also reminds you when the front door is missing. Until it's installed, reach the CLI directly as `fno-py`.
+
 Inside Claude Code, type `/fno:` and you should see skill autocomplete (`target`, `think`, `blueprint`, ...).
 
 ```bash
@@ -153,7 +155,17 @@ Each agent runs its own loop; Claude, Codex, and Gemini, one project.
 
 `megawalk` reads a dependency graph (`fno backlog ...` manages it) and picks what ships next. Optional; `/fno:target "feature"` runs end to end with no backlog required.
 
-## Next steps
+## Keeping fno up to date
+
+From a clone, the full refresh is three steps - `fno update` refreshes the binaries, but the long-running mux server and agents daemon keep the old code until restarted:
+
+```bash
+git pull
+fno update          # reinstall the Python CLI + cargo binaries (fno mux + fno-agents) from source
+fno restart --mux   # restart the daemon AND the mux server onto the fresh binaries
+```
+
+`fno restart` on its own restarts only the agents daemon (PTY workers survive). The `--mux` flag also restarts the mux server, which is **destructive** - it ends live mux sessions - so it is opt-in; reattach afterward. `fno doctor` flags a running mux server that predates the installed binary and reminds you to run it. In a running Claude Code session, bump the plugin (or relaunch) to pick up new skills/hooks after a pull.
 
 - [Target pipeline](guides/target.md) - the full autonomous loop: flags, gates, cross-project, resume
 - [Think and plan](guides/think-and-plan.md) - design exploration and planning

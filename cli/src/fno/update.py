@@ -15,6 +15,7 @@ replaced while it runs" race.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import shlex
 import shutil
@@ -314,6 +315,70 @@ def _cargo_installed_mux() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
+def _mux_dir() -> Path:
+    """The mux socket dir, matching the Rust `proto::mux_dir()`: `$FNO_MUX_DIR`
+    when set (tests point it at a tempdir), else `~/.fno/mux`."""
+    override = os.environ.get("FNO_MUX_DIR")
+    return Path(override) if override else Path.home() / ".fno" / "mux"
+
+
+def _live_mux_sessions(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+) -> list[str]:
+    """Live mux session names from `fno mux ls --json` (entries with
+    `state == "live"`). Bounded + best-effort: no mux binary, a non-zero exit, a
+    timeout, or unparseable JSON all yield `[]` (advisory reads never cry wolf)."""
+    fno = _cargo_installed_mux() or shutil.which("fno")
+    if not fno:
+        return []
+    try:
+        proc = runner(
+            [str(fno), "mux", "ls", "--json"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except (ValueError, TypeError):
+        return []
+    return [
+        r["session"]
+        for r in rows
+        if isinstance(r, dict) and r.get("state") == "live" and r.get("session")
+    ]
+
+
+def stale_mux_servers() -> list[str]:
+    """Live mux sessions whose SERVER predates the installed mux binary - i.e. a
+    long-running server still speaking the old proto after an upgrade (the fix is
+    `fno restart --mux`). Proto-agnostic: the socket file is created when the
+    server binds at startup, and the cargo binary's mtime bumps on every
+    (re)install, so `socket mtime < binary mtime` means the server is older than
+    the binary. Best-effort and advisory: any missing binary / unreadable socket
+    yields `[]`, never a false alarm. `fno doctor` renders this; `fno update`
+    nudges on it after a mux refresh."""
+    mux = _cargo_installed_mux()
+    if mux is None:
+        return []
+    try:
+        bin_mtime = mux.stat().st_mtime
+    except OSError:
+        return []
+    stale: list[str] = []
+    mux_dir = _mux_dir()
+    for sess in _live_mux_sessions():
+        sock = mux_dir / f"{sess}.sock"
+        try:
+            if sock.stat().st_mtime < bin_mtime:
+                stale.append(sess)
+        except OSError:
+            continue
+    return stale
+
+
 def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) -> None:
     """Best-effort: install the crates/fno mux binary (`fno` on PATH - the front
     door) alongside the fno-agents bins, into the same --root.
@@ -487,6 +552,16 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             )
     except (OSError, subprocess.SubprocessError):
         pass
+
+    # Best-effort mux advisory: a long-running mux server keeps speaking the OLD
+    # proto after this refresh (the mux deliberately survives a reinstall), which
+    # silently blocks agent dispatch until restarted. Nothing else nudges for it.
+    for sess in stale_mux_servers():
+        typer.echo(
+            f"fno update: note: mux server '{sess}' is running the OLD binary;"
+            " run 'fno restart --mux' to cut it over (ends live sessions)",
+            err=True,
+        )
 
     return outcome
 
