@@ -149,7 +149,7 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         }
     }
 
-    let addr = format!("{}:{}", args.bind, args.port);
+    let addr = bind_addr(&args.bind, args.port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -355,6 +355,16 @@ fn bridge_status(state: &str) -> String {
     format!("{{\"_bridge\":{{\"state\":\"{state}\"}}}}")
 }
 
+/// `host:port`, bracketing an IPv6 literal so `[::1]:8722` parses - a bare
+/// `::1:8722` does not (the colons are ambiguous).
+fn bind_addr(bind: &str, port: u16) -> String {
+    if bind.contains(':') {
+        format!("[{bind}]:{port}")
+    } else {
+        format!("{bind}:{port}")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HTTP + WebSocket
 // ---------------------------------------------------------------------------
@@ -437,10 +447,10 @@ async fn ws_conn(mut socket: WebSocket, st: AppState) {
                 Err(broadcast::error::RecvError::Closed) => return,
             },
             r = socket.recv() => match r {
-                // Read-only: every inbound browser message is dropped. We watch
-                // recv() only to notice a close.
+                // Read-only: drop every inbound browser message. A Close frame,
+                // an error, or EOF ends the connection.
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
                 Some(Ok(_)) => {}
-                Some(Err(_)) | None => return,
             },
         }
     }
@@ -502,6 +512,14 @@ mod tests {
         let s = bridge_status("disconnected");
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["_bridge"]["state"], "disconnected");
+    }
+
+    #[test]
+    fn bind_addr_brackets_ipv6_only() {
+        assert_eq!(bind_addr("127.0.0.1", 8722), "127.0.0.1:8722");
+        assert_eq!(bind_addr("0.0.0.0", 80), "0.0.0.0:80");
+        assert_eq!(bind_addr("::1", 8722), "[::1]:8722");
+        assert_eq!(bind_addr("::", 8722), "[::]:8722");
     }
 
     #[test]
