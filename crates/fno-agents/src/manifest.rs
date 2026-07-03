@@ -24,7 +24,7 @@
 //! ponytail: a rule's regexes recompile on each `evaluate` (regions are tiny,
 //! evaluate runs at human-perception cadence on readiness polls); cache compiled
 //! `Regex`es per rule if a profiler ever flags it. The `prompt_box_body` region
-//! and `skip_state_update`/priority semantics are tuned against herdr's design,
+//! and `skip_state_update`/priority semantics are tuned against the reference design,
 //! not yet against a live claude TUI (E6.3's job).
 
 use crate::readiness::ScreenView;
@@ -33,7 +33,7 @@ use std::path::Path;
 
 /// Max nesting depth for a [`Gate`] tree. A pathological manifest (deeply nested
 /// `all`/`any`/`not`) is refused while building the [`Gate`] so `evaluate`'s
-/// recursion is bounded. 16 is far past any real rule (herdr's deepest is ~3).
+/// recursion is bounded. 16 is far past any real rule (the reference's deepest is ~3).
 ///
 /// Note: this caps OUR tree-walk, not `toml::from_str`, which builds the nested
 /// `toml::Value` first. For locally-authored (trusted) manifests that is fine;
@@ -498,6 +498,25 @@ pub fn bundled_manifest(agent: &str) -> Option<&'static str> {
         // x-8f7f: agy (hosted, US1) + opencode (staged/inert until x-51f6, US2).
         "agy" => Some(include_str!("manifests/agy.toml")),
         "opencode" => Some(include_str!("manifests/opencode.toml")),
+        // x-83e7: full-roster roster. All staged/inert - none has a provider
+        // host yet (no build_pane_argv arm), so each is bundled-but-dormant like
+        // opencode. Adapted from the reference manifests per manifests/ADAPTING.md.
+        // "copilot" resolves github-copilot.toml, mirroring the reference's own mapping.
+        // antigravity is intentionally absent: the reference antigravity manifest is the
+        // agy harness (id "agy"), already covered by agy.toml above.
+        "amp" => Some(include_str!("manifests/amp.toml")),
+        "cline" => Some(include_str!("manifests/cline.toml")),
+        "cursor" => Some(include_str!("manifests/cursor.toml")),
+        "devin" => Some(include_str!("manifests/devin.toml")),
+        "droid" => Some(include_str!("manifests/droid.toml")),
+        "copilot" => Some(include_str!("manifests/github-copilot.toml")),
+        "grok" => Some(include_str!("manifests/grok.toml")),
+        "hermes" => Some(include_str!("manifests/hermes.toml")),
+        "kilo" => Some(include_str!("manifests/kilo.toml")),
+        "kimi" => Some(include_str!("manifests/kimi.toml")),
+        "kiro" => Some(include_str!("manifests/kiro.toml")),
+        "pi" => Some(include_str!("manifests/pi.toml")),
+        "qodercli" => Some(include_str!("manifests/qodercli.toml")),
         _ => None,
     }
 }
@@ -1052,19 +1071,29 @@ mod tests {
 
     #[test]
     fn bundled_manifests_all_parse() {
-        // x-8f7f added agy + opencode to the bundled set; both must parse and
-        // carry rules (the parse-coverage guard the domain pitfall calls for -
-        // a herdr-only key left in the TOML fails loud here).
-        for agent in ["claude", "codex", "gemini", "agy", "opencode"] {
-            let m = bundled(agent);
+        // Every bundled agent must parse, carry rules, and evaluate against a
+        // synthetic view without panicking (x-83e7 AC-happy). This is the
+        // parse-coverage guard the domain pitfall calls for: a leftover reference-
+        // only key (unknown region/field/root key) fails loud here, NAMING the
+        // file (x-83e7 AC-error) rather than silently shipping a dead manifest.
+        // x-8f7f added agy + opencode; x-83e7 grew the roster to full-roster parity.
+        let synthetic = view("some scrollback\nesc to interrupt\n\u{276f} ");
+        for agent in [
+            "claude", "codex", "gemini", "agy", "opencode", // pre-x-83e7
+            "amp", "cline", "cursor", "devin", "droid", "copilot", "grok", "hermes", "kilo",
+            "kimi", "kiro", "pi", "qodercli", // x-83e7
+        ] {
+            let src = bundled_manifest(agent).unwrap_or_else(|| panic!("{agent} is bundled"));
+            let m = Manifest::parse(src)
+                .unwrap_or_else(|e| panic!("{agent}.toml failed to parse: {e:?}"));
             assert!(!m.rules().is_empty(), "{agent}.toml has rules");
+            // Must not panic (regexes compiled at parse; this exercises evaluate).
+            let _ = m.evaluate(&synthetic);
         }
         // A genuinely-unhosted harness still resolves to None (the fail-loud
-        // guard): hermes is adapters-layer only, no bundled manifest.
-        assert!(
-            bundled_manifest("hermes").is_none(),
-            "unknown agent -> None"
-        );
+        // guard, mirrors readiness OQ#9: no fail-open default). aider is a real
+        // coding CLI we deliberately do not bundle a manifest for.
+        assert!(bundled_manifest("aider").is_none(), "unknown agent -> None");
     }
 
     // AC-E6-4: codex/gemini ported to TOML reproduce the hardcoded
@@ -1192,9 +1221,10 @@ mod tests {
             .expect("known agent")
             .expect("parses");
         assert!(!m.rules().is_empty());
-        // Unknown agent, no override -> None (caller fails loud). opencode is now
-        // bundled (x-8f7f), so use hermes (adapters-layer only, no manifest).
-        assert!(load_manifest("hermes", None).is_none());
+        // Unknown agent, no override -> None (caller fails loud). hermes is now
+        // bundled (x-83e7 full-roster parity), so use aider (a real coding CLI we
+        // deliberately do not bundle a manifest for).
+        assert!(load_manifest("aider", None).is_none());
 
         // A readable <agent>.toml override wins over the bundled copy.
         let dir = tempfile::tempdir().unwrap();
@@ -1254,11 +1284,11 @@ mod tests {
         );
     }
 
-    // AC2-HP + AC2-EDGE (x-8f7f): opencode's herdr manifest, translated per
-    // ADAPTING.md, matches the same screens herdr's rules match - including the
+    // AC2-HP + AC2-EDGE (x-8f7f): opencode's reference manifest, translated per
+    // ADAPTING.md, matches the same screens the reference's rules match - including the
     // multi-key AND permission rule whose nesting is preserved under one gate.
     #[test]
-    fn x8f7f_opencode_manifest_matches_herdr_screens() {
+    fn x8f7f_opencode_manifest_matches_reference_screens() {
         let m = bundled("opencode");
         // Simple blocked marker.
         assert_eq!(
@@ -1293,10 +1323,10 @@ mod tests {
         assert!(m.evaluate(&view("here is your answer")).is_none());
     }
 
-    // AC2-ERR (x-8f7f): an adaptation that leaves a herdr-only key in the TOML
+    // AC2-ERR (x-8f7f): an adaptation that leaves a unknown source key in the TOML
     // fails loud at parse (our fail-closed parser) - the bad port never ships.
     #[test]
-    fn x8f7f_herdr_only_key_fails_loud() {
+    fn x8f7f_unknown_source_key_fails_loud() {
         let bad = "[[rule]]\nid = \"p\"\nstate = \"blocked\"\npriority = 1\n\
                    region = \"whole_recent\"\nvisible_blocker = true\n\
                    gate = { contains = \"x\" }\n";

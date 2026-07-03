@@ -1,0 +1,62 @@
+# kiro readiness manifest (x-83e7) - full-roster parity port from
+# the reference manifest for kiro per ADAPTING.md.
+#
+# UNVALIDATED + INERT: kiro has no fno provider host (no build_pane_argv arm /
+# provider impl), so scrape_targets never selects it and this manifest is
+# bundled-but-dormant (like opencode). Markers are reference-derived, NOT pinned
+# against a live kiro TUI. Our engine is case-sensitive and the reference engine is not, so
+# these lowercase needles under-fire until smoke-pinned - the conservative
+# never-false-ready direction (readiness OQ#9). State vocab + arbitration: see
+# codex.toml.
+#
+# Priority (highest wins): 300 tool_approval > 290 subagent_approval (blocked)
+# > 100 working_marker > 90 tool_spinner (working).
+
+min_engine_version = 1
+
+[[rule]]
+id = "tool_approval"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+gate = { all = [
+  { contains = "requires approval" },
+  { any = [
+    { contains = "yes, single permission" },
+    { contains = "trust, always allow" },
+    { contains = "no (tab to edit)" },
+    { contains = "esc to close" },
+  ] },
+] }
+
+[[rule]]
+id = "subagent_approval"
+state = "blocked"
+priority = 290
+region = "whole_recent"
+gate = { all = [
+  { contains = "pending from subagents" },
+  { any = [ { contains = "tool approval" }, { contains = "tool approvals" } ] },
+  { any = [
+    { contains = "approve all pending" },
+    { contains = "configure individually" },
+    { contains = "exit (cancel subagents)" },
+  ] },
+] }
+
+[[rule]]
+id = "kiro_working_marker"
+state = "working"
+priority = 100
+region = "whole_recent"
+gate = { contains = "kiro is working" }
+
+[[rule]]
+id = "tool_spinner_working"
+state = "working"
+priority = 90
+region = "whole_recent"
+gate = { all = [
+  { contains = "esc to cancel" },
+  { line_regex = '^\s*(◔|◑|◕|●)\s+\p{Alphabetic}' },
+] }

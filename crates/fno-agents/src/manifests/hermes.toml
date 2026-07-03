@@ -1,0 +1,45 @@
+# hermes readiness manifest (x-83e7) - full-roster parity port from
+# the reference manifest for hermes per ADAPTING.md.
+#
+# UNVALIDATED + INERT: hermes has no fno provider host (no build_pane_argv arm /
+# provider impl), so scrape_targets never selects it and this manifest is
+# bundled-but-dormant (like opencode). Markers are reference-derived, NOT pinned
+# against a live hermes TUI. Our engine is case-sensitive and the reference engine is not, so
+# these lowercase needles under-fire until smoke-pinned - the conservative
+# never-false-ready direction (readiness OQ#9). State vocab + arbitration: see
+# codex.toml.
+#
+# Priority (highest wins): 300 dangerous_command (blocked) > 100 interrupt (working).
+
+min_engine_version = 1
+
+[[rule]]
+id = "dangerous_command_approval"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+gate = { all = [
+  { any = [
+    { contains = "dangerous command" },
+    { all = [
+      { contains = "allow once" },
+      { contains = "allow for this session" },
+      { contains = "deny" },
+    ] },
+  ] },
+  { any = [
+    { contains = "enter to confirm" },
+    { contains = "↑/↓ to select" },
+    { contains = "show full command" },
+  ] },
+] }
+
+[[rule]]
+id = "interrupt_status_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+gate = { any = [
+  { contains = "msg=interrupt" },
+  { contains = "ctrl+c cancel" },
+] }

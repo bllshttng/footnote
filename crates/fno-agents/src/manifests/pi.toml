@@ -1,0 +1,21 @@
+# pi readiness manifest (x-83e7) - full-roster parity port from
+# the reference manifest for pi per ADAPTING.md. the reference set ships a
+# single working marker for pi; no blocked/idle rules known yet.
+#
+# UNVALIDATED + INERT: pi has no fno provider host (no build_pane_argv arm /
+# provider impl), so scrape_targets never selects it and this manifest is
+# bundled-but-dormant (like opencode). The "Working..." marker is capitalized in
+# the reference's source (the reference engine lowercases at match; our engine is case-sensitive, so the
+# case here IS load-bearing - kept verbatim as it reads on screen). NOT pinned
+# against a live pi TUI. State vocab + arbitration: see codex.toml.
+#
+# Priority: 100 working_literal (working).
+
+min_engine_version = 1
+
+[[rule]]
+id = "working_literal"
+state = "working"
+priority = 100
+region = "whole_recent"
+gate = { contains = "Working..." }

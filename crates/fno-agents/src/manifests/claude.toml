@@ -1,4 +1,4 @@
-# Claude readiness manifest (E6.3) - new, mirroring herdr's claude detection
+# Claude readiness manifest (E6.3) - new, mirroring the reference claude detection
 # rules. Claude's TUI is richer than codex/gemini's single composer line, so its
 # rules use more of the engine: the OSC title (authoritative, survives
 # scrollback/wrap/resize), the box-drawn composer body, and skip_state_update
@@ -21,7 +21,7 @@
 #    250 osc_title_idle       - "✳ " idle title, last-resort idle signal
 #
 # Both blocking prompts (live_blocked_form, permission_prompt) outrank the idle
-# composer box on purpose. herdr orders permission BELOW the box; we diverge
+# composer box on purpose. the reference engine orders permission BELOW the box; we diverge
 # because prompt_box_body is unpinned and could match a composer box still drawn
 # beneath a permission prompt - and badging `idle` while a prompt is up is a
 # false-ready, the one direction readiness.rs Open Question #9 forbids. A blocked
@@ -34,12 +34,12 @@
 #
 # ponytail: the braille spinner (U+2800-28FF) and "✳ " idle title are grounded
 # in osc.rs; the transcript-pager / permission / select-menu MARKER STRINGS and
-# the bottom_non_empty_lines(N) window sizes are from herdr's design and are NOT
+# the bottom_non_empty_lines(N) window sizes are from the reference design and are NOT
 # yet pinned against a live claude TUI (no live pane until E2 lands - same
 # constraint readiness.rs documents in its SMOKE-PINNING NOTE). Pin them via
 # cli/scripts/smoke/capture-readiness-grid.sh when E2 lands. Conservative bias
 # holds: a wrong marker is a brief false/late badge, never input sent into the
-# wrong state. herdr splits bash-vs-generic permission prompts; folded into one
+# wrong state. the reference engine splits bash-vs-generic permission prompts; folded into one
 # `permission_prompt` here until the bash-specific marker is pinned (carveout).
 
 # OSC title carries a braille spinner (U+2800-28FF) while claude is working.
@@ -94,7 +94,7 @@ gate = { all = [
 # to the live bottom region so a "yes" or the question in scrollback cannot fake
 # it (AC-E6-5). Priority 960 (above live_prompt_box 950) so a permission prompt
 # beats an idle composer box drawn beneath it - never false-ready into the box.
-# herdr's bash-vs-generic split folded into one (header carveout).
+# the reference's bash-vs-generic split folded into one (header carveout).
 [[rule]]
 id = "permission_prompt"
 state = "blocked"

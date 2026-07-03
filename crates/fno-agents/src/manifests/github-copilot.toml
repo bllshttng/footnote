@@ -1,0 +1,44 @@
+# github-copilot readiness manifest (x-83e7) - full-roster parity port from
+# the reference manifest for github-copilot (the reference id
+# "copilot") per ADAPTING.md. Resolved under the agent key "copilot" (see the
+# bundled_manifest arm), mirroring the reference's own agent->file mapping.
+#
+# UNVALIDATED + INERT: copilot has no fno provider host (no build_pane_argv arm /
+# provider impl), so scrape_targets never selects it and this manifest is
+# bundled-but-dormant (like opencode). Markers are reference-derived, NOT pinned
+# against a live copilot TUI. Our engine is case-sensitive and the reference engine is not, so
+# these lowercase needles under-fire until smoke-pinned - the conservative
+# never-false-ready direction (readiness OQ#9). State vocab + arbitration: see
+# codex.toml.
+#
+# Priority (highest wins): 300 selection_blocker (blocked) > 100 cancel (working).
+# The selection menu (esc cancel + enter select/confirm/submit/accept) outranks
+# the bare cancel-hint so a live menu never reads as plain working.
+
+min_engine_version = 1
+
+[[rule]]
+id = "selection_blocker"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+gate = { all = [
+  { any = [ { contains = "esc to cancel" }, { contains = "esc cancel" } ] },
+  { any = [
+    { contains = "enter to select" },
+    { contains = "enter to confirm" },
+    { contains = "enter to submit" },
+    { contains = "enter accept" },
+  ] },
+] }
+
+[[rule]]
+id = "working_cancel_hint"
+state = "working"
+priority = 100
+region = "whole_recent"
+gate = { any = [
+  { contains = "esc to cancel" },
+  { contains = "esc cancel" },
+  { contains = "esc again to cancel" },
+] }
