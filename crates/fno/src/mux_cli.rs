@@ -68,11 +68,14 @@ enum Probe {
 }
 
 fn probe(sock: &Path) -> Probe {
-    let stream = match std::os::unix::net::UnixStream::connect(sock) {
+    let stream = match proto::connect_unix_timeout(sock, PROBE_TIMEOUT) {
         Ok(s) => s,
-        // Only a refused connection proves nothing listens; every other
-        // error (EMFILE, EACCES, ...) is OUR failure, not the server's.
+        // Only a refused connection proves nothing listens. A connect TIMEOUT
+        // means something holds the socket but never accepted (wedged server):
+        // alive-but-unqueryable, never stale. Every other error (EMFILE,
+        // EACCES, ...) is OUR failure, not the server's.
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return Probe::Stale,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Probe::Unqueryable,
         Err(e) => return Probe::Unprobeable(e.to_string()),
     };
     let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
@@ -648,12 +651,13 @@ pub fn kill_server(session: &str, json: bool) -> i32 {
         eprintln!("fno: no server for session {session:?}");
         return EXIT_ERROR;
     }
-    let stream = match std::os::unix::net::UnixStream::connect(&sock) {
+    let stream = match proto::connect_unix_timeout(&sock, PROBE_TIMEOUT) {
         Ok(s) => s,
         // Only a REFUSED connection (or a socket that vanished mid-race)
-        // proves the server is dead. Any other connect error is client-side
-        // (fd exhaustion, permissions) - unlinking on it would orphan a LIVE
-        // server: still running, unreachable by name, invisible to ls.
+        // proves the server is dead. Any other connect error - including a
+        // bounded-connect TIMEOUT (wedged server) - is not proof of death:
+        // unlinking on it would orphan a LIVE server: still running,
+        // unreachable by name, invisible to ls.
         Err(e)
             if matches!(
                 e.kind(),
@@ -670,6 +674,22 @@ pub fn kill_server(session: &str, json: bool) -> i32 {
                     EXIT_ERROR
                 }
             };
+        }
+        // A bounded-connect timeout means the server holds the socket but
+        // never accepts: it is wedged. kill-server needs an ACCEPTED
+        // connection to send KillServer, so it cannot recover this - and it
+        // must NOT unlink (the socket may front a live-but-stuck server).
+        // Name the real remedy instead of a bare io::Error, since every other
+        // call site's advice points the operator here.
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            eprintln!(
+                "fno: session {session:?} is wedged (connect timed out); the server holds \
+                 {} but is not accepting. kill-server cannot recover it - kill the server \
+                 process directly (its log is at {}).",
+                sock.display(),
+                sock.with_extension("log").display()
+            );
+            return EXIT_ERROR;
         }
         Err(e) => {
             eprintln!("fno: cannot connect to {}: {e}", sock.display());
@@ -770,7 +790,9 @@ enum VersionVerdict {
 /// read-only `PaneLs` verb - lists panes, mutates nothing - so doctor stays
 /// side-effect free (AC6-ERR).
 fn version_probe(sock: &Path) -> VersionVerdict {
-    let stream = match std::os::unix::net::UnixStream::connect(sock) {
+    // Bounded connect: a wedged server (never accepts) reads as Unqueryable
+    // via the generic arm below, never as Stale, and never hangs doctor.
+    let stream = match proto::connect_unix_timeout(sock, PROBE_TIMEOUT) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
             return VersionVerdict::Stale
@@ -1395,14 +1417,15 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             }
         }
     } else {
-        match std::os::unix::net::UnixStream::connect(sock) {
+        match proto::connect_unix_timeout(sock, PROBE_TIMEOUT) {
             Ok(s) => s,
             // Only a refused/absent socket proves "no server" (nothing to act
             // on): `ls` -> empty listing (exit 0), the rest -> error. Any
-            // OTHER connect error (fd exhaustion, permissions) is a real
-            // failure that must never read as a clean empty result - mirrors
-            // the sibling `ls`/`kill_server` split, which keeps a bad session
-            // from looking like zero panes.
+            // OTHER connect error (fd exhaustion, permissions, a bounded-
+            // connect timeout on a wedged server) is a real failure that must
+            // never read as a clean empty result - mirrors the sibling
+            // `ls`/`kill_server` split, which keeps a bad session from
+            // looking like zero panes.
             Err(e) => {
                 let no_server = matches!(
                     e.kind(),

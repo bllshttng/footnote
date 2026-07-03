@@ -115,3 +115,40 @@ def test_restart_no_daemon_binary_is_non_fatal(monkeypatch) -> None:
     result = runner.invoke(app, ["restart"])
     assert result.exit_code == 0
     assert "no installed fno-agents binary" in result.output
+
+
+def test_restart_mux_json_nothing_running_completes(monkeypatch) -> None:
+    """AC (x-2896): no daemon + no mux server -> `--mux --json` completes with a
+    JSON summary saying nothing was running - the 2026-07-03 hang scenario."""
+    from fno.agents import rust_runtime
+
+    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: [])
+
+    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
+    assert payload["mux_sessions"] == []
+    assert payload["mux_restarted"] == []
+    assert payload["ok"] is True
+
+
+def test_restart_mux_kill_timeout_names_the_session(monkeypatch) -> None:
+    """A kill-server that exceeds its 10s belt is reported BY NAME and fails
+    the command - never a silent hang or an anonymous failure (x-2896)."""
+    import subprocess as sp
+
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "wedged", "state": "live"}])
+
+    def _run(cmd, **kwargs):
+        if "kill-server" in cmd:
+            raise sp.TimeoutExpired(cmd, 10)
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(restart.subprocess, "run", _run)
+
+    result = runner.invoke(app, ["restart", "--mux"])
+    assert result.exit_code == 1
+    assert "gave up on mux session 'wedged'" in result.output

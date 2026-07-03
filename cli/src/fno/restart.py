@@ -30,6 +30,13 @@ def _mux_sessions() -> Optional[list[dict[str, Any]]]:
         proc = subprocess.run(
             [fno, "mux", "ls", "--json"], capture_output=True, text=True, timeout=10
         )
+    except subprocess.TimeoutExpired:
+        typer.echo(
+            "fno restart: `fno mux ls --json` gave up after 10s; skipped mux check "
+            "(a wedged server? `fno mux doctor`).",
+            err=True,
+        )
+        return None
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
@@ -138,6 +145,10 @@ def restart_command(
                             text=True,
                             timeout=10,
                         ).returncode
+                    except subprocess.TimeoutExpired:
+                        say(f"fno restart: gave up on mux session '{name}' after 10s.", err=True)
+                        failures.append(f"mux: kill {name} timed out")
+                        continue
                     except (OSError, subprocess.SubprocessError):
                         kc = 1
                     if kc == 0:

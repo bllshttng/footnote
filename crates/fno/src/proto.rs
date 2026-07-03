@@ -885,15 +885,167 @@ fn socket_in_use(e: &std::io::Error) -> bool {
     )
 }
 
+/// Connect bound for liveness probes at bind time. Generous next to a socket
+/// round-trip; a wedged predecessor times out in ~1s and reads as alive on the
+/// first attempt (the refused-connect retry loop below only re-tries a dead
+/// socket), so server startup never hangs forever on it.
+const PROBE_ALIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Connect to an AF_UNIX SOCK_STREAM path with a bounded timeout. std's
+/// `UnixStream::connect` has no connect-timeout knob, so a live-but-wedged
+/// listener (dead accept loop, full backlog) blocks it indefinitely - the
+/// `fno restart --mux` hang. Nonblocking connect + `poll` for writability,
+/// then blocking mode restored so the caller's read/write timeouts apply.
+///
+/// The `ErrorKind::TimedOut` this returns means "wedged server" and callers
+/// match on it to keep a wedged server out of the "stale/dead" bucket. That
+/// signal is only sound for the CONNECT: a post-connect read/write timeout
+/// (a server that accepted then stopped answering) is a different state and
+/// must NOT be kind-matched against `TimedOut` here - callers treat those
+/// with a bare `Err(_)` arm instead.
+pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::FromRawFd;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket path contains NUL")
+    })?;
+    // SAFETY: a standard libc socket/connect/poll sequence. The fd is closed on
+    // every error path and wrapped into a UnixStream (which owns + closes it)
+    // on success.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Close-on-exec: std's UnixStream::connect sets it, so replacing that
+        // call must too - otherwise a raw fd leaks into every child the mux
+        // spawns (PTYs, the digest shell-out). fcntl(F_SETFD) is the portable
+        // path (macOS has no SOCK_CLOEXEC socket-type flag); the tiny
+        // create->set window is acceptable here (no fork+exec races on it).
+        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = c_path.as_bytes();
+        if bytes.len() >= std::mem::size_of_val(&addr.sun_path) {
+            libc::close(fd);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "socket path too long",
+            ));
+        }
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr() as *const libc::c_char,
+            addr.sun_path.as_mut_ptr(),
+            bytes.len(),
+        );
+        let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
+        let addr_len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        let rc = libc::connect(fd, &addr as *const _ as *const libc::sockaddr, addr_len);
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            // AF_UNIX with a FULL accept backlog: Linux reports EAGAIN from a
+            // nonblocking connect (macOS reports EINPROGRESS and the poll
+            // below times out). Same wedged-server meaning - normalize to
+            // TimedOut so every caller sees one signal on both platforms.
+            if err.raw_os_error() == Some(libc::EAGAIN) {
+                libc::close(fd);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "connect timed out (accept backlog full)",
+                ));
+            }
+            // A connect interrupted by a signal (EINTR) is NOT a failure: POSIX
+            // says the connection continues asynchronously, exactly like
+            // EINPROGRESS, so poll for its completion rather than reporting the
+            // signal as a dead server (which the bind path would unlink).
+            if err.raw_os_error() != Some(libc::EINPROGRESS)
+                && err.raw_os_error() != Some(libc::EINTR)
+            {
+                libc::close(fd);
+                return Err(err);
+            }
+            // Poll against a deadline, retrying on EINTR with the remaining
+            // budget so a signal storm can neither abort the connect early nor
+            // let it outlast `timeout`.
+            let deadline = std::time::Instant::now() + timeout;
+            let writable = loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let ms = remaining.as_millis().min(i32::MAX as u128) as libc::c_int;
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let pr = libc::poll(&mut pfd, 1, ms);
+                if pr < 0 {
+                    let e = std::io::Error::last_os_error();
+                    if e.raw_os_error() == Some(libc::EINTR) {
+                        continue; // interrupted: re-poll with recomputed remaining
+                    }
+                    libc::close(fd);
+                    return Err(e);
+                }
+                break pr;
+            };
+            if writable == 0 {
+                libc::close(fd);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "connect timed out",
+                ));
+            }
+            let mut soerr: libc::c_int = 0;
+            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            if libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut soerr as *mut _ as *mut libc::c_void,
+                &mut len,
+            ) < 0
+            {
+                let e = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(e);
+            }
+            if soerr != 0 {
+                libc::close(fd);
+                return Err(std::io::Error::from_raw_os_error(soerr));
+            }
+        }
+        // Restore blocking mode for the subsequent read/write timeouts.
+        if libc::fcntl(fd, libc::F_SETFL, flags) < 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
+        Ok(UnixStream::from_raw_fd(fd))
+    }
+}
+
 /// True if something accepts connections at `path`. Retries a few times so a
 /// server that has bound but not yet reached `listen` is not declared dead.
+/// A connect TIMEOUT counts as alive: only a refused connect proves the
+/// server is dead, and unlinking a wedged-but-live server's socket would
+/// orphan it (still running, unreachable by name, invisible to ls).
 fn probe_alive(path: &Path) -> bool {
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(50));
         }
-        if UnixStream::connect(path).is_ok() {
-            return true;
+        match connect_unix_timeout(path, PROBE_ALIVE_CONNECT_TIMEOUT) {
+            Ok(_) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return true,
+            Err(_) => {}
         }
     }
     false
