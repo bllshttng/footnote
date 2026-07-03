@@ -147,12 +147,12 @@ class Fno < Formula
   def install
     system Formula["python@3.13"].opt_bin/"python3.13", "-m", "venv", libexec
     system libexec/"bin/pip", "install", "--disable-pip-version-check", Dir["*.whl"].first
-    bin.install_symlink libexec/"bin/fno"
+    bin.install_symlink libexec/"bin/fno-py"
     bin.install_symlink Dir[libexec/"bin/fno-agents*"]
   end
 
   test do
-    assert_match "fno", shell_output("#{bin}/fno --version")
+    assert_match "fno", shell_output("#{bin}/fno-py --version")
     %w[fno-agents fno-agents-daemon fno-agents-worker].each do |b|
       assert_predicate bin/b, :executable?, "#{b} missing from the keg bin"
     end
@@ -176,16 +176,18 @@ RUBY
     else miss "binary:$b" "absent (the explicit symlink must surface the wheel's shared_scripts)"; fi
   done
 
-  # --- check 6: fno --version runs (no 127) + brew test passes ---
-  if [ -x "$KEGBIN/fno" ]; then
-    run_capture "$KEGBIN/fno" --version
+  # --- check 6: fno-py --version runs (no 127) + brew test passes ---
+  # The keg bin carries `fno-py` (the Python CLI console script); the `fno` mux
+  # front door is a separate binary, not shipped by the brew/py-wheel channel yet.
+  if [ -x "$KEGBIN/fno-py" ]; then
+    run_capture "$KEGBIN/fno-py" --version
     if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -qi 'fno'; then
-      pass "version" "fno --version runs from the keg bin (rc=0)"
+      pass "version" "fno-py --version runs from the keg bin (rc=0)"
     else
       miss "version" "rc=$RC out: $(printf '%s' "$OUT" | tail -1)"
     fi
   else
-    miss "version" "fno not on the keg bin at $KEGBIN/fno"
+    miss "version" "fno-py not on the keg bin at $KEGBIN/fno-py"
   fi
   run_capture brew test "$TAP/fno"
   if [ "$RC" -eq 0 ]; then
@@ -199,7 +201,7 @@ RUBY
   # -e follows symlinks (a broken/orphaned symlink reads as absent), so also
   # check -L to catch a symlink brew left behind pointing at a removed keg.
   if [ "$RC" -eq 0 ] \
-     && [ ! -e "$KEGBIN/fno" ] && [ ! -L "$KEGBIN/fno" ] \
+     && [ ! -e "$KEGBIN/fno-py" ] && [ ! -L "$KEGBIN/fno-py" ] \
      && [ ! -e "$KEGBIN/fno-agents" ] && [ ! -L "$KEGBIN/fno-agents" ]; then
     pass "uninstall" "brew uninstall removed the keg + symlinks cleanly"
   else

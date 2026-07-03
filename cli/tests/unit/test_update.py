@@ -642,6 +642,49 @@ def test_ac1_hp_refresh_rust_bins_refreshed(
     assert marker_file.read_text(encoding="utf-8").strip() == subtree_rev
 
 
+def test_refresh_rust_bins_also_installs_mux_front_door(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """When crates/fno is present, the rust leg installs the mux front door too:
+    two cargo installs (fno-agents + fno), both into the same --root. Without a
+    crates/fno dir the mux leg is a no-op (covered by the existing tests, which
+    stage only crates/fno-agents and still see exactly one cargo call)."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    agents_crate = source.parent / "crates" / "fno-agents"
+    agents_crate.mkdir(parents=True)
+    mux_crate = source.parent / "crates" / "fno"
+    mux_crate.mkdir(parents=True)
+    marker_file = tmp_path / "installed-rust-rev"
+    marker_file.write_text("oldrev\n", encoding="utf-8")
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
+
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "a" * 40)
+    monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
+
+    recorded_calls: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):
+        recorded_calls.append(list(cmd))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(update.subprocess, "run", _fake_run)
+
+    result = update._refresh_rust_bins(source)
+    assert result == "refreshed"
+
+    cargo_paths = [
+        c[c.index("--path") + 1]
+        for c in recorded_calls
+        if c and c[0] == "cargo" and "--path" in c
+    ]
+    assert str(agents_crate) in cargo_paths, cargo_paths
+    assert str(mux_crate) in cargo_paths, "the mux front door (crates/fno) must be installed too"
+
+
 # --- ab-703f2ed2: refreshed-no-marker outcome granularity ---
 
 def test_refresh_rust_bins_marker_write_failure_returns_no_marker(

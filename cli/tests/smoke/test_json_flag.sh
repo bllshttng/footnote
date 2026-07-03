@@ -15,7 +15,7 @@ iteration: 1
 # Target Session State
 EOF
 
-out=$(uv run fno --json state show --path "$TMPDIR_STATE/target-state.md" 2>&1)
+out=$(uv run fno-py --json state show --path "$TMPDIR_STATE/target-state.md" 2>&1)
 echo "$out" | python3 -m json.tool > /dev/null || {
   echo "FAIL: --json state show did not produce parseable JSON"; echo "$out"; exit 1;
 }

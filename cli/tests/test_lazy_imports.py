@@ -240,16 +240,16 @@ def test_executor_resolve_group_shape_preserved():
 # ---------------------------------------------------------------------------
 
 def test_abi_backlog_ready_via_real_subprocess():
-    """Smoke test the installed `fno` console script through the lazy group.
+    """Smoke test the installed `fno-py` console script through the lazy group.
 
     Exercises the full ``[project.scripts]`` entry-point wiring + lazy
-    sub-app dispatch.  Skipped if ``fno`` is not on PATH (e.g. running
+    sub-app dispatch.  Skipped if ``fno-py`` is not on PATH (e.g. running
     in a clean tox env where the package is not installed as a tool).
     """
     import shutil
-    fno = shutil.which("fno")
+    fno = shutil.which("fno-py")
     if not fno:
-        pytest.skip("fno binary not on PATH (run `uv tool install <repo>/cli` first)")
+        pytest.skip("fno-py console script not on PATH (run `uv tool install <repo>/cli` first)")
     result = subprocess.run(
         [fno, "backlog", "ready", "--help"],
         capture_output=True,

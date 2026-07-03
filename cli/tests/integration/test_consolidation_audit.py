@@ -164,7 +164,7 @@ def test_abi_consolidation_audit_wrapper_matches_bash() -> None:
         env=env,
     )
     abi_proc = subprocess.run(
-        ["uv", "run", "fno", "consolidation", "audit"],
+        ["uv", "run", "fno-py", "consolidation", "audit"],
         cwd=cli_dir,
         capture_output=True,
         text=True,

@@ -35,7 +35,7 @@ def _write_state(base: Path, session_id: str = SESSION_ID, status: str = "IN_PRO
 def _run_abi(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     cli_dir = Path(__file__).parent.parent.parent
     return subprocess.run(
-        ["uv", "run", "fno", *args],
+        ["uv", "run", "fno-py", *args],
         cwd=cli_dir,
         capture_output=True,
         text=True,

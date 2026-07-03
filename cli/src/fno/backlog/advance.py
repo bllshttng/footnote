@@ -162,7 +162,7 @@ def _next_node(project: Optional[str]) -> Optional[dict]:
     uses). Raises on a non-zero/garbled response so advance skips rather than
     guessing a node (Failure Modes: Errors).
     """
-    cmd = ["fno", "backlog", "next"]
+    cmd = ["fno-py", "backlog", "next"]
     if project:
         cmd += ["--project", project]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -183,7 +183,7 @@ def _next_node(project: Optional[str]) -> Optional[dict]:
     if not node.get("_resolved_cwd"):
         try:
             gp = subprocess.run(
-                ["fno", "backlog", "get", node["id"]],
+                ["fno-py", "backlog", "get", node["id"]],
                 capture_output=True, text=True, timeout=30,
             )
             if gp.returncode == 0 and (gp.stdout or "").strip():
@@ -233,7 +233,7 @@ def _ready_nodes(project: Optional[str], mission: Optional[str] = None) -> list[
     ``mission`` restricts to that mission's nodes, mirroring the sequential
     path's ``MegawalkQueue::with_mission`` (codex P1 on PR #137).
     """
-    cmd = ["fno", "backlog", "ready"]
+    cmd = ["fno-py", "backlog", "ready"]
     if project:
         cmd += ["--project", project]
     if mission:
@@ -430,7 +430,7 @@ def _spawn_worker(
     agent_name = _worker_agent_name(
         node_id, node_slug, prefix="reconcile" if is_reconcile else "target"
     )
-    cmd = ["fno", "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
+    cmd = ["fno-py", "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -566,7 +566,7 @@ def _ensure_lane_worktree(node_id: str, *, canonical_root: Path) -> Path:
     without touching the others (Failure Modes: Errors).
     """
     proc = subprocess.run(
-        ["fno", "worktree", "ensure", "--repo", str(canonical_root), "--name", node_id],
+        ["fno-py", "worktree", "ensure", "--repo", str(canonical_root), "--name", node_id],
         capture_output=True,
         text=True,
         timeout=300,

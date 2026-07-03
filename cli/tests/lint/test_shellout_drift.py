@@ -14,7 +14,7 @@ import pytest
 
 from fno import lint_shellout_drift as g
 
-_FNO_AVAILABLE = shutil.which("fno") is not None or (Path(sys.executable).parent / "fno").exists()
+_FNO_AVAILABLE = shutil.which("fno-py") is not None or (Path(sys.executable).parent / "fno-py").exists()
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 

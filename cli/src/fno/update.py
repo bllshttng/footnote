@@ -304,6 +304,44 @@ def _cargo_installed_bin() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
+def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) -> None:
+    """Best-effort: install the crates/fno mux binary (`fno` on PATH - the front
+    door) alongside the fno-agents bins, into the same --root.
+
+    Called only when the agents leg already decided a refresh is due, so it
+    shares that crates/ subtree staleness gate. A failure warns and continues:
+    the mux is heavier to build (tokio + alacritty + pty), and an absent/stale
+    mux is a front-door problem `fno doctor` surfaces, never a reason to fail the
+    Python update. No marker of its own - `fno doctor`'s front-door check keys on
+    the binary's presence, not a rev marker.
+    """
+    crate_dir = source.parent / "crates" / "fno"
+    if not crate_dir.is_dir():
+        return
+    cmd = ["cargo", "install", "--path", str(crate_dir), "--bins", "--root", str(install_root)]
+    if dry_run:
+        typer.echo(f"Would run: {shlex.join(cmd)}")
+        return
+    typer.echo(f"fno update: refreshing mux front door: {shlex.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, check=False)
+    except OSError as exc:
+        typer.echo(
+            f"fno update: WARNING: mux front door install failed to execute ({exc});"
+            " `fno` may be absent/stale; continuing",
+            err=True,
+        )
+        return
+    if result.returncode != 0:
+        typer.echo(
+            f"fno update: WARNING: mux front door install failed (exit {result.returncode});"
+            " `fno` may be absent/stale; continuing",
+            err=True,
+        )
+        return
+    typer.echo("fno update: mux front door refreshed (crates/fno -> `fno`)")
+
+
 def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = False) -> RefreshOutcome:
     """Refresh the cargo-installed fno-agents rust bins if stale.
 
@@ -368,6 +406,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
 
     if dry_run:
         typer.echo(f"Would run: {shlex.join(cmd)}")
+        _install_mux_front_door(source, install_root, dry_run=True)
         return "dry-run"
 
     typer.echo(f"fno update: refreshing rust bins: {shlex.join(cmd)}")
@@ -389,6 +428,12 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             err=True,
         )
         return "failed"
+
+    # The mux front door (crates/fno -> `fno` on PATH) rides the SAME crates/
+    # subtree staleness gate as the agents bins, so refresh it here too. Without
+    # this the front door is an orphan: `fno update` rebuilds fno-agents but the
+    # `fno` binary this whole channel is about is never installed or refreshed.
+    _install_mux_front_door(source, install_root, dry_run=False)
 
     outcome: RefreshOutcome
     if subtree is None:

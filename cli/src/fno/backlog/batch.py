@@ -502,7 +502,7 @@ def _abandon_and_requeue(domain: str, members: list[str], root: Path) -> None:
 def _get_node(node_id: str, run: Runner) -> Optional[dict]:
     """Fetch a node dict via `fno backlog get`, or None on any failure."""
     try:
-        p = run(["fno", "backlog", "get", node_id])
+        p = run(["fno-py", "backlog", "get", node_id])
         if p.returncode == 0 and (p.stdout or "").strip():
             return json.loads(p.stdout)
     except Exception as e:  # noqa: BLE001
@@ -530,7 +530,7 @@ def _peek_next(
     (MegawalkQueue::with_mission): without it, a same-domain ready node OUTSIDE
     the mission would keep a mission batch open forever (codex P2).
     """
-    cmd = ["fno", "backlog", "next"]
+    cmd = ["fno-py", "backlog", "next"]
     if project:
         cmd += ["--project", project]
     if mission:
@@ -580,7 +580,7 @@ def prepare_batch(
         # random suffix guarantees one branch per batch (codex P2).
         name = f"batch-{_safe(domain)}-{secrets.token_hex(3)}"
         branch = f"feature/{name}"
-        we = run(["fno", "worktree", "ensure", "--repo", repo, "--name", name, "--branch", branch])
+        we = run(["fno-py", "worktree", "ensure", "--repo", repo, "--name", name, "--branch", branch])
         worktree = (we.stdout or "").strip()
         if we.returncode != 0 or not worktree:
             return {"mode": "solo", "reason": f"worktree ensure failed: {(we.stderr or '').strip()[:160]}"}
@@ -1164,7 +1164,7 @@ def cli_policy(
     node_dict: Optional[dict] = None
     try:
         proc = subprocess.run(
-            ["fno", "backlog", "get", node], capture_output=True, text=True, timeout=30
+            ["fno-py", "backlog", "get", node], capture_output=True, text=True, timeout=30
         )
         if proc.returncode == 0 and proc.stdout.strip():
             node_dict = json.loads(proc.stdout)

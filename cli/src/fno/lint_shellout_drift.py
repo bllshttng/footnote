@@ -350,14 +350,16 @@ def scan_tree(scan_root: Path, allowed: Set[str], repo_root: Path,
 # Degrade proof.
 # --------------------------------------------------------------------------- #
 def _resolve_fno_cmd() -> List[str]:
-    found = shutil.which("fno")
+    # The console script is `fno-py` (the Rust mux binary owns `fno`); resolve
+    # it directly so the proof works without the front-door binary installed.
+    found = shutil.which("fno-py")
     if found:
         return [found]
-    sibling = Path(sys.executable).parent / "fno"
+    sibling = Path(sys.executable).parent / "fno-py"
     if sibling.exists():
         return [str(sibling)]
     raise GuardError(
-        "could not locate the `fno` executable for the degrade proof "
+        "could not locate the `fno-py` executable for the degrade proof "
         "(not on PATH and not beside the interpreter); run via `uv run`"
     )
 

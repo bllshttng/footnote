@@ -608,7 +608,7 @@ def _spawn_think_worker(
     # x-2c27: a conversational /think handoff is a DETACHED thread, so route it
     # to the `claude --bg` substrate explicitly (the x-3ab8 default `pane` would
     # land an owned-PTY pane that stalls a fire-and-forget dispatch).
-    cmd = ["fno", "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
+    cmd = ["fno-py", "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:

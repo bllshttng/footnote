@@ -20,7 +20,7 @@ CLI_DIR = REPO_ROOT / "cli"
 
 def _run_abi(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["uv", "run", "fno", *args],
+        ["uv", "run", "fno-py", *args],
         cwd=CLI_DIR,
         capture_output=True,
         text=True,

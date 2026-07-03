@@ -87,13 +87,15 @@ class Fno < Formula
     # into the keg bin, so symlink them explicitly. The fno-agents* symlink is
     # the load-bearing step (Locked Decision 4): the CLI invokes the binaries by
     # name on PATH. Arch-agnostic via libexec.
-    bin.install_symlink libexec/"bin/fno"
+    # The wheel's Python CLI console script is `fno-py` (the Rust mux binary owns
+    # `fno`); symlink that, plus the three fno-agents* shared_scripts.
+    bin.install_symlink libexec/"bin/fno-py"
     bin.install_symlink Dir[libexec/"bin/fno-agents*"]
   end
 
   test do
     # The CLI runs from the keg bin.
-    assert_match "fno", shell_output("#{bin}/fno --version")
+    assert_match "fno", shell_output("#{bin}/fno-py --version")
 
     # All three binaries must be present + executable on the keg bin, or a
     # daemon/loop verb would 127 at runtime. Fail the test on any miss

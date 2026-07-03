@@ -677,11 +677,11 @@ class TestRedispatch:
 
         def fake_run(cmd, **kw):
             calls.append(cmd)
-            if cmd[:3] == ["fno", "agents", "stop"]:
+            if cmd[:3] == ["fno-py", "agents", "stop"]:
                 return SimpleNamespace(returncode=stop_rc)
-            if cmd[:3] == ["fno", "claim", "force-release"]:
+            if cmd[:3] == ["fno-py", "claim", "force-release"]:
                 return SimpleNamespace(returncode=force_release_rc)
-            if cmd[:3] == ["fno", "agents", "spawn"]:
+            if cmd[:3] == ["fno-py", "agents", "spawn"]:
                 return SimpleNamespace(returncode=spawn_rc)
             return SimpleNamespace(returncode=0)
 
@@ -698,8 +698,8 @@ class TestRedispatch:
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand()) is True
 
-        fr = self._index_of(calls, ["fno", "claim", "force-release"])
-        spawn = self._index_of(calls, ["fno", "agents", "spawn"])
+        fr = self._index_of(calls, ["fno-py", "claim", "force-release"])
+        spawn = self._index_of(calls, ["fno-py", "agents", "spawn"])
         assert fr is not None and spawn is not None
         assert fr < spawn                      # claim freed strictly before spawn
         assert "node:x-370f" in calls[fr]      # exact claim key
@@ -716,15 +716,15 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, stop_rc=1)
         assert recovery._redispatch(self._cand()) is False
-        assert self._index_of(calls, ["fno", "claim", "force-release"]) is None
-        assert self._index_of(calls, ["fno", "agents", "spawn"]) is None
+        assert self._index_of(calls, ["fno-py", "claim", "force-release"]) is None
+        assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
 
     def test_force_release_failure_skips_spawn(self, monkeypatch):
         # AC1-ERR: force-release non-zero → no spawn, False so the caller nudges.
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, force_release_rc=1)
         assert recovery._redispatch(self._cand()) is False
-        assert self._index_of(calls, ["fno", "agents", "spawn"]) is None
+        assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
 
     def test_done_node_not_redispatched(self, monkeypatch):
         # AC1-EDGE: already-done node → no stop/force-release/spawn at all.
@@ -745,7 +745,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, spawn_rc=1)
         assert recovery._redispatch(self._cand()) is False
-        lr = self._index_of(calls, ["fno", "claim", "lane-release"])
+        lr = self._index_of(calls, ["fno-py", "claim", "lane-release"])
         assert lr is not None
         assert "x-370f" in calls[lr]
 
@@ -755,7 +755,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand()) is True
-        assert self._index_of(calls, ["fno", "claim", "lane-release"]) is None
+        assert self._index_of(calls, ["fno-py", "claim", "lane-release"]) is None
 
     def test_unresolvable_node_returns_false(self, monkeypatch):
         # No node id in the worktree manifest → nothing to re-dispatch.

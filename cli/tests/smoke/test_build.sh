@@ -8,7 +8,7 @@ TMPDIR_INSTALL=$(mktemp -d)
 trap "rm -rf $TMPDIR_INSTALL" EXIT
 uv venv --quiet "$TMPDIR_INSTALL/venv"
 uv pip install --quiet --python "$TMPDIR_INSTALL/venv/bin/python" dist/*.whl
-out=$("$TMPDIR_INSTALL/venv/bin/fno" --version 2>&1 || true)
+out=$("$TMPDIR_INSTALL/venv/bin/fno-py" --version 2>&1 || true)
 # version-agnostic: the binary must report SOME semver, not a pinned one, so a
 # release bump never breaks this smoke test (the build wires the version).
 echo "$out" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+'

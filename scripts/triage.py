@@ -42,7 +42,7 @@ def _abi_on_path() -> bool:
 def _forward(argv: list[str]) -> int:
     """Try installed CLI first; fall back to in-repo import; error otherwise."""
     if _abi_on_path():
-        return subprocess.call(["fno", "backlog", "triage", *argv])
+        return subprocess.call(["fno-py", "backlog", "triage", *argv])
 
     try:
         from fno.graph.triage import cli as triage_app  # type: ignore[import-not-found]

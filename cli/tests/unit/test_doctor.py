@@ -1011,3 +1011,30 @@ def test_emit_human_surfaces_binary_rev_match(capsys: pytest.CaptureFixture[str]
     out = capsys.readouterr().out
     assert "self-reports rev abc123abc123" in out
     assert "matches source" in out
+
+
+# --- x-c267: mux front-door health (advisory) ---
+
+
+@pytest.mark.parametrize(
+    "mux, which_fno, expected",
+    [
+        (None, None, "not-installed"),
+        (None, "/home/x/.local/bin/fno", "not-installed"),
+        ("/home/x/.cargo/bin/fno", "/home/x/.cargo/bin/fno", "active"),
+        ("/home/x/.cargo/bin/fno", "/home/x/.local/bin/fno", "shadowed"),
+        ("/home/x/.cargo/bin/fno", None, "shadowed"),
+    ],
+)
+def test_mux_front_door_report_states(
+    monkeypatch: pytest.MonkeyPatch, mux, which_fno, expected
+) -> None:
+    """The front-door state is active only when the mux is installed AND `fno` on
+    PATH resolves to it; shadowed when something else (or nothing) wins PATH;
+    not-installed when the cargo mux binary is absent."""
+    monkeypatch.setattr(doctor, "_cargo_installed_mux", lambda: Path(mux) if mux else None)
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: which_fno)
+    report = doctor._mux_front_door_report()
+    assert report["mux_front_door"] == expected
+    assert report["mux_binary"] == (mux if mux else None)
+    assert report["path_fno"] == which_fno

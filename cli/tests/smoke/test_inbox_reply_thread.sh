@@ -22,7 +22,7 @@ export FNO_INBOX_ROOT="$INBOX_ROOT"
 export FNO_INBOX_KNOWN_PROJECTS="web,api"
 
 # 1) web sends a question to api (creates a new thread file).
-PARENT_OUT=$(uv run fno mail send --to-project api --kind question \
+PARENT_OUT=$(uv run fno-py mail send --to-project api --kind question \
     --body "Is the payments endpoint ready?" --from-name web --json)
 PARENT_PATH=$(echo "$PARENT_OUT" | python3 -c "import json, sys; print(json.loads(sys.stdin.read().splitlines()[-1])['thread_path'])")
 PARENT_MSG=$(echo "$PARENT_OUT" | python3 -c "import json, sys; print(json.loads(sys.stdin.read().splitlines()[-1])['msg_id'])")
@@ -35,7 +35,7 @@ if [[ "$files_before" != "1" ]]; then
 fi
 
 # 2) api replies via send --reply-to. Should APPEND to the same thread file.
-REPLY_OUT=$(uv run fno mail send --to-project api --kind fyi \
+REPLY_OUT=$(uv run fno-py mail send --to-project api --kind fyi \
     --reply-to "$PARENT_MSG" --body "Yes, ready and behind a feature flag" \
     --from-name api --json)
 APPENDED=$(echo "$REPLY_OUT" | python3 -c "import json, sys; print(json.loads(sys.stdin.read().splitlines()[-1])['appended'])")
@@ -61,7 +61,7 @@ fi
 
 # 4) fno mail reply sends to the ORIGINAL sender (web here), not back to api.
 #    Since web's inbox has no thread yet, an orphan thread lands in web/inbox/.
-THIRD_OUT=$(uv run fno mail reply --to "$PARENT_MSG" --kind fyi \
+THIRD_OUT=$(uv run fno-py mail reply --to "$PARENT_MSG" --kind fyi \
     --body "Loud answer to web" --from api --json)
 THIRD_ORPHAN=$(echo "$THIRD_OUT" | python3 -c "import json, sys; d=json.loads(sys.stdin.read().splitlines()[-1]); print(d.get('orphan', False))")
 if [[ "$THIRD_ORPHAN" != "True" ]]; then

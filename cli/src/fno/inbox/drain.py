@@ -293,7 +293,7 @@ def _create_graph_node_from_plan(repo_root: Path, h: ThreadHandle, plan) -> str:
     msg-id keep working while new queries can resolve back to the full thread.
     """
     args = [
-        "fno", "new",
+        "fno-py", "new",
         plan.title,
         "--priority", plan.priority,
         "--source-kind", "from_inbox",
@@ -305,7 +305,7 @@ def _create_graph_node_from_plan(repo_root: Path, h: ThreadHandle, plan) -> str:
     # `fno new --help` is cheap; failing the probe only loses provenance breadth.
     try:
         help_out = subprocess.run(
-            ["fno", "new", "--help"],
+            ["fno-py", "new", "--help"],
             capture_output=True, text=True, check=False, cwd=repo_root,
             timeout=5,
         )

@@ -30,12 +30,12 @@ export FNO_INBOX_KNOWN_PROJECTS="proj-a,somesender"
 export FNO_INBOX_TRIAGE_STUB="$STUB_SCRIPT"
 
 # Seed proj-a with a heads-up thread, capture msg-id.
-SEND_OUT=$(uv run fno mail send --to-project proj-a --kind heads-up \
+SEND_OUT=$(uv run fno-py mail send --to-project proj-a --kind heads-up \
     --body "Integration smoke test body for triage" --from-name somesender --json)
 MSG_ID=$(echo "$SEND_OUT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read().splitlines()[-1])['msg_id'])")
 
 # Run triage on the thread (look up by any contained msg-id).
-TRIAGE_OUT=$(uv run fno mail triage "$MSG_ID" --json --from proj-a)
+TRIAGE_OUT=$(uv run fno-py mail triage "$MSG_ID" --json --from proj-a)
 
 # Assert plan shape.
 echo "$TRIAGE_OUT" | python3 -c "

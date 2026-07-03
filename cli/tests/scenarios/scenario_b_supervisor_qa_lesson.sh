@@ -56,7 +56,7 @@ export FNO_INBOX_KNOWN_PROJECTS="abilities,acme-web"
 export HOME="$HOME_OVERRIDE"
 
 run_abi() {
-    cd "$CLI_DIR" && uv run fno "$@"
+    cd "$CLI_DIR" && uv run fno-py "$@"
 }
 
 echo "=== Scenario B: Q/A/lesson chain (supervisor) ==="

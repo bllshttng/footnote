@@ -28,8 +28,8 @@ _reconcile_resolve_abi() {
         echo "fno"
         return 0
     fi
-    if [[ -x "$HOME/.local/bin/fno" ]]; then
-        echo "$HOME/.local/bin/fno"
+    if [[ -x "$HOME/.local/bin/fno-py" ]]; then
+        echo "$HOME/.local/bin/fno-py"
         return 0
     fi
     return 1

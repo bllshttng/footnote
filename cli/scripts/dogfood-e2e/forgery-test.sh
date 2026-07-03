@@ -55,7 +55,7 @@ echo "" >&2
 # Run gate verify - expect non-zero exit
 cd "$REPO_ROOT/cli"
 set +e
-out=$(uv run fno --json gate verify \
+out=$(uv run fno-py --json gate verify \
   --phase ship \
   --state "$SANDBOX/state.md" \
   --artifacts-dir "$SANDBOX/artifacts" \

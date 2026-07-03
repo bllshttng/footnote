@@ -25,7 +25,7 @@ export FNO_INBOX_ROOT="$INBOX_ROOT"
 export FNO_INBOX_KNOWN_PROJECTS="proj-a,proj-b"
 
 # 1) Send from proj-a to proj-b's inbox/.
-SEND_OUT=$(uv run fno mail send --to-project proj-b --kind heads-up \
+SEND_OUT=$(uv run fno-py mail send --to-project proj-b --kind heads-up \
     --body "hello from a please respond" --from-name proj-a --json)
 THREAD_PATH=$(echo "$SEND_OUT" | python3 -c "import json, sys; print(json.loads(sys.stdin.read().splitlines()[-1])['thread_path'])")
 MSG_ID=$(echo "$SEND_OUT" | python3 -c "import json, sys; print(json.loads(sys.stdin.read().splitlines()[-1])['msg_id'])")
@@ -40,7 +40,7 @@ case "$THREAD_PATH" in
 esac
 
 # 2) proj-b sees unread thread.
-UNREAD_OUT=$(uv run fno mail unread --name proj-b --json)
+UNREAD_OUT=$(uv run fno-py mail unread --name proj-b --json)
 if ! echo "$UNREAD_OUT" | grep -q "hello from a"; then
   echo "FAIL: unread did not show body:" >&2
   echo "$UNREAD_OUT" >&2
@@ -52,8 +52,8 @@ if ! echo "$UNREAD_OUT" | grep -q '"from": "proj-a"'; then
 fi
 
 # 3) ack by msg-id marks the thread read.
-uv run fno mail ack "$MSG_ID" --name proj-b
-UNREAD_OUT=$(uv run fno mail unread --name proj-b --json)
+uv run fno-py mail ack "$MSG_ID" --name proj-b
+UNREAD_OUT=$(uv run fno-py mail unread --name proj-b --json)
 if [[ "$UNREAD_OUT" != "[]" ]]; then
   echo "FAIL: unread should be empty after ack:" >&2
   echo "$UNREAD_OUT" >&2
@@ -62,7 +62,7 @@ fi
 
 # 4) deprecated kinds reject with replacement hint.
 set +e
-NOTIF_OUT=$(uv run fno mail send --to-project proj-b --kind notification \
+NOTIF_OUT=$(uv run fno-py mail send --to-project proj-b --kind notification \
     --body "x" --from-name proj-a 2>&1)
 NOTIF_RC=$?
 set -e

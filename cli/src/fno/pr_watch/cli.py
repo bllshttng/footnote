@@ -35,16 +35,17 @@ def _resolve_fno_binary() -> str:
     """Return the absolute path to the fno binary.
 
     Tries shutil.which first; falls back to the console-script alongside
-    the current interpreter (handles ``uv run --project cli fno`` dev use).
+    the current interpreter (handles ``uv run --project cli fno-py`` dev use).
+    Resolves `fno-py` (the console script); the Rust mux binary owns `fno`.
     """
-    found = shutil.which("fno")
+    found = shutil.which("fno-py")
     if found:
         return os.path.abspath(found)
     # Fallback: the entry-point next to the running Python interpreter
-    candidate = Path(sys.executable).parent / "fno"
+    candidate = Path(sys.executable).parent / "fno-py"
     if candidate.exists():
         return str(candidate)
-    return "fno"  # last resort: bare name (launchd may still find it via PATH)
+    return "fno-py"  # last resort: bare name (launchd may still find it via PATH)
 
 
 # ---------------------------------------------------------------------------

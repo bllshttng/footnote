@@ -29,9 +29,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo "DRY-RUN: would create worktree $slug" >&2
   echo "DRY-RUN: would lock graph node $node_id with session-$slug" >&2
 else
-  uv run fno state init --type target --output "$REPO_ROOT/.fno/e2e-state.md" >&2
-  uv run fno runtime worktree --action create --name "$slug" >&2
-  uv run fno graph update --id "$node_id" --locked-by "session-$slug" >&2
+  uv run fno-py state init --type target --output "$REPO_ROOT/.fno/e2e-state.md" >&2
+  uv run fno-py runtime worktree --action create --name "$slug" >&2
+  uv run fno-py graph update --id "$node_id" --locked-by "session-$slug" >&2
 fi
 
 echo "Session initialized: $slug" >&2

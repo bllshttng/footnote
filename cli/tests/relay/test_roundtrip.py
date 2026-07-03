@@ -613,7 +613,7 @@ def test_live_deliver_via_daemon_worker(monkeypatch):
         )
     name = f"relay-live-{sid[:8]}"
     promote = subprocess.run(
-        ["fno", "agents", "promote", name, "--from", sid, "--provider", "claude"],
+        ["fno-py", "agents", "promote", name, "--from", sid, "--provider", "claude"],
         capture_output=True, text=True, timeout=60,
     )
     if promote.returncode != 0:
@@ -630,7 +630,7 @@ def test_live_deliver_via_daemon_worker(monkeypatch):
         # The transcript pivot's payoff: faithful text keeps inter-word spaces.
         assert " " in reply, f"reply not faithful (space-collapsed?): {reply!r}"
     finally:
-        subprocess.run(["fno", "agents", "stop", name], capture_output=True, timeout=30)
+        subprocess.run(["fno-py", "agents", "stop", name], capture_output=True, timeout=30)
 
 
 # ---------------------------------------------------------------------------

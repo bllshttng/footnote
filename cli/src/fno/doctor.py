@@ -32,6 +32,7 @@ Exit code is non-zero only when staleness is **proven**.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -101,10 +102,15 @@ def _probe_installed_verb() -> ProbeResult:
     """Probe whether the *installed* fno exposes the known gate verb.
 
     Returns "present", "missing" (proven via "No such command"), or "unknown"
-    (could not probe - no ``fno`` on PATH, or a non-zero exit for some other
+    (could not probe - no ``fno-py`` on PATH, or a non-zero exit for some other
     reason). "unknown" never asserts staleness.
+
+    Probes ``fno-py`` (the Python CLI console script), NOT ``fno`` (the Rust mux
+    front door): the gate verb is a property of the Python CLI, and probing it
+    directly keeps this check working even when the front door binary is not
+    installed - the front door only forwards here anyway.
     """
-    abi_bin = shutil.which("fno")
+    abi_bin = shutil.which("fno-py")
     if not abi_bin:
         return "unknown"
     try:
@@ -426,6 +432,53 @@ def _cost_check() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Mux front door health (x-c267)
+# ---------------------------------------------------------------------------
+
+
+def _cargo_installed_mux() -> Optional[Path]:
+    """Path to the cargo-installed mux front-door binary (`fno`), or None.
+
+    Probes ``$CARGO_HOME/bin/fno`` - the location `fno update` installs the mux
+    to (the same --root as the fno-agents bins). A mux installed at a custom
+    --root is not seen here; the ``which("fno")`` resolution below still catches
+    it as the active front door in that case.
+    """
+    cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+    name = "fno.exe" if os.name == "nt" else "fno"
+    candidate = cargo_home / "bin" / name
+    return candidate if candidate.is_file() else None
+
+
+def _mux_front_door_report() -> dict[str, Any]:
+    """Report whether the Rust mux binary owns `fno` on PATH (advisory only).
+
+    ``mux_front_door`` is one of:
+    - ``active``: the mux binary is installed AND `fno` on PATH resolves to it.
+    - ``shadowed``: the mux is cargo-installed but `fno` on PATH resolves
+      elsewhere (a Python `fno`, another binary) or is not on PATH - so bare
+      `fno` will not launch the mux.
+    - ``not-installed``: the mux binary is not cargo-installed.
+
+    Never changes the verdict status or exit code: a front-door setup problem is
+    distinct from source-vs-installed staleness.
+    """
+    mux = _cargo_installed_mux()
+    path_fno = shutil.which("fno")
+    if mux is None:
+        state = "not-installed"
+    elif path_fno is not None and Path(path_fno).resolve() == mux.resolve():
+        state = "active"
+    else:
+        state = "shadowed"
+    return {
+        "mux_binary": str(mux) if mux else None,
+        "path_fno": path_fno,
+        "mux_front_door": state,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
 
@@ -600,6 +653,23 @@ def _emit_human(
         else:
             out(f"fno doctor: rust fno-agents binary self-reports rev {binary_rev[:12]}.")
 
+    # Mux front-door health (x-c267): does bare `fno` launch the mux? Advisory.
+    fd_state = result.get("mux_front_door")
+    if fd_state == "active":
+        out(f"fno doctor: mux front door: `fno` -> {result.get('mux_binary')} (active).")
+    elif fd_state == "not-installed":
+        out(
+            "fno doctor: mux front door: crates/fno not cargo-installed; bare `fno` will "
+            "not launch the mux. Run `fno update` (or cargo install --path crates/fno)."
+        )
+    elif fd_state == "shadowed":
+        where = result.get("path_fno") or "nothing on PATH"
+        out(
+            f"fno doctor: mux front door: installed at {result.get('mux_binary')} but `fno` "
+            f"on PATH resolves to {where}; the mux is shadowed. Ensure the cargo bin dir "
+            "precedes any Python `fno` on PATH."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Command
@@ -659,6 +729,8 @@ def doctor_command(
         rust_source_rev=rust_src_rev,
         cargo_bin_present=cargo_bin_present,
     )
+    # Advisory front-door fields (x-c267); never change status/exit.
+    result.update(_mux_front_door_report())
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).

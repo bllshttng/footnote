@@ -94,7 +94,7 @@ def verify_cmd(
     if not paths_sh.exists():
         typer.echo(
             f"error: {paths_sh} does not exist. "
-            "Generate it with: uv run fno paths emit-shell",
+            "Generate it with: uv run fno-py paths emit-shell",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -110,7 +110,7 @@ def verify_cmd(
             f"schema hash:  {derived}\n"
             f"file hash:    {checked}\n"
             f"\nHashes differ. Regenerate with:\n"
-            f"  cd cli && uv run fno paths emit-shell",
+            f"  cd cli && uv run fno-py paths emit-shell",
             err=True,
         )
         raise typer.Exit(code=1)

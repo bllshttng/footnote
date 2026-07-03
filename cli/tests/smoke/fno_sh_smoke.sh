@@ -113,8 +113,10 @@ for b in fno-agents fno-agents-daemon fno-agents-worker; do
   else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
 done
 
-# --- check 5: the provisioned fno --version runs (AC3-ERR: no 127) ---
-FNO_BIN="$UV_BIN/fno"
+# --- check 5: the provisioned fno-py --version runs (AC3-ERR: no 127) ---
+# The console script is `fno-py` (the Rust mux binary owns `fno`); fno.sh installs
+# the Python CLI, so the tool bin carries `fno-py`, not `fno`.
+FNO_BIN="$UV_BIN/fno-py"
 if [ -x "$FNO_BIN" ]; then
   run_capture "$FNO_BIN" --version
   if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -qE 'fno[[:space:]]+[0-9]+\.[0-9]+'; then

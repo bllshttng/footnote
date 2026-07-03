@@ -152,9 +152,9 @@ class PrepareGh:
 
     def __call__(self, cmd, *, cwd=None):
         self.calls.append(cmd)
-        if cmd[:3] == ["fno", "backlog", "get"]:
+        if cmd[:3] == ["fno-py", "backlog", "get"]:
             return _cp(0, json.dumps(self.node))
-        if cmd[:3] == ["fno", "worktree", "ensure"]:
+        if cmd[:3] == ["fno-py", "worktree", "ensure"]:
             return _cp(self.we_rc, self.worktree if self.we_rc == 0 else "", "boom" if self.we_rc else "")
         return _cp(0, "")
 
@@ -202,7 +202,7 @@ def test_prepare_join_reuses_open_batch(tmp_path, batching_on):
     assert out["mode"] == "batched"
     assert out["worktree"] == str(tmp_path / "shared")
     # join path never calls `fno worktree ensure` (reuses the recorded one).
-    assert not any(c[:3] == ["fno", "worktree", "ensure"] for c in gh.calls)
+    assert not any(c[:3] == ["fno-py", "worktree", "ensure"] for c in gh.calls)
 
 
 def test_prepare_solo_when_worktree_ensure_fails(tmp_path, batching_on):
@@ -222,7 +222,7 @@ class CloseableRunner:
 
     def __call__(self, cmd, *, cwd=None):
         self.calls.append(cmd)
-        if cmd[:3] == ["fno", "backlog", "next"]:
+        if cmd[:3] == ["fno-py", "backlog", "next"]:
             return _cp(0, json.dumps(self.next_node) if self.next_node else "null")
         if cmd[:3] == ["gh", "pr", "list"]:
             return _cp(0, "[]")
@@ -268,7 +268,7 @@ class PeekFailRunner:
     """Runner whose `fno backlog next` fails (rc!=0) - a transient peek error."""
 
     def __call__(self, cmd, *, cwd=None):
-        if cmd[:3] == ["fno", "backlog", "next"]:
+        if cmd[:3] == ["fno-py", "backlog", "next"]:
             return _cp(1, "", "graph locked")
         if cmd[:3] == ["gh", "pr", "create"]:
             raise AssertionError("must not ship on a peek error")
@@ -316,7 +316,7 @@ def test_ship_closeable_scopes_peek_to_mission(tmp_path, graph, batching_on):
     B.join_batch(domain="code", node_id="x-1", root=tmp_path)
     r = CloseableRunner(next_node=None)
     B.ship_closeable(project="fno", root=tmp_path, run=r, mission="m-42")
-    next_calls = [c for c in r.calls if c[:3] == ["fno", "backlog", "next"]]
+    next_calls = [c for c in r.calls if c[:3] == ["fno-py", "backlog", "next"]]
     assert next_calls, "expected a next peek"
     assert "--mission" in next_calls[0] and "m-42" in next_calls[0]
 

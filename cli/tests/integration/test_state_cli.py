@@ -44,7 +44,9 @@ def _cli_cmd() -> list[str]:
     falls back to python -c runner using typer's CLI app.
     """
     import shutil
-    abilities_exe = shutil.which("fno")
+    # The console script is `fno-py` (the Rust mux binary owns `fno`); the state
+    # CLI is Python, so target it directly rather than through the mux front door.
+    abilities_exe = shutil.which("fno-py")
     if abilities_exe:
         return [abilities_exe]
     # Fallback: invoke via typer's app directly

@@ -11,7 +11,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 cd "$TMPDIR"
 
 # Drop a signal via the CLI verb
-uv run --project "$CLI_DIR" fno wake drop \
+uv run --project "$CLI_DIR" fno-py wake drop \
   --source inbox-drain \
   --kind question \
   --msg-id msg-deadbeef \

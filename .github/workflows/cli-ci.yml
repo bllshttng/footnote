@@ -87,7 +87,7 @@ jobs:
 
       - name: paths.sh hash gate
         working-directory: cli
-        run: uv run fno paths verify ../scripts/lib/paths.sh
+        run: uv run fno-py paths verify ../scripts/lib/paths.sh
 
       - name: Bash events-validate harness
         run: bash tests/events/test-bash-validator.sh
@@ -295,11 +295,11 @@ jobs:
 
       - name: Agent flock-pattern lint
         working-directory: cli
-        run: uv run fno lint flock-pattern
+        run: uv run fno-py lint flock-pattern
 
       - name: Provider stderr-merge lint
         working-directory: cli
-        run: uv run fno lint provider-stderr-merge
+        run: uv run fno-py lint provider-stderr-merge
 
       - name: Repo-root shell-out drift guard (US4, clone-only allowlist)
         # ab-acbde274: forbid a fno verb shelling out to a resolve_repo_root()/
@@ -307,7 +307,7 @@ jobs:
         # CLONE_ONLY_SCRIPTS allowlist, and prove each allowlisted verb degrades
         # on a bare install. uv run so the degrade proof can invoke `fno`.
         working-directory: cli
-        run: uv run fno lint shellout-drift
+        run: uv run fno-py lint shellout-drift
 
       - name: Schema parity self-test
         # Exercises check-event-schema-parity.sh with synthetic fixtures via
