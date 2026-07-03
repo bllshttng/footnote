@@ -67,8 +67,18 @@ pub fn scrape_targets(reg: &Registry) -> Vec<ScrapeTarget> {
             // ANY inside-leg report (live or lapsed) marks the row
             // hook-capable: the hook owns the signal, TTL lapse degrades to
             // liveness-only, never to a scrape (no authority flapping).
+            // Non-live statuses are excluded too: Orphaned (failed
+            // reachability probe) and Failed (panicked task) already say the
+            // backend is not live, so scraping their last screen would badge
+            // a dead pane (codex P2).
             e.inside_leg.is_none()
-                && !matches!(e.status, AgentStatus::Exited | AgentStatus::PermanentDead)
+                && !matches!(
+                    e.status,
+                    AgentStatus::Exited
+                        | AgentStatus::PermanentDead
+                        | AgentStatus::Orphaned
+                        | AgentStatus::Failed
+                )
         })
         .filter_map(|e| {
             e.mux.as_ref().map(|m| ScrapeTarget {
@@ -146,9 +156,10 @@ pub fn decide(
 
 /// The `fno` front-door binary (the Rust mux owner), same resolution as the
 /// active-backlog supervisor and the Python spawn back half: `FNO_BIN`
-/// overrides for tests and non-PATH installs.
-fn fno_bin() -> String {
-    std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string())
+/// overrides for tests and non-PATH installs. `var_os` (not `var`) so a path
+/// with non-UTF-8 bytes passes through to `Command` unmangled (gemini MEDIUM).
+fn fno_bin() -> std::ffi::OsString {
+    std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"))
 }
 
 /// `fno mux pane ls --session <s> --json` -> pane_id -> OSC title. `None`
@@ -160,7 +171,7 @@ fn fno_bin() -> String {
 /// reads/writes, so a wedged server errors instead of hanging; a hung
 /// FNO_BIN stalls only this sweep thread (the in-flight gate skips further
 /// sweeps rather than piling them up).
-fn mux_pane_ls(bin: &str, session: &str) -> Option<BTreeMap<u64, Option<String>>> {
+fn mux_pane_ls(bin: &std::ffi::OsStr, session: &str) -> Option<BTreeMap<u64, Option<String>>> {
     let out = Command::new(bin)
         .args(["mux", "pane", "ls", "--session", session, "--json"])
         .output()
@@ -184,7 +195,7 @@ fn mux_pane_ls(bin: &str, session: &str) -> Option<BTreeMap<u64, Option<String>>
 
 /// `fno mux pane read <pane> --session <s> --json` -> the pane's rendered
 /// grid text. `None` on any failure (dead pane, unreachable server).
-fn mux_pane_read(bin: &str, session: &str, pane: u64) -> Option<String> {
+fn mux_pane_read(bin: &std::ffi::OsStr, session: &str, pane: u64) -> Option<String> {
     let out = Command::new(bin)
         .args([
             "mux",
@@ -202,6 +213,35 @@ fn mux_pane_read(bin: &str, session: &str, pane: u64) -> Option<String> {
     }
     let reply: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     reply.get("text")?.as_str().map(String::from)
+}
+
+/// What the locked write should do for one row, re-checked under the registry
+/// lock against the state the row is in NOW (not the snapshot the sweep read).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WriteDisposition {
+    /// A capability flip landed since the snapshot: the hook is senior, clear
+    /// any scrape verdict so it can never shadow the hook.
+    HookFlip,
+    /// The row still points at the pane we scraped: apply the verdict.
+    Apply,
+    /// The row was re-homed or removed+recreated with the same name since the
+    /// snapshot (its mux ref no longer matches what we scraped): skip, so the
+    /// old pane's verdict never lands on the current pane (codex P2).
+    Skip,
+}
+
+/// Decide the locked-write disposition for one row. Pure so the arbitration
+/// re-checks (hook flip, mux-ref match) are unit-testable without a daemon.
+fn write_disposition(e: &state::RegistryEntry, expect_ref: &(String, u64)) -> WriteDisposition {
+    if e.inside_leg.is_some() {
+        return WriteDisposition::HookFlip;
+    }
+    let cur_ref = e.mux.as_ref().map(|m| (m.session.clone(), m.pane_id));
+    if cur_ref.as_ref() == Some(expect_ref) {
+        WriteDisposition::Apply
+    } else {
+        WriteDisposition::Skip
+    }
 }
 
 /// One sweep pass: load -> filter -> read screens -> evaluate -> batch the
@@ -229,7 +269,10 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter) {
     let mut manifests: BTreeMap<String, Option<Manifest>> = BTreeMap::new();
     let mut sessions: BTreeMap<String, Option<BTreeMap<u64, Option<String>>>> = BTreeMap::new();
 
-    let mut changes: Vec<(String, Option<ScreenStateReport>, Option<String>)> = Vec::new();
+    // (name, expected-mux-ref, verdict). The ref is re-verified under the
+    // lock so a row removed+recreated (or re-homed to a new pane) with the
+    // same name since the snapshot never gets the old pane's verdict (codex P2).
+    let mut changes: Vec<(String, (String, u64), Option<ScreenStateReport>)> = Vec::new();
     for t in &targets {
         let manifest = manifests.entry(t.provider.clone()).or_insert_with(|| {
             match load_manifest(&t.provider, Some(&override_dir)) {
@@ -287,36 +330,31 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                 )
             }
         };
+        let expect_ref = (t.session.clone(), t.pane_id);
         match decision {
             Decision::Hold => {}
-            Decision::Clear => changes.push((t.name.clone(), None, None)),
-            Decision::Write(rep) => {
-                let rule = Some(rep.rule.clone());
-                changes.push((t.name.clone(), Some(rep), rule));
-            }
+            Decision::Clear => changes.push((t.name.clone(), expect_ref, None)),
+            Decision::Write(rep) => changes.push((t.name.clone(), expect_ref, Some(rep))),
         }
     }
     if changes.is_empty() {
         return;
     }
     let write = state::update_registry(&home.registry_json(), |r| {
-        for (name, rep, _) in &changes {
+        for (name, expect_ref, rep) in &changes {
             if let Some(e) = r.find_mut(name) {
-                // Re-check under the lock: a capability flip since our
-                // snapshot wins - the hook is senior, a racing scrape verdict
-                // must not shadow it.
-                if e.inside_leg.is_some() {
-                    e.screen_state = None;
-                    continue;
+                match write_disposition(e, expect_ref) {
+                    WriteDisposition::HookFlip => e.screen_state = None,
+                    WriteDisposition::Apply => e.screen_state = rep.clone(),
+                    WriteDisposition::Skip => {}
                 }
-                e.screen_state = rep.clone();
             }
         }
     });
     if write.is_err() {
         return; // nothing published; next sweep retries
     }
-    for (name, rep, _) in &changes {
+    for (name, _, rep) in &changes {
         let _ = emitter.emit(
             "screen_state_change",
             &json!({
@@ -488,20 +526,79 @@ mod tests {
         reg.entries.push(hooked);
         // Not mux-hosted: nothing to read.
         reg.entries.push(entry("worker", "codex"));
-        // Terminal: pane-exit fact beats any badge.
-        let mut dead = entry("dead", "codex");
-        dead.mux = Some(state::MuxRef {
-            session: "main".into(),
-            pane_id: 9,
-        });
-        dead.status = AgentStatus::Exited;
-        reg.entries.push(dead);
+        // Non-live statuses are excluded: Exited/PermanentDead (pane-exit
+        // fact) and Orphaned/Failed (backend not live - codex P2).
+        for (i, status) in [
+            AgentStatus::Exited,
+            AgentStatus::PermanentDead,
+            AgentStatus::Orphaned,
+            AgentStatus::Failed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut dead = entry(&format!("dead{i}"), "codex");
+            dead.mux = Some(state::MuxRef {
+                session: "main".into(),
+                pane_id: 90 + i as u64,
+            });
+            dead.status = status;
+            reg.entries.push(dead);
+        }
 
         let targets = scrape_targets(&reg);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].name, "scrapeme");
         assert_eq!(targets[0].session, "main");
         assert_eq!(targets[0].pane_id, 7);
+    }
+
+    #[test]
+    fn write_disposition_rechecks_hook_flip_and_mux_ref() {
+        // The locked-write re-checks against the row's CURRENT state, not the
+        // snapshot the sweep read.
+        let scraped = ("main".to_string(), 7u64);
+
+        // Row still on the scraped pane -> Apply.
+        let mut row = entry("r", "codex");
+        row.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 7,
+        });
+        assert_eq!(write_disposition(&row, &scraped), WriteDisposition::Apply);
+
+        // A capability flip landed since the snapshot -> HookFlip (clear).
+        row.inside_leg = Some(state::InsideLegReport {
+            state: state::InsideLegState::Working,
+            seq: 1,
+            reason: None,
+            received_at: NOW_STAMP.into(),
+            ttl_ms: None,
+        });
+        assert_eq!(
+            write_disposition(&row, &scraped),
+            WriteDisposition::HookFlip
+        );
+
+        // Row re-homed to a new pane since the snapshot -> Skip (codex P2:
+        // never stamp the old pane's verdict onto the new pane).
+        let mut rehomed = entry("r", "codex");
+        rehomed.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 8,
+        });
+        assert_eq!(
+            write_disposition(&rehomed, &scraped),
+            WriteDisposition::Skip
+        );
+
+        // Row lost its mux ref entirely -> Skip (not this pane anymore).
+        let mut unhosted = entry("r", "codex");
+        unhosted.mux = None;
+        assert_eq!(
+            write_disposition(&unhosted, &scraped),
+            WriteDisposition::Skip
+        );
     }
 
     // -- decide: write-on-change ------------------------------------------
