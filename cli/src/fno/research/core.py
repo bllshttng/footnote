@@ -31,6 +31,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
+
+from fno import _subprocess_util
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -384,7 +386,7 @@ def read_sources(path: Path) -> list[Source]:
 def _run_claim(args: list[str]) -> tuple[int, str]:
     try:
         proc = subprocess.run(
-            ["fno-py", "claim", *args], capture_output=True, text=True, check=False, timeout=10
+            [*_subprocess_util.fno_py_cmd(), "claim", *args], capture_output=True, text=True, check=False, timeout=10
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         # Missing binary OR a hung/contended lock: degrade to the single-process

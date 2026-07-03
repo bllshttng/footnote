@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from fno import _subprocess_util
 from fno.provenance.resolver import resolve_transcript
 
 _LOG = logging.getLogger(__name__)
@@ -608,7 +609,7 @@ def _spawn_think_worker(
     # x-2c27: a conversational /think handoff is a DETACHED thread, so route it
     # to the `claude --bg` substrate explicitly (the x-3ab8 default `pane` would
     # land an owned-PTY pane that stalls a fire-and-forget dispatch).
-    cmd = ["fno-py", "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
+    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:

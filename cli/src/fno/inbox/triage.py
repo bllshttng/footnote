@@ -23,6 +23,7 @@ from typing import Literal, Optional
 
 import yaml
 
+from fno import _subprocess_util
 from fno.inbox.store import (
     ThreadHandle,
     _git_root,
@@ -138,7 +139,7 @@ def _build_prompt(handle: ThreadHandle, receiver: str, cwd: Path) -> str:
     backlog_failure_reason = ""
     try:
         result = subprocess.run(
-            ["fno-py", "backlog", "ready", "--project", receiver, "--json"],
+            [*_subprocess_util.fno_py_cmd(), "backlog", "ready", "--project", receiver, "--json"],
             capture_output=True,
             text=True,
             timeout=5,
