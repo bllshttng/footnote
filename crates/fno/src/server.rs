@@ -1506,10 +1506,13 @@ impl Core {
                 None => self.notice(client_id, "pane not found"),
             },
             SearchOp::Clear => match self.panes.get_mut(&pane) {
-                Some(e) => {
+                Some(e) if e.vt.has_search() => {
                     e.vt.search_clear();
                     self.broadcast_pane(pane);
                 }
+                // Honor the documented no-op: clearing with nothing active is a
+                // notice, not a stray broadcast (matches the Step arm).
+                Some(_) => self.notice(client_id, "no active search"),
                 None => self.notice(client_id, "pane not found"),
             },
         }

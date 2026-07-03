@@ -999,7 +999,7 @@ const KEY_TABLE: &[&str] = &[
     "  [ ]  jump block       v  select block   ",
     "  y  copy selection     r  rerun block    ",
     "  g  grab work (dispatch next ready)     ",
-    "  /  search scrollback  n/N  next/prev   ",
+    "  /  search scrollback  n/N older/newer  ",
     "  d  detach             C-b C-b  literal  ",
     " any key dismisses                        ",
 ];
@@ -1383,13 +1383,18 @@ async fn attach_and_run(
                     });
                 }
                 Ok(ServerMsg::SearchResult {
-                    total, current, ..
+                    pane_id,
+                    total,
+                    current,
                 }) => {
                     // Land the counter on the active search line. A lost reply
                     // never wedges the client (Esc exits locally); a reply for a
                     // search we already closed is simply dropped. Total 0 = no
                     // matches: a BEL makes the empty result audible (AC1-ERR).
-                    if let Some(sv) = view.search.as_mut() {
+                    // Filter on pane_id: after Esc-then-new-search-on-another-
+                    // pane, the superseded pane's late reply must not paint its
+                    // counter (or a spurious zero-match BEL) onto the new search.
+                    if let Some(sv) = view.search.as_mut().filter(|sv| sv.pane == pane_id) {
                         sv.result = Some((total, current));
                         // BEL only while the search is still open: a late
                         // zero-result reply arriving after a local Esc must not
