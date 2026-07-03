@@ -220,6 +220,84 @@ fn parse_bool(rest: &str) -> Option<bool> {
     }
 }
 
+/// `config.mux.notify_on_blocked` (default ON): the daemon fires an OS
+/// notification when a badge ENTERS `blocked` (x-dd84). Same file precedence
+/// and hang-safe degrade as [`dead_row_grace_secs`].
+pub fn notify_on_blocked_enabled(cwd: &Path) -> bool {
+    mux_bool(cwd, "notify_on_blocked", true)
+}
+
+/// `config.mux.notify_on_done` (default OFF): also notify on a terminal `done`
+/// hook transition (the scrape path has no `done`, so this only affects the
+/// inside-leg hook).
+pub fn notify_on_done_enabled(cwd: &Path) -> bool {
+    mux_bool(cwd, "notify_on_done", false)
+}
+
+/// Resolve a `config: > mux: > <key>` boolean, mirroring [`dead_row_grace_secs`]'s
+/// candidate precedence (`$FNO_CONFIG` sole-when-set > project-local > global)
+/// and degrading to `default` when no candidate carries the key.
+fn mux_bool(cwd: &Path, key: &str, default: bool) -> bool {
+    if let Some(explicit) = non_empty_env("FNO_CONFIG") {
+        return read_mux_file(Path::new(&explicit), key).unwrap_or(default);
+    }
+    if let Some(v) = read_mux_file(&cwd.join(".fno/settings.yaml"), key) {
+        return v;
+    }
+    let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/settings.yaml")));
+    if let Some(g) = global {
+        if let Some(v) = read_mux_file(&g, key) {
+            return v;
+        }
+    }
+    default
+}
+
+fn read_mux_file(path: &Path, key: &str) -> Option<bool> {
+    let content = std::fs::read_to_string(path).ok()?;
+    read_mux_bool(&content, key)
+}
+
+/// Scan a settings.yaml body for `config: > mux: > <key>:` (a direct child of
+/// `mux:`, like `dead_row_grace` under `agents:`). Indent-unit-agnostic. `None`
+/// when absent or non-boolean so the caller falls through to the default.
+pub(crate) fn read_mux_bool(content: &str, key: &str) -> Option<bool> {
+    let unit = content
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|l| l.len() - l.trim_start().len())
+        .find(|&i| i > 0)
+        .unwrap_or(2);
+    let level = |line: &str| -> usize { (line.len() - line.trim_start().len()) / unit };
+
+    let mut in_config = false;
+    let mut in_mux = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        match level(line) {
+            0 => {
+                in_config = trimmed.starts_with("config:");
+                in_mux = false;
+            }
+            1 if in_config => {
+                in_mux = trimmed.starts_with("mux:");
+            }
+            2 if in_mux => {
+                if let Some(rest) = trimmed.strip_prefix(key).and_then(|r| r.strip_prefix(':')) {
+                    return parse_bool(rest);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +367,38 @@ mod tests {
         // A headless_yolo: under some other block must not match.
         let yaml = "config:\n  target:\n    headless_yolo: false\n";
         assert_eq!(read_headless_yolo(yaml, "gemini"), None);
+    }
+
+    #[test]
+    fn mux_bool_reads_mux_child_key() {
+        let yaml = "config:\n  mux:\n    notify_on_blocked: false\n    notify_on_done: true\n";
+        assert_eq!(read_mux_bool(yaml, "notify_on_blocked"), Some(false));
+        assert_eq!(read_mux_bool(yaml, "notify_on_done"), Some(true));
+    }
+
+    #[test]
+    fn mux_bool_absent_is_none() {
+        assert_eq!(read_mux_bool("config:\n  agents:\n    confirm: auto\n", "notify_on_blocked"), None);
+        assert_eq!(read_mux_bool("schema_version: 1\n", "notify_on_done"), None);
+    }
+
+    #[test]
+    fn mux_bool_ignores_nested_and_bad_values() {
+        // A key one level too deep must NOT be read as the mux-child.
+        let nested = "config:\n  mux:\n    pane:\n      notify_on_blocked: false\n";
+        assert_eq!(read_mux_bool(nested, "notify_on_blocked"), None);
+        // Non-boolean value -> None (falls through to the compiled default).
+        let bad = "config:\n  mux:\n    notify_on_blocked: banana\n";
+        assert_eq!(read_mux_bool(bad, "notify_on_blocked"), None);
+        // A prefix key must not match without the ':' boundary.
+        let prefix = "config:\n  mux:\n    notify_on_blocked_extra: true\n";
+        assert_eq!(read_mux_bool(prefix, "notify_on_blocked"), None);
+    }
+
+    #[test]
+    fn mux_bool_handles_four_space_indent() {
+        let yaml = "config:\n    mux:\n        notify_on_done: on\n";
+        assert_eq!(read_mux_bool(yaml, "notify_on_done"), Some(true));
     }
 
     #[test]
