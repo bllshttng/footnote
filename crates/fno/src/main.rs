@@ -230,7 +230,7 @@ fn main() {
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
                  | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
                  | fno mux pane ls|read|run|send|wait|kill|claim|release ... \
-                 | fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--force]"
+                 | fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json] [--force]"
             );
             std::process::exit(2);
         }
