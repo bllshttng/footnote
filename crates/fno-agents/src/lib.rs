@@ -79,8 +79,10 @@ pub mod screen;
 pub mod state;
 pub mod stream_worker;
 pub mod subprocess_ask;
+pub mod subscribe;
 pub mod supervisor;
 pub mod verify_evidence;
+pub mod wait;
 pub mod write_queue;
 
 use serde::{Deserialize, Serialize};

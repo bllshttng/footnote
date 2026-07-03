@@ -125,6 +125,14 @@ RUST_CLIENT_VERBS = frozenset(
         # build_request (no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
         "report",
+        # Agent-state wait + event subscription (mux roadmap wave 2).
+        # Both dispatch DIRECTLY in client.rs before build_request (no daemon
+        # RPC): `wait` polls registry.json until a row reaches idle|blocked|done;
+        # `subscribe` follows the daemon's events.jsonl and streams state
+        # transitions + pane exits as NDJSON. These entries keep the
+        # client.rs<->router parity test in sync and provide the help lines.
+        "wait",
+        "subscribe",
     }
 )
 
@@ -226,6 +234,8 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno phase kill-check`.",
     "verify-evidence": "Verify subagent/child-promise event evidence (folded from verify-event-evidence.sh); usually via `fno event verify-evidence`.",
     "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",
+    "wait": "Block until an agent's registry row reaches idle|blocked|done: --agent <name> --state <s> [--timeout-ms N] [--json].",
+    "subscribe": "Stream registry state transitions + pane exits as NDJSON (follows events.jsonl): [--agent <name>] [--kinds state,exit] [--json].",
 }
 
 #: Verbs retired at G4 (x-f54c): the grid, the WebSocket ``drive`` surface, and

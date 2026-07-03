@@ -190,6 +190,18 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "report" {
         return fno_agents::client_verbs::run_report(&args[1..], &AgentsHome::from_env()).await;
     }
+    // `wait`: block until an agent's registry row reaches a state. Reads
+    // `registry.json` directly and polls (no daemon RPC), so it needs no running
+    // daemon and dispatches here before build_request.
+    if verb == "wait" {
+        return fno_agents::wait::run_wait(&args[1..], &AgentsHome::from_env()).await;
+    }
+    // `subscribe`: follow the daemon's own `events.jsonl` and stream registry
+    // state transitions + pane exits as NDJSON. File-follow, no daemon RPC, so it
+    // dispatches here before build_request.
+    if verb == "subscribe" {
+        return fno_agents::subscribe::run_subscribe(&args[1..], &AgentsHome::from_env()).await;
+    }
 
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to
     // describe it as up. A down daemon is exit 13 (AC10-ERR).
@@ -1864,6 +1876,8 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "logs <name> [--follow] [options]",
     "loop run --driver target|megawalk [options]",
     "report --session-id <uuid> --seq <n> --state working|blocked|done [--reason <text>] [--ttl-ms <n>]",
+    "wait --agent <name> --state idle|blocked|done [--timeout-ms <n>] [--json]",
+    "subscribe [--agent <name>] [--kinds state,exit] [--json]",
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`
@@ -1992,6 +2006,8 @@ mod tests {
             "loop",
             "finalize",
             "report",
+            "wait",
+            "subscribe",
         ];
         let listed: std::collections::HashSet<&str> = CLIENT_VERB_USAGE
             .iter()
