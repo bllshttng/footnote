@@ -156,7 +156,10 @@ pub fn available_tool() -> Option<&'static str> {
 /// [`available_tool`] with the PATH predicate injected, so the preference-order
 /// and none-present branches are testable without depending on the host's tools.
 fn available_tool_with(on_path: impl Fn(&str) -> bool) -> Option<&'static str> {
-    TOOLS.iter().map(|(name, _)| *name).find(|name| on_path(name))
+    TOOLS
+        .iter()
+        .map(|(name, _)| *name)
+        .find(|name| on_path(name))
 }
 
 /// Is `name` a regular file in some `PATH` directory? Pure filesystem lookup, no
