@@ -27,10 +27,13 @@ if _cli_src.is_dir() and str(_cli_src) not in sys.path:
 
 
 def _abi_on_path() -> bool:
+    # Check for `fno-py` (the Python CLI console script), matching what `_forward`
+    # actually calls - the mux binary owns `fno`, and `fno-py` is what runs the
+    # `backlog triage` verb.
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         if not entry:
             continue
-        candidate = Path(entry) / "fno"
+        candidate = Path(entry) / "fno-py"
         try:
             if candidate.is_file() and os.access(candidate, os.X_OK):
                 return True

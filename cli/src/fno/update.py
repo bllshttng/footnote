@@ -304,6 +304,16 @@ def _cargo_installed_bin() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
+def _cargo_installed_mux() -> Optional[Path]:
+    """Return the path to the cargo-installed mux front-door binary (`fno`), or
+    None if absent. Same `$CARGO_HOME/bin` location as the fno-agents bins - the
+    front door this channel installs. `fno doctor` reuses this via `update`."""
+    cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+    name = "fno.exe" if os.name == "nt" else "fno"
+    candidate = cargo_home / "bin" / name
+    return candidate if candidate.is_file() else None
+
+
 def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) -> None:
     """Best-effort: install the crates/fno mux binary (`fno` on PATH - the front
     door) alongside the fno-agents bins, into the same --root.
@@ -383,6 +393,15 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     marker = _read_rust_marker()
     if not force and marker is not None and marker == subtree:
         typer.echo(f"fno update: rust bins fresh (rev {subtree[:12]}); skipping cargo install")
+        # The agents bins are current, but the mux front door (crates/fno ->
+        # `fno`) can still be ABSENT at a fresh marker: the fno->fno-py rename
+        # lands fno-py while a fresh-marker `fno update` never installed the mux,
+        # stranding the front door (no `fno` on PATH). Heal it additively if
+        # missing, so `fno doctor`'s "run fno update" hint is true rather than a
+        # dead-end. No-op when there is no crates/fno source. installed_bin is
+        # non-None here (passed the `installed_bin is None and not force` gate).
+        if _cargo_installed_mux() is None:
+            _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
         return "fresh"
 
     if shutil.which("cargo") is None:

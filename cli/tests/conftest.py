@@ -9,6 +9,23 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _stable_fno_py_cmd(monkeypatch):
+    """Pin source self-shellouts to a bare ``["fno-py"]`` prefix (x-69b3).
+
+    Source modules resolve the Python CLI via
+    ``_subprocess_util.fno_py_cmd()``, which returns an ABSOLUTE path in most
+    runner envs (the console script on PATH / beside the interpreter). Command
+    assertions across the suite assert the bare ``["fno-py", <verb>, ...]``, so
+    stub the resolver here to keep them stable regardless of how it resolves
+    locally. The resolver's own unit tests bind the real function at import time
+    and are unaffected by this module-attribute patch.
+    """
+    from fno import _subprocess_util
+
+    monkeypatch.setattr(_subprocess_util, "fno_py_cmd", lambda: ["fno-py"])
+
+
 # ---------------------------------------------------------------------------
 # Hermetic state isolation (ab-2f78b48e)
 # ---------------------------------------------------------------------------

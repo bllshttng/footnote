@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from fno import _subprocess_util
 from fno.graph._constants import extract_node_ids
 from fno.paths import resolve_canonical_worktree
 from fno.inbox.store import (
@@ -293,7 +294,7 @@ def _create_graph_node_from_plan(repo_root: Path, h: ThreadHandle, plan) -> str:
     msg-id keep working while new queries can resolve back to the full thread.
     """
     args = [
-        "fno-py", "new",
+        *_subprocess_util.fno_py_cmd(), "new",
         plan.title,
         "--priority", plan.priority,
         "--source-kind", "from_inbox",
@@ -305,7 +306,7 @@ def _create_graph_node_from_plan(repo_root: Path, h: ThreadHandle, plan) -> str:
     # `fno new --help` is cheap; failing the probe only loses provenance breadth.
     try:
         help_out = subprocess.run(
-            ["fno-py", "new", "--help"],
+            [*_subprocess_util.fno_py_cmd(), "new", "--help"],
             capture_output=True, text=True, check=False, cwd=repo_root,
             timeout=5,
         )

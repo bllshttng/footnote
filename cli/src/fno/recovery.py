@@ -52,6 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from fno import _subprocess_util
 from fno.agents.providers.claude import ProviderSocketError
 
 # The error the real send seam raises; aliased so callers/tests have one name.
@@ -477,7 +478,7 @@ def _release_lane_slot(node: str, cwd: str) -> None:
     log = logging.getLogger(__name__)
     try:
         rel = subprocess.run(
-            ["fno-py", "claim", "lane-release", "--lane-id", node],
+            [*_subprocess_util.fno_py_cmd(), "claim", "lane-release", "--lane-id", node],
             cwd=cwd, capture_output=True, timeout=30, check=False,
         )
         if rel.returncode != 0:
@@ -529,7 +530,7 @@ def _redispatch(candidate: "Candidate") -> bool:
         if name:
             # Kill the rate-limited worker. This does NOT free its node claim.
             stopped = subprocess.run(
-                ["fno-py", "agents", "stop", name],
+                [*_subprocess_util.fno_py_cmd(), "agents", "stop", name],
                 cwd=cwd, capture_output=True, timeout=30, check=False,
             )
             if stopped.returncode != 0:
@@ -542,7 +543,7 @@ def _redispatch(candidate: "Candidate") -> bool:
         # force-release is idempotent (a claim already self-released by a late
         # worker is success), so this also covers the stop/self-release race.
         rel = subprocess.run(
-            ["fno-py", "claim", "force-release", f"node:{node}",
+            [*_subprocess_util.fno_py_cmd(), "claim", "force-release", f"node:{node}",
              "-R", f"failover respawn {candidate.short_id}"],
             cwd=cwd, capture_output=True, timeout=30, check=False,
         )
@@ -554,7 +555,7 @@ def _redispatch(candidate: "Candidate") -> bool:
         # active in settings.yaml, so the kind is what spawn needs. no-merge: an
         # autonomous worker lands a PR for review, never auto-merges.
         proc = subprocess.run(
-            ["fno-py", "agents", "spawn", "--provider", "claude",
+            [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", "claude",
              "--substrate", "bg", "--cwd", cwd, agent, f"/target no-merge {node}"],
             cwd=cwd, capture_output=True, timeout=60, check=False,
         )
