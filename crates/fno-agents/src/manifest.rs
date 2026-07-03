@@ -29,6 +29,7 @@
 
 use crate::readiness::ScreenView;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Max nesting depth for a [`Gate`] tree. A pathological manifest (deeply nested
@@ -286,11 +287,133 @@ impl Gate {
     }
 }
 
+/// How a chosen option's captured index becomes PTY bytes. The entire v1
+/// vocabulary (Locked 4): numbered permission prompts, no arrow-navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendMapping {
+    /// Send the captured `idx` as one ASCII byte.
+    Digit,
+    /// Send the captured `idx` then CR.
+    DigitEnter,
+}
+
+/// The optional `[rule.answer]` grammar on a `blocked` rule: how to enumerate a
+/// numbered prompt's options and how a picked option becomes a keystroke. Its
+/// presence is what makes a blocked prompt *answerable* (its absence means
+/// blocked-but-not-answerable, which the queue shows as focus-only).
+#[derive(Debug, Clone)]
+struct AnswerGrammar {
+    /// One option per line the regex matches; must name `idx` + `label` captures.
+    option: Regex,
+    send: SendMapping,
+}
+
+/// One selectable option of an answerable prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerOption {
+    /// The captured menu index the operator presses, e.g. "1".
+    pub idx: String,
+    /// The display label (untruncated; the client truncates for width).
+    pub label: String,
+    /// The exact PTY bytes to inject for this pick, pinned by the manifest's
+    /// `send` mapping over `idx` - NEVER a runtime guess (Locked 2).
+    pub keystroke: Vec<u8>,
+}
+
+/// A blocked prompt the operator can answer from the queue without focusing the
+/// pane. Produced by [`ManifestRule::extract_answer`] and carried on the badge
+/// to the sideline; the mux server re-verifies `fingerprint` against its live
+/// grid before injecting a chosen option's `keystroke` (Locked 3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerablePrompt {
+    /// The lines above the first option, display-only.
+    pub prompt: String,
+    pub options: Vec<AnswerOption>,
+    /// blake3 of the region text the human reads - the server's freshness key.
+    pub fingerprint: [u8; 32],
+    /// The N of `bottom_non_empty_lines(N)`, so the server re-reads the same
+    /// region window to re-hash.
+    pub region_lines: usize,
+}
+
+impl AnswerGrammar {
+    /// Parse a `[rule.answer]` table. Fails loud (like every manifest field): an
+    /// answer grammar is meaningful ONLY on a `state = "blocked"` rule whose
+    /// region is a `bottom_non_empty_lines(N)` window (so the server can re-read
+    /// the same lines to re-hash). Either mismatch is a config bug, never ignored.
+    fn parse(
+        v: &toml::Value,
+        rule: &str,
+        state: &str,
+        region: &Region,
+    ) -> Result<AnswerGrammar, ManifestError> {
+        if state != "blocked" {
+            return Err(ManifestError::Field {
+                rule: rule.to_string(),
+                field: "answer (only allowed on a state = \"blocked\" rule)".to_string(),
+            });
+        }
+        if !matches!(region, Region::BottomNonEmptyLines(_)) {
+            return Err(ManifestError::Field {
+                rule: rule.to_string(),
+                field: "answer (region must be bottom_non_empty_lines(N))".to_string(),
+            });
+        }
+        let table = v.as_table().ok_or_else(|| ManifestError::Field {
+            rule: rule.to_string(),
+            field: "answer (must be a table)".to_string(),
+        })?;
+        const ALLOWED: &[&str] = &["option", "send"];
+        if let Some(unknown) = table.keys().find(|k| !ALLOWED.contains(&k.as_str())) {
+            return Err(ManifestError::Field {
+                rule: rule.to_string(),
+                field: format!("answer unknown key '{unknown}'"),
+            });
+        }
+        let option_pat = table
+            .get("option")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| ManifestError::Field {
+                rule: rule.to_string(),
+                field: "answer.option".to_string(),
+            })?;
+        let option = Regex::new(option_pat).map_err(|e| ManifestError::BadRegex {
+            rule: rule.to_string(),
+            pattern: option_pat.to_string(),
+            detail: e.to_string(),
+        })?;
+        // extract_answer reads the captures by name, so both must exist - a
+        // missing `idx`/`label` group is a parse-time config error, not a
+        // runtime None that would silently make every blocked prompt focus-only.
+        let names: Vec<&str> = option.capture_names().flatten().collect();
+        for need in ["idx", "label"] {
+            if !names.contains(&need) {
+                return Err(ManifestError::Field {
+                    rule: rule.to_string(),
+                    field: format!("answer.option (missing named capture '{need}')"),
+                });
+            }
+        }
+        let send = match table.get("send").and_then(|x| x.as_str()) {
+            Some("digit") => SendMapping::Digit,
+            Some("digit_enter") => SendMapping::DigitEnter,
+            _ => {
+                return Err(ManifestError::Field {
+                    rule: rule.to_string(),
+                    field: "answer.send (must be \"digit\" or \"digit_enter\")".to_string(),
+                })
+            }
+        };
+        Ok(AnswerGrammar { option, send })
+    }
+}
+
 /// One detection rule: when `gate` matches `region`'s text, the agent is in
 /// `state`. `priority` arbitrates between simultaneously-matching rules (highest
 /// wins). `skip_state_update` marks a rule whose match means "hold the current
 /// state, don't update it" - e.g. claude's ctrl+o transcript pager, which must
-/// not flip a working agent to idle.
+/// not flip a working agent to idle. `answer` (x-c929) is the optional grammar
+/// that makes a `blocked` prompt answerable from the queue.
 #[derive(Debug, Clone)]
 pub struct ManifestRule {
     pub id: String,
@@ -299,6 +422,75 @@ pub struct ManifestRule {
     pub region: Region,
     pub skip_state_update: bool,
     pub gate: Gate,
+    answer: Option<AnswerGrammar>,
+}
+
+impl ManifestRule {
+    /// Enumerate this rule's answerable options from `region_text`, fail-closed.
+    /// Returns `None` (blocked-but-not-answerable) unless the rule carries an
+    /// `[answer]` grammar AND the region yields a clean numbered menu: >=1
+    /// option, non-empty labels, and single-digit indices forming a contiguous
+    /// `1..N` run. A lowest index != 1 means the menu top scrolled past the
+    /// region window (truncated) and is not answerable (AC3-EDGE). Strictly
+    /// additive to detection: any miss leaves the blocked badge untouched.
+    pub fn extract_answer(&self, region_text: &str) -> Option<AnswerablePrompt> {
+        let grammar = self.answer.as_ref()?;
+        // Parse enforces a bottom-N region on any answer grammar; be defensive.
+        let Region::BottomNonEmptyLines(n) = self.region else {
+            return None;
+        };
+        let mut options: Vec<AnswerOption> = Vec::new();
+        let mut first_option_line: Option<usize> = None;
+        for (i, line) in region_text.lines().enumerate() {
+            let Some(caps) = grammar.option.captures(line) else {
+                continue;
+            };
+            let idx = caps.name("idx")?.as_str().to_string();
+            let label = caps.name("label")?.as_str().trim().to_string();
+            // One ASCII digit only (send maps one digit to one byte); a 2-digit
+            // or non-digit index, or an empty label, is not answerable in v1.
+            if idx.len() != 1 || !idx.as_bytes()[0].is_ascii_digit() || label.is_empty() {
+                return None;
+            }
+            if first_option_line.is_none() {
+                first_option_line = Some(i);
+            }
+            let mut keystroke = vec![idx.as_bytes()[0]];
+            if matches!(grammar.send, SendMapping::DigitEnter) {
+                keystroke.push(b'\r');
+            }
+            options.push(AnswerOption {
+                idx,
+                label,
+                keystroke,
+            });
+        }
+        if options.is_empty() {
+            return None;
+        }
+        // The indices must be exactly {1, 2, ..., N}: unique, contiguous, and
+        // starting at 1. This one check rejects duplicates (AC3-ERR), gaps, and
+        // a truncated menu whose first captured option is `2.`/`3.` (AC3-EDGE).
+        let mut idxs: Vec<u8> = options.iter().map(|o| o.idx.as_bytes()[0] - b'0').collect();
+        idxs.sort_unstable();
+        let expected: Vec<u8> = (1..=options.len() as u8).collect();
+        if idxs != expected {
+            return None;
+        }
+        let first = first_option_line.unwrap_or(0);
+        let prompt = region_text
+            .lines()
+            .take(first)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fingerprint = *blake3::hash(region_text.as_bytes()).as_bytes();
+        Some(AnswerablePrompt {
+            prompt,
+            options,
+            fingerprint,
+            region_lines: n,
+        })
+    }
 }
 
 impl ManifestRule {
@@ -357,6 +549,12 @@ impl ManifestRule {
             field: "gate".to_string(),
         })?;
         let gate = Gate::parse(gate_val, &id, 0)?;
+        // Optional `[rule.answer]` (x-c929): parsed here so its blocked-only /
+        // bottom-N-region constraints fail loud alongside every other field.
+        let answer = match v.get("answer") {
+            None => None,
+            Some(a) => Some(AnswerGrammar::parse(a, &id, &state, &region)?),
+        };
         // Reject unknown keys: a typo like `skip_state_updates = true` would
         // otherwise parse fine and silently drop the real flag, changing
         // arbitration. Fail closed instead (matches the gate's one-key rule).
@@ -368,6 +566,7 @@ impl ManifestRule {
                 "region",
                 "skip_state_update",
                 "gate",
+                "answer",
             ];
             if let Some(unknown) = table.keys().find(|k| !ALLOWED.contains(&k.as_str())) {
                 return Err(ManifestError::Field {
@@ -383,6 +582,7 @@ impl ManifestRule {
             region,
             skip_state_update,
             gate,
+            answer,
         })
     }
 }
@@ -482,6 +682,32 @@ impl Manifest {
                 state: &rule.state,
                 skip_state_update: rule.skip_state_update,
             })
+        })
+    }
+
+    /// Like [`evaluate`](Self::evaluate) but also returns the winning rule's
+    /// [`AnswerablePrompt`] when it carries an `[answer]` grammar and the region
+    /// yields a clean menu (`None` otherwise - blocked-but-not-answerable). The
+    /// scrape sweep uses this so the answer payload rides the same badge; the
+    /// cheap `evaluate` stays for callers that only need the state.
+    pub fn evaluate_answerable(
+        &self,
+        screen: &ScreenView,
+    ) -> Option<(Verdict<'_>, Option<AnswerablePrompt>)> {
+        self.rules.iter().find_map(|rule| {
+            let text = rule.region.extract(screen);
+            if !rule.gate.matches(&text) {
+                return None;
+            }
+            let answerable = rule.extract_answer(&text);
+            Some((
+                Verdict {
+                    rule_id: &rule.id,
+                    state: &rule.state,
+                    skip_state_update: rule.skip_state_update,
+                },
+                answerable,
+            ))
         })
     }
 }
@@ -1352,5 +1578,216 @@ mod tests {
             crate::provider::for_name("agy").is_some(),
             "agy IS hostable (AgyProvider) -> manifest can fire",
         );
+    }
+
+    // ---- x-c929: answer grammar + fail-closed extractor ----
+
+    fn blocked_answer_manifest() -> Manifest {
+        Manifest::parse(
+            r#"
+            [[rule]]
+            id = "perm"
+            state = "blocked"
+            priority = 900
+            region = "bottom_non_empty_lines(8)"
+            gate = { contains = "proceed?" }
+            [rule.answer]
+            option = '^\s*\x{276f}?\s*(?P<idx>[0-9])\.\s+(?P<label>.+?)\s*$'
+            send = "digit"
+            "#,
+        )
+        .unwrap()
+    }
+
+    // AC3-HP: a clean numbered menu yields one option per line with pinned digit
+    // keystrokes, a display-only prompt, region_lines, and a blake3 fingerprint
+    // over the exact region text the server will re-read.
+    #[test]
+    fn xc929_extract_answer_clean_numbered_menu() {
+        let m = blocked_answer_manifest();
+        // No blank lines, so the bottom_non_empty_lines(8) region == the screen.
+        let screen = "Do you want to proceed?\n  ❯ 1. Yes\n  2. No";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_eq!(v.state, "blocked");
+        let ans = ans.expect("a clean numbered menu is answerable");
+        assert_eq!(ans.options.len(), 2);
+        assert_eq!(ans.options[0].idx, "1");
+        assert_eq!(ans.options[0].label, "Yes");
+        assert_eq!(ans.options[0].keystroke, b"1");
+        assert_eq!(ans.options[1].idx, "2");
+        assert_eq!(ans.options[1].label, "No");
+        assert_eq!(ans.options[1].keystroke, b"2");
+        assert_eq!(ans.region_lines, 8);
+        assert_eq!(ans.prompt, "Do you want to proceed?");
+        // Fingerprint is blake3 over the region join (the server re-hashes this).
+        assert_eq!(ans.fingerprint, *blake3::hash(screen.as_bytes()).as_bytes());
+    }
+
+    // AC3-ERR: duplicated indices are not a clean 1..N run -> None (fail closed).
+    #[test]
+    fn xc929_extract_answer_rejects_duplicate_indices() {
+        let m = blocked_answer_manifest();
+        let screen = "proceed?\n1. Yes\n1. No";
+        let (_, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert!(ans.is_none(), "duplicate index -> not answerable");
+    }
+
+    // AC3-EDGE: a menu whose top scrolled past the region window presents its
+    // first captured option as "2." -> lowest index != 1 -> truncated -> None.
+    #[test]
+    fn xc929_extract_answer_rejects_truncated_menu() {
+        let m = blocked_answer_manifest();
+        let screen = "proceed?\n2. No\n3. Cancel";
+        let (_, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert!(ans.is_none(), "menu not starting at 1 -> truncated -> None");
+    }
+
+    // AC3-FR: extraction is strictly additive - an unextractable blocked prompt
+    // still badges `blocked`; only the answer payload degrades to None.
+    #[test]
+    fn xc929_extraction_failure_is_additive_badge_survives() {
+        let m = blocked_answer_manifest();
+        let screen = "proceed?\nuse arrows to select";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_eq!(
+            v.state, "blocked",
+            "detection unaffected by extraction miss"
+        );
+        assert!(ans.is_none(), "no numbered options -> focus-only");
+    }
+
+    // A long label is kept untruncated (the client truncates for display); the
+    // fingerprint covers the full region text (AC3-UI is a client concern, but
+    // the extractor must not pre-truncate).
+    #[test]
+    fn xc929_extract_answer_keeps_full_label() {
+        let m = blocked_answer_manifest();
+        let long = "No, and tell Claude what to do differently (esc)";
+        let screen = format!("proceed?\n1. Yes\n2. {long}");
+        let (_, ans) = m.evaluate_answerable(&view(&screen)).unwrap();
+        assert_eq!(ans.unwrap().options[1].label, long);
+    }
+
+    // `send = "digit_enter"` appends CR to the pinned keystroke.
+    #[test]
+    fn xc929_send_digit_enter_appends_cr() {
+        let m = Manifest::parse(
+            r#"
+            [[rule]]
+            id = "perm"
+            state = "blocked"
+            priority = 900
+            region = "bottom_non_empty_lines(8)"
+            gate = { contains = "?" }
+            [rule.answer]
+            option = '^\s*(?P<idx>[0-9])\.\s+(?P<label>.+?)\s*$'
+            send = "digit_enter"
+            "#,
+        )
+        .unwrap();
+        let (_, ans) = m.evaluate_answerable(&view("pick?\n1. A\n2. B")).unwrap();
+        assert_eq!(ans.unwrap().options[0].keystroke, b"1\r");
+    }
+
+    // Parse-time fail-loud: an [answer] on a non-blocked rule is a config bug.
+    #[test]
+    fn xc929_answer_on_non_blocked_rule_fails_loud() {
+        let err = Manifest::parse(
+            r#"
+            [[rule]]
+            id = "r"
+            state = "idle"
+            priority = 1
+            region = "bottom_non_empty_lines(8)"
+            gate = { contains = "x" }
+            [rule.answer]
+            option = '(?P<idx>[0-9])\.\s+(?P<label>.+)'
+            send = "digit"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Field { rule, field } if rule == "r" && field.starts_with("answer"))
+        );
+    }
+
+    // Parse-time fail-loud: an [answer] needs a bottom_non_empty_lines(N) region
+    // so the server can re-read the same window.
+    #[test]
+    fn xc929_answer_on_non_bottom_n_region_fails_loud() {
+        let err = Manifest::parse(
+            r#"
+            [[rule]]
+            id = "r"
+            state = "blocked"
+            priority = 1
+            region = "whole_recent"
+            gate = { contains = "x" }
+            [rule.answer]
+            option = '(?P<idx>[0-9])\.\s+(?P<label>.+)'
+            send = "digit"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Field { field, .. } if field.contains("bottom_non_empty_lines"))
+        );
+    }
+
+    // Parse-time fail-loud: the option regex must name both idx and label.
+    #[test]
+    fn xc929_answer_missing_named_capture_fails_loud() {
+        let err = Manifest::parse(
+            r#"
+            [[rule]]
+            id = "r"
+            state = "blocked"
+            priority = 1
+            region = "bottom_non_empty_lines(8)"
+            gate = { contains = "x" }
+            [rule.answer]
+            option = '(?P<idx>[0-9])\.'
+            send = "digit"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ManifestError::Field { field, .. } if field.contains("label")));
+    }
+
+    // Parse-time fail-loud: an unknown send mapping is rejected (not v1 vocab).
+    #[test]
+    fn xc929_answer_bad_send_fails_loud() {
+        let err = Manifest::parse(
+            r#"
+            [[rule]]
+            id = "r"
+            state = "blocked"
+            priority = 1
+            region = "bottom_non_empty_lines(8)"
+            gate = { contains = "x" }
+            [rule.answer]
+            option = '(?P<idx>[0-9])\.\s+(?P<label>.+)'
+            send = "arrows"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Field { field, .. } if field.starts_with("answer.send"))
+        );
+    }
+
+    // Integration: the bundled claude permission_prompt rule is answerable on a
+    // real "Do you want to proceed? / 1. Yes / 2. No" screen.
+    #[test]
+    fn xc929_bundled_claude_permission_prompt_is_answerable() {
+        let m = bundled("claude");
+        let screen =
+            "Do you want to proceed?\n  ❯ 1. Yes\n  2. No, and tell Claude what to do differently";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_eq!(v.rule_id, "permission_prompt");
+        let ans = ans.expect("claude permission prompt is answerable");
+        assert_eq!(ans.options.len(), 2);
+        assert_eq!(ans.options[0].keystroke, b"1");
+        assert_eq!(ans.options[1].idx, "2");
     }
 }
