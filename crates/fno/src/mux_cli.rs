@@ -523,15 +523,7 @@ fn run_picker(rows: Vec<SessionRow>) -> Option<String> {
         for key in pick_keys_from_read(&mut esc, &buf[..n]) {
             action = picker.step(key);
             match &action {
-                PickAction::Attach(_) => {
-                    // Clear the frame before yielding the terminal to the client.
-                    if prev_lines > 0 {
-                        let _ = write!(stdout, "\r\x1b[{prev_lines}A\x1b[J");
-                        let _ = stdout.flush();
-                    }
-                    break;
-                }
-                PickAction::Quit => break,
+                PickAction::Attach(_) | PickAction::Quit => break,
                 PickAction::Bell => {
                     let _ = stdout.write_all(b"\x07");
                     let _ = stdout.flush();
@@ -545,12 +537,11 @@ fn run_picker(rows: Vec<SessionRow>) -> Option<String> {
             _ => redraw(&mut stdout, &picker, &mut prev_lines),
         }
     };
-    if result.is_none() {
-        // Clear the picker frame on quit so nothing lingers above the prompt.
-        if prev_lines > 0 {
-            let _ = write!(stdout, "\r\x1b[{prev_lines}A\x1b[J");
-            let _ = stdout.flush();
-        }
+    // One clear on ANY exit path (attach or quit): nothing lingers above the
+    // prompt on quit, nor above the client's first frame on attach (gemini).
+    if prev_lines > 0 {
+        let _ = write!(stdout, "\r\x1b[{prev_lines}A\x1b[J");
+        let _ = stdout.flush();
     }
     result
 }

@@ -802,10 +802,14 @@ enum DisplayRow<'a> {
 /// boundary so `/home/user2/...` never reads as `~2/...`.
 fn abbrev_home(p: &str) -> String {
     // var_os, not var: HOME is a path, and the idiomatic read for a path env
-    // var avoids assuming UTF-8 up front (gemini). A non-UTF-8 HOME simply
-    // yields None here and the path renders unabbreviated.
-    let home = std::env::var_os("HOME");
-    abbrev_home_in(p, home.as_deref().and_then(|s| s.to_str()))
+    // var avoids assuming UTF-8 up front. A non-UTF-8 HOME yields None and the
+    // path renders unabbreviated. Cached in a OnceLock: this runs on every
+    // frame compose (a hot path during output floods) and HOME is fixed for
+    // the process lifetime, so the env lookup + global env lock happens once
+    // (gemini).
+    static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| std::env::var_os("HOME").and_then(|s| s.into_string().ok()));
+    abbrev_home_in(p, home.as_deref())
 }
 
 fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
