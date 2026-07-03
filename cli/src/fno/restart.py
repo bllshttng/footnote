@@ -48,7 +48,7 @@ def restart_command(
         help="Also restart live mux servers (DESTRUCTIVE: ends their shells/panes).",
     ),
     json_out: bool = typer.Option(
-        False, "--json", help="Emit a single JSON summary on stdout; text to stderr."
+        False, "--json", "-J", help="Emit a single JSON summary on stdout; text to stderr."
     ),
 ) -> None:
     """Restart running fno processes onto freshly-installed binaries.
