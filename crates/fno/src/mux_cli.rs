@@ -1666,17 +1666,22 @@ fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
     })
 }
 
-/// The receive-side idle guard (x-fe8f, same fail-closed discipline as the
-/// block-rerun guard): never inject into a working agent's composer. Decides
-/// from the registry rows [`derive_rows`] folded (in-TTL hook > fresh screen >
-/// liveness), scoped to THIS mux session - pane ids collide across sessions.
+/// The receive-side idle guard (x-fe8f): never inject into a working agent's
+/// composer. Same cell-for-cell policy as the server's block-rerun guard
+/// (`rerun_allowed`), decided client-side from the registry rows
+/// [`derive_rows`] folds (in-TTL hook > fresh screen > liveness), scoped to
+/// THIS mux session - pane ids collide across sessions.
 ///
 /// - `rows: None` (malformed registry) -> refuse: the target's state is
 ///   unknown and the default fails closed.
 /// - no row for (session, pane) -> proceed: a plain shell pane is not an
 ///   agent; the guard protects agents' composers, not shells.
 /// - exited row -> proceed: the agent is gone, there is no composer left.
-/// - any live badge (working/blocked/done) -> refuse with a typed reason.
+/// - `Done` badge -> proceed: a finished agent sitting at its composer is a
+///   valid pipe target (the point of the verb).
+/// - `Working`/`Blocked` badge -> refuse (busy).
+/// - no live badge on an agent row (liveness-only) -> refuse: not provably
+///   idle, and false-ready is the forbidden direction.
 fn pipe_guard(rows: Option<&[RegistryAgent]>, session: &str, pane: u64) -> Result<(), String> {
     let Some(rows) = rows else {
         return Err("agents registry unreadable - target agent state unknown".to_string());
@@ -1691,20 +1696,47 @@ fn pipe_guard(rows: Option<&[RegistryAgent]>, session: &str, pane: u64) -> Resul
     if row.exited {
         return Ok(());
     }
-    if let Some(badge) = row.badge {
-        let state = match badge {
-            AgentBadge::Working => "working",
-            AgentBadge::Blocked => "blocked",
-            AgentBadge::Done => "done",
-        };
-        let hint = row
-            .reason
-            .as_deref()
-            .map(|r| format!(": {r}"))
-            .unwrap_or_default();
-        return Err(format!(
-            "target pane {pane} not idle (agent {name:?} {state}{hint})",
+    match row.badge {
+        Some(AgentBadge::Done) => Ok(()),
+        Some(badge @ (AgentBadge::Working | AgentBadge::Blocked)) => {
+            let state = if badge == AgentBadge::Working {
+                "working"
+            } else {
+                "blocked"
+            };
+            let hint = row
+                .reason
+                .as_deref()
+                .map(|r| format!(": {r}"))
+                .unwrap_or_default();
+            Err(format!(
+                "target pane {pane} busy (agent {name:?} {state}{hint})",
+                name = row.name
+            ))
+        }
+        None => Err(format!(
+            "target pane {pane} state unknown (agent {name:?} has no fresh report)",
             name = row.name
+        )),
+    }
+}
+
+/// Data-integrity gate on the source block's metadata: an open (still
+/// running) or byte-cap-truncated block must never pipe - partial text is
+/// worse than no pipe (the verb's contract). Distinct from the idle guard:
+/// `--force` does NOT bypass this (an incomplete block does not become
+/// complete because a human insists; wait or use `pane read` directly).
+fn pipe_block_gate(meta: Option<&proto::BlockMeta>) -> Result<(), String> {
+    let Some(m) = meta else { return Ok(()) };
+    let seq = m.seq.map(|s| format!("#{s}")).unwrap_or_else(|| "?".into());
+    if !m.complete {
+        return Err(format!(
+            "source block {seq} is still running - wait for the command to finish"
+        ));
+    }
+    if m.truncated {
+        return Err(format!(
+            "source block {seq} was truncated by the byte cap - refusing to pipe partial text"
         ));
     }
     Ok(())
@@ -1742,7 +1774,7 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
 
     // 1. Read the source block. EXIT_BLOCK_UNAVAILABLE propagates verbatim -
     //    an evicted/nonexistent block must never pipe wrong or truncated text.
-    let (text, seq) = match control_roundtrip(
+    let (text, meta) = match control_roundtrip(
         &sock,
         &session,
         ControlVerb::PaneRead {
@@ -1751,7 +1783,7 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
             block: Some(parsed.block),
         },
     ) {
-        Ok(ServerMsg::PaneText { text, block, .. }) => (text, block.and_then(|m| m.seq)),
+        Ok(ServerMsg::PaneText { text, block, .. }) => (text, block),
         Ok(ServerMsg::Err { code, msg }) => {
             eprintln!("fno mux block: {msg}");
             return if code == err_code::BLOCK_UNAVAILABLE {
@@ -1769,6 +1801,19 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
             return EXIT_ERROR;
         }
     };
+    // 1b. An open or truncated block never pipes (partial text is worse than
+    //     no pipe); the markerless implicit block pipes with a visible note.
+    if let Err(why) = pipe_block_gate(meta.as_ref()) {
+        eprintln!("fno mux block: {why}");
+        return EXIT_BLOCK_UNAVAILABLE;
+    }
+    let seq = meta.as_ref().and_then(|m| m.seq);
+    let implicit = meta.as_ref().is_some_and(|m| m.implicit);
+    if implicit {
+        eprintln!(
+            "fno mux block: note: markerless source pane - piping the implicit whole-output block"
+        );
+    }
 
     // 2. Receive-side idle guard. A missing registry FILE means no daemon and
     //    no agents (proceed); an unreadable/malformed one means unknown state
@@ -1828,6 +1873,7 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
                 "block_seq": seq,
                 "bytes": sent,
                 "forced": parsed.force,
+                "implicit": implicit,
             })
         );
     } else {
@@ -2457,14 +2503,14 @@ mod tests {
     }
 
     #[test]
-    fn block_pipe_guard_refuses_any_live_badge() {
-        // AC-ERR: a working target refuses; blocked and done fail closed too.
-        for badge in [AgentBadge::Working, AgentBadge::Blocked, AgentBadge::Done] {
+    fn block_pipe_guard_refuses_busy_and_unknown() {
+        // AC-ERR: a working/blocked target refuses (busy)...
+        for badge in [AgentBadge::Working, AgentBadge::Blocked] {
             let rows = [agent_row("a", Some(("main", 2)), Some(badge), false)];
             let err = pipe_guard(Some(&rows), "main", 2).unwrap_err();
-            assert!(err.contains("not idle"), "{badge:?}: {err}");
+            assert!(err.contains("busy"), "{badge:?}: {err}");
         }
-        // The refusal names the state and carries the reason hint when present.
+        // ...naming the state and the reason hint when present.
         let rows = [agent_row(
             "a",
             Some(("main", 2)),
@@ -2473,12 +2519,22 @@ mod tests {
         )];
         let err = pipe_guard(Some(&rows), "main", 2).unwrap_err();
         assert!(err.contains("working: building"), "{err}");
+        // An agent row with NO live badge is not provably idle: refuse
+        // fail-closed, the same cell as the server's rerun guard.
+        let rows = [agent_row("a", Some(("main", 2)), None, false)];
+        let err = pipe_guard(Some(&rows), "main", 2).unwrap_err();
+        assert!(err.contains("unknown"), "{err}");
     }
 
     #[test]
-    fn block_pipe_guard_passes_idle_shell_and_exited() {
-        // Idle agent (row, no live badge) -> send.
-        let rows = [agent_row("a", Some(("main", 2)), None, false)];
+    fn block_pipe_guard_passes_done_shell_and_exited() {
+        // A done agent sits at its composer - the intended pipe target.
+        let rows = [agent_row(
+            "a",
+            Some(("main", 2)),
+            Some(AgentBadge::Done),
+            false,
+        )];
         assert_eq!(pipe_guard(Some(&rows), "main", 2), Ok(()));
         // AC-EDGE: no registry row for the pane -> a plain shell pane, send.
         assert_eq!(pipe_guard(Some(&[]), "main", 2), Ok(()));
@@ -2490,6 +2546,28 @@ mod tests {
             true,
         )];
         assert_eq!(pipe_guard(Some(&rows), "main", 2), Ok(()));
+    }
+
+    #[test]
+    fn block_pipe_gate_refuses_open_and_truncated_blocks() {
+        let meta = |complete: bool, truncated: bool, implicit: bool| proto::BlockMeta {
+            seq: Some(7),
+            exit: Some(0),
+            complete,
+            truncated,
+            implicit,
+        };
+        // A completed, untruncated block pipes; implicit alone does not block
+        // (it pipes with a stderr note - the degradation stays visible).
+        assert_eq!(pipe_block_gate(Some(&meta(true, false, false))), Ok(()));
+        assert_eq!(pipe_block_gate(Some(&meta(true, false, true))), Ok(()));
+        // No metadata (plain read shape) has nothing to refuse on.
+        assert_eq!(pipe_block_gate(None), Ok(()));
+        // Open (still running) and byte-cap-truncated blocks never pipe.
+        let err = pipe_block_gate(Some(&meta(false, false, false))).unwrap_err();
+        assert!(err.contains("still running"), "{err}");
+        let err = pipe_block_gate(Some(&meta(true, true, false))).unwrap_err();
+        assert!(err.contains("truncated"), "{err}");
     }
 
     #[test]
