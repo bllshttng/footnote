@@ -272,3 +272,7 @@ config:
     notify_on_blocked: true
     # Also notify on a terminal 'done' hook transition (default off).
     notify_on_done: false
+    # Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on).
+    attach_digest: true
+    # Minutes since last detach before the catch-up digest overlay shows (default 10).
+    attach_digest_threshold_min: 10

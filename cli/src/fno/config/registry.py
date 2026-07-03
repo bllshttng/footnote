@@ -181,6 +181,8 @@ FIELD_META: dict[str, Meta] = {
     ),
     "config.mux.notify_on_blocked": Meta("advanced", "Fire an OS notification when an agent badge enters 'blocked' (default on).", default_source="default"),
     "config.mux.notify_on_done": Meta("advanced", "Also notify on a terminal 'done' hook transition (default off).", default_source="default"),
+    "config.mux.attach_digest": Meta("advanced", "Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on).", default_source="default"),
+    "config.mux.attach_digest_threshold_min": Meta("advanced", "Minutes since last detach before the catch-up digest overlay shows (default 10).", default_source="default"),
     # --- config.parallel.* ---
     "config.parallel.max_lanes": Meta(
         "advanced",

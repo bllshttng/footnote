@@ -115,3 +115,5 @@
 | `config.mux.shell_integration` | str | `mux-panes` | advanced | Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc. |
 | `config.mux.notify_on_blocked` | bool | `true` | advanced | Fire an OS notification when an agent badge enters 'blocked' (default on). |
 | `config.mux.notify_on_done` | bool | `false` | advanced | Also notify on a terminal 'done' hook transition (default off). |
+| `config.mux.attach_digest` | bool | `true` | advanced | Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on). |
+| `config.mux.attach_digest_threshold_min` | int | `10` | advanced | Minutes since last detach before the catch-up digest overlay shows (default 10). |
