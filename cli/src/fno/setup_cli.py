@@ -322,6 +322,42 @@ def offer_recommended_rules(
     return {"installed": True, "results": results}
 
 
+def offer_starship_module(
+    *,
+    confirm_fn: Callable[[str], bool],
+    echo_fn: Callable[[str], None] = lambda _m: None,
+    snippet_path: Optional[Path] = None,
+    target_toml: Optional[Path] = None,
+) -> dict:
+    """Opt-in offer to install footnote's starship provenance module (x-84a8).
+
+    Interactive-agnostic (the CLI passes typer confirm/echo). Prompts once,
+    default No; appends only on explicit yes. On No (or no snippet shipped) it
+    prints the snippet path for manual use and leaves starship.toml untouched.
+    Returns ``{"installed": bool, "result": StarshipResult | None}``."""
+    from fno.setup.starship import (
+        default_snippet_source,
+        default_starship_config,
+        install_starship_module,
+        summarize as starship_summarize,
+    )
+
+    src = snippet_path or default_snippet_source()
+    if src is None or not Path(src).is_file():
+        return {"installed": False, "result": None}
+
+    if not confirm_fn(
+        "Install footnote's starship provenance module into your starship.toml?"
+    ):
+        echo_fn(f"  starship: skipped - snippet at {src} (append it by hand to use it)")
+        return {"installed": False, "result": None}
+
+    tgt = target_toml or default_starship_config()
+    result = install_starship_module(Path(src), Path(tgt))
+    echo_fn(starship_summarize(result))
+    return {"installed": True, "result": result}
+
+
 @app.command("wizard")
 def wizard_cmd(
     advanced: bool = typer.Option(
@@ -389,6 +425,11 @@ def wizard_cmd(
             return False
 
     offer_recommended_rules(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
+
+    # Optional capstone: install the starship provenance module so fno panes
+    # render their backlog node in the prompt (x-84a8). Opt-in, default No;
+    # only appends to starship.toml on explicit yes.
+    offer_starship_module(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
 
     # Optional capstone: wire the /fno:* slash commands into the agent CLIs on
     # PATH. A CLI-only install has the binary but not the slash commands; this
