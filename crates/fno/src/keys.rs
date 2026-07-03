@@ -77,6 +77,10 @@ pub enum Event {
     /// work", x-6f77). The server shells the Python porcelain; no-work /
     /// lanes-full comes back as a one-line notice.
     DispatchNext,
+    /// Open in-scrollback search on the focused pane (leader+/, x-e780). The
+    /// client enters a local typing mode; the query and n/N/Esc are interpreted
+    /// by the client's view layer, not here (like OpenSelector / OpenAnswers).
+    SearchOpen,
     /// Swallowed unmapped chord: the client sounds BEL.
     Bell,
 }
@@ -245,6 +249,9 @@ fn chord(b: u8) -> Event {
         b'r' => Event::BlockRerun,
         // leader+n is NextTab (tmux muscle memory); "grab work" is leader+g.
         b'g' => Event::DispatchNext,
+        // In-scrollback search (leader+/, x-e780): tmux copy-mode `/` muscle
+        // memory. The client owns the typing mode; the chord only opens it.
+        b'/' => Event::SearchOpen,
         _ => Event::Bell,
     }
 }
@@ -359,6 +366,17 @@ mod tests {
         assert_eq!(scan_all(&[b"\x02s"]), vec![Event::ToggleStatus]);
         assert_eq!(scan_all(&[b"\x02?"]), vec![Event::ShowKeys]);
         assert_eq!(scan_all(&[b"\x02d"]), vec![Event::Detach]);
+        assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
+        // leader+/ opens in-scrollback search (x-e780); the `/` never leaks.
+        let searched = scan_all(&[b"a\x02/b"]);
+        assert_eq!(
+            searched,
+            vec![
+                Event::Forward(b"a".to_vec()),
+                Event::SearchOpen,
+                Event::Forward(b"b".to_vec()),
+            ]
+        );
     }
 
     #[test]

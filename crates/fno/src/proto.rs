@@ -85,7 +85,16 @@ use crate::tree::{Dir, Rect, TabId};
 /// v11 (work-queue dispatch, x-6f77): a new `DispatchNext` client verb (leader+g
 /// "grab work") AND `Layout` gains `backlog: Vec<BacklogCard>` (the sideline
 /// work-queue lane) - both wire-shape changes, so the shared counter bumps once.
-pub const PROTO_VERSION: u32 = 11;
+///
+/// v12 (in-scrollback search, x-e780): `ClientMsg::{SearchOpen, SearchStep,
+/// SearchClear}` (leader+/ free-text find over a pane's server-side vt history)
+/// and the initiator-only reply `ServerMsg::SearchResult { pane_id, total,
+/// current }`. `SearchStep` reuses [`BlockDir`] (`Prev` = older match, `Next` =
+/// newer). Only match counts + coordinates cross the wire; the 10k-line history
+/// never leaves the server. The match jump + highlight reach co-viewers via the
+/// shared-scroll `Frame` + `cell_flags::SELECTED` broadcast (v7), so no new
+/// frame plumbing.
+pub const PROTO_VERSION: u32 = 12;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -199,6 +208,25 @@ pub enum ClientMsg {
         region_lines: u16,
         keystroke: Vec<u8>,
     },
+    /// (v12, x-e780) Open/refresh a free-text search over the pane's server-side
+    /// vt history (leader+/): scan case-insensitively, jump the shared scroll to
+    /// the initial match, highlight it via the v7 `SELECTED` broadcast, and store
+    /// the match list as a per-pane snapshot. An empty `query` clears (never a
+    /// scan that matches every row). The reply is one [`ServerMsg::SearchResult`]
+    /// to the initiator; co-viewers get the jump + highlight via the broadcast
+    /// `Frame`. History text never crosses the wire.
+    SearchOpen { pane: u64, query: String },
+    /// (v12, x-e780) Walk the active search's match snapshot: `Prev` toward older,
+    /// `Next` toward newer (reusing [`BlockDir`], whose doc semantics match n/N).
+    /// Re-jumps + re-highlights and replies a fresh `SearchResult`. A pane with no
+    /// active search no-ops with a `Notice`, never a panic.
+    SearchStep { pane: u64, dir: BlockDir },
+    /// (v12, x-e780) Clear the active search: drop the highlight (selection) and
+    /// the per-pane search state, then broadcast a `Frame`. Idempotent: clearing
+    /// with nothing active still clears + broadcasts (the client sends this on
+    /// every search exit, and a no-match search_open has already dropped the
+    /// state server-side).
+    SearchClear { pane: u64 },
 }
 
 /// A block-navigation walk direction (v8). `Prev` moves toward older blocks,
@@ -518,6 +546,17 @@ pub enum ServerMsg {
     /// else reports the failure visibly. Reliable - a dropped copy is silent
     /// data loss, never acceptable.
     Copy { text: String },
+    /// (v12, x-e780) The initiator-only result of a `SearchOpen`/`SearchStep`:
+    /// `total` matches in the snapshot and the `current` 1-based position after
+    /// the jump. `total == 0` means no matches (the client shows "no matches" +
+    /// BEL and the viewport did not move). Co-viewers never receive this - they
+    /// see only the shared jump + highlight via the broadcast `Frame`, not the
+    /// `[i/n]` counter chrome. Reliable.
+    SearchResult {
+        pane_id: u64,
+        total: u32,
+        current: u32,
+    },
 }
 
 /// One pane's metadata in a [`ServerMsg::PaneList`]. `cwd` is the squad's
@@ -1140,6 +1179,19 @@ mod tests {
             },
             ClientMsg::BlockRerun { pane: 5 },
             ClientMsg::Command(Command::CopySelection),
+            ClientMsg::SearchOpen {
+                pane: 3,
+                query: "deadlock".into(),
+            },
+            ClientMsg::SearchStep {
+                pane: 3,
+                dir: BlockDir::Prev,
+            },
+            ClientMsg::SearchStep {
+                pane: 3,
+                dir: BlockDir::Next,
+            },
+            ClientMsg::SearchClear { pane: 3 },
         ] {
             let bytes = encode(&msg).unwrap();
             let mut cursor = std::io::Cursor::new(bytes);
@@ -1374,6 +1426,16 @@ mod tests {
             },
             ServerMsg::Copy {
                 text: "selected lines\nincluding history".into(),
+            },
+            ServerMsg::SearchResult {
+                pane_id: 4,
+                total: 12,
+                current: 3,
+            },
+            ServerMsg::SearchResult {
+                pane_id: 4,
+                total: 0,
+                current: 0,
             },
         ] {
             let bytes = encode(&msg).unwrap();

@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use fno::proto::{
-    read_msg_sync, write_msg_sync, AgentRow, ClientMsg, Command, Frame, MouseEvent, ProtoError,
-    ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
+    read_msg_sync, write_msg_sync, AgentRow, BlockDir, ClientMsg, Command, Frame, MouseEvent,
+    ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
 };
 use fno::tree::Rect;
 use fno::vt::{frame_text, Pane};
@@ -292,6 +292,9 @@ pub struct FakeClient {
     pub byes: Vec<String>,
     /// Server-extracted copy payloads (v7, US2), newest last.
     pub copies: Vec<String>,
+    /// Initiator-only search results (v12, x-e780): `(pane_id, total, current)`,
+    /// newest last. A co-viewer never receives these.
+    pub search_results: Vec<(u64, u32, u32)>,
     /// Every absorbed message's kind, chronologically.
     pub order: Vec<Absorbed>,
 }
@@ -325,6 +328,7 @@ impl FakeClient {
             notices: Vec::new(),
             byes: Vec::new(),
             copies: Vec::new(),
+            search_results: Vec::new(),
             order: Vec::new(),
         }
     }
@@ -354,6 +358,29 @@ impl FakeClient {
     pub fn detach(&mut self) {
         let mut w = self.stream.try_clone().unwrap();
         write_msg_sync(&mut w, &ClientMsg::Detach).unwrap();
+    }
+
+    /// (v12, x-e780) Open/step/clear an in-scrollback search on `pane`.
+    pub fn search_open(&mut self, pane: u64, query: &str) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(
+            &mut w,
+            &ClientMsg::SearchOpen {
+                pane,
+                query: query.to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    pub fn search_step(&mut self, pane: u64, dir: BlockDir) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(&mut w, &ClientMsg::SearchStep { pane, dir }).unwrap();
+    }
+
+    pub fn search_clear(&mut self, pane: u64) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(&mut w, &ClientMsg::SearchClear { pane }).unwrap();
     }
 
     pub fn reset_counts(&mut self) {
@@ -397,6 +424,11 @@ impl FakeClient {
             ServerMsg::Notice { text } => self.notices.push(text),
             ServerMsg::Bye { reason } => self.byes.push(reason),
             ServerMsg::Copy { text } => self.copies.push(text),
+            ServerMsg::SearchResult {
+                pane_id,
+                total,
+                current,
+            } => self.search_results.push((pane_id, total, current)),
             // Answers a pre-Attach Query only; stray on an attached client.
             ServerMsg::Info { .. } => {}
             // v4 control-verb replies belong to one-shot `fno mux pane`
