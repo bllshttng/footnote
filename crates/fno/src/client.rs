@@ -206,6 +206,9 @@ struct LayoutView {
     /// Sideline agent rows (4a-G2): registry-derived, fact-badged, rendered
     /// under their squads (display-only; never selectable).
     agents: Vec<AgentRow>,
+    /// (v10) The focused pane's `FNO_NODE` provenance, for the status-row
+    /// `⚑ <node>` cell (x-66e8). `None` for an ad-hoc pane.
+    focus_node: Option<String>,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -630,6 +633,15 @@ impl View {
             put(cells, c, ch, cell_flags::DIM);
             c += 1;
         }
+        // Provenance cell for the focused pane (x-66e8): config-free `⚑ <node>`,
+        // shown only when the focused pane was node-driven. Absent for an ad-hoc
+        // pane, so a plain shell reads clean.
+        if let Some(node) = &self.layout.focus_node {
+            for ch in format!("⚑ {node} ").chars() {
+                put(cells, c, ch, cell_flags::BOLD);
+                c += 1;
+            }
+        }
         if let Some(f) = self.frames.get(&self.layout.focus) {
             if f.scroll_offset != 0 {
                 for ch in format!("[+{}] ", f.scroll_offset).chars() {
@@ -1025,6 +1037,7 @@ async fn attach_and_run(
             focus: 0,
             area: (0, 0),
             agents: Vec::new(),
+            focus_node: None,
         },
     );
     let (c_rows, c_cols) = view.content_dims();
@@ -1062,6 +1075,7 @@ async fn attach_and_run(
                 focus,
                 area,
                 agents,
+                focus_node,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -1070,6 +1084,7 @@ async fn attach_and_run(
                     focus,
                     area,
                     agents,
+                    focus_node,
                 });
                 break;
             }
@@ -1200,8 +1215,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node });
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -1927,6 +1942,7 @@ mod tests {
                 focus: 11,
                 area: (29, 72),
                 agents: vec![],
+                focus_node: None,
             },
         );
         view.frames.insert(10, text_frame(29, 35, 'a'));
@@ -2022,6 +2038,37 @@ mod tests {
         view.frames.insert(11, f);
         let text = frame_text(&view.compose());
         assert!(text.lines().last().unwrap().contains("[+3]"));
+    }
+
+    #[test]
+    fn client_status_row_shows_focus_node_provenance() {
+        // x-66e8 AC (happy): a node-driven focused pane -> `⚑ <node>` cell.
+        let mut view = two_pane_view();
+        view.layout.focus_node = Some("x-66e8".into());
+        let bottom = frame_text(&view.compose())
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(bottom.contains("⚑ x-66e8"), "provenance cell: {bottom:?}");
+        // AC (edge): an ad-hoc pane (no node) shows no provenance cell.
+        view.layout.focus_node = None;
+        let bottom = frame_text(&view.compose())
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(!bottom.contains('⚑'), "no cell for ad-hoc pane: {bottom:?}");
+        // AC (edge): the which-key hint still fully overrides the row.
+        view.layout.focus_node = Some("x-66e8".into());
+        view.hint = true;
+        let bottom = frame_text(&view.compose())
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(bottom.contains("hjkl focus"), "hint takeover: {bottom:?}");
+        assert!(!bottom.contains('⚑'), "hint hides the cell: {bottom:?}");
     }
 
     #[test]
@@ -2174,6 +2221,7 @@ mod tests {
                     answerable: None,
                 },
             ],
+            focus_node: None,
         });
         let frame = view.compose();
         let text = frame_text(&frame);
@@ -2296,6 +2344,7 @@ mod tests {
             focus: 10,
             area: (29, 72),
             agents: vec![],
+            focus_node: None,
         });
         assert!(view.frames.contains_key(&10));
         assert!(
@@ -2327,6 +2376,7 @@ mod tests {
                 focus: 10,
                 area: (20, 50),
                 agents: vec![],
+                focus_node: None,
             },
         );
         view.frames.insert(10, text_frame(20, 50, 'a'));
@@ -2392,6 +2442,7 @@ mod tests {
             focus: 20,
             area: (29, 72),
             agents: vec![],
+            focus_node: None,
         });
         assert_eq!(view.selector, Some(0), "cursor clamped to the live rows");
     }
@@ -2496,6 +2547,7 @@ mod tests {
             focus: v.layout.focus,
             area: v.layout.area,
             agents: vec![blocked_row("a", 1, None)],
+            focus_node: None,
         });
         assert_eq!(v.answers, Some(0));
         // The queue empties -> the overlay closes (AC2-ERR).
@@ -2506,6 +2558,7 @@ mod tests {
             focus: v.layout.focus,
             area: v.layout.area,
             agents: vec![],
+            focus_node: None,
         });
         assert_eq!(v.answers, None);
     }

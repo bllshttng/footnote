@@ -264,6 +264,7 @@ pub struct LayoutSnap {
     pub focus: u64,
     pub area: (u16, u16),
     pub agents: Vec<AgentRow>,
+    pub focus_node: Option<String>,
 }
 
 /// One absorbed message kind, in arrival order - the seam for asserting the
@@ -372,6 +373,7 @@ impl FakeClient {
                 focus,
                 area,
                 agents,
+                focus_node,
             } => {
                 self.layout = Some(LayoutSnap {
                     squads,
@@ -380,6 +382,7 @@ impl FakeClient {
                     focus,
                     area,
                     agents,
+                    focus_node,
                 });
             }
             ServerMsg::ModeSync { bytes } => self.modesyncs.push(bytes),

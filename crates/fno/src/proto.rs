@@ -76,7 +76,12 @@ use crate::tree::{Dir, Rect, TabId};
 /// region_lines, keystroke }` injects a picked option after the server
 /// re-verifies `fingerprint` against its live grid; `err_code` gains
 /// `STALE`/`BUSY`.
-pub const PROTO_VERSION: u32 = 9;
+///
+/// v10 (status-row provenance): `Layout` gains `focus_node` - the focused
+/// pane's `FNO_NODE` provenance (x-84a8), parsed server-side from the pane-run
+/// argv, so the client status row shows `⚑ <node>` config-free. `None` for an
+/// ad-hoc pane.
+pub const PROTO_VERSION: u32 = 10;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -418,6 +423,12 @@ pub enum ServerMsg {
         /// a session with no known agents.
         #[serde(default)]
         agents: Vec<AgentRow>,
+        /// (v10) The focused pane's `FNO_NODE` provenance, parsed server-side
+        /// from the pane-run argv (x-84a8). `None` for an ad-hoc pane; carried
+        /// on `Layout` (not `Frame`) because it changes only on focus/structure
+        /// changes, mirroring how `SquadMeta::canonical_cwd` reaches the client.
+        #[serde(default)]
+        focus_node: Option<String>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -1029,6 +1040,7 @@ mod tests {
                         answerable: None,
                     },
                 ],
+                focus_node: Some("x-66e8".into()),
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
