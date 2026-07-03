@@ -223,6 +223,56 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     # Bare interactive session: no -i without a message.
     assert "-i" not in build_pane_argv("gemini", "", tmp_path, False, None)
 
+    # x-8f7f US1: agy is never-prompt, stateless (no --session-id), message as
+    # trailing positional; never `-p` (that is agy's headless/print form).
+    agy = build_pane_argv("agy", "task", tmp_path, False, "ignored-uuid")
+    assert agy == ["agy", "--dangerously-skip-permissions", "task"]
+    assert "-p" not in agy and "--session-id" not in agy
+    assert build_pane_argv("agy", "", tmp_path, False, None) == [
+        "agy",
+        "--dangerously-skip-permissions",
+    ]
+
+
+def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) -> None:
+    """x-8f7f: PANE_HOSTABLE_PROVIDERS is the pane gate's source of truth and MUST
+    match build_pane_argv's branches exactly - every listed provider builds argv,
+    and a readable-but-argvless provider (opencode, staged inert until x-51f6) does
+    NOT. This is the enforcement the borrowed READABLE_PROVIDERS list lacked."""
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import PANE_HOSTABLE_PROVIDERS, build_pane_argv
+    from fno.agents.providers import READABLE_PROVIDERS
+
+    for provider in PANE_HOSTABLE_PROVIDERS:
+        argv = build_pane_argv(provider, "", tmp_path, False, None)
+        assert argv and argv[0] == provider
+
+    # opencode is readable (its manifest is bundled) but NOT pane-hostable yet:
+    # the two sets are genuinely distinct, and the gate rides the correct one.
+    assert "opencode" not in PANE_HOSTABLE_PROVIDERS
+    for readable in READABLE_PROVIDERS:
+        if readable not in PANE_HOSTABLE_PROVIDERS:
+            with pytest.raises(DispatchAskError, match="no interactive pane form"):
+                build_pane_argv(readable, "", tmp_path, False, None)
+
+
+def test_ac1_host_pane_gate_admits_agy_rejects_unhosted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-8f7f US1/US3: the pane gate is READABLE_PROVIDERS, not KNOWN_PROVIDERS.
+    agy (readable, pane-hostable) is admitted and produces a mux-hosted row;
+    opencode (not readable until x-51f6) is rejected at the gate."""
+    from fno.agents.dispatch import DispatchAskError
+
+    # agy spawns a real (faked) mux pane -> a row lands.
+    result, runner = _spawn(monkeypatch, tmp_path, provider="agy")
+    assert result.provider == "agy"
+    assert runner.calls[0][1:4] == ["mux", "pane", "run"]
+
+    # opencode is not pane-hostable yet -> refused before any mux subprocess.
+    with pytest.raises(DispatchAskError, match="unknown provider 'opencode'"):
+        _spawn(monkeypatch, tmp_path, provider="opencode", name="oc")
+
 
 def test_unparseable_pane_id_is_a_loud_error(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.dispatch import DispatchAskError

@@ -1,0 +1,48 @@
+# Agy readiness manifest (x-8f7f) - authored from `AgyReadinessDetector`
+# (readiness.rs), NOT from a live capture: agy is closed-source, so the markers
+# are cribbed from the detector it mirrors. agy runs Gemini models under the hood
+# and draws the same prompt-glyph family via the shared `prompt_ready` logic
+# (PROMPT_GLYPHS / BUSY_MARKERS / WALL_MARKERS), so this file is rule-for-rule
+# gemini.toml. It is its own file because manifests resolve per agent id and
+# these WILL diverge once pinned against a live agy TUI.
+#
+# UNVALIDATED (AC1-FR): these markers have NOT yet been pinned against a real agy
+# grid via cli/scripts/smoke/capture-readiness-grid.sh. Until they are, the
+# strict-never-false-ready bias (readiness OQ#9) means this manifest must not be
+# trusted for an idle/working (ready) verdict on unverified markers. The
+# conservative direction still holds: a wrong glyph is a false-NOT-ready (the
+# daemon waits), never a false-ready.
+#
+# State vocabulary + arbitration: see codex.toml header (same contract):
+#   auth_wall (980) > busy (900) > idle_prompt (100).
+
+[[rule]]
+id = "auth_wall"
+state = "blocked"
+priority = 980
+region = "bottom_non_empty_lines(3)"
+gate = { any = [
+  { contains = "Waiting for auth" },
+  { contains = "waiting for auth" },
+  { contains = "Do you trust" },
+  { contains = "Login required" },
+] }
+
+[[rule]]
+id = "busy"
+state = "working"
+priority = 900
+region = "bottom_non_empty_lines(3)"
+gate = { any = [
+  { contains = "esc to interrupt" },
+  { contains = "Esc to interrupt" },
+  { contains = "Working" },
+  { contains = "Thinking" },
+] }
+
+[[rule]]
+id = "idle_prompt"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(1)"
+gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }

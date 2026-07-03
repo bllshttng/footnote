@@ -495,6 +495,9 @@ pub fn bundled_manifest(agent: &str) -> Option<&'static str> {
         "claude" => Some(include_str!("manifests/claude.toml")),
         "codex" => Some(include_str!("manifests/codex.toml")),
         "gemini" => Some(include_str!("manifests/gemini.toml")),
+        // x-8f7f: agy (hosted, US1) + opencode (staged/inert until x-51f6, US2).
+        "agy" => Some(include_str!("manifests/agy.toml")),
+        "opencode" => Some(include_str!("manifests/opencode.toml")),
         _ => None,
     }
 }
@@ -1049,12 +1052,17 @@ mod tests {
 
     #[test]
     fn bundled_manifests_all_parse() {
-        for agent in ["claude", "codex", "gemini"] {
+        // x-8f7f added agy + opencode to the bundled set; both must parse and
+        // carry rules (the parse-coverage guard the domain pitfall calls for -
+        // a herdr-only key left in the TOML fails loud here).
+        for agent in ["claude", "codex", "gemini", "agy", "opencode"] {
             let m = bundled(agent);
             assert!(!m.rules().is_empty(), "{agent}.toml has rules");
         }
+        // A genuinely-unhosted harness still resolves to None (the fail-loud
+        // guard): hermes is adapters-layer only, no bundled manifest.
         assert!(
-            bundled_manifest("opencode").is_none(),
+            bundled_manifest("hermes").is_none(),
             "unknown agent -> None"
         );
     }
@@ -1184,8 +1192,9 @@ mod tests {
             .expect("known agent")
             .expect("parses");
         assert!(!m.rules().is_empty());
-        // Unknown agent, no override -> None (caller fails loud).
-        assert!(load_manifest("opencode", None).is_none());
+        // Unknown agent, no override -> None (caller fails loud). opencode is now
+        // bundled (x-8f7f), so use hermes (adapters-layer only, no manifest).
+        assert!(load_manifest("hermes", None).is_none());
 
         // A readable <agent>.toml override wins over the bundled copy.
         let dir = tempfile::tempdir().unwrap();
@@ -1218,5 +1227,100 @@ mod tests {
             load_manifest("gemini", Some(dir.path())),
             Some(Err(ManifestError::Io { .. }))
         ));
+    }
+
+    // AC1-HP (x-8f7f): agy's manifest is authored from AgyReadinessDetector
+    // (agy wraps Gemini, shares prompt_ready), so it badges idle/working/blocked
+    // on the same conditions gemini does, with the never-false-ready bias
+    // (auth_wall 980 > busy 900 > idle_prompt 100).
+    #[test]
+    fn x8f7f_agy_manifest_evaluates_idle_working_blocked() {
+        let m = bundled("agy");
+        assert_eq!(
+            m.evaluate(&view("agy 1.0\n\u{276f} ")).unwrap().state,
+            "idle"
+        );
+        assert_eq!(
+            m.evaluate(&view("running tool...\nesc to interrupt\n\u{276f}"))
+                .unwrap()
+                .state,
+            "working", // busy (900) beats the idle glyph (100)
+        );
+        assert_eq!(
+            m.evaluate(&view("Waiting for auth...\n\u{276f}"))
+                .unwrap()
+                .state,
+            "blocked", // auth_wall (980) is the never-false-ready guard
+        );
+    }
+
+    // AC2-HP + AC2-EDGE (x-8f7f): opencode's herdr manifest, translated per
+    // ADAPTING.md, matches the same screens herdr's rules match - including the
+    // multi-key AND permission rule whose nesting is preserved under one gate.
+    #[test]
+    fn x8f7f_opencode_manifest_matches_herdr_screens() {
+        let m = bundled("opencode");
+        // Simple blocked marker.
+        assert_eq!(
+            m.evaluate(&view("△ Permission required")).unwrap().state,
+            "blocked",
+        );
+        // Both working markers.
+        assert_eq!(
+            m.evaluate(&view("thinking\nesc to interrupt"))
+                .unwrap()
+                .state,
+            "working",
+        );
+        assert_eq!(
+            m.evaluate(&view("progress \u{25a0}\u{25a0}\u{25a0}\u{25a0}\u{25a0}"))
+                .unwrap()
+                .state,
+            "working", // progress-bar regex (■|⬝){4,}
+        );
+        // AC2-EDGE: the nested any/all permission branch (esc dismiss AND a
+        // confirm hint AND a select hint) still resolves to blocked.
+        assert_eq!(
+            m.evaluate(&view(
+                "esc dismiss   enter confirm   \u{2191}\u{2193} select"
+            ))
+            .unwrap()
+            .state,
+            "blocked",
+        );
+        // A bare model reply that merely mentions none of the markers -> no rule
+        // fires (the engine never guesses).
+        assert!(m.evaluate(&view("here is your answer")).is_none());
+    }
+
+    // AC2-ERR (x-8f7f): an adaptation that leaves a herdr-only key in the TOML
+    // fails loud at parse (our fail-closed parser) - the bad port never ships.
+    #[test]
+    fn x8f7f_herdr_only_key_fails_loud() {
+        let bad = "[[rule]]\nid = \"p\"\nstate = \"blocked\"\npriority = 1\n\
+                   region = \"whole_recent\"\nvisible_blocker = true\n\
+                   gate = { contains = \"x\" }\n";
+        assert!(matches!(
+            Manifest::parse(bad),
+            Err(ManifestError::Field { .. })
+        ));
+    }
+
+    // AC2-FR / AC3 (x-8f7f): the hosting gate is real. opencode's manifest is
+    // BUNDLED (staged) but opencode has no provider impl, so it can never be
+    // hosted as a pane and the manifest sits inert. agy, by contrast, is both
+    // bundled AND hostable (has an AgyProvider), so its manifest can fire.
+    #[test]
+    fn x8f7f_staged_manifest_is_inert_without_a_host() {
+        assert!(bundled_manifest("opencode").is_some(), "opencode staged");
+        assert!(
+            crate::provider::for_name("opencode").is_none(),
+            "opencode is not hostable (no provider impl) -> manifest inert",
+        );
+        assert!(bundled_manifest("agy").is_some(), "agy staged");
+        assert!(
+            crate::provider::for_name("agy").is_some(),
+            "agy IS hostable (AgyProvider) -> manifest can fire",
+        );
     }
 }
