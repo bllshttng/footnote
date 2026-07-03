@@ -903,6 +903,17 @@ fn socket_dir_check() -> Check {
             detail: format!("{}: {e}", dir.display()),
             remedy: Some("check permissions on the parent directory".into()),
         },
+        // A non-directory at the mux path (a stray regular file) blocks every
+        // session - flag it, don't read its file mode as a dir verdict (gemini).
+        Ok(md) if !md.is_dir() => Check {
+            name: "socket-dir".into(),
+            verdict: Verdict::Fail,
+            detail: format!("{} exists but is not a directory", dir.display()),
+            remedy: Some(format!(
+                "remove {} (must be the mux socket dir)",
+                dir.display()
+            )),
+        },
         Ok(md) => {
             use std::os::unix::fs::PermissionsExt;
             let mode = md.permissions().mode() & 0o777;

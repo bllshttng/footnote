@@ -62,13 +62,22 @@ enum Role {
 fn split_json(rest: &[OsString]) -> Option<(Vec<&str>, bool)> {
     let mut positionals = Vec::new();
     let mut json = false;
+    let mut end_of_flags = false;
     for a in rest {
-        match a.to_str() {
-            Some("--json") if !json => json = true,
-            Some("--json") => return None, // repeated flag
-            Some(s) if s.starts_with("--") => return None, // unknown flag
-            Some(s) => positionals.push(s),
-            None => return None, // non-UTF-8
+        let s = a.to_str()?; // non-UTF-8 -> usage
+        if end_of_flags {
+            positionals.push(s); // after `--` everything is positional (gemini)
+        } else if s == "--" {
+            end_of_flags = true; // the standard end-of-options delimiter
+        } else if s == "--json" {
+            if json {
+                return None; // repeated flag
+            }
+            json = true;
+        } else if s.starts_with("--") {
+            return None; // unknown flag
+        } else {
+            positionals.push(s);
         }
     }
     Some((positionals, json))
@@ -323,6 +332,18 @@ mod tests {
         assert_eq!(
             decide_role(&os(&["mux", "doctor", "--wat"]), false),
             Role::MuxUsage
+        );
+        // `--` ends flag parsing: a dashed session name passes as a positional.
+        assert_eq!(
+            decide_role(&os(&["mux", "kill-server", "--", "--weird"]), false),
+            Role::MuxKill(Some("--weird".into()), false)
+        );
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "kill-server", "--json", "--", "--weird"]),
+                false
+            ),
+            Role::MuxKill(Some("--weird".into()), true)
         );
     }
 
