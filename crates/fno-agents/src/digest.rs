@@ -28,6 +28,7 @@
 use crate::paths::AgentsHome;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// The typed fold result. Field order is the JSON key order (serde serializes
@@ -77,16 +78,26 @@ fn event_ts(v: &Value) -> &str {
     v.get("ts").and_then(|t| t.as_str()).unwrap_or("")
 }
 
-/// Does this event belong to `session`? Branch A carries `data.session_id`,
-/// Branch B a flat `session_id`.
-fn event_session_matches(v: &Value, session: &str) -> bool {
-    field(v, "session_id").and_then(|s| s.as_str()) == Some(session)
+/// Does this event's session id fall in `set`? Branch A carries
+/// `data.session_id`, Branch B a flat `session_id`.
+fn event_session_in(v: &Value, set: &HashSet<&str>) -> bool {
+    field(v, "session_id")
+        .and_then(|s| s.as_str())
+        .is_some_and(|s| set.contains(s))
 }
 
 /// The pure fold. `events_raw` is the newline-joined concatenation of every
 /// events.jsonl source; `ledger_raw` is ledger.json content. Both are tolerant:
 /// a bad event line bumps `skipped_lines`; an unparseable ledger yields cost 0.
-pub fn fold(events_raw: &str, ledger_raw: &str, session: &str, since: &str) -> DigestSummary {
+pub fn fold(events_raw: &str, ledger_raw: &str, selector: &str, since: &str) -> DigestSummary {
+    // Resolve the ledger FIRST: the selector may be a real fno session id, or a
+    // node id / title / worktree basename (what the mux client hands us from the
+    // focused pane's cwd). The ledger maps any of those to the concrete session
+    // id(s), which is how the event fold below finds the loop_check lines.
+    let ledger = resolve_from_ledger(ledger_raw, selector, since);
+    let mut session_ids: HashSet<&str> = ledger.session_ids.iter().map(String::as_str).collect();
+    session_ids.insert(selector);
+
     let mut skipped_lines = 0usize;
     let mut commit_shas: Vec<String> = Vec::new(); // ordered, for transition count
     let mut pr_state: Option<String> = None;
@@ -106,7 +117,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, session: &str, since: &str) -> D
             skipped_lines += 1;
             continue;
         };
-        if !event_session_matches(&v, session) {
+        if !event_session_in(&v, &session_ids) {
             continue;
         }
         if event_ts(&v) < since {
@@ -164,8 +175,6 @@ pub fn fold(events_raw: &str, ledger_raw: &str, session: &str, since: &str) -> D
     // First observed sha is the baseline (not a new commit), so subtract it.
     let commits = commit_shas.len().saturating_sub(1);
 
-    let (pr_number, pr_url, cost_usd) = fold_ledger(ledger_raw, session, since);
-
     let state = if terminated {
         "done"
     } else if last_decision_blocked {
@@ -176,18 +185,18 @@ pub fn fold(events_raw: &str, ledger_raw: &str, session: &str, since: &str) -> D
     .to_string();
 
     let mut summary = DigestSummary {
-        session: session.to_string(),
+        session: selector.to_string(),
         since: since.to_string(),
         commits,
-        pr_number,
-        pr_url,
+        pr_number: ledger.pr_number,
+        pr_url: ledger.pr_url,
         pr_state,
         ci,
         reviewed,
         blocked_episodes,
         last_block_reason,
         resolved,
-        cost_usd,
+        cost_usd: ledger.cost_usd,
         state,
         skipped_lines,
         lines: Vec::new(),
@@ -196,35 +205,87 @@ pub fn fold(events_raw: &str, ledger_raw: &str, session: &str, since: &str) -> D
     summary
 }
 
-/// Sum `cost_usd` and pull the latest PR ref from ledger entries matching the
-/// session, restricted to `ts >= since`. An entry matches by scalar
-/// `session_id` OR membership in its `sessions[]` array (execution rows carry
-/// both a provider UUID and the fno session id there).
-fn fold_ledger(ledger_raw: &str, session: &str, since: &str) -> (Option<u64>, Option<String>, f64) {
+/// What the ledger resolves for a selector.
+#[derive(Default)]
+struct LedgerFold {
+    /// Concrete fno session ids discovered from matched entries (used to find
+    /// the matching events).
+    session_ids: HashSet<String>,
+    pr_number: Option<u64>,
+    pr_url: Option<String>,
+    cost_usd: f64,
+}
+
+/// The basename of a `/`-separated path value (worktree/root_path), lowercased
+/// comparison left to the caller.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Does this ledger entry match `selector`? An entry matches by scalar
+/// `session_id`, membership in its `sessions[]` array (execution rows carry both
+/// a provider UUID and the fno session id there), `graph_node_id`, `title`, or
+/// the basename of `worktree` / `root_path` (so a node id like `x-4e2d`, which
+/// is also the worktree directory name, resolves).
+fn ledger_entry_matches(entry: &Value, selector: &str) -> bool {
+    if entry.get("session_id").and_then(|s| s.as_str()) == Some(selector) {
+        return true;
+    }
+    if entry
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .is_some_and(|arr| arr.iter().any(|s| s.as_str() == Some(selector)))
+    {
+        return true;
+    }
+    for key in ["graph_node_id", "title"] {
+        if entry.get(key).and_then(|v| v.as_str()) == Some(selector) {
+            return true;
+        }
+    }
+    for key in ["worktree", "root_path"] {
+        if entry
+            .get(key)
+            .and_then(|v| v.as_str())
+            .is_some_and(|p| basename(p) == selector)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Resolve session ids + sum `cost_usd` + pull the latest PR ref from ledger
+/// entries matching `selector`, restricted to `ts >= since`. Tolerant: an
+/// unparseable ledger yields an empty fold.
+fn resolve_from_ledger(ledger_raw: &str, selector: &str, since: &str) -> LedgerFold {
+    let mut out = LedgerFold::default();
     let Ok(root) = serde_json::from_str::<Value>(ledger_raw) else {
-        return (None, None, 0.0);
+        return out;
     };
     // Tolerate both {"entries":[...]} and a bare [...].
-    let entries = root
+    let Some(entries) = root
         .get("entries")
         .and_then(|e| e.as_array())
-        .or_else(|| root.as_array());
-    let Some(entries) = entries else {
-        return (None, None, 0.0);
+        .or_else(|| root.as_array())
+    else {
+        return out;
     };
 
-    let mut cost = 0.0_f64;
-    let mut pr_number: Option<u64> = None;
-    let mut pr_url: Option<String> = None;
-
     for entry in entries {
-        let matches = entry.get("session_id").and_then(|s| s.as_str()) == Some(session)
-            || entry
-                .get("sessions")
-                .and_then(|s| s.as_array())
-                .is_some_and(|arr| arr.iter().any(|s| s.as_str() == Some(session)));
-        if !matches {
+        if !ledger_entry_matches(entry, selector) {
             continue;
+        }
+        // Collect the concrete session id(s) even from a pre-`since` entry, so
+        // the event fold can still find in-window events for a node resolved via
+        // an older ledger row.
+        if let Some(sid) = entry.get("session_id").and_then(|s| s.as_str()) {
+            out.session_ids.insert(sid.to_string());
+        }
+        if let Some(arr) = entry.get("sessions").and_then(|s| s.as_array()) {
+            for s in arr.iter().filter_map(|s| s.as_str()) {
+                out.session_ids.insert(s.to_string());
+            }
         }
         // Timestamp key varies across writers: timestamp | completed | ts.
         let ts = ["timestamp", "completed", "ts"]
@@ -235,16 +296,16 @@ fn fold_ledger(ledger_raw: &str, session: &str, since: &str) -> (Option<u64>, Op
             continue;
         }
         if let Some(c) = entry.get("cost_usd").and_then(|c| c.as_f64()) {
-            cost += c;
+            out.cost_usd += c;
         }
         if let Some(n) = entry.get("pr_number").and_then(|n| n.as_u64()) {
-            pr_number = Some(n);
+            out.pr_number = Some(n);
         }
         if let Some(u) = entry.get("pr_url").and_then(|u| u.as_str()) {
-            pr_url = Some(u.to_string());
+            out.pr_url = Some(u.to_string());
         }
     }
-    (pr_number, pr_url, cost)
+    out
 }
 
 /// Ranked short lines, attention (blocked) first. Empty digest → one calm line.
@@ -476,16 +537,37 @@ mod tests {
     fn cost_matches_sessions_array_membership() {
         // Execution rows carry the fno session id in sessions[], not session_id.
         let ledger = r#"[{"sessions":["uuid-1","sess-A"],"cost_usd":23.45,"pr_number":7,"pr_url":"https://x/pull/7","completed":"2026-07-03T03:00:00Z"}]"#;
-        let (n, url, cost) = fold_ledger(ledger, "sess-A", "");
-        assert_eq!(n, Some(7));
-        assert_eq!(url.as_deref(), Some("https://x/pull/7"));
-        assert_eq!(cost, 23.45);
+        let l = resolve_from_ledger(ledger, "sess-A", "");
+        assert_eq!(l.pr_number, Some(7));
+        assert_eq!(l.pr_url.as_deref(), Some("https://x/pull/7"));
+        assert_eq!(l.cost_usd, 23.45);
     }
 
     #[test]
     fn ledger_cost_respects_since() {
         let ledger = r#"[{"session_id":"sess-A","cost_usd":9.0,"timestamp":"2026-07-01T00:00:00Z"},{"session_id":"sess-A","cost_usd":1.0,"timestamp":"2026-07-03T00:00:00Z"}]"#;
-        let (_, _, cost) = fold_ledger(ledger, "sess-A", "2026-07-02T00:00:00Z");
-        assert_eq!(cost, 1.0, "the pre-since entry is excluded from the delta");
+        let l = resolve_from_ledger(ledger, "sess-A", "2026-07-02T00:00:00Z");
+        assert_eq!(l.cost_usd, 1.0, "the pre-since entry is excluded from the delta");
+    }
+
+    #[test]
+    fn node_id_selector_resolves_via_ledger_to_events() {
+        // The mux client hands a node id (worktree basename), not a session id.
+        // The ledger row maps the node -> its fno session id, which then finds
+        // the loop_check events.
+        let ledger = r#"[{"graph_node_id":"x-4e2d","worktree":"/w/footnote/x-4e2d","session_id":"20260703T-abc","cost_usd":2.0,"pr_number":99,"pr_url":"https://x/pull/99","completed":"2026-07-03T03:00:00Z"}]"#;
+        let events = loop_check("2026-07-03T02:00:00Z", "20260703T-abc", "c1", "OPEN", "SUCCESS", true, "block");
+        let d = fold(&events, ledger, "x-4e2d", "");
+        assert_eq!(d.pr_number, Some(99), "PR resolved from the ledger by node id");
+        assert_eq!(d.cost_usd, 2.0);
+        assert_eq!(d.pr_state.as_deref(), Some("OPEN"), "events found via the resolved session id");
+        assert_eq!(d.blocked_episodes, 1);
+    }
+
+    #[test]
+    fn worktree_basename_selector_matches() {
+        let entry: Value = serde_json::from_str(r#"{"worktree":"/Users/x/conductor/workspaces/footnote/x-4e2d"}"#).unwrap();
+        assert!(ledger_entry_matches(&entry, "x-4e2d"));
+        assert!(!ledger_entry_matches(&entry, "footnote"));
     }
 }
