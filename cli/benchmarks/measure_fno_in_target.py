@@ -229,7 +229,7 @@ def measure_median_fno_latency_ms(n_runs: int = 20) -> float:
         t0 = time.perf_counter()
         try:
             result = subprocess.run(
-                ["fno", "--help"],
+                ["fno-py", "--help"],
                 capture_output=True,
                 check=False,
                 timeout=PROBE_TIMEOUT_SECONDS,

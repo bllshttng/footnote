@@ -31,7 +31,7 @@ chmod +x "$STUB"
 # Fake `fno new` so drain's graph-node creation succeeds without a real CLI.
 FAKE_BIN="$WORK/bin"
 mkdir -p "$FAKE_BIN"
-cat > "$FAKE_BIN/fno" <<'FAKE_ABI'
+cat > "$FAKE_BIN/fno-py" <<'FAKE_ABI'
 #!/usr/bin/env bash
 case "${1:-}" in
   new)
@@ -47,26 +47,26 @@ case "${1:-}" in
     ;;
 esac
 FAKE_ABI
-chmod +x "$FAKE_BIN/fno"
+chmod +x "$FAKE_BIN/fno-py"
 # Resolve the real fno only when the fake needs to delegate.
-export REAL_ABI=$(command -v fno || echo "")
+export REAL_ABI=$(command -v fno-py || echo "")
 
 # Inject one of each kind via the real CLI. Use --project so cwd stays at $WORK
 # (so drain's _git_root() / cwd lands convo-signals under $WORK/.fno/).
-FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno mail send \
+FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind heads-up \
   --body "please file as a graph node"
-FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno mail send \
+FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind question \
   --body "should we proceed with rollback"
-FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno mail send \
+FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind fyi \
   --body "build complete in 4 minutes"
 
 # Drain (with fake fno on PATH for graph creation, triage stub for LLM).
 DRAIN_JSON=$(FNO_INBOX_ROOT="$INBOX_ROOT" \
   FNO_INBOX_TRIAGE_STUB="$STUB" PATH="$FAKE_BIN:$PATH" \
-  uv run --project "$CLI_DIR" fno mail drain --from "$PROJECT" --json --max 10)
+  uv run --project "$CLI_DIR" fno-py mail drain --from "$PROJECT" --json --max 10)
 
 # 3 results, 3 distinct actions.
 echo "$DRAIN_JSON" | python3 -c "

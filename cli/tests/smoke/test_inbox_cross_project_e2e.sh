@@ -43,7 +43,7 @@ echo '{"_lock_version": 1, "entries": []}' > "$FAKE_HOME/.fno/graph.json"
 run_abi() {
   FNO_INBOX_ROOT="$INBOX_ROOT" HOME="$FAKE_HOME" \
     FNO_INBOX_TRIAGE_STUB="$STUB" \
-    uv run --project "$CLI_DIR" fno "$@"
+    uv run --project "$CLI_DIR" fno-py "$@"
 }
 
 # 1) proj-a sends a heads-up to proj-b.

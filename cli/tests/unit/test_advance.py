@@ -297,7 +297,7 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
 
     assert sid == "abc12345"
     cmd = captured["cmd"]
-    assert cmd[:5] == ["fno", "agents", "spawn", "--provider", "claude"]
+    assert cmd[:5] == ["fno-py", "agents", "spawn", "--provider", "claude"]
     assert "--cwd" in cmd and "/work/dir" in cmd
     assert "--fresh" not in cmd
     assert cmd[-2] == "target-ab-2222aaaa"
@@ -449,9 +449,9 @@ def test_next_node_enriches_resolved_cwd(monkeypatch):
 
     def fake_run(cmd, **kw):
         calls.append(cmd[:3])
-        if cmd[:3] == ["fno", "backlog", "next"]:
+        if cmd[:3] == ["fno-py", "backlog", "next"]:
             return _FakeProc(0, json.dumps({"id": "ab-2222aaaa", "cwd": "/raw"}))
-        if cmd[:3] == ["fno", "backlog", "get"]:
+        if cmd[:3] == ["fno-py", "backlog", "get"]:
             return _FakeProc(0, json.dumps(
                 {"id": "ab-2222aaaa", "cwd": "/raw", "_resolved_cwd": "/mapped/root"}))
         return _FakeProc(1)
@@ -459,12 +459,12 @@ def test_next_node_enriches_resolved_cwd(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     node = adv._next_node("fno")
     assert node["_resolved_cwd"] == "/mapped/root"
-    assert ["fno", "backlog", "get"] in calls
+    assert ["fno-py", "backlog", "get"] in calls
 
 
 def test_next_node_get_failure_is_nonfatal(monkeypatch):
     def fake_run(cmd, **kw):
-        if cmd[:3] == ["fno", "backlog", "next"]:
+        if cmd[:3] == ["fno-py", "backlog", "next"]:
             return _FakeProc(0, json.dumps({"id": "ab-2222aaaa", "cwd": "/raw"}))
         return _FakeProc(1, "", "get exploded")
 
@@ -485,7 +485,7 @@ def test_next_node_skips_get_when_already_resolved(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     node = adv._next_node("fno")
     assert node["_resolved_cwd"] == "/already"
-    assert ["fno", "backlog", "get"] not in calls  # no redundant get
+    assert ["fno-py", "backlog", "get"] not in calls  # no redundant get
 
 
 # ---------------------------------------------------------------------------

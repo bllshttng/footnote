@@ -20,7 +20,7 @@ cd "$REPO_ROOT/cli"
 # Prefer the in-tree build (`uv run`) over an installed snapshot: a stale
 # global `fno` may predate the `config schema` verb (install staleness).
 if command -v uv >/dev/null 2>&1; then
-    FNO=(uv run fno)
+    FNO=(uv run fno-py)
 elif command -v fno >/dev/null 2>&1; then
     FNO=(fno)
 else

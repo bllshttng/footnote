@@ -186,7 +186,7 @@ class TestSubprocessHardening:
 
     def _make_completed(self, returncode: int, stderr: bytes = b""):
         return subprocess.CompletedProcess(
-            args=["fno", "--help"], returncode=returncode, stdout=b"", stderr=stderr,
+            args=["fno-py", "--help"], returncode=returncode, stdout=b"", stderr=stderr,
         )
 
     def test_clean_run_returns_median(self):

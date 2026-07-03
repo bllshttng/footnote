@@ -138,7 +138,7 @@ def _build_prompt(handle: ThreadHandle, receiver: str, cwd: Path) -> str:
     backlog_failure_reason = ""
     try:
         result = subprocess.run(
-            ["fno", "backlog", "ready", "--project", receiver, "--json"],
+            ["fno-py", "backlog", "ready", "--project", receiver, "--json"],
             capture_output=True,
             text=True,
             timeout=5,
