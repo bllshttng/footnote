@@ -75,6 +75,15 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::client_verbs::run_claim(&args[1..]);
     }
 
+    // `detect` is the HIDDEN debug front over the screen-manifest fallback
+    // authority (`fno_agents::scrape`): `detect explain <agent>` prints which
+    // rung of the badge lattice currently badges the agent. Same `matches!`
+    // treatment as `claim` so it stays out of CLIENT_VERB_USAGE /
+    // RUST_CLIENT_VERBS and the parity guard.
+    if matches!(verb, "detect") {
+        return fno_agents::scrape::run_detect(&args[1..]);
+    }
+
     // Per-verb help: `fno agents <verb> --help` prints that verb's usage line
     // and exits 0, instead of the verb's arg parser erroring "unknown flag:
     // --help" / "takes no arguments" (ab-351427cb). Only fires for a recognized

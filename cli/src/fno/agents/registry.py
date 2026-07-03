@@ -99,8 +99,9 @@ from fno import paths
 # but stamping v5 makes a pre-inside-leg reader (which accepts only {1,2,3,4})
 # reject a v5 store instead of silently dropping the inside-leg report on
 # write-back. Reads stay backward-compatible: load_registry accepts
-# 1..=SCHEMA_VERSION.
-SCHEMA_VERSION = 6
+# 1..=SCHEMA_VERSION. v6 (4a-G2) is the mux-ref bump; v7 (screen-manifest
+# fallback authority) the same bump for the additive `screen_state` verdict.
+SCHEMA_VERSION = 7
 
 
 class RegistryVersionError(RuntimeError):
@@ -231,6 +232,15 @@ class AgentEntry:
     # Rust ``RegistryEntry.mux: Option<MuxRef>`` (X3); gated by the v6 schema
     # bump so a pre-mux reader rejects instead of silently dropping the ref.
     mux: Optional[dict] = None
+    # Latest screen-manifest verdict for this row's mux pane (v7, the fallback
+    # rung of the badge lattice under the inside-leg hook): ``{"state", "rule",
+    # "seq", "at", "ttl_ms"?}``. The Rust daemon's scrape sweep is the sole
+    # writer and owns all behaviour (eligibility, write-on-change, clears);
+    # Python only custodies the blob so a row round-trips across the
+    # mixed-language registry, same X3 passthrough treatment as ``inside_leg``.
+    # Gated by the v7 schema bump so a pre-v7 reader rejects instead of
+    # silently dropping a stored verdict.
+    screen_state: Optional[dict] = None
 
     @property
     def session_id(self) -> Optional[str]:

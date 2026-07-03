@@ -1028,6 +1028,7 @@ fn dispatch_create(
         inside_leg: None,
         exited_at: None,
         mux: None,
+        screen_state: None,
     };
 
     match update_registry(registry_path, |reg| {

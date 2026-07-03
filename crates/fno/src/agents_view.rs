@@ -147,7 +147,42 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                     (None, None) // TTL lapsed -> liveness-only (AC2-ERR)
                 }
             }
-            _ => (None, None),
+            // Screen-manifest rung (v7): consulted ONLY when no inside_leg
+            // report exists at all - a hook-capable row (even TTL-lapsed)
+            // never falls through to a scrape verdict (per-capability
+            // arbitration; the writer clears screen_state on the flip, this
+            // is the reader-side defense in depth).
+            _ => match row.get("screen_state") {
+                Some(ss) if !ss.is_null() => {
+                    let live = report_is_live(
+                        ss.get("at").and_then(|v| v.as_str()).unwrap_or(""),
+                        ss.get("ttl_ms").and_then(|v| v.as_u64()),
+                        now_secs,
+                    );
+                    if live {
+                        // Manifest vocabulary is working|idle|blocked. `idle`
+                        // maps to no badge (a plain live row): AgentBadge has
+                        // no Idle variant and adding one is a proto bump,
+                        // serialized behind the v7 wire work. Anything
+                        // malformed fails badge-closed.
+                        let badge = match ss.get("state").and_then(|v| v.as_str()) {
+                            Some("working") => Some(AgentBadge::Working),
+                            Some("blocked") => Some(AgentBadge::Blocked),
+                            _ => None,
+                        };
+                        // The matched rule doubles as the human hint, the way
+                        // an inside-leg reason does.
+                        let reason = badge
+                            .is_some()
+                            .then(|| ss.get("rule").and_then(|v| v.as_str()).map(str::to_string))
+                            .flatten();
+                        (badge, reason)
+                    } else {
+                        (None, None) // TTL lapsed -> liveness-only
+                    }
+                }
+                _ => (None, None),
+            },
         };
         out.push(RegistryAgent {
             name: name.to_string(),
@@ -278,6 +313,50 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "ok");
+    }
+
+    #[test]
+    fn agent_rows_screen_state_rung_badges_only_hookless_rows() {
+        // The screen-manifest rung (v7): a hook-less row with a fresh scrape
+        // verdict badges (blocked/working); `idle` renders as a plain live
+        // row (no AgentBadge::Idle until the next proto bump); a lapsed or
+        // malformed verdict ages to liveness-only; and ANY inside_leg report
+        // - even TTL-lapsed - keeps a leftover verdict from badging (the hook
+        // is unconditionally senior).
+        let raw = reg(&format!(
+            r#"{{"name":"scraped-blocked","cwd":"/w","status":"live",
+                 "screen_state":{{"state":"blocked","rule":"permission_prompt",
+                                  "seq":2,"at":"{recent}","ttl_ms":120000}}}},
+               {{"name":"scraped-idle","cwd":"/w","status":"live",
+                 "screen_state":{{"state":"idle","rule":"idle_prompt",
+                                  "seq":1,"at":"{recent}","ttl_ms":120000}}}},
+               {{"name":"scraped-lapsed","cwd":"/w","status":"live",
+                 "screen_state":{{"state":"working","rule":"busy","seq":1,
+                                  "at":"2020-01-01T00:00:00Z","ttl_ms":120000}}}},
+               {{"name":"scraped-corrupt","cwd":"/w","status":"live",
+                 "screen_state":{{"state":"working","rule":"busy","seq":1,
+                                  "at":"garbage","ttl_ms":120000}}}},
+               {{"name":"hook-wins","cwd":"/w","status":"live",
+                 "inside_leg":{{"state":"working","seq":9,
+                                "received_at":"2020-01-01T00:00:00Z","ttl_ms":60000}},
+                 "screen_state":{{"state":"blocked","rule":"leftover","seq":1,
+                                  "at":"{recent}","ttl_ms":120000}}}}"#,
+            recent = "2027-01-15T07:59:30Z",
+        ));
+        let now = rfc3339_like_to_secs("2027-01-15T08:00:00Z").unwrap();
+        let rows = derive_rows(&raw, now).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        let blocked = get("scraped-blocked");
+        assert_eq!(blocked.badge, Some(AgentBadge::Blocked));
+        assert_eq!(blocked.reason.as_deref(), Some("permission_prompt"));
+        assert_eq!(get("scraped-idle").badge, None, "idle = plain live row");
+        assert_eq!(get("scraped-lapsed").badge, None, "TTL lapse ages out");
+        assert_eq!(get("scraped-corrupt").badge, None, "corrupt stamp closed");
+        assert_eq!(
+            get("hook-wins").badge,
+            None,
+            "a hook-capable row (even lapsed) never badges from a scrape verdict"
+        );
     }
 
     #[test]

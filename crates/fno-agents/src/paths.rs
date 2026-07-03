@@ -78,6 +78,13 @@ impl AgentsHome {
         self.root.join("events.jsonl")
     }
 
+    /// Operator override dir for detection manifests: a readable
+    /// `<provider>.toml` here beats the bundled copy
+    /// (`crate::manifest::load_manifest` resolution chain).
+    pub fn manifests_dir(&self) -> PathBuf {
+        self.root.join("manifests")
+    }
+
     pub fn supervisor_sock(&self) -> PathBuf {
         self.root.join("supervisor.sock")
     }

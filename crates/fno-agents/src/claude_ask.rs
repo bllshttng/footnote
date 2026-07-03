@@ -2161,6 +2161,7 @@ fn create(
         inside_leg: None,
         exited_at: None,
         mux: None,
+        screen_state: None,
     };
 
     // Re-check the name UNDER the registry lock before appending. The per-agent
