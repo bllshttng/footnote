@@ -29,5 +29,5 @@ fi
 cat <<'EOF'
 ## Install the `fno` front door
 
-`fno` (the Rust mux front door) is not active on your PATH - you likely have `fno-py` (the Python CLI) only. Install the front door so bare `fno` works and can bootstrap the rest: run `cargo install fno` (or, from a clone, `fno update --rust`). Until then, reach the CLI as `fno-py`.
+`fno` (the Rust mux front door) is not active on your PATH - you likely have `fno-py` (the Python CLI) only. Install the front door so bare `fno` works and bootstraps the rest: `cargo install fno` (needs a Rust toolchain), or `fno update --rust` from a clone - see docs/getting-started.md for other methods. Until then, reach the CLI as `fno-py`.
 EOF
