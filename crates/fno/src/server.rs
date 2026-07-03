@@ -405,8 +405,18 @@ struct PaneEntry {
 /// (mux_spawn.py) prefixes the command with `env FNO_NODE=<id> ...`, so the id
 /// is already in the argv the server receives - no new IPC from the pane. An
 /// ad-hoc pane (no such token) yields `None`.
+///
+/// Anchored to the `env(1)` wrapper to avoid false positives: only a leading
+/// `env` followed by its `NAME=VALUE` assignment run is scanned, stopping at
+/// the actual command. So a real command that merely mentions `FNO_NODE=` in
+/// its own args (e.g. `grep FNO_NODE=x file`) is never mistaken for provenance.
 fn node_from_argv(argv: &[String]) -> Option<String> {
+    if argv.first().map(String::as_str) != Some("env") {
+        return None;
+    }
     argv.iter()
+        .skip(1)
+        .take_while(|a| a.contains('='))
         .find_map(|a| a.strip_prefix("FNO_NODE="))
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
@@ -2846,15 +2856,20 @@ mod tests {
 
     #[test]
     fn node_from_argv_is_none_for_ad_hoc_pane() {
+        let ad_hoc =
+            |a: &[&str]| node_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         // A plain `pane run htop` (no wrapper) has no provenance.
-        let argv: Vec<String> = ["htop"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(node_from_argv(&argv), None);
+        assert_eq!(ad_hoc(&["htop"]), None);
         // An empty-valued token is treated as absent (no empty-string exports).
-        let empty: Vec<String> = ["env", "FNO_NODE=", "sh"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(node_from_argv(&empty), None);
+        assert_eq!(ad_hoc(&["env", "FNO_NODE=", "sh"]), None);
+        // A command that merely MENTIONS FNO_NODE= in its own args is not
+        // provenance: scanning stops at the command (first non-`NAME=` token).
+        assert_eq!(
+            ad_hoc(&["env", "FOO=1", "grep", "FNO_NODE=x", "file"]),
+            None
+        );
+        // No `env` wrapper at all -> never scanned, even with a bare token.
+        assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
     }
 
     #[test]
