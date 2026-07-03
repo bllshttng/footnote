@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use fno::proto::{
-    read_msg_sync, write_msg_sync, AgentRow, BlockDir, ClientMsg, Command, Frame, ProtoError,
-    ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
+    read_msg_sync, write_msg_sync, AgentRow, BlockDir, ClientMsg, Command, Frame, MouseEvent,
+    ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
 };
 use fno::tree::Rect;
 use fno::vt::{frame_text, Pane};
@@ -341,6 +341,13 @@ impl FakeClient {
     pub fn cmd(&mut self, cmd: Command) {
         let mut w = self.stream.try_clone().unwrap();
         write_msg_sync(&mut w, &ClientMsg::Command(cmd)).unwrap();
+    }
+
+    /// Forward a pane-local mouse event (v7): what the real client sends
+    /// after hit-testing an outer-terminal event into a pane rect.
+    pub fn mouse(&mut self, pane: u64, event: MouseEvent) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(&mut w, &ClientMsg::Mouse { pane, event }).unwrap();
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {

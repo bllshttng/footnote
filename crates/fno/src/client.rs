@@ -36,6 +36,11 @@ use crate::tree::Rect;
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Connect bound for the attach path. Longer than the scriptable verbs'
+/// probe (a human is willing to wait a beat) but never infinite: a wedged
+/// server must produce a clear line, not a hang.
+const ATTACH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Sideline width in columns, divider column included. Client-local chrome:
 /// the server sees only the content-area viewport.
 const PANEL_W: u16 = 28;
@@ -92,8 +97,21 @@ fn run_inner(session: &str) -> Result<i32, String> {
 /// `mux_cli::pane run`, which must self-spawn a server for a script-only
 /// session (AC1-EDGE).
 pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixStream, String> {
-    if let Ok(s) = std::os::unix::net::UnixStream::connect(path) {
-        return Ok(s);
+    match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
+        Ok(s) => return Ok(s),
+        // A connect timeout means something holds the socket but never
+        // accepted: a wedged server. Spawning over it would just lose the
+        // bind race, so report instead - never hang, never clobber.
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            return Err(format!(
+                "server at {} is not accepting connections (connect timed out); it is \
+                 wedged. kill-server needs an accepted connection and cannot recover it - \
+                 kill the server process directly (its log is at {}), then retry.",
+                path.display(),
+                log_path(path).display()
+            ));
+        }
+        Err(_) => {}
     }
     if path.exists() {
         eprintln!("fno: previous session ended; starting a fresh one");
@@ -101,7 +119,7 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
     spawn_server(path)?;
     let deadline = Instant::now() + SPAWN_CONNECT_TIMEOUT;
     loop {
-        match std::os::unix::net::UnixStream::connect(path) {
+        match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
             Ok(s) => return Ok(s),
             Err(e) if Instant::now() >= deadline => {
                 return Err(format!(
