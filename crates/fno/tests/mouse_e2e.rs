@@ -9,7 +9,6 @@
 mod common;
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use common::{spawn_server, FakeClient};
 use fno::proto::{MouseButton, MouseEvent, MouseKind};
@@ -51,11 +50,28 @@ fn wheel_up() -> MouseEvent {
     }
 }
 
+/// Wait until the pane's shell has printed its first prompt. Writing to the
+/// PTY before `sh` is ready to read gets the bytes echoed by the tty line
+/// discipline but never executed (the submitting `\r` is lost during startup),
+/// so every test gates its FIRST input on this. The pinned prompt ends with
+/// `$` (`sh-3.2$ ` on macOS bash-as-sh).
+fn wait_prompt(c: &mut FakeClient, pane: u64) {
+    c.wait_pane_text(15, pane, |t| t.trim_end().ends_with('$'));
+}
+
 /// Fill the pane with enough output that the wheel has history to scroll
 /// into, and wait until the shell is provably done producing it.
 fn fill_history(c: &mut FakeClient, pane: u64) {
-    c.input(b"i=0; while [ $i -lt 200 ]; do echo hist-$i; i=$((i+1)); done; echo filled#\r");
-    c.wait_pane_text(15, pane, |t| t.contains("filled#"));
+    wait_prompt(c, pane);
+    // 60 lines: comfortably past the 24-row viewport so a wheel-up has real
+    // history to scroll into, without the load of a 200-iteration sh loop
+    // (which under a saturated box crawls and blows the timeout).
+    c.input(b"i=0; while [ $i -lt 60 ]; do echo hist-$i; i=$((i+1)); done; echo filled#\r");
+    // Wait on the loop's OWN output, not "filled#" alone: the echoed command
+    // line already carries "filled#" the instant it is typed, so keying on it
+    // would return before the loop produced any scrollback. "hist-59" only
+    // exists once the loop's last iteration ran.
+    c.wait_pane_text(15, pane, |t| t.contains("hist-59") && t.contains("filled#"));
 }
 
 // -- AC1-HP + AC-EDGE: wheel scroll is shared state every co-viewer sees ------
@@ -127,6 +143,7 @@ fn mouse_drag_release_copies_selection_to_initiator_only() {
     let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
     b.wait_layout(10, "b attached", |l| !l.panes.is_empty());
 
+    wait_prompt(&mut a, pane);
     a.input(b"echo copy-me-payload#\r");
     let text = a.wait_pane_text(15, pane, |t| {
         t.lines().any(|l| l.starts_with("copy-me-payload#"))
@@ -166,14 +183,23 @@ fn mouse_drag_release_copies_selection_to_initiator_only() {
         },
     );
     let copied = a.wait(10, "copy payload", |c| c.copies.first().cloned());
-    assert!(
-        copied.contains("copy-me"),
-        "copy carries the dragged text; got {copied:?}"
+    // Exact, not a substring: cols 0..=14 on the output line is precisely
+    // "copy-me-payload" (the `#` sits at col 15). A substring check would pass
+    // even if the selection had bled into the prompt-prefixed command line
+    // above or over-run its right edge.
+    assert_eq!(
+        copied, "copy-me-payload",
+        "copy carries exactly the dragged cells"
     );
 
     // The copy is a reply to the gesture, not a broadcast: the co-viewer's
-    // clipboard is untouched.
-    b.pump(Duration::from_millis(500));
+    // clipboard is untouched. Prove it with a causal barrier, not a timer: a
+    // emits a marker and we absorb b's stream until b renders it. Copy and
+    // Frame share b's single ordered socket, so any (buggy) Copy broadcast to b
+    // would have been read before this marker frame - if b.copies is still
+    // empty here, none was ever sent.
+    a.input(b"echo no-stray-copy#\r");
+    b.wait_pane_text(15, pane, |t| t.contains("no-stray-copy#"));
     assert!(
         b.copies.is_empty(),
         "copy must reach the initiator only; b got {:?}",

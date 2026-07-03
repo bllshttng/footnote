@@ -262,6 +262,123 @@ fn agent_edge_watch_only_rows_match_squad_by_cwd_else_catch_all() {
     kill_server(&scratch);
 }
 
+/// `fno mux block pipe ...` against the same hermetic session (x-fe8f).
+fn block(scratch: &Scratch, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_fno"))
+        .args(["mux", "block"])
+        .args(args)
+        .env("FNO_MUX_DIR", &scratch.0)
+        .env("FNO_AGENTS_HOME", agents_home(scratch))
+        .env("SHELL", "/bin/sh")
+        .output()
+        .expect("fno binary runs")
+}
+
+#[test]
+fn agent_edge_block_pipe_reads_guards_and_lands() {
+    // The block-pipe composition end to end: source block text lands in the
+    // target pane's input (happy path, incl. the NotFound-registry -> proceed
+    // branch and the JSON receipt); a nonexistent block propagates exit 14;
+    // a working-badged target refuses with exit 15; --force overrides.
+    let scratch = Scratch::new("agent_edge_block_pipe");
+    let dir = scratch.0.to_str().unwrap().to_string();
+
+    // Source pane: emit OSC 133 C/D markers around the output so it captures
+    // ONE real typed, completed block (block pipe refuses markerless-implicit
+    // and still-open blocks). It then sleeps so the pane stays live.
+    let src = pane(
+        &scratch,
+        &[
+            "run",
+            "--cwd",
+            &dir,
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf '\\033]133;C\\ahi-from-a\\n\\033]133;D;0\\a'; sleep 300",
+        ],
+    );
+    assert!(
+        src.status.success(),
+        "run stderr: {:?}",
+        String::from_utf8_lossy(&src.stderr)
+    );
+    let from = stdout(&src);
+    // Target pane: `cat` echoes every byte that lands, so the grid proves it.
+    let dst = pane(&scratch, &["run", "--cwd", &dir, "--", "/bin/cat"]);
+    assert!(dst.status.success());
+    let to = stdout(&dst);
+
+    // Let the source's output reach its grid before reading the block.
+    let settled = pane(
+        &scratch,
+        &["wait", &from, "--pattern", "hi-from-a", "--timeout", "10"],
+    );
+    assert_eq!(settled.status.code(), Some(10), "source output on the grid");
+
+    // Happy path (no registry file at all -> the guard's NotFound branch).
+    let piped = block(&scratch, &["pipe", "--from", &from, "--to", &to, "--json"]);
+    assert!(
+        piped.status.success(),
+        "pipe stderr: {:?}",
+        String::from_utf8_lossy(&piped.stderr)
+    );
+    let receipt: serde_json::Value = serde_json::from_str(&stdout(&piped)).unwrap();
+    assert!(receipt["bytes"].as_u64().unwrap() > 0);
+    assert_eq!(receipt["forced"], serde_json::json!(false));
+    assert_eq!(
+        receipt["block_seq"],
+        serde_json::json!(0),
+        "first typed block"
+    );
+    let landed = pane(
+        &scratch,
+        &["wait", &to, "--pattern", "hi-from-a", "--timeout", "10"],
+    );
+    assert_eq!(
+        landed.status.code(),
+        Some(10),
+        "piped text lands in the target pane"
+    );
+
+    // A nonexistent block: EXIT_BLOCK_UNAVAILABLE propagates verbatim.
+    let gone = block(
+        &scratch,
+        &["pipe", "--from", &from, "--to", &to, "--block", "99"],
+    );
+    assert_eq!(gone.status.code(), Some(14), "evicted/nonexistent block");
+
+    // A working-badged agent on the target pane: the idle guard refuses with
+    // the typed exit and the --force hint. No-ttl report, so it never decays
+    // into a false green mid-test.
+    write_registry(
+        &scratch,
+        &format!(
+            r#"{{"name":"busy-agent","provider":"claude","cwd":"{dir}","status":"live",
+                 "mux":{{"session":"main","pane_id":{to}}},
+                 "inside_leg":{{"state":"working","seq":1,
+                                "received_at":"2026-07-02T00:00:00Z"}}}}"#
+        ),
+    );
+    let refused = block(&scratch, &["pipe", "--from", &from, "--to", &to]);
+    assert_eq!(refused.status.code(), Some(15), "guard refuses busy target");
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        err.contains("--force"),
+        "refusal names the override: {err:?}"
+    );
+
+    // --force bypasses the guard (and only the guard).
+    let forced = block(&scratch, &["pipe", "--from", &from, "--to", &to, "--force"]);
+    assert!(
+        forced.status.success(),
+        "forced pipe stderr: {:?}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+
+    kill_server(&scratch);
+}
+
 #[test]
 fn agent_edge_inject_vs_typing_interlock() {
     // 4a-G3 (US3): while the relay holds a claimed agent pane, human Input
