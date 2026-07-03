@@ -152,17 +152,23 @@ impl ClientHarness {
         }
     }
 
-    /// Wait until the shell sits at a fresh prompt: the last non-empty screen
-    /// line ends with the pinned `PS1` (`$ `). Required after an interrupt
-    /// (^C) before typing again - until the shell regains the foreground, the
-    /// tty line discipline can flush/drop bytes typed at the dying process
-    /// (codex P1: consistently reproducible on Linux PTYs).
+    /// Wait until the shell sits at a fresh prompt: a fresh prompt line ends
+    /// with the pinned `PS1` (`$ `). Required after an interrupt (^C) before
+    /// typing again - until the shell regains the foreground, the tty line
+    /// discipline can flush/drop bytes typed at the dying process (codex P1:
+    /// consistently reproducible on Linux PTYs).
+    ///
+    /// Scans the last two non-empty lines rather than only the last: the
+    /// always-on status row (US4) is client-local chrome that renders as the
+    /// final non-empty line and never ends with `$`, so keying on the very
+    /// last line alone would never see the prompt sitting just above it.
     pub fn wait_prompt(&mut self, secs: u64) -> String {
         self.wait_screen(secs, |s| {
             s.lines()
                 .rev()
-                .find(|l| !l.trim().is_empty())
-                .is_some_and(|l| l.trim_end().ends_with('$'))
+                .filter(|l| !l.trim().is_empty())
+                .take(2)
+                .any(|l| l.trim_end().ends_with('$'))
         })
     }
 

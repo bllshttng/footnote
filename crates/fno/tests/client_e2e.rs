@@ -23,14 +23,20 @@ fn client_e2e_prompt_appears_and_echo_roundtrips() {
     h.type_bytes(b"echo he\"ll\"o\r");
     // Only the OUTPUT line is bare "hello" (the typed line has quotes).
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "hello"));
-    // AC1-UI: the cursor is visible and sits on the last written row (the
-    // fresh prompt), where the shell put it.
+    // AC1-UI: the cursor is visible and sits on the fresh prompt row, where
+    // the shell put it. That row is the last screen line ending with `PS1`
+    // (`$ `) - NOT necessarily the last screen line, since the always-on
+    // status row (US4) is chrome that renders below the content prompt.
     let frame = h.pane.frame();
     assert!(frame.cursor_visible, "cursor must be visible at the prompt");
     let text = h.screen();
-    let last_row = text.lines().count().saturating_sub(1);
+    let lines: Vec<&str> = text.lines().collect();
+    let prompt_row = lines
+        .iter()
+        .rposition(|l| l.trim_end().ends_with('$'))
+        .unwrap_or_else(|| panic!("no prompt row found; screen:\n{text}"));
     assert_eq!(
-        frame.cursor_row as usize, last_row,
+        frame.cursor_row as usize, prompt_row,
         "cursor should sit on the prompt row; screen:\n{text}"
     );
 }
