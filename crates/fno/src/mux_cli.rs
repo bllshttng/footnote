@@ -1,8 +1,27 @@
-//! The `fno mux ls | kill-server` verbs: plain client-process code over the
-//! frozen pre-Attach protocol pair (`Query`/`Info`, `KillServer`). These run
-//! and exit - no TUI, no raw mode, no attach - so every probe is bounded by
-//! a read/write timeout and a bad session can never hang the listing
-//! (AC4-ERR).
+//! The scriptable `fno mux` verbs: `ls`, `kill-server`, `shell-init`, `doctor`,
+//! and the `pane` control-verb family. Plain client-process code - they run and
+//! exit, no TUI, no raw mode, no attach - so every probe is bounded by a
+//! read/write timeout and a bad session can never hang the listing (AC4-ERR).
+//!
+//! ## Exit-code table (US6, the one authority; asserted by tests)
+//!
+//! Every verb returns one of [`EXIT_OK`] (0), [`EXIT_ERROR`] (1, an io/dead/skew
+//! failure), [`EXIT_USAGE`] (2, malformed args), or - for `pane wait`/`read` -
+//! the distinct `EXIT_WAIT_*`/`EXIT_BLOCK_UNAVAILABLE` codes (10-14). The
+//! constants below carry the canonical comment per code.
+//!
+//! ## `--json` envelope (US6; every verb accepts `--json`)
+//!
+//! Each verb emits a stable, documented JSON shape on stdout under `--json`;
+//! errors stay one-line on stderr (never mixed into the json). The shapes:
+//! - `ls`: array of `{session, state: live|stale|unqueryable|unprobeable,
+//!   clients?, squads?, panes?, error?}` (`[]` when empty).
+//! - `kill-server`: `{session, killed: true, note}` on success.
+//! - `shell-init`: `{shell, snippet}` (the raw snippet without `--json`).
+//! - `doctor`: `{ok: bool, checks: [{check, verdict: ok|warn|fail|n/a, detail,
+//!   remedy}]}`.
+//! - `pane ls|read|run|send|wait|kill|claim|release`: the per-reply shapes in
+//!   [`render_reply`].
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -139,25 +158,30 @@ fi
 /// captures ONE implicit block; a terminal whose shell already emits OSC 133
 /// (Warp/iTerm) works with zero setup (AC4-EDGE) - the scanner does not care
 /// who emits. An unsupported / missing shell is a one-line error (AC4-ERR).
-pub fn shell_init(shell: Option<&str>) -> i32 {
-    match shell {
-        Some("zsh") => {
-            print!("{ZSH_SHELL_INIT}");
-            EXIT_OK
-        }
-        Some("bash") => {
-            print!("{BASH_SHELL_INIT}");
-            EXIT_OK
-        }
+pub fn shell_init(shell: Option<&str>, json: bool) -> i32 {
+    let snippet = match shell {
+        Some("zsh") => ZSH_SHELL_INIT,
+        Some("bash") => BASH_SHELL_INIT,
         Some(other) => {
             eprintln!("fno mux shell-init: unsupported shell {other:?}; supported: zsh, bash");
-            EXIT_USAGE
+            return EXIT_USAGE;
         }
         None => {
             eprintln!("fno mux shell-init: needs a shell argument: zsh|bash");
-            EXIT_USAGE
+            return EXIT_USAGE;
         }
+    };
+    // --json wraps the snippet in the stable envelope (a script reads `.snippet`);
+    // the default prints the raw snippet for `eval "$(fno mux shell-init zsh)"`.
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "shell": shell.unwrap_or(""), "snippet": snippet })
+        );
+    } else {
+        print!("{snippet}");
     }
+    EXIT_OK
 }
 
 /// One enumerated session: its name and what a probe learned. Shared by
@@ -174,11 +198,12 @@ impl SessionRow {
     }
 }
 
-/// Enumerate `*.sock` in the mux dir, probing each, sorted by name. `Err` is
-/// an unreadable dir the caller must distinguish from "no sessions" (a
-/// permissions/IO error must never read as empty); `NotFound` returns an
-/// empty list (no session ever started here).
-fn session_rows() -> Result<Vec<SessionRow>, String> {
+/// Enumerate `*.sock` stems in the mux dir, sorted. `Err` is an unreadable dir
+/// the caller must distinguish from "no sessions" (a permissions/IO error must
+/// never read as empty); `NotFound` returns an empty list (no session ever
+/// started here, AC6-FR). Shared by `ls`/picker (which then probe) and `doctor`
+/// (which version-probes) so both see the same session set.
+fn session_names() -> Result<Vec<String>, String> {
     let dir = proto::mux_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -195,7 +220,14 @@ fn session_rows() -> Result<Vec<SessionRow>, String> {
         })
         .collect();
     names.sort();
-    Ok(names
+    Ok(names)
+}
+
+/// Enumerate sessions and probe each (`Query`/`Info`) for the live/stale verdict
+/// `ls` and the picker render.
+fn session_rows() -> Result<Vec<SessionRow>, String> {
+    let dir = proto::mux_dir();
+    Ok(session_names()?
         .into_iter()
         .map(|name| {
             let sock = dir.join(format!("{name}.sock"));
@@ -209,17 +241,43 @@ fn session_rows() -> Result<Vec<SessionRow>, String> {
 /// socket is REPORTED, never unlinked (kill-server owns removal). Exits 0
 /// even when every row is stale or unqueryable; only "no sessions" is
 /// distinguishable by text, not exit code, so scripts can `grep`.
-pub fn ls() -> i32 {
+pub fn ls(json: bool) -> i32 {
     let rows = match session_rows() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("fno: {e}");
-            return 1;
+            return EXIT_ERROR;
         }
     };
+    if json {
+        // Stable per-row envelope: `state` is always present; live rows carry
+        // the counts. An empty listing is `[]` (never the "no sessions" prose).
+        let arr: Vec<_> = rows
+            .iter()
+            .map(|SessionRow { name, probe }| match probe {
+                Probe::Live {
+                    clients,
+                    squads,
+                    panes,
+                } => serde_json::json!({
+                    "session": name, "state": "live",
+                    "clients": clients, "squads": squads, "panes": panes,
+                }),
+                Probe::Unqueryable => {
+                    serde_json::json!({ "session": name, "state": "unqueryable" })
+                }
+                Probe::Stale => serde_json::json!({ "session": name, "state": "stale" }),
+                Probe::Unprobeable(e) => {
+                    serde_json::json!({ "session": name, "state": "unprobeable", "error": e })
+                }
+            })
+            .collect();
+        println!("{}", serde_json::Value::Array(arr));
+        return EXIT_OK;
+    }
     if rows.is_empty() {
         println!("no sessions");
-        return 0;
+        return EXIT_OK;
     }
     for SessionRow { name, probe } in &rows {
         match probe {
@@ -233,7 +291,7 @@ pub fn ls() -> i32 {
             Probe::Unprobeable(e) => println!("{name}: probe failed ({e})"),
         }
     }
-    0
+    EXIT_OK
 }
 
 // ---------------------------------------------------------------------------
@@ -555,17 +613,30 @@ fn run_picker(rows: Vec<SessionRow>) -> Option<String> {
 /// its clients, kills every pane child, and exits (its SocketGuard unlinks
 /// the socket); a stale socket is unlinked here with a message (exit 0); no
 /// socket at all is "no server" (exit 1).
-pub fn kill_server(session: &str) -> i32 {
+pub fn kill_server(session: &str, json: bool) -> i32 {
+    // On success `--json` prints `{"session":..,"killed":true,"note":..}`; errors
+    // stay one-line on stderr (mirrors the pane verbs' json/error split).
+    let killed_ok = |note: &str| -> i32 {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "session": session, "killed": true, "note": note })
+            );
+        } else {
+            println!("{note}");
+        }
+        EXIT_OK
+    };
     let sock = match proto::socket_path(session) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("fno: {e}");
-            return 2;
+            return EXIT_USAGE;
         }
     };
     if !sock.exists() {
         eprintln!("fno: no server for session {session:?}");
-        return 1;
+        return EXIT_ERROR;
     }
     let stream = match std::os::unix::net::UnixStream::connect(&sock) {
         Ok(s) => s,
@@ -581,19 +652,18 @@ pub fn kill_server(session: &str) -> i32 {
         {
             // AC4-EDGE: dead server left its socket behind - take it out.
             return match std::fs::remove_file(&sock) {
-                Ok(()) => {
-                    println!("removed stale socket for session {session:?} (server was dead)");
-                    0
-                }
+                Ok(()) => killed_ok(&format!(
+                    "removed stale socket for session {session:?} (server was dead)"
+                )),
                 Err(e) => {
                     eprintln!("fno: cannot remove stale socket {}: {e}", sock.display());
-                    1
+                    EXIT_ERROR
                 }
             };
         }
         Err(e) => {
             eprintln!("fno: cannot connect to {}: {e}", sock.display());
-            return 1;
+            return EXIT_ERROR;
         }
     };
     let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
@@ -602,12 +672,12 @@ pub fn kill_server(session: &str) -> i32 {
         Ok(w) => w,
         Err(e) => {
             eprintln!("fno: socket setup failed: {e}");
-            return 1;
+            return EXIT_ERROR;
         }
     };
     if write_msg_sync(&mut w, &ClientMsg::KillServer).is_err() {
         eprintln!("fno: could not reach the server for session {session:?}");
-        return 1;
+        return EXIT_ERROR;
     }
     // Drain until the server closes the connection (bounded), then wait for
     // its SocketGuard unlink - the observable proof the process exited.
@@ -624,10 +694,299 @@ pub fn kill_server(session: &str) -> i32 {
     }
     if sock.exists() {
         eprintln!("fno: session {session:?} did not shut down in time");
-        return 1;
+        return EXIT_ERROR;
     }
-    println!("killed session {session:?}");
-    0
+    killed_ok(&format!("killed session {session:?}"))
+}
+
+// ---------------------------------------------------------------------------
+// `fno mux doctor` - read-only diagnostics (US6)
+//
+// Checks socket dir + perms, every session's server/client protocol match, and
+// the terminal's copy/color capabilities. Read-only by construction: it probes
+// with `Query` and the read-only `PaneLs` control verb and never unlinks a
+// socket, kills a server, or scaffolds state (AC6-ERR "touches nothing",
+// AC6-FR no side effects). Exit is `EXIT_ERROR` iff some check FAILs (a version
+// skew); a degraded-but-usable state is a `Warn` and stays exit 0, so a box
+// with no mux state exits clean (AC6-FR).
+// ---------------------------------------------------------------------------
+
+/// A doctor check's severity. Only `Fail` flips the exit non-zero; `Warn` is
+/// advisory (degraded but usable), `Ok`/`Na` are clean. This is what keeps
+/// AC6-ERR (skew -> non-zero) apart from AC6-FR (no state -> exit 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Ok,
+    Warn,
+    Fail,
+    Na,
+}
+
+impl Verdict {
+    fn word(self) -> &'static str {
+        match self {
+            Verdict::Ok => "ok",
+            Verdict::Warn => "warn",
+            Verdict::Fail => "fail",
+            Verdict::Na => "n/a",
+        }
+    }
+}
+
+/// One diagnostic line (AC6-UI: check name, verdict, detail, optional remedy).
+struct Check {
+    name: String,
+    verdict: Verdict,
+    detail: String,
+    remedy: Option<String>,
+}
+
+/// What a version probe against one session's socket learned.
+enum VersionVerdict {
+    /// The server accepted our versioned control verb: protocols match.
+    Ok,
+    /// The server refused with `VERSION_SKEW`; `String` is its message, which
+    /// already names both versions and the restart remedy (AC6-ERR).
+    Skew(String),
+    /// Connection refused: a leftover socket from a dead server.
+    Stale,
+    /// Connected but no usable control reply (an older pre-control server, or a
+    /// client-side io error). Says nothing about state - never read as stale.
+    Unqueryable(String),
+}
+
+/// Probe one session's socket over the VERSIONED control path (a plain `Query`
+/// is frozen and version-independent, so it cannot detect skew). Sends the
+/// read-only `PaneLs` verb - lists panes, mutates nothing - so doctor stays
+/// side-effect free (AC6-ERR).
+fn version_probe(sock: &Path) -> VersionVerdict {
+    let stream = match std::os::unix::net::UnixStream::connect(sock) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            return VersionVerdict::Stale
+        }
+        Err(e) => return VersionVerdict::Unqueryable(e.to_string()),
+    };
+    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+    match send_control(stream, ControlVerb::PaneLs, PROBE_TIMEOUT) {
+        Ok(ServerMsg::PaneList { .. }) => VersionVerdict::Ok,
+        Ok(ServerMsg::Err { code, msg }) if code == err_code::VERSION_SKEW => {
+            VersionVerdict::Skew(msg)
+        }
+        Ok(_) => VersionVerdict::Unqueryable("unexpected control reply".into()),
+        Err(e) => VersionVerdict::Unqueryable(e),
+    }
+}
+
+/// Map one session's version verdict to a check line (pure, so AC6-ERR skew and
+/// the stale/unqueryable advisories are unit-testable without a live server).
+fn session_check(name: &str, v: VersionVerdict) -> Check {
+    let cname = format!("session {name}");
+    match v {
+        VersionVerdict::Ok => Check {
+            name: cname,
+            verdict: Verdict::Ok,
+            detail: format!("live, protocol v{PROTO_VERSION}"),
+            remedy: None,
+        },
+        // The skew message already names both versions and the restart remedy.
+        VersionVerdict::Skew(msg) => Check {
+            name: cname,
+            verdict: Verdict::Fail,
+            detail: msg,
+            remedy: None,
+        },
+        VersionVerdict::Stale => Check {
+            name: cname,
+            verdict: Verdict::Warn,
+            detail: "stale socket (dead server)".into(),
+            remedy: Some(format!("fno mux kill-server {name}")),
+        },
+        VersionVerdict::Unqueryable(e) => Check {
+            name: cname,
+            verdict: Verdict::Warn,
+            detail: format!("alive but unqueryable ({e}); older server?"),
+            remedy: Some("stop it and re-run fno to refresh".into()),
+        },
+    }
+}
+
+/// One check per session, or a single `Na` line when there is nothing to check
+/// (AC6-FR). `probe` is injected so the empty and skew aggregations are testable.
+fn session_checks(names: &[String], probe: impl Fn(&str) -> VersionVerdict) -> Vec<Check> {
+    if names.is_empty() {
+        return vec![Check {
+            name: "sessions".into(),
+            verdict: Verdict::Na,
+            detail: "no sessions".into(),
+            remedy: None,
+        }];
+    }
+    names.iter().map(|n| session_check(n, probe(n))).collect()
+}
+
+/// Copy capability (AC6-EDGE): a local clipboard tool is reliable; its absence
+/// leaves only the unverifiable OSC 52 fallback, which doctor flags as degraded.
+fn clipboard_check(tool: Option<&str>) -> Check {
+    match tool {
+        Some(t) => Check {
+            name: "copy".into(),
+            verdict: Verdict::Ok,
+            detail: format!("local clipboard tool `{t}` on PATH"),
+            remedy: None,
+        },
+        None => Check {
+            name: "copy".into(),
+            verdict: Verdict::Warn,
+            detail: "no clipboard tool on PATH; OSC 52 fallback only (unverifiable)".into(),
+            remedy: Some("install pbcopy/wl-copy/xclip/xsel, or use an OSC 52 terminal".into()),
+        },
+    }
+}
+
+/// 24-bit color (best-effort env sniff; a true probe needs an interactive DA
+/// round-trip doctor deliberately avoids). `COLORTERM` is the de-facto signal.
+fn truecolor_check(colorterm: &str) -> Check {
+    if colorterm == "truecolor" || colorterm == "24bit" {
+        Check {
+            name: "truecolor".into(),
+            verdict: Verdict::Ok,
+            detail: "COLORTERM advertises 24-bit".into(),
+            remedy: None,
+        }
+    } else {
+        Check {
+            name: "truecolor".into(),
+            verdict: Verdict::Warn,
+            detail: format!("COLORTERM={colorterm:?} (24-bit not advertised)"),
+            remedy: Some("set COLORTERM=truecolor if your terminal supports it".into()),
+        }
+    }
+}
+
+/// The outer terminal (`TERM`): mouse SGR and OSC 52 acceptance are not
+/// env-derivable (both need a live query), so doctor reports `TERM` as context
+/// rather than faking a capability probe. `dumb`/unset means no mouse routing.
+fn terminal_check(term: &str) -> Check {
+    if term.is_empty() || term == "dumb" {
+        Check {
+            name: "terminal".into(),
+            verdict: Verdict::Warn,
+            detail: format!("TERM={term:?} (no mouse/color support)"),
+            remedy: Some("run inside a real terminal (xterm/tmux/alacritty/...)".into()),
+        }
+    } else {
+        Check {
+            name: "terminal".into(),
+            verdict: Verdict::Ok,
+            detail: format!("TERM={term}"),
+            remedy: None,
+        }
+    }
+}
+
+/// Socket dir presence + perms. Absent is `Na` (AC6-FR: no state, not an error);
+/// present-but-loose is a `Warn` (other users could reach the sockets).
+fn socket_dir_check() -> Check {
+    let dir = proto::mux_dir();
+    match std::fs::metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Check {
+            name: "socket-dir".into(),
+            verdict: Verdict::Na,
+            detail: format!("{} absent (no sessions started yet)", dir.display()),
+            remedy: None,
+        },
+        Err(e) => Check {
+            name: "socket-dir".into(),
+            verdict: Verdict::Fail,
+            detail: format!("{}: {e}", dir.display()),
+            remedy: Some("check permissions on the parent directory".into()),
+        },
+        Ok(md) => {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = md.permissions().mode() & 0o777;
+            if mode == 0o700 {
+                Check {
+                    name: "socket-dir".into(),
+                    verdict: Verdict::Ok,
+                    detail: format!("{} (0700)", dir.display()),
+                    remedy: None,
+                }
+            } else {
+                Check {
+                    name: "socket-dir".into(),
+                    verdict: Verdict::Warn,
+                    detail: format!("{} has mode {mode:o} (want 0700)", dir.display()),
+                    remedy: Some(format!("chmod 700 {}", dir.display())),
+                }
+            }
+        }
+    }
+}
+
+/// Run every check. The fs/net/env reads live here; the verdict logic each one
+/// calls is pure and unit-tested.
+fn gather_checks() -> Vec<Check> {
+    let mut checks = vec![socket_dir_check()];
+    match session_names() {
+        Ok(names) => {
+            let dir = proto::mux_dir();
+            checks.extend(session_checks(&names, |name| {
+                version_probe(&dir.join(format!("{name}.sock")))
+            }));
+        }
+        Err(e) => checks.push(Check {
+            name: "sessions".into(),
+            verdict: Verdict::Fail,
+            detail: e,
+            remedy: Some("fix the mux dir permissions".into()),
+        }),
+    }
+    checks.push(terminal_check(&std::env::var("TERM").unwrap_or_default()));
+    checks.push(truecolor_check(
+        &std::env::var("COLORTERM").unwrap_or_default(),
+    ));
+    checks.push(clipboard_check(crate::clipboard::available_tool()));
+    checks
+}
+
+/// Render every check and return the exit code: `EXIT_ERROR` iff any check
+/// FAILed (a version skew), else `EXIT_OK`. Pure over the check list so the
+/// exit mapping and both output shapes are testable without a live server.
+fn render_doctor(checks: &[Check], json: bool) -> i32 {
+    let failed = checks.iter().any(|c| c.verdict == Verdict::Fail);
+    if json {
+        let arr: Vec<_> = checks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "check": c.name,
+                    "verdict": c.verdict.word(),
+                    "detail": c.detail,
+                    "remedy": c.remedy,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::json!({ "ok": !failed, "checks": arr }));
+    } else {
+        for c in checks {
+            match &c.remedy {
+                Some(r) => println!("{}: {} - {} [{}]", c.name, c.verdict.word(), c.detail, r),
+                None => println!("{}: {} - {}", c.name, c.verdict.word(), c.detail),
+            }
+        }
+    }
+    if failed {
+        EXIT_ERROR
+    } else {
+        EXIT_OK
+    }
+}
+
+/// `fno mux doctor [--json]`: read-only environment diagnostics.
+pub fn doctor(json: bool) -> i32 {
+    render_doctor(&gather_checks(), json)
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,13 +1730,17 @@ mod tests {
         // session uses resolves to a socket that does not exist -> exit 1.
         // The full live/stale matrix runs e2e against FNO_MUX_DIR-scoped
         // servers in 3.6.
-        let code = kill_server(&format!("fno-test-absent-{}", std::process::id()));
-        assert_eq!(code, 1, "missing socket must exit 1");
+        let code = kill_server(&format!("fno-test-absent-{}", std::process::id()), false);
+        assert_eq!(code, EXIT_ERROR, "missing socket must exit 1");
     }
 
     #[test]
     fn mux_kill_server_invalid_name_is_usage_exit_2() {
-        assert_eq!(kill_server("../evil"), 2, "validation precedes any I/O");
+        assert_eq!(
+            kill_server("../evil", false),
+            EXIT_USAGE,
+            "validation precedes any I/O"
+        );
     }
 
     // -- pane verb parsing (the socket-free grammar) -----------------------
@@ -1614,9 +1977,114 @@ mod tests {
     #[test]
     fn mux_shell_init_unsupported_shell_is_a_usage_error() {
         // AC4-ERR: an unsupported / missing shell exits non-zero.
-        assert_eq!(shell_init(Some("zsh")), EXIT_OK);
-        assert_eq!(shell_init(Some("bash")), EXIT_OK);
-        assert_eq!(shell_init(Some("fish")), EXIT_USAGE);
-        assert_eq!(shell_init(None), EXIT_USAGE);
+        assert_eq!(shell_init(Some("zsh"), false), EXIT_OK);
+        assert_eq!(shell_init(Some("bash"), false), EXIT_OK);
+        assert_eq!(shell_init(Some("zsh"), true), EXIT_OK);
+        assert_eq!(shell_init(Some("fish"), false), EXIT_USAGE);
+        assert_eq!(shell_init(None, false), EXIT_USAGE);
+    }
+
+    // -- doctor (US6) --------------------------------------------------------
+
+    fn check(verdict: Verdict) -> Check {
+        Check {
+            name: "t".into(),
+            verdict,
+            detail: "d".into(),
+            remedy: None,
+        }
+    }
+
+    #[test]
+    fn doctor_exit_ok_when_no_check_fails() {
+        // AC6-FR/HP: ok/warn/na only -> exit 0 (the exit table's OK row).
+        let checks = [check(Verdict::Ok), check(Verdict::Warn), check(Verdict::Na)];
+        assert_eq!(render_doctor(&checks, false), EXIT_OK);
+        assert_eq!(render_doctor(&checks, true), EXIT_OK);
+    }
+
+    #[test]
+    fn doctor_exit_error_when_any_check_fails() {
+        // AC6-ERR: a single Fail (version skew) flips the exit non-zero.
+        let checks = [check(Verdict::Ok), check(Verdict::Fail)];
+        assert_eq!(render_doctor(&checks, false), EXIT_ERROR);
+        assert_eq!(render_doctor(&checks, true), EXIT_ERROR);
+    }
+
+    #[test]
+    fn doctor_version_skew_is_a_failing_check_naming_both_versions() {
+        // AC6-ERR: the skew verdict carries the server's message (which names
+        // both versions + the restart remedy) and renders as a Fail.
+        let msg = "protocol version mismatch: client 0.3.0 speaks v7, \
+                   server 0.2.0 speaks v6. ... re-run fno to start a fresh one.";
+        let c = session_check("main", VersionVerdict::Skew(msg.into()));
+        assert_eq!(c.verdict, Verdict::Fail);
+        assert!(c.detail.contains("v7") && c.detail.contains("v6"));
+    }
+
+    #[test]
+    fn doctor_no_sessions_is_na_not_a_finding() {
+        // AC6-FR: nothing to check reports cleanly and never fails the run.
+        let checks = session_checks(&[], |_| VersionVerdict::Ok);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].verdict, Verdict::Na);
+        assert_eq!(render_doctor(&checks, false), EXIT_OK);
+    }
+
+    #[test]
+    fn doctor_sessions_aggregate_each_verdict() {
+        // A live session is Ok; a skewed one Fails the run.
+        let names = vec!["good".to_string(), "bad".to_string()];
+        let checks = session_checks(&names, |n| match n {
+            "bad" => VersionVerdict::Skew("client v7 server v6".into()),
+            _ => VersionVerdict::Ok,
+        });
+        assert_eq!(checks.len(), 2);
+        assert_eq!(render_doctor(&checks, false), EXIT_ERROR);
+    }
+
+    #[test]
+    fn doctor_stale_socket_is_advisory_not_a_failure() {
+        // A leftover socket is worth cleaning but not a run failure; doctor
+        // never unlinks it (read-only) - the remedy points at kill-server.
+        let c = session_check("old", VersionVerdict::Stale);
+        assert_eq!(c.verdict, Verdict::Warn);
+        assert!(c.remedy.as_deref().unwrap().contains("kill-server old"));
+    }
+
+    #[test]
+    fn doctor_copy_degraded_without_a_clipboard_tool() {
+        // AC6-EDGE: no local tool -> copy flagged degraded (Warn), before the
+        // user ever hits AC2-ERR. A present tool is Ok.
+        assert_eq!(clipboard_check(None).verdict, Verdict::Warn);
+        assert!(clipboard_check(None).detail.contains("OSC 52 fallback"));
+        assert_eq!(clipboard_check(Some("pbcopy")).verdict, Verdict::Ok);
+    }
+
+    #[test]
+    fn doctor_truecolor_and_terminal_env_sniffs() {
+        assert_eq!(truecolor_check("truecolor").verdict, Verdict::Ok);
+        assert_eq!(truecolor_check("24bit").verdict, Verdict::Ok);
+        assert_eq!(truecolor_check("").verdict, Verdict::Warn);
+        assert_eq!(terminal_check("xterm-256color").verdict, Verdict::Ok);
+        assert_eq!(terminal_check("dumb").verdict, Verdict::Warn);
+        assert_eq!(terminal_check("").verdict, Verdict::Warn);
+    }
+
+    #[test]
+    fn doctor_text_lines_are_single_line_with_verdict() {
+        // AC6-UI: every finding is one line carrying its verdict word.
+        let c = Check {
+            name: "socket-dir".into(),
+            verdict: Verdict::Warn,
+            detail: "mode 755".into(),
+            remedy: Some("chmod 700".into()),
+        };
+        // Render captures stdout only in an integration harness; here assert the
+        // verdict vocabulary the line is built from stays stable.
+        assert_eq!(c.verdict.word(), "warn");
+        assert_eq!(Verdict::Ok.word(), "ok");
+        assert_eq!(Verdict::Fail.word(), "fail");
+        assert_eq!(Verdict::Na.word(), "n/a");
     }
 }

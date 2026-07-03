@@ -35,21 +35,43 @@ enum Role {
     ServerSession(String),
     /// An attach invocation with no TTY: print the notice, exit 0.
     NotTty,
-    /// `mux ls`: list sessions (no TTY needed).
-    MuxLs,
-    /// `mux kill-server [<name>]`: shut a session down (no TTY needed).
-    MuxKill(Option<String>),
+    /// `mux ls [--json]`: list sessions (no TTY needed). The bool is `--json`.
+    MuxLs(bool),
+    /// `mux kill-server [<name>] [--json]`: shut a session down (no TTY needed).
+    MuxKill(Option<String>, bool),
+    /// `mux doctor [--json]`: read-only environment diagnostics (US6). The bool
+    /// is `--json`.
+    MuxDoctor(bool),
     /// `mux pane <verb> ...`: the v4 script API. Carries the tokens after
     /// `mux pane` verbatim; `mux_cli::pane` parses the verb + flags. No TTY
     /// needed (control verbs are scriptable one-shots).
     MuxPane(Vec<OsString>),
-    /// `mux shell-init <zsh|bash>`: print the OSC 133 shell-integration
+    /// `mux shell-init <zsh|bash> [--json]`: print the OSC 133 shell-integration
     /// snippet (v6). `None` / an unsupported shell is an error in the verb.
-    MuxShellInit(Option<String>),
+    MuxShellInit(Option<String>, bool),
     /// A malformed mux/server invocation: print usage, exit 2.
     MuxUsage,
     /// Any other args: the Python-CLI forwarding path.
     Forward,
+}
+
+/// Split a mux verb's trailing args into positionals plus a `--json` flag (US6:
+/// every scriptable verb accepts `--json`). `--json` may appear once, anywhere;
+/// a repeated `--json`, an unknown `--flag`, or a non-UTF-8 arg is `None` (the
+/// caller maps that to `MuxUsage`, exit 2).
+fn split_json(rest: &[OsString]) -> Option<(Vec<&str>, bool)> {
+    let mut positionals = Vec::new();
+    let mut json = false;
+    for a in rest {
+        match a.to_str() {
+            Some("--json") if !json => json = true,
+            Some("--json") => return None, // repeated flag
+            Some(s) if s.starts_with("--") => return None, // unknown flag
+            Some(s) => positionals.push(s),
+            None => return None, // non-UTF-8
+        }
+    }
+    Some((positionals, json))
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
@@ -97,7 +119,15 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             // a bare `mux pane` (no verb) falls through to MuxUsage. Nothing
             // under `mux pane` ever forwards to Python (AC).
             Some("pane") if args.len() > 2 => Role::MuxPane(args[2..].to_vec()),
-            Some("ls") if args.len() == 2 => Role::MuxLs,
+            // ls / doctor take no positional, an optional `--json` (US6).
+            Some("ls") => match split_json(&args[2..]) {
+                Some((pos, json)) if pos.is_empty() => Role::MuxLs(json),
+                _ => Role::MuxUsage,
+            },
+            Some("doctor") => match split_json(&args[2..]) {
+                Some((pos, json)) if pos.is_empty() => Role::MuxDoctor(json),
+                _ => Role::MuxUsage,
+            },
             Some("attach") => match args.get(2).and_then(|a| a.to_str()) {
                 Some(name) if args.len() == 3 => {
                     if is_tty {
@@ -108,23 +138,23 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 }
                 _ => Role::MuxUsage,
             },
-            Some("kill-server") => match args.len() {
-                2 => Role::MuxKill(None),
-                3 => match args[2].to_str() {
-                    Some(name) => Role::MuxKill(Some(name.to_string())),
-                    None => Role::MuxUsage,
+            Some("kill-server") => match split_json(&args[2..]) {
+                Some((pos, json)) => match pos.as_slice() {
+                    [] => Role::MuxKill(None, json),
+                    [name] => Role::MuxKill(Some((*name).to_string()), json),
+                    _ => Role::MuxUsage,
                 },
-                _ => Role::MuxUsage,
+                None => Role::MuxUsage,
             },
-            // `mux shell-init [<shell>]`: the verb validates the shell (an
-            // unsupported / missing one is its own one-line error, AC4-ERR).
-            Some("shell-init") => match args.len() {
-                2 => Role::MuxShellInit(None),
-                3 => match args[2].to_str() {
-                    Some(shell) => Role::MuxShellInit(Some(shell.to_string())),
-                    None => Role::MuxUsage,
+            // `mux shell-init [<shell>] [--json]`: the verb validates the shell
+            // (an unsupported / missing one is its own one-line error, AC4-ERR).
+            Some("shell-init") => match split_json(&args[2..]) {
+                Some((pos, json)) => match pos.as_slice() {
+                    [] => Role::MuxShellInit(None, json),
+                    [shell] => Role::MuxShellInit(Some((*shell).to_string()), json),
+                    _ => Role::MuxUsage,
                 },
-                _ => Role::MuxUsage,
+                None => Role::MuxUsage,
             },
             _ => Role::MuxUsage,
         },
@@ -151,18 +181,22 @@ fn main() {
         Role::MuxUsage => {
             eprintln!(
                 "usage: fno [--session <name>] | fno mux server [--session <name>] \
-                 | fno mux ls | fno mux attach <name> | fno mux kill-server [<name>] \
-                 | fno mux shell-init <zsh|bash> \
+                 | fno mux ls [--json] | fno mux attach <name> \
+                 | fno mux kill-server [<name>] [--json] \
+                 | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
                  | fno mux pane ls|read|run|send|wait|kill|claim|release ..."
             );
             std::process::exit(2);
         }
-        Role::MuxLs => std::process::exit(mux_cli::ls()),
-        Role::MuxKill(name) => {
+        Role::MuxLs(json) => std::process::exit(mux_cli::ls(json)),
+        Role::MuxKill(name, json) => {
             let session = mux_cli::resolve_session(name.as_deref(), env_session.as_deref());
-            std::process::exit(mux_cli::kill_server(&session));
+            std::process::exit(mux_cli::kill_server(&session, json));
         }
-        Role::MuxShellInit(shell) => std::process::exit(mux_cli::shell_init(shell.as_deref())),
+        Role::MuxShellInit(shell, json) => {
+            std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
+        }
+        Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::MuxPane(rest) => std::process::exit(mux_cli::pane(&rest, env_session.as_deref())),
         Role::Client(flag) => {
             let env = env_session.as_deref().filter(|s| !s.is_empty());
@@ -242,14 +276,14 @@ mod tests {
 
     #[test]
     fn proto_role_mux_ls_and_kill_server_need_no_tty() {
-        assert_eq!(decide_role(&os(&["mux", "ls"]), false), Role::MuxLs);
+        assert_eq!(decide_role(&os(&["mux", "ls"]), false), Role::MuxLs(false));
         assert_eq!(
             decide_role(&os(&["mux", "kill-server"]), false),
-            Role::MuxKill(None)
+            Role::MuxKill(None, false)
         );
         assert_eq!(
             decide_role(&os(&["mux", "kill-server", "work"]), false),
-            Role::MuxKill(Some("work".into()))
+            Role::MuxKill(Some("work".into()), false)
         );
         assert_eq!(
             decide_role(&os(&["mux", "kill-server", "a", "b"]), false),
@@ -259,14 +293,52 @@ mod tests {
     }
 
     #[test]
+    fn proto_role_mux_json_flag_on_scriptable_verbs() {
+        // US6: every scriptable verb accepts `--json`, anywhere in its args.
+        assert_eq!(
+            decide_role(&os(&["mux", "ls", "--json"]), false),
+            Role::MuxLs(true)
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "kill-server", "--json", "work"]), false),
+            Role::MuxKill(Some("work".into()), true)
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "kill-server", "work", "--json"]), false),
+            Role::MuxKill(Some("work".into()), true)
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "doctor"]), false),
+            Role::MuxDoctor(false)
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "doctor", "--json"]), false),
+            Role::MuxDoctor(true)
+        );
+        // A repeated flag or an unknown flag is usage, not a silent accept.
+        assert_eq!(
+            decide_role(&os(&["mux", "ls", "--json", "--json"]), false),
+            Role::MuxUsage
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "doctor", "--wat"]), false),
+            Role::MuxUsage
+        );
+    }
+
+    #[test]
     fn proto_role_mux_shell_init_carries_optional_shell() {
         assert_eq!(
             decide_role(&os(&["mux", "shell-init", "zsh"]), false),
-            Role::MuxShellInit(Some("zsh".into()))
+            Role::MuxShellInit(Some("zsh".into()), false)
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "shell-init", "zsh", "--json"]), false),
+            Role::MuxShellInit(Some("zsh".into()), true)
         );
         assert_eq!(
             decide_role(&os(&["mux", "shell-init"]), false),
-            Role::MuxShellInit(None)
+            Role::MuxShellInit(None, false)
         );
         assert_eq!(
             decide_role(&os(&["mux", "shell-init", "a", "b"]), false),
