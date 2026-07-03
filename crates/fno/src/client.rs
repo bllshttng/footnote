@@ -528,6 +528,12 @@ impl View {
             return;
         }
         let r = rows - 1;
+        // Blank the whole row first: the divider-fill pass in `compose` treats
+        // this uncovered row as content and paints '─' glyphs into it, which
+        // would otherwise bleed through the gaps between the status segments.
+        for c in 0..cols {
+            cells[r * cols + c] = Cell::default();
+        }
         let put = |cells: &mut [Cell], c: usize, ch: char, flags: u8| {
             if c < cols {
                 cells[r * cols + c] = Cell {
@@ -1736,6 +1742,10 @@ mod tests {
         assert!(bottom.contains("/code/footnote"), "{bottom:?}");
         assert!(bottom.contains("? for keys"), "{bottom:?}");
         assert!(!bottom.contains("[+"), "no stale indicator: {bottom:?}");
+        // The row is blanked first, so no divider glyphs bleed through the
+        // gaps between segments.
+        assert!(!bottom.contains('\u{2500}'), "no '─' bleed: {bottom:?}");
+        assert!(!bottom.contains('\u{253c}'), "no '┼' bleed: {bottom:?}");
         // Focused pane (11) scrolled -> [+N] in the status row.
         let mut f = text_frame(29, 36, 'b');
         f.scroll_offset = 3;
