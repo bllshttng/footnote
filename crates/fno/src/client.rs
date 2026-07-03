@@ -624,7 +624,7 @@ impl View {
         if self.hint {
             let text = " % \" split · hjkl focus · HJKL resize · x close · c tab \
                         · n/p cycle · 1-9 tab · & close-tab · w select · b sideline \
-                        · s status · d detach · ? all keys";
+                        · g grab · s status · d detach · ? all keys";
             for (i, ch) in text.chars().take(cols).enumerate() {
                 put(cells, i, ch, 0);
             }
@@ -941,6 +941,7 @@ const KEY_TABLE: &[&str] = &[
     "  s  toggle status      ?  this key table  ",
     "  [ ]  jump block       v  select block   ",
     "  y  copy selection     r  rerun block    ",
+    "  g  grab work (dispatch next ready)     ",
     "  d  detach             C-b C-b  literal  ",
     " any key dismisses                        ",
 ];
