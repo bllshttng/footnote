@@ -40,18 +40,19 @@
 # Exit is always 0 in v1: the Stop payload carries no cheap error signal, and
 # the turn's on-screen content is its label -- no custom param vocabulary.
 #
-# Known v1 limits (accepted; the scanner CONTAINS all of them -- a stray C
-# finalizes the prior block with unknown exit, a D with no open block is a
-# no-op, so segmentation degrades, never corrupts):
-#   - A NESTED claude (e.g. `claude -p` spawned from the pane session via
-#     Bash) inherits FNO_PANE + the controlling tty, so its hooks also emit,
-#     splitting the outer turn early. The gate is env-presence, not
-#     session-identity.
-#   - A BLOCKED Stop (the /target loop) emits D;0 while the leg continues;
-#     no C re-opens until the next user prompt, so loop continuations sit
-#     outside any block.
-#   - A user interrupt fires no Stop, so that turn's block stays open until
-#     the next turn's C finalizes it.
+# Marker emission is gated TWICE (x-61a0): FNO_PANE presence AND a first-writer
+# session-identity pin, so only the claude pty.rs spawned INTO the pane emits. A
+# nested `claude -p` inherits FNO_PANE + the ctty but loses the pin race and
+# stays silent, so it no longer splits the outer turn. On a blocked Stop (the
+# /target loop) the `done` marker also RE-OPENS a block, so every loop leg is
+# segmented, not just the first.
+#
+# Remaining accepted limit (the scanner CONTAINS it -- a stray C finalizes the
+# prior block with unknown exit, a D with no open block is a no-op, so
+# segmentation degrades, never corrupts): a user interrupt fires no Stop, so
+# that turn's block stays open until the next turn's C finalizes it. The
+# continuation re-open likewise leaves one empty block open when the loop ends,
+# finalized by the next turn's C.
 
 set -uo pipefail
 
@@ -61,28 +62,15 @@ case "$STATE" in
   *) STATE="working" ;;
 esac
 
-# Turn boundary -> OSC 133 marker, mux panes only. Redirect-open of /dev/tty
-# fails silently when there is no controlling terminal (headless), hence the
-# stderr silence BEFORE the tty redirect and the || true. A write to a pane
-# whose master-side reader has stalled can block rather than fail; accepted --
-# that pane is frozen anyway, and the hook's own timeout bounds it.
-if [[ -n "${FNO_PANE:-}" ]]; then
-  case "$STATE" in
-    working) { printf '\033]133;C\007' >/dev/tty; } 2>/dev/null || true ;;
-    done) { printf '\033]133;D;0\007' >/dev/tty; } 2>/dev/null || true ;;
-  esac
-fi
-
+# Read the hook payload once. The session id both GATES marker emission (only
+# THE pane host emits) and LABELS the state report; the monotonic seq orders the
+# report. seq is `time.monotonic_ns()`, NOT wall-clock: the daemon drops a
+# report with `seq <= last_seq`, so the working/done pair of one turn MUST be
+# strictly increasing. Wall-clock ns would regress if NTP steps the clock
+# backward between the two reports (dropping the `done`, pinning the badge at
+# `working`); the monotonic clock is host-global across processes and never
+# steps back. A missing/garbled session id -> silent exit 0.
 INPUT=$(cat)
-
-# One python process extracts the session id and a monotonic seq. seq is
-# `time.monotonic_ns()`, NOT wall-clock: the daemon drops a report with
-# `seq <= last_seq`, so the working/done pair of one turn MUST be strictly
-# increasing. Wall-clock ns would regress if NTP steps the clock backward
-# between the two reports (dropping the `done`, pinning the badge at `working`);
-# the monotonic clock is host-global across processes and never steps back, so
-# done's seq (read later) always exceeds working's. A missing/garbled session id
-# -> silent exit 0.
 PARSED=$(python3 -c '
 import sys, json, time
 try:
@@ -99,6 +87,61 @@ print(f"{sid}\t{time.monotonic_ns()}")
 SESSION_ID="${PARSED%%$'\t'*}"
 SEQ="${PARSED##*$'\t'}"
 [[ -z "$SESSION_ID" || -z "$SEQ" ]] && exit 0
+
+# Turn boundary -> OSC 133 marker, mux panes only, and only from THE pane host.
+# The sink is /dev/tty (the pane PTY, this process's controlling terminal);
+# FNO_TURN_MARKER_TTY overrides it for tests. Redirect-open fails silently with
+# no controlling terminal (headless), hence the stderr silence + || true. A
+# write to a pane whose reader stalled can block rather than fail; accepted --
+# that pane is frozen anyway, and the hook's own timeout bounds it.
+# Append, not truncate: a turn boundary can emit two markers (D then a re-open
+# C) and each printf reopens the sink. `>>` is identical to `>` on a tty stream
+# but preserves both writes when the sink is a regular file (the test seam).
+TTY_SINK="${FNO_TURN_MARKER_TTY:-/dev/tty}"
+emit_marker() { { printf '%b' "$1" >>"$TTY_SINK"; } 2>/dev/null || true; }
+
+# First-writer session-identity gate: only the claude pty.rs spawned INTO the
+# pane emits. It fires its first C at turn start, BEFORE it can spawn a nested
+# `claude -p`, so it always wins the pin; the nested session (which inherits
+# FNO_PANE + the ctty) reads a different pinned id and stays silent instead of
+# spraying C mid-turn. Degrades to the v1 presence gate when there is no
+# recycle-safe key (old server without FNO_PANE_EPOCH, or no session id). The
+# key carries FNO_PANE_EPOCH because pane ids recycle across server restarts.
+is_pane_host() {
+  [[ -z "${FNO_PANE_EPOCH:-}" || -z "$SESSION_ID" ]] && return 0
+  local dir="${XDG_RUNTIME_DIR:-/tmp}/fno-turn-pins-${EUID:-0}"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  local pin="${dir}/${FNO_SESSION:-_}-${FNO_PANE}-${FNO_PANE_EPOCH}"
+  # noclobber makes the create fail if the pin exists -> exactly one winner.
+  if ( set -o noclobber; printf '%s\n' "$SESSION_ID" >"$pin" ) 2>/dev/null; then
+    return 0
+  fi
+  # An empty pin means our own create half-succeeded (e.g. ENOSPC after the
+  # O_EXCL create): degrade to the presence gate (emit) instead of latching the
+  # host into permanent silence. A real nested claude always wrote a non-empty
+  # id, so it still mismatches below and stays silent.
+  [[ -s "$pin" ]] || return 0
+  [[ "$(cat "$pin" 2>/dev/null)" == "$SESSION_ID" ]]
+}
+
+if [[ -n "${FNO_PANE:-}" ]] && is_pane_host; then
+  case "$STATE" in
+    working) emit_marker '\033]133;C\007' ;;
+    done)
+      emit_marker '\033]133;D;0\007'
+      # Continuation re-open: a blocked Stop (the /target loop) keeps the leg
+      # going, but Claude Code fires no UserPromptSubmit between legs, so without
+      # this the next leg lands outside any block. Re-open here so every loop leg
+      # is its own block. Gated on the mere PRESENCE of the manifest, not its
+      # liveness: a stale manifest just re-opens a harmless block the scanner
+      # absorbs. ponytail: over-emits one trailing empty block when the loop
+      # actually ends (the scanner no-ops it, finalized by the next C); precise
+      # gating needs the stop hook's block/allow verdict, which races across
+      # parallel Stop hooks -- not worth the plumbing.
+      [[ -f .fno/target-state.md ]] && emit_marker '\033]133;C\007'
+      ;;
+  esac
+fi
 
 # Resolve the fno-agents binary, most-local first (mirrors target-stop-hook.sh).
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
