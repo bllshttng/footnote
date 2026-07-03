@@ -1821,7 +1821,15 @@ class MuxBlock(BaseModel):
     @field_validator("shell_integration", mode="before")
     @classmethod
     def _coerce_shell_integration(cls, v: object) -> object:
-        """Only the literal ``off`` disables; anything else is ``mux-panes``."""
+        """Only ``off`` disables; anything else is ``mux-panes``.
+
+        YAML 1.1 (PyYAML's default) parses an unquoted ``off``/``no``/``false``
+        as boolean ``False``, so ``shell_integration: off`` reaches here as
+        ``False``, not ``"off"`` - treat that as off too, else the user's
+        disable is silently ignored.
+        """
+        if v is False:
+            return "off"
         return "off" if isinstance(v, str) and v.strip() == "off" else "mux-panes"
 
 
@@ -1868,6 +1876,20 @@ class ConfigBlock(BaseModel):
         settings load. A dict passes through so the inner coercers still run.
         """
         if isinstance(v, (dict, ModelRoutingBlock)):
+            return v
+        return {}
+
+    @field_validator("mux", mode="before")
+    @classmethod
+    def _coerce_mux(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``mux:`` degrades to defaults.
+
+        Mirrors ``_coerce_model_routing``: ``mux: off`` (a scalar, list, or
+        null) cannot build the block; fall back to defaults rather than raising
+        out of the whole settings load (which would break every `fno` command).
+        A dict passes through so the inner ``shell_integration`` coercer runs.
+        """
+        if isinstance(v, (dict, MuxBlock)):
             return v
         return {}
 
