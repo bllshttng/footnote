@@ -2055,4 +2055,104 @@ mod tests {
         assert!(pane.read_block(BlockSel::Last).is_ok());
         assert_eq!(pane.rerun_command(), None);
     }
+
+    // -- Turn blocks (hook-emitted markers) -------------------------------------
+
+    /// Feed one agent TURN the way the inside-leg hook emits it: a bare `C` at
+    /// turn start (no A/B, no command echo), styled TUI-ish output, `D;0` at
+    /// Stop. The scanner must treat these exactly like shell-emitted markers.
+    fn run_turn(pane: &mut Pane, output: &str) {
+        pane.feed(b"\x1b]133;C\x07");
+        for line in output.lines() {
+            pane.feed(format!("\x1b[1m{line}\x1b[0m\r\n").as_bytes());
+        }
+        pane.feed(b"\x1b]133;D;0\x07");
+    }
+
+    #[test]
+    fn turn_markers_segment_pane_history_and_navigate() {
+        // Hook-shaped markers segment a claude pane by turns: each block's span
+        // is exactly one turn's output, idle repaints between turns land outside
+        // every block, and BlockJump prev from the live tail anchors at the
+        // newest turn's first row.
+        let mut pane = Pane::new(4, 40);
+        pane.feed(b"claude banner\r\n"); // pre-turn TUI noise: outside any block
+        run_turn(&mut pane, "t1a\nt1b\nt1c");
+        pane.feed(b"idle repaint\r\n"); // between turns: no open block
+        run_turn(&mut pane, "t2a\nt2b\nt2c");
+        run_turn(&mut pane, "t3a\nt3b\nt3c");
+
+        // Pure turn output, ANSI-stripped, no command (no B echo -> cmd None).
+        let b0 = pane.read_block(BlockSel::Seq(0)).unwrap();
+        assert_eq!(
+            (b0.text.as_str(), b0.complete, b0.exit),
+            ("t1a\r\nt1b\r\nt1c\r\n", true, Some(0))
+        );
+        let b1 = pane.read_block(BlockSel::Seq(1)).unwrap();
+        assert_eq!(
+            b1.text, "t2a\r\nt2b\r\nt2c\r\n",
+            "idle repaint stays outside the turn"
+        );
+        assert_eq!(
+            pane.rerun_command(),
+            None,
+            "a turn has no rerun-able command"
+        );
+
+        // BlockJump prev from the live tail of a 3-turn pane lands on turn 3,
+        // anchored at its first row (AC happy).
+        match pane.block_jump(BlockDir::Prev) {
+            BlockJumpOutcome::Moved { seq, abs_row } => {
+                assert_eq!(seq, 2);
+                assert_eq!(
+                    pane.viewport_top_abs(),
+                    abs_row,
+                    "turn anchored at viewport top"
+                );
+            }
+            other => panic!("expected Moved, got {other:?}"),
+        }
+
+        // The copy chain extracts a full turn (leader+y path).
+        pane.selection_clear();
+        assert_eq!(pane.block_select(BlockDir::Prev), Some(2));
+        let sel = pane.selection_text().unwrap_or_default();
+        assert!(
+            sel.contains("t3a") && sel.contains("t3c"),
+            "selection spans the turn: {sel:?}"
+        );
+    }
+
+    #[test]
+    fn shell_and_turn_blocks_navigate_the_union_in_stream_order() {
+        // AC edge: a pane mixing SHELL blocks (auto-injected zsh) and TURN blocks
+        // (claude launched from that shell) is one stream-ordered sequence - no
+        // special-casing anywhere.
+        let mut pane = Pane::new(4, 40);
+        run_named(&mut pane, "ls", "shell-a\nshell-b\nshell-c", 0);
+        run_turn(&mut pane, "turn-a\nturn-b\nturn-c");
+        // Post-turn shell activity pushes both anchors into history so jumps scroll.
+        pane.feed(b"$ back-at-shell\r\n\r\n");
+
+        let shell = pane.read_block(BlockSel::Seq(0)).unwrap();
+        assert_eq!(shell.text, "shell-a\r\nshell-b\r\nshell-c\r\n");
+        let turn = pane.read_block(BlockSel::Seq(1)).unwrap();
+        assert_eq!(turn.text, "turn-a\r\nturn-b\r\nturn-c\r\n");
+
+        // Navigation walks newest (turn) then older (shell), one union.
+        assert!(matches!(
+            pane.block_jump(BlockDir::Prev),
+            BlockJumpOutcome::Moved { seq: 1, .. }
+        ));
+        assert!(matches!(
+            pane.block_jump(BlockDir::Prev),
+            BlockJumpOutcome::Moved { seq: 0, .. }
+        ));
+        // Selection walks the same union; the shell block keeps its rerun-able
+        // command (the turn block, selected first, has none).
+        assert_eq!(pane.block_select(BlockDir::Prev), Some(1));
+        assert_eq!(pane.rerun_command(), None, "a selected turn has no command");
+        assert_eq!(pane.block_select(BlockDir::Prev), Some(0));
+        assert_eq!(pane.rerun_command().as_deref(), Some("ls"));
+    }
 }
