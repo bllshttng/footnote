@@ -40,7 +40,7 @@
 # Exit is always 0 in v1: the Stop payload carries no cheap error signal, and
 # the turn's on-screen content is its label -- no custom param vocabulary.
 #
-# Marker emission is gated TWICE (x-61a0): FNO_PANE presence AND a first-writer
+# Marker emission is gated TWICE: FNO_PANE presence AND a first-writer
 # session-identity pin, so only the claude pty.rs spawned INTO the pane emits. A
 # nested `claude -p` inherits FNO_PANE + the ctty but loses the pin race and
 # stays silent, so it no longer splits the outer turn. On a blocked Stop (the

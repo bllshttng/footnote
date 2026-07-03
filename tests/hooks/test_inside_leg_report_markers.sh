@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test suite for the turn-block marker emission in hooks/inside-leg-report.sh
-# (x-61a0: session-identity gate + continuation re-open).
+# (session-identity gate + continuation re-open).
 #
 # The hook writes OSC 133 markers to /dev/tty; FNO_TURN_MARKER_TTY redirects
 # that sink to a file so we can assert what got emitted. XDG_RUNTIME_DIR is
