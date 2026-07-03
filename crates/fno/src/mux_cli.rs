@@ -326,6 +326,23 @@ fn fold_pick_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<PickKey> {
     keys
 }
 
+/// Fold one blocking-read chunk into keys, then flush a lone ESC left pending
+/// at the chunk boundary as [`PickKey::Esc`]. A bare Esc press delivers just
+/// `0x1b`; without this flush it lingers in `esc` (indistinguishable from the
+/// start of an arrow) until the next keystroke, so Esc-to-quit does nothing
+/// (codex P2). An arrow's `ESC [ A` arrives within a single read, so it is
+/// already resolved and never lingers. Residual (accepted): an arrow whose
+/// bytes are split across two reads reads the leading ESC as a quit - rare
+/// (terminals emit an arrow as one write) and low-stakes pre-attach.
+fn pick_keys_from_read(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<PickKey> {
+    let mut keys = fold_pick_keys(esc, bytes);
+    if esc.as_slice() == [0x1b] {
+        esc.clear();
+        keys.push(PickKey::Esc);
+    }
+    keys
+}
+
 /// Picker view state: the row list, the cursor, and (while naming a new
 /// session) the typed buffer. Pure - [`Picker::step`] is exhaustively
 /// unit-testable; the IO loop only renders and reads.
@@ -503,7 +520,7 @@ fn run_picker(rows: Vec<SessionRow>) -> Option<String> {
             Err(_) => break None,
         };
         let mut action = PickAction::Redraw;
-        for key in fold_pick_keys(&mut esc, &buf[..n]) {
+        for key in pick_keys_from_read(&mut esc, &buf[..n]) {
             action = picker.step(key);
             match &action {
                 PickAction::Attach(_) => {
@@ -1243,6 +1260,28 @@ mod tests {
         assert_eq!(
             fold_pick_keys(&mut esc, b"a\r\x7f"),
             vec![PickKey::Char(b'a'), PickKey::Enter, PickKey::Backspace]
+        );
+    }
+
+    #[test]
+    fn mux_pick_keys_from_read_flushes_a_lone_esc_as_quit() {
+        // codex P2: a bare Esc press (single 0x1b byte in a read) must surface
+        // as PickKey::Esc so Esc-to-quit works without a second keystroke.
+        let mut esc = Vec::new();
+        assert_eq!(
+            pick_keys_from_read(&mut esc, b"\x1b"),
+            vec![PickKey::Esc],
+            "lone ESC flushes as Esc at the read boundary"
+        );
+        assert!(esc.is_empty(), "no ESC left pending after the flush");
+        // An arrow arriving whole in one read is still Up, not a spurious quit.
+        let mut esc = Vec::new();
+        assert_eq!(pick_keys_from_read(&mut esc, b"\x1b[A"), vec![PickKey::Up]);
+        // A char after ESC in the same read: the fold already resolves the ESC.
+        let mut esc = Vec::new();
+        assert_eq!(
+            pick_keys_from_read(&mut esc, b"\x1bx"),
+            vec![PickKey::Esc, PickKey::Char(b'x')]
         );
     }
 
