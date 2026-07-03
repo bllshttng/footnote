@@ -694,6 +694,15 @@ def _emit_human(
             "precedes any Python `fno` on PATH."
         )
 
+    # Running-process freshness (x-e6dd): a mux server that predates the installed
+    # binary is still speaking the old proto - it survives an upgrade by design and
+    # silently blocks agent dispatch until restarted. Advisory only.
+    for sess in result.get("mux_server_stale") or []:
+        out(
+            f"fno doctor: mux server '{sess}' is running an older build than the installed "
+            "`fno`; run `fno restart --mux` to cut it over (ends live sessions)."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Command
@@ -755,6 +764,12 @@ def doctor_command(
     )
     # Advisory front-door fields (x-c267); never change status/exit.
     result.update(_mux_front_door_report())
+    # Advisory process-freshness (x-e6dd): a long-running mux server still on the
+    # OLD proto after an upgrade. Binary staleness is above; this is the running
+    # PROCESS. Never changes status/exit.
+    from fno import update as _update
+
+    result["mux_server_stale"] = _update.stale_mux_servers()
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).
