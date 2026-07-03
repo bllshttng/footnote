@@ -20,10 +20,11 @@
 //! reported as resolved-or-not (a later non-block decision for the session),
 //! not by author.
 //!
-//! Timestamps are RFC3339 UTC with a `Z` suffix throughout the pipeline, so a
-//! lexicographic string compare against `--since` is chronologically correct;
-//! no date parsing is needed. `ponytail: string compare over Z-suffixed
-//! RFC3339, swap for a parsed compare only if a non-Z offset ever appears.`
+//! The `--since` bound has two forms (see [`Since`]): the CLI `--since <ts>`
+//! compares lexicographically (correct for the Z-suffixed RFC3339 in the log,
+//! no date math), while `--since-epoch <secs>` — what the attach overlay passes
+//! so it can hand the detach time without synthesizing an RFC3339 string —
+//! parses each row's ts to epoch seconds for a numeric compare.
 
 use crate::paths::AgentsHome;
 use serde::Serialize;
@@ -72,10 +73,38 @@ fn event_kind(v: &Value) -> Option<&str> {
         .or_else(|| v.get("kind").and_then(|k| k.as_str()))
 }
 
-/// The event timestamp; `""` if absent (sorts before any real ts, so an
-/// undated event is never excluded by `--since`).
+/// The event timestamp; `""` if absent.
 fn event_ts(v: &Value) -> &str {
     v.get("ts").and_then(|t| t.as_str()).unwrap_or("")
+}
+
+/// The `--since` bound. `Epoch` (what the attach overlay passes: the detach
+/// time in epoch seconds) parses each row's RFC3339 ts to epoch and compares
+/// numerically, so the digest scopes to the absence window without the caller
+/// synthesizing an RFC3339 string. `Str` is the CLI `--since <ts>` form,
+/// compared lexicographically (correct for the Z-suffixed RFC3339 in the log).
+#[derive(Clone, Copy)]
+enum Since<'a> {
+    Str(&'a str),
+    Epoch(u64),
+}
+
+impl Since<'_> {
+    /// Is a row with timestamp `ts` inside the window? An undated/unparseable
+    /// row is included (never silently dropped by the bound).
+    fn includes(&self, ts: &str) -> bool {
+        match self {
+            Since::Str(s) => ts >= *s,
+            Since::Epoch(e) => crate::state::rfc3339_like_to_secs(ts).is_none_or(|secs| secs >= *e),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Since::Str(s) => s.to_string(),
+            Since::Epoch(e) => format!("epoch:{e}"),
+        }
+    }
 }
 
 /// Does this event's session id fall in `set`? Branch A carries
@@ -90,6 +119,15 @@ fn event_session_in(v: &Value, set: &HashSet<&str>) -> bool {
 /// events.jsonl source; `ledger_raw` is ledger.json content. Both are tolerant:
 /// a bad event line bumps `skipped_lines`; an unparseable ledger yields cost 0.
 pub fn fold(events_raw: &str, ledger_raw: &str, selector: &str, since: &str) -> DigestSummary {
+    fold_since(events_raw, ledger_raw, selector, Since::Str(since))
+}
+
+fn fold_since(
+    events_raw: &str,
+    ledger_raw: &str,
+    selector: &str,
+    since: Since<'_>,
+) -> DigestSummary {
     // Resolve the ledger FIRST: the selector may be a real fno session id, or a
     // node id / title / worktree basename (what the mux client hands us from the
     // focused pane's cwd). The ledger maps any of those to the concrete session
@@ -120,7 +158,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, selector: &str, since: &str) -> 
         if !event_session_in(&v, &session_ids) {
             continue;
         }
-        if event_ts(&v) < since {
+        if !since.includes(event_ts(&v)) {
             continue;
         }
         match event_kind(&v) {
@@ -191,7 +229,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, selector: &str, since: &str) -> 
 
     let mut summary = DigestSummary {
         session: selector.to_string(),
-        since: since.to_string(),
+        since: since.label(),
         commits,
         pr_number: ledger.pr_number,
         pr_url: ledger.pr_url,
@@ -263,7 +301,7 @@ fn ledger_entry_matches(entry: &Value, selector: &str) -> bool {
 /// Resolve session ids + sum `cost_usd` + pull the latest PR ref from ledger
 /// entries matching `selector`, restricted to `ts >= since`. Tolerant: an
 /// unparseable ledger yields an empty fold.
-fn resolve_from_ledger(ledger_raw: &str, selector: &str, since: &str) -> LedgerFold {
+fn resolve_from_ledger(ledger_raw: &str, selector: &str, since: Since<'_>) -> LedgerFold {
     let mut out = LedgerFold::default();
     let Ok(root) = serde_json::from_str::<Value>(ledger_raw) else {
         return out;
@@ -297,7 +335,7 @@ fn resolve_from_ledger(ledger_raw: &str, selector: &str, since: &str) -> LedgerF
             .iter()
             .find_map(|k| entry.get(*k).and_then(|v| v.as_str()))
             .unwrap_or("");
-        if ts < since {
+        if !since.includes(ts) {
             continue;
         }
         if let Some(c) = entry.get("cost_usd").and_then(|c| c.as_f64()) {
@@ -364,6 +402,9 @@ fn default_sources(home: &AgentsHome) -> (Vec<PathBuf>, PathBuf) {
 struct DigestArgs {
     session: String,
     since: String,
+    /// `--since-epoch <secs>`: the absence-window bound in epoch seconds (what
+    /// the attach overlay passes). Wins over `--since` when both are given.
+    since_epoch: Option<u64>,
     json: bool,
     events_override: Vec<PathBuf>,
     ledger_override: Option<PathBuf>,
@@ -372,6 +413,7 @@ struct DigestArgs {
 fn parse_args(rest: &[String]) -> Result<DigestArgs, String> {
     let mut session: Option<String> = None;
     let mut since = String::new();
+    let mut since_epoch: Option<u64> = None;
     let mut json = false;
     let mut events_override: Vec<PathBuf> = Vec::new();
     let mut ledger_override: Option<PathBuf> = None;
@@ -381,6 +423,13 @@ fn parse_args(rest: &[String]) -> Result<DigestArgs, String> {
         match a.as_str() {
             "--session" => session = it.next(),
             "--since" => since = it.next().ok_or("--since needs a value")?,
+            "--since-epoch" => {
+                since_epoch = Some(
+                    it.next()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .ok_or("--since-epoch needs a non-negative integer")?,
+                )
+            }
             "--json" | "-J" => json = true,
             // Hidden test hooks: point the fold at fixture files.
             "--events" => {
@@ -399,6 +448,7 @@ fn parse_args(rest: &[String]) -> Result<DigestArgs, String> {
     Ok(DigestArgs {
         session,
         since,
+        since_epoch,
         json,
         events_override,
         ledger_override,
@@ -451,7 +501,11 @@ pub async fn run_digest(rest: &[String], home: &AgentsHome) -> i32 {
     }
     let ledger_raw = std::fs::read_to_string(&ledger_path).unwrap_or_default();
 
-    let summary = fold(&events_raw, &ledger_raw, &args.session, &args.since);
+    let since = match args.since_epoch {
+        Some(e) => Since::Epoch(e),
+        None => Since::Str(&args.since),
+    };
+    let summary = fold_since(&events_raw, &ledger_raw, &args.session, since);
 
     if args.json {
         println!(
@@ -617,7 +671,7 @@ mod tests {
     fn cost_matches_sessions_array_membership() {
         // Execution rows carry the fno session id in sessions[], not session_id.
         let ledger = r#"[{"sessions":["uuid-1","sess-A"],"cost_usd":23.45,"pr_number":7,"pr_url":"https://x/pull/7","completed":"2026-07-03T03:00:00Z"}]"#;
-        let l = resolve_from_ledger(ledger, "sess-A", "");
+        let l = resolve_from_ledger(ledger, "sess-A", Since::Str(""));
         assert_eq!(l.pr_number, Some(7));
         assert_eq!(l.pr_url.as_deref(), Some("https://x/pull/7"));
         assert_eq!(l.cost_usd, 23.45);
@@ -626,7 +680,7 @@ mod tests {
     #[test]
     fn ledger_cost_respects_since() {
         let ledger = r#"[{"session_id":"sess-A","cost_usd":9.0,"timestamp":"2026-07-01T00:00:00Z"},{"session_id":"sess-A","cost_usd":1.0,"timestamp":"2026-07-03T00:00:00Z"}]"#;
-        let l = resolve_from_ledger(ledger, "sess-A", "2026-07-02T00:00:00Z");
+        let l = resolve_from_ledger(ledger, "sess-A", Since::Str("2026-07-02T00:00:00Z"));
         assert_eq!(
             l.cost_usd, 1.0,
             "the pre-since entry is excluded from the delta"
@@ -661,6 +715,42 @@ mod tests {
             "events found via the resolved session id"
         );
         assert_eq!(d.blocked_episodes, 1);
+    }
+
+    #[test]
+    fn since_epoch_scopes_to_the_absence_window() {
+        // Two loop_checks: one before the "detach", one after. An epoch bound at
+        // the detach time must exclude the earlier one.
+        let events = [
+            loop_check(
+                "2026-07-03T01:00:00Z",
+                "sess-A",
+                "old",
+                "OPEN",
+                "PENDING",
+                false,
+                "block",
+            ),
+            loop_check(
+                "2026-07-03T05:00:00Z",
+                "sess-A",
+                "new",
+                "OPEN",
+                "SUCCESS",
+                true,
+                "allow",
+            ),
+        ]
+        .join("\n");
+        // 2026-07-03T03:00:00Z == 1751511600 epoch.
+        let detach = crate::state::rfc3339_like_to_secs("2026-07-03T03:00:00Z").unwrap();
+        let d = fold_since(&events, "", "sess-A", Since::Epoch(detach));
+        assert_eq!(
+            d.blocked_episodes, 0,
+            "the pre-detach block is out of window"
+        );
+        assert!(d.reviewed, "the in-window allow still counts");
+        assert!(d.since.starts_with("epoch:"));
     }
 
     #[test]

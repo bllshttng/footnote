@@ -230,8 +230,20 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
     }
     let selector = selector_from_cwd(focused_cwd)?;
 
+    // Scope the fold to the absence window: pass the detach time as epoch
+    // seconds so the digest reports what changed WHILE AWAY, not lifetime
+    // totals. Epoch avoids synthesizing an RFC3339 string in a crate with no
+    // date library; `fno-agents` parses each row's ts to epoch for the compare.
+    let since_epoch = last.to_string();
     let fut = tokio::process::Command::new(fno_agents_bin())
-        .args(["digest", "--session", &selector, "--json"])
+        .args([
+            "digest",
+            "--session",
+            &selector,
+            "--since-epoch",
+            &since_epoch,
+            "--json",
+        ])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output();

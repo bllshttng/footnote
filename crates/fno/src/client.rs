@@ -1195,7 +1195,9 @@ async fn attach_and_run(
     // x-4e2d: after an absence, fold a "while you were gone" digest for the
     // focused pane's node and show it on the FIRST frame. Fully fail-open (a
     // disabled knob, a too-recent detach, or a slow/absent `fno-agents` all
-    // leave `digest` None), so it can never delay or break the attach.
+    // leave `digest` None), so it can never break the attach. It runs before the
+    // first paint and is bounded by the 800ms shell-out timeout, so the worst
+    // case is first paint delayed by that budget - never an indefinite hang.
     let focused_cwd = view
         .layout
         .squads

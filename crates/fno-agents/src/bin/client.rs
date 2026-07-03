@@ -1884,7 +1884,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "report --session-id <uuid> --seq <n> --state working|blocked|done [--reason <text>] [--ttl-ms <n>]",
     "wait --agent <name> --state idle|blocked|done [--timeout-ms <n>] [--json]",
     "subscribe [--agent <name>] [--kinds state,exit] [--json]",
-    "digest --session <s> --since <ts> [--json]",
+    "digest --session <s> [--since <ts> | --since-epoch <secs>] [--json]",
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`
