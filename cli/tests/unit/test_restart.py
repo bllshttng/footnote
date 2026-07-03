@@ -47,7 +47,11 @@ def test_restart_mux_flag_kills_each_session(monkeypatch) -> None:
     calls: list = []
     monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
     monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
-    monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main"}, {"session": "work"}])
+    monkeypatch.setattr(
+        restart,
+        "_mux_sessions",
+        lambda: [{"session": "main", "state": "live"}, {"session": "work", "state": "live"}],
+    )
 
     result = runner.invoke(app, ["restart", "--mux"])
     assert result.exit_code == 0
@@ -55,18 +59,51 @@ def test_restart_mux_flag_kills_each_session(monkeypatch) -> None:
     assert ["/cargo/bin/fno", "mux", "kill-server", "work"] in calls
 
 
+def test_restart_mux_skips_non_live_sessions(monkeypatch) -> None:
+    """--mux only kills LIVE sessions; stale/unqueryable rows are reported, not
+    killed (killing a non-live socket is meaningless)."""
+    _fake_daemon_binary(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
+    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
+    monkeypatch.setattr(
+        restart,
+        "_mux_sessions",
+        lambda: [{"session": "live1", "state": "live"}, {"session": "dead", "state": "stale"}],
+    )
+
+    result = runner.invoke(app, ["restart", "--mux"])
+    assert result.exit_code == 0
+    assert ["/cargo/bin/fno", "mux", "kill-server", "live1"] in calls
+    assert not any("dead" in c for c in calls), "must NOT kill a non-live session"
+
+
+def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
+    """A real daemon-restart failure fails the command (scripts must see it)."""
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(
+        restart.subprocess, "run", lambda cmd, **k: types.SimpleNamespace(returncode=3)
+    )
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["restart"])
+    assert result.exit_code == 1
+    assert "exited 3" in result.output
+
+
 def test_restart_json_summary(monkeypatch) -> None:
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(
         restart.subprocess, "run", lambda cmd, **k: types.SimpleNamespace(returncode=0)
     )
-    monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main"}])
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main", "state": "live"}])
 
     result = runner.invoke(app, ["restart", "--json"])
     assert result.exit_code == 0
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
     assert payload["daemon"] == "restarted"
     assert payload["mux_sessions"] == ["main"]
+    assert payload["ok"] is True
 
 
 def test_restart_no_daemon_binary_is_non_fatal(monkeypatch) -> None:

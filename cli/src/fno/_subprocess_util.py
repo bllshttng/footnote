@@ -35,9 +35,12 @@ def fno_py_cmd() -> list[str]:
     found = shutil.which("fno-py")
     if found:
         return [found]
-    sibling = Path(sys.executable).parent / "fno-py"
-    if sibling.exists():
-        return [str(sibling)]
+    # sys.executable can be empty/None in embedded or frozen interpreters; guard
+    # before Path() so resolution degrades to the bare name rather than raising.
+    if sys.executable:
+        sibling = Path(sys.executable).parent / "fno-py"
+        if sibling.exists():
+            return [str(sibling)]
     return ["fno-py"]
 
 
