@@ -108,7 +108,7 @@ def _dispatch_one(
     # 2. Atomic lane cap (config.parallel.max_lanes). A full cap -> lanes-full:
     #    no claim, no spawn (AC-edge). max_lanes 0 would forbid every manual grab,
     #    so a deliberate keystroke floors it to one slot.
-    max_lanes = max(1, load_settings().config.parallel.max_lanes)
+    max_lanes = max(1, load_settings().config.parallel.max_lanes or 1)
     slot = acquire_lane_slot(max_lanes, node_id)
     if slot is None:
         return {"outcome": "lanes-full", "node": node_id, "slug": slug or ""}

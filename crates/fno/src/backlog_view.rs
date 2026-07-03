@@ -158,11 +158,21 @@ impl ReaderState {
         read_if_changed: impl FnOnce() -> Option<String>,
     ) -> Option<Vec<BacklogCard>> {
         if stamp != self.cached_stamp {
-            self.cached_stamp = stamp;
             match (read_if_changed(), stamp) {
-                (Some(raw), _) => self.cached_raw = Some(raw),
-                (None, None) => self.cached_raw = None,
-                (None, Some(_)) => {} // read raced a writer: keep last-good
+                // Only commit the new stamp once we have matching content, so a
+                // torn read (raced a writer: file exists but read yielded None)
+                // is RE-TRIED on the next tick instead of pinning the stale card
+                // set until the graph's mtime changes again (gemini HIGH; this
+                // improves on the older agents_view reader's advance-anyway).
+                (Some(raw), _) => {
+                    self.cached_stamp = stamp;
+                    self.cached_raw = Some(raw);
+                }
+                (None, None) => {
+                    self.cached_stamp = stamp;
+                    self.cached_raw = None; // file vanished: empty the lane
+                }
+                (None, Some(_)) => {} // torn read: keep last-good AND retry next tick
             }
         }
         let cards = match &self.cached_raw {
@@ -235,8 +245,16 @@ mod tests {
         let good = graph(r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"}"#);
         let s1 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
         assert_eq!(st.tick(s1, || Some(good.clone())).unwrap().len(), 1);
-        // A changed stamp but an unreadable (raced) read keeps the last-good card.
+        // A changed stamp but a torn (None) read keeps the last-good card AND
+        // does not commit the new stamp, so the read is retried next tick.
         let s2 = Some((std::time::SystemTime::UNIX_EPOCH, 999));
-        assert!(st.tick(s2, || None).is_none()); // unchanged -> no republish
+        assert!(st.tick(s2, || None).is_none()); // last-good unchanged -> no republish
+                                                 // Retry at the same stamp now succeeds with two cards -> republished
+                                                 // (proves the torn read did not pin the stale set).
+        let two = graph(
+            r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"},
+               {"id":"b","slug":"t","priority":"p2","_status":"blocked"}"#,
+        );
+        assert_eq!(st.tick(s2, || Some(two.clone())).unwrap().len(), 2);
     }
 }

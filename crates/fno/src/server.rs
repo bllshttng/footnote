@@ -594,8 +594,19 @@ async fn run_dispatch_one(session: &str) -> String {
     match tokio::time::timeout(DISPATCH_TIMEOUT, fut).await {
         Err(_) => "grab work: timed out".to_string(),
         Ok(Err(_)) => "grab work: dispatch unavailable".to_string(),
-        Ok(Ok(o)) if !o.status.success() => "grab work: dispatch failed".to_string(),
-        Ok(Ok(o)) => dispatch_notice(&String::from_utf8_lossy(&o.stdout)),
+        // The porcelain ALWAYS prints its `--json` verdict to stdout, even on a
+        // `failed` exit (code 1), so parse stdout whenever it is non-empty - the
+        // JSON is the contract, not the exit code. `dispatch_notice` surfaces the
+        // `detail` of a failed verdict; the exit status only distinguishes
+        // "couldn't produce a verdict at all" (empty stdout).
+        Ok(Ok(o)) => {
+            let out = String::from_utf8_lossy(&o.stdout);
+            if out.trim().is_empty() {
+                "grab work: dispatch failed".to_string()
+            } else {
+                dispatch_notice(&out)
+            }
+        }
     }
 }
 
