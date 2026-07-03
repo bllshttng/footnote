@@ -101,10 +101,15 @@ def _probe_installed_verb() -> ProbeResult:
     """Probe whether the *installed* fno exposes the known gate verb.
 
     Returns "present", "missing" (proven via "No such command"), or "unknown"
-    (could not probe - no ``fno`` on PATH, or a non-zero exit for some other
+    (could not probe - no ``fno-py`` on PATH, or a non-zero exit for some other
     reason). "unknown" never asserts staleness.
+
+    Probes ``fno-py`` (the Python CLI console script), NOT ``fno`` (the Rust mux
+    front door): the gate verb is a property of the Python CLI, and probing it
+    directly keeps this check working even when the front door binary is not
+    installed - the front door only forwards here anyway.
     """
-    abi_bin = shutil.which("fno")
+    abi_bin = shutil.which("fno-py")
     if not abi_bin:
         return "unknown"
     try:

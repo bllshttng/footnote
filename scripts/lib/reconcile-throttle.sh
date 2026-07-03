@@ -28,8 +28,10 @@ _reconcile_resolve_abi() {
         echo "fno"
         return 0
     fi
-    if [[ -x "$HOME/.local/bin/fno" ]]; then
-        echo "$HOME/.local/bin/fno"
+    # Fallback when ~/.local/bin is off PATH. The Python CLI console script is
+    # now `fno-py` (the Rust mux binary owns `fno`); it runs `backlog reconcile`.
+    if [[ -x "$HOME/.local/bin/fno-py" ]]; then
+        echo "$HOME/.local/bin/fno-py"
         return 0
     fi
     return 1

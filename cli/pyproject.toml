@@ -35,8 +35,15 @@ Homepage = "https://github.com/bllshttng/footnote"
 Repository = "https://github.com/bllshttng/footnote"
 Issues = "https://github.com/bllshttng/footnote/issues"
 
+# The Python control-plane CLI ships as `fno-py`, NOT `fno`: the Rust mux binary
+# (crates/fno) owns `fno` on PATH and forwards every non-mux verb here by
+# absolute path (`<uv tool dir>/fno/bin/fno-py`). Naming this `fno` too would
+# make the two fight for the name on PATH (whichever `~/.local/bin` vs
+# `~/.cargo/bin` wins), silently breaking `fno mux`. `fno-py` slots into the
+# fno-<component> binary family (fno-agents*, fno-py) and is never typed by a
+# user - they type `fno`, which routes. See crates/fno/src/bootstrap.rs::forward.
 [project.scripts]
-fno = "fno.cli:app"
+fno-py = "fno.cli:app"
 
 [tool.hatch.version]
 path = "src/fno/__init__.py"

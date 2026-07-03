@@ -149,9 +149,11 @@ resolve_source() {
 	FNO_SOURCE=fno
 }
 
-# --- resolution: the wheel fno + its tool venv python ----------------------
-# Resolve the wheel fno console script + its venv python inside uv's tool dir:
-# <uv tool dir>/fno/bin/{fno,python}. Sets FNO_REAL + FNO_VENV_PY; returns 1 when
+# --- resolution: the wheel fno-py + its tool venv python -------------------
+# Resolve the wheel's Python CLI console script + its venv python inside uv's
+# tool dir: <uv tool dir>/fno/bin/{fno-py,python}. The console script is `fno-py`
+# (the Rust mux binary owns `fno`; see crates/fno). Sets FNO_REAL + FNO_VENV_PY;
+# returns 1 when
 # uv is absent or the tool dir is unreadable (the caller then provisions).
 # uv colorizes `tool dir` on a TTY; we capture via a pipe and pass NO_COLOR, but
 # strip any stray CSI escape defensively so it can never corrupt the path.
@@ -163,7 +165,7 @@ resolve_real() {
 	_dir=$(NO_COLOR=1 UV_NO_COLOR=1 "$FNO_UV" tool dir 2>/dev/null) || return 1
 	_dir=$(strip_ansi "$_dir")
 	[ -n "$_dir" ] || return 1
-	FNO_REAL="$_dir/fno/bin/fno"
+	FNO_REAL="$_dir/fno/bin/fno-py"
 	FNO_VENV_PY="$_dir/fno/bin/python"
 	# The tool-BIN dir (where uv exposes `fno` and the fno-agents* binaries for
 	# PATH) is distinct from the venv bin above. Ask uv directly; fall back to the
@@ -223,7 +225,7 @@ print(md["Version"])'
 
 # --- success report --------------------------------------------------------
 # Report the verified version (AC5-UI) and, when uv's tool bin is not on PATH,
-# make a later `fno`/`fno-agents` call resolvable rather than a bare 127 (AC3-UI).
+# make a later `fno-py`/`fno-agents` call resolvable rather than a bare 127 (AC3-UI).
 report_success() {
 	say "verified fno $FNO_VERIFIED_VERSION (this project's package)."
 	# Check the DIRECTORY against PATH, not `have fno`: a pre-existing fno earlier
@@ -231,7 +233,7 @@ report_success() {
 	# binary instead of the one just verified here (codex P2).
 	case ":${PATH:-}:" in
 		*":$FNO_TOOL_BIN:"*)
-			say "done. run 'fno --help' to get started."
+			say "done. run 'fno-py --help' for the CLI (the 'fno' mux front door is a separate binary; see the cargo channel)."
 			return 0
 			;;
 	esac
@@ -245,7 +247,7 @@ report_success() {
 		say "installed, but $FNO_TOOL_BIN is not on your PATH yet (FNO_NO_MODIFY_PATH set)."
 		say "add it for this and future shells, e.g.:"
 		say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
-		say "done. run 'fno --help' once $FNO_TOOL_BIN is on PATH."
+		say "done. run 'fno-py --help' once $FNO_TOOL_BIN is on PATH."
 		return 0
 	fi
 	# Degrade to the manual hint if this uv predates `tool update-shell` or the

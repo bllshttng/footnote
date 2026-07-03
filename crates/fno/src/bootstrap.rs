@@ -11,13 +11,16 @@
 //!   1. ensure `uv` is present (download Astral's standalone uv if absent),
 //!   2. `uv tool install fno` (the PyPI platform wheel, binaries bundled),
 //!   3. verify the installed package is *ours* before running it,
-//!   4. `exec` the wheel `fno` by ABSOLUTE path.
+//!   4. `exec` the wheel's `fno-py` console script by ABSOLUTE path.
 //!
 //! Subsequent runs read a sentinel and forward immediately - no network.
 //!
-//! The shim execs the wheel `fno` by absolute path, NEVER via a PATH lookup,
-//! so it can never self-exec into an infinite loop even when `~/.cargo/bin`
-//! and uv's tool bin both carry an `fno`.
+//! The wheel's Python CLI ships as the `fno-py` console script (this Rust
+//! binary owns `fno`), and the shim execs it by absolute path, NEVER via a PATH
+//! lookup. Two guards against a self-loop, either sufficient: the target is a
+//! different name (`fno-py`, not `fno`), and it is reached by absolute path, not
+//! a PATH search - so it holds even when `~/.cargo/bin` and uv's tool bin both
+//! carry an `fno`.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -226,10 +229,13 @@ fn install_source(override_val: Option<&str>) -> String {
 // Resolution: find the wheel `fno` absolute path
 // ---------------------------------------------------------------------------
 
-/// Resolve the wheel `fno` console script inside uv's tool venv:
-/// `<uv tool dir>/fno/bin/fno`. This is ALWAYS the wheel CLI, never this shim,
-/// so execing it by absolute path cannot self-loop. Returns `None` when uv is
-/// absent or the tool dir cannot be read; the caller then provisions.
+/// Resolve the wheel Python CLI console script inside uv's tool venv:
+/// `<uv tool dir>/fno/bin/fno-py`. The wheel's `[project.scripts]` names the
+/// Python CLI `fno-py` (this Rust binary owns `fno`), so the forward target is
+/// `fno-py`, never `fno` - which is what makes the self-loop impossible by
+/// construction: this shim is `fno`, the thing it execs is `fno-py`, a
+/// different name even when both live on PATH. Returns `None` when uv is absent
+/// or the tool dir cannot be read; the caller then provisions.
 fn resolve_via_uv_tool_dir() -> Option<PathBuf> {
     let uv = find_uv()?;
     let out = Command::new(&uv)
@@ -250,7 +256,10 @@ fn resolve_via_uv_tool_dir() -> Option<PathBuf> {
         PathBuf::from(tool_dir)
             .join(TOOL_NAME)
             .join("bin")
-            .join("fno"),
+            // The console script is `fno-py` (see the wheel's [project.scripts]);
+            // TOOL_NAME above is the uv *tool* name (still `fno`), which is a
+            // different axis from the script name.
+            .join("fno-py"),
     )
 }
 

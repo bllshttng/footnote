@@ -46,7 +46,9 @@ if ! "$VENV/bin/pip" install --quiet "$WHEEL"; then
   exit 1
 fi
 BIN="$VENV/bin"
-FNO="$BIN/fno"
+# The wheel's Python CLI console script is `fno-py` (the Rust mux binary owns
+# `fno`); a pip-only install lands exactly this one, not `fno`.
+FNO="$BIN/fno-py"
 
 # Run every verb from a dir OUTSIDE any git repo, with repo/plugin env unset, so
 # only the bare-install path is exercised (AC5-EDGE: no RuntimeError from
