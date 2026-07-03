@@ -553,13 +553,14 @@ def _resolve_fno_cmd() -> list[str]:
     install layout). Falls back to the bare name so a misconfigured PATH still
     surfaces a real subprocess error rather than a silent no-op.
     """
-    found = shutil.which("fno")
+    # Resolve `fno-py` (the console script; the Rust mux binary owns `fno`).
+    found = shutil.which("fno-py")
     if found:
         return [found]
-    sibling = Path(sys.executable).parent / "fno"
+    sibling = Path(sys.executable).parent / "fno-py"
     if sibling.exists():
         return [str(sibling)]
-    return ["fno"]
+    return ["fno-py"]
 
 
 def _git_out(cwd: Path, *args: str) -> Optional[str]:

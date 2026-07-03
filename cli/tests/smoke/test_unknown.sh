@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)/cli"
 uv sync --quiet
 set +e
-out=$(uv run fno bogus 2>&1)
+out=$(uv run fno-py bogus 2>&1)
 rc=$?
 set -e
 if [[ $rc -eq 0 ]]; then

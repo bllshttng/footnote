@@ -7,10 +7,10 @@ REPO_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
 
 # Prefer abilities project; fall back to any project with a stderr warning.
 cd "$REPO_ROOT/cli"
-node=$(uv run fno --json graph next --project fno 2>/dev/null || true)
+node=$(uv run fno-py --json graph next --project fno 2>/dev/null || true)
 if [[ -z "$node" || "$node" == "null" ]]; then
   echo "WARNING: no ready node in abilities project; falling back to any project" >&2
-  node=$(uv run fno --json graph next 2>/dev/null || true)
+  node=$(uv run fno-py --json graph next 2>/dev/null || true)
 fi
 
 if [[ -z "$node" || "$node" == "null" ]]; then

@@ -52,7 +52,7 @@ log_invoke() {
 cli() {
   log_invoke "abilities $*"
   cd "$CLI_DIR"
-  uv run fno "$@"
+  uv run fno-py "$@"
 }
 
 log "=== dogfood-driver started (dry_run=$DRY_RUN) ==="

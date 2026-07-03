@@ -54,7 +54,7 @@ def test_bundle_no_subcommand_runs_bundler_against_committed_tree():
     # Use subprocess directly so we exercise the real `fno bundle` entry
     # point (CliRunner doesn't enter the subprocess that the wrapper spawns).
     result = subprocess.run(
-        ["uv", "run", "fno", "bundle"],
+        ["uv", "run", "fno-py", "bundle"],
         cwd=str(REPO_ROOT / "cli"),
         env=env,
         capture_output=True,
@@ -70,7 +70,7 @@ def test_bundle_check_passes_for_fresh_tree():
     env = dict(os.environ)
     env["FNO_REPO_ROOT"] = str(REPO_ROOT)
     result = subprocess.run(
-        ["uv", "run", "fno", "bundle", "check"],
+        ["uv", "run", "fno-py", "bundle", "check"],
         cwd=str(REPO_ROOT / "cli"),
         env=env,
         capture_output=True,
@@ -86,7 +86,7 @@ def test_bundle_lint_passes_for_current_state():
     env = dict(os.environ)
     env["FNO_REPO_ROOT"] = str(REPO_ROOT)
     result = subprocess.run(
-        ["uv", "run", "fno", "bundle", "lint"],
+        ["uv", "run", "fno-py", "bundle", "lint"],
         cwd=str(REPO_ROOT / "cli"),
         env=env,
         capture_output=True,

@@ -22,7 +22,7 @@ export FNO_INBOX_ROOT="$INBOX_ROOT"
 export FNO_INBOX_KNOWN_PROJECTS="abilities,example-pipeline"
 
 # 1) example-pipeline sends a fyi to abilities (replaces the old `notification` kind).
-SEND_OUT=$(uv run fno mail send --to-project abilities --kind fyi \
+SEND_OUT=$(uv run fno-py mail send --to-project abilities --kind fyi \
     --body "region data source live in PR 112 please be advised" \
     --from-name example-pipeline --json)
 THREAD_PATH=$(echo "$SEND_OUT" | python3 -c "import json, sys; print(json.loads(sys.stdin.read().splitlines()[-1])['thread_path'])")
@@ -32,7 +32,7 @@ case "$THREAD_PATH" in
 esac
 
 # 2) abilities reads the unread thread, including the body and sender.
-JSON_OUT=$(uv run fno mail unread --name abilities --json)
+JSON_OUT=$(uv run fno-py mail unread --name abilities --json)
 echo "$JSON_OUT" | python3 -c "
 import json, sys
 msgs = json.loads(sys.stdin.read())
@@ -45,7 +45,7 @@ print('envelope shape ok')
 "
 
 # 3) example-pipeline's own inbox is empty (it sent; it did not receive).
-RR_OUT=$(uv run fno mail unread --name example-pipeline --json)
+RR_OUT=$(uv run fno-py mail unread --name example-pipeline --json)
 if [[ "$RR_OUT" != "[]" ]]; then
   echo "FAIL: example-pipeline should not have received any message; got $RR_OUT" >&2
   exit 1

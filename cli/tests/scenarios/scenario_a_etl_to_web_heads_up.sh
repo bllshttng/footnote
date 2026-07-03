@@ -67,7 +67,7 @@ if [ -z "$FNO_CMD" ]; then
     FNO_CMD="fno"
 fi
 run_abi() {
-    cd "$CLI_DIR" && uv run fno "$@"
+    cd "$CLI_DIR" && uv run fno-py "$@"
 }
 
 echo "=== Scenario A: ETL to web heads-up triage ==="

@@ -27,7 +27,11 @@ def _abi(args, cwd: Path, env: dict = None) -> subprocess.CompletedProcess:
     if env:
         full_env.update(env)
     return subprocess.run(
-        ["uv", "run", "--project", "cli", "fno", *args],
+        # Absolute --project so uv resolves cli/'s env (which has the `fno-py`
+        # console script) regardless of `cwd`. A relative "cli" resolves against
+        # the tmpdir cwd, misses, and falls back to the ambient PATH - which used
+        # to accidentally find an installed `fno`, but there is no ambient `fno-py`.
+        ["uv", "run", "--project", str(REPO_ROOT / "cli"), "fno-py", *args],
         capture_output=True,
         text=True,
         cwd=cwd,
