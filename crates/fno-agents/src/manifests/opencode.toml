@@ -37,11 +37,9 @@ gate = { any = [
       { contains = "enter submit" },
       { contains = "enter toggle" },
     ] },
-    { all = [
-      { any = [
-        { contains = "↑↓ select" },
-        { contains = "⇆ tab" },
-      ] },
+    { any = [
+      { contains = "↑↓ select" },
+      { contains = "⇆ tab" },
     ] },
   ] },
 ] }
