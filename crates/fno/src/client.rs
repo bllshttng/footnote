@@ -215,6 +215,12 @@ struct SelRow {
     tab: Option<usize>,
 }
 
+/// A live pane badged `blocked` - the answer-queue membership test (x-c929).
+/// Shared by every queue read so counting/emptiness checks never clone the rows.
+fn is_blocked_row(a: &AgentRow) -> bool {
+    !a.exited && a.badge == Some(AgentBadge::Blocked)
+}
+
 /// Everything the client renders from. Pure state - `compose` turns it into
 /// one full-terminal `Frame` the row-diffing `Compositor` draws.
 struct View {
@@ -281,7 +287,7 @@ impl View {
         self.layout
             .agents
             .iter()
-            .filter(|a| !a.exited && a.badge == Some(AgentBadge::Blocked))
+            .filter(|a| is_blocked_row(a))
             .cloned()
             .collect()
     }
@@ -361,7 +367,12 @@ impl View {
         // the slot, move to the new last entry if the removed one was last, and
         // close when the queue empties (AC2-ERR).
         if let Some(cur) = self.answers {
-            let n = self.blocked_queue().len();
+            let n = self
+                .layout
+                .agents
+                .iter()
+                .filter(|a| is_blocked_row(a))
+                .count();
             self.answers = if n == 0 { None } else { Some(cur.min(n - 1)) };
         }
     }
@@ -1444,8 +1455,8 @@ async fn handle_stdin(
             }
             Event::OpenAnswers => {
                 // Nothing blocked -> a local BEL, the overlay never opens on an
-                // empty queue (AC2-ERR).
-                if view.blocked_queue().is_empty() {
+                // empty queue (AC2-ERR). `.any` over the rows, no clone.
+                if !view.layout.agents.iter().any(is_blocked_row) {
                     let _ = raw_out(b"\x07");
                 } else {
                     view.answers = Some(0);

@@ -1348,12 +1348,18 @@ impl Core {
         }
         // Writer-claim interlock (same as rerun/Input): a live relay holder
         // bounces; a dead holder releases here so the answer resumes (AC3-FR).
-        if let Some(&holder) = self.claims.get(&pane) {
-            if pid_alive(holder) {
-                self.notice(client_id, "driven by relay - focus to answer");
-                return;
+        // Single map lookup via Entry; the notice is deferred past the borrow.
+        let mut driven_by_relay = false;
+        if let std::collections::hash_map::Entry::Occupied(e) = self.claims.entry(pane) {
+            if pid_alive(*e.get()) {
+                driven_by_relay = true;
+            } else {
+                e.remove();
             }
-            self.claims.remove(&pane);
+        }
+        if driven_by_relay {
+            self.notice(client_id, "driven by relay - focus to answer");
+            return;
         }
         if let Some(entry) = self.panes.get(&pane) {
             let _ = entry.pty.write_input(keystroke);
