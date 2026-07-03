@@ -652,12 +652,15 @@ impl Pane {
         let cols = self.cols as usize;
         let nlen = needle.len();
         let mut out = Vec::new();
+        // Reused across rows (cleared per row) so a full 10k-line scrollback scan
+        // does not allocate a fresh Vec per row. (gemini review, MEDIUM)
+        let mut cells: Vec<(char, usize)> = Vec::with_capacity(cols);
         let mut ln = top;
         while ln <= bot {
             let row = &grid[Line(ln as i32)];
             // (char, grid column) for each visible cell, spacers skipped so the
             // char stream and the column map stay aligned for wide chars.
-            let mut cells: Vec<(char, usize)> = Vec::with_capacity(cols);
+            cells.clear();
             for c in 0..cols {
                 let cell = &row[Column(c)];
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER)

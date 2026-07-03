@@ -1858,6 +1858,10 @@ enum SearchKey {
 /// leaks its param/final tail into the typed query (gemini review, HIGH). A bare
 /// Esc surfaces as [`SearchKey::Esc`]; everything else is a [`SearchKey::Byte`].
 /// A lone trailing ESC stays pending until the next byte disambiguates it.
+/// Query-length ceiling. Far above any real search term; only bounds the scan
+/// cost against a held key or a paste. (gemini review, MEDIUM)
+const MAX_SEARCH_QUERY: usize = 256;
+
 fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKey> {
     let mut keys = Vec::new();
     for &b in bytes {
@@ -1889,7 +1893,15 @@ fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKey> {
             // pathological stream can never grow `esc` without limit.
             // ponytail: 16-byte ceiling; real CSI sequences are far shorter.
             _ => {
-                if (0x40..=0x7e).contains(&b) || esc.len() >= 16 {
+                if b == 0x1b {
+                    // ESC aborts any in-progress sequence and starts a fresh
+                    // one (standard VT semantics). Without this, an ESC arriving
+                    // mid-CSI (a split sequence in the buffer) would be eaten as
+                    // a param byte, so pressing Esc to cancel search would
+                    // silently fail. (gemini review, HIGH)
+                    esc.clear();
+                    esc.push(0x1b);
+                } else if (0x40..=0x7e).contains(&b) || esc.len() >= 16 {
                     esc.clear();
                 } else {
                     esc.push(b);
@@ -1945,8 +1957,15 @@ async fn search_keys(
                     view.search.as_mut().unwrap().query.pop();
                 }
                 // ASCII printable appends; other control bytes are ignored (the
-                // query is ASCII in v1, matching the ASCII-fold scan).
-                0x20..=0x7e => view.search.as_mut().unwrap().query.push(b as char),
+                // query is ASCII in v1, matching the ASCII-fold scan). Capped so
+                // a held key / paste can't grow the query unbounded and drive an
+                // O(len * scrollback) server scan. (gemini review, MEDIUM)
+                0x20..=0x7e => {
+                    let q = &mut view.search.as_mut().unwrap().query;
+                    if q.len() < MAX_SEARCH_QUERY {
+                        q.push(b as char);
+                    }
+                }
                 _ => {}
             },
             SearchKey::Byte(b) => match b {
@@ -2214,6 +2233,16 @@ mod tests {
             fold_search_input(&mut esc, b"\x1bx"),
             vec![SearchKey::Esc, SearchKey::Byte(b'x')]
         );
+        // gemini review (HIGH): an ESC arriving mid-CSI aborts the sequence and
+        // restarts, so Esc-to-cancel works even with a split CSI pending. A
+        // partial CSI (`ESC [ 1 ;`) then ESC then `x` must yield exactly one Esc
+        // and the `x`, never swallow the cancel as a CSI param byte.
+        assert!(fold_search_input(&mut esc, b"\x1b[1;").is_empty());
+        assert_eq!(
+            fold_search_input(&mut esc, b"\x1bx"),
+            vec![SearchKey::Esc, SearchKey::Byte(b'x')]
+        );
+        assert!(esc.is_empty());
     }
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
