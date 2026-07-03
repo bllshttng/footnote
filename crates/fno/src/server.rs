@@ -1123,6 +1123,9 @@ impl Core {
                 badge: if exited { None } else { a.badge },
                 reason: if exited { None } else { a.reason.clone() },
                 exited,
+                // An exited pane is unanswerable; drop any stale payload with
+                // the badge (x-c929).
+                answerable: if exited { None } else { a.answerable.clone() },
             });
         }
         out
@@ -2828,6 +2831,7 @@ mod tests {
             badge,
             reason: None,
             mux: Some((sess.into(), pane)),
+            answerable: None,
         }
     }
 

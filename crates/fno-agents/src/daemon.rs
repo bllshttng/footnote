@@ -5682,6 +5682,7 @@ done
                 seq: 4,
                 at: "2026-07-02T00:00:00Z".into(),
                 ttl_ms: Some(120_000),
+                answerable: None,
             });
         })
         .unwrap();

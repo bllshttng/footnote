@@ -166,6 +166,13 @@ pub struct ScreenStateReport {
     pub at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
+    /// (x-c929) The answerable-prompt payload when this `blocked` verdict came
+    /// from a rule with an `[answer]` grammar and the region yielded a clean
+    /// numbered menu; `None` for every other state or a focus-only blocked
+    /// prompt. Rides the badge to the sideline (JSON passthrough); the mux
+    /// server re-verifies its fingerprint before injecting a picked answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answerable: Option<crate::manifest::AnswerablePrompt>,
 }
 
 impl ScreenStateReport {
@@ -1228,6 +1235,7 @@ mod tests {
             seq: 9,
             at: "2026-07-02T01:00:00Z".into(),
             ttl_ms: None,
+            answerable: None,
         });
         let mut reg = Registry::default();
         reg.entries.push(scraped.clone());
@@ -1249,6 +1257,7 @@ mod tests {
             seq: 1,
             at: at.into(),
             ttl_ms,
+            answerable: None,
         };
         // No TTL never self-ages; in-TTL live; lapsed expires; corrupt stamp
         // fails closed (a bad `at` must not pin a forever-working badge).

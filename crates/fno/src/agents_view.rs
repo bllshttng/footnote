@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use crate::proto::AgentBadge;
+use crate::proto::{AgentBadge, AnswerablePrompt};
 
 /// One registry row as the sideline consumes it: badge already TTL-derived
 /// (the reader knows "now"); the pane-exit fact is joined later, on the core
@@ -30,6 +30,10 @@ pub struct RegistryAgent {
     pub reason: Option<String>,
     /// The `mux` ref, when this row is pane-hosted: (session, pane_id).
     pub mux: Option<(String, u64)>,
+    /// (x-c929) The answerable-prompt payload from the scrape rung, present only
+    /// when this row is `blocked` on a numbered menu the daemon could extract;
+    /// `None` for a hook-badged block or a focus-only blocked prompt.
+    pub answerable: Option<AnswerablePrompt>,
 }
 
 /// The registry path, resolved exactly as fno-agents' `AgentsHome::from_env`
@@ -122,7 +126,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                 m.get("pane_id")?.as_u64()?,
             ))
         });
-        let (badge, reason) = match row.get("inside_leg") {
+        let (badge, reason, answerable) = match row.get("inside_leg") {
             Some(leg) if !leg.is_null() => {
                 let live = report_is_live(
                     leg.get("received_at")
@@ -142,9 +146,11 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                         .get("reason")
                         .and_then(|v| v.as_str())
                         .map(str::to_string);
-                    (badge, reason)
+                    // Hook-badged blocks carry no answer payload in v1 (the
+                    // grammar is a scrape-rung concern); focus-only.
+                    (badge, reason, None)
                 } else {
-                    (None, None) // TTL lapsed -> liveness-only (AC2-ERR)
+                    (None, None, None) // TTL lapsed -> liveness-only (AC2-ERR)
                 }
             }
             // Screen-manifest rung (v7): consulted ONLY when no inside_leg
@@ -176,12 +182,23 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                             .is_some()
                             .then(|| ss.get("rule").and_then(|v| v.as_str()).map(str::to_string))
                             .flatten();
-                        (badge, reason)
+                        // Answer payload only for a live `blocked` scrape verdict
+                        // that carried one; a malformed payload degrades to
+                        // focus-only (extraction is additive - never blanks the
+                        // badge). from_value tolerates the missing/extra field.
+                        let answerable = if badge == Some(AgentBadge::Blocked) {
+                            ss.get("answerable").filter(|v| !v.is_null()).and_then(|v| {
+                                serde_json::from_value::<AnswerablePrompt>(v.clone()).ok()
+                            })
+                        } else {
+                            None
+                        };
+                        (badge, reason, answerable)
                     } else {
-                        (None, None) // TTL lapsed -> liveness-only
+                        (None, None, None) // TTL lapsed -> liveness-only
                     }
                 }
-                _ => (None, None),
+                _ => (None, None, None),
             },
         };
         out.push(RegistryAgent {
@@ -191,6 +208,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             badge,
             reason,
             mux,
+            answerable,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -375,5 +393,47 @@ mod tests {
         let rows = derive_rows(&raw, NOW).unwrap();
         assert_eq!(rows[0].name, "alpha");
         assert_eq!(rows[1].name, "zeta");
+    }
+
+    // x-c929: a live `blocked` scrape verdict with an `answerable` payload parses
+    // it onto the row; a blocked verdict without one, and a hook-badged block,
+    // are both focus-only (no answer payload in v1).
+    #[test]
+    fn agent_rows_carry_answerable_payload_on_blocked_scrape() {
+        let fp = ["7"; 32].join(",");
+        let raw = reg(&format!(
+            r#"{{"name":"answerable","cwd":"/w","status":"live",
+                 "screen_state":{{"state":"blocked","rule":"permission_prompt",
+                   "seq":2,"at":"{recent}","ttl_ms":120000,
+                   "answerable":{{"prompt":"Do you want to proceed?",
+                     "options":[{{"idx":"1","label":"Yes","keystroke":[49]}},
+                                {{"idx":"2","label":"No","keystroke":[50]}}],
+                     "fingerprint":[{fp}],"region_lines":8}}}}}},
+               {{"name":"focus-only","cwd":"/w","status":"live",
+                 "screen_state":{{"state":"blocked","rule":"live_blocked_form",
+                   "seq":1,"at":"{recent}","ttl_ms":120000}}}},
+               {{"name":"hook-blocked","cwd":"/w","status":"live",
+                 "inside_leg":{{"state":"blocked","seq":3,
+                   "received_at":"{recent}","ttl_ms":60000}}}}"#,
+            recent = "2027-01-15T07:59:30Z",
+        ));
+        let now = rfc3339_like_to_secs("2027-01-15T08:00:00Z").unwrap();
+        let rows = derive_rows(&raw, now).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        let a = get("answerable");
+        assert_eq!(a.badge, Some(AgentBadge::Blocked));
+        let ans = a
+            .answerable
+            .as_ref()
+            .expect("answerable parsed onto the row");
+        assert_eq!(ans.options.len(), 2);
+        assert_eq!(ans.options[0].keystroke, b"1");
+        assert_eq!(ans.region_lines, 8);
+        // Blocked but no payload -> focus-only.
+        assert_eq!(get("focus-only").badge, Some(AgentBadge::Blocked));
+        assert!(get("focus-only").answerable.is_none());
+        // A hook-badged block carries no answer payload in v1.
+        assert_eq!(get("hook-blocked").badge, Some(AgentBadge::Blocked));
+        assert!(get("hook-blocked").answerable.is_none());
     }
 }

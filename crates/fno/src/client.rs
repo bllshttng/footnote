@@ -1934,6 +1934,7 @@ mod tests {
                     badge: Some(AgentBadge::Blocked),
                     reason: Some("perm prompt".into()),
                     exited: false,
+                    answerable: None,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -1942,6 +1943,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: true,
+                    answerable: None,
                 },
                 AgentRow {
                     squad: None,
@@ -1950,6 +1952,7 @@ mod tests {
                     badge: Some(AgentBadge::Working),
                     reason: None,
                     exited: false,
+                    answerable: None,
                 },
             ],
         });
