@@ -1739,6 +1739,19 @@ fn pipe_block_gate(meta: Option<&proto::BlockMeta>) -> Result<(), String> {
             "source block {seq} was truncated by the byte cap - refusing to pipe partial text"
         ));
     }
+    // A markerless pane has no command boundaries, so `--block last` degrades
+    // to the whole-scrollback implicit block - which reports complete=true
+    // even while a command is still running (there is no D marker to prove
+    // otherwise). block pipe is a TYPED-block verb (the node's contract), so
+    // refuse the implicit block rather than pipe unbounded, possibly
+    // mid-command screen text at exit 0.
+    if m.implicit {
+        return Err(
+            "source pane emits no command markers - block pipe needs a typed block \
+             (enable OSC 133 shell integration: `fno mux shell-init`)"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -1801,19 +1814,14 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
             return EXIT_ERROR;
         }
     };
-    // 1b. An open or truncated block never pipes (partial text is worse than
-    //     no pipe); the markerless implicit block pipes with a visible note.
+    // 1b. Only a completed, typed, untruncated block pipes: open, truncated,
+    //     and markerless-implicit blocks all refuse here (partial or unbounded
+    //     text is worse than no pipe).
     if let Err(why) = pipe_block_gate(meta.as_ref()) {
         eprintln!("fno mux block: {why}");
         return EXIT_BLOCK_UNAVAILABLE;
     }
     let seq = meta.as_ref().and_then(|m| m.seq);
-    let implicit = meta.as_ref().is_some_and(|m| m.implicit);
-    if implicit {
-        eprintln!(
-            "fno mux block: note: markerless source pane - piping the implicit whole-output block"
-        );
-    }
 
     // 2. Receive-side idle guard. A missing registry FILE means no daemon and
     //    no agents (proceed); an unreadable/malformed one means unknown state
@@ -1873,7 +1881,6 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
                 "block_seq": seq,
                 "bytes": sent,
                 "forced": parsed.force,
-                "implicit": implicit,
             })
         );
     } else {
@@ -2549,25 +2556,31 @@ mod tests {
     }
 
     #[test]
-    fn block_pipe_gate_refuses_open_and_truncated_blocks() {
-        let meta = |complete: bool, truncated: bool, implicit: bool| proto::BlockMeta {
-            seq: Some(7),
-            exit: Some(0),
-            complete,
-            truncated,
-            implicit,
-        };
-        // A completed, untruncated block pipes; implicit alone does not block
-        // (it pipes with a stderr note - the degradation stays visible).
-        assert_eq!(pipe_block_gate(Some(&meta(true, false, false))), Ok(()));
-        assert_eq!(pipe_block_gate(Some(&meta(true, false, true))), Ok(()));
+    fn block_pipe_gate_refuses_open_truncated_and_implicit_blocks() {
+        let meta =
+            |seq: Option<u64>, complete: bool, truncated: bool, implicit: bool| proto::BlockMeta {
+                seq,
+                exit: Some(0),
+                complete,
+                truncated,
+                implicit,
+            };
+        // Only a completed, untruncated, TYPED block pipes.
+        assert_eq!(
+            pipe_block_gate(Some(&meta(Some(7), true, false, false))),
+            Ok(())
+        );
         // No metadata (plain read shape) has nothing to refuse on.
         assert_eq!(pipe_block_gate(None), Ok(()));
         // Open (still running) and byte-cap-truncated blocks never pipe.
-        let err = pipe_block_gate(Some(&meta(false, false, false))).unwrap_err();
+        let err = pipe_block_gate(Some(&meta(Some(7), false, false, false))).unwrap_err();
         assert!(err.contains("still running"), "{err}");
-        let err = pipe_block_gate(Some(&meta(true, true, false))).unwrap_err();
+        let err = pipe_block_gate(Some(&meta(Some(7), true, true, false))).unwrap_err();
         assert!(err.contains("truncated"), "{err}");
+        // A markerless implicit block (whole scrollback, complete=true even
+        // mid-command) is refused: block pipe is a typed-block verb.
+        let err = pipe_block_gate(Some(&meta(None, true, false, true))).unwrap_err();
+        assert!(err.contains("no command markers"), "{err}");
     }
 
     #[test]

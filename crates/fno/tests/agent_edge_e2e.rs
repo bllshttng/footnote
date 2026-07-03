@@ -283,8 +283,9 @@ fn agent_edge_block_pipe_reads_guards_and_lands() {
     let scratch = Scratch::new("agent_edge_block_pipe");
     let dir = scratch.0.to_str().unwrap().to_string();
 
-    // Source pane: a markerless one-shot echo (its whole output reads as the
-    // implicit block, which is complete and pipes with the implicit note).
+    // Source pane: emit OSC 133 C/D markers around the output so it captures
+    // ONE real typed, completed block (block pipe refuses markerless-implicit
+    // and still-open blocks). It then sleeps so the pane stays live.
     let src = pane(
         &scratch,
         &[
@@ -294,7 +295,7 @@ fn agent_edge_block_pipe_reads_guards_and_lands() {
             "--",
             "/bin/sh",
             "-c",
-            "echo hi-from-a; sleep 300",
+            "printf '\\033]133;C\\ahi-from-a\\n\\033]133;D;0\\a'; sleep 300",
         ],
     );
     assert!(
@@ -325,7 +326,11 @@ fn agent_edge_block_pipe_reads_guards_and_lands() {
     let receipt: serde_json::Value = serde_json::from_str(&stdout(&piped)).unwrap();
     assert!(receipt["bytes"].as_u64().unwrap() > 0);
     assert_eq!(receipt["forced"], serde_json::json!(false));
-    assert_eq!(receipt["implicit"], serde_json::json!(true));
+    assert_eq!(
+        receipt["block_seq"],
+        serde_json::json!(0),
+        "first typed block"
+    );
     let landed = pane(
         &scratch,
         &["wait", &to, "--pattern", "hi-from-a", "--timeout", "10"],
