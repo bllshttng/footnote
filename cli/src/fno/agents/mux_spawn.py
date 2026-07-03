@@ -160,12 +160,22 @@ def build_pane_argv(
 
 
 def _mesh_env_wrapper(
-    name: str, provider: str, role: Optional[str], argv: list[str]
+    name: str,
+    provider: str,
+    role: Optional[str],
+    argv: list[str],
+    provenance: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """Prefix ``argv`` with ``env(1)`` carrying the mesh identity the daemon
     worker used to set on its PTY child (worker.rs), plus any role-routing env
-    (x-d2fe). ``pane run`` transports argv only, so env rides the wrapper;
-    the spawn-name validation already forbids ``=``/newlines in ``name``."""
+    (x-d2fe) and node provenance (x-84a8). ``pane run`` transports argv only, so
+    env rides the wrapper; the spawn-name validation already forbids
+    ``=``/newlines in ``name``.
+
+    ``provenance`` is an already-resolved map of provenance env vars (e.g.
+    ``FNO_NODE``/``FNO_SLUG``/``FNO_PLAN``) for a node-driven spawn; empty values
+    are dropped so an ad-hoc pane exports nothing new (the starship module hides
+    absent vars via ``when``)."""
     pairs = [f"FNO_AGENT_SELF={name}", f"FNO_AGENT_PROVIDER={provider}"]
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
@@ -176,7 +186,45 @@ def _mesh_env_wrapper(
         route = resolve_route(role)
         if route:
             pairs += [f"{k}={v}" for k, v in route.items()]
+    if provenance:
+        pairs += [f"{k}={v}" for k, v in provenance.items() if v]
     return ["env", *pairs, *argv]
+
+
+def resolve_provenance(
+    node: Optional[str],
+    slug: Optional[str] = None,
+    plan: Optional[str] = None,
+) -> dict[str, str]:
+    """Build the ``FNO_NODE``/``FNO_SLUG``/``FNO_PLAN`` provenance map for a
+    node-driven pane spawn (x-84a8).
+
+    ``node`` is the only required input (a node id or slug). ``slug``/``plan``
+    fill from the graph node record when absent - a single graph read that a
+    caller can skip by passing both. An unresolvable node keeps just
+    ``FNO_NODE``; no node at all yields ``{}`` so an ad-hoc pane exports nothing
+    (edge AC: no empty-string exports). ``FNO_PLAN`` is omitted when the node has
+    no linked plan; ``FNO_PR`` is intentionally absent (unknown at spawn)."""
+    if not node:
+        return {}
+    if slug is None or plan is None:
+        try:
+            from fno.graph.load import load_graph
+
+            for rec in load_graph():
+                if rec.get("id") == node or rec.get("slug") == node:
+                    node = rec.get("id") or node  # normalize a slug input to id
+                    if slug is None:
+                        slug = rec.get("slug") or ""
+                    if plan is None:
+                        plan = rec.get("plan_path") or ""
+                    break
+        except Exception:
+            # A missing/corrupt graph must not block the spawn; degrade to the
+            # node id alone rather than raising in the pane path.
+            pass
+    prov = {"FNO_NODE": node, "FNO_SLUG": slug or "", "FNO_PLAN": plan or ""}
+    return {k: v for k, v in prov.items() if v}
 
 
 def _run_mux(
@@ -235,6 +283,7 @@ def dispatch_spawn_pane(
     yolo: bool = False,
     role: Optional[str] = None,
     session: Optional[str] = None,
+    provenance: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
 ) -> MuxSpawnResult:
     """Spawn ``name`` as a mux-hosted agent pane (AC1-HP).
@@ -272,7 +321,7 @@ def dispatch_spawn_pane(
             "claude",
             exit_code=2,
         )
-    wrapped = _mesh_env_wrapper(name, provider, role, argv)
+    wrapped = _mesh_env_wrapper(name, provider, role, argv, provenance)
 
     registry_path = paths.agents_registry_path()
 

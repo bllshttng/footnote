@@ -318,6 +318,103 @@ def test_routing_pane_substrate_spawn_stays_python() -> None:
     )
 
 
+def test_routing_provenance_bearing_spawn_stays_python() -> None:
+    """x-84a8: a spawn carrying --node/--slug/--plan is Python-only (the Rust
+    client cannot parse them), even on a bg substrate that would otherwise route
+    to the binary. Covers the /agent spawn.sh forward AND a direct CLI call."""
+    from fno.agents.rust_runtime import _is_provenance_bearing_spawn
+
+    assert _is_provenance_bearing_spawn("spawn", ["spawn", "p", "--node", "x-84a8"])
+    assert _is_provenance_bearing_spawn("spawn", ["spawn", "p", "--node=x-84a8"])
+    assert _is_provenance_bearing_spawn(
+        "spawn", ["spawn", "p", "--substrate", "bg", "--slug", "s"]
+    )
+    assert _is_provenance_bearing_spawn("spawn", ["spawn", "p", "--plan", "a.md"])
+    assert not _is_provenance_bearing_spawn("spawn", ["spawn", "p"])
+    assert not _is_provenance_bearing_spawn("ask", ["ask", "p", "--node", "x"])
+
+
+def test_provenance_vars_ride_wrapper_for_node_driven(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-84a8 AC(happy): a node-driven pane spawn exports FNO_NODE/SLUG/PLAN
+    into the pane env alongside the mesh identity."""
+    _, runner = _spawn(
+        monkeypatch,
+        tmp_path,
+        provenance={"FNO_NODE": "x-84a8", "FNO_SLUG": "pane-prov", "FNO_PLAN": "p.md"},
+    )
+    tail = runner.calls[0][runner.calls[0].index("--") + 1 :]
+    assert "FNO_NODE=x-84a8" in tail
+    assert "FNO_SLUG=pane-prov" in tail
+    assert "FNO_PLAN=p.md" in tail
+
+
+def test_ad_hoc_spawn_exports_no_provenance(tmp_path: Path, monkeypatch) -> None:
+    """x-84a8 AC(edge): an ad-hoc spawn (no node) exports no FNO_NODE/SLUG/PLAN,
+    and no empty-string variants."""
+    _, runner = _spawn(monkeypatch, tmp_path)  # default: no provenance
+    tail = runner.calls[0][runner.calls[0].index("--") + 1 :]
+    assert not any(t.startswith(("FNO_NODE", "FNO_SLUG", "FNO_PLAN")) for t in tail)
+
+
+def test_resolve_provenance_branches(tmp_path: Path, monkeypatch) -> None:
+    """resolve_provenance: explicit slug/plan skip the graph read; a linked plan
+    yields FNO_PLAN, an empty one drops it; no node -> {}."""
+    use_tmpdir(monkeypatch, tmp_path)  # empty graph, so any read misses
+    from fno.agents.mux_spawn import resolve_provenance
+
+    # No node -> nothing (the ad-hoc edge case at the resolver level).
+    assert resolve_provenance(None) == {}
+
+    # Explicit slug+plan: no graph needed, all three present.
+    assert resolve_provenance("x-1", "the-slug", "plan.md") == {
+        "FNO_NODE": "x-1",
+        "FNO_SLUG": "the-slug",
+        "FNO_PLAN": "plan.md",
+    }
+
+    # An unlinked plan (empty string) is dropped, slug kept.
+    assert resolve_provenance("x-2", "s2", "") == {"FNO_NODE": "x-2", "FNO_SLUG": "s2"}
+
+    # Unknown node + empty graph degrades to the node id alone (no raise).
+    assert resolve_provenance("x-missing") == {"FNO_NODE": "x-missing"}
+
+
+def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-84a8: `fno agents spawn --node ... --slug ... --plan ...` resolves the
+    provenance map and hands it to dispatch_spawn_pane."""
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    captured: dict = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return MuxSpawnResult(
+            name=kwargs["name"], provider=kwargs["provider"], session="main",
+            pane_id=1, child_pid=None, session_uuid="u",
+        )
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "peer", "--provider", "claude",
+         "--node", "x-84a8", "--slug", "s", "--plan", "p.md"],
+    )
+    assert res.exit_code == 0, res.output
+    assert captured["provenance"] == {
+        "FNO_NODE": "x-84a8", "FNO_SLUG": "s", "FNO_PLAN": "p.md",
+    }
+
+
 def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
     """The CLI receipt is one JSON line, a superset of the daemon-spawn shape
     ({"name","short_id","provider","status"}) plus the mux fields."""

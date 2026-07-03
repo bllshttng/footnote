@@ -290,6 +290,10 @@ if [[ -n "$SUBSTRATE" ]]; then
 elif [[ "$ONCE" -eq 1 ]]; then
   cmd+=(--once)
 fi
+# x-84a8: forward the node so a node-driven pane spawn exports FNO_NODE/SLUG/PLAN
+# provenance (the verb resolves slug/plan from the graph). Ad-hoc spawns have no
+# --node and export nothing new. Harmless on bg/headless (the verb ignores it).
+[[ -n "$NODE" ]] && cmd+=(--node "$NODE")
 cmd+=("$NAME")
 [[ -n "$MESSAGE" ]] && cmd+=("$MESSAGE")
 
