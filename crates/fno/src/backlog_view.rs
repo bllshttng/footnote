@@ -85,8 +85,14 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
         };
         let slug = e.get("slug").and_then(|v| v.as_str()).unwrap_or("");
         let priority = e.get("priority").and_then(|v| v.as_str()).unwrap_or("p2");
-        // Unscoped (null/absent project) sorts into the last lane, like the board.
-        let project = e.get("project").and_then(|v| v.as_str());
+        // Unscoped (null/absent/empty/whitespace project) sorts into the last
+        // lane, like the board's UNSCOPED_LABEL - trim so `""`/`"  "` are not
+        // treated as a named lane sorting before real projects.
+        let project = e
+            .get("project")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|p| !p.is_empty());
         let unscoped = project.is_none();
         let rank = e.get("rank").and_then(|v| v.as_f64());
         let created = e.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
@@ -235,6 +241,26 @@ mod tests {
         // fno lane first: ranked (band 0) beats the higher-priority unranked one,
         // then the unscoped card last.
         assert_eq!(ids, ["fno-ranked", "fno-unranked", "unscoped"]);
+    }
+
+    #[test]
+    fn empty_or_whitespace_project_sorts_as_unscoped_last() {
+        // A `""`/whitespace project must land in the unscoped lane (last), not
+        // sort as a named lane before real projects (gemini/codex P2).
+        let raw = graph(
+            r#"{"id":"blank","slug":"b","priority":"p0","_status":"ready","project":"  "},
+               {"id":"fno","slug":"f","priority":"p3","_status":"ready","project":"fno"}"#,
+        );
+        let ids: Vec<_> = derive_cards(&raw)
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            ["fno", "blank"],
+            "named lane first; blank-project last"
+        );
     }
 
     #[test]

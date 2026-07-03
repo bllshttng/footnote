@@ -626,6 +626,10 @@ fn dispatch_notice(stdout: &str) -> String {
         Some("launched") => format!("dispatched {label}"),
         Some("no-work") => "no ready work".to_string(),
         Some("lanes-full") => "lanes full".to_string(),
+        // The node is already being dispatched/worked (same-node race loser or an
+        // in-flight node) - a benign no-op, not a failure.
+        Some("already-dispatching") if label.is_empty() => "already dispatching".to_string(),
+        Some("already-dispatching") => format!("already dispatching {label}"),
         Some("failed") => match v.get("detail").and_then(|d| d.as_str()) {
             Some(d) if !d.is_empty() => format!("grab work failed: {d}"),
             _ => "grab work: dispatch failed".to_string(),

@@ -82,6 +82,20 @@ def test_lanes_full_when_cap_reached(monkeypatch, tmp_path):
     assert active_lane_count() == 1
 
 
+def test_same_node_second_dispatch_is_deduped(monkeypatch, tmp_path):
+    # Two fast leader+g resolve _next_node to the SAME node before the first
+    # worker claims it. The create-only dispatch:<id> reservation must make the
+    # second a no-op (already-dispatching) - never a second spawn, and never a
+    # release of the first worker's live lane slot (the P1 race).
+    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)}, max_lanes=2)
+    assert dispatch._dispatch_one(session="s", node=None, project=None)["outcome"] == "launched"
+    v = dispatch._dispatch_one(session="s", node=None, project=None)
+    assert v["outcome"] == "already-dispatching"
+    assert v["node"] == "x-1"
+    assert len(calls) == 1  # the second never spawned
+    assert active_lane_count() == 1  # first worker's slot intact
+
+
 def test_spawn_failure_releases_the_slot(monkeypatch, tmp_path):
     def boom():
         raise RuntimeError("mux pane spawn failed")

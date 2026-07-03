@@ -83,7 +83,8 @@ use crate::tree::{Dir, Rect, TabId};
 /// ad-hoc pane.
 ///
 /// v11 (work-queue dispatch, x-6f77): a new `DispatchNext` client verb (leader+g
-/// "grab work") - a wire-shape change, so the shared counter bumps.
+/// "grab work") AND `Layout` gains `backlog: Vec<BacklogCard>` (the sideline
+/// work-queue lane) - both wire-shape changes, so the shared counter bumps once.
 pub const PROTO_VERSION: u32 = 11;
 
 /// The crate version, carried in the handshake purely for the error message.
