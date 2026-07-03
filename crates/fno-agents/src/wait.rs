@@ -190,7 +190,9 @@ pub async fn run_wait(rest: &[String], home: &AgentsHome) -> i32 {
         }
     };
 
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    // checked_add so an astronomically large --timeout-ms (which would overflow
+    // the Instant) is treated as "wait indefinitely" rather than panicking.
+    let deadline = Instant::now().checked_add(Duration::from_millis(timeout_ms));
     loop {
         match find_effective(home, &name, now_secs()) {
             Ok(Some((st, authority))) => {
@@ -213,7 +215,8 @@ pub async fn run_wait(rest: &[String], home: &AgentsHome) -> i32 {
                 return 1;
             }
         }
-        if Instant::now() >= deadline {
+        // A `None` deadline (overflow above) never fires -> effectively infinite.
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             // Report the last-observed state (one read; the timeout path is rare).
             let last = find_effective(home, &name, now_secs())
                 .ok()
