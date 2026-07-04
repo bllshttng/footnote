@@ -166,6 +166,11 @@ def _parse_ttl_ms(value: Optional[str]) -> Optional[int]:
     if not m:
         raise typer.BadParameter(f"invalid TTL format: {value!r} ({_TTL_PATTERN_HELP})")
     n = int(m.group(1))
+    if n == 0:
+        # A zero TTL is falsy in Python, so `pause_all` would read it as "no
+        # expiry" (ttl_ms=0 -> None) instead of "expires immediately" -
+        # reject it outright rather than silently pausing forever.
+        raise typer.BadParameter(f"TTL must be > 0: {value!r}")
     unit = m.group(2).lower()
     seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
     return n * seconds * 1000

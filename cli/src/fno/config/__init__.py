@@ -1925,11 +1925,23 @@ class ConfigBlock(BaseModel):
     @field_validator("loops", mode="before")
     @classmethod
     def _coerce_loops(cls, v: object) -> object:
-        """Fail-safe: a non-mapping ``loops:`` degrades to {} (every loop
-        then defaults to level "report" via LoopEntry)."""
-        if isinstance(v, dict):
-            return v
-        return {}
+        """Fail-safe: a non-mapping ``loops:`` degrades to {}, and a malformed
+        per-loop entry (e.g. ``loops: {my-loop: assisted}`` or ``null`` instead
+        of ``{level: ...}``) is dropped rather than raising - a config typo
+        must never crash settings load for the whole project; the dropped
+        loop just defaults to level "report" via absence."""
+        if not isinstance(v, dict):
+            return {}
+        coerced = {}
+        for name, entry in v.items():
+            if isinstance(entry, (dict, LoopEntry)):
+                coerced[name] = entry
+            else:
+                _LOG.warning(
+                    "config.loops.%s=%r is not a mapping; dropping (defaults to level 'report')",
+                    name, entry,
+                )
+        return coerced
 
     @field_validator("batch", mode="before")
     @classmethod

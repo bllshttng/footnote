@@ -196,3 +196,41 @@ def test_last_tick_survives_null_data_event(isolated_home, tmp_path, monkeypatch
         assert _last_tick("my-loop") is None
     finally:
         paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_zero_ttl_rejected(isolated_home):
+    """codex peer review P3: --ttl 0m must not silently mean "no expiry".
+
+    ttl_ms=0 is falsy, so `pause_all`'s `if ttl_ms else None` would otherwise
+    read a zero TTL as "pause forever" instead of erroring.
+    """
+    import typer
+
+    from fno.loops import _parse_ttl_ms
+
+    with pytest.raises(typer.BadParameter):
+        _parse_ttl_ms("0m")
+    with pytest.raises(typer.BadParameter):
+        _parse_ttl_ms("0s")
+
+
+def test_loops_paused_json_ignores_custom_absolute_state_dir(isolated_home, tmp_path, monkeypatch):
+    """codex peer review P1: the sentinel must stay pinned to ~/.fno/ even
+    when config.state_dir is customized to a different absolute path -
+    otherwise two repos with different state_dir overrides would each get
+    their own "global" pause-all sentinel, defeating the whole point."""
+    custom_state_dir = tmp_path / "custom-state"
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text(
+        f"config:\n  state_dir: {custom_state_dir}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
+
+    from fno import config as config_mod
+    from fno import paths as paths_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
+
+    assert paths_mod.loops_paused_json() == tmp_path / ".fno" / "loops-paused.json"
