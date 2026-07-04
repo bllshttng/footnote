@@ -281,11 +281,61 @@ def test_reconcile_ac2_err_tool_fault_excluded(monkeypatch, tmp_path):  # AC2-ER
 def test_reconcile_ac3_err_batch_failure_leaves_unclosed(monkeypatch, tmp_path):  # AC3-ERR
     events = [_rc("r1"), _find("r1", "sid-a"), _find("r1", "sid-b"), _proposed(201)]
     p = _wire(monkeypatch, tmp_path, events)
-    # Every replay tool-faults -> no usable verdict -> no receipt.
+    # Every replay tool-faults -> no comparable top-dim verdict -> no receipt.
     _wire_reeval(monkeypatch, p, replay={"sid-a": "tool_fault", "sid-b": "tool_fault"})
     r = runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
-    assert "batch failed" in r.output
+    assert "left unclosed for retry" in r.output
     assert "skill_diff_eval_closed" not in [e["type"] for e in _events(p)]
+
+
+def test_reconcile_non_replayable_top_dim_is_outcome_pending(monkeypatch, tmp_path):  # codex P1
+    # shipped_outcome is the top failing dim, but replay is structural-only and
+    # never re-scores it -> must NOT replay and must NOT report a fabricated
+    # positive delta; close as outcome-pending (null delta, no replay).
+    events = [_rc("r1", top="shipped_outcome"),
+              _find("r1", "sid-a", dim="shipped_outcome"), _proposed(201)]
+    p = _wire(monkeypatch, tmp_path, events)
+    calls = _wire_reeval(monkeypatch, p, replay={"sid-a": "pass"})
+    r = runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
+    assert "outcome-pending" in r.output and "not structurally replayable" in r.output
+    assert not calls  # nothing replayed (no spend)
+    closed = [e for e in _events(p) if e["type"] == "skill_diff_eval_closed"]
+    assert closed and closed[0]["data"]["score_delta"] is None
+    assert closed[0]["data"]["run_id_after"] is None
+
+
+def test_reconcile_receipt_emit_failure_leaves_unclosed(monkeypatch, tmp_path):  # codex P2
+    events = [_rc("r1"), _find("r1", "sid-a"), _proposed(201)]
+    p = _wire(monkeypatch, tmp_path, events)
+    _wire_reeval(monkeypatch, p, replay={"sid-a": "pass"})
+    # Canonical-log append fails -> _emit returns False -> report unclosed, never
+    # claim a close we did not durably record.
+    monkeypatch.setattr(cli, "_emit", lambda *a, **k: False)
+    r = runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
+    assert "receipt emit failed" in r.output and "left unclosed for retry" in r.output
+
+
+def test_reconcile_concurrent_close_is_noop(monkeypatch, tmp_path):  # codex P1 (race guard)
+    events = [_rc("r1"), _find("r1", "sid-a"), _proposed(201)]
+    p = _wire(monkeypatch, tmp_path, events)
+    monkeypatch.setattr(cli, "_pr_merged", lambda pr: True)
+    monkeypatch.setattr(cli, "_merge_sha", lambda pr: "mergesha12345")
+
+    def racing_replay(corpus_item, skill_ref, run_id_after):
+        # Simulate a concurrent reconcile closing the PR during our replay window,
+        # plus our own after-finding.
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_find(run_id_after, corpus_item, verdict="pass")) + "\n")
+            fh.write(json.dumps({"type": "skill_diff_eval_closed",
+                     "data": {"pr_number": 201, "skill_id": "fno:blueprint",
+                              "run_id_before": "r1"}}) + "\n")
+        return 0
+
+    monkeypatch.setattr(cli, "_run_replay", racing_replay)
+    r = runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
+    assert "already closed by a concurrent reconcile" in r.output
+    # Exactly one receipt (the concurrent one) - we did not append a second.
+    assert [e["type"] for e in _events(p)].count("skill_diff_eval_closed") == 1
 
 
 def test_reconcile_ac5_edge_zero_failure_null_after(monkeypatch, tmp_path):  # AC5-EDGE

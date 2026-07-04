@@ -65,11 +65,18 @@ def unprocessed_runs(events: list[dict], skill_id: str) -> list[str]:
     The key is the (run_id, skill_id) pair, so a run_id shared across skills
     (a multi-skill sweep) is only marked handled for the skill it terminated.
 
-    A run_complete carrying ``skill_ref`` is a REPLAY/candidate eval (an
+    A run_complete carrying a ``skill_ref`` FIELD is a REPLAY/candidate eval (an
     eval-after-merge re-run, or a manual ``fno observer replay``), never a bare
     sweep - it must NOT trigger the proposer (x-ed13 Locked Decision 5), else a
     closed loop re-opens: propose -> merge -> eval-after-merge -> propose ...
-    Only ``skill_ref``-absent run_completes (real sweeps) are candidate triggers.
+    Only sweeps (no ``skill_ref`` field at all) are candidate triggers.
+
+    The discriminator is FIELD PRESENCE, not truthiness: a HEAD replay emits
+    ``skill_ref: null`` (the observer sets the key explicitly), while a sweep
+    omits the key entirely (``build_run_summary`` adds it only when non-None). A
+    truthiness test (``not d.get('skill_ref')``) would let a HEAD replay's null
+    ref fall through and re-trigger the proposer - the exact latent bug this
+    guard closes.
     """
     handled: set[tuple[str, str]] = set()
     complete: list[str] = []
@@ -80,7 +87,7 @@ def unprocessed_runs(events: list[dict], skill_id: str) -> list[str]:
             rid, sid = d.get("run_id"), d.get("skill_id")
             if rid and sid:
                 handled.add((rid, sid))
-        elif t == "skill_eval_run_complete" and d.get("skill_id") == skill_id and not d.get("skill_ref"):
+        elif t == "skill_eval_run_complete" and d.get("skill_id") == skill_id and "skill_ref" not in d:
             rid = d.get("run_id")
             if rid and rid not in complete:
                 complete.append(rid)
@@ -286,10 +293,15 @@ if __name__ == "__main__":  # pragma: no cover - smoke self-check
          "dimension": "structural_validity", "verdict": "fail", "tool_fault": True}},
     ]
     assert unprocessed_runs(evs, "fno:blueprint") == ["r1"]
-    # A skill_ref-tagged run_complete (a replay/candidate eval) is NOT a trigger.
-    evs_ref = evs + [{"type": "skill_eval_run_complete", "data": {"run_id": "after1",
-                      "skill_id": "fno:blueprint", "skill_ref": "deadbeef"}}]
-    assert unprocessed_runs(evs_ref, "fno:blueprint") == ["r1"]  # after1 excluded
+    # A replay/candidate eval run_complete is NOT a trigger - by FIELD presence,
+    # so a HEAD replay's `skill_ref: null` is excluded just like a ref'd one.
+    evs_ref = evs + [
+        {"type": "skill_eval_run_complete", "data": {"run_id": "after1",
+         "skill_id": "fno:blueprint", "skill_ref": "deadbeef"}},
+        {"type": "skill_eval_run_complete", "data": {"run_id": "after2",
+         "skill_id": "fno:blueprint", "skill_ref": None}},  # HEAD replay: null ref
+    ]
+    assert unprocessed_runs(evs_ref, "fno:blueprint") == ["r1"]  # both after-runs excluded
     assert len(findings_for_run(evs, "r1")) == 1  # tool_fault excluded
     assert has_actionable_findings(evs, "r1")
     assert top_dimension(evs, "r1") == "structural_validity"

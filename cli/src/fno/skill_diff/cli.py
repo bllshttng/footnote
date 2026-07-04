@@ -428,6 +428,36 @@ def reconcile(
         print(f"reconcile: {_reeval_pr(pr, proposed[pr], events)}")
 
 
+# Dimensions a /blueprint replay can re-score structurally (Review Amendment A1:
+# replay sets include_shipped_outcome=False, so shipped_outcome is never emitted).
+# If the top failure dimension is not one of these, there is no structural
+# before/after to compute - the deferred outcome horizon owns it (Locked
+# Decision 1), so reconcile closes it as outcome-pending rather than replaying.
+_REPLAYABLE_DIMS = {"structural_validity", "collision_free"}
+
+
+def _emit_receipt(pr: int, skill_id: str, run_id_before: str,
+                  run_id_after: Optional[str], score_delta: Optional[int]) -> bool:
+    """Emit the close receipt; return the canonical-log success flag so the caller
+    never reports a close it did not durably record."""
+    return _emit("skill_diff_eval_closed", {
+        "pr_number": pr, "skill_id": skill_id, "run_id_before": run_id_before,
+        "run_id_after": run_id_after, "score_delta": score_delta,
+    })
+
+
+def _already_closed(pr: int) -> bool:
+    """A skill_diff_eval_closed for this PR already landed. A cheap re-read right
+    before emitting narrows the merge-trigger vs periodic-sweep race (both can read
+    'unclosed', replay, and append). Locked Decision 3 chose idempotency-on-presence
+    over a lock, so this shrinks - does not eliminate - a simultaneous double-emit;
+    it is the plan-faithful guard, not a claim."""
+    for e in engine.read_events_tolerant(_events_paths()[0]):
+        if e.get("type") == "skill_diff_eval_closed" and (e.get("data") or {}).get("pr_number") == pr:
+            return True
+    return False
+
+
 def _replay_set(events: list[dict], run_id_before: str, skill_id: str, top_dim: Optional[str]) -> list[str]:
     """The corpus items the diff was supposed to fix: the before run's failing
     findings on the top dimension only (Locked Decision 4). Order-preserving
@@ -449,10 +479,13 @@ def _reeval_pr(pr: int, proposed: dict, events: list[dict]) -> str:
     """Re-eval one merged-unclosed proposer PR; return its one-line report status.
 
     Emits ``skill_diff_eval_closed`` on success. Emits NOTHING (leaving the PR
-    detectable as unclosed for the next tick) on: not-yet-merged, paused, or a
-    replay batch that produced no usable verdict (AC3-ERR degrade-not-crash).
-    The after-run's ``skill_eval_run_complete`` (with ``skill_ref``) is emitted by
-    the observer replays themselves - reconcile only orchestrates and folds.
+    detectable as unclosed for the next tick) on: not-yet-merged, gh-offline,
+    paused, a replay that produced no comparable top-dim verdict (AC3-ERR), or a
+    canonical-log emit failure - all degrade-not-crash. A non-replayable top
+    dimension (e.g. shipped_outcome) closes as outcome-pending (null delta, no
+    replay). The after-run's ``skill_eval_run_complete`` (with ``skill_ref``) is
+    emitted by the observer replays themselves - reconcile only folds the delta on
+    the top dimension both sides.
     """
     skill_id = proposed.get("skill_id") or "unknown"
     run_id_before = proposed.get("run_id")
@@ -482,41 +515,59 @@ def _reeval_pr(pr: int, proposed: dict, events: list[dict]) -> str:
         return f"PR#{pr} ({skill_id}) malformed proposed event (no run_id), skipped"
 
     top = engine.top_dimension(events, run_id_before, skill_id)
-    ranking = engine.failure_ranking(events, run_id_before, skill_id)
-    before_fail = ranking[0]["fail_count"] if ranking else 0
     replay_set = _replay_set(events, run_id_before, skill_id, top)
 
     # AC5-EDGE: nothing failing on the top dimension -> replay nothing; close with
     # a null after-run and a zero delta.
     if not replay_set:
-        _emit("skill_diff_eval_closed", {
-            "pr_number": pr, "skill_id": skill_id,
-            "run_id_before": run_id_before, "run_id_after": None, "score_delta": 0,
-        })
+        if _already_closed(pr):
+            return f"PR#{pr} ({skill_id}) already closed by a concurrent reconcile (no-op)"
+        if not _emit_receipt(pr, skill_id, run_id_before, None, 0):
+            return f"PR#{pr} ({skill_id}) receipt emit failed (canonical log), left unclosed for retry"
         return f"PR#{pr} ({skill_id}) re-evaluated: no failing items on {top or 'top'} dim, delta=0"
+
+    # The top failure dimension is not one replay can structurally re-score (e.g.
+    # shipped_outcome). There is no structural before/after here - the deferred
+    # outcome horizon owns it (Locked Decision 1). Close as outcome-pending (null
+    # delta, no replay) so it neither spins the replay fleet forever nor reports a
+    # fabricated structural win on a dimension that was never re-measured.
+    if top not in _REPLAYABLE_DIMS:
+        if _already_closed(pr):
+            return f"PR#{pr} ({skill_id}) already closed by a concurrent reconcile (no-op)"
+        if not _emit_receipt(pr, skill_id, run_id_before, None, None):
+            return f"PR#{pr} ({skill_id}) receipt emit failed (canonical log), left unclosed for retry"
+        return f"PR#{pr} ({skill_id}) outcome-pending: top dim {top} not structurally replayable (delta=null)"
 
     merge_sha = _merge_sha(pr) or "origin/main"  # record which ref actually ran
     run_id_after = _mint_run_id(skill_id)
     for corpus_item in replay_set:
         _run_replay(corpus_item, merge_sha, run_id_after)
 
-    # Re-read: the replays appended their findings (+ their own skill_ref-tagged
-    # run_completes) since we last read events.
+    # Re-read and scope the fold to the TOP dimension both sides: a replay emits a
+    # finding on EVERY structural dimension, but the delta is only honest on the
+    # dimension the diff targeted (Locked Decision 7).
     events_after = engine.read_events_tolerant(_events_paths()[0])
-    usable = engine.findings_for_run(events_after, run_id_after, skill_id)  # tool_fault excluded
+    top_after = [
+        f for f in engine.findings_for_run(events_after, run_id_after, skill_id)  # tool_fault excluded
+        if f.get("dimension") == top
+    ]
 
-    # AC3-ERR: the whole batch produced no usable (non-tool-fault) verdict - every
-    # spawn errored / gh was unreachable. Emit no receipt; the PR stays unclosed
-    # so the next tick retries.
-    if not usable:
-        return f"PR#{pr} ({skill_id}) replay batch failed, left unclosed for retry"
+    # AC3-ERR: the replay produced no comparable top-dimension verdict - every
+    # spawn tool-faulted, or the top dim came back unscorable. Emit no receipt; the
+    # PR stays unclosed so the next tick retries (never a fabricated delta).
+    if not top_after:
+        return f"PR#{pr} ({skill_id}) replay produced no {top} verdict, left unclosed for retry"
 
-    after_fail = sum(1 for f in usable if f.get("dimension") == top and f.get("verdict") == "fail")
+    # before_fail = the targeted slice size (every replay-set item failed the top
+    # dim before, by construction); after_fail = how many still fail. Same corpus
+    # IDs both sides, so delta = the items the merged diff actually fixed.
+    before_fail = len(replay_set)
+    after_fail = sum(1 for f in top_after if f.get("verdict") == "fail")
     score_delta = before_fail - after_fail
-    _emit("skill_diff_eval_closed", {
-        "pr_number": pr, "skill_id": skill_id,
-        "run_id_before": run_id_before, "run_id_after": run_id_after, "score_delta": score_delta,
-    })
+    if _already_closed(pr):
+        return f"PR#{pr} ({skill_id}) already closed by a concurrent reconcile (no-op)"
+    if not _emit_receipt(pr, skill_id, run_id_before, run_id_after, score_delta):
+        return f"PR#{pr} ({skill_id}) receipt emit failed (canonical log), left unclosed for retry"
     return (f"PR#{pr} ({skill_id}) re-evaluated: delta={score_delta} "
             f"(before={before_fail} after={after_fail}, ref={merge_sha[:12]})")
 
