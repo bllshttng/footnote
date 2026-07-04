@@ -179,6 +179,26 @@ explicit call covers the case where the node was already closed before
 `/pr merged` ran (reconcile then no-ops, so the successor would otherwise never
 be dispatched).
 
+## Step 3c: Skill-diff eval-after-merge (close the loop)
+
+If the merged PR is a skill-diff proposer PR, re-score the merged skill against
+the exact corpus items its diff targeted and emit the `skill_diff_eval_closed`
+receipt (the before/after delta). Call it unconditionally - the verb self-guards
+(a plain "not a known proposer PR" no-op for any ordinary PR) and dedups on the
+receipt, so this is safe for every merge and idempotent on a re-run:
+
+```bash
+fno skill-diff reconcile --pr-number "$PR" \
+  || echo "post-merge: skill-diff eval-after-merge returned non-zero (non-fatal) - record in report" >&2
+```
+
+This is the **merge-triggered fast path** (fast feedback on the just-merged
+diff). The periodic proposer tick's bare `fno skill-diff reconcile` full sweep is
+the backstop for a missed merge-trigger; both key idempotency on the
+`skill_diff_eval_closed` receipt, so firing both dispatches at most one re-eval
+per PR. Non-fatal: a re-eval failure leaves the PR detectable as un-closed for
+the next tick and never blocks the rest of the ritual.
+
 ## Step 4: Best-effort worktree archive
 
 After the mechanical triage steps complete, archive the feature's worktree so
