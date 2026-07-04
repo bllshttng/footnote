@@ -60,12 +60,21 @@ def parse_proposal(text: str) -> Proposal:
     for h in hunks:
         if not isinstance(h, dict) or "file" not in h:
             raise ProposalParseError(f"malformed hunk: {h!r}")
+        # Fail closed on wrong field types: a non-str file crashes the git apply,
+        # and a str cited_finding_ids would silently become a per-character list
+        # (turning "s1" into ['s','1']). The output is untrusted LLM JSON.
+        for key in ("file", "old_text", "new_text", "rationale"):
+            if key in h and h[key] is not None and not isinstance(h[key], str):
+                raise ProposalParseError(f"hunk.{key} must be a string, got {type(h[key]).__name__}")
+        cites = h.get("cited_finding_ids") or []
+        if not isinstance(cites, list) or not all(isinstance(c, str) for c in cites):
+            raise ProposalParseError("hunk.cited_finding_ids must be a list of strings")
         norm.append(
             {
                 "file": h["file"],
                 "old_text": h.get("old_text", "") or "",
                 "new_text": h.get("new_text", "") or "",
-                "cited_finding_ids": list(h.get("cited_finding_ids") or []),
+                "cited_finding_ids": list(cites),
                 "rationale": h.get("rationale", "") or "",
             }
         )

@@ -35,6 +35,12 @@ def _callback() -> None:
     """No-op: keeps Typer from collapsing the multi-command sub-app."""
 
 
+class RedactionRefused(RuntimeError):
+    """A redaction hit refused the PR open. Distinct from a transient git/gh
+    error so the caller can make it terminal (a content problem won't fix
+    itself) while transient failures leave the run unprocessed for retry."""
+
+
 # --------------------------------------------------------------------------- #
 # plumbing
 # --------------------------------------------------------------------------- #
@@ -102,7 +108,7 @@ def _project_names() -> list[str]:
     """Every project name in the workspace work-map (redaction guard input, A3)."""
     names: list[str] = []
     try:
-        work = load_settings().work
+        work = load_settings().config.work
         for ws in work.workspaces.values():
             for proj in ws.projects:
                 if proj.name:
@@ -144,6 +150,24 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
     return m.group(0) if m else None
 
 
+def _no_diff_helps(name: str, level: str, run_id: str, skill_id: str, reason: str) -> None:
+    """Terminal no-diff-helps path: file a backlog node, then emit the terminal
+    event ONLY if the node was filed. If filing fails (network hiccup), emit no
+    terminal event so the run stays unprocessed and the next tick retries - the
+    plan's degrade-not-crash rule. Without this guard a failed `fno backlog idea`
+    would still mark the run handled, making the advertised retry impossible.
+    """
+    node = _file_no_diff_node(skill_id, run_id, reason)
+    if node is None:
+        _emit_tick(name, level, "no-diff-helps-defer")
+        print(f"no-diff-helps {run_id} ({reason}) - node filing failed, will retry next tick")
+        return
+    _emit("skill_diff_no_diff_helps",
+          {"run_id": run_id, "skill_id": skill_id, "reason": reason, "filed_node_id": node})
+    _emit_tick(name, level, "no-diff-helps")
+    print(f"no-diff-helps {run_id} ({reason}, node={node})")
+
+
 def _apply_and_open_pr(
     *, skill_id: str, run_id: str, hunks: list[dict], body: str, cited: list[str]
 ) -> tuple[Optional[int], str]:
@@ -154,16 +178,28 @@ def _apply_and_open_pr(
     takes no-action rather than reporting a phantom PR.
     """
     root = paths.resolve_repo_root().resolve()
-    skills_root = (root / "skills").resolve()
+    skill_root = _skill_dir(skill_id).resolve()
     short_run = run_id.split("-")[-1][:12]
     branch = f"skill-diff/{skill_id.split(':')[-1]}-{short_run}"
+
+    # Redaction guard (A3) over EVERY surface that gets committed or pushed: the
+    # PR body, the commit message, AND the hunk content itself. The first two are
+    # GitHub metadata check-no-internal-refs CI never sees; the third lands in a
+    # skills/ file that CI also does not scan. Refuse before writing anything.
+    commit_msg = f"docs(skill): {skill_id} diff from observer run {short_run}\n\ncites: {', '.join(cited)}"
+    scan_text = "\n".join([body, commit_msg] + [h.get("new_text", "") for h in hunks])
+    hits = guards.redaction_violations(scan_text, _project_names())
+    if hits:
+        raise RedactionRefused(f"redaction guard refused open: {hits}")
+
     touched: list[str] = []
     for h in hunks:
         # h["file"] comes from untrusted LLM output: resolve it and refuse any
-        # path that escapes the skills/ tree (traversal / absolute-path guard).
+        # path outside the TARGET skill's own directory, and any non-markdown
+        # file (skill content is markdown - a .py/.sh path is never legitimate).
         f = (root / h["file"]).resolve()
-        if not (f == skills_root or skills_root in f.parents):
-            raise RuntimeError(f"hunk path escapes skills/: {h['file']}")
+        if not (f == skill_root or skill_root in f.parents) or f.suffix != ".md":
+            raise RuntimeError(f"hunk path not a .md under {skill_id}'s dir: {h['file']}")
         old, new = h.get("old_text", ""), h.get("new_text", "")
         current = f.read_text(encoding="utf-8") if f.exists() else ""
         if old:
@@ -180,13 +216,6 @@ def _apply_and_open_pr(
 
     def git(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=True)
-
-    commit_msg = f"docs(skill): {skill_id} diff from observer run {short_run}\n\ncites: {', '.join(cited)}"
-    # Redaction guard over BOTH the PR body and the commit message (A3): the two
-    # surfaces check-no-internal-refs CI never sees.
-    hits = guards.redaction_violations(body + "\n" + commit_msg, _project_names())
-    if hits:
-        raise RuntimeError(f"redaction guard refused open: {hits}")
 
     git("checkout", "-B", branch)  # -B: reset if the branch exists (idempotent retry)
     git("add", *touched)
@@ -239,8 +268,8 @@ def tick(
     run_id = runs[0]
 
     # AC6-EDGE: an all-pass (or empty) run is a no-op - nothing to fix.
-    if not engine.has_actionable_findings(events, run_id):
-        reason = "zero_findings" if not engine.findings_for_run(events, run_id) else "zero_failures"
+    if not engine.has_actionable_findings(events, run_id, skill_id):
+        reason = "zero_findings" if not engine.findings_for_run(events, run_id, skill_id) else "zero_failures"
         _emit("skill_diff_noop", {"run_id": run_id, "skill_id": skill_id, "reason": reason})
         _emit_tick(name, loop_level(name), "noop")
         print(f"noop {run_id} ({reason})")
@@ -248,16 +277,12 @@ def tick(
 
     # AC7-EDGE: local-maxima ceiling -> file a node, do not diff again.
     if engine.local_maxima_tripped(events, skill_id, run_id):
-        node = _file_no_diff_node(skill_id, run_id, f"top dimension unchanged x{engine.LOCAL_MAXIMA_WINDOW}")
-        _emit("skill_diff_no_diff_helps",
-              {"run_id": run_id, "skill_id": skill_id, "reason": "local_maxima", "filed_node_id": node})
-        _emit_tick(name, loop_level(name), "no-diff-helps")
-        print(f"no-diff-helps {run_id} (local_maxima, node={node})")
+        _no_diff_helps(name, loop_level(name), run_id, skill_id, "local_maxima")
         return
 
     level = loop_level(name)
-    ranking = engine.failure_ranking(events, run_id)
-    findings = engine.findings_for_run(events, run_id)
+    ranking = engine.failure_ranking(events, run_id, skill_id)
+    findings = engine.findings_for_run(events, run_id, skill_id)
 
     # report (default): dry-run. Show what it WOULD process and
     # stop - no synthesis spend, no PR. Manually graduated to assisted.
@@ -286,31 +311,19 @@ def tick(
         return
 
     if proposal.verdict == "no_diff_helps":
-        node = _file_no_diff_node(skill_id, run_id, proposal.no_diff_reason or "synth")
-        _emit("skill_diff_no_diff_helps",
-              {"run_id": run_id, "skill_id": skill_id, "reason": "synth_no_diff", "filed_node_id": node})
-        _emit_tick(name, level, "no-diff-helps")
-        print(f"no-diff-helps {run_id} (synth, node={node})")
+        _no_diff_helps(name, level, run_id, skill_id, "synth_no_diff")
         return
 
     kept, dropped = guards.filter_cited_hunks(proposal.hunks)
     if not kept:
         # AC2-ERR: every hunk uncited -> no PR, take the no-diff-helps path.
-        node = _file_no_diff_node(skill_id, run_id, "all hunks uncited")
-        _emit("skill_diff_no_diff_helps",
-              {"run_id": run_id, "skill_id": skill_id, "reason": "all_hunks_uncited", "filed_node_id": node})
-        _emit_tick(name, level, "no-diff-helps")
-        print(f"no-diff-helps {run_id} (all {len(dropped)} hunks uncited, node={node})")
+        _no_diff_helps(name, level, run_id, skill_id, "all_hunks_uncited")
         return
 
     # AC4-UI: additive-only over threshold requires justification.
     justification = proposal.justification
     if guards.additive_only_needs_justification(kept) and not (justification or "").strip():
-        node = _file_no_diff_node(skill_id, run_id, "additive-only without justification")
-        _emit("skill_diff_no_diff_helps",
-              {"run_id": run_id, "skill_id": skill_id, "reason": "synth_no_diff", "filed_node_id": node})
-        _emit_tick(name, level, "no-diff-helps")
-        print(f"no-diff-helps {run_id} (additive-only, no justification)")
+        _no_diff_helps(name, level, run_id, skill_id, "additive_only_no_justification")
         return
 
     bloat = guards.bloat_flag(engine.prior_proposed(events, skill_id))
@@ -327,22 +340,37 @@ def tick(
         pr_number, branch = _apply_and_open_pr(
             skill_id=skill_id, run_id=run_id, hunks=kept, body=body, cited=cited
         )
-    except (RuntimeError, subprocess.CalledProcessError, OSError) as exc:
-        # includes the redaction refusal (A3): record it, take no PR.
-        reason = "redaction_refused" if "redaction" in str(exc) else "synth_no_diff"
+    except RedactionRefused as exc:
+        # A leak in the synthesized content is a hard, terminal refusal (retrying
+        # would re-run synthesis on the same corpus and likely leak again).
         _emit("skill_diff_no_diff_helps",
-              {"run_id": run_id, "skill_id": skill_id, "reason": reason, "filed_node_id": None})
+              {"run_id": run_id, "skill_id": skill_id, "reason": "redaction_refused", "filed_node_id": None})
         _emit_tick(name, level, "no-diff-helps")
-        print(f"no-diff-helps {run_id} (open refused: {exc})")
+        print(f"no-diff-helps {run_id} (redaction refused: {exc})")
+        return
+    except (RuntimeError, subprocess.CalledProcessError, OSError) as exc:
+        # A transient git/gh failure (dirty tree, push reject, network) must NOT
+        # become terminal: emit no terminal event so the run stays unprocessed
+        # and the next tick retries.
+        _emit_tick(name, level, "open-failed")
+        print(f"open-failed {run_id} (transient, will retry next tick: {exc})")
         return
 
-    _emit("skill_diff_proposed", {
+    proposed_ok = _emit("skill_diff_proposed", {
         "run_id": run_id, "skill_id": skill_id,
         "skill_version_observed": version_observed, "skill_version_proposed_against": version_against,
         "pr_number": pr_number, "branch": branch, "cited_finding_ids": cited,
         "added_lines": added, "removed_lines": removed,
         "justification": justification,
     })
+    if not proposed_ok:
+        # The proposed event IS the idempotency record. If the canonical log
+        # append failed after the PR opened, the next tick can't see this run as
+        # handled and could open a second PR - surface it loudly for the operator
+        # rather than swallowing it (the PR is already up; it can't be un-opened).
+        print(f"CRITICAL {run_id}: PR#{pr_number} opened but skill_diff_proposed "
+              f"failed to log canonically - reconcile before the next tick to avoid a duplicate PR",
+              file=sys.stderr)
     _emit_tick(name, level, "proposed")
     print(f"proposed {run_id} PR#{pr_number} branch={branch} +{added}/-{removed} cited={cited}")
 

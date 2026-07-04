@@ -57,6 +57,16 @@ def test_idempotency_key_is_run_id_and_skill():
     assert engine.unprocessed_runs(evs, "fno:review") == ["shared"]
 
 
+def test_findings_scope_by_skill_id():  # P2 review: shared run_id across skills
+    evs = [
+        _finding("shared", skill_id="fno:blueprint"),
+        _finding("shared", skill_id="fno:review"),
+    ]
+    assert len(engine.findings_for_run(evs, "shared")) == 2  # unscoped: both
+    got = engine.findings_for_run(evs, "shared", "fno:blueprint")
+    assert len(got) == 1 and got[0]["skill_id"] == "fno:blueprint"
+
+
 def test_findings_exclude_tool_fault():  # tool_fault rule
     evs = [_finding("r1"), _finding("r1", tool_fault=True), _finding("r1", verdict="pass")]
     got = engine.findings_for_run(evs, "r1")

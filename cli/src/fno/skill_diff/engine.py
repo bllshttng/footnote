@@ -88,9 +88,11 @@ def run_complete_event(events: list[dict], run_id: str) -> Optional[dict]:
     return None
 
 
-def findings_for_run(events: list[dict], run_id: str) -> list[dict]:
+def findings_for_run(events: list[dict], run_id: str, skill_id: Optional[str] = None) -> list[dict]:
     """skill_eval_finding data dicts for *run_id*, excluding tool faults.
 
+    When *skill_id* is given, a finding must also match it - so a run_id shared
+    across skills (a multi-skill sweep) never pulls the other skill's findings.
     A tool_fault=true finding is a replay-harness crash, not a skill-quality
     verdict - the schema requires downstream to exclude it from failure
     rankings, so a spawn timeout never masquerades as a skill that needs fixing.
@@ -102,13 +104,15 @@ def findings_for_run(events: list[dict], run_id: str) -> list[dict]:
         d = _data(e)
         if d.get("run_id") != run_id:
             continue
+        if skill_id is not None and d.get("skill_id") != skill_id:
+            continue
         if d.get("tool_fault") is True:
             continue
         out.append(d)
     return out
 
 
-def failure_ranking(events: list[dict], run_id: str) -> list[dict]:
+def failure_ranking(events: list[dict], run_id: str, skill_id: Optional[str] = None) -> list[dict]:
     """[{dimension, fail_count}] descending. Prefer the run_complete's own
     ranking (the observer already excluded coverage gaps); fall back to counting
     non-tool-fault fail findings when the terminal event lacks a ranking."""
@@ -118,7 +122,7 @@ def failure_ranking(events: list[dict], run_id: str) -> list[dict]:
         if ranking:
             return list(ranking)
     counts: dict[str, int] = {}
-    for f in findings_for_run(events, run_id):
+    for f in findings_for_run(events, run_id, skill_id):
         dim = f.get("dimension")
         if f.get("verdict") == "fail" and dim:
             counts[dim] = counts.get(dim, 0) + 1
@@ -128,17 +132,20 @@ def failure_ranking(events: list[dict], run_id: str) -> list[dict]:
     ]
 
 
-def has_actionable_findings(events: list[dict], run_id: str) -> bool:
+def has_actionable_findings(events: list[dict], run_id: str, skill_id: Optional[str] = None) -> bool:
     """True when at least one non-tool-fault finding is fail or degraded (AC6-EDGE).
 
     A run whose findings are all ``pass`` is a no-op: there is nothing to fix,
     and a proposer that "always does something" would fabricate a diff.
     """
-    return any(f.get("verdict") in ("fail", "degraded") for f in findings_for_run(events, run_id))
+    return any(
+        f.get("verdict") in ("fail", "degraded")
+        for f in findings_for_run(events, run_id, skill_id)
+    )
 
 
-def top_dimension(events: list[dict], run_id: str) -> Optional[str]:
-    ranking = failure_ranking(events, run_id)
+def top_dimension(events: list[dict], run_id: str, skill_id: Optional[str] = None) -> Optional[str]:
+    ranking = failure_ranking(events, run_id, skill_id)
     return ranking[0]["dimension"] if ranking else None
 
 
@@ -157,7 +164,7 @@ def local_maxima_tripped(events: list[dict], skill_id: str, run_id: str) -> bool
     the dimension stayed on top. Upgrade to merge-aware if false ceilings show
     up in practice.
     """
-    current_top = top_dimension(events, run_id)
+    current_top = top_dimension(events, run_id, skill_id)
     if current_top is None:
         return False
 
@@ -173,7 +180,7 @@ def local_maxima_tripped(events: list[dict], skill_id: str, run_id: str) -> bool
     window = seq[-LOCAL_MAXIMA_WINDOW:]
     if len(window) < LOCAL_MAXIMA_WINDOW:
         return False
-    if any(top_dimension(events, rid) != current_top for rid in window):
+    if any(top_dimension(events, rid, skill_id) != current_top for rid in window):
         return False
     proposed_in_span = any(
         e.get("type") == "skill_diff_proposed"

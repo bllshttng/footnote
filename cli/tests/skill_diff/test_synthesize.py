@@ -59,6 +59,18 @@ def test_unknown_verdict_raises():
         synthesize.parse_proposal('{"verdict":"ship_it"}')
 
 
+def test_non_string_file_raises():  # P2 review: untrusted field types
+    with pytest.raises(synthesize.ProposalParseError, match="must be a string"):
+        synthesize.parse_proposal('{"verdict":"propose_pr","hunks":[{"file":1}]}')
+
+
+def test_string_cited_ids_raises():  # would silently become a per-char list
+    with pytest.raises(synthesize.ProposalParseError, match="list of strings"):
+        synthesize.parse_proposal(
+            '{"verdict":"propose_pr","hunks":[{"file":"a","cited_finding_ids":"s1"}]}'
+        )
+
+
 def test_no_json_raises():
     with pytest.raises(synthesize.ProposalParseError):
         synthesize.parse_proposal("the model refused")
