@@ -63,8 +63,13 @@ const ACQUIRE_MAX_ATTEMPTS: usize = 5;
 pub enum ClaimState {
     /// No claim file exists.
     Free,
-    /// Claim exists and its holder is verifiably alive (or TTL unexpired).
+    /// Claim exists and its holder is verifiably alive.
     Live,
+    /// TTL unexpired but the holder is NOT provably alive (dead/replaced pid).
+    /// A respawned worker whose supervisor pid died reads here: the TTL still
+    /// protects the claim, so it is treated like `Live` for acquire/dispatch
+    /// (never stolen) - only TTL expiry (-> `Stale`) frees it.
+    Suspect,
     /// Claim exists but the holder is dead/expired (recoverable).
     Stale,
     /// Claim file present but unreadable (parse/schema failure).
@@ -76,6 +81,7 @@ impl ClaimState {
         match self {
             ClaimState::Free => "free",
             ClaimState::Live => "live",
+            ClaimState::Suspect => "suspect",
             ClaimState::Stale => "stale",
             ClaimState::Corrupted => "corrupted",
         }
@@ -362,6 +368,13 @@ fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
 /// INCLUDING the hybrid arm: an expired-TTL claim whose recorded pid is a
 /// live process on this host is still LIVE — a suspended-but-alive session
 /// must not have its claim reclaimed by a peer).
+///
+/// SUSPECT arm (x-ba4b): a TTL claim still inside its window whose recorded pid
+/// is NOT a live process reads `Suspect`, not `Live`. Dead-pid-but-unexpired is
+/// the respawned-worker case (supervisor pid died, session lives on): the TTL
+/// keeps protecting the slot, so acquire/dispatch treat it like `Live` (never
+/// steal), but the distinct state lets init/dispatch branch on it. Only TTL
+/// expiry frees the claim (-> `Stale`); pid death alone never does.
 pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
     let now = now.unwrap_or_else(now_ms);
     if is_expired(rec, now) {
@@ -378,7 +391,13 @@ pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
             ClaimState::Stale
         };
     }
-    ClaimState::Live
+    // TTL claim, still inside its window: live pid => Live, dead/replaced pid
+    // => Suspect (TTL-protected, not stealable).
+    if is_live(rec) {
+        ClaimState::Live
+    } else {
+        ClaimState::Suspect
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -732,7 +751,12 @@ pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
             );
         }
 
-        if classify(&existing, None) != ClaimState::Live {
+        // Suspect (TTL-unexpired, dead pid) refuses exactly like Live: the TTL
+        // still protects a respawned worker's slot, so we never reclaim it.
+        if !matches!(
+            classify(&existing, None),
+            ClaimState::Live | ClaimState::Suspect
+        ) {
             match recover_stale(&path, key, holder, &opts, events_dir.as_deref()) {
                 RecoverResult::Done(outcome) => return outcome,
                 RecoverResult::Retry => continue,
@@ -874,8 +898,11 @@ fn recover_stale_locked(
         ));
     }
 
-    if classify(&existing, None) == ClaimState::Live {
-        // Raced — now it's live.
+    if matches!(
+        classify(&existing, None),
+        ClaimState::Live | ClaimState::Suspect
+    ) {
+        // Raced — now it's live (or a TTL-protected suspect); back off, no steal.
         return RecoverResult::Done(AcquireOutcome::HeldByOther {
             holder: existing.holder,
             pid: existing.pid,
@@ -1192,10 +1219,22 @@ mod tests {
             classify(&record(me, now, None, "elsewhere.example"), Some(now)),
             ClaimState::Stale
         );
-        // Unexpired TTL is live regardless of pid.
+        // Unexpired TTL + LIVE pid -> LIVE.
+        assert_eq!(
+            classify(&record(me, now, Some(now + 60_000), &host), Some(now)),
+            ClaimState::Live
+        );
+        // SUSPECT arm (x-ba4b): unexpired TTL + dead/replaced pid -> SUSPECT
+        // (was LIVE). A respawned worker's slot stays TTL-protected, but the
+        // distinct state lets init/dispatch refuse-and-skip rather than steal.
         assert_eq!(
             classify(&record(-1, now, Some(now + 60_000), &host), Some(now)),
-            ClaimState::Live
+            ClaimState::Suspect
+        );
+        // SUSPECT is off-host too: unexpired TTL but a foreign host pid.
+        assert_eq!(
+            classify(&record(me, now, Some(now + 60_000), "elsewhere.example"), Some(now)),
+            ClaimState::Suspect
         );
         // HYBRID arm: expired TTL + live recorded pid -> LIVE.
         assert_eq!(

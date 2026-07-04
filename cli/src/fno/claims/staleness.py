@@ -102,6 +102,12 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     ``os.getpid()`` of the acquire subprocess) fails ``is_live`` -> STALE
     exactly as before, so every non-suspended case is byte-for-byte today.
     ``is_live`` already guards host + pid-reuse (create_time < acquired_at).
+
+    SUSPECT arm (x-ba4b): a TTL claim still inside its window whose recorded pid
+    is NOT live reads SUSPECT, not LIVE. Dead-pid-but-unexpired is the respawned-
+    worker case; the TTL keeps protecting the slot (acquire/dispatch refuse it
+    like LIVE), but the distinct state lets init/dispatch branch. Only TTL expiry
+    frees the claim (-> STALE). Mirrors ``claims.rs::classify``.
     """
     if is_expired(claim, now=now):
         # HYBRID: an expired clock does NOT imply a dead session - check the
@@ -109,5 +115,6 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
         return ClaimState.LIVE if is_live(claim) else ClaimState.STALE
     if claim.expires_at is None:
         return ClaimState.LIVE if is_live(claim) else ClaimState.STALE
-    # TTL claim, not yet expired - live regardless of PID
-    return ClaimState.LIVE
+    # TTL claim, not yet expired: live pid => LIVE, dead/replaced pid => SUSPECT
+    # (TTL-protected, not stealable).
+    return ClaimState.LIVE if is_live(claim) else ClaimState.SUSPECT

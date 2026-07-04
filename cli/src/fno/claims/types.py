@@ -36,12 +36,17 @@ class ClaimState(str, Enum):
 
     - free: no claim file exists
     - live: claim exists and holder process is verifiably alive
+    - suspect: TTL unexpired but holder not provably alive (dead/replaced pid).
+      The respawned-worker case: TTL still protects the slot, so acquire/
+      dispatch treat it like `live` (never steal); only TTL expiry (-> stale)
+      frees it. (x-ba4b)
     - stale: claim exists but holder is dead or expired (recoverable)
     - corrupted: claim file present but cannot be parsed
     """
 
     FREE = "free"
     LIVE = "live"
+    SUSPECT = "suspect"
     STALE = "stale"
     CORRUPTED = "corrupted"
 
