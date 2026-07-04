@@ -83,7 +83,6 @@ fn run_inner(session: &str) -> Result<i32, String> {
              `unset FNO_SESSION` if this shell is not really inside a pane."
         ));
     }
-    proto::ensure_mux_dir().map_err(|e| format!("cannot prepare the mux dir: {e}"))?;
     let path = proto::socket_path(session)?;
     let stream = connect_or_spawn(&path)?;
 
@@ -97,6 +96,9 @@ fn run_inner(session: &str) -> Result<i32, String> {
 /// `mux_cli::pane run`, which must self-spawn a server for a script-only
 /// session (AC1-EDGE).
 pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixStream, String> {
+    // spawn_server opens a log file in the mux dir, so the dir must exist first.
+    // pane run reaches here without going through run_inner's ensure (AC1-EDGE).
+    proto::ensure_mux_dir().map_err(|e| format!("cannot prepare the mux dir: {e}"))?;
     match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
         Ok(s) => return Ok(s),
         // A connect timeout means something holds the socket but never
