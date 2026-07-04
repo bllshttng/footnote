@@ -278,7 +278,7 @@ def check_isolation(
                             - ``repo_events_jsonl`` fno repo .fno/events.jsonl
                             - ``global_events_jsonl`` ~/.fno/events.jsonl
                             - ``memory_dir``        ~/.fno/memory/ directory
-                            - ``corrections_log``   ~/.claude/corrections.log
+                            - ``corrections_log``   ~/.fno/corrections.log
 
                             Unknown keys are ignored.  Missing files are
                             silently skipped (clean).
@@ -444,7 +444,9 @@ def default_real_state_paths(repo_root: Path) -> dict[str, Path]:
         "repo_events_jsonl": repo_root / ".fno" / "events.jsonl",
         "global_events_jsonl": abilities_home / "events.jsonl",
         "memory_dir": abilities_home / "memory",
-        "corrections_log": home / ".claude" / "corrections.log",
+        # corrections.log was re-homed to ~/.fno/ by the placement-rule wave
+        # (ab-f063 W2); scan it there, not the dead ~/.claude/ location.
+        "corrections_log": abilities_home / "corrections.log",
     }
 
 
