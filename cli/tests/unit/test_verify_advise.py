@@ -115,6 +115,32 @@ def test_decide_verdict_garbage_reply_is_error(tmp_path: Path, monkeypatch) -> N
     assert v == "error"
 
 
+def test_decide_verdict_unreadable_plan_is_error(tmp_path: Path, monkeypatch) -> None:
+    """An exists-but-unreadable plan is a fault (error), not not_applicable."""
+    _plan_with_acs(tmp_path)
+    monkeypatch.setattr(
+        va, "read_plan_acs", lambda p: (_ for _ in ()).throw(OSError("EACCES"))
+    )
+    v = va.decide_verdict(
+        reason="DonePRGreen", plan_path="plan.md", cwd=tmp_path, session_id="s"
+    )
+    assert v == "error"
+
+
+def test_emit_verdict_event_per_path_independence(tmp_path: Path, capsys) -> None:
+    """A project-log write failure must not starve the global log (sigma P2)."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, not a dir", encoding="utf-8")
+    bad = blocker / "ev.jsonl"  # parent is a file -> append fails
+    good = tmp_path / "gev.jsonl"
+    va.emit_verdict_event(
+        verdict="pass", node_id="x-1", pr_number=None, session_id="s",
+        events_paths=[bad, good],
+    )
+    assert good.exists() and "verifier_verdict" in good.read_text()
+    assert "event emit to" in capsys.readouterr().err
+
+
 def test_decide_verdict_happy_path(tmp_path: Path, monkeypatch) -> None:
     _plan_with_acs(tmp_path)
     monkeypatch.setattr(va, "run_verifier", lambda *a, **k: "looks good\nVERDICT: pass")

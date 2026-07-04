@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -35,12 +36,13 @@ SPAWN_TIMEOUT_S = 90
 
 def read_plan_acs(plan_path: Path) -> Optional[str]:
     """Extract the acceptance-criteria text from a plan (dir -> 00-INDEX.md,
-    else the file itself - same resolution finalize uses). None = no ACs."""
+    else the file itself - same resolution finalize uses). None = no plan / no
+    ACs. An exists-but-unreadable doc raises OSError so the caller records
+    verdict `error`, not a false `not_applicable` (sigma P3)."""
     doc = plan_path / "00-INDEX.md" if plan_path.is_dir() else plan_path
-    try:
-        content = doc.read_text(encoding="utf-8")
-    except OSError:
+    if not doc.exists():
         return None
+    content = doc.read_text(encoding="utf-8")
     # Prefer the dedicated section; fall back to any AC-labelled lines.
     m = re.search(
         r"^#{2,4}\s*Acceptance [Cc]riteria.*?$(.*?)(?=^#{1,2}\s|\Z)",
@@ -132,8 +134,13 @@ def emit_verdict_event(
             "session_id": session_id,
         },
     )
+    # Per-path append: a project-log write failure must not starve the global
+    # log calibration reads (source-independence, sigma P2).
     for p in events_paths:
-        append_event(event, p)
+        try:
+            append_event(event, p)
+        except Exception as exc:
+            print(f"verify_advise: event emit to {p} failed: {exc}", file=sys.stderr)
 
 
 def stamp_ledger(session_id: str, verdict: str, ledger_path: Path) -> bool:
@@ -143,7 +150,24 @@ def stamp_ledger(session_id: str, verdict: str, ledger_path: Path) -> bool:
         return False
     lock_fd = os.open("/tmp/abilities-ledger.lock", os.O_CREAT | os.O_RDWR)
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # Bounded, non-blocking acquisition: this runs synchronously inside the
+        # stop hook's finalize, so an orphaned lock holder must cost seconds,
+        # never wedge every session's exit (sigma P3). The event is canonical;
+        # a skipped stamp is a lost convenience field, not lost data.
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    print(
+                        "verify_advise: ledger lock busy; skipping stamp "
+                        "(event is canonical)",
+                        file=sys.stderr,
+                    )
+                    return False
+                time.sleep(0.1)
         try:
             data = json.loads(ledger_path.read_text())
         except (OSError, json.JSONDecodeError):
@@ -217,7 +241,13 @@ def decide_verdict(*, reason: str, plan_path: str, cwd: Path, session_id: str) -
         return "not_applicable"  # doc ship: the rubric is code-shaped (AC6-EDGE)
     if not plan_path:
         return "not_applicable"  # quick/ad-hoc ship with no plan bound
-    acs = read_plan_acs(cwd / plan_path if not Path(plan_path).is_absolute() else Path(plan_path))
+    try:
+        acs = read_plan_acs(
+            cwd / plan_path if not Path(plan_path).is_absolute() else Path(plan_path)
+        )
+    except OSError as exc:  # exists but unreadable: a real fault, not "no ACs"
+        print(f"verify_advise: plan unreadable: {exc}", file=sys.stderr)
+        return "error"
     if not acs:
         return "not_applicable"
     try:

@@ -156,6 +156,16 @@ def test_classify_ambiguous_is_inbox_not_guessed() -> None:
     assert disposition == DISPOSITION_INBOX and cand is not None and cand.tier == "inbox"
 
 
+def test_classify_reasonless_cancel_wording_is_not_archived() -> None:
+    """Archive requires an EXPLICIT one-off reason kind: a reason-less gist
+    merely quoting cancel-ish words (.target-cancelled sentinel) is ambiguous
+    and must surface, not be silently consumed."""
+    disposition, cand = classify_postmortem(
+        _item("worker saw .fno/.target-cancelled and stopped", subkind=None)
+    )
+    assert disposition == DISPOSITION_INBOX and cand is not None
+
+
 # -- dedup round-trip (degraded stamp path) ------------------------------------
 
 def test_none_pr_trailer_round_trips() -> None:

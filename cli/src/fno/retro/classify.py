@@ -160,8 +160,12 @@ def classify_postmortem(item: RawItem, *, body_cap: int = BODY_CAP) -> "tuple[st
     postmortem file itself, carried in source_id) rather than through the
     PR-cited classify_item path.
     """
+    # Archive only on an EXPLICIT one-off reason kind. A reason-less postmortem
+    # whose gist merely mentions cancel-ish words (e.g. quoting the
+    # .target-cancelled sentinel) is ambiguous, and ambiguous never archives -
+    # it falls through to the wedge check / inbox (sigma P3).
     reason = item.subkind or ""
-    if _PM_ONEOFF_RE.search(reason) or (not reason and _PM_ONEOFF_RE.search(item.text or "")):
+    if _PM_ONEOFF_RE.search(reason):
         return DISPOSITION_ARCHIVE, None
 
     wedge = bool(_PM_WEDGE_RE.search(item.text or ""))

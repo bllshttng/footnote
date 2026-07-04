@@ -382,12 +382,22 @@ pub fn run_finalize(args: &[String]) -> i32 {
             .arg(&global_events);
         match adv.output() {
             Ok(out) if !out.status.success() => eprintln!(
-                "finalize: verify_advise exit {:?}: {}",
+                "finalize: verify_advise failed with exit {:?}: {}",
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
+            Ok(out) => {
+                // rc=0 is the module's contract even when its internals failed
+                // (verifier died, event emit failed): forward any stderr so
+                // those messages reach the stop hook's finalize log instead of
+                // dying in a dead channel (sigma silent-failure P1).
+                let err_raw = String::from_utf8_lossy(&out.stderr);
+                let err = err_raw.trim();
+                if !err.is_empty() {
+                    eprintln!("finalize: verify_advise: {err}");
+                }
+            }
             Err(e) => eprintln!("finalize: verify_advise spawn failed: {e}"),
-            _ => {}
         }
     }
 

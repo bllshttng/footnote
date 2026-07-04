@@ -331,12 +331,18 @@ def build_calibration(verdict_events: list[dict], rows: list[dict], graph_nodes:
     table = {v: {o: 0 for o in _OUTCOMES} for v in _COUNTABLE_VERDICTS}
     for nid, v in counted.items():
         table[v][_node_outcome(nid, ship_ts.get(nid), by_id, fixes)] += 1
+    # Coverage-honesty (fold rule): a node with no timestamped Done-row gets a
+    # conservative outcome (any caused_by fix counts as bounced, however old),
+    # so surface how many outcomes were derived untimed rather than letting a
+    # ledger gap silently bias the headline rate.
+    untimed = sum(1 for nid in counted if nid not in ship_ts)
     # The rate the whole task exists to measure: verdict pass -> bad outcome.
     fp = table["pass"]["bounced"] + table["pass"]["reverted"]
     passes = sum(table["pass"].values())
     return {
         "state": "ok",
         **base,
+        "untimed_outcomes": untimed,
         "table": table,
         "false_positive": {"count": fp, "of_pass": passes, "rate_pct": _pct(fp, passes)},
     }

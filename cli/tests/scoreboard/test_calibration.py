@@ -99,11 +99,26 @@ def test_confusion_table_and_false_positive_rate():
 
 def test_untimeable_fix_counts_against_node():
     # No ship row for the node -> the caused_by fix can't be time-bounded ->
-    # conservative bounced (mirrors _survival).
+    # conservative bounced (mirrors _survival), and the untimed count is
+    # surfaced so the conservative bias is visible (coverage honesty).
     events = [_ev(f"x-{i}", "pass") for i in range(10)]
     graph = [{"id": "x-fix", "caused_by": "x-0", "created_at": "2026-07-03T10:00:00"}]
     cal = build_calibration(events, [], graph)
     assert cal["table"]["pass"]["bounced"] == 1
+    assert cal["untimed_outcomes"] == 10  # no ship rows at all in this fixture
+
+
+def test_cli_untimed_caveat_rendered(tmp_path, monkeypatch):
+    events = [_ev(f"x-{i}", "pass") for i in range(10)]
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": []}))  # no ship rows -> all untimed
+    (tmp_path / "events.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n"
+    )
+    _wire(monkeypatch, tmp_path, ledger)
+    res = runner.invoke(_app(), ["--calibration"])
+    assert res.exit_code == 0, res.output
+    assert "10 node(s) lack a timestamped ship row" in res.output
 
 
 # --- CLI (AC6-UI) -------------------------------------------------------------

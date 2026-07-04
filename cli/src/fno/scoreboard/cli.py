@@ -93,7 +93,13 @@ def _render_calibration(cal: dict) -> None:
         )
         return
 
-    out(f"  N={cal['n']} verdicts{excl_line}\n\n")
+    out(f"  N={cal['n']} verdicts{excl_line}\n")
+    if cal.get("untimed_outcomes"):
+        out(
+            f"  ! {cal['untimed_outcomes']} node(s) lack a timestamped ship row; "
+            f"their outcomes are conservative (any caused_by fix counts as bounced).\n"
+        )
+    out("\n")
     outcomes = ("merged_clean", "bounced", "reverted")
     out(f"  {'':<10}" + "".join(f"{o:>14}" for o in outcomes) + "\n")
     for verdict in ("pass", "concerns", "fail"):
