@@ -118,6 +118,18 @@ def test_stamp_inserts_into_existing_frontmatter(tmp_path: Path) -> None:
     assert harvest_postmortems(tmp_path) == []
 
 
+def test_empty_frontmatter_harvests_and_stamps_cleanly(tmp_path: Path) -> None:
+    """`---\\n---\\nbody` (empty fm) must not grow a second fm block on stamp."""
+    p = _write(tmp_path, "pm.md", "---\n---\n# Postmortem\n\nsome body\n")
+    (item,) = harvest_postmortems(tmp_path)
+    assert item.source_id == "postmortem:pm.md"
+    stamp_postmortem_consumed(p, ts="2026-07-04T00:00:00+00:00")
+    text = p.read_text()
+    assert text.startswith("---\nconsumed_at: 2026-07-04T00:00:00+00:00\n---\n")
+    assert text.count("---\n") == 2 and "some body" in text
+    assert harvest_postmortems(tmp_path) == []
+
+
 def test_stamp_is_idempotent(tmp_path: Path) -> None:
     p = _write(tmp_path, "pm.md", FINALIZE_FMT)
     stamp_postmortem_consumed(p, ts="2026-07-04T00:00:00+00:00")

@@ -234,8 +234,9 @@ def triage_postmortems(
 
     Ordering is the AC6-FR invariant: the stamp lands AFTER the disposition,
     so an interrupted run re-processes only the not-yet-stamped tail. A stamp
-    failure after a successful land is degraded-not-broken: the widened dedup
-    trailer (source_pr=None) collapses the re-proposal next run.
+    failure after a successful land is degraded-not-broken: the node tier
+    collapses the re-proposal via the widened dedup trailer (source_pr=None);
+    the inbox tier via add_item's own (where, title) pre-check.
     """
     report = PostmortemReport()
     items = _harvest.harvest_postmortems(postmortems_dir, warnings=report.warnings)

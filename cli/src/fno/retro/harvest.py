@@ -893,6 +893,10 @@ def _split_frontmatter(text: str) -> "tuple[Optional[dict], str]":
     if not text.startswith("---"):
         return None, text
     rest = text[3:].lstrip("\n")
+    if rest.startswith("---"):
+        # Empty frontmatter ("---\n---\nbody"): the lstrip above ate the
+        # separator newline, so the closing-fence find below would miss it.
+        return {}, rest[3:].lstrip("\n")
     idx = rest.find("\n---")
     if idx == -1:
         return None, text
@@ -978,6 +982,10 @@ def stamp_postmortem_consumed(path: Path, *, ts: Optional[str] = None) -> None:
         path.write_text(f"---\nconsumed_at: {ts}\n---\n{text}", encoding="utf-8")
         return
     rest = text[3:].lstrip("\n")
+    if rest.startswith("---"):
+        # Empty frontmatter: the key becomes its whole content.
+        path.write_text(f"---\nconsumed_at: {ts}\n{rest}", encoding="utf-8")
+        return
     idx = rest.find("\n---")
     head = text[: len(text) - len(rest) + idx]
     tail = text[len(text) - len(rest) + idx :]
