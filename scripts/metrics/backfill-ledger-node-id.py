@@ -81,18 +81,19 @@ def resolve_row(row: dict, node_ids: set[str]) -> tuple[str, str | None]:
 
     outcome is one of: 'title' / 'branch' (resolved, node_id set), or
     'unrecoverable' (node_id None). A token counts only when it is an existing
-    graph node; exactly one distinct existing node across a field resolves it.
+    graph node; the row resolves only when title and branch TOGETHER name
+    exactly one distinct existing node. A title/branch disagreement (each names
+    a different valid node) or any multi-match is unrecoverable - never guess
+    (AC1-EDGE). Checking the union, not title-then-branch, is what makes a
+    title-A / branch-B disagreement unrecoverable rather than silently
+    resolving to whichever field is inspected first.
     """
-    for field in ("title", "branch"):
-        value = row.get(field)
-        if not isinstance(value, str):
-            continue
-        matches = {t for t in _TOKEN.findall(value) if t in node_ids}
-        if len(matches) == 1:
-            return field, next(iter(matches))
-        if len(matches) > 1:
-            # Ambiguous within a single field: never guess (AC1-EDGE).
-            return "unrecoverable", None
+    title_m = {t for t in _TOKEN.findall(str(row.get("title") or "")) if t in node_ids}
+    branch_m = {t for t in _TOKEN.findall(str(row.get("branch") or "")) if t in node_ids}
+    union = title_m | branch_m
+    if len(union) == 1:
+        node = next(iter(union))
+        return ("title" if node in title_m else "branch"), node
     return "unrecoverable", None
 
 

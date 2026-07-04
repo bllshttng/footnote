@@ -68,18 +68,37 @@ def _atomic_write_json(path: Path, data: object) -> None:
                 pass
 
 
+def _row_key(row: dict) -> tuple[str, str]:
+    """Stable dedupe key: the session_id when present, else a fingerprint of the
+    row's content. A null/absent session_id must NOT collapse every id-less row
+    onto one key - otherwise a single legacy id-less row in global would mask
+    every id-less stray row, which would then be lost when the stray is
+    replaced by the symlink.
+    """
+    sid = row.get("session_id")
+    if sid:
+        return ("sid", str(sid))
+    return ("fp", json.dumps(row, sort_keys=True, default=str))
+
+
 def merge(stray_real: Path, global_path: Path, apply: bool) -> int:
-    """Fold stray rows (by session_id) into global, then symlink the stray to global."""
-    stray_data = json.loads(stray_real.read_text(encoding="utf-8"))
-    stray_rows = _entries(stray_data)
+    """Fold stray rows into global (dedupe by session_id, else fingerprint),
+    then replace the stray file with a symlink to global."""
+    stray_raw = stray_real.read_text(encoding="utf-8")
+    stray_rows = _entries(json.loads(stray_raw))
     global_data = json.loads(global_path.read_text(encoding="utf-8"))
     global_rows = _entries(global_data)
-    seen = {r.get("session_id") for r in global_rows if isinstance(r, dict)}
+    seen = {_row_key(r) for r in global_rows if isinstance(r, dict)}
 
-    to_add = [
-        r for r in stray_rows
-        if isinstance(r, dict) and r.get("session_id") not in seen
-    ]
+    to_add: list[dict] = []
+    for r in stray_rows:
+        if not isinstance(r, dict):
+            continue
+        key = _row_key(r)
+        if key in seen:
+            continue
+        seen.add(key)  # dedupe within the stray too, not just against global
+        to_add.append(r)
     print(f"stray rows: {len(stray_rows)} | already in global: "
           f"{len(stray_rows) - len(to_add)} | to merge: {len(to_add)}")
     for r in to_add:
@@ -97,12 +116,18 @@ def merge(stray_real: Path, global_path: Path, apply: bool) -> int:
         _atomic_write_json(global_path, global_data)
         print(f"merged {len(to_add)} row(s) into {global_path}")
 
+    # Back up the stray content before replacing the file (belt-and-suspenders:
+    # the rows are already in global, but never unlink the only copy blind).
+    backup = stray_real.with_suffix(".json.pre-merge.bak")
+    backup.write_text(stray_raw, encoding="utf-8")
+
     # Replace the stray fork FILE with a symlink to the global ledger so the
     # path stays valid (worktree symlinks / config_cli / setup-worktree.sh)
     # while pointing at the single source of truth.
     stray_real.unlink()
     stray_real.symlink_to(global_path)
-    print(f"replaced stray fork with symlink: {stray_real} -> {global_path}")
+    print(f"replaced stray fork with symlink: {stray_real} -> {global_path} "
+          f"(backup: {backup})")
     return 0
 
 

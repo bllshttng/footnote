@@ -47,6 +47,22 @@ def test_ambiguous_title_is_unrecoverable_not_guessed():
     assert mod.resolve_row(row, NODES) == ("unrecoverable", None)
 
 
+def test_title_branch_disagreement_is_unrecoverable():
+    # AC1-EDGE: title names one valid node, branch names a DIFFERENT valid node
+    # -> the union has size 2, so it must not resolve to whichever field is
+    # inspected first.
+    mod = _load()
+    row = {"title": "work on ab-11112222", "branch": "feature/x-3344-thing"}
+    assert mod.resolve_row(row, NODES) == ("unrecoverable", None)
+
+
+def test_title_branch_agreement_resolves():
+    # Same node in both fields -> union size 1 -> resolves.
+    mod = _load()
+    row = {"title": "x-3344 ship", "branch": "feature/x-3344"}
+    assert mod.resolve_row(row, NODES) == ("title", "x-3344")
+
+
 def test_token_absent_from_graph_is_unrecoverable():
     # A node-id-shaped token that is not a real graph node does not count.
     mod = _load()
