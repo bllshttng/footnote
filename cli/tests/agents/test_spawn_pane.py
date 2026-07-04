@@ -311,6 +311,9 @@ def test_routing_pane_substrate_spawn_stays_python() -> None:
     assert not _is_pane_substrate_spawn(
         "spawn", ["spawn", "p", "--substrate=headless"]
     )
+    # x-c772: --headless / -H is the headless shortcut -> never a pane.
+    assert not _is_pane_substrate_spawn("spawn", ["spawn", "p", "--headless"])
+    assert not _is_pane_substrate_spawn("spawn", ["spawn", "p", "-H"])
     assert not _is_pane_substrate_spawn("ask", ["ask", "peer", "hi"])
     # The scan stops at --argv: payload tokens cannot masquerade as our flag.
     assert _is_pane_substrate_spawn(

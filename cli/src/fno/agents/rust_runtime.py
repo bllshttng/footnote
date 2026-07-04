@@ -396,6 +396,11 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
         if a in ("--once", "-o"):
             # The pre-substrate spelling of headless: a one-shot, never a pane.
             return False
+        if a in ("--headless", "-H"):
+            # Ergonomic shortcut for --substrate headless (x-c772): one-shot,
+            # never a pane. Must be honored here or a `-H` spawn would route to
+            # the pane back half.
+            return False
         if a == "--substrate":
             substrate = next(it, "")
         elif a.startswith("--substrate="):

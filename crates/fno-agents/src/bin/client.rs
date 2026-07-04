@@ -1234,6 +1234,15 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     .entry("substrate")
                     .or_insert_with(|| Value::String("headless".into()));
             }
+            "--headless" | "-H" => {
+                // Ergonomic front for --substrate headless (x-c772). Mobile:
+                // one hyphen, no `--substrate` to type (`--` autocorrects to an
+                // em-dash on iOS). Same routing key as --once; explicit
+                // --substrate already present wins.
+                params
+                    .entry("substrate")
+                    .or_insert_with(|| Value::String("headless".into()));
+            }
             "--fresh" => {
                 // Resolve the worker cwd to the canonical repo root (main
                 // checkout) regardless of caller cwd. Opt-in; --cwd still wins.
@@ -2770,6 +2779,44 @@ mod tests {
             "--substrate".to_string(),
             "bg".to_string(),
             "--once".to_string(),
+        ];
+        let (_m, params) = build_request("spawn", &args).unwrap();
+        assert_eq!(params["substrate"], "bg");
+    }
+
+    #[test]
+    fn spawn_headless_flag_aliases_to_substrate_headless() {
+        // x-c772: --headless and -H are the mobile-friendly front for
+        // --substrate headless (identical to --once), for every provider.
+        for flag in ["--headless", "-H"] {
+            for provider in ["claude", "codex", "gemini", "agy"] {
+                let args = vec![
+                    "wk".to_string(),
+                    "--provider".to_string(),
+                    provider.to_string(),
+                    flag.to_string(),
+                ];
+                let (_m, params) = build_request("spawn", &args).unwrap();
+                assert_eq!(
+                    params.get("substrate").and_then(|v| v.as_str()),
+                    Some("headless"),
+                    "{provider} {flag} aliases to substrate=headless"
+                );
+                assert!(params.get("host_mode").is_none(), "{flag}: no host_mode");
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_explicit_substrate_wins_over_headless_flag() {
+        // An explicit --substrate is not clobbered by a trailing -H.
+        let args = vec![
+            "wk".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "bg".to_string(),
+            "-H".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
         assert_eq!(params["substrate"], "bg");
