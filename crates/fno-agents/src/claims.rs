@@ -996,6 +996,47 @@ pub fn status(key: &str, root: Option<&Path>) -> (ClaimState, Option<ClaimRecord
     }
 }
 
+/// Best-effort lease renewal (x-ba4b): extend a TTL claim's `expires_at`, but
+/// ONLY if the on-disk holder still matches `holder`. `fno-agents loop-check`
+/// calls this on every stop so a respawned worker (whose supervisor pid died)
+/// keeps its claim's TTL fresh under any pid, with no separate heartbeat.
+///
+/// The extension re-anchors the claim's OWN original TTL span
+/// (`expires_at - acquired_at`) to now, so no TTL string has to be threaded
+/// through the manifest. Only `expires_at` changes — `acquired_at`, `pid`,
+/// `host`, `reason`, `metadata` are preserved byte-for-byte, so PID-reuse
+/// detection (`create_time <= acquired_at`) is untouched.
+///
+/// Returns `Ok(true)` when renewed, `Ok(false)` on a benign no-op (missing /
+/// gone / corrupted claim, held by a different holder, or a PID-liveness claim
+/// with no `expires_at` to extend), and `Err(_)` only on a real write failure
+/// (perms/disk) — callers stay best-effort and treat any outcome as advisory.
+pub fn renew(key: &str, holder: &str, root: Option<&Path>) -> Result<bool, String> {
+    if key.is_empty() || holder.is_empty() {
+        return Err("key and holder must be non-empty".into());
+    }
+    let path = claim_path(key, root)?;
+    let mut existing = match read_claim_file(&path) {
+        Ok(rec) => rec,
+        Err(ReadError::GoneAway) => return Ok(false),
+        Err(ReadError::Corrupted(_)) => return Ok(false),
+    };
+    if existing.holder != holder {
+        return Ok(false); // not ours — never touch a peer's lease
+    }
+    let old_exp = match existing.expires_at {
+        Some(exp) => exp,
+        None => return Ok(false), // PID-liveness claim: no TTL to extend
+    };
+    // The claim's own TTL span, floored at MIN_TTL so a degenerate record never
+    // produces a shrinking or past deadline.
+    let span = (old_exp - existing.acquired_at).max(MIN_TTL_MS);
+    existing.expires_at = Some(now_ms() + span);
+    let payload = serialize_claim(&existing)?;
+    atomic_replace(&path, &payload)?;
+    Ok(true)
+}
+
 /// Process-global lock serializing every test (in ANY module) that mutates
 /// `FNO_CLAIMS_ROOT` / `PATH` / `FNO_BIN`. Env vars are process-global and the
 /// crate test suite runs multithreaded, so a per-module lock lets a daemon test
@@ -1031,6 +1072,68 @@ mod tests {
         text.lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
+    }
+
+    // ---- lease renewal (x-ba4b) -----------------------------------------
+
+    fn read_claim(root: &TempDir, key: &str) -> ClaimRecord {
+        read_claim_file(&lockfile(root, key)).unwrap()
+    }
+
+    #[test]
+    fn renew_extends_expires_at_for_matching_holder() {
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        match acquire("node:x-renew", "target-session:me", o) {
+            AcquireOutcome::Acquired(_) => {}
+            other => panic!("{other:?}"),
+        };
+        let before = read_claim(&td, "node:x-renew").expires_at.unwrap();
+        let acquired_at = read_claim(&td, "node:x-renew").acquired_at;
+        // Renew re-anchors the original 120s span to now: after >=1ms elapsed
+        // the new deadline is strictly later, and acquired_at is preserved.
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(
+            renew("node:x-renew", "target-session:me", Some(td.path())),
+            Ok(true)
+        );
+        let after = read_claim(&td, "node:x-renew");
+        assert!(
+            after.expires_at.unwrap() > before,
+            "expected extended deadline, before={before} after={:?}",
+            after.expires_at
+        );
+        assert_eq!(after.acquired_at, acquired_at, "acquired_at must be preserved");
+    }
+
+    #[test]
+    fn renew_is_noop_for_wrong_holder() {
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        let _ = acquire("node:x-other", "target-session:owner", o);
+        let before = read_claim(&td, "node:x-other").expires_at.unwrap();
+        // A peer must never extend a claim it does not hold.
+        assert_eq!(
+            renew("node:x-other", "target-session:intruder", Some(td.path())),
+            Ok(false)
+        );
+        assert_eq!(read_claim(&td, "node:x-other").expires_at.unwrap(), before);
+    }
+
+    #[test]
+    fn renew_is_noop_for_pid_liveness_and_missing_claim() {
+        let td = TempDir::new().unwrap();
+        // Missing claim -> Ok(false).
+        assert_eq!(
+            renew("node:x-absent", "h", Some(td.path())),
+            Ok(false)
+        );
+        // PID-liveness claim (no ttl_ms) has no expires_at to extend -> Ok(false).
+        let _ = acquire("session:pidonly", "h", opts_in(&td));
+        assert!(read_claim(&td, "session:pidonly").expires_at.is_none());
+        assert_eq!(renew("session:pidonly", "h", Some(td.path())), Ok(false));
     }
 
     // ---- encoding parity (contract item 1) ------------------------------

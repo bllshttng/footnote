@@ -62,6 +62,10 @@ struct Manifest {
     budget_wall_clock_cap_minutes: Option<Result<u64, String>>,
     /// None = absent (unlimited). Some(Ok(v)) = valid cap. Some(Err(s)) = malformed raw value.
     budget_cost_cap_usd: Option<Result<f64, String>>,
+    /// Node-claim key + holder written by `fno target init` (x-ba4b). Used to
+    /// renew the lease on every loop-check so a respawned worker keeps its claim.
+    target_claim_key: Option<String>,
+    target_claim_holder: Option<String>,
 }
 
 impl Default for Manifest {
@@ -77,6 +81,8 @@ impl Default for Manifest {
             legacy_status: None,
             budget_wall_clock_cap_minutes: None, // None = absent = unlimited
             budget_cost_cap_usd: None,           // None = absent = unlimited
+            target_claim_key: None,
+            target_claim_holder: None,
         }
     }
 }
@@ -112,6 +118,8 @@ fn parse_manifest(content: &str) -> Option<Manifest> {
             match k {
                 "session_id" => m.session_id = Some(v.to_string()),
                 "created_at" => m.created_at = Some(v.to_string()),
+                "target_claim_key" => m.target_claim_key = Some(v.to_string()),
+                "target_claim_holder" => m.target_claim_holder = Some(v.to_string()),
                 "attended" => m.attended = v == "true",
                 "advisory" => m.advisory = v == "true",
                 "no_ship" => m.no_ship = v == "true",
@@ -1749,6 +1757,22 @@ pub fn decide(args: &[String]) -> (i32, String) {
         }
     };
 
+    // Lease renewal (x-ba4b): keep this session's node claim fresh on every
+    // stop, so a worker whose supervisor pid died mid-run (and now runs under a
+    // new pid) never loses its claim to TTL expiry. Best-effort and non-fatal:
+    // renew only bumps expires_at when the on-disk holder still matches, so it
+    // can never steal, and any failure is a warning that just shortens the lease
+    // (the loop never blocks on it). Root=None routes node:<id> to the global
+    // claims root inside renew.
+    if let (Some(key), Some(holder)) =
+        (&manifest.target_claim_key, &manifest.target_claim_holder)
+    {
+        match crate::claims::renew(key, holder, None) {
+            Ok(_) => {}
+            Err(e) => eprintln!("loop-check: lease renewal for {key} failed (non-fatal): {e}"),
+        }
+    }
+
     // Resolve paths
     let project_events = parsed
         .events_path
@@ -2629,6 +2653,19 @@ mod tests {
         assert_eq!(m.created_at.as_deref(), Some("2026-06-05T00:00:00Z"));
         assert!(m.attended);
         assert!(m.legacy_status.is_none());
+        // Absent claim fields default to None (renewal is then skipped).
+        assert!(m.target_claim_key.is_none());
+        assert!(m.target_claim_holder.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_target_claim_fields() {
+        // x-ba4b: the node-claim key + holder drive loop-check lease renewal;
+        // quotes are stripped like every other string field.
+        let content = "---\nsession_id: s1\ntarget_claim_key: \"node:x-ba4b\"\ntarget_claim_holder: \"target-session:s1\"\n---\n";
+        let m = parse_manifest(content).unwrap();
+        assert_eq!(m.target_claim_key.as_deref(), Some("node:x-ba4b"));
+        assert_eq!(m.target_claim_holder.as_deref(), Some("target-session:s1"));
     }
 
     #[test]
