@@ -55,8 +55,8 @@ config:
     memory_dir: null         # default: <state_dir>/memory/
     hook_logs_dir: null      # default: <state_dir>/hook-logs/
     inbox_dir: null          # default: <project_root>/.fno/inbox/
-    handoffs_dir: null       # default: <vault>/internal/{project}/handoffs/ when obsidian.enabled,
-                             # else <state_dir>/handoffs/<project>/
+    handoffs_dir: null       # default: a design-docs subtree under <vault>/{project}/ when
+                             # obsidian.enabled, else <state_dir>/handoffs/<project>/
 
   obsidian:
     enabled: false  # set true to use {vault} template variable
