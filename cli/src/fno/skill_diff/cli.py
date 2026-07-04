@@ -462,8 +462,16 @@ def _reeval_pr(pr: int, proposed: dict, events: list[dict]) -> str:
     if skill_id == "fno:review":
         return f"PR#{pr} ({skill_id}) outcome-pending (review-skill)"
 
-    if not _pr_merged(pr):
+    merged = _pr_merged(pr)
+    if merged is False:
         return f"PR#{pr} ({skill_id}, run {run_id_before}) not-yet-merged, no eval-closed"
+    if merged is None:
+        # gh unreachable -> merge state unconfirmable. Never re-eval a PR we can't
+        # confirm merged: it could still be open, and replaying it against
+        # origin/main would score a diff that never landed. Leave it unclosed for
+        # a later tick when gh is back (AC3-ERR). Distinct from `is False` so an
+        # offline blip is not misreported as a genuinely open PR.
+        return f"PR#{pr} ({skill_id}) merge status unknown (gh offline), left unclosed for retry"
 
     # Pause gate BEFORE any replay spend (AC8-FR); replay honors it too, but we
     # never even spawn while paused.
@@ -533,6 +541,9 @@ def _run_replay(corpus_item: str, skill_ref: str, run_id_after: str) -> int:
              "--corpus-item", corpus_item, "--skill-ref", skill_ref, "--run-id", run_id_after],
             cwd=paths.resolve_repo_root(), capture_output=True, text=True, timeout=900,
         )
+        if p.returncode != 0:
+            _LOG.warning("skill-diff: replay of %s failed (rc=%d): %s",
+                         corpus_item, p.returncode, (p.stderr or "").strip()[:300])
         return p.returncode
     except (OSError, subprocess.TimeoutExpired) as exc:
         _LOG.warning("skill-diff: replay of %s failed: %s", corpus_item, exc)
@@ -559,6 +570,10 @@ def _merge_sha(pr_number: int) -> Optional[str]:
             ["gh", "pr", "view", str(pr_number), "--json", "mergeCommit", "-q", ".mergeCommit.oid"],
             cwd=paths.resolve_repo_root(), capture_output=True, text=True, check=True,
         )
-        return out.stdout.strip() or None
+        # A null mergeCommit (not-yet-populated squash race) prints the literal
+        # "null" via jq -q; treat it as unrecoverable so the caller falls back to
+        # origin/main rather than `git worktree add null`.
+        sha = out.stdout.strip()
+        return sha if sha and sha != "null" else None
     except (OSError, subprocess.CalledProcessError):
         return None

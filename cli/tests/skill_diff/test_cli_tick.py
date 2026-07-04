@@ -330,6 +330,28 @@ def test_reconcile_not_yet_merged(monkeypatch, tmp_path):
     assert "skill_diff_eval_closed" not in [e["type"] for e in _events(p)]
 
 
+def test_reconcile_gh_offline_leaves_unclosed(monkeypatch, tmp_path):  # AC3-ERR (None != False)
+    # gh unreachable -> _pr_merged is None -> skip-and-retry, NOT re-eval against
+    # origin/main (which would score a diff that may never have landed).
+    events = [_rc("r1"), _find("r1", "sid-a"), _proposed(201)]
+    p = _wire(monkeypatch, tmp_path, events)
+    calls = _wire_reeval(monkeypatch, p, merged=None, replay={"sid-a": "pass"})
+    r = runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
+    assert "merge status unknown" in r.output and not calls
+    assert "skill_diff_eval_closed" not in [e["type"] for e in _events(p)]
+
+
+def test_merge_sha_treats_literal_null_as_unrecoverable(monkeypatch, tmp_path):
+    # `gh ... -q .mergeCommit.oid` prints the string "null" for a null field; it
+    # must not be handed to git as a ref (caller falls back to origin/main).
+    class _P:
+        returncode = 0
+        stdout = "null\n"
+    monkeypatch.setattr(cli.paths, "resolve_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _P())
+    assert cli._merge_sha(201) is None
+
+
 def test_reconcile_pr_number_already_closed_is_noop(monkeypatch, tmp_path):  # AC7-FR
     events = [
         _proposed(201),
