@@ -414,6 +414,9 @@ def _process_payload(
         inbox_fn=inbox_fn,
         carveout_root=cr,
         carveouts_readonly=carveouts_readonly,
+        # W4 causal links: the sentinel names the node whose PR spawned these
+        # findings; filed follow-ups point back at it via caused_by.
+        origin_node_id=payload.get("node_id"),
     )
     # Surface derivation warnings alongside the harvest's own (ordered first).
     if derive_warnings:

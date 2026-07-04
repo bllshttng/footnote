@@ -171,6 +171,63 @@ def _emit_session_satisfied(pr_url: str, state_dir: str) -> None:
         )
 
 
+def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
+    """Emit ``human_touch{source:merge}`` for a MANUAL merge (W4 telemetry).
+
+    Only a human at a terminal counts: the autonomous loop's ship gate runs
+    this same followup path with no tty and must not inflate the touch count,
+    so the gate is stdin-isatty. Best-effort: a failure prints a diagnostic
+    and never changes the merge outcome.
+    """
+    if not sys.stdin.isatty():
+        return
+    # The CLI already rejects non-positive PR args (_PR_RE); this keeps the
+    # helper safe for any future caller (0/negative must never match a node).
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        return
+    node_id = None
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json, resolve_canonical_repo_root
+
+        # The graph is global across projects, so bare PR numbers collide;
+        # only nodes homed in THIS repo (node.cwd == canonical root) may
+        # claim the touch, and only an UNAMBIGUOUS match does (two same-repo
+        # nodes on one number -> resolution=failed, never an arbitrary pick).
+        root = str(resolve_canonical_repo_root())
+        hits = set()
+        for e in read_graph(graph_json()):
+            if e.get("cwd") != root:
+                continue
+            if e.get("pr_number") == pr_number or any(
+                isinstance(p, dict) and p.get("number") == pr_number
+                for p in e.get("additional_prs") or []
+            ):
+                hits.add(e.get("id"))
+        node_id = hits.pop() if len(hits) == 1 else None
+    except Exception:
+        node_id = None
+    try:
+        from pathlib import Path
+
+        from fno.events import _build, append_event
+
+        event = _build(
+            "human_touch",
+            "target",
+            {
+                "graph_node_id": node_id,
+                "source": "merge",
+                "resolution": "ok" if node_id else "failed",
+            },
+        )
+        append_event(event, events_path=Path(state_dir) / "events.jsonl")
+    except Exception as exc:  # noqa: BLE001 - best-effort, surface a diagnostic
+        sys.stderr.write(
+            f"pr-merge: human_touch emit failed ({exc}); merge outcome unaffected\n"
+        )
+
+
 def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
     state_dir = _repo_state_dir(cwd)
     state_file = os.path.join(state_dir, "target-state.md")
@@ -216,6 +273,14 @@ def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
         _emit_session_satisfied(pr_url, state_dir)
     except Exception:
         pass
+
+    # W4 touch telemetry: a manual (tty) merge is a human steering action.
+    try:
+        _emit_human_touch_merge(pr_number, state_dir)
+    except Exception as exc:
+        sys.stderr.write(
+            f"pr-merge: human_touch emit failed ({exc}); merge outcome unaffected\n"
+        )
 
     # Per-PR artifact consolidation (best-effort; degrades cleanly when the
     # script is absent, e.g. a bare pip install). The consolidator lives in the

@@ -25,8 +25,9 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
@@ -575,6 +576,60 @@ struct Core {
     /// on the next contested keystroke, so typing resumes without a server
     /// restart (AC3-FR) and no sweep timer exists to tune.
     claims: HashMap<u64, u32>,
+    /// Per-pane last `human_touch(inject)` emit time (W4 touch telemetry):
+    /// at most one emit per pane per [`TOUCH_COALESCE_WINDOW`], so a typing
+    /// burst is one steering action, not a per-keystroke fork storm. Purged
+    /// with the pane in [`Core::reap_pane`].
+    touch_last_emit: HashMap<u64, Instant>,
+    /// Failed `human_touch` emits (AC4-ERR): counted, never raised to the
+    /// steering path. An inflated autonomy rate is the dangerous silent
+    /// failure, so the count exists even before the scoreboard reads it.
+    touch_emit_failures: Arc<AtomicU64>,
+}
+
+/// At most one `human_touch(inject)` per pane per window: the first keystroke
+/// of a burst means "operator started steering this pane".
+/// ponytail: fixed 5s window; tune only if real bursts split.
+const TOUCH_COALESCE_WINDOW: Duration = Duration::from_secs(5);
+
+/// Whether an inject emit should fire now for `pane` (recording `now`), or be
+/// coalesced into the burst whose start time is already stored.
+fn touch_coalesce(last: &mut HashMap<u64, Instant>, pane: u64, now: Instant) -> bool {
+    match last.entry(pane) {
+        std::collections::hash_map::Entry::Occupied(mut e) => {
+            // saturating: a `now` behind the stored instant (clock quirks
+            // under virtualization) coalesces instead of panicking.
+            if now.saturating_duration_since(*e.get()) < TOUCH_COALESCE_WINDOW {
+                false
+            } else {
+                e.insert(now);
+                true
+            }
+        }
+        std::collections::hash_map::Entry::Vacant(v) => {
+            v.insert(now);
+            true
+        }
+    }
+}
+
+/// Loose `<prefix>-<hex4..8>` node-id shape check for the cwd-basename
+/// fallback, so a plain shell squad (basename "footnote") is never
+/// mis-attributed as a graph node.
+fn node_id_shaped(s: &str) -> bool {
+    match s.split_once('-') {
+        Some((prefix, hex)) => {
+            !prefix.is_empty()
+                && prefix
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && (4..=8).contains(&hex.len())
+                && hex
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        }
+        None => false,
+    }
 }
 
 /// True while `pid` is alive (or unprobeable - erring toward "held" keeps a
@@ -778,6 +833,7 @@ impl Core {
         // held claim never blocks the close cascade.
         self.claims.remove(&pid);
         self.claim_eligible.remove(&pid);
+        self.touch_last_emit.remove(&pid);
         if let Some(tx) = self.pane_watch.remove(&pid) {
             // Last observable tick before the sender drops: a watcher that
             // reads it sees `exited`; one blocked in `changed()` sees the
@@ -1602,6 +1658,95 @@ impl Core {
         if let Some(entry) = self.panes.get(&pane) {
             let _ = entry.pty.write_input(keystroke);
         }
+        // W4 touch telemetry: one submitted answer = one steering action (a
+        // bounced answer returned above and never emits).
+        self.touch(pane, "answer", false);
+    }
+
+    /// (graph node id, squad cwd) for a `human_touch` emit on `pane`. Node id:
+    /// the pane's `FNO_NODE` provenance (x-84a8); fallback, the owning squad's
+    /// cwd basename when it is node-id shaped (the worktree-per-node
+    /// convention). Neither -> None, and the event carries resolution=failed
+    /// rather than being dropped (AC4-FR).
+    fn pane_touch_provenance(&self, pane: u64) -> (Option<String>, Option<String>) {
+        let cwd = self
+            .session
+            .find_pane(pane)
+            .and_then(|(sid, _)| self.session.squad(sid))
+            .map(|sq| sq.canonical_cwd.clone());
+        let node = self
+            .panes
+            .get(&pane)
+            .and_then(|e| e.node.clone())
+            .or_else(|| {
+                cwd.as_deref()
+                    .and_then(|c| Path::new(c).file_name())
+                    .and_then(|b| b.to_str())
+                    .filter(|b| node_id_shaped(b))
+                    .map(str::to_owned)
+            });
+        (node, cwd)
+    }
+
+    /// Emit `human_touch` for one steering action on `pane` (W4 touch
+    /// telemetry). `coalesced` applies the per-pane window (inject bursts);
+    /// answer submits are one emit per action. The write rides the Python
+    /// `type` envelope via a fire-and-forget `fno event emit` shell-out (the
+    /// x-4e2d digest idiom) - no Rust-side `kind`, so the three-places rule
+    /// never applies. The shell-out runs in the squad's cwd so the event
+    /// lands in that project's events.jsonl. A failure bumps
+    /// `touch_emit_failures` and never touches the steering path (AC4-ERR).
+    fn touch(&mut self, pane: u64, source: &'static str, coalesced: bool) {
+        if coalesced && !touch_coalesce(&mut self.touch_last_emit, pane, Instant::now()) {
+            return;
+        }
+        // cfg!(test): in unit tests current_exe is the test binary, and
+        // exec'ing it with event-emit args would re-enter the test harness.
+        // FNO_TOUCH_EMIT=0 is the operator kill switch.
+        if cfg!(test) || std::env::var_os("FNO_TOUCH_EMIT").is_some_and(|v| v == "0") {
+            return;
+        }
+        let (node, cwd) = self.pane_touch_provenance(pane);
+        let failures = Arc::clone(&self.touch_emit_failures);
+        tokio::spawn(async move {
+            let resolution = if node.is_some() { "ok" } else { "failed" };
+            let data = serde_json::json!({
+                "graph_node_id": node,
+                "source": source,
+                "resolution": resolution,
+            })
+            .to_string();
+            const TOUCH_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
+            let mut cmd = tokio::process::Command::new(fno_bin());
+            cmd.args([
+                "event",
+                "emit",
+                "--type",
+                "human_touch",
+                "--source",
+                "daemon",
+                "--data",
+                &data,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+            if let Some(dir) = cwd {
+                cmd.current_dir(dir);
+            }
+            let ok = matches!(
+                tokio::time::timeout(TOUCH_EMIT_TIMEOUT, cmd.status()).await,
+                Ok(Ok(s)) if s.success()
+            );
+            if !ok {
+                // Counted AND visible (never swallowed): a 100%-failing
+                // emitter silently inflates the autonomy rate, so each miss
+                // logs to the server's stderr alongside the running total.
+                let n = failures.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("fno mux: human_touch({source}) emit failed ({n} this session)");
+            }
+        });
     }
 
     /// Live mode changes in a focused pane (vim toggling mouse reporting
@@ -2021,6 +2166,10 @@ impl Core {
                             }
                         }
                     }
+                    // W4 touch telemetry: a keystroke past the relay guard is
+                    // a human steering this pane; PaneSend (script API) and
+                    // relay writes never reach here.
+                    self.touch(focus, "inject", true);
                 }
                 Flow::Continue
             }
@@ -2455,6 +2604,8 @@ async fn serve(
         backlog: Vec::new(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
+        touch_last_emit: HashMap::new(),
+        touch_emit_failures: Arc::new(AtomicU64::new(0)),
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -3409,6 +3560,87 @@ mod tests {
         assert_eq!(rerun_allowed(&foreign_only, "main", 5), Ok(()));
     }
 
+    // -- W4 touch telemetry (human_touch emitters) -------------------------
+
+    #[test]
+    fn touch_coalesce_window() {
+        let mut last = HashMap::new();
+        let t0 = Instant::now();
+        assert!(
+            touch_coalesce(&mut last, 7, t0),
+            "first keystroke of a burst emits"
+        );
+        assert!(
+            !touch_coalesce(&mut last, 7, t0 + Duration::from_secs(3)),
+            "a keystroke inside the window coalesces into the burst"
+        );
+        assert!(
+            touch_coalesce(&mut last, 7, t0 + Duration::from_secs(6)),
+            "past the window a new burst emits"
+        );
+    }
+
+    #[test]
+    fn touch_coalesce_per_pane() {
+        let mut last = HashMap::new();
+        let t0 = Instant::now();
+        assert!(touch_coalesce(&mut last, 1, t0));
+        assert!(
+            touch_coalesce(&mut last, 2, t0),
+            "panes coalesce independently"
+        );
+    }
+
+    #[test]
+    fn pane_touch_provenance_cwd_fallback_and_none() {
+        let mut core = empty_core();
+        // No PaneEntry exists for either pane (no FNO_NODE provenance), so
+        // the squad-cwd-basename fallback decides the node id.
+        core.session.add_squad(
+            1,
+            "/tmp/worktrees/x-aff6".into(),
+            Tab {
+                id: 1,
+                root: Node::Leaf(7),
+                focus: 7,
+            },
+        );
+        core.session.add_squad(
+            2,
+            "/tmp/worktrees/footnote".into(),
+            Tab {
+                id: 2,
+                root: Node::Leaf(8),
+                focus: 8,
+            },
+        );
+        let (node, cwd) = core.pane_touch_provenance(7);
+        assert_eq!(node.as_deref(), Some("x-aff6"));
+        assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/x-aff6"));
+        // Unshaped basename: no node (the emit carries resolution=failed,
+        // never a drop - AC4-FR), but the squad cwd still routes the event.
+        let (node, cwd) = core.pane_touch_provenance(8);
+        assert!(node.is_none());
+        assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/footnote"));
+        // Unknown pane: (None, None).
+        assert_eq!(core.pane_touch_provenance(99), (None, None));
+    }
+
+    #[test]
+    fn node_id_shape_check() {
+        assert!(node_id_shaped("x-aff6"));
+        assert!(node_id_shaped("ab-1234abcd"));
+        assert!(
+            !node_id_shaped("footnote"),
+            "a plain squad basename is never a node id"
+        );
+        assert!(!node_id_shaped("feature-x-aff6"));
+        assert!(!node_id_shaped("x-123"), "hex run too short");
+        assert!(!node_id_shaped("x-AFF6"), "node ids are lowercase hex");
+        assert!(!node_id_shaped("x-aff6789012"), "hex run too long");
+        assert!(!node_id_shaped("-aff6"), "empty prefix");
+    }
+
     // -- Observer attach (x-6a14 web read-only bridge) --------------------------
 
     fn empty_core() -> Core {
@@ -3432,6 +3664,8 @@ mod tests {
             backlog: Vec::new(),
             claim_eligible: HashSet::new(),
             claims: HashMap::new(),
+            touch_last_emit: HashMap::new(),
+            touch_emit_failures: Arc::new(AtomicU64::new(0)),
         }
     }
 

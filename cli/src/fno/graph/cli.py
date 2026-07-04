@@ -1329,6 +1329,21 @@ def cmd_update(
         "--remove-pr",
         help="Remove a PR entry from additional_prs by number. No-op if absent. The primary pr_number is unaffected (use --pr-number to change that).",
     ),
+    caused_by: Optional[str] = typer.Option(
+        None,
+        "--caused-by",
+        help="Node id this node was created to address (causal link, W4). Pass 'null' to clear.",
+    ),
+    fixes_pr: Optional[int] = typer.Option(
+        None,
+        "--fixes-pr",
+        help="PR number this node fixes (causal link, W4). Pass 0 to clear.",
+    ),
+    reverted: Optional[bool] = typer.Option(
+        None,
+        "--reverted/--no-reverted",
+        help="Mark this node's ship as reverted (manual fallback for reconcile's best-effort revert detection).",
+    ),
 ) -> None:
     from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
@@ -1529,6 +1544,26 @@ def cmd_update(
                 item for item in existing_list
                 if not (isinstance(item, dict) and item.get("number") == int(remove_pr))
             ]
+        if caused_by is not None:
+            if caused_by.lower() == "null":
+                node["caused_by"] = None
+            else:
+                origin = _find_node(entries, caused_by)
+                if origin is None:
+                    typer.echo(f"Error: --caused-by node {caused_by} not found", err=True)
+                    raise typer.Exit(code=1)
+                if origin["id"] == node["id"]:
+                    typer.echo("Error: --caused-by cannot reference the node itself", err=True)
+                    raise typer.Exit(code=1)
+                # Store the resolved id, not the raw input (which may be a
+                # prefix/bare-hex form _find_node normalized).
+                # ponytail: self-reference check only; add a cycle walk if a
+                # consumer ever traverses caused_by chains.
+                node["caused_by"] = origin["id"]
+        if fixes_pr is not None:
+            node["fixes_pr"] = None if fixes_pr == 0 else int(fixes_pr)
+        if reverted is not None:
+            node["reverted"] = reverted
         if parent is not None:
             if parent.lower() == "null":
                 node["parent"] = None
@@ -4279,6 +4314,7 @@ def cmd_reconcile(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
+        emit_human_touch_for_record,
         emit_session_satisfied_for_record,
         scan_merge_drift,
         write_retro_sentinel,
@@ -4393,6 +4429,11 @@ def cmd_reconcile(
             # (the defensive stop-hook probe is the backstop).
             emit_session_satisfied_for_record(record)
 
+            # W4 touch telemetry: an out-of-band merge is a human steering
+            # action no loop performed. Once per node - reconcile only ever
+            # closes a node once (AC4-EDGE).
+            emit_human_touch_for_record(record)
+
             closed.append({
                 "node_id": record.node_id,
                 "pr_number": record.pr_number,
@@ -4471,6 +4512,41 @@ def cmd_reconcile(
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
 
+    # W4 causal links: best-effort revert stamp, full sweep only. A merged
+    # "Revert ..." PR referencing a PR carried by a graph node flips that
+    # node's `reverted` flag so survival math stops counting it. Strictly
+    # non-fatal; misses fall back to `fno backlog update --reverted`.
+    reverted_stamped: list[dict] = []
+    if node is None:
+        try:
+            from fno.graph._reconcile import (
+                ReconcileError,
+                detect_reverted_nodes,
+                fetch_recent_merged_prs,
+            )
+
+            try:
+                merged_prs = fetch_recent_merged_prs()
+            except ReconcileError:
+                # gh unauthed/offline: reconcile auto-fires on SessionStart,
+                # so a degraded gh must stay quiet (manual --reverted remains).
+                merged_prs = []
+            pairs = detect_reverted_nodes(merged_prs, entries)
+            if pairs and not dry_run:
+                def _stamp_reverts(entries2):
+                    for nid, _rpr in pairs:
+                        n = _find_node(entries2, nid)
+                        if n is not None and not n.get("reverted"):
+                            n["reverted"] = True
+                    return entries2
+
+                locked_mutate_graph(_graph_path(), _stamp_reverts)
+            reverted_stamped = [
+                {"node_id": nid, "revert_pr": rpr} for nid, rpr in pairs
+            ]
+        except Exception as exc:  # noqa: BLE001 - never abort the sweep
+            typer.echo(f"warning: revert detection skipped: {exc}", err=True)
+
     if json_out:
         payload = {
             "dry_run": dry_run,
@@ -4487,6 +4563,8 @@ def cmd_reconcile(
             # Auto-closed container epics (cascade + self-heal sweep); on --dry-run
             # this is the simulated preview of what a real run would heal (codex P3).
             "healed_epics": healed_epics,
+            # Nodes whose ship a merged revert PR names (stamped unless --dry-run).
+            "reverted": reverted_stamped,
             "failures": [
                 {"node_id": r.node_id, "pr_number": r.pr_number, "error": r.error}
                 for r in failures
@@ -4499,7 +4577,13 @@ def cmd_reconcile(
             raise typer.Exit(code=4)
         return
 
-    if not closeable and not failures and not strandable and not healed_epics:
+    if (
+        not closeable
+        and not failures
+        and not strandable
+        and not healed_epics
+        and not reverted_stamped
+    ):
         typer.echo("No merged-PR drift found. Backlog is in sync.")
         return
 
@@ -4524,6 +4608,12 @@ def cmd_reconcile(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
                 f"(all children complete): " + ", ".join(healed_epics)
             )
+
+    if reverted_stamped:
+        verb = "Would stamp" if dry_run else "Stamped"
+        typer.echo(f"{verb} {len(reverted_stamped)} node(s) reverted:")
+        for r in reverted_stamped:
+            typer.echo(f"  {r['node_id']}  revert PR #{r['revert_pr']}")
 
     if failures:
         typer.echo(f"{len(failures)} node(s) could not be resolved:", err=True)

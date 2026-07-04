@@ -56,6 +56,13 @@ def _make_graph(path: Path, entries: list[dict]) -> None:
     path.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
 
 
+@pytest.fixture(autouse=True)
+def _no_revert_fetch(monkeypatch):
+    """Keep reconcile hermetic: never shell `gh pr list` from tests. W4 revert
+    detection has its own unit tests (test_causal_fields.py)."""
+    monkeypatch.setattr(rec, "fetch_recent_merged_prs", lambda **kw: [])
+
+
 def _stub_query(state_by_number: dict[int, str]):
     """Return a query stub mapping pr_number -> state string."""
 

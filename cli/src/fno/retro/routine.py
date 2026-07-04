@@ -78,6 +78,7 @@ def triage_pr(
     inbox_fn=None,
     carveout_root: Optional[Path] = None,
     carveouts_readonly: bool = False,
+    origin_node_id: Optional[str] = None,
 ) -> TriageReport:
     warnings: list[str] = []
 
@@ -143,6 +144,33 @@ def triage_pr(
     existing_keys = existing_keys_from_nodes(existing_nodes or [])
     kept, skipped = dedup_candidates(cited, existing_keys=existing_keys)
 
+    # Auto caused_by (W4 causal links, AC4-UI): a follow-up filed from this
+    # PR's findings points back at the node that shipped the PR. Prefer the
+    # trigger sentinel's node_id; fall back to the graph node carrying this
+    # pr_number - repo-scoped when ``repo`` is known, because the graph is
+    # global and bare PR numbers collide across projects. Unresolvable ->
+    # nodes land without the link (manual `backlog update --caused-by`
+    # remains).
+    caused_by = origin_node_id
+    # pr_number 0 is the synthetic-path placeholder (`int(... or 0)` upstream);
+    # it must never match a node. Fail closed without repo context: the graph
+    # is global, so a bare-number match against it can cross projects. And an
+    # ambiguous same-repo match (two nodes on one number) links nothing - the
+    # same exactly-one-or-nothing rule as revert detection.
+    if not caused_by and repo and isinstance(pr_number, int) and pr_number > 0:
+        from fno.graph._reconcile import repo_slug_from_url
+
+        def _same_repo(n: dict) -> bool:
+            slug = repo_slug_from_url(n.get("pr_url"))
+            return slug is not None and slug.lower() == repo.lower()
+
+        hits = {
+            n.get("id")
+            for n in existing_nodes or []
+            if n.get("pr_number") == pr_number and _same_repo(n)
+        }
+        caused_by = hits.pop() if len(hits) == 1 else None
+
     results = land_candidates(
         kept,
         mode=mode,
@@ -153,6 +181,7 @@ def triage_pr(
         cwd=cwd,
         create_fn=create_fn,
         inbox_fn=inbox_fn,
+        caused_by=caused_by,
     )
 
     return TriageReport(

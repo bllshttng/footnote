@@ -198,6 +198,108 @@ def query_pr_merge_state(
     )
 
 
+# W4 causal links: best-effort revert detection. A GitHub revert PR titles
+# itself `Revert "..."` and auto-writes `Reverts owner/repo#N` in the body;
+# a hand-written one usually keeps the git subject. Misses are a documented
+# limitation with the manual `fno backlog update --reverted` fallback.
+_REVERT_TITLE_RE = re.compile(r"^\s*Revert\b")
+_REVERT_BODY_PR_RE = re.compile(r"\breverts\s+(?:([\w.-]+/[\w.-]+))?#(\d+)", re.IGNORECASE)
+
+
+def fetch_recent_merged_prs(
+    *,
+    repo: Optional[str] = None,
+    cwd: Optional[str] = None,
+    limit: int = 30,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    timeout_s: float = GH_QUERY_TIMEOUT_S,
+) -> list[dict]:
+    """Recently merged PRs (number/title/body) for revert detection.
+
+    Returns ``[]`` when gh is absent (reconcile auto-fires on SessionStart;
+    a gh-less machine must stay quiet). Raises :class:`ReconcileError` on a
+    real gh failure so the caller can degrade with one warning.
+    """
+    if _gh_executable() is None:
+        return []
+    cmd = ["gh", "pr", "list", "--state", "merged", "--limit", str(limit)]
+    if repo:
+        cmd += ["--repo", repo]
+    cmd += ["--json", "number,title,body,url"]
+    try:
+        result = runner(
+            cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ReconcileError(f"gh pr list failed: {exc}") from exc
+    if result.returncode != 0:
+        raise ReconcileError(
+            f"gh pr list failed (rc={result.returncode}): {(result.stderr or '').strip()}"
+        )
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
+    return rows if isinstance(rows, list) else []
+
+
+def detect_reverted_nodes(
+    merged_prs: list[dict], entries: list[dict]
+) -> list[tuple[str, int]]:
+    """(node_id, revert_pr_number) pairs to stamp ``reverted: true``.
+
+    A merged PR whose title starts with ``Revert`` and whose body references
+    a PR number carried by a not-yet-reverted graph node names that node's
+    ship as reverted. Pure (no I/O) so tests need no gh.
+
+    Matching is REPO-SCOPED: the graph is global across projects, so bare PR
+    numbers collide. A candidate node must carry a ``pr_url`` in the SAME
+    repo as the revert PR's own ``url``, a body qualifier
+    (``Reverts other/repo#N``) must match that repo, and an ambiguous match
+    (two same-repo nodes on one number) stamps nothing - the same
+    ambiguity-resolves-to-nothing rule as the W1 backfill.
+    """
+    # pr_number -> [(entry, that ref's repo slug)]; refs without a parseable
+    # pr_url are indexed with slug None and never match (conservative).
+    by_pr: dict[int, list[tuple[dict, Optional[str]]]] = {}
+    for e in entries:
+        for num, url in node_pr_refs(e):
+            by_pr.setdefault(num, []).append((e, repo_slug_from_url(url)))
+
+    out: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for pr in merged_prs:
+        number = pr.get("number")
+        if not isinstance(number, int) or number <= 0:
+            continue
+        if not _REVERT_TITLE_RE.match(str(pr.get("title") or "")):
+            continue
+        revert_slug = repo_slug_from_url(pr.get("url"))
+        if revert_slug is None:
+            # No repo context for the revert PR itself: refuse to match a
+            # bare number against the multi-project graph.
+            continue
+        for m in _REVERT_BODY_PR_RE.finditer(str(pr.get("body") or "")):
+            qualifier, target = m.group(1), int(m.group(2))
+            if qualifier and qualifier.lower() != revert_slug.lower():
+                continue  # explicit cross-repo reference: not this repo's PR
+            matches = [
+                e
+                for e, slug in by_pr.get(target, [])
+                if slug is not None
+                and slug.lower() == revert_slug.lower()
+                and not e.get("reverted")
+            ]
+            hit_ids = {e.get("id") for e in matches}
+            if len(hit_ids) != 1:
+                continue  # zero or ambiguous: stamp nothing
+            nid = hit_ids.pop()
+            if isinstance(nid, str) and nid not in seen:
+                seen.add(nid)
+                out.append((nid, number))
+    return out
+
+
 def scan_merge_drift(
     entries: list[dict],
     *,
@@ -440,3 +542,39 @@ def emit_session_satisfied_for_record(
         )
         return None
     return events_path
+
+
+def emit_human_touch_for_record(record: MergeDriftRecord) -> Optional[Path]:
+    """Emit ``human_touch{source:merge}`` for a node reconcile just closed (W4).
+
+    An out-of-band merge (web merge button, bare ``gh pr merge``) is a human
+    steering action no loop performed. Reconcile closes a node exactly once (a
+    closed node is no longer scanned), so this fires once per node with no
+    separate idempotence ledger (AC4-EDGE). Best-effort: a failure prints a
+    diagnostic and never aborts the close.
+    """
+    try:
+        from fno.events import _build, append_event
+
+        event = _build(
+            "human_touch",
+            "backlog",
+            {
+                "graph_node_id": record.node_id,
+                "source": "merge",
+                "resolution": "ok",
+            },
+        )
+        if isinstance(record.cwd, str) and record.cwd:
+            events_path = Path(record.cwd) / ".fno" / "events.jsonl"
+            append_event(event, events_path=events_path)
+            return events_path
+        append_event(event)
+        return None
+    except Exception as exc:  # best-effort: never abort the close on emit failure
+        print(
+            f"reconcile: human_touch emit failed for {record.node_id}: "
+            f"{type(exc).__name__}: {exc}; merge close unaffected",
+            file=sys.stderr,
+        )
+        return None

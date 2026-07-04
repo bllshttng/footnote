@@ -121,6 +121,14 @@ class Entry(BaseModel):
     # so old graph.json entries parse without migration.
     additional_prs: list[dict] = Field(default_factory=list)
     merge_status: Optional[str] = None
+    # Causal links (W4 telemetry, x-f063): survival math needs a fix node to
+    # point back at what it fixes and a reverted ship to stop counting as a
+    # survival. Writers: `backlog update --caused-by/--fixes-pr/--reverted`
+    # (manual), retro-harvest node creation (auto caused_by), reconcile's
+    # best-effort revert stamp.
+    caused_by: Optional[str] = None
+    fixes_pr: Optional[int] = None
+    reverted: bool = False
     artifact_url: Optional[str] = None
     completion_note: Optional[str] = None
     created_at: Optional[str] = None

@@ -86,3 +86,8 @@
 {"expect":"invalid","reason":"recovery_skipped missing reason","event":{"ts":"2026-06-29T20:11:32Z","type":"recovery_skipped","source":"daemon","data":{"short_id":"b78039cc"}}}
 {"expect":"valid","reason":"recovery_capped basic","event":{"ts":"2026-06-29T20:11:32Z","type":"recovery_capped","source":"daemon","data":{"short_id":"b78039cc","nudges":3}}}
 {"expect":"invalid","reason":"recovery_capped missing nudges","event":{"ts":"2026-06-29T20:11:32Z","type":"recovery_capped","source":"daemon","data":{"short_id":"b78039cc"}}}
+{"expect":"valid","reason":"human_touch inject with node","event":{"ts":"2026-07-04T00:00:00Z","type":"human_touch","source":"daemon","data":{"graph_node_id":"x-aaaa","source":"inject","resolution":"ok"}}}
+{"expect":"valid","reason":"human_touch inject null node (resolution failed, counted not dropped)","event":{"ts":"2026-07-04T00:00:00Z","type":"human_touch","source":"daemon","data":{"graph_node_id":null,"source":"inject","resolution":"failed"}}}
+{"expect":"valid","reason":"human_touch merge from reconcile","event":{"ts":"2026-07-04T00:00:00Z","type":"human_touch","source":"backlog","data":{"graph_node_id":"x-bbbb","source":"merge","resolution":"ok"}}}
+{"expect":"invalid","reason":"human_touch missing resolution","event":{"ts":"2026-07-04T00:00:00Z","type":"human_touch","source":"daemon","data":{"graph_node_id":"x-aaaa","source":"inject"}}}
+{"expect":"invalid","reason":"human_touch missing graph_node_id (required-nullable: must be present, may be null)","event":{"ts":"2026-07-04T00:00:00Z","type":"human_touch","source":"daemon","data":{"source":"inject","resolution":"ok"}}}
