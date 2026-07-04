@@ -62,22 +62,31 @@ def is_expired(state: PauseState, *, now: Optional[int] = None) -> bool:
     return (now if now is not None else _now_ms()) >= state.expires_at
 
 
-def read_pause_state() -> Optional[PauseState]:
-    """Read the raw sentinel from disk, ignoring TTL expiry.
+class SentinelCorrupted(Exception):
+    """Raised by :func:`read_pause_state` when the sentinel exists but is unparseable."""
 
-    Returns None if absent or corrupted (logged) - callers that need to fail
-    CLOSED on corruption (:func:`loops_paused`, ``status``) check
-    ``paths.loops_paused_json().is_file()`` themselves first to tell "absent"
-    apart from "present but unreadable".
+
+def read_pause_state() -> Optional[PauseState]:
+    """Read the sentinel from disk in one pass (no check-then-read race), ignoring TTL expiry.
+
+    Returns None only when the sentinel is genuinely absent. Raises
+    :class:`SentinelCorrupted` (logged) when it exists but can't be parsed -
+    callers that must fail CLOSED on corruption (:func:`loops_paused`,
+    ``status``) catch that and treat it as paused.
     """
     p = paths.loops_paused_json()
-    if not p.is_file():
-        return None
     try:
-        return PauseState.model_validate(json.loads(p.read_text(encoding="utf-8")))
-    except (OSError, ValueError) as exc:
-        _LOG.warning("loops-paused sentinel at %s is unreadable: %s", p, exc)
+        raw = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
+    except OSError as exc:
+        _LOG.warning("loops-paused sentinel at %s could not be read: %s", p, exc)
+        raise SentinelCorrupted(str(p)) from exc
+    try:
+        return PauseState.model_validate(json.loads(raw))
+    except ValueError as exc:
+        _LOG.warning("loops-paused sentinel at %s is unreadable: %s", p, exc)
+        raise SentinelCorrupted(str(p)) from exc
 
 
 def loops_paused() -> bool:
@@ -88,13 +97,11 @@ def loops_paused() -> bool:
     the worst) rather than letting every loop silently resume - this
     primitive exists to be a safety rail, not a best-effort convenience.
     """
-    p = paths.loops_paused_json()
-    if not p.is_file():
-        return False
-    state = read_pause_state()
-    if state is None:
-        return True  # present but unreadable: fail closed
-    return not is_expired(state)
+    try:
+        state = read_pause_state()
+    except SentinelCorrupted:
+        return True
+    return state is not None and not is_expired(state)
 
 
 def pause_all(*, who: str, ttl_ms: Optional[int] = None) -> PauseState:
@@ -105,17 +112,17 @@ def pause_all(*, who: str, ttl_ms: Optional[int] = None) -> PauseState:
     p = paths.loops_paused_json()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(state.model_dump_json())
+    tmp.write_text(state.model_dump_json(), encoding="utf-8")
     tmp.replace(p)
     return state
 
 
 def resume_all() -> bool:
     """Remove the pause-all sentinel. Returns True if one was present."""
-    p = paths.loops_paused_json()
-    if not p.is_file():
+    try:
+        paths.loops_paused_json().unlink()
+    except FileNotFoundError:
         return False
-    p.unlink()
     return True
 
 
@@ -139,7 +146,7 @@ def _last_tick(name: str) -> Optional[str]:
     for event in events:
         if event.get("type") != "loop_tick":
             continue
-        if event.get("data", {}).get("name") != name:
+        if (event.get("data") or {}).get("name") != name:
             continue
         ts = event.get("ts")
         if ts and (last is None or ts > last):
@@ -185,13 +192,13 @@ def cmd_resume_all() -> None:
 @loops_app.command("status")
 def cmd_status() -> None:
     """Show the current pause-all sentinel, including an expired one."""
-    p = paths.loops_paused_json()
-    if not p.is_file():
-        typer.echo("not paused")
+    try:
+        state = read_pause_state()
+    except SentinelCorrupted as exc:
+        typer.echo(f"sentinel at {exc} is corrupted; failing closed (treated as paused) - investigate")
         return
-    state = read_pause_state()
     if state is None:
-        typer.echo(f"sentinel at {p} is corrupted; failing closed (treated as paused) - investigate")
+        typer.echo("not paused")
         return
     if is_expired(state):
         typer.echo(f"expired (was paused by {state.who} at {state.paused_at})")

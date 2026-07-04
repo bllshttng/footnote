@@ -67,6 +67,17 @@ def test_expired_ttl_reads_as_not_paused(isolated_home):
     assert loops_paused() is False
 
 
+def test_read_pause_state_raises_on_corruption(isolated_home):
+    from fno import paths
+    from fno.loops import SentinelCorrupted, read_pause_state
+
+    p = paths.loops_paused_json()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("not valid json{{{", encoding="utf-8")
+    with pytest.raises(SentinelCorrupted):
+        read_pause_state()
+
+
 def test_corrupted_sentinel_fails_closed(isolated_home):
     """A present-but-unparseable sentinel must count as paused, not resumed.
 
@@ -156,3 +167,32 @@ def test_cli_ls_lists_configured_loop_with_level(isolated_home, tmp_path, monkey
     assert "my-loop" in result.output
     assert "assisted" in result.output
     assert "never" in result.output  # no loop_tick events yet
+
+
+def test_last_tick_survives_null_data_event(isolated_home, tmp_path, monkeypatch):
+    """A ``loop_tick`` event with ``"data": null`` must not crash the lookup.
+
+    ``event.get("data", {})`` only supplies the {} default when the key is
+    absent - an explicit ``null`` value passes through as None and blows up
+    the next ``.get("name")`` call.
+    """
+    import json as json_mod
+
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    from fno import paths as paths_mod
+
+    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
+
+    events_path = tmp_path / ".fno" / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        json_mod.dumps({"ts": "2026-01-01T00:00:00Z", "type": "loop_tick", "data": None}) + "\n",
+        encoding="utf-8",
+    )
+
+    from fno.loops import _last_tick
+
+    try:
+        assert _last_tick("my-loop") is None
+    finally:
+        paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
