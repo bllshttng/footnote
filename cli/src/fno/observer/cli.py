@@ -125,7 +125,14 @@ def _read_plan_text(item: dict, node: Optional[dict], gh_runner) -> Optional[str
             pass
     pr_number = (node or {}).get("pr_number")
     if pr_number:
-        rc, out, _err = gh_runner(["pr", "diff", str(pr_number)])
+        # A node's PR can live in another repo (the global graph spans projects),
+        # so pin --repo from its pr_url; without it gh resolves the current
+        # checkout and fetches the wrong PR or fails a valid item (codex P2).
+        args = ["pr", "diff", str(pr_number)]
+        repo = _repo_from_pr_url((node or {}).get("pr_url"))
+        if repo:
+            args += ["--repo", repo]
+        rc, out, _err = gh_runner(args)
         if rc == 0 and out.strip():
             return out
     return None
@@ -218,6 +225,7 @@ def _emit_finding(
     cost_usd: float,
     skill_ref: Optional[str],
     events_paths: list[Path],
+    tool_fault: bool = False,
 ) -> None:
     from fno.events import _build, append_event
 
@@ -233,6 +241,8 @@ def _emit_finding(
     }
     if skill_ref is not None:
         data["skill_ref"] = skill_ref
+    if tool_fault:
+        data["tool_fault"] = True
     event = _build("skill_eval_finding", "observer", data)
     for p in events_paths:
         try:
@@ -241,16 +251,24 @@ def _emit_finding(
             print(f"observer: finding emit to {p} failed: {exc}", file=sys.stderr)
 
 
-def _emit_run_complete(summary: dict, events_paths: list[Path]) -> None:
+def _emit_run_complete(summary: dict, events_paths: list[Path]) -> bool:
+    """Emit the terminal run event. Returns whether the CANONICAL (first, project)
+    log append succeeded - the caller fails the command if not, so the CLI never
+    reports ``ok`` while the machine contract has no terminal event (codex P2).
+    The global log (later paths) stays best-effort."""
     from fno.events import _build, append_event
 
     data = {k: v for k, v in summary.items() if k != "state"}
     event = _build("skill_eval_run_complete", "observer", data)
-    for p in events_paths:
+    canonical_ok = False
+    for i, p in enumerate(events_paths):
         try:
             append_event(event, p)
+            if i == 0:
+                canonical_ok = True
         except Exception as exc:
             print(f"observer: run_complete emit to {p} failed: {exc}", file=sys.stderr)
+    return canonical_ok
 
 
 def _write_digest(summary: dict, skill: str, *, mode: str) -> Path:
@@ -361,7 +379,13 @@ def sweep(
         scored_count=scored_count,
     )
     summary["cost_usd"] = 0.0  # sweep is a read-only fold
-    _emit_run_complete(summary, events_paths)
+    if not _emit_run_complete(summary, events_paths):
+        typer.echo(
+            "error: could not write the canonical skill_eval_run_complete event; "
+            "the sweep is not recorded (the digest alone is not the machine contract).",
+            err=True,
+        )
+        raise typer.Exit(5)
     digest = _write_digest(summary, skill, mode="sweep")
 
     state = "ok" if scored_count == len(items) else "partial"
@@ -609,11 +633,27 @@ def _replay(
                 err=True,
             )
 
+        # DETECTIVE scan FIRST, before any emit (codex P1): an isolation violation
+        # is the ONE hard failure and must VOID the whole replay. Emitting findings
+        # or a terminal skill_eval_run_complete before the scan would leave x-0ca7
+        # a "successful" event for a run whose results are tainted by a real-state
+        # leak. A violation here emits nothing and exits 3.
+        if _run_worktree:
+            ids, _tp = isolation.collect_eval_session_ids(scratch)
+            iso = isolation.check_isolation(ids, isolation.default_real_state_paths(repo_root))
+            if iso.verdict == "violated":
+                typer.echo(isolation.format_violation_report(iso), err=True)
+                raise typer.Exit(3)
+
         if rc != 0 or not (out or "").strip():
+            # A replay TOOL fault (spawn crash/timeout/unparseable), tagged
+            # tool_fault=True so downstream never counts it as a skill-quality
+            # structural fail (AC2-ERR: never conflated).
             _emit_finding(
                 run_id=run_id, item=item, dimension="structural_validity", verdict="fail",
                 evidence=f"replay spawn tool-fault rc={rc}: {(err or '')[:200]}",
                 cost_usd=cost_usd, skill_ref=skill_ref, events_paths=events_paths,
+                tool_fault=True,
             )
             typer.echo(f"tool-fault: replay spawn for {corpus_item} rc={rc}; emitted tool-fault finding.")
             result_state = "tool-fault"
@@ -640,18 +680,15 @@ def _replay(
             )
             summary["cost_usd"] = cost_usd
             summary["skill_ref"] = skill_ref
-            _emit_run_complete(summary, events_paths)
+            if not _emit_run_complete(summary, events_paths):
+                typer.echo(
+                    "error: could not write the canonical skill_eval_run_complete event; "
+                    "the replay is not recorded (the digest alone is not the machine contract).",
+                    err=True,
+                )
+                raise typer.Exit(5)
             _write_digest(summary, skill, mode="replay")
             typer.echo(f"ok: replayed {corpus_item} under {skill_ref or 'HEAD'} (cost=${cost_usd:.2f})")
-
-        # DETECTIVE scan: the ONE hard failure. A replay session id in real
-        # ~/.fno/{ledger,graph}.json or the global events log = correctness bug.
-        if _run_worktree:
-            ids, _tp = isolation.collect_eval_session_ids(scratch)
-            iso = isolation.check_isolation(ids, isolation.default_real_state_paths(repo_root))
-            if iso.verdict == "violated":
-                typer.echo(isolation.format_violation_report(iso), err=True)
-                raise typer.Exit(3)
     finally:
         if _run_worktree:
             subprocess.run(["git", "worktree", "remove", "--force", str(scratch)], cwd=repo_root, capture_output=True, text=True)

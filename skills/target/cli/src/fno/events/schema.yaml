@@ -2125,6 +2125,9 @@ event_types:
         skill_ref:
           type: [string, "null"]
           description: "Git ref under test; absent/null for a retrospective sweep against HEAD, present for a replay batch against a candidate branch."
+        tool_fault:
+          type: boolean
+          description: "True when this finding records a REPLAY tool fault (spawn crash/timeout/unparseable output) rather than a skill-quality verdict. Downstream (x-0ca7) MUST exclude tool_fault=true findings from skill failure rankings (AC2-ERR: a tool fault is never conflated with a skill-quality fail). Absent = a genuine skill-quality verdict."
 
   - name: skill_eval_run_complete
     description: "Observer harness (x-57a5): the terminal event for one sweep or replay batch - the trigger x-0ca7's loop tick scans for. Never emitted when the corpus is insufficient (<10 attributable runs); an insufficient run reports its state on stdout only, with no terminal event, since there is nothing to complete."

@@ -196,11 +196,25 @@ def test_replay_spawn_failure_is_tool_fault(monkeypatch, tmp_path):
     assert exc.value.exit_code == 1
     findings = [e for e in _events(events_path) if e["type"] == "skill_eval_finding"]
     assert findings and "tool-fault" in findings[0]["data"]["evidence"]
+    # machine-readable marker: never conflated with a skill-quality fail (AC2-ERR)
+    assert findings[0]["data"].get("tool_fault") is True
+
+
+def test_sweep_fatal_when_canonical_event_unwritable(monkeypatch, tmp_path):
+    # codex P2: the CLI must not report ok/write a digest when the canonical
+    # skill_eval_run_complete could not be recorded.
+    items = [_item(f"s{i}", f"x-{i}", _good_plan(tmp_path, f"p{i}.md")) for i in range(10)]
+    _wire(monkeypatch, tmp_path, items)
+    monkeypatch.setattr(cli, "_emit_run_complete", lambda summary, paths: False)
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "blueprint"])
+    assert r.exit_code == 5
+    assert "not recorded" in r.output
+    assert not list((tmp_path / "reports").glob("*.md"))  # no digest on failure
 
 
 def test_replay_isolation_violation_hard_fails(monkeypatch, tmp_path):
     item = _item("s-rep", "x-rep", None)
-    _wire_replay(monkeypatch, tmp_path, item)
+    events_path = _wire_replay(monkeypatch, tmp_path, item)
     monkeypatch.setattr(cli, "_write_workdir_settings", lambda wd: None)
 
     class _P:
@@ -225,3 +239,6 @@ def test_replay_isolation_violation_hard_fails(monkeypatch, tmp_path):
             run_worktree=True,
         )
     assert exc.value.exit_code == 3  # the ONE non-advisory failure
+    # codex P1: the scan runs BEFORE any emit, so a violated run voids all output
+    assert not any(e["type"] == "skill_eval_run_complete" for e in _events(events_path))
+    assert not any(e["type"] == "skill_eval_finding" for e in _events(events_path))
