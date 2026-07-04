@@ -472,8 +472,11 @@ trap _init_release_lock EXIT
 # is unusable here because init's OWN parent (the target session) is legitimately
 # cwd'd in the worktree, so it would false-positive on every run and strand
 # genuinely-dead nodes. mtime measures actual work, not mere presence.
+# Validate the env override is a bare integer (seconds); a non-numeric value
+# like "15m" or "abc" must NOT reach the `(( now - newest < window ))` arithmetic
+# (it would abort under set -u). Fall through to config, then the 900s default.
 _ACTIVITY_WINDOW="${TARGET_CLAIM_ACTIVITY_WINDOW:-}"
-if [[ -z "$_ACTIVITY_WINDOW" ]]; then
+if ! [[ "$_ACTIVITY_WINDOW" =~ ^[0-9]+$ ]]; then
   _cfg_win="$(fno config get config.claims.activity_window 2>/dev/null || true)"
   if [[ "$_cfg_win" =~ ^[0-9]+$ ]]; then _ACTIVITY_WINDOW="$_cfg_win"; else _ACTIVITY_WINDOW=900; fi
   unset _cfg_win
@@ -556,9 +559,8 @@ if [[ -f "$STATE_FILE" ]]; then
     _CLAIM_STATE=$(fno claim status "$_STALE_CLAIM_KEY" --json 2>/dev/null \
       | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' || true)
     case "${_CLAIM_STATE:-}" in
-      ""|live|suspect)
-        : ;;  # preserve: protected claim or degrade-safe unknown
-      *)
+      free|stale|corrupted)
+        # Reap CANDIDATE, gated on activity below.
         if _worktree_has_fresh_activity "$REPO_ROOT" "$_ACTIVITY_WINDOW"; then
           # Contested: a live session owns this worktree despite a
           # $_CLAIM_STATE claim. Emit the BLOCKED contract and STOP - never
@@ -571,6 +573,10 @@ if [[ -f "$STATE_FILE" ]]; then
           exit 0
         fi
         _STALE_REASON="dead claim $_STALE_CLAIM_KEY ($_CLAIM_STATE); no fresh worktree activity" ;;
+      *)
+        # "" (probe error) | live | suspect | any UNKNOWN/future state -> preserve
+        # (degrade-safe: only a KNOWN not-live state is ever a reap candidate).
+        : ;;
     esac
   fi
   if [[ -n "$_STALE_REASON" ]]; then

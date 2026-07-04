@@ -56,16 +56,20 @@ make_repo() {
     printf '# isolated\n' > .fno/settings.yaml
     printf 'work\n' > work.txt
     git add work.txt && git commit -qm init
-    # A valid prior-session manifest (frontmatter + claim key, NO terminal
-    # status so the reap decision falls through to the claim/activity check).
+    # A valid prior-session manifest (NO terminal status so the reap decision
+    # falls through to the claim/activity check). The claim fields are APPENDED
+    # AFTER the closing frontmatter marker - init's real shape (x-ba4b), which
+    # the archive block reads by scanning the whole file, not the frontmatter.
     cat > .fno/target-state.md <<EOF
 ---
 session_id: prior-session-0000
 created_at: 2026-07-03T00:00:00Z
-target_claim_key: "node:${NODE}"
-target_claim_holder: "target-session:prior-session-0000"
 attended: false
 ---
+Immutable session manifest.
+target_claim_key: "node:${NODE}"
+target_claim_holder: "target-session:prior-session-0000"
+target_claim_ttl: "2h"
 EOF
   ) || fail "repo setup failed in $_dir"
 }

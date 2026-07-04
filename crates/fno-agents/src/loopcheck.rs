@@ -62,10 +62,6 @@ struct Manifest {
     budget_wall_clock_cap_minutes: Option<Result<u64, String>>,
     /// None = absent (unlimited). Some(Ok(v)) = valid cap. Some(Err(s)) = malformed raw value.
     budget_cost_cap_usd: Option<Result<f64, String>>,
-    /// Node-claim key + holder written by `fno target init` (x-ba4b). Used to
-    /// renew the lease on every loop-check so a respawned worker keeps its claim.
-    target_claim_key: Option<String>,
-    target_claim_holder: Option<String>,
 }
 
 impl Default for Manifest {
@@ -81,10 +77,23 @@ impl Default for Manifest {
             legacy_status: None,
             budget_wall_clock_cap_minutes: None, // None = absent = unlimited
             budget_cost_cap_usd: None,           // None = absent = unlimited
-            target_claim_key: None,
-            target_claim_holder: None,
         }
     }
+}
+
+/// Read a single `^<field>: value` line from ANYWHERE in the manifest, not just
+/// the frontmatter block. `fno target init` writes the immutable frontmatter
+/// first, then APPENDS the node-claim fields (`target_claim_key/holder/ttl`)
+/// after the closing `---`, so `parse_manifest` (frontmatter-bounded) never sees
+/// them. Renewal reads them here instead (x-ba4b). Surrounding quotes stripped.
+fn scan_manifest_field(content: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    content.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix(&prefix)
+            .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+            .filter(|v| !v.is_empty())
+    })
 }
 
 /// Parse frontmatter from a `---\n...\n---\n` block at the top of a file.
@@ -118,8 +127,6 @@ fn parse_manifest(content: &str) -> Option<Manifest> {
             match k {
                 "session_id" => m.session_id = Some(v.to_string()),
                 "created_at" => m.created_at = Some(v.to_string()),
-                "target_claim_key" => m.target_claim_key = Some(v.to_string()),
-                "target_claim_holder" => m.target_claim_holder = Some(v.to_string()),
                 "attended" => m.attended = v == "true",
                 "advisory" => m.advisory = v == "true",
                 "no_ship" => m.no_ship = v == "true",
@@ -1762,10 +1769,20 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // new pid) never loses its claim to TTL expiry. Best-effort and non-fatal:
     // renew only bumps expires_at when the on-disk holder still matches, so it
     // can never steal, and any failure is a warning that just shortens the lease
-    // (the loop never blocks on it). Root=None routes node:<id> to the global
-    // claims root inside renew.
-    if let (Some(key), Some(holder)) = (&manifest.target_claim_key, &manifest.target_claim_holder) {
-        match crate::claims::renew(key, holder, None) {
+    // (the loop never blocks on it). The claim key/holder/ttl are APPENDED after
+    // the frontmatter by `fno target init`, so scan the whole manifest for them
+    // (parse_manifest is frontmatter-bounded and would miss them). Root=None
+    // routes node:<id> to the global claims root inside renew.
+    if let (Some(key), Some(holder)) = (
+        scan_manifest_field(&manifest_content, "target_claim_key"),
+        scan_manifest_field(&manifest_content, "target_claim_holder"),
+    ) {
+        // Renew for the SAME window the claim was acquired with (default 2h,
+        // matching init's `_CLAIM_TTL`), so the deadline never grows.
+        let ttl_ms = scan_manifest_field(&manifest_content, "target_claim_ttl")
+            .and_then(|s| crate::claims::parse_ttl_ms(&s))
+            .unwrap_or(7_200_000);
+        match crate::claims::renew(&key, &holder, ttl_ms, None) {
             Ok(_) => {}
             Err(e) => eprintln!("loop-check: lease renewal for {key} failed (non-fatal): {e}"),
         }
@@ -2651,19 +2668,38 @@ mod tests {
         assert_eq!(m.created_at.as_deref(), Some("2026-06-05T00:00:00Z"));
         assert!(m.attended);
         assert!(m.legacy_status.is_none());
-        // Absent claim fields default to None (renewal is then skipped).
-        assert!(m.target_claim_key.is_none());
-        assert!(m.target_claim_holder.is_none());
     }
 
     #[test]
-    fn parse_manifest_target_claim_fields() {
-        // x-ba4b: the node-claim key + holder drive loop-check lease renewal;
-        // quotes are stripped like every other string field.
-        let content = "---\nsession_id: s1\ntarget_claim_key: \"node:x-ba4b\"\ntarget_claim_holder: \"target-session:s1\"\n---\n";
+    fn scan_manifest_field_reads_claim_fields_after_frontmatter() {
+        // x-ba4b regression: `fno target init` APPENDS the node-claim fields
+        // AFTER the closing `---`, so the frontmatter-bounded parse_manifest must
+        // NOT be relied on for them - the whole-file scanner is what drives
+        // renewal. Mirrors init's real manifest shape.
+        let content = "---\nsession_id: s1\nattended: false\n---\n\
+                       Immutable session manifest.\n\
+                       target_claim_key: \"node:x-ba4b\"\n\
+                       target_claim_holder: \"target-session:s1\"\n\
+                       target_claim_ttl: \"2h\"\n";
+        // parse_manifest (frontmatter-bounded) never sees the appended fields.
         let m = parse_manifest(content).unwrap();
-        assert_eq!(m.target_claim_key.as_deref(), Some("node:x-ba4b"));
-        assert_eq!(m.target_claim_holder.as_deref(), Some("target-session:s1"));
+        assert_eq!(m.session_id.as_deref(), Some("s1"));
+        // The whole-file scanner does.
+        assert_eq!(
+            scan_manifest_field(content, "target_claim_key").as_deref(),
+            Some("node:x-ba4b")
+        );
+        assert_eq!(
+            scan_manifest_field(content, "target_claim_holder").as_deref(),
+            Some("target-session:s1")
+        );
+        assert_eq!(
+            scan_manifest_field(content, "target_claim_ttl")
+                .as_deref()
+                .and_then(crate::claims::parse_ttl_ms),
+            Some(7_200_000)
+        );
+        assert_eq!(scan_manifest_field(content, "nonexistent_field"), None);
     }
 
     #[test]

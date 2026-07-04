@@ -1073,9 +1073,11 @@ def _walker_live_at(project_root: str) -> bool:
     from fno.claims.core import claim_status
 
     try:
+        # live OR suspect (x-ba4b): a suspect walker claim is still an occupied
+        # lane; treat it as live so we never double-launch into that repo.
         return claim_status(
             f"walker:{project_root}", root=Path(project_root)
-        ).get("state") == "live"
+        ).get("state") in ("live", "suspect")
     except Exception:  # noqa: BLE001 - a probe error must not block dispatch
         return False
 

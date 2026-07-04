@@ -92,7 +92,8 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     """Compose is_live + is_expired into a state classification.
 
     A PID-liveness claim is STALE when the holder process is dead or replaced.
-    A TTL claim within its window is LIVE regardless of PID.
+    A TTL claim within its window is LIVE when its pid is live, else SUSPECT
+    (x-ba4b) - never reclaimable until the TTL actually expires.
 
     HYBRID liveness (ab-cc5553f2): a TTL claim whose clock has lapsed is NOT
     unconditionally STALE - if its recorded pid is a live process on this host
