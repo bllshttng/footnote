@@ -796,6 +796,17 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ("gemini", "headless") => emit!(dispatch_gemini_once(
             home, name, message, from_name, &cwd, yolo, timeout,
         )),
+        // opencode v1 hosts the PTY-TUI only (x-51f6 Locked Decision 3): no
+        // client-side `opencode run` one-shot lane is wired. Refuse loudly
+        // rather than fall through to the daemon RPC (which would silently
+        // attempt a retired PTY host).
+        ("opencode", "headless") => {
+            eprintln!(
+                "substrate 'headless' is not wired for opencode yet; spawn an interactive pane with --substrate pane"
+            );
+            Some(2)
+        }
+
         ("agy", "headless") => {
             // agy is stateless (plain text, no session id): a one-shot `agy -p`.
             // It ignores `yolo` (headless create always passes
@@ -2785,11 +2796,12 @@ mod tests {
     fn spawn_unknown_provider_does_not_force_interactive() {
         // AC1-EDGE (Boundaries): an unknown provider keeps today's behavior; the
         // daemon's provider_for_pty errors on it as before, so we must NOT force
-        // host_mode (which would change the error surface).
+        // host_mode (which would change the error surface). aider is the
+        // canonical unhosted CLI (opencode joined the roster at x-51f6).
         let args = vec![
             "wk".to_string(),
             "--provider".to_string(),
-            "opencode".to_string(),
+            "aider".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
         assert!(

@@ -2224,10 +2224,11 @@ mod tests {
         fs::write(&reg, r#"{"schema_version":8,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
-        // Unknown provider -> Err.
+        // Unknown provider -> Err (aider: a real CLI we deliberately do not
+        // host; opencode joined the roster at x-51f6 so it no longer fits).
         fs::write(
             &reg,
-            r#"{"schema_version":3,"agents":[{"name":"x","provider":"opencode","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+            r#"{"schema_version":3,"agents":[{"name":"x","provider":"aider","cwd":"/x","log_path":"/l","status":"live"}]}"#,
         )
         .unwrap();
         assert!(load_registry_entries(&reg).is_err());

@@ -51,6 +51,9 @@ priority = 110
 region = "whole_recent"
 gate = { any = [
   { contains = "esc to interrupt" },
+  # live 1.14.50 footer says "esc interrupt" (no "to") - pinned from a
+  # mux-pane capture at the hosting buildout; "to" variants kept for older builds.
+  { contains = "esc interrupt" },
   { contains = "ctrl+c to interrupt" },
   { contains = "press esc to interrupt" },
   { line_regex = '(?i).*opencode.*esc (again to )?interrupt' },

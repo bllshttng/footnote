@@ -10,10 +10,12 @@ dataclass plus the dispatch-layer availability detection.
 KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini")
 
 # Providers the registry loader will ACCEPT ON READ. Superset of the
-# dispatchable set: `agy` (Antigravity, binary `ln`) is spawned Rust-side
-# only (Phase C stateless, no Python adapter), but Rust writes provider="agy"
-# rows, so load_registry must tolerate them or every Python consumer
-# (spawn collision check, mail send, discuss dispatch) hard-fails rc=12 on
-# a single agy row. Mirrors Rust's KNOWN_PROVIDERS in client_verbs.rs. This
-# stays an enumeration (not blanket tolerance) to keep the corruption guard.
-READABLE_PROVIDERS: tuple[str, ...] = KNOWN_PROVIDERS + ("agy",)
+# dispatchable set: `agy` (Antigravity, binary `ln`) and `opencode` (hosted
+# at x-51f6) have no Python ask adapter, but their pane rows land in the
+# registry (agy via Rust spawn paths, opencode via the mux pane back half),
+# so load_registry must tolerate them or every Python consumer (spawn
+# collision check, mail send, discuss dispatch) hard-fails rc=12 on a single
+# such row. Mirrors Rust's KNOWN_PROVIDERS in provider.rs (the x-51f6 single
+# source; a cli test asserts the two lists stay identical). This stays an
+# enumeration (not blanket tolerance) to keep the corruption guard.
+READABLE_PROVIDERS: tuple[str, ...] = KNOWN_PROVIDERS + ("agy", "opencode")

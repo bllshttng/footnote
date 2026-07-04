@@ -1669,6 +1669,7 @@ fn provider_readiness_detector(provider: &str) -> Box<dyn crate::readiness::Read
         "codex" => crate::provider::CodexProvider.readiness_detector(),
         "gemini" => crate::provider::GeminiProvider.readiness_detector(),
         "agy" => crate::provider::AgyProvider.readiness_detector(),
+        "opencode" => crate::provider::OpencodeProvider.readiness_detector(),
         // E1 (codex review P2): interactive claude rows need a real detector, else
         // `agent.ask` polls NoSignalDetector and times out with "no readiness
         // signal" despite ClaudeReadinessDetector existing. Same source of truth.
