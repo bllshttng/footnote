@@ -13,6 +13,7 @@ import typer
 
 from fno.scoreboard.fold import (
     BrokenLedger,
+    build_calibration,
     build_scoreboard,
     load_ledger_rows,
     read_graph_nodes,
@@ -23,6 +24,15 @@ from fno.scoreboard.fold import (
 def scoreboard_command(
     since: int = typer.Option(28, "--since", help="Window in days (default 28)."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the scoreboard as JSON."),
+    calibration: bool = typer.Option(
+        False,
+        "--calibration",
+        help=(
+            "Verifier calibration: join verifier_verdict events to per-node "
+            "outcomes (merged_clean/bounced/reverted) and print the confusion "
+            "table. All-time (ignores --since); gated on >=10 verdicts."
+        ),
+    ),
 ) -> None:
     """Fold ledger + events + graph into a stop-cause / spend / autonomy /
     survival scoreboard, with a mandatory coverage line."""
@@ -41,6 +51,18 @@ def scoreboard_command(
         typer.echo(f"{e.path}: parse error at byte {e.offset}: {e.msg}", err=True)
         raise typer.Exit(1)
 
+    if calibration:
+        cal = build_calibration(
+            read_jsonl_events(events_paths, {"verifier_verdict"}),
+            rows,
+            read_graph_nodes(graph_path),
+        )
+        if json_out:
+            typer.echo(_json.dumps(cal, indent=2))
+            return
+        _render_calibration(cal)
+        return
+
     touch_events = read_jsonl_events(events_paths, {"human_touch"})
     graph_nodes = read_graph_nodes(graph_path)
 
@@ -53,6 +75,35 @@ def scoreboard_command(
         typer.echo(_json.dumps(sb, indent=2))
         return
     _render(sb)
+
+
+def _render_calibration(cal: dict) -> None:
+    out = sys.stdout.write
+    out("fno scoreboard --calibration\n\n")
+    excluded = cal.get("excluded") or {}
+    excl_bits = [f"{n} {k}" for k, n in sorted(excluded.items())]
+    if cal.get("unattributed"):
+        excl_bits.append(f"{cal['unattributed']} unattributed")
+    excl_line = f" (excluded: {', '.join(excl_bits)})" if excl_bits else ""
+
+    if cal["state"] == "insufficient":
+        out(
+            f"  {cal['n']} verdicts so far, need >={cal['need']} for "
+            f"calibration.{excl_line}\n"
+        )
+        return
+
+    out(f"  N={cal['n']} verdicts{excl_line}\n\n")
+    outcomes = ("merged_clean", "bounced", "reverted")
+    out(f"  {'':<10}" + "".join(f"{o:>14}" for o in outcomes) + "\n")
+    for verdict in ("pass", "concerns", "fail"):
+        row = cal["table"][verdict]
+        out(f"  {verdict:<10}" + "".join(f"{row[o]:>14}" for o in outcomes) + "\n")
+    fp = cal["false_positive"]
+    out(
+        f"\n  false-positive (pass -> bounced/reverted): "
+        f"{fp['count']}/{fp['of_pass']} ({fp['rate_pct']}%)\n"
+    )
 
 
 def _render(sb: dict) -> None:
