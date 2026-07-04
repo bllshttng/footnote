@@ -796,10 +796,16 @@ def _walker_key() -> str:
 
 
 def _claim_is_live(key: str) -> bool:
+    # "occupied" for dispatch: a live OR a suspect claim (x-ba4b) blocks
+    # selection. suspect = TTL-unexpired, dead pid (respawned worker); the TTL
+    # still protects the slot, so selection must skip it, never steal.
     from fno.claims.core import claim_status
 
     try:
-        return claim_status(key, root=_claims_root_for(key)).get("state") == "live"
+        return claim_status(key, root=_claims_root_for(key)).get("state") in (
+            "live",
+            "suspect",
+        )
     except Exception:  # noqa: BLE001 - a probe error must not crash advance
         return False
 

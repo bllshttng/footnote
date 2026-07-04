@@ -74,6 +74,36 @@ target claims opt in by recording a durable session pid (see below); the
 megawalk walker records a transient pid, so the arm never fires for it and
 its TTL park-exclusion is unchanged.
 
+**Suspect state + skip-not-steal (x-ba4b).** A TTL claim still *inside* its
+window whose recorded pid is not live classifies as `suspect`, not `live`.
+This is the respawned-worker case: a bg `/target` supervisor pid dies and the
+claude session keeps working under a new pid, so the pid arm can no longer
+*prove* liveness but the TTL still protects the slot. The governing principle
+is that contested or ambiguous liveness degrades to **skip**, never to
+**steal** and never to a stalled lane:
+
+- **acquire** treats `suspect` exactly like `live` and refuses (never reclaims
+  it). Only TTL expiry (`suspect` -> `stale`) makes a claim reclaimable; pid
+  death alone never frees one.
+- **dispatch** (`fno agents spawn-guard`, `dispatch-node.sh`, `backlog next`
+  selection) skips a `suspect`-claimed node with a `skipped-contested` outcome
+  and advances to the next unblocked ready node - it does not park the lane.
+- **lease renewal** rides `fno-agents loop-check`: on every stop, if the
+  manifest holder matches the lockfile holder it extends `expires_at` by the
+  claim TTL, so a respawned worker keeps its claim alive under any pid with no
+  separate heartbeat. Renewal is best-effort; a missed renewal only shortens
+  the lease, never blocks the loop.
+- **`fno target init`** may archive-and-reclaim a prior manifest only when the
+  lockfile is `free`/`stale` AND the worktree shows no fresh activity within
+  `config.claims.activity_window` (default 15m). A `suspect` claim, or fresh
+  worktree activity, makes init refuse as `contested` (`RESULT: BLOCKED`)
+  rather than steal.
+
+The live lockfile holder is the only ownership truth: the `target_claim_*`
+manifest fields are an init-time snapshot and graph `_status: claimed` names no
+holder, so all guidance compares `fno claim status` against the session's own
+id, never a snapshot.
+
 `is_live` returns False for cross-host claims (`claim.host != gethostname()`).
 The design explicitly does not support multi-host coordination - operators
 running two hosts on the same shared filesystem will see both claims as
