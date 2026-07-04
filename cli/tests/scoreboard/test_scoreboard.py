@@ -10,7 +10,7 @@ AC5-FR  mid-append partial -> single retry recovers rather than crashing.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 import typer
@@ -104,7 +104,7 @@ def test_ui_partial_coverage_shows_caveat(tmp_path, monkeypatch):
     ]
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), [])
-    assert "termination coverage" in res.output  # caveat present
+    assert "a partial window is not a trend" in res.output  # caveat present
     assert "%" in res.output
 
 
@@ -139,10 +139,47 @@ def test_malformed_cost_does_not_crash(tmp_path, monkeypatch):
     assert json.loads(res.output)["spend"]["ship_terminal_usd"] == 0.0
 
 
-def test_aware_offset_timestamp_normalizes_to_utc():
-    # +02:00 at 12:00 is 10:00 UTC - must convert, not just strip tzinfo.
-    assert _parse_ts("2026-07-03T12:00:00+02:00") == datetime(2026, 7, 3, 10, 0, 0)
-    assert _parse_ts("2026-07-03T12:00:00Z") == datetime(2026, 7, 3, 12, 0, 0)
+def test_aware_offset_timestamps_land_on_one_timeline():
+    # Equivalent instants in different offsets must parse equal (convert, not
+    # just strip tzinfo). tz-agnostic: no absolute value, so this holds whether
+    # CI runs in UTC or the dev laptop in PDT.
+    assert _parse_ts("2026-07-03T12:00:00+02:00") == _parse_ts("2026-07-03T10:00:00Z")
+    assert _parse_ts("2026-07-03T14:00:00+04:00") == _parse_ts("2026-07-03T10:00:00Z")
+    # a naive ledger timestamp is taken as-is (already local)
+    assert _parse_ts("2026-07-03T10:00:00") == datetime(2026, 7, 3, 10, 0, 0)
+
+
+def test_survival_ignores_fix_predating_ship(tmp_path, monkeypatch):
+    # A fix-node created BEFORE the ship is not a follow-up to it -> node survives.
+    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 1.0}]
+    graph = [
+        {"id": "x-1", "reverted": False},
+        {"id": "x-fix", "caused_by": "x-1", "created_at": "2026-07-01T00:00:00"},  # 2 days BEFORE ship
+    ]
+    sb = build_scoreboard(rows, [], graph, since_days=28, now=datetime(2026, 7, 3, 20, 0, 0))
+    assert sb["survival"]["available"] is True and sb["survival"]["survived"] == 1
+
+    # a fix AFTER the ship, within 14 days, counts against survival
+    graph[1]["created_at"] = "2026-07-04T00:00:00"
+    sb2 = build_scoreboard(rows, [], graph, since_days=28, now=datetime(2026, 7, 5, 20, 0, 0))
+    assert sb2["survival"]["survived"] == 0
+
+
+def test_zero_shipped_nodes_is_na_not_a_bare_rate():
+    # W4 signals present but no Done* row in window -> autonomy/survival must be n/a,
+    # never "0/0" or a raw touch count.
+    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "NoProgress", "graph_node_id": "x-2", "cost_usd": 1.0}]
+    touch = [{"type": "human_touch", "ts": "2026-07-03T09:00:00"}]
+    graph = [{"id": "x-2", "reverted": False}, {"id": "x-9", "caused_by": "x-1"}]
+    sb = build_scoreboard(rows, touch, graph, since_days=28, now=datetime(2026, 7, 3, 20, 0, 0))
+    assert sb["autonomy"]["available"] is False
+    assert sb["survival"]["available"] is False
+
+
+def test_malformed_entries_shape_is_empty_not_crash(tmp_path):
+    p = tmp_path / "ledger.json"
+    p.write_text('{"entries": null}')  # valid JSON, junk shape
+    assert load_ledger_rows(p) == []
 
 
 # --- real-data fold (regression) --------------------------------------------
@@ -156,7 +193,7 @@ def test_live_ledger_shape_folds_without_crash():
     if not live.exists():
         pytest.skip("no live ledger on this machine")
     rows = load_ledger_rows(live)
-    sb = build_scoreboard(rows, [], [], since_days=3650, now=datetime.now(timezone.utc).replace(tzinfo=None))
+    sb = build_scoreboard(rows, [], [], since_days=3650, now=datetime.now())
     assert sb["state"] in {"full", "partial", "no_data"}
     if sb["state"] != "no_data":
         cov = sb["coverage"]

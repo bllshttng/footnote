@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json as _json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 
 import typer
 
@@ -44,10 +44,10 @@ def scoreboard_command(
     touch_events = read_jsonl_events(events_paths, {"human_touch"})
     graph_nodes = read_graph_nodes(graph_path)
 
-    # Naive UTC throughout: aware timestamps (events carry `...Z`) are converted
-    # to UTC before their tzinfo is stripped (see fold._parse_ts).
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    sb = build_scoreboard(rows, touch_events, graph_nodes, since_days=since, now=now)
+    # Naive LOCAL throughout: the ledger's `completed` is written naive-local, so
+    # `now` matches it; aware event timestamps are converted to local in
+    # fold._parse_ts. One timeline, no local/UTC boundary skew.
+    sb = build_scoreboard(rows, touch_events, graph_nodes, since_days=since, now=datetime.now())
 
     if json_out:
         typer.echo(_json.dumps(sb, indent=2))
@@ -69,12 +69,14 @@ def _render(sb: dict) -> None:
     out(f"  rows in window:      {cov['rows']}\n")
     out(f"  termination_reason:  {cov['termination_reason_pct']}%")
     out(f"    node linkage:  {cov['node_linkage_pct']}%\n")
-    # Silent-failure guard: whenever coverage is partial, the caveat rides on the
-    # same screen as any rate below (AC5-UI). Never a bare rate.
-    if cov["termination_reason_pct"] < 100:
+    # Silent-failure guard: whenever coverage is partial on EITHER axis, the
+    # caveat rides on the same screen as any rate below (AC5-UI). Stop-cause/spend
+    # lean on termination_reason; autonomy/survival lean on node linkage - a gap in
+    # either can bias a rate, so both gate the caveat. Never a bare rate.
+    if cov["termination_reason_pct"] < 100 or cov["node_linkage_pct"] < 100:
         out(
-            f"  ! rates below reflect {cov['termination_reason_pct']}% termination coverage - "
-            "a partial window is not a trend.\n"
+            f"  ! rates below reflect {cov['termination_reason_pct']}% termination / "
+            f"{cov['node_linkage_pct']}% node-linkage coverage - a partial window is not a trend.\n"
         )
 
     out("\nStop-cause distribution\n")

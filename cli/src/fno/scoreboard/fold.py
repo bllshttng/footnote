@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import time
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # termination_reason -> outcome class. "Done*" is a delivered ship; the wedge
@@ -50,6 +50,8 @@ def load_ledger_rows(path: Path, *, _retry: bool = True) -> list[dict]:
             return load_ledger_rows(path, _retry=False)
         raise BrokenLedger(str(path), e.pos, e.msg) from e
     rows = data.get("entries", data) if isinstance(data, dict) else data
+    if not isinstance(rows, list):  # {"entries": null} etc. - valid JSON, junk shape
+        return []
     return [r for r in rows if isinstance(r, dict)]
 
 
@@ -92,10 +94,15 @@ def read_graph_nodes(path: Path) -> list[dict]:
 
 
 def _parse_ts(raw) -> datetime | None:
-    """Parse an ISO timestamp to naive UTC. Aware timestamps (events carry a
-    `...Z` / offset) are converted to UTC before their tzinfo is stripped, so an
-    offset like `+02:00` is not silently mis-read as UTC. Naive strings (the
-    ledger's `completed`) are taken as-is."""
+    """Parse an ISO timestamp to a naive LOCAL datetime - the one timeline the
+    whole fold uses.
+
+    The dominant source, the ledger's `completed`, is written naive-local
+    (`datetime.now().isoformat()`), and `now` is `datetime.now()` (also naive
+    local), so those are compared apples-to-apples. Aware timestamps (events
+    carry a `...Z` / offset) are converted to local *before* their tzinfo is
+    stripped, so an offset like `+02:00` is not silently mis-read - it lands on
+    the same local timeline instead of being off by the offset."""
     if not isinstance(raw, str) or not raw:
         return None
     try:
@@ -103,7 +110,7 @@ def _parse_ts(raw) -> datetime | None:
     except ValueError:
         return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        dt = dt.astimezone().replace(tzinfo=None)  # -> naive local
     return dt
 
 
@@ -192,13 +199,14 @@ def _autonomy(touch_events: list[dict], shipped_nodes: set, cutoff, now) -> dict
     any human_touch event at all."""
     if not touch_events:
         return {"available": False, "reason": "no human_touch signals (Wave 4 not shipped)"}
+    if not shipped_nodes:
+        return {"available": False, "reason": "no shipped nodes in window"}
     in_window = [e for e in touch_events if _event_in_window(e, cutoff, now)]
-    n_nodes = len(shipped_nodes) or 1  # avoid div-by-zero; touches with 0 ships => raw count
     return {
         "available": True,
         "touches": len(in_window),
         "shipped_nodes": len(shipped_nodes),
-        "touches_per_shipped_node": round(len(in_window) / n_nodes, 2),
+        "touches_per_shipped_node": round(len(in_window) / len(shipped_nodes), 2),
     }
 
 
@@ -210,7 +218,7 @@ def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict]
     if not w4:
         return {"available": False, "reason": "no causal telemetry (Wave 4 not shipped)"}
     if not shipped_nodes:
-        return {"available": True, "survived": 0, "shipped_nodes": 0, "rate_pct": 0}
+        return {"available": False, "reason": "no shipped nodes in window"}
 
     by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
     ship_ts = {r["graph_node_id"]: _parse_ts(r.get("completed")) for r in ship_rows if r.get("graph_node_id")}
@@ -230,7 +238,9 @@ def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict]
         followed = False
         for fx in fixes.get(nid, []):
             fx_at = _parse_ts(fx.get("created_at"))
-            if shipped_at and fx_at and (fx_at - shipped_at) <= timedelta(days=_SURVIVAL_FOLLOWUP_DAYS):
+            # A follow-up is a fix created AFTER the ship, within the window. A
+            # fix pre-dating the ship (negative delta) is not a follow-up to it.
+            if shipped_at and fx_at and timedelta(0) <= (fx_at - shipped_at) <= timedelta(days=_SURVIVAL_FOLLOWUP_DAYS):
                 followed = True
                 break
             if not shipped_at or not fx_at:
@@ -283,8 +293,15 @@ if __name__ == "__main__":
     assert sb2["survival"]["available"] is True and sb2["survival"]["survived"] == 1, sb2
     assert sb2["autonomy"]["available"] is True and sb2["autonomy"]["touches"] == 1, sb2
 
-    # aware timestamps convert to UTC before the tzinfo is stripped
-    assert _parse_ts("2026-07-03T12:00:00+02:00") == datetime(2026, 7, 3, 10, 0, 0)
+    # equivalent instants in different offsets land on the same local timeline
+    # (tz-agnostic: no absolute-value assertion, so CI-UTC == laptop-PDT)
+    assert _parse_ts("2026-07-03T12:00:00+02:00") == _parse_ts("2026-07-03T10:00:00Z")
     # a malformed cost never crashes the fold
     assert _num("junk") == 0.0 and _num(None) == 0.0 and _num("5.5") == 5.5
+    # {"entries": null} is valid JSON, junk shape -> empty, never a crash
+    import tempfile as _tf, os as _os
+    _fd, _p = _tf.mkstemp()
+    _os.write(_fd, b'{"entries": null}'); _os.close(_fd)
+    assert load_ledger_rows(Path(_p)) == []
+    _os.unlink(_p)
     print("fold self-check OK")
