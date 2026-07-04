@@ -358,6 +358,30 @@ pub fn run_finalize(args: &[String]) -> i32 {
                 failed.push("handoff".into());
             }
         }
+
+        // W6 verifier advisory (x-f063): AC-vs-diff verdict, recorded then
+        // ignored. Log-only and never pushed to `failed` - an advisory must
+        // never wedge the loop or hold session_finalized open for retry.
+        let mut adv = py_module(&cwd);
+        adv.arg("-m")
+            .arg("fno.verify_advise")
+            .arg("--node-id")
+            .arg(m.graph_node_id.as_deref().unwrap_or(""))
+            .arg("--plan-path")
+            .arg(m.plan_path.as_deref().unwrap_or(""))
+            .arg("--session-id")
+            .arg(&session_id)
+            .arg("--reason")
+            .arg(&reason);
+        match adv.output() {
+            Ok(out) if !out.status.success() => eprintln!(
+                "finalize: verify_advise exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => eprintln!("finalize: verify_advise spawn failed: {e}"),
+            _ => {}
+        }
     }
 
     // ── STUCK ONLY: postmortem artifact (ab-1a92b677) ──────────────────────
