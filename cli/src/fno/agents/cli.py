@@ -418,6 +418,7 @@ def cmd_spawn(
                 cwd=workdir,
                 yolo=yolo,
                 role=role,
+                model=model,
                 provenance=resolve_provenance(node, slug, plan),
             )
         except DispatchAskError as exc:

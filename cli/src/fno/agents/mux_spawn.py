@@ -53,6 +53,12 @@ _MUX_SUBPROCESS_TIMEOUT_S = 30
 #: (mirrors crates/fno proto::DEFAULT_SESSION).
 _DEFAULT_SESSION = "main"
 
+#: opencode is spawned with a model by default (its provider/model form). The
+#: chosen default is the z.ai GLM (the secondary provider); an explicit --model
+#: overrides it. ponytail: a plain constant, not a config knob, until a second
+#: opencode default is actually wanted.
+_OPENCODE_DEFAULT_MODEL = "z-ai/glm-5.2"
+
 
 @dataclass
 class MuxSpawnResult:
@@ -134,6 +140,7 @@ def build_pane_argv(
     cwd: Path,
     yolo: bool,
     session_uuid: Optional[str],
+    model: Optional[str] = None,
 ) -> list[str]:
     """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
@@ -141,7 +148,13 @@ def build_pane_argv(
     form for the `--substrate headless` lane; the two intentionally differ
     (e.g. opencode: bare ``opencode --prompt <msg>`` here vs
     ``opencode run --auto <msg>`` there) and there is no cross-language
-    parity contract between them - don't go looking for one."""
+    parity contract between them - don't go looking for one.
+
+    ``model`` (x-c772): an explicit ``--model`` forwarded to the provider's own
+    TUI flag (claude/codex/gemini/agy ``--model <m>``; opencode
+    ``--model <provider/model>``). Exact passthrough, no fuzzy resolution;
+    empty/None = provider default. A CLI ``--model`` arg beats any role-routing
+    model set via env (``resolve_route``), so explicit intent wins."""
     if provider == "claude":
         # `claude --session-id <uuid> [message]`: the pinned session id makes
         # the transcript discoverable and keys the inside-leg reports
@@ -149,6 +162,8 @@ def build_pane_argv(
         argv = ["claude"]
         if session_uuid:
             argv += ["--session-id", session_uuid]
+        if model:
+            argv += ["--model", model]
         if message:
             argv.append(message)
         return argv
@@ -160,6 +175,8 @@ def build_pane_argv(
             if yolo
             else ["--sandbox", "workspace-write"]
         )
+        if model:
+            argv += ["--model", model]
         if message:
             argv.append(message)
         return argv
@@ -167,6 +184,8 @@ def build_pane_argv(
         # `-i` executes the prompt then stays interactive; --skip-trust avoids
         # the workspace-trust modal blocking the TUI.
         argv = ["gemini", "--skip-trust"]
+        if model:
+            argv += ["--model", model]
         if message:
             argv += ["-i", message]
         argv += ["--yolo"] if yolo else ["--approval-mode", "default"]
@@ -182,6 +201,8 @@ def build_pane_argv(
         # ponytail: argv unvalidated against a live agy TUI (agy is closed-source);
         # pin it via capture-readiness-grid.sh when the manifest is validated.
         argv = ["agy", "--dangerously-skip-permissions"]
+        if model:
+            argv += ["--model", model]
         if message:
             argv.append(message)
         return argv
@@ -196,6 +217,9 @@ def build_pane_argv(
         argv = ["opencode"]
         if message:
             argv += ["--prompt", message]
+        # opencode expects the provider/model form and is always launched with a
+        # model: an explicit --model wins, else the z-ai/glm-5.2 default.
+        argv += ["--model", model or _OPENCODE_DEFAULT_MODEL]
         if yolo:
             argv.append("--auto")
         return argv
@@ -330,6 +354,7 @@ def dispatch_spawn_pane(
     *,
     yolo: bool = False,
     role: Optional[str] = None,
+    model: Optional[str] = None,
     session: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
@@ -361,7 +386,7 @@ def dispatch_spawn_pane(
 
     session = resolve_mux_session(session)
     session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
-    argv = build_pane_argv(provider, message, cwd, yolo, session_uuid)
+    argv = build_pane_argv(provider, message, cwd, yolo, session_uuid, model)
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(
             "refusing to pane-host claude with -p/--print (that bills the "
