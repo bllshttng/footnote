@@ -59,6 +59,7 @@ FIELD_META: dict[str, Meta] = {
     "config.paths.retro_pending_dir": Meta("never", "Override path to the retro-pending dir."),
     "config.paths.bus_dir": Meta("never", "Override path to the cross-project mail bus dir."),
     "config.paths.loops_paused_json": Meta("never", "Override path to the loops pause-all sentinel."),
+    "config.paths.observer_reports_dir": Meta("never", "Override path to the observer harness digest dir."),
     # --- config.obsidian.* (a real decision) ---
     "config.obsidian.enabled": Meta(
         "always", "Whether this project uses an Obsidian vault for plans/docs.",

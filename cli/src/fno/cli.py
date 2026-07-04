@@ -77,6 +77,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "codemap":       ("fno.codemap_cli:app",               "Codebase map management"),
     "worktree":      ("fno.worktree_cli:app",              "Worktree management"),
     "evals":         ("fno.evals.cli:evals_app",           "Golden-task efficacy evals (run / report / diff)"),
+    "observer":      ("fno.observer.cli:observer_app",      "Skill eval over a recorded corpus (sweep / replay)."),
     "pr-watch":      ("fno.pr_watch.cli:cli",              "PR-state watcher: auto-fire /pr check + /pr merged for open-PR backlog nodes"),
     "loops":         ("fno.loops:loops_app",                "Loop level config + pause-all kill switch (pause-all/resume-all/status/ls)"),
     # Individual commands (plain functions wrapped as single-command apps) -

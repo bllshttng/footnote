@@ -190,6 +190,19 @@ def validate(event: dict[str, Any]) -> None:
                     f"(allowed: {allowed})"
                 )
 
+    # Same chokepoint rationale: skill_eval_finding's dimension/verdict drive
+    # x-0ca7's downstream ranking logic, so a typo'd enum value must fail here
+    # rather than silently landing as an unrecognized bucket.
+    if type_name == "skill_eval_finding":
+        type_props = type_spec["data"]["properties"]
+        for field in ("dimension", "verdict"):
+            allowed = type_props[field]["enum"]
+            if data.get(field) not in allowed:
+                raise ValidationError(
+                    f"unknown skill_eval_finding data.{field}: {data.get(field)!r} "
+                    f"(allowed: {allowed})"
+                )
+
     serialized = _json.dumps(data, separators=(",", ":")).encode("utf-8")
     if len(serialized) > MAX_DATA_BYTES:
         raise ValidationError(

@@ -38,7 +38,7 @@ envelope:
       # branch B pattern ^(daemon|worker:.+)$; the enum here covers the common
       # fixed-string sources only. The bash validator builds a regex from this enum,
       # so worker:<id> is checked at the parity-script layer, not here.
-      enum: [target, megawalk, megatron, abi-loop, hook, subagent, migration, test, backlog, daemon]
+      enum: [target, megawalk, megatron, abi-loop, hook, subagent, migration, test, backlog, daemon, observer]
       description: "Producer identity; consumers route on this. See events-v3.json branch B for worker:<id> pattern sources."
     data:
       type: object
@@ -2089,6 +2089,85 @@ event_types:
         session_id:
           type: string
           description: "Target session that shipped; joins to the ledger row."
+
+  - name: skill_eval_finding
+    description: "Observer harness (x-57a5): one scored corpus item for a sweep or replay run. Corpus construction is a read-time fold over already-captured signals (ledger/graph/events) - this event is the observer's own new activity, not retroactive instrumentation of history. One event per (run_id, corpus_item_id) pair; a replay batch tags skill_ref so a before/after comparison is a filter over this event type."
+    sources: [observer, test]
+    data:
+      required: [run_id, skill_id, skill_version, corpus_item_id, dimension, verdict, evidence, cost_usd]
+      properties:
+        run_id:
+          type: string
+          description: "obs-<skill_id>-<UTC-timestamp>, minted once per sweep/replay-batch; correlates every finding in a run to its terminal skill_eval_run_complete."
+        skill_id:
+          type: string
+          description: "Skill under evaluation, e.g. fno:blueprint or fno:review - same id fno scoreboard --by-skill (x-4829) emits."
+        skill_version:
+          type: string
+          description: "Best-effort git hash of the skill's SKILL.md at the corpus item's timestamp, or 'unknown' - x-4829's convention, reused verbatim."
+        corpus_item_id:
+          type: string
+          description: "The historical session's real session_id - no new ID scheme is minted for corpus items."
+        dimension:
+          type: string
+          enum: [structural_validity, collision_free, shipped_outcome, finding_precision]
+          description: "Which rubric dimension this finding scores. structural_validity/collision_free/shipped_outcome are blueprint dimensions (replay scores the first two only, per Review Amendment A1); finding_precision is the review dimension (sweep-only, per Review Amendment A2)."
+        verdict:
+          type: string
+          enum: [pass, degraded, fail]
+          description: "pass = clean signal; degraded = ambiguous (execution-attributable postmortem, or a discrepancy-path resolution); fail = a clear miss (plan-attributable postmortem, reverted/bounced, or a declined-and-never-contradicted finding)."
+        evidence:
+          type: string
+          description: "<=500 chars: what specifically drove the verdict (earned-specificity discipline - no vague attribution)."
+        cost_usd:
+          type: number
+          description: "Spend attributable to producing this finding: 0 for a sweep item (read-only fold), the headless spawn's cost for a replay item."
+        skill_ref:
+          type: [string, "null"]
+          description: "Git ref under test; absent/null for a retrospective sweep against HEAD, present for a replay batch against a candidate branch."
+        tool_fault:
+          type: boolean
+          description: "True when this finding records a REPLAY tool fault (spawn crash/timeout/unparseable output) rather than a skill-quality verdict. Downstream (x-0ca7) MUST exclude tool_fault=true findings from skill failure rankings (AC2-ERR: a tool fault is never conflated with a skill-quality fail). Absent = a genuine skill-quality verdict."
+
+  - name: skill_eval_run_complete
+    description: "Observer harness (x-57a5): the terminal event for one sweep or replay batch - the trigger x-0ca7's loop tick scans for. Never emitted when the corpus is insufficient (<10 attributable runs); an insufficient run reports its state on stdout only, with no terminal event, since there is nothing to complete."
+    sources: [observer, test]
+    data:
+      required: [run_id, skill_id, skill_version, corpus_size, pass_count, degraded_count, fail_count, cost_usd, coverage_pct, failure_ranking]
+      properties:
+        run_id:
+          type: string
+          description: "Same run_id minted at sweep/replay-batch start; correlates to every skill_eval_finding in this run."
+        skill_id:
+          type: string
+          description: "Skill evaluated, e.g. fno:blueprint or fno:review."
+        skill_version:
+          type: string
+          description: "Best-effort git hash of the skill's SKILL.md, or 'unknown' - x-4829's convention."
+        corpus_size:
+          type: integer
+          description: "Count of attributable corpus items actually scored in this run (post coverage-gap exclusion)."
+        pass_count:
+          type: integer
+          description: "Findings with verdict=pass across the run."
+        degraded_count:
+          type: integer
+          description: "Findings with verdict=degraded across the run."
+        fail_count:
+          type: integer
+          description: "Findings with verdict=fail across the run."
+        cost_usd:
+          type: number
+          description: "Total spend for the run: 0 for a sweep, the sum of per-item headless-spawn costs for a replay batch."
+        coverage_pct:
+          type: integer
+          description: "Attributable-and-scored fraction of the window's total rows, 0-100 - the same coverage-honesty rule fno scoreboard already enforces, carried into this event since x-0ca7's original proposal did not have one."
+        failure_ranking:
+          type: array
+          description: "[{dimension, fail_count}] sorted by fail_count descending - only the dimensions actually scorable in this run (a replay batch's ranking carries structural_validity/collision_free only, per Review Amendment A1)."
+        skill_ref:
+          type: [string, "null"]
+          description: "Git ref under test; absent/null for a retrospective sweep against HEAD, present for a replay batch."
 
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
