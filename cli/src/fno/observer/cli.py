@@ -19,6 +19,7 @@ I/O (plan reads, gh fetches, spawns) lives here; the scoring is pure in
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -547,23 +548,31 @@ def _replay(
         typer.echo(f"tool-fault: recorded input for {corpus_item} unresolvable; emitted tool-fault finding.")
         raise typer.Exit(1)
 
-    from fno.claims.core import acquire_claim, release_claim
+    from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim
     from fno.observer import isolation
 
     repo_root = _paths.resolve_repo_root()
     worktree_name = f"observer-{skill}-{corpus_item[:12]}"
     scratch = _paths.worktrees_base() / repo_root.name / worktree_name
+    claim_key = f"observer:{skill}:{worktree_name}"
+    # Per-PROCESS holder (not corpus_item): two same-item replays share the
+    # scratch path, and an identical holder would make acquire_claim an
+    # idempotent re-acquire (no exclusion), letting both race on `git worktree
+    # add/remove` of one path (AC2-EDGE). A distinct holder -> the second gets
+    # ClaimHeldByOther and refuses cleanly instead of stomping.
+    holder = f"{corpus_item}:{os.getpid()}"
 
     claim = None
     result_state = "ok"
     try:
-        # AC2-EDGE: serialize concurrent replays of the same skill/worktree.
-        claim = acquire_claim(
-            key=f"observer:{skill}:{worktree_name}",
-            holder=corpus_item,
-            reason=f"observer replay {run_id}",
-            ttl_ms=30 * 60 * 1000,
-        )
+        try:
+            claim = acquire_claim(
+                key=claim_key, holder=holder,
+                reason=f"observer replay {run_id}", ttl_ms=30 * 60 * 1000,
+            )
+        except ClaimHeldByOther as exc:
+            typer.echo(f"another replay holds {corpus_item}; exiting without touching its worktree ({exc}).")
+            raise typer.Exit(4)
 
         if _run_worktree:
             subprocess.run(["git", "worktree", "prune"], cwd=repo_root, capture_output=True, text=True)
@@ -590,6 +599,13 @@ def _replay(
             cwd=(scratch if _run_worktree else repo_root), timeout=600,
         )
         cost_usd = _read_scratch_cost(scratch) if _run_worktree else 0.0
+        cap = _replay_cost_cap()
+        if cost_usd > cap:
+            typer.echo(
+                f"warning: replay of {corpus_item} spent ${cost_usd:.2f}, over the ${cap:.2f} cap "
+                "(the 600s spawn timeout is the hard pre-spawn bound; dollar caps are post-hoc in v1).",
+                err=True,
+            )
 
         if rc != 0 or not (out or "").strip():
             _emit_finding(
@@ -616,8 +632,9 @@ def _replay(
             summary = fold.build_run_summary(
                 run_id=run_id, skill_id=skill_id,
                 skill_version=item.get("skill_version") or "unknown",
-                findings=findings, corpus_size=fold.MIN_ATTRIBUTABLE,  # single-item batch: gate met by lineage
+                findings=findings, corpus_size=1,  # truthful: a single-item replay batch
                 scored_count=1 if findings else 0, skill_ref=skill_ref,
+                require_min=False,  # replay is a targeted before/after, not a >=10 trend
             )
             summary["cost_usd"] = cost_usd
             summary["skill_ref"] = skill_ref
@@ -638,12 +655,32 @@ def _replay(
             subprocess.run(["git", "worktree", "remove", "--force", str(scratch)], cwd=repo_root, capture_output=True, text=True)
         if claim is not None:
             try:
-                release_claim(f"observer:{skill}:{worktree_name}", holder=corpus_item)
+                release_claim(claim_key, holder=holder)
             except Exception:
                 pass
 
     if result_state == "tool-fault":
         raise typer.Exit(1)
+
+
+def _replay_cost_cap() -> float:
+    """Per-item spend ceiling: the min of the configured aggregate per-run budget
+    (``config.loops.observer_harness.budget_usd_per_run``) and the hard $3
+    per-item cap (Locked Decision 6, never uncapped).
+
+    ponytail: a headless spawn surfaces no cost until it finishes, so this is a
+    post-hoc overage warning, not a pre-spawn gate; the 600s timeout is the real
+    pre-spawn bound. Upgrade path if precise enforcement matters: a spawn-API
+    budget arg that aborts the session at a dollar ceiling."""
+    budget = None
+    try:
+        from fno.config import load_settings
+
+        entry = load_settings().config.loops.get("observer_harness")
+        budget = entry.budget_usd_per_run if entry is not None else None
+    except Exception:
+        budget = None
+    return min(_PER_ITEM_CAP_USD, budget) if budget is not None else _PER_ITEM_CAP_USD
 
 
 def _read_scratch_cost(scratch: Path) -> float:

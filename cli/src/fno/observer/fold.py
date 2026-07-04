@@ -263,6 +263,7 @@ def build_run_summary(
     corpus_size: int,
     scored_count: int,
     skill_ref: Optional[str] = None,
+    require_min: bool = True,
 ) -> dict:
     """Aggregate a run's (dimension, verdict) findings into the
     ``skill_eval_run_complete`` payload shape, or an ``insufficient`` state.
@@ -272,8 +273,14 @@ def build_run_summary(
     :data:`MIN_ATTRIBUTABLE` (Locked Decision 11); ``scored_count`` (<=
     corpus_size) drives ``coverage_pct``, the honesty rule carried over from
     ``fno scoreboard``.
+
+    The <10 gate is a *sweep* rule (a retrospective ranking under 10 attributable
+    runs is fabricated confidence). A *replay* batch is a targeted before/after on
+    specific items, not a trend, so it passes ``require_min=False`` and reports
+    its true, small ``corpus_size`` rather than a padded one (a HEAD replay has no
+    ``skill_ref``, so the flag - not ``skill_ref`` presence - controls the gate).
     """
-    if corpus_size < MIN_ATTRIBUTABLE:
+    if require_min and corpus_size < MIN_ATTRIBUTABLE:
         return {"state": "insufficient", "need": MIN_ATTRIBUTABLE, "n": corpus_size}
 
     counts = Counter(v for _d, v in findings)

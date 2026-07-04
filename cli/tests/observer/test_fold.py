@@ -47,6 +47,25 @@ def test_insufficient_guard_below_ten():
     assert summary == {"state": "insufficient", "need": 10, "n": 3}
 
 
+def test_replay_batch_skips_min_gate_and_reports_true_size():
+    # require_min=False (a replay is a targeted before/after, not a >=10 trend):
+    # a single-item batch reports corpus_size=1, never a padded 10.
+    summary = fold.build_run_summary(
+        run_id="obs-x", skill_id="fno:blueprint", skill_version="unknown",
+        findings=[("structural_validity", "pass")], corpus_size=1, scored_count=1,
+        skill_ref=None, require_min=False,
+    )
+    assert summary["state"] == "ok"
+    assert summary["corpus_size"] == 1
+    assert summary["coverage_pct"] == 100
+    # the default (sweep) still gates
+    gated = fold.build_run_summary(
+        run_id="obs-x", skill_id="fno:blueprint", skill_version="unknown",
+        findings=[("structural_validity", "pass")], corpus_size=1, scored_count=1,
+    )
+    assert gated["state"] == "insufficient"
+
+
 def test_coverage_pct_rounds_scored_over_corpus():
     summary = fold.build_run_summary(
         run_id="obs-x", skill_id="fno:blueprint", skill_version="abc1234",

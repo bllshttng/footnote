@@ -148,6 +148,25 @@ def test_replay_happy_path_emits_tagged_finding(monkeypatch, tmp_path):
     assert all(f["data"]["dimension"] != "shipped_outcome" for f in findings)
     completes = [e for e in evs if e["type"] == "skill_eval_run_complete"]
     assert completes and completes[0]["data"].get("skill_ref") == "cand-branch"
+    # truthful single-item batch numbers (not a padded corpus_size=10)
+    assert completes[0]["data"]["corpus_size"] == 1
+    assert completes[0]["data"]["coverage_pct"] == 100
+
+
+def test_replay_concurrent_holder_refuses_without_stomping(monkeypatch, tmp_path):
+    item = _item("s-rep", "x-rep", None)
+    _wire_replay(monkeypatch, tmp_path, item)
+    import fno.claims.core as claims
+    def _held(**k):
+        raise claims.ClaimHeldByOther(holder="peer:999", pid=999, host="h", key=k.get("key", "obs"))
+    monkeypatch.setattr(claims, "acquire_claim", _held)
+    with pytest.raises(typer.Exit) as exc:
+        cli._replay(
+            skill="blueprint", corpus_item="s-rep", skill_ref=None,
+            run_id="obs-fno:blueprint-conc", since=90,
+            spawn=lambda *a, **k: (0, "x", ""), run_worktree=False,
+        )
+    assert exc.value.exit_code == 4  # refused cleanly, no worktree touched
 
 
 def test_replay_spawn_failure_is_tool_fault(monkeypatch, tmp_path):
