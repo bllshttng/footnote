@@ -12,9 +12,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from fno.retro import harvest as _harvest
-from fno.retro.classify import classify
+from fno.retro.classify import (
+    DISPOSITION_ARCHIVE,
+    classify,
+    classify_postmortem,
+)
 from fno.retro.dedup import dedup_candidates, existing_keys_from_nodes
-from fno.retro.land import LandResult, land_candidates
+from fno.retro.land import MODE_INTERACTIVE, LandResult, land_candidates
 from fno.retro.types import Candidate
 
 
@@ -195,3 +199,93 @@ def triage_pr(
         warnings=warnings,
         gh_unavailable=gh_unavailable,
     )
+
+
+# ── postmortem pass (W6 6.2, x-f063) ─────────────────────────────────────────
+
+@dataclass
+class PostmortemReport:
+    harvested: int = 0
+    # source_id -> "node" | "inbox" | "archived" | "dupe" | "failed"
+    dispositions: dict = field(default_factory=dict)
+    results: list[LandResult] = field(default_factory=list)
+    stamped: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def failed(self) -> bool:
+        return any(d == "failed" for d in self.dispositions.values())
+
+
+def triage_postmortems(
+    *,
+    postmortems_dir: Path,
+    repo_root: Path,
+    mode: str = MODE_INTERACTIVE,
+    project: Optional[str] = None,
+    cwd: Optional[str] = None,
+    existing_nodes: Optional[list[dict]] = None,
+    create_fn=None,
+    inbox_fn=None,
+    stamp_fn: Optional[Callable[[Path], None]] = None,
+) -> PostmortemReport:
+    """Drain unconsumed postmortems: harvest -> rule-first disposition ->
+    dedup -> land -> stamp ``consumed_at``.
+
+    Ordering is the AC6-FR invariant: the stamp lands AFTER the disposition,
+    so an interrupted run re-processes only the not-yet-stamped tail. A stamp
+    failure after a successful land is degraded-not-broken: the widened dedup
+    trailer (source_pr=None) collapses the re-proposal next run.
+    """
+    report = PostmortemReport()
+    items = _harvest.harvest_postmortems(postmortems_dir, warnings=report.warnings)
+    report.harvested = len(items)
+    if not items:
+        return report
+
+    stamp = stamp_fn or _harvest.stamp_postmortem_consumed
+    seen = existing_keys_from_nodes(existing_nodes or [])
+
+    def _stamp(source_id: str) -> None:
+        path = postmortems_dir / source_id.split(":", 1)[1]
+        try:
+            stamp(path)
+            report.stamped += 1
+        except Exception as exc:  # degraded: dedup collapses the re-proposal
+            report.warnings.append(f"{source_id}: consumed_at stamp failed: {exc}")
+
+    for item in items:
+        disposition, candidate = classify_postmortem(item)
+        if disposition == DISPOSITION_ARCHIVE:
+            # One-off: no work filed, but the entry is still consumed.
+            report.dispositions[item.source_id] = "archived"
+            _stamp(item.source_id)
+            continue
+
+        kept, _skipped = dedup_candidates([candidate], existing_keys=seen)
+        if not kept:
+            # Landed by a prior run whose stamp failed: consume, don't re-file.
+            report.dispositions[item.source_id] = "dupe"
+            _stamp(item.source_id)
+            continue
+        seen.add(f"{kept[0].source_pr}:{kept[0].content_hash}")
+
+        results = land_candidates(
+            kept,
+            mode=mode,
+            repo_root=repo_root,
+            project=project,
+            cwd=cwd,
+            create_fn=create_fn,
+            inbox_fn=inbox_fn,
+        )
+        report.results.extend(results)
+        outcome = results[0].outcome if results else "failed"
+        if outcome == "failed":
+            # Not stamped: the unconsumed entry retries next run (AC6-FR).
+            report.dispositions[item.source_id] = "failed"
+            continue
+        report.dispositions[item.source_id] = "node" if outcome in ("active", "queued") else "inbox"
+        _stamp(item.source_id)
+
+    return report

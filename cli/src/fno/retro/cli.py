@@ -503,6 +503,51 @@ def process_sentinel_file(
     return report, removed
 
 
+def _run_postmortem_pass(repo_root: Path, node_root: Path) -> bool:
+    """Drain unconsumed postmortems (W6 6.2). Returns True when any entry
+    failed to land (caller retains the retry exit code). Fully self-contained:
+    an exception here never sinks the sentinel loop."""
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json, postmortems_dir
+    from fno.retro.routine import triage_postmortems
+
+    try:
+        try:
+            existing_nodes = read_graph(graph_json())
+        except Exception:
+            existing_nodes = []
+        try:
+            from fno.graph._intake import detect_project_from_settings
+
+            project = detect_project_from_settings(str(node_root))
+        except Exception:
+            project = None
+        pm = triage_postmortems(
+            postmortems_dir=postmortems_dir(),
+            repo_root=repo_root,
+            project=project,
+            cwd=str(node_root),
+            existing_nodes=existing_nodes,
+        )
+    except Exception as exc:  # one bad source never sinks the run
+        typer.echo(f"WARN postmortem harvest: {exc}", err=True)
+        return True
+    if pm.harvested:
+        counts = {
+            k: sum(1 for d in pm.dispositions.values() if d == k)
+            for k in ("node", "inbox", "archived", "dupe", "failed")
+        }
+        typer.echo(
+            f"postmortems: {pm.harvested} unconsumed -> "
+            f"{counts['node']} node(s), {counts['inbox']} inbox, "
+            f"{counts['archived']} archived, {counts['dupe']} dupe(s), "
+            f"{counts['failed']} failed; {pm.stamped} stamped consumed_at"
+        )
+    for w in pm.warnings:
+        typer.echo(f"WARN postmortem: {w}", err=True)
+    return pm.failed
+
+
 @retro_app.command("run")
 def run(
     node: Optional[str] = typer.Option(None, "--node", help="Triage only this node's sentinel."),
@@ -608,11 +653,20 @@ def run(
             if _sentinel_pr_number(p) == pr and _sentinel_repo_matches(p, current_slug)
         ]
 
+    # W6 6.2 (x-f063): the postmortem source rides the PLAIN retro run - no
+    # new trigger (the post-merge ritual and on-demand `fno retro run` both
+    # land here). A --node/--pr-number run is a targeted harvest and skips it.
+    # Same independence contract as the PR-scoped sources: its failure never
+    # sinks the sentinel loop, and vice versa.
+    pm_failed = False
+    if node is None and pr is None:
+        pm_failed = _run_postmortem_pass(repo_root, node_root)
+
     if not candidates and pr is None:
         typer.echo("(no retro-pending sentinels to triage)")
-        raise typer.Exit(0)
+        raise typer.Exit(1 if pm_failed else 0)
 
-    any_retained = False
+    any_retained = pm_failed
     for sentinel_path in candidates:
         # Reload live nodes per sentinel so a node filed by an earlier sentinel
         # in THIS run is seen by dedup for the next one (AC6-FR: dual triggers).

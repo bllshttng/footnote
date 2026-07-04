@@ -22,7 +22,13 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from fno.carveout.core import BACKFILL_KIND
-from fno.retro.types import KIND_CARVEOUT, KIND_DEFERRED, KIND_REVIEW, RawItem
+from fno.retro.types import (
+    KIND_CARVEOUT,
+    KIND_DEFERRED,
+    KIND_POSTMORTEM,
+    KIND_REVIEW,
+    RawItem,
+)
 
 # Severity badge -> normalized severity (check-pr Step 4 table). No badge -> medium.
 _GEMINI_BADGE = re.compile(r"!\[(critical|high|medium|low)\]", re.IGNORECASE)
@@ -869,3 +875,110 @@ def harvest_deferred_findings(
                 )
                 idx += 1
     return items
+
+
+# ── postmortems (W6 6.2, x-f063) ─────────────────────────────────────────────
+
+# Two on-disk formats coexist: the legacy target-postmortem (YAML frontmatter
+# with `blocked_reason: {kind: ...}`) and the finalize.rs artifact (no
+# frontmatter; `- termination: **Reason**` bullet). Harvest reads both; the
+# consumed_at stamp adds a frontmatter block when none exists.
+_PM_TERMINATION_RE = re.compile(r"^-\s*termination:\s*\*{0,2}([A-Za-z_]+)\*{0,2}", re.MULTILINE)
+_PM_GIST_LINES = 40
+_PM_GIST_CHARS = 4000
+
+
+def _split_frontmatter(text: str) -> "tuple[Optional[dict], str]":
+    """Return (frontmatter dict or None, body). Malformed YAML raises ValueError."""
+    if not text.startswith("---"):
+        return None, text
+    rest = text[3:].lstrip("\n")
+    idx = rest.find("\n---")
+    if idx == -1:
+        return None, text
+    import yaml
+
+    try:
+        fm = yaml.safe_load(rest[:idx])
+    except yaml.YAMLError as exc:
+        raise ValueError(f"bad frontmatter: {exc}") from exc
+    if not isinstance(fm, dict):
+        fm = {}
+    return fm, rest[idx + 4 :].lstrip("\n")
+
+
+def harvest_postmortems(
+    postmortems_dir: Path,
+    *,
+    warnings: Optional[list[str]] = None,
+) -> list[RawItem]:
+    """Harvest unconsumed postmortem artifacts into RawItems.
+
+    - Skips any file whose frontmatter already carries ``consumed_at`` (AC6-FR).
+    - Batches: each item carries only a bounded gist (frontmatter + first-N
+      lines), never the whole directory in one blob (Failure Mode boundary).
+    - A malformed file is skipped with a warning, never an abort (mirrors the
+      carveouts contract).
+    """
+    warnings = warnings if warnings is not None else []
+    if not postmortems_dir.is_dir():
+        return []
+
+    items: list[RawItem] = []
+    for path in sorted(postmortems_dir.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+            fm, _body = _split_frontmatter(text)
+        except (OSError, ValueError) as exc:
+            warnings.append(f"postmortem {path.name}: {exc}; skipped")
+            continue
+        fm = fm or {}
+        if fm.get("consumed_at"):
+            continue  # already dispositioned by a prior run
+
+        # Termination/blocked reason: legacy frontmatter first, else the
+        # finalize.rs bullet line.
+        reason = ""
+        blocked = fm.get("blocked_reason")
+        if isinstance(blocked, dict):
+            reason = str(blocked.get("kind") or "")
+        if not reason:
+            m = _PM_TERMINATION_RE.search(text)
+            reason = m.group(1) if m else ""
+
+        gist = "\n".join(text.splitlines()[:_PM_GIST_LINES])[:_PM_GIST_CHARS]
+        invocation = str(fm.get("target_invocation") or "").strip()
+        hint = f"postmortem {reason or 'unknown'}: {invocation}".strip().rstrip(":")
+        items.append(
+            RawItem(
+                kind=KIND_POSTMORTEM,
+                text=gist,
+                source_id=f"postmortem:{path.name}",
+                title_hint=hint,
+                subkind=reason or None,
+            )
+        )
+    return items
+
+
+def stamp_postmortem_consumed(path: Path, *, ts: Optional[str] = None) -> None:
+    """Stamp ``consumed_at`` into a postmortem's frontmatter (idempotent).
+
+    Files without frontmatter (the finalize.rs format) get a minimal block
+    prepended; files with one get the key inserted before the closing fence.
+    Raises OSError/ValueError to the caller - the disposition already landed,
+    so the caller records the failure and the entry is re-deduped next run.
+    """
+    ts = ts or datetime.now(timezone.utc).isoformat()
+    text = path.read_text(encoding="utf-8")
+    fm, _body = _split_frontmatter(text)
+    if fm is not None and fm.get("consumed_at"):
+        return  # already stamped
+    if fm is None:
+        path.write_text(f"---\nconsumed_at: {ts}\n---\n{text}", encoding="utf-8")
+        return
+    rest = text[3:].lstrip("\n")
+    idx = rest.find("\n---")
+    head = text[: len(text) - len(rest) + idx]
+    tail = text[len(text) - len(rest) + idx :]
+    path.write_text(f"{head}\nconsumed_at: {ts}{tail}", encoding="utf-8")
