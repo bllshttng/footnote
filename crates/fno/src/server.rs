@@ -3532,6 +3532,56 @@ mod tests {
     }
 
     #[test]
+    fn watch_only_bg_row_surfaces_while_foreign_pane_is_skipped() {
+        // An `fno agents spawn --substrate bg` worker writes a paneless
+        // (`mux: None`) registry row. It MUST surface as a watch-only AgentRow,
+        // even alongside a pane row hosted by another mux session. The
+        // session-id skip in `agent_rows()` only eats ANOTHER session's live
+        // pane; it must never drop a paneless bg/headless row. Guards a future
+        // membership-first rewrite of `agent_rows()` from re-dropping bg rows.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        core.agents = vec![
+            // A pane hosted by ANOTHER session -> that session's server renders
+            // it; correctly skipped here.
+            RegistryAgent {
+                name: "foreign-pane".into(),
+                cwd: "/other".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: Some(("other".into(), 5)),
+                answerable: None,
+            },
+            // A bg worker: paneless, no squad match -> watch-only orphan.
+            RegistryAgent {
+                name: "bg-worker".into(),
+                cwd: "/bg".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+            },
+        ];
+        let rows = core.agent_rows();
+        assert!(
+            !rows.iter().any(|r| r.name == "foreign-pane"),
+            "a pane hosted by another session must be skipped"
+        );
+        let bg = rows
+            .iter()
+            .find(|r| r.name == "bg-worker")
+            .expect("a paneless bg row must surface as a watch-only row");
+        assert_eq!(
+            bg.squad, None,
+            "an unmatched bg row is an orphan (squad None)"
+        );
+        assert_eq!(bg.pane_id, None, "a watch-only row has no pane");
+        assert!(!bg.exited);
+    }
+
+    #[test]
     fn rerun_allowed_on_a_plain_shell_pane() {
         // AC-HP: a pane with no agent row is a shell - rerun is always safe.
         assert_eq!(rerun_allowed(&[], "main", 7), Ok(()));
