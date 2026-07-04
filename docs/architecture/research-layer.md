@@ -86,7 +86,7 @@ Green only if all three pass (exit 0 green / 1 red / 2 setup-error). The golden 
 
 ### The research-verify profile (US4, advisory)
 
-`/review research <brief.md>` runs a claim-shaped panel - fact-checker / citation-auditor / contradiction-finder / completeness-critic (`skills/review/research-verify.md`) - reusing the sigma panel machine with a swapped roster. It is **advisory**: it annotates the brief; the green/red verdict belongs to `fno evals grade` and this panel never changes it (mirroring sigma-is-advice / PR-CI-bot-is-the-code-gate).
+`/review research <brief.md>` runs a claim-shaped panel - fact-checker / citation-auditor / contradiction-finder / completeness-critic (`skills/review/references/research-verify.md`) - reusing the sigma panel machine with a swapped roster. It is **advisory**: it annotates the brief; the green/red verdict belongs to `fno evals grade` and this panel never changes it (mirroring sigma-is-advice / PR-CI-bot-is-the-code-gate).
 
 ### Scope note
 

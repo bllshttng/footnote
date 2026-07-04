@@ -133,7 +133,7 @@ For each candidate, construct a JSON object and call the writer:
 ```bash
 # Memory dir uses Claude's slash-encoded full-path scheme so the same
 # recipe works for any project, not just this one. MUST match the
-# post-merge pass recipe in skills/pr/check.md so both checkpoints
+# post-merge pass recipe in skills/pr/references/check.md so both checkpoints
 # land entries in the same directory.
 # Resolve the CANONICAL repo root, NOT the worktree: from a conductor worktree
 # `git rev-parse --show-toplevel` returns the worktree path, which slash-encodes

@@ -81,7 +81,7 @@ bundles:
         dest: references/worktree.md
 
   # Cluster router: /fix. The default fix loop (SKILL.md) and the investigate
-  # flow (investigate.md) plus their references are canonical in the folder.
+  # flow (references/investigate.md) plus their references are canonical in the folder.
   # Only the shared iteration/verification references come from /target.
   - skill: fix
     files:
@@ -90,7 +90,7 @@ bundles:
       - source: skills/target/references/verification-patterns.md
         dest: references/verification-patterns.md
 
-  # Cluster router: /think. Mode bodies (think.md, what-if.md, panel.md) and
+  # Cluster router: /think. Mode bodies (references/think.md, references/what-if.md, references/panel.md) and
   # their references are canonical in the folder. Shared references come from
   # /target (iteration/verification) and /blueprint (the discovery protocol).
   - skill: think
@@ -102,7 +102,7 @@ bundles:
       - source: skills/blueprint/references/discovery-gate.md
         dest: references/discovery-gate.md
 
-  # Cluster router: /do. Mode bodies (flat.md, waves.md), orchestrator.py,
+  # Cluster router: /do. Mode bodies (references/flat.md, references/waves.md), orchestrator.py,
   # scripts/, and the wave-orchestration references are canonical in the folder.
   # Only the shared Multi-CLI tool mapping comes from /target.
   - skill: do

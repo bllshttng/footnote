@@ -49,8 +49,8 @@ request the block when it is handing off.
 
 Load these references as needed:
 
-- [references/iteration-loop.md](references/iteration-loop.md)
-- [references/verification-patterns.md](references/verification-patterns.md)
+- [iteration-loop.md](iteration-loop.md)
+- [verification-patterns.md](verification-patterns.md)
 
 ## Defaults
 

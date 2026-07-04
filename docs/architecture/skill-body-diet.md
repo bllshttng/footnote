@@ -107,7 +107,7 @@ Concrete check:
 Other long skills should follow the same pattern when they cross the threshold. Candidates that may need a diet eventually:
 
 - `skills/blueprint/SKILL.md` (currently in the same range as pre-diet target)
-- `skills/do/waves.md` (full wave-orchestration body)
+- `skills/do/references/waves.md` (full wave-orchestration body)
 - Anything else that crosses 500 lines of body without strong load-bearing-every-invocation justification
 
 A future enhancement could be `scripts/validate-skill-size.sh`: a pre-commit hook that errors when any `SKILL.md` exceeds 500 lines without an explicit `# size-exempt: <reason>` directive in frontmatter. Out of scope for the initial diet.

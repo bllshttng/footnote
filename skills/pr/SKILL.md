@@ -85,7 +85,7 @@ Dispatch with the Task/Agent tool:
 - subagent type: **pr-creator** (the bundled Haiku agent at `agents/pr-creator.md`). On a runtime that resolves subagents by name, use that name; otherwise dispatch a general worker with the `agents/pr-creator.md` prompt and `model: "haiku"`.
 - Pass ONLY the gathered context the worker needs - the current branch, the base branch, a one-line summary of the change, and the no-merge / auto-merge posture. Do NOT pass the full session transcript: Haiku's window is small and a fork would blow it.
 
-`create.md` is the canonical create flow (the bundled copy of the standalone create-pr skill); `agents/pr-creator.md` is the same flow rewritten as the Haiku subagent. The router dispatches the agent via the Task/Agent tool - it never reaches a create skill through a runtime skill call.
+`references/create.md` is the canonical create flow (the bundled copy of the standalone create-pr skill); `agents/pr-creator.md` is the same flow rewritten as the Haiku subagent. The router dispatches the agent via the Task/Agent tool - it never reaches a create skill through a runtime skill call.
 
 ### 2c. Parse the worker's RESULT line (no false success)
 
@@ -98,11 +98,11 @@ A failed worker is never reported as a silent success. If the worker died withou
 
 ## Step 3: check mode (poll for external review)
 
-Load [check.md](check.md) and execute it in full, in this context. That body is the canonical review-polling flow: determine the configured reviewers, wait for review, fetch inline comments, parse priority badges, implement the findings, push fixes, and reply to each reviewer in-thread. It runs in the router's own main context (no subagent) and reaches no other skill at runtime.
+Load [check.md](references/check.md) and execute it in full, in this context. That body is the canonical review-polling flow: determine the configured reviewers, wait for review, fetch inline comments, parse priority badges, implement the findings, push fixes, and reply to each reviewer in-thread. It runs in the router's own main context (no subagent) and reaches no other skill at runtime.
 
 ## Step 4: merged mode (the post-merge ritual)
 
-Load [merged.md](merged.md) and execute it in full, in this context. That body is the canonical post-merge ritual: resolve the per-project inbox path from settings (fail loud if unset), close + stamp the backlog node via `fno backlog reconcile`, harvest retro / carveout items, write prose follow-ups to the project's vault inbox, file triage-worthy work as backlog nodes, and offer a backfill / handoff slot before close. It runs in the router's own main context.
+Load [merged.md](references/merged.md) and execute it in full, in this context. That body is the canonical post-merge ritual: resolve the per-project inbox path from settings (fail loud if unset), close + stamp the backlog node via `fno backlog reconcile`, harvest retro / carveout items, write prose follow-ups to the project's vault inbox, file triage-worthy work as backlog nodes, and offer a backfill / handoff slot before close. It runs in the router's own main context.
 
 ## Multi-CLI
 

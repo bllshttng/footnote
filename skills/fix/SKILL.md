@@ -58,7 +58,7 @@ Parse the first argument token:
 
 ## Investigate mode
 
-Load [investigate.md](investigate.md) and execute it in full, in this context. That reference is the canonical scientific-method debugging loop: define acceptance criteria, prove the bug with a failing reproduction, then test one falsifiable hypothesis per iteration. When it finishes with confirmed findings, the natural next step is the default repair loop - `/fix from-debug` consumes those findings in severity order.
+Load [investigate.md](references/investigate.md) and execute it in full, in this context. That reference is the canonical scientific-method debugging loop: define acceptance criteria, prove the bug with a failing reproduction, then test one falsifiable hypothesis per iteration. When it finishes with confirmed findings, the natural next step is the default repair loop - `/fix from-debug` consumes those findings in severity order.
 
 ## Fix mode (default)
 

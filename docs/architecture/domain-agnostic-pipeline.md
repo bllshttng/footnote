@@ -127,7 +127,7 @@ All functions are bash 3.2 compatible (no associative arrays). `yq` is required 
 | `skills/target/SKILL.md` | Pipeline orchestration (domain resolution + phase invocation, allow_claw check) |
 | `skills/target/references/state-schema.md` | State schema (domain fields) |
 | `skills/target/references/domain-profiles.md` | Domain profile reference (NEW) |
-| `skills/review/sigma.md` | Gate name reference |
+| `skills/review/references/sigma.md` | Gate name reference |
 
 ## Design Spec
 

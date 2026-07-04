@@ -61,7 +61,7 @@ Phase 2 is intentionally **not shipped with Phase 1**: it installs a plist to th
 
 | Path | Role |
 |---|---|
-| `skills/pr/merged.md` | the skill |
+| `skills/pr/references/merged.md` | the skill |
 | `skills/pr/scripts/inbox-has-pr.sh` | fno-free idempotency guard (marker grep) |
 | `cli/src/fno/config/__init__.py` | `PostMergeBlock` (parking_lot_path, enabled) + validator |
 | `cli/tests/unit/test_config_post_merge.py` | schema + `fno config get` resolution tests |

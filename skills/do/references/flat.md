@@ -66,7 +66,7 @@ root**, STOP — do NOT `cd` into the other repo and edit it. Surface that work 
 a backlog node and spawn a worker into its project
 (`fno agents spawn --provider claude --cwd <root> "target-<node>" "/target <node>"`),
 or, if no node exists yet, report it so the user can `/blueprint` it. See
-[references/session-project-invariant.md](references/session-project-invariant.md).
+[session-project-invariant.md](session-project-invariant.md).
 
 For each numbered change under `## Changes`:
 

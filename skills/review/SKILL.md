@@ -67,7 +67,7 @@ fi
 
 ### 2b. Run the panel
 
-Load [sigma.md](sigma.md) and execute it in full, in this context. That reference is the canonical six-agent review process. It dispatches the reviewer subagents via the **Task/Agent tool**, never by invoking another skill at runtime.
+Load [sigma.md](references/sigma.md) and execute it in full, in this context. That reference is the canonical six-agent review process. It dispatches the reviewer subagents via the **Task/Agent tool**, never by invoking another skill at runtime.
 
 ### 2c. Agent-failure transparency (do not silently drop a dead reviewer)
 
@@ -80,13 +80,13 @@ Never present a partial panel as a complete one, and never omit a reviewer that 
 
 ## Step 3: peer mode (cross-model second opinion)
 
-Load [peer.md](peer.md) and execute it in full, in this context. That reference is the canonical cross-model peer-review process. It assembles the diff, spawns `codex` or `gemini` via `fno agents spawn --once` (the agent is the runner), and relays the findings honestly.
+Load [peer.md](references/peer.md) and execute it in full, in this context. That reference is the canonical cross-model peer-review process. It assembles the diff, spawns `codex` or `gemini` via `fno agents spawn --once` (the agent is the runner), and relays the findings honestly.
 
 The peer review is **advisory**: it runs on a coding-account quota, not the bot account, and never satisfies a `required_bots` review gate. A human still merges.
 
 ## Step 4: research mode (advisory research-verify panel)
 
-Load [research-verify.md](research-verify.md) and execute it in full, in this context. That reference is the canonical research-verify process: it dispatches four claim-shaped reviewers (fact-checker / citation-auditor / contradiction-finder / completeness-critic) over a `doc` deliverable (the brief + its `sources.jsonl` sidecar) via the **Task/Agent tool**, never by invoking another skill at runtime.
+Load [research-verify.md](references/research-verify.md) and execute it in full, in this context. That reference is the canonical research-verify process: it dispatches four claim-shaped reviewers (fact-checker / citation-auditor / contradiction-finder / completeness-critic) over a `doc` deliverable (the brief + its `sources.jsonl` sidecar) via the **Task/Agent tool**, never by invoking another skill at runtime.
 
 The research-verify panel is **advisory**: the green/red verdict on a research brief is mechanical and belongs to `fno evals grade` (zero uncited claims, zero dead URLs, ≥1 golden checklist item per section). This panel annotates the brief; it never blocks, flips, or substitutes for the eval.
 

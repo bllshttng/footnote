@@ -74,7 +74,7 @@ def _resolve_pr_session_ids(
 ) -> list[str]:
     """Session id(s) whose ledger entry owns this PR, scoped to ``repo_slug``.
 
-    Mirrors the post-merge Step 4b ledger scan (skills/pr/merged.md). Because
+    Mirrors the post-merge Step 4b ledger scan (skills/pr/references/merged.md). Because
     ``ledger.json`` is GLOBAL and GitHub PR numbers collide across repos, a known
     ``repo_slug`` is REQUIRED to attribute any entry: an entry matches when its
     ``pr_url`` ends in ``/<slug>/pull/<pr>``, or (for a url-less entry) its bare

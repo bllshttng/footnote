@@ -1,6 +1,6 @@
 # Post-merge watcher (Phase 2 of the post-merge ritual)
 
-`ab-4e9fb05a`. Phase 1 ([`/fno:pr merged`](../../skills/pr/merged.md), PR #384) closes + stamps a backlog node, harvests retro/carveout items, and writes prose follow-ups to the repo's vault inbox - but only when a human invokes it. A **web-button merge** (the GitHub UI) produces no local event, so the ritual never fires for those PRs.
+`ab-4e9fb05a`. Phase 1 ([`/fno:pr merged`](../../skills/pr/references/merged.md), PR #384) closes + stamps a backlog node, harvests retro/carveout items, and writes prose follow-ups to the repo's vault inbox - but only when a human invokes it. A **web-button merge** (the GitHub UI) produces no local event, so the ritual never fires for those PRs.
 
 This directory adds a per-repo macOS `LaunchAgent` that polls for merged PRs on an interval and fires the ritual headlessly for each new merge, catching web-button (and other out-of-band) merges.
 

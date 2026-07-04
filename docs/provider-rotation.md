@@ -502,7 +502,7 @@ The sidecar feeds:
 
 > **Shipped path:** the wired cross-model routing for `/review sigma` and
 > `fno review` uses `config.review.cross_model` / `config.review.agent_providers`
-> (see `skills/review/sigma.md` -> "Cross-Model Review Routing"), resolved by
+> (see `skills/review/references/sigma.md` -> "Cross-Model Review Routing"), resolved by
 > `cli/src/fno/review/provider_resolution.py`. The `config.agents.<name>.provider`
 > schema described in the rest of this section is the original Spec-3 design and
 > was never wired; prefer the `config.review.*` keys.

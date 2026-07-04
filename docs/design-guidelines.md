@@ -183,7 +183,7 @@ argument-hint: "[expertise] [plan-path]"
 
 `fno:operator` remains as a compatibility shim.
 
-Use `fno:operator` (`skills/do/waves.md`) for the primary flow.
+Use `fno:operator` (`skills/do/references/waves.md`) for the primary flow.
 
 When invoked through this alias, follow the exact same workflow as `fno:operator`.
 ```

@@ -442,7 +442,7 @@ SURFACE=$(printf '%s' "$DESIGN_TEXT" | bash "$HELPER")
 ```
 
 Resolve the call mode in this priority order. Load
-[references/executor-routing-prompt.md](references/executor-routing-prompt.md)
+[executor-routing-prompt.md](executor-routing-prompt.md)
 for the full rule set, prompt template, and decision-capture format.
 
 1. **CLI flag wins.** If the env var `FNO_EXECUTOR_OVERRIDE` is set
@@ -463,7 +463,7 @@ for the full rule set, prompt template, and decision-capture format.
 
 Write the chosen decision as a single Locked Decisions entry using the
 format documented in
-[references/executor-routing-prompt.md](references/executor-routing-prompt.md).
+[executor-routing-prompt.md](executor-routing-prompt.md).
 For `mixed`, the entry must list the surface-inference patterns
 (`**/*.tsx`, `**/*.jsx`, `components/**`, `routes/**`, `src/styles/**`) so
 `/blueprint` can emit per-task `executor: impeccable` overrides on matching

@@ -16,7 +16,7 @@ requires:
 | Type | Finish line (the mechanical "green") | What runs |
 |------|--------------------------------------|-----------|
 | `pr` | PR exists + CI green + required bot reviewed, no unaddressed blocking finding (`DonePRGreen`) | the `/pr` router (`create` / `check` / `merged`) |
-| `doc` (alias `artifact`) | brief written to `config.research.output_dir` + `fno evals grade` green (`DoneAdvisory`) | [doc.md](doc.md), in this same context |
+| `doc` (alias `artifact`) | brief written to `config.research.output_dir` + `fno evals grade` green (`DoneAdvisory`) | [doc.md](references/doc.md), in this same context |
 
 ## The membership test (load-bearing)
 
@@ -28,7 +28,7 @@ A thing is a ship type ONLY if it has a definable **green** - a finish line read
 
 ## Composition, not self-containment
 
-`/ship` is a **composing umbrella**, deliberately NOT a self-contained, liftable-in-isolation skill. `/ship pr` routes to the co-installed `/pr` skill (which stays the real implementation and permanent alias - the plan's no-forced-migration rule); `/pr` is therefore a hard companion dependency, not reimplemented here. Only the genuinely-new `doc` mode is local to this folder ([doc.md](doc.md), loaded via Read). This skill is intentionally excluded from the marketplace self-containment lint, because folding `/pr`'s ~400 lines of mode bodies in would tax the dominant code path for no payoff.
+`/ship` is a **composing umbrella**, deliberately NOT a self-contained, liftable-in-isolation skill. `/ship pr` routes to the co-installed `/pr` skill (which stays the real implementation and permanent alias - the plan's no-forced-migration rule); `/pr` is therefore a hard companion dependency, not reimplemented here. Only the genuinely-new `doc` mode is local to this folder ([doc.md](references/doc.md), loaded via Read). This skill is intentionally excluded from the marketplace self-containment lint, because folding `/pr`'s ~400 lines of mode bodies in would tax the dominant code path for no payoff.
 
 ## Step 1: Resolve the type (ALWAYS announce it)
 
@@ -43,7 +43,7 @@ This is a **router**, not a monolith. Parse the first argument token:
   ```
 
 - **`pr`** -> the PR lifecycle. Print `running ship pr (PR lifecycle)`. The remaining tokens are the `/pr` mode + its arguments. Defer to the `/pr` skill: run `/pr <remaining tokens>` and follow it. (`/pr` is the retained, permanent alias - `/pr create` and `/ship pr create` are the same thing, byte-for-byte. `/ship pr` does not reimplement the PR flow; it routes to the one implementation in the `pr` skill.)
-- **`doc`** or **`artifact`** -> the research-doc deliverable. Print `running ship doc (research brief + grade)`. Load [doc.md](doc.md) and execute it in full in this context. The remaining tokens are doc's arguments.
+- **`doc`** or **`artifact`** -> the research-doc deliverable. Print `running ship doc (research brief + grade)`. Load [doc.md](references/doc.md) and execute it in full in this context. The remaining tokens are doc's arguments.
 - **`budget`** or **`community`** -> NOT a ship type. Print and stop with a non-zero result:
 
   ```

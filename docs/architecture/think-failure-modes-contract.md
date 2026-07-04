@@ -137,6 +137,6 @@ document-level. The stop hook's gate audit is unaffected.
 ## Related Files
 
 - `skills/think/SKILL.md` Step 6b and Step 8 (Save Design Document).
-- `skills/think/what-if.md` "Invoked from /think" section.
+- `skills/think/references/what-if.md` "Invoked from /think" section.
 - `skills/blueprint/SKILL.md` "Failure Mode Ingestion" section.
 - `skills/blueprint/references/phase-template.md` AC4-EDGE citation examples.

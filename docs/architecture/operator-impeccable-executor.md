@@ -165,7 +165,7 @@ booleans inconsistently.
 
 | Path | Owner | Purpose |
 |------|-------|---------|
-| `skills/do/waves.md` | this plan | Section 3 dispatcher + section 3c gate-artifact write |
+| `skills/do/references/waves.md` | this plan | Section 3 dispatcher + section 3c gate-artifact write |
 | `skills/do/references/executor-resolution.md` | this plan | Resolver chain reference |
 | `skills/do/scripts/resolve-executor.sh` | this plan | env-var-driven resolver shim |
 | `skills/do/scripts/run-critique-loop.sh` | this plan | testable shell port of agent loop |

@@ -119,7 +119,7 @@ fi
 # every contributor except Jason; `git rev-parse --show-toplevel` returns the
 # worktree path, which slash-encodes to a different dir and splits memory when
 # run from a conductor worktree. The recipe must derive the canonical root from
-# the common git-dir and slash-encode it, matching skills/pr/check.md.
+# the common git-dir and slash-encode it, matching skills/pr/references/check.md.
 # -----------------------------------------------------------------------
 if grep -qE 'MEMORY_DIR="[^"]*projects/-Users-[a-z0-9-]+/memory"' "$PRE_PROMISE"; then
     fail "AC8: MEMORY_DIR appears hardcoded to a literal slash-encoded path; derive it dynamically"
@@ -136,7 +136,7 @@ fi
 # means pre-promise writes to project-A while post-merge writes to project-B,
 # silently splitting the index.
 # -----------------------------------------------------------------------
-CHECK_PR="$(cd "$(dirname "$0")/../.." && pwd)/skills/pr/check.md"
+CHECK_PR="$(cd "$(dirname "$0")/../.." && pwd)/skills/pr/references/check.md"
 if [[ -f "$CHECK_PR" ]]; then
     if grep -q -- '--git-common-dir' "$CHECK_PR" && grep -qF "sed 's|/|-|g'" "$CHECK_PR"; then
         pass "AC9: check-pr SKILL.md uses the same canonical MEMORY_DIR scheme"

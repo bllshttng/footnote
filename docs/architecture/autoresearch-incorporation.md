@@ -82,9 +82,9 @@ The implementation also fixes `scripts/validate-plan.sh` so scaffolding and POC 
 |------|------|
 | `skills/target/references/iteration-loop.md` | Shared iteration protocol |
 | `skills/target/references/verification-patterns.md` | Verification catalog and repo-specific checks |
-| `skills/think/what-if.md` | Scenario exploration skill |
+| `skills/think/references/what-if.md` | Scenario exploration skill |
 | `skills/fix/SKILL.md` | Atomic repair skill |
-| `skills/fix/investigate.md` | Scientific-method upgrade with `--fix` chain |
+| `skills/fix/references/investigate.md` | Scientific-method upgrade with `--fix` chain |
 | `scripts/validate-plan.sh` | Semantic stub-detection bugfix |
 | `CLAUDE.md` | Skill discovery and iteration-loop documentation |
 
