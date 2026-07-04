@@ -70,6 +70,7 @@ pub mod loopcheck;
 pub mod mail_inject;
 pub mod manifest;
 pub mod nudge;
+pub mod opencode_ask;
 pub mod osc;
 pub mod paths;
 pub mod protocol;

@@ -31,7 +31,8 @@ use std::time::Duration;
 
 use crate::envelope::{Envelope, JsonEnvelope, NoEnvelope};
 use crate::readiness::{
-    AgyReadinessDetector, CodexReadinessDetector, GeminiReadinessDetector, ReadinessDetector,
+    AgyReadinessDetector, CodexReadinessDetector, GeminiReadinessDetector,
+    OpencodeReadinessDetector, ReadinessDetector,
 };
 use crate::supervisor::RestartPolicy;
 use crate::ParsedEvent;
@@ -865,6 +866,99 @@ impl ProviderWithPty for AgyProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Opencode — PTY-managed pane, PLAIN-TEXT (v1 hosts the TUI; acp is a future lane).
+// ---------------------------------------------------------------------------
+
+/// opencode provider (x-51f6). v1 hosts the interactive PTY-TUI — bare
+/// `opencode`, with the message on `--prompt` (the positional is a PROJECT
+/// PATH, not a prompt) — mirroring the codex/gemini pane pattern; opencode's
+/// structured `acp` protocol is a documented future lane, not wired here.
+/// The pane argv itself lives in `mux_spawn.build_pane_argv` (Python owns the
+/// pane back half since 4a-G2); the argv forms below are the HEADLESS
+/// `opencode run` shapes, carried for trait completeness — no client-side
+/// one-shot lane is wired in v1 (`spawn --substrate headless` refuses with a
+/// pointer to `pane`). opencode mints session ids (`--session`/`-s`), but v1
+/// does not probe or resume them (registry rows are live-only, like agy).
+pub struct OpencodeProvider;
+
+impl Provider for OpencodeProvider {
+    fn name(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
+        // `opencode run [prompt]` is the headless one-shot; `--auto`
+        // (auto-approve permissions) is the never-prompt lane so an
+        // unattended run cannot wedge on its first approval.
+        vec![
+            "opencode".into(),
+            "run".into(),
+            "--auto".into(),
+            ctx.message.clone(),
+        ]
+    }
+
+    fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
+        // opencode continues a session via `--session <id>` (run cmd).
+        vec![
+            "opencode".into(),
+            "run".into(),
+            "--auto".into(),
+            "--session".into(),
+            ctx.session_id.clone(),
+            ctx.message.clone(),
+        ]
+    }
+
+    fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
+        // The hosted TUI is plain text — no structured stream to parse (the
+        // acp lane would change this). Same shape as agy.
+        if chunk.trim().is_empty() {
+            ParsedEvent::Unknown {
+                raw: chunk.to_string(),
+            }
+        } else {
+            ParsedEvent::ReplyComplete {
+                text: chunk.to_string(),
+                duration_ms: 0,
+            }
+        }
+    }
+
+    fn reachability(
+        &self,
+        _entry: &AgentEntry,
+        _timeout: Duration,
+    ) -> Result<bool, ReachabilityProbeError> {
+        // opencode HAS an on-disk session store, but v1 does not probe it —
+        // inconclusive, so callers never false-orphan a live opencode pane.
+        Err(ReachabilityProbeError::new(
+            "opencode",
+            "opencode session probe not wired in v1 (pane is live-only)",
+        ))
+    }
+
+    fn as_pty(&self) -> Option<&dyn ProviderWithPty> {
+        Some(self)
+    }
+}
+
+impl ProviderWithPty for OpencodeProvider {
+    fn readiness_detector(&self) -> Box<dyn ReadinessDetector> {
+        Box::new(OpencodeReadinessDetector)
+    }
+
+    fn envelope(&self) -> Box<dyn Envelope> {
+        // Plain-text stdin into the TUI composer: no JSON wrapper.
+        Box::new(NoEnvelope)
+    }
+
+    fn default_restart_policy(&self) -> RestartPolicy {
+        RestartPolicy::default()
+    }
+}
+
 /// Parse gemini's single JSON document. Gemini emits one blob at EOF (the
 /// structural cleavage from codex), so this expects the COMPLETE document;
 /// partial input parses as [`ParsedEvent::Unknown`].
@@ -945,6 +1039,19 @@ pub fn gemini_session_id_from_blob(blob: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// The provider roster: every provider name the Rust side accepts — the spawn
+/// gates in `bin/client.rs`, the registry-acceptance check in `client_verbs`,
+/// and [`for_name`] all ride THIS list (x-51f6 US1: one source of truth, no
+/// per-site `matches!` copies). Python's mirror is `READABLE_PROVIDERS` in
+/// `cli/src/fno/agents/providers/__init__.py`; a cli test asserts the two stay
+/// identical. Every name here MUST have a [`for_name`] arm (test-enforced).
+pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "agy", "opencode"];
+
+/// The roster joined for error messages ("claude, codex, gemini, agy, opencode").
+pub fn known_providers_csv() -> String {
+    KNOWN_PROVIDERS.join(", ")
+}
+
 /// Resolve a provider impl by its stable name (`"claude"` / `"codex"` /
 /// `"gemini"`). Returns `None` for an unknown provider so callers (e.g.
 /// reconcile) can treat the probe as inconclusive rather than guessing. The
@@ -956,6 +1063,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "codex" => Some(Box::new(CodexProvider)),
         "gemini" => Some(Box::new(GeminiProvider)),
         "agy" => Some(Box::new(AgyProvider)),
+        "opencode" => Some(Box::new(OpencodeProvider)),
         _ => None,
     }
 }
@@ -1142,12 +1250,58 @@ mod tests {
 
     // ---- ClaudeInteractiveProvider (E1 keystone) ----
 
+    // ---- OpencodeProvider (x-51f6) ----
+
+    #[test]
+    fn opencode_create_argv_is_headless_run_never_bare_tui() {
+        // The trait's create path is the headless `opencode run` one-shot
+        // (never-prompt via --auto); the bare-`opencode` TUI is the PANE form
+        // and lives in mux_spawn.build_pane_argv, not here.
+        let argv = OpencodeProvider.create_argv(&create_ctx());
+        assert_eq!(argv, vec!["opencode", "run", "--auto", "build feature X"]);
+    }
+
+    #[test]
+    fn opencode_resume_argv_uses_session_flag() {
+        let ctx = ResumeContext {
+            session_id: "ses_abc".into(),
+            message: "m".into(),
+            cwd: PathBuf::from("/x"),
+            from_name: None,
+            yolo: false,
+        };
+        assert_eq!(
+            OpencodeProvider.resume_argv(&ctx),
+            vec!["opencode", "run", "--auto", "--session", "ses_abc", "m"]
+        );
+    }
+
+    #[test]
+    fn opencode_is_pty_managed_and_inconclusive_to_probe() {
+        assert!(OpencodeProvider.as_pty().is_some());
+        // v1 never false-orphans a live opencode pane: probes are inconclusive.
+        let entry = AgentEntry {
+            name: "oc".into(),
+            provider: "opencode".into(),
+            session_id: None,
+            cwd: PathBuf::from("/x"),
+        };
+        assert!(OpencodeProvider
+            .reachability(&entry, Duration::from_secs(1))
+            .is_err());
+    }
+
     #[test]
     fn for_name_round_trips_every_known_provider() {
         // for_name is the LD8 single registration point; a copy-paste slip
         // (e.g. "codex" => GeminiProvider) would pass every other test, so
         // assert each name resolves to a provider reporting that same name.
-        for name in ["claude", "codex", "gemini"] {
+        // Iterating KNOWN_PROVIDERS (x-51f6 US1 / AC1-FR) makes this the
+        // roster-parity gate too: a name added to the const without a
+        // for_name arm fails here, and the consolidation can never silently
+        // narrow the roster (the old hardcoded list had already drifted —
+        // it missed agy).
+        for name in KNOWN_PROVIDERS.iter().copied() {
             let p = for_name(name).unwrap_or_else(|| panic!("for_name({name}) returned None"));
             assert_eq!(
                 p.name(),

@@ -1562,21 +1562,25 @@ mod tests {
         ));
     }
 
-    // AC2-FR / AC3 (x-8f7f): the hosting gate is real. opencode's manifest is
-    // BUNDLED (staged) but opencode has no provider impl, so it can never be
-    // hosted as a pane and the manifest sits inert. agy, by contrast, is both
-    // bundled AND hostable (has an AgyProvider), so its manifest can fire.
+    // AC2-FR / AC3 (x-8f7f, flipped live at x-51f6): the hosting gate is
+    // real. opencode's manifest was BUNDLED (staged) while opencode had no
+    // provider impl; x-51f6 added OpencodeProvider, so opencode is now both
+    // bundled AND hostable — like agy — and its manifest can fire. aider
+    // remains the genuinely-unhosted example (bundled nothing, hosted
+    // nothing).
     #[test]
-    fn x8f7f_staged_manifest_is_inert_without_a_host() {
-        assert!(bundled_manifest("opencode").is_some(), "opencode staged");
+    fn x8f7f_staged_manifest_fires_once_hosted() {
+        for hosted in ["opencode", "agy"] {
+            assert!(bundled_manifest(hosted).is_some(), "{hosted} bundled");
+            assert!(
+                crate::provider::for_name(hosted).is_some(),
+                "{hosted} IS hostable -> manifest can fire",
+            );
+        }
+        assert!(bundled_manifest("aider").is_none(), "aider not bundled");
         assert!(
-            crate::provider::for_name("opencode").is_none(),
-            "opencode is not hostable (no provider impl) -> manifest inert",
-        );
-        assert!(bundled_manifest("agy").is_some(), "agy staged");
-        assert!(
-            crate::provider::for_name("agy").is_some(),
-            "agy IS hostable (AgyProvider) -> manifest can fire",
+            crate::provider::for_name("aider").is_none(),
+            "aider not hosted"
         );
     }
 

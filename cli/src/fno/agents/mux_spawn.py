@@ -113,13 +113,19 @@ def claude_argv_is_interactive(argv: list[str]) -> bool:
 
 # Providers with an interactive-pane form below. This is the pane-hostable set -
 # a DISTINCT invariant from READABLE_PROVIDERS (which only means "the registry
-# loader tolerates this string in a row"). The two coincide today but diverge the
-# moment a readable-but-argvless provider is staged: opencode is bundled as a
-# manifest now and joins READABLE_PROVIDERS when x-51f6 hosts it, yet has no pane
-# argv until then. Gate the pane path on THIS, so opencode is refused with an
-# honest message rather than slipping to build_pane_argv's backstop raise.
+# loader tolerates this string in a row"). The two coincide today (opencode
+# graduated from staged-manifest-only to hosted at x-51f6) but diverge the
+# moment the next readable-but-argvless provider is staged. Gate the pane path
+# on THIS, so a staged provider is refused with an honest message rather than
+# slipping to build_pane_argv's backstop raise.
 # Keep in sync with the branches in build_pane_argv (the round-trip test enforces it).
-PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini", "agy")
+PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = (
+    "claude",
+    "codex",
+    "gemini",
+    "agy",
+    "opencode",
+)
 
 
 def build_pane_argv(
@@ -129,9 +135,13 @@ def build_pane_argv(
     yolo: bool,
     session_uuid: Optional[str],
 ) -> list[str]:
-    """The interactive PTY argv for ``provider`` (mirrors
-    crates/fno-agents/src/provider.rs ``create_interactive_argv``; the mux pane
-    replaces the daemon worker as the host, the argv contract is unchanged)."""
+    """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
+    pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
+    (crates/fno-agents/src/provider.rs), which builds the HEADLESS one-shot
+    form for the `--substrate headless` lane; the two intentionally differ
+    (e.g. opencode: bare ``opencode --prompt <msg>`` here vs
+    ``opencode run --auto <msg>`` there) and there is no cross-language
+    parity contract between them - don't go looking for one."""
     if provider == "claude":
         # `claude --session-id <uuid> [message]`: the pinned session id makes
         # the transcript discoverable and keys the inside-leg reports
@@ -174,6 +184,20 @@ def build_pane_argv(
         argv = ["agy", "--dangerously-skip-permissions"]
         if message:
             argv.append(message)
+        return argv
+    if provider == "opencode":
+        # Bare `opencode` is the TUI (x-51f6); `opencode run` is the HEADLESS
+        # form and must not be pane-hosted. The positional is a PROJECT PATH,
+        # not a prompt, so the message rides --prompt (argv pinned from
+        # opencode source, packages/opencode/src/cli/cmd/tui.ts). --auto is
+        # the never-prompt lane (visible spelling of the hidden
+        # --yolo/--dangerously-skip-permissions aliases); non-yolo keeps
+        # opencode's default permission prompting for the answer queue.
+        argv = ["opencode"]
+        if message:
+            argv += ["--prompt", message]
+        if yolo:
+            argv.append("--auto")
         return argv
     raise DispatchAskError(
         f"provider {provider!r} has no interactive pane form", exit_code=2

@@ -15,6 +15,7 @@ use fno_agents::client::{
 use fno_agents::drift::drift_warning;
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
+use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 
@@ -369,8 +370,18 @@ async fn run(args: Vec<String>) -> i32 {
         if let Some(code) = maybe_run_agy_ask(&home, &params, &agent_name) {
             return code;
         }
+        // Opencode `ask` is intercepted client-side (x-51f6): opencode is
+        // pane-hosted only in v1, so a stateful resume is unsupported — this
+        // surfaces a clear error directing the caller to drive the pane
+        // directly, rather than the generic "provider required for new
+        // agent" text an existing opencode row would otherwise hit below
+        // (that text is both wrong - the agent already exists - and a dead
+        // end, since retrying with --provider opencode reproduces it).
+        if let Some(code) = maybe_run_opencode_ask(&home, &params, &agent_name) {
+            return code;
+        }
         // Unconditional flip (ab-73da4ac2): `ask` now auto-routes to this
-        // client for every provider, so an ask that matched none of the three
+        // client for every provider, so an ask that matched none of the four
         // provider hooks is a create with no/unknown `--provider`. Surface
         // Python's `select_provider` exit-2 error here rather than falling
         // through to the daemon RPC, whose `handle_ask` PTY screen is the wrong
@@ -406,15 +417,17 @@ async fn run(args: Vec<String>) -> i32 {
             match params.get("provider").and_then(|v| v.as_str()) {
                 None => {
                     eprintln!(
-                        "provider is required to spawn a new agent {}; pass --provider one of: claude, codex, gemini, agy",
-                        py_repr(&agent_name)
+                        "provider is required to spawn a new agent {}; pass --provider one of: {}",
+                        py_repr(&agent_name),
+                        known_providers_csv()
                     );
                     return 2;
                 }
-                Some(p) if !matches!(p, "claude" | "codex" | "gemini" | "agy") => {
+                Some(p) if !KNOWN_PROVIDERS.contains(&p) => {
                     eprintln!(
-                        "unknown provider {}; supported: claude, codex, gemini, agy",
-                        py_repr(p)
+                        "unknown provider {}; supported: {}",
+                        py_repr(p),
+                        known_providers_csv()
                     );
                     return 2;
                 }
@@ -627,6 +640,13 @@ fn maybe_run_agy_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
     fno_agents::agy_ask::maybe_run_agy_ask(home, params, name)
 }
 
+/// Route an opencode `ask` to the client-side pane-only guard (x-51f6).
+/// opencode is hosted as a pane with no client-side stateful resume; this
+/// returns `Some(2)` with a redirect error for an opencode target, else `None`.
+fn maybe_run_opencode_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
+    fno_agents::opencode_ask::maybe_run_opencode_ask(home, params, name)
+}
+
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
 ///
 /// x-2c27 names the session substrate as one axis with three values; this arm
@@ -683,8 +703,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         Some(p) => p,
         None => {
             eprintln!(
-                "provider is required to spawn a new agent {}; pass --provider one of: claude, codex, gemini, agy",
-                py_repr(name)
+                "provider is required to spawn a new agent {}; pass --provider one of: {}",
+                py_repr(name),
+                known_providers_csv()
             );
             return Some(2);
         }
@@ -720,10 +741,11 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
 
     // Validate the provider FIRST so an unknown provider is a client-side
     // error (exit 2) for every substrate, never a fall-through to the daemon.
-    if !matches!(provider, "claude" | "codex" | "gemini" | "agy") {
+    if !KNOWN_PROVIDERS.contains(&provider) {
         eprintln!(
-            "unknown provider {}; supported: claude, codex, gemini, agy",
-            py_repr(provider)
+            "unknown provider {}; supported: {}",
+            py_repr(provider),
+            known_providers_csv()
         );
         return Some(2);
     }
@@ -791,6 +813,17 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ("gemini", "headless") => emit!(dispatch_gemini_once(
             home, name, message, from_name, &cwd, yolo, timeout,
         )),
+        // opencode v1 hosts the PTY-TUI only (x-51f6 Locked Decision 3): no
+        // client-side `opencode run` one-shot lane is wired. Refuse loudly
+        // rather than fall through to the daemon RPC (which would silently
+        // attempt a retired PTY host).
+        ("opencode", "headless") => {
+            eprintln!(
+                "substrate 'headless' is not wired for opencode yet; spawn an interactive pane with --substrate pane"
+            );
+            Some(2)
+        }
+
         ("agy", "headless") => {
             // agy is stateless (plain text, no session id): a one-shot `agy -p`.
             // It ignores `yolo` (headless create always passes
@@ -798,6 +831,17 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             emit!(dispatch_agy_once(
                 home, name, message, from_name, &cwd, model, timeout,
             ))
+        }
+
+        // opencode bg: pointing this at the generic (other,"bg") message below
+        // would tell the caller to use --substrate headless, which opencode
+        // ALSO refuses (the arm above) - a dead-end loop identical to the one
+        // the ask-refusal fix addressed. Point at the real working substrate.
+        ("opencode", "bg") => {
+            eprintln!(
+                "substrate 'bg' (detached interactive thread) is claude-only; opencode has no detached-thread or headless substrate - use --substrate pane"
+            );
+            Some(2)
         }
 
         // bg is claude-only (Locked Decision 2): codex/gemini/agy have no
@@ -825,19 +869,20 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
 /// prints to stderr verbatim). Never routes to the daemon (Locked Decision 3).
 fn unresolvable_ask_exit(params: &Value, name: &str) -> i32 {
     use fno_agents::claude_ask::py_repr;
-    const KNOWN: [&str; 4] = ["claude", "codex", "gemini", "agy"];
     let provider_param = params.get("provider").and_then(|v| v.as_str());
     let msg = match provider_param {
         // `select_provider` validates the requested provider FIRST, so an
         // unknown `--provider` surfaces the "unknown provider" error.
-        Some(p) if !KNOWN.contains(&p) => format!(
-            "unknown provider {}; supported: claude, codex, gemini, agy",
-            py_repr(p)
+        Some(p) if !KNOWN_PROVIDERS.contains(&p) => format!(
+            "unknown provider {}; supported: {}",
+            py_repr(p),
+            known_providers_csv()
         ),
         // New agent with no resolvable provider.
         _ => format!(
-            "provider is required for new agent {}; pass --provider one of: claude, codex, gemini, agy",
-            py_repr(name)
+            "provider is required for new agent {}; pass --provider one of: {}",
+            py_repr(name),
+            known_providers_csv()
         ),
     };
     eprintln!("{}", msg);
@@ -1295,10 +1340,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 .get("substrate")
                 .and_then(Value::as_str)
                 .unwrap_or("pane");
-            let pty_capable = matches!(
-                params.get("provider").and_then(Value::as_str),
-                Some("claude") | Some("codex") | Some("gemini") | Some("agy")
-            );
+            let pty_capable = params
+                .get("provider")
+                .and_then(Value::as_str)
+                .is_some_and(|p| KNOWN_PROVIDERS.contains(&p));
             if substrate == "pane" && pty_capable {
                 apply_interactive_defaults(&mut params);
             }
@@ -2779,11 +2824,12 @@ mod tests {
     fn spawn_unknown_provider_does_not_force_interactive() {
         // AC1-EDGE (Boundaries): an unknown provider keeps today's behavior; the
         // daemon's provider_for_pty errors on it as before, so we must NOT force
-        // host_mode (which would change the error surface).
+        // host_mode (which would change the error surface). aider is the
+        // canonical unhosted CLI (opencode joined the roster at x-51f6).
         let args = vec![
             "wk".to_string(),
             "--provider".to_string(),
-            "opencode".to_string(),
+            "aider".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
         assert!(

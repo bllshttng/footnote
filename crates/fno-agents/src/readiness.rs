@@ -239,6 +239,69 @@ impl ReadinessDetector for ClaudeReadinessDetector {
     }
 }
 
+/// opencode TUI readiness (x-51f6 US3). Markers pinned from a LIVE capture
+/// (opencode 1.14.50, mux-pane hosted), not guessed:
+///
+/// - **idle**: the composer box draws a `┃` (U+2503) left edge; the footer
+///   hint row reads "tab agents  ctrl+p commands". The LAST line is a status
+///   bar (`~/path:branch … 1.14.50`), so the shared trailing-glyph
+///   [`prompt_ready`] can never fire for opencode — a positive signal needs
+///   the composer edge instead.
+/// - **working**: the footer swaps to a progress fill (`⬝⬝⬝⬝■■■■`) plus an
+///   "esc interrupt" hint. NOTE: live 1.14.50 says "esc interrupt" (no "to"),
+///   which the shared `BUSY_MARKERS` miss — matched here on "interrupt".
+/// - **blocked**: the "Permission required" dialog (same marker family as
+///   `manifests/opencode.toml`) and the shared auth [`WALL_MARKERS`].
+///
+/// Conservative bias holds (readiness OQ#9): the composer edge is required
+/// AND every busy/blocked marker vetoes, so a UI change degrades to
+/// false-NOT-ready (footnote waits), never a false-ready dispatch.
+pub struct OpencodeReadinessDetector;
+
+/// Bottom non-blank lines forming opencode's status region: the composer box
+/// (edge rows + model line), the hint row, and the status bar — deeper than
+/// the shared 3-line region because opencode's composer is a multi-row box.
+const OPENCODE_STATUS_REGION_LINES: usize = 8;
+
+impl ReadinessDetector for OpencodeReadinessDetector {
+    fn provider_name(&self) -> &str {
+        "opencode"
+    }
+
+    fn is_ready(&self, screen: &ScreenView) -> Result<bool, ReadinessError> {
+        let nonblank: Vec<&str> = screen
+            .visible_text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        if nonblank.is_empty() {
+            return Ok(false); // blank screen: nothing drawn yet
+        }
+        let start = nonblank.len().saturating_sub(OPENCODE_STATUS_REGION_LINES);
+        let region = nonblank[start..].join("\n");
+        if WALL_MARKERS.iter().any(|m| region.contains(m)) {
+            return Ok(false);
+        }
+        // "interrupt" covers "esc interrupt" (live 1.14.50) and the "esc to
+        // interrupt"/"ctrl+c to interrupt" variants; the ⬝/■ runs are the
+        // progress fill; "Permission required" is the blocked dialog.
+        const OPENCODE_NOT_READY: &[&str] = &[
+            "interrupt",
+            "Permission required",
+            "\u{25a0}\u{25a0}\u{25a0}\u{25a0}",
+            "\u{2b1d}\u{2b1d}\u{2b1d}\u{2b1d}",
+        ];
+        if OPENCODE_NOT_READY.iter().any(|m| region.contains(m)) {
+            return Ok(false);
+        }
+        // Positive signal: the composer's `┃` left edge in the status region.
+        // A dialog overlay or half-drawn screen has no edge -> not ready.
+        Ok(nonblank[start..]
+            .iter()
+            .any(|l| l.trim_start().starts_with('\u{2503}')))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,18 +347,92 @@ mod tests {
         assert_eq!(d.is_ready(&view("Waiting for auth \u{276f}")), Ok(false));
     }
 
+    // ---- opencode (x-51f6 US3): fixtures condensed from a live 1.14.50
+    // mux-pane capture (capture method: `fno mux pane run -- opencode` +
+    // `pane read`), per the markers-from-capture locked decision. ----
+
+    fn opencode_screen(footer_hint: &str) -> String {
+        format!(
+            "   \u{2503}\n   \u{2503}  Ask anything... \"Fix a TODO in the codebase\"\n   \u{2503}\n   \u{2503}  Sisyphus - Ultraworker \u{b7} model \u{b7} medium\n   \u{2579}\u{2580}\u{2580}\u{2580}\u{2580}\n{footer_hint}\n  ~/proj:main  \u{2299} 6 MCP /status   1.14.50"
+        )
+    }
+
+    #[test]
+    fn opencode_idle_composer_is_ready() {
+        let d = OpencodeReadinessDetector;
+        let screen = opencode_screen("                 tab agents  ctrl+p commands");
+        assert_eq!(d.is_ready(&view(&screen)), Ok(true));
+        assert_eq!(d.provider_name(), "opencode");
+    }
+
+    #[test]
+    fn opencode_progress_fill_or_interrupt_hint_is_busy() {
+        let d = OpencodeReadinessDetector;
+        // Live 1.14.50 working footer: fill run + "esc interrupt" (no "to").
+        let working = opencode_screen(
+            "   \u{2b1d}\u{2b1d}\u{2b1d}\u{2b1d}\u{25a0}\u{25a0}\u{25a0}\u{25a0}  esc interrupt      tab agents  ctrl+p commands",
+        );
+        assert_eq!(d.is_ready(&view(&working)), Ok(false));
+        // The shared "esc to interrupt" spelling stays busy too.
+        let alt = opencode_screen("   esc to interrupt");
+        assert_eq!(d.is_ready(&view(&alt)), Ok(false));
+    }
+
+    #[test]
+    fn opencode_permission_dialog_and_auth_wall_are_not_ready() {
+        let d = OpencodeReadinessDetector;
+        let perm = opencode_screen("   \u{25b3} Permission required");
+        assert_eq!(d.is_ready(&view(&perm)), Ok(false));
+        let wall = opencode_screen("   Login required");
+        assert_eq!(d.is_ready(&view(&wall)), Ok(false));
+    }
+
+    #[test]
+    fn opencode_stale_blocker_above_the_8_line_window_does_not_block() {
+        // A "Permission required" / progress-fill marker that has scrolled
+        // ABOVE the trailing OPENCODE_STATUS_REGION_LINES(8) window (into old
+        // reply text) must not veto readiness - only the bottom composer/
+        // status region gates it (mirrors busy_word_in_model_reply_above_
+        // status_region_does_not_block for the shared 3-line window). This
+        // fixture has 11 non-blank lines; the last 8 exclude both noise lines.
+        let d = OpencodeReadinessDetector;
+        let screen = "Permission required somewhere in old reply\n\
+                      \u{25a0}\u{25a0}\u{25a0}\u{25a0} progress marker from old scrollback\n\
+                      filler line one\n\
+                      filler line two\n\
+                      \u{2503}\n\
+                      \u{2503}  Ask anything... \"Fix a TODO in the codebase\"\n\
+                      \u{2503}\n\
+                      \u{2503}  Sisyphus - Ultraworker \u{b7} model \u{b7} medium\n\
+                      \u{2579}\u{2580}\u{2580}\u{2580}\u{2580}\n\
+                                       tab agents  ctrl+p commands\n\
+                      ~/proj:main  \u{2299} 6 MCP /status   1.14.50";
+        assert_eq!(d.is_ready(&view(screen)), Ok(true));
+    }
+
+    #[test]
+    fn opencode_no_composer_edge_is_not_ready() {
+        let d = OpencodeReadinessDetector;
+        // A half-drawn screen / full-screen dialog with no `┃` edge must read
+        // not-ready (conservative bias), and a blank screen too.
+        assert_eq!(d.is_ready(&view("loading opencode...")), Ok(false));
+        assert_eq!(d.is_ready(&view("")), Ok(false));
+    }
+
     #[test]
     fn no_signal_detector_errors_never_guesses() {
+        // "aider" is the canonical genuinely-unhosted CLI (opencode graduated
+        // to a real detector at x-51f6).
         let d = NoSignalDetector {
-            provider: "opencode".to_string(),
+            provider: "aider".to_string(),
         };
         // The detector reports the real provider name (not the literal
         // "unknown") in both provider_name() and the error (cv-789fdba0).
-        assert_eq!(d.provider_name(), "opencode");
+        assert_eq!(d.provider_name(), "aider");
         assert_eq!(
             d.is_ready(&view("anything at all, 9999 bytes of banner")),
             Err(ReadinessError::UnknownReadinessSignal {
-                provider: "opencode".into()
+                provider: "aider".into()
             })
         );
     }

@@ -405,7 +405,10 @@ def test_spawn_unknown_provider_exits_2(workdir) -> None:
     # Default substrate is `pane`, so the READABLE_PROVIDERS pane gate rejects
     # (x-8f7f): the message names the pane-hostable set (agy included), not the
     # narrower Python-dispatchable KNOWN_PROVIDERS set.
-    assert "pane-hostable providers: claude, codex, gemini, agy" in result.output
+    assert (
+        "pane-hostable providers: claude, codex, gemini, agy, opencode"
+        in result.output
+    )
 
 
 # ---------------------------------------------------------------------------
