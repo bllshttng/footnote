@@ -1552,8 +1552,13 @@ def cmd_update(
                 if origin is None:
                     typer.echo(f"Error: --caused-by node {caused_by} not found", err=True)
                     raise typer.Exit(code=1)
+                if origin["id"] == node["id"]:
+                    typer.echo("Error: --caused-by cannot reference the node itself", err=True)
+                    raise typer.Exit(code=1)
                 # Store the resolved id, not the raw input (which may be a
                 # prefix/bare-hex form _find_node normalized).
+                # ponytail: self-reference check only; add a cycle walk if a
+                # consumer ever traverses caused_by chains.
                 node["caused_by"] = origin["id"]
         if fixes_pr is not None:
             node["fixes_pr"] = None if fixes_pr == 0 else int(fixes_pr)

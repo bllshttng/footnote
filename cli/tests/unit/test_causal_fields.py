@@ -76,6 +76,15 @@ def test_update_sets_causal_fields(tmp_graph):
     assert n["reverted"] is True
 
 
+def test_update_caused_by_self_reference_fails(tmp_graph):
+    _seed(tmp_graph, [_node("ab-00000001")])
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--caused-by", "ab-00000001",
+    ])
+    assert result.exit_code == 1
+    assert _read(tmp_graph)[0].get("caused_by") is None
+
+
 def test_update_caused_by_unknown_node_fails(tmp_graph):
     _seed(tmp_graph, [_node("ab-00000001")])
     result = runner.invoke(app, [
