@@ -1379,9 +1379,15 @@ impl Core {
                 // An exited pane is unanswerable; drop any stale payload with
                 // the badge (x-c929).
                 answerable: if exited { None } else { a.answerable.clone() },
-                // A terminal session can't be attached (its supervisor row is
-                // being reaped): drop the attach target on exit, like the badge.
-                attach_id: if exited { None } else { a.attach_id.clone() },
+                // The attach target rides ONLY a live watch-only row: a
+                // pane-hosted row focuses its pane instead (wire contract), and
+                // a terminal session can't be attached (its supervisor row is
+                // being reaped). Drop it in both cases, like the badge.
+                attach_id: if exited || pane_id.is_some() {
+                    None
+                } else {
+                    a.attach_id.clone()
+                },
             });
         }
         out
@@ -2082,6 +2088,17 @@ impl Core {
                 // fail-closed, like the other catalog-named commands.
                 if id.len() != 8 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
                     self.notice(client_id, "not an attachable agent");
+                    return Flow::Continue;
+                }
+                // Attach ONLY a session actually surfaced in this sideline: a
+                // live watch-only row (paneless, not exited) whose jobId matches
+                // - the same catalog-membership refusal FocusPane/SelectTab use,
+                // so a stale or never-surfaced id can never drive a spawn.
+                let known = self.agents.iter().any(|a| {
+                    a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id.as_str())
+                });
+                if !known {
+                    self.notice(client_id, "no such agent");
                     return Flow::Continue;
                 }
                 // Spawn `claude attach <id>` as a new tab in the sender's squad
@@ -3640,17 +3657,26 @@ mod tests {
     }
 
     #[test]
-    fn attach_agent_refuses_a_malformed_jobid() {
+    fn attach_agent_refuses_unknown_or_malformed_jobid() {
         // The jobId lands in `claude attach <id>`'s argv, so an out-of-shape id
-        // is refused before any pane spawns - defense in depth even though the
-        // argv is never a shell string.
-        for bad in ["short", "toolongxx", "ZZZZZZZZ", "; rm -rf /", "c19cd2c"] {
+        // is refused before any pane spawns (argv defense in depth). A
+        // well-formed id that names no surfaced watch-only row is refused too
+        // (catalog membership, like the sibling FocusPane/SelectTab commands) -
+        // here `empty_core` has no agents, so even valid-shape "deadbeef" fails.
+        for bad in [
+            "short",
+            "toolongxx",
+            "ZZZZZZZZ",
+            "; rm -rf /",
+            "c19cd2c",
+            "deadbeef",
+        ] {
             let mut core = empty_core();
             let flow = core.command(1, Command::AttachAgent(bad.into()));
             assert!(matches!(flow, Flow::Continue));
             assert!(
                 core.panes.is_empty(),
-                "malformed jobId {bad:?} must not spawn a pane"
+                "un-surfaced/malformed jobId {bad:?} must not spawn a pane"
             );
         }
     }

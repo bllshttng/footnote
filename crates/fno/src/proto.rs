@@ -1169,6 +1169,7 @@ mod tests {
             ClientMsg::Command(Command::SelectTab(3)),
             ClientMsg::Command(Command::SelectSquad(42)),
             ClientMsg::Command(Command::FocusPane(3)),
+            ClientMsg::Command(Command::AttachAgent("c19cd2c3".into())),
             ClientMsg::Query,
             ClientMsg::KillServer,
             ClientMsg::Mouse {
@@ -1224,6 +1225,19 @@ mod tests {
             let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
             assert_eq!(decoded, msg);
         }
+    }
+
+    #[test]
+    fn agent_row_from_v13_json_defaults_attach_id_none() {
+        // A pre-v14 (v13) AgentRow omits `attach_id` entirely (skip-when-None).
+        // A v14 reader must decode it as `None`, never fail - the wire
+        // back-compat that lets the version skew window hold.
+        let v13 = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(v13).unwrap();
+        assert_eq!(row.attach_id, None);
+        assert_eq!(row.answerable, None);
+        assert_eq!(row.name, "bg");
     }
 
     #[test]
