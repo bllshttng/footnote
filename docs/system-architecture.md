@@ -63,7 +63,7 @@ graph TB
     end
 
     subgraph "Hooks Layer"
-        STOP["Stop Hooks<br/>target-stop-hook.sh<br/>convo-signal-capture.sh"]
+        STOP["Stop Hooks<br/>target-stop-hook.sh"]
         SESS["Session Hooks<br/>session-start.sh<br/>inject-project-vision.sh"]
         TOOL["Tool Hooks<br/>context-monitor.js"]
         HELP["Helpers<br/>init-target-state.sh<br/>init-session-state.sh<br/>enforce-fork-context.sh"]
@@ -72,7 +72,7 @@ graph TB
     subgraph "Scripts Layer"
         VAL["Validation<br/>validate-plan.sh<br/>validate-test-first.sh<br/>validate-roadmap.sh<br/>scan-antipatterns.sh"]
         ORC["Orchestration<br/>orchestrator.py<br/>run-target-loop.sh"]
-        MET["Metrics<br/>analyze.sh<br/>cost-tracker.sh<br/>register-task.py"]
+        MET["Metrics<br/>cost-tracker.sh<br/>register-task.py"]
     end
 
     CMD --> WF
@@ -418,7 +418,6 @@ Hooks intercept CLI lifecycle events to enforce behavior. The footnote plugin us
 | Script | Event | Purpose |
 |--------|-------|---------|
 | `target-stop-hook.sh` | Stop | Blocks exit when target-state.md is IN_PROGRESS and no promise tag |
-| `convo-signal-capture.sh` | Stop | Captures conversation signals for skill distillation |
 | `session-start.sh` | SessionStart | Cross-platform wrapper that injects vision |
 | `inject-project-vision.sh` | SessionStart | Loads project context into session |
 | `context-monitor.js` | PostToolUse | Monitors context window usage (Claude Code only) |

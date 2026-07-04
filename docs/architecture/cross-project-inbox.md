@@ -121,7 +121,7 @@ Sender resolution: `resolve_project()` walks up from cwd looking for `.fno/setti
 |---|---|---|
 | `question` | drop a wake-signal, leave thread unread so a human handles it | YES (interrupts) |
 | `heads-up` | call `fno mail triage <msg-id>`; dispatch on action plan; mark thread read | NO (between features) |
-| `fyi` | log a line to `.fno/convo-signals.jsonl`, mark thread read | NO (between features) |
+| `fyi` | dismiss, mark thread read | NO (between features) |
 | `fyi --persist memory` | write a recipient memory file with `auto_generated: true`, mark thread read | NO (between features) |
 
 Only `kind: question` interrupts an in-flight feature. Everything else
@@ -192,7 +192,7 @@ Megawalk's Step 0 only runs at the top of a target iteration. Projects without a
 
 ### The three pieces
 
-- **`fno mail drain --json --max 10`** - an LLM-side processor for the four non-interrupting message kinds: `heads-up`, `notification`, `lesson`, and `answer`. For each unread message it runs the appropriate handler (triage to `fno new`, write to convo-signals, extract to memory, integrate into context) and acks. A `kind: question` message is never handled here: the drain drops a wake-signal and leaves the message unread for a human to answer.
+- **`fno mail drain --json --max 10`** - an LLM-side processor for the four non-interrupting message kinds: `heads-up`, `notification`, `lesson`, and `answer`. For each unread message it runs the appropriate handler (triage to `fno new`, dismiss, extract to memory, integrate into context) and acks. A `kind: question` message is never handled here: the drain drops a wake-signal and leaves the message unread for a human to answer.
 
 - **Per-project launchd daemon** (`scripts/abi-watch.sh`, opt-in via `config.inbox.watch.enabled: true`) - wraps the drain with an `fswatch` trigger loop. On each file-change event it calls `wake.detect.detect_session_state` to determine whether a human or target session is already active. When the project is IDLE it spawns `claude -p --bare` to run the drain. When a session is active it either drops a wake-signal (INTERACTIVE_ACTIVE) or does nothing at all (TARGET_ACTIVE, because megawalk Step 0 will pick the message up at the next iteration boundary).
 

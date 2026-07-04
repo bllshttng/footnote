@@ -1,5 +1,5 @@
 {
-  "description": "Abilities plugin hooks for target loops, context monitoring, project context injection, and convo signal capture",
+  "description": "Abilities plugin hooks for target loops, context monitoring, and project context injection",
   "hooks": {
     "PreToolUse": [
       {
@@ -33,10 +33,6 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/target-stop-hook.sh"
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/convo-signal-capture.sh"
           },
           {
             "type": "command",

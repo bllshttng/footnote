@@ -81,7 +81,6 @@
 | `config.auto_merge.conflict_resolution` | str | `opus` | never | Conflict-resolution agent for auto-merge rebases. |
 | `config.auto_merge.allowed_invokers` | list[str] | `[]` | never | Who may trigger auto-merge. |
 | `config.auto_merge.remediation` | str | `attempt` | never | Post-failure remediation policy for auto-merge. |
-| `config.logs.convo_signals_max_mb` | int | `5` | never | Rotation cap (MB) for convo-signals.jsonl. |
 | `config.pr_watch.enabled` | bool | `false` | advanced | Enable the global PR-state watcher daemon. |
 | `config.pr_watch.interval_seconds` | int | `600` | never | PR-watcher poll interval (seconds). |
 | `config.pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |

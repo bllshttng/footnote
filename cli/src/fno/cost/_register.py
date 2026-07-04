@@ -14,7 +14,6 @@ import fcntl
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,22 +21,6 @@ from datetime import datetime
 from pathlib import Path
 
 from fno import paths as _paths
-
-_OLD_TASKS_PATH = Path.home() / ".fno" / "tasks.json"
-
-def _ensure_ledger(ledger_path: Path):
-    """Migrate from _OLD_TASKS_PATH to ledger_path on first access.
-
-    Runs before append_to_tasks_json creates the parent, and ledger_path is
-    now a resolved (possibly non-default) location, so ensure the parent
-    exists and use shutil.move to survive a cross-filesystem state_dir.
-    """
-    try:
-        if not ledger_path.exists() and _OLD_TASKS_PATH.exists():
-            ledger_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(_OLD_TASKS_PATH), str(ledger_path))
-    except (FileNotFoundError, OSError):
-        pass  # Concurrent process already moved it, or the move failed (best-effort)
 
 
 def safe_number(val, as_type: str = "float", decimals: int = 2):
@@ -950,7 +933,6 @@ def register_entry(entry: dict) -> None:
     node-level joins; it is removed.
     """
     ledger_path = _paths.ledger_json()
-    _ensure_ledger(ledger_path)
     append_to_tasks_json(ledger_path, entry)
     render_tasks_md(ledger_path, ledger_path.with_suffix(".md"))
 

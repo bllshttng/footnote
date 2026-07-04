@@ -308,8 +308,8 @@ def help_command(ctx: typer.Context) -> None:
         "  fno cost [SESSION_ID...]   per-session token/cost summary\n"
         "  fno cost --branches       per-branch cost breakdown\n"
         "  fno cost --by-provider    per-provider cost from ledger.json\n"
-        "  fno cost --backfill       recalculate tasks.json costs\n"
-        "  fno cost --render         re-render tasks.md from tasks.json\n\n"
+        "  fno cost --backfill       recalculate ledger.json costs\n"
+        "  fno cost --render         re-render ledger.md from ledger.json\n\n"
         "Also accepts --json / --branch / --since / --dry-run. Runs from the "
         "installed wheel with no repo-root script."
     ),

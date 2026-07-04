@@ -484,7 +484,7 @@ def cmd_drain(
 ) -> None:
     """Drain unread threads. Per-kind dispatch:
     heads-up -> triage + create graph node; question -> drop wake-signal;
-    fyi -> log to convo-signals or write a memory file (when persist_to_memory)."""
+    fyi -> dismiss or write a memory file (when persist_to_memory)."""
     from fno.inbox.drain import drain_inbox
     from fno.inbox.store import _git_root
 

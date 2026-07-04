@@ -246,7 +246,6 @@ footnote/                          # Repository root
         hooks-codex.json            # Codex CLI hooks
         helpers/                    # Shared hook helper scripts
         target-stop-hook.sh       # Stop hook script
-        convo-signal-capture.sh     # Signal capture hook
         session-start.sh            # Session bootstrap hook
         inject-project-vision.sh    # Vision injection
         context-monitor.js          # Context monitoring (Node.js)

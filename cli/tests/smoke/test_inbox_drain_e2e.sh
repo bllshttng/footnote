@@ -52,7 +52,7 @@ chmod +x "$FAKE_BIN/fno-py"
 export REAL_ABI=$(command -v fno-py || echo "")
 
 # Inject one of each kind via the real CLI. Use --project so cwd stays at $WORK
-# (so drain's _git_root() / cwd lands convo-signals under $WORK/.fno/).
+# (so drain's _git_root() / cwd resolves against $WORK/.fno/).
 FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind heads-up \
   --body "please file as a graph node"
@@ -76,13 +76,13 @@ assert len(results) == 3, results
 actions = {r['kind']: r['action'] for r in results}
 assert actions.get('heads-up') == 'created_node', actions
 assert actions.get('question') == 'wake_signal_dropped', actions
-assert actions.get('fyi') == 'logged', actions
+assert actions.get('fyi') == 'dismissed', actions
 print(f'ok: heads-up={actions[\"heads-up\"]} question={actions[\"question\"]} fyi={actions[\"fyi\"]}')
 "
 
-# Filesystem-level checks: convo-signals + wake-signals.
-if [[ ! -f "$WORK/.fno/convo-signals.jsonl" ]]; then
-  echo "FAIL: fyi did not write convo-signals.jsonl" >&2
+# Filesystem-level checks: convo-signals capture removed + wake-signals.
+if [[ -f "$WORK/.fno/convo-signals.jsonl" ]]; then
+  echo "FAIL: fyi wrote convo-signals.jsonl (capture was removed)" >&2
   exit 1
 fi
 WAKE_FILES=$(find "$WORK/.fno/wake-signals" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')

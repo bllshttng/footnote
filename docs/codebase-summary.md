@@ -262,9 +262,6 @@ The plugin includes test scripts but no formal test framework:
 # Run orchestrator CLI
 python skills/do/orchestrator.py --help
 
-# Analyze subagent metrics
-./scripts/metrics/analyze.sh
-
 # Test hook behavior
 ./scripts/test_stop_hook_events.sh
 ./scripts/test-target-state-recovery.sh

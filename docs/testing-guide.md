@@ -134,9 +134,6 @@ python skills/do/orchestrator.py --agent "Build React component" --tags ui,front
 ### Metrics and Health
 
 ```bash
-# Analyze subagent metrics (token usage, duration, success rates)
-./scripts/metrics/analyze.sh
-
 # Track session costs
 ./scripts/metrics/cost-tracker.sh
 

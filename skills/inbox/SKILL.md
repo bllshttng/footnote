@@ -93,9 +93,8 @@ Use sparingly. A `question` is the only kind that stays unread after drain.
 
 ### fyi
 
-Inform without action. The recipient logs an `inbox_fyi` event to
-`convo-signals.jsonl`; the next session in that project sees it in its
-session-start digest.
+Inform without action. The recipient's drain marks it read and dismisses
+it (or persists it as a memory file when `persist_to_memory: true`).
 
 ```bash
 fno mail send --to-project acme-docs --kind fyi \
@@ -197,7 +196,7 @@ A one-paragraph mental model so you can send freely:
   or by an autonomous worker), reading each unread thread.
 - For each unread thread, the drain dispatches by kind. `heads-up`
   triggers triage and may file a graph node. `question` drops a
-  wake-signal and stays unread. `fyi` logs to convo-signals OR writes
+  wake-signal and stays unread. `fyi` dismisses OR writes
   a memory file (when `persist_to_memory: true`).
 - After dispatch, the thread's frontmatter gains `read_at:` (except
   `question`, which stays unread). The thread file is durable in the

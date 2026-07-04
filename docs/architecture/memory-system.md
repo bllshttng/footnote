@@ -99,8 +99,9 @@ classification from the LLM that lived through the session, and no subprocess re
   The `TARGET_INSIDE_DISTILL` recursion guard is removed from the stop hook.
 - **Next release:** `distill-session.sh` will be deleted entirely.
 
-The `convo-signals.jsonl` file is unchanged. Mempalace and any manual-triage
-consumers that read it are not affected by this change.
+The `convo-signals.jsonl` capture itself has since been removed entirely
+(it had zero readers anywhere in the codebase). This section is retained
+for historical context on the Haiku distillation deprecation only.
 
 ## For consumers of distill-session.sh
 

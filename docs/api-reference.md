@@ -267,10 +267,6 @@ Hooks provide lifecycle control for autonomous loops, context injection, and sig
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/target-stop-hook.sh"
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/convo-signal-capture.sh"
           }
         ]
       }
@@ -305,7 +301,7 @@ Hooks provide lifecycle control for autonomous loops, context injection, and sig
 
 | Event | Trigger | Hooks |
 |-------|---------|-------|
-| `Stop` | Session exit attempted | `target-stop-hook.sh` - blocks exit when `target-state.md` shows `status: IN_PROGRESS` and output lacks a `<promise>` tag. `convo-signal-capture.sh` - captures conversation signals |
+| `Stop` | Session exit attempted | `target-stop-hook.sh` - blocks exit when `target-state.md` shows `status: IN_PROGRESS` and output lacks a `<promise>` tag |
 | `PostToolUse` | After any tool call | `context-monitor.js` - monitors context usage and token budget |
 | `SessionStart` | Session begins | `inject-project-vision.sh` - loads project vision into context |
 
@@ -314,7 +310,6 @@ Hooks provide lifecycle control for autonomous loops, context injection, and sig
 | Script | Purpose |
 |--------|---------|
 | `target-stop-hook.sh` | In-session loop control. Prevents premature exit during autonomous pipeline |
-| `convo-signal-capture.sh` | Captures conversation signals for telemetry |
 | `context-monitor.js` | Token budget monitoring and context management |
 | `inject-project-vision.sh` | Injects project vision document at session start |
 | `session-start.sh` | General session bootstrap |
@@ -541,14 +536,10 @@ Utility scripts in `scripts/`.
 |--------|---------|
 | `validate-test-first.sh` | Validates TDD discipline in commits |
 | `run-target-loop.sh` | Cross-session external loop runner |
-| `metrics/analyze.sh` | Subagent cost and performance analysis |
 
 ```bash
 # Validate test-first discipline
 ./scripts/validate-test-first.sh
-
-# Analyze subagent metrics
-./scripts/metrics/analyze.sh
 ```
 
 ---

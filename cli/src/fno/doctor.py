@@ -502,6 +502,43 @@ def _mux_front_door_report() -> dict[str, Any]:
     }
 
 
+# Runtime files no code writes anymore (Group 3 GC wave: convo-signals
+# capture, tasks.json/md migration, evals-history, metrics.jsonl analytics).
+# Purely informational - never changes doctor's status or exit code.
+_ORPHAN_BASENAMES = (
+    "convo-signals.jsonl",
+    "tasks.json",
+    "tasks.md",
+    "evals-history.jsonl",
+    "metrics.jsonl",
+)
+
+
+def _orphan_report() -> list[str]:
+    """Leftover files from deleted capture/migration paths.
+
+    Checks the default global state dir (``~/.fno``, not a configured
+    override - this is a lightweight advisory check, not a path-config-aware
+    operation) and the project ``.fno/`` dir. Returns an empty list on a
+    clean machine, or if either dir can't be resolved (e.g. cwd deleted out
+    from under a running shell); never raises.
+    """
+    dirs: list[Path] = []
+    for get_dir in (Path.home, Path.cwd):
+        try:
+            dirs.append(get_dir() / ".fno")
+        except OSError:
+            continue
+
+    found: set[str] = set()
+    for d in dirs:
+        for name in _ORPHAN_BASENAMES:
+            p = d / name
+            if p.exists():
+                found.add(str(p))
+    return sorted(found)
+
+
 # ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
@@ -703,6 +740,14 @@ def _emit_human(
             "`fno`; run `fno restart --mux` to cut it over (ends live sessions)."
         )
 
+    # Orphan files from deleted capture/migration paths (Group 3 GC). Advisory.
+    orphans = result.get("orphan_files") or []
+    if orphans:
+        out(
+            f"fno doctor: found {len(orphans)} orphaned file(s) from removed "
+            f"capture paths (safe to delete): {', '.join(orphans)}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Command
@@ -770,6 +815,9 @@ def doctor_command(
     from fno import update as _update
 
     result["mux_server_stale"] = _update.stale_mux_servers()
+
+    # Advisory orphan-file check (Group 3 GC); never changes status/exit.
+    result["orphan_files"] = _orphan_report()
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).

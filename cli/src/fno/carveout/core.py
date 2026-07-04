@@ -48,7 +48,7 @@ def resolve_carveout_root() -> Path:
     """Resolve the root that owns the carveouts ledger: the CANONICAL (main)
     worktree, never the per-worktree ``--show-toplevel`` root.
 
-    Carve-outs are SHARED project state, like ``ledger.json`` / ``tasks.json``
+    Carve-outs are SHARED project state, like ``ledger.json`` / ``graph.json``
     - not per-session state like ``target-state.md``. A carve-out captured
     inside a linked worktree must survive that worktree's archival so the
     retro-triage harvest (which runs from the main checkout at merge) can still

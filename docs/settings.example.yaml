@@ -192,9 +192,6 @@ config:
     allowed_invokers: []
     # Post-failure remediation policy for auto-merge.
     remediation: attempt
-  logs:
-    # Rotation cap (MB) for convo-signals.jsonl.
-    convo_signals_max_mb: 5
   pr_watch:
     # Enable the global PR-state watcher daemon.
     enabled: false
