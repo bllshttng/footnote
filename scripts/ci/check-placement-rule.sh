@@ -147,6 +147,7 @@ cli/src/fno/review/scorers/__init__.py
 cli/src/fno/runtime/cli.py
 cli/src/fno/runtime/probe.py
 cli/src/fno/runtime/worktree.py
+cli/src/fno/scoreboard/fold.py
 cli/src/fno/setup_cli.py
 cli/src/fno/setup/integration.py
 cli/src/fno/setup/recommended_rules.py
