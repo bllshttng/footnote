@@ -921,7 +921,7 @@ def test_resolve_relative_path_without_dot_anchors_to_project_root(
 def test_handoffs_dir_default_with_obsidian_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default: {vault}/fno/{project}/handoffs/ when obsidian is enabled."""
+    """Default: <vault>/internal/<project>/handoffs/ when obsidian is enabled."""
     vault_dir = tmp_path / "my-vault"
     vault_dir.mkdir()
     _set_settings(
@@ -936,7 +936,7 @@ def test_handoffs_dir_default_with_obsidian_enabled(
     from fno.paths import handoffs_dir
 
     result = handoffs_dir()
-    assert result == (vault_dir / "fno" / "myproj" / "handoffs").resolve()
+    assert result == (vault_dir / "internal" / "myproj" / "handoffs").resolve()
 
 
 def test_handoffs_dir_explicit_override(
@@ -1006,7 +1006,7 @@ def test_handoffs_dir_bare_vault_name_anchors_at_home(
     from fno.paths import handoffs_dir
 
     result = handoffs_dir(project_root=worktree)
-    expected = (fake_home / "myvault" / "fno" / "myproj" / "handoffs").resolve()
+    expected = (fake_home / "myvault" / "internal" / "myproj" / "handoffs").resolve()
     assert result == expected, f"bare vault name must anchor at $HOME, got {result}"
     assert not str(result).startswith(str(worktree)), (
         "handoffs_dir must never anchor inside the worktree"

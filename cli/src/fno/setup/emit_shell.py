@@ -178,7 +178,7 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
     # HANDOFFS_DIR: vault-aware persistent location for target session handoffs.
     # Mirrors paths.handoffs_dir() resolution:
     #   override        -> emit override (template-resolved at codegen if needed)
-    #   obsidian on     -> {vault}/fno/{project}/handoffs/ (resolved at codegen)
+    #   obsidian on     -> <vault>/internal/<project>/handoffs/ (resolved at codegen)
     #   default         -> $STATE_DIR/handoffs/<basename of $REPO_ROOT>
     # The default uses a shell command substitution so the checked-in stub stays
     # machine-stable; the project name resolves at source-time from the consumer's

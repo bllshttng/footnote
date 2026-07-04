@@ -804,7 +804,10 @@ fn handoff_cost_line(cwd: &Path, transcript_uuid: &str) -> String {
 ///   2. `$HANDOFFS_DIR`
 ///   3. `config.paths.handoffs_dir` from project then global settings.yaml,
 ///      with `~` and `{project}` expanded (skipped if it still has `{...}`)
-///   4. fallback `~/.fno/handoffs/<project>`
+///   4. vault-derived `<vault>/internal/<project>/handoffs/` when
+///      `obsidian.enabled` + `obsidian.vault` are set (placement rule,
+///      ab-f063 Wave 2 - mirrors `paths.handoffs_dir()` in the Python CLI)
+///   5. fallback `~/.fno/handoffs/<project>`
 ///
 /// Pure-Rust resolution: it never shells `fno`, so the verb keeps its Python-CLI
 /// independence (it only ever runs the in-package metric modules via
@@ -830,10 +833,17 @@ fn resolve_handoffs_dir(
     if let Some(h) = home {
         candidates.push(h.join(".fno/settings.yaml"));
     }
-    for sp in candidates {
-        if let Some(raw) = read_path_setting(&sp, "handoffs_dir") {
+    for sp in &candidates {
+        if let Some(raw) = read_path_setting(sp, "handoffs_dir") {
             if let Some(expanded) = expand_handoffs_template(&raw, home, &project) {
                 return expanded;
+            }
+        }
+    }
+    for sp in &candidates {
+        if let Some(vault) = read_obsidian_vault(sp) {
+            if let Some(vroot) = resolve_vault_root(&vault, home) {
+                return vroot.join("internal").join(&project).join("handoffs");
             }
         }
     }
@@ -841,6 +851,62 @@ fn resolve_handoffs_dir(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| cwd.to_path_buf());
     base.join(".fno/handoffs").join(project)
+}
+
+/// Read `obsidian.vault` from a settings.yaml, but only when `obsidian.enabled`
+/// is also true - mirrors `paths.vault_root()` in the Python CLI (both must be
+/// set). Indent-aware (unlike `read_path_setting`) because `enabled:`/`vault:`
+/// are generic key names reused by other settings.yaml sections
+/// (`post_merge.enabled`, `think_spawn.enabled`, ...); a flat scan would risk
+/// picking up an unrelated section's value.
+fn read_obsidian_vault(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut block_indent: Option<usize> = None;
+    let mut enabled = false;
+    let mut vault: Option<String> = None;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with('#') || t.is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if let Some(bi) = block_indent {
+            if indent <= bi {
+                break; // dedented out of the obsidian: block
+            }
+            if let Some(rest) = t.strip_prefix("enabled:") {
+                enabled = rest.trim().eq_ignore_ascii_case("true");
+            } else if let Some(rest) = t.strip_prefix("vault:") {
+                let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+                if !v.is_empty() && !v.eq_ignore_ascii_case("null") {
+                    vault = Some(v.to_string());
+                }
+            }
+        } else if t == "obsidian:" {
+            block_indent = Some(indent);
+        }
+    }
+    if enabled {
+        vault
+    } else {
+        None
+    }
+}
+
+/// Expand a vault name to its filesystem root - mirrors `paths.vault_root()`:
+/// a bare name (e.g. `c3po`) maps to `~/c3po`; an already-absolute or
+/// `~`-prefixed value is honored as-is.
+fn resolve_vault_root(vault: &str, home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(rest) = vault.strip_prefix("~/") {
+        return home.map(|h| h.join(rest));
+    }
+    if vault == "~" {
+        return home.map(Path::to_path_buf);
+    }
+    if Path::new(vault).is_absolute() {
+        return Some(PathBuf::from(vault));
+    }
+    home.map(|h| h.join(vault))
 }
 
 /// Read a `<key>:` path value from a settings.yaml (any indent level). The
@@ -1472,6 +1538,63 @@ mod tests {
         let contents = fs::read_to_string(&log_path).unwrap();
         assert!(contents.contains("target-postmortem"), "{contents}");
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_uses_vault_when_obsidian_enabled() {
+        // ab-f063 Wave 2: no explicit handoffs_dir override, obsidian enabled
+        // with a vault -> <vault>/internal/<project>/handoffs/, matching
+        // paths.handoffs_dir() in the Python CLI (not the old ~/.fno/handoffs
+        // fallback).
+        let dir = std::env::temp_dir().join(format!("fin-hd-vault-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: true\n    vault: myvault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_ignores_vault_when_obsidian_disabled() {
+        // obsidian.enabled: false must NOT take the vault branch even though
+        // vault: is set - falls through to the ~/.fno/handoffs/<project> default.
+        let dir = std::env::temp_dir().join(format!("fin-hd-novault-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: false\n    vault: myvault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join(".fno/handoffs/demo"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_indent_scan_ignores_other_sections_enabled_key() {
+        // A generic `enabled:` key in an earlier, unrelated section must not be
+        // mistaken for obsidian.enabled (flat-scan-by-key would get this wrong;
+        // the indent-aware block scan must not).
+        let dir = std::env::temp_dir().join(format!("fin-hd-indent-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  post_merge:\n    enabled: false\n  obsidian:\n    enabled: true\n    vault: myvault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

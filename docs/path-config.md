@@ -55,7 +55,7 @@ config:
     memory_dir: null         # default: <state_dir>/memory/
     hook_logs_dir: null      # default: <state_dir>/hook-logs/
     inbox_dir: null          # default: <project_root>/.fno/inbox/
-    handoffs_dir: null       # default: {vault}/fno/{project}/handoffs/ when obsidian.enabled,
+    handoffs_dir: null       # default: <vault>/internal/{project}/handoffs/ when obsidian.enabled,
                              # else <state_dir>/handoffs/<project>/
 
   obsidian:

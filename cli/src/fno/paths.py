@@ -455,9 +455,11 @@ def handoffs_dir(project_root: Optional[Path] = None) -> Path:
 
     Resolution order:
       1. ``config.paths.handoffs_dir`` explicit override (template-expanded).
-      2. ``{vault}/fno/{project}/handoffs/`` when ``obsidian.enabled`` and
-         ``obsidian.vault`` are set (survives worktree archive; lives in
-         the user's Obsidian vault).
+      2. ``<vault>/internal/<project>/handoffs/`` when ``obsidian.enabled``
+         and ``obsidian.vault`` are set (placement rule, ab-f063 Wave 2:
+         handoffs are prose, so they live in the vault's ``internal/``
+         subtree alongside plans and design docs - not a top-level
+         ``<vault>/fno/`` namespace).
       3. ``state_dir()/handoffs/<project>/`` fallback when no vault
          (survives worktree archive; lives in the global state dir).
     """
@@ -465,14 +467,16 @@ def handoffs_dir(project_root: Optional[Path] = None) -> Path:
     override = settings.config.paths.handoffs_dir
     if override is not None:
         return _resolve(override, project_root=project_root)
-    if settings.config.obsidian.enabled and settings.config.obsidian.vault:
-        return _resolve("{vault}/fno/{project}/handoffs/", project_root=project_root)
     pid = settings.config.project.id
     if pid:
         project_name = pid
     else:
         root = project_root or resolve_repo_root()
         project_name = root.name
+    if settings.config.obsidian.enabled and settings.config.obsidian.vault:
+        vroot = vault_root()
+        if vroot is not None:
+            return vroot / "internal" / project_name / "handoffs"
     return state_dir() / "handoffs" / project_name
 
 
