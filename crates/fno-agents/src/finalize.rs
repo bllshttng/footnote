@@ -865,8 +865,13 @@ fn read_obsidian_vault(path: &Path) -> Option<String> {
     let mut enabled = false;
     let mut vault: Option<String> = None;
     for line in content.lines() {
-        let t = line.trim();
-        if t.starts_with('#') || t.is_empty() {
+        // Strip inline comments before matching/parsing (consistent with
+        // read_path_setting and yaml_scalar_at in this same file) - otherwise
+        // "obsidian: # comment" fails the block-header match, and a comment
+        // on the vault: line gets folded into the resolved path (gemini
+        // review, PR #185).
+        let t = line.split('#').next().unwrap_or("").trim();
+        if t.is_empty() {
             continue;
         }
         let indent = line.len() - line.trim_start().len();
@@ -1596,6 +1601,25 @@ mod tests {
         write_settings(
             &cwd,
             "config:\n  project:\n    id: demo\n  post_merge:\n    enabled: false\n  obsidian:\n    enabled: true\n    vault: myvault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_vault_scan_strips_inline_comments() {
+        // gemini review, PR #185: "obsidian: # comment" must still match the
+        // block header, and a comment on the vault: line must not get folded
+        // into the resolved path.
+        let dir = std::env::temp_dir().join(format!("fin-hd-inlinecmt-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian: # vault settings\n    enabled: true # on\n    vault: myvault # personal vault\n",
         );
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
