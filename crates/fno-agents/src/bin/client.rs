@@ -735,8 +735,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         .get("yolo")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    // claude --bg (x-571f per-node pin) and agy honor an optional --model
-    // (appended to the worker argv); codex/gemini and claude --headless ignore it.
+    // Optional --model, forwarded to every provider's own --model (x-c772
+    // wired codex/gemini/claude-headless; claude --bg was x-571f). Exact
+    // passthrough appended to the worker argv.
     let model = params.get("model").and_then(|v| v.as_str());
 
     // Validate the provider FIRST so an unknown provider is a client-side
@@ -802,16 +803,18 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 &cwd,
                 yolo,
                 timeout,
+                model,
             ))
         }
 
         // codex/gemini/agy headless: the client-side one-shot (codex --exec /
-        // gemini -p / agy -p).
+        // gemini -p / agy -p). x-c772: --model is forwarded to each (exact
+        // passthrough to the provider CLI's own --model).
         ("codex", "headless") => emit!(dispatch_codex_once(
-            home, name, message, from_name, &cwd, yolo, timeout,
+            home, name, message, from_name, &cwd, yolo, timeout, model,
         )),
         ("gemini", "headless") => emit!(dispatch_gemini_once(
-            home, name, message, from_name, &cwd, yolo, timeout,
+            home, name, message, from_name, &cwd, yolo, timeout, model,
         )),
         // opencode v1 hosts the PTY-TUI only (x-51f6 Locked Decision 3): no
         // client-side `opencode run` one-shot lane is wired. Refuse loudly
@@ -1232,13 +1235,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--force" | "-F" => {
                 params.insert("force".into(), Value::Bool(true));
             }
-            "--model" => {
-                // claude --bg (x-571f per-node pin) and agy honor an exact model
-                // name; codex/gemini and claude --headless ignore the param.
-                // Forwarded so `spawn --substrate bg --model <m>` reaches
-                // dispatch_claude_spawn and `--provider agy --once --model <name>`
-                // reaches dispatch_agy_once (codex P2).
-                params.insert("model".into(), str_arg(&mut it, "--model")?);
+            "--model" | "-m" => {
+                // Exact model name forwarded to the provider CLI's own --model:
+                // claude --bg/-p, codex exec, gemini, agy (x-c772 wired the
+                // headless one-shots; claude --bg was x-571f). -m is the mobile
+                // short. No fuzzy resolution.
+                params.insert("model".into(), str_arg(&mut it, "-m/--model")?);
             }
             "--from-name" => {
                 // NOTE: --from-name is accepted and forwarded to the daemon, but
@@ -1275,6 +1277,15 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 // one-shot, i.e. headless. Map it to --substrate headless so old
                 // callers keep working without the conflated `once` boolean. An
                 // explicit --substrate already present wins.
+                params
+                    .entry("substrate")
+                    .or_insert_with(|| Value::String("headless".into()));
+            }
+            "--headless" | "-H" => {
+                // Ergonomic front for --substrate headless (x-c772). Mobile:
+                // one hyphen, no `--substrate` to type (`--` autocorrects to an
+                // em-dash on iOS). Same routing key as --once; explicit
+                // --substrate already present wins.
                 params
                     .entry("substrate")
                     .or_insert_with(|| Value::String("headless".into()));
@@ -2815,6 +2826,66 @@ mod tests {
             "--substrate".to_string(),
             "bg".to_string(),
             "--once".to_string(),
+        ];
+        let (_m, params) = build_request("spawn", &args).unwrap();
+        assert_eq!(params["substrate"], "bg");
+    }
+
+    #[test]
+    fn spawn_headless_flag_aliases_to_substrate_headless() {
+        // x-c772: --headless and -H are the mobile-friendly front for
+        // --substrate headless (identical to --once), for every provider.
+        for flag in ["--headless", "-H"] {
+            for provider in ["claude", "codex", "gemini", "agy"] {
+                let args = vec![
+                    "wk".to_string(),
+                    "--provider".to_string(),
+                    provider.to_string(),
+                    flag.to_string(),
+                ];
+                let (_m, params) = build_request("spawn", &args).unwrap();
+                assert_eq!(
+                    params.get("substrate").and_then(|v| v.as_str()),
+                    Some("headless"),
+                    "{provider} {flag} aliases to substrate=headless"
+                );
+                assert!(params.get("host_mode").is_none(), "{flag}: no host_mode");
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_model_short_m_parses_like_long() {
+        // x-c772: -m is the mobile short for --model.
+        for flag in ["--model", "-m"] {
+            let args = vec![
+                "wk".to_string(),
+                "--provider".to_string(),
+                "claude".to_string(),
+                "--substrate".to_string(),
+                "bg".to_string(),
+                flag.to_string(),
+                "opus".to_string(),
+            ];
+            let (_m, params) = build_request("spawn", &args).unwrap();
+            assert_eq!(
+                params.get("model").and_then(|v| v.as_str()),
+                Some("opus"),
+                "{flag} sets model"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_explicit_substrate_wins_over_headless_flag() {
+        // An explicit --substrate is not clobbered by a trailing -H.
+        let args = vec![
+            "wk".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "bg".to_string(),
+            "-H".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
         assert_eq!(params["substrate"], "bg");

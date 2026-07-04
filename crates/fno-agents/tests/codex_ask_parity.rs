@@ -222,6 +222,7 @@ fn rust_codex_create(
         output_path,
         Some(std::time::Duration::from_secs(timeout_sec)),
         None,
+        None,
     );
 
     match old_path {
