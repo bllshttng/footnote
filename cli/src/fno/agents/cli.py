@@ -349,9 +349,11 @@ def cmd_spawn(
     model: str | None = typer.Option(
         None, "--model",
         help=(
-            "Per-node model pin (x-571f). Appended as --model <m> to the "
-            "claude --bg (and agy) worker argv; unset = provider default. "
-            "codex/gemini and claude --headless ignore it."
+            "Model for the worker, forwarded as --model <m> to the provider's "
+            "own CLI (exact passthrough, no fuzzy resolution). On the default "
+            "pane substrate every provider honors it (claude/codex/gemini/agy/"
+            "opencode); on --substrate bg/headless it reaches claude and agy. "
+            "Unset = provider default; opencode defaults to z-ai/glm-5.2."
         ),
     ),
     node: str | None = typer.Option(
