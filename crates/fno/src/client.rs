@@ -154,6 +154,16 @@ fn spawn_server(path: &Path) -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log);
+    // Config->env bridge for the interactive path (x-6165). The pure-Rust mux
+    // server reads no settings.yaml, so `config.mux.shell_integration: off` was
+    // a silent no-op here (the Python spawn front-half already bridges
+    // dispatched panes, x-b63b). Latch it at server birth: an explicit env
+    // export wins (inherited naturally, never overwritten); otherwise a single
+    // bounded `fno config get` decides. Only `off` needs materializing - the
+    // server reads absent/anything-else as on (the default).
+    if std::env::var_os("FNO_MUX_SHELL_INTEGRATION").is_none() && shell_integration_off() {
+        cmd.env("FNO_MUX_SHELL_INTEGRATION", "off");
+    }
     // Safety: setsid only detaches the child from our session/terminal; it is
     // async-signal-safe and touches no shared state.
     unsafe {
@@ -166,6 +176,59 @@ fn spawn_server(path: &Path) -> Result<(), String> {
     cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("cannot spawn the mux server: {e}"))
+}
+
+/// Shell `fno config get mux.shell_integration` once, bounded, to learn whether
+/// the interactive path must disable OSC 133 injection. Bounded + fail-open (the
+/// `run_dispatch_one` idiom): any spawn/read error, a non-`off` value, or a read
+/// that overruns the budget all leave injection on (the default). The bound
+/// matters because this runs synchronously inside `spawn_server`, *before* the
+/// client's spawn-connect wait loop exists - nothing downstream would rescue an
+/// unbounded `.output()`, so a slow or wedged config read would freeze `fno`
+/// startup with no notice. On timeout the child is killed and reaped; stdout is
+/// read only after the child exits on its own, so a lingering grandchild holding
+/// the pipe cannot re-introduce the hang.
+fn shell_integration_off() -> bool {
+    use std::io::Read;
+    const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(3);
+    let mut child = match std::process::Command::new(crate::server::fno_bin())
+        .args(["config", "get", "mux.shell_integration"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let deadline = Instant::now() + CONFIG_READ_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut out = String::new();
+                return status.success()
+                    && child
+                        .stdout
+                        .take()
+                        .and_then(|mut s| s.read_to_string(&mut out).ok())
+                        .map(|_| config_says_off(&out))
+                        .unwrap_or(false);
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return false,
+        }
+    }
+}
+
+/// The one off-switch, matched exactly like the Rust pane-spawn side
+/// (`pty::integration_disabled`): only a trimmed `off` disables injection.
+fn config_says_off(stdout: &str) -> bool {
+    stdout.trim() == "off"
 }
 
 /// Restore the terminal on every exit path, including panics.
@@ -2233,6 +2296,18 @@ mod tests {
     use super::*;
     use crate::proto::{AnswerOption, AnswerablePrompt, TabMeta};
     use crate::vt::frame_text;
+
+    #[test]
+    fn config_says_off_matches_only_trimmed_off() {
+        // Bridges settings.yaml -> the env the interactive server latches
+        // (x-6165). Must mirror `pty::integration_disabled`: exactly `off`.
+        assert!(config_says_off("off"));
+        assert!(config_says_off("off\n")); // config get trailing newline
+        assert!(config_says_off("  off  "));
+        assert!(!config_says_off("mux-panes\n")); // the default -> stays on
+        assert!(!config_says_off("OFF")); // case-sensitive, like the Rust side
+        assert!(!config_says_off("")); // unknown key / empty -> default on
+    }
 
     #[test]
     fn fold_search_input_swallows_multibyte_csi_without_leaking() {
