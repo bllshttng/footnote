@@ -45,6 +45,7 @@ from pathlib import Path
 # sibling module (not a repo-relative sys.path hack) is the whole point of the
 # move: run from the installed wheel in /tmp with no repo on disk, this binds
 # the in-package cost_tracker, never a stray repo copy.
+from fno import paths as _paths
 from fno.cost.cost_tracker import (
     FALLBACK_MODELS_SEEN,
     PRICING,
@@ -466,8 +467,10 @@ def print_metrics(metrics: SessionMetrics, as_json: bool = False):
 
 # --- Backfill support ---
 
-LEDGER_JSON_PATH = Path.home() / ".fno" / "ledger.json"
-LEDGER_MD_PATH = Path.home() / ".fno" / "ledger.md"
+# Single resolution path: the ledger is cross-project, so it always routes
+# through the pinned-global paths.ledger_json() (x-bb53 / epic x-f063 Wave 1).
+LEDGER_JSON_PATH = _paths.ledger_json()
+LEDGER_MD_PATH = LEDGER_JSON_PATH.with_suffix(".md")
 _OLD_TASKS_PATH = Path.home() / ".fno" / "tasks.json"
 _OLD_TASKS_MD = Path.home() / ".fno" / "tasks.md"
 

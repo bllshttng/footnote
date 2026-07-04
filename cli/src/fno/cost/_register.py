@@ -20,14 +20,15 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-LEDGER_JSON_PATH = Path.home() / ".fno" / "ledger.json"
+from fno import paths as _paths
+
 _OLD_TASKS_PATH = Path.home() / ".fno" / "tasks.json"
 
-def _ensure_ledger():
-    """Migrate from _OLD_TASKS_PATH to LEDGER_JSON_PATH on first access."""
+def _ensure_ledger(ledger_path: Path):
+    """Migrate from _OLD_TASKS_PATH to ledger_path on first access."""
     try:
-        if not LEDGER_JSON_PATH.exists() and _OLD_TASKS_PATH.exists():
-            _OLD_TASKS_PATH.rename(LEDGER_JSON_PATH)
+        if not ledger_path.exists() and _OLD_TASKS_PATH.exists():
+            _OLD_TASKS_PATH.rename(ledger_path)
     except FileNotFoundError:
         pass  # Concurrent process already renamed
 
@@ -579,7 +580,7 @@ def render_tasks_md(tasks_json_path: Path, tasks_md_path: Path) -> None:
     script_dir = Path(__file__).parent
     render_script = script_dir / "_session_cost.py"
 
-    if tasks_json_path == LEDGER_JSON_PATH and render_script.exists():
+    if tasks_json_path == _paths.ledger_json() and render_script.exists():
         # Global: use the canonical _session_cost --render renderer.
         subprocess.run(
             [sys.executable, str(render_script), "--render"],
@@ -928,21 +929,20 @@ def _emit_ledger_transition(entry: dict) -> None:
 
 
 def register_entry(entry: dict) -> None:
-    """Write entry to global + project-local ledger.json and render ledger.md."""
-    _ensure_ledger()
-    # 1. Global registry
-    append_to_tasks_json(LEDGER_JSON_PATH, entry)
-    render_tasks_md(LEDGER_JSON_PATH, LEDGER_JSON_PATH.with_suffix(".md"))
+    """Write entry to the global ledger.json and render ledger.md.
 
-    # 2. Project-local registry
-    root_path = entry.get("root_path")
-    if root_path:
-        project_tasks = Path(root_path) / ".fno" / "ledger.json"
-        project_md = Path(root_path) / ".fno" / "ledger.md"
-        append_to_tasks_json(project_tasks, entry)
-        render_tasks_md(project_tasks, project_md)
+    The ledger is cross-project by definition (one row per terminal session
+    across every repo), so there is a single writer path: the global
+    ``paths.ledger_json()``. The former project-local dual-write (a stray
+    ``<root_path>/.fno/ledger.json``) was the split-brain that corrupted
+    node-level joins; it is removed (x-bb53 / epic x-f063 Wave 1).
+    """
+    ledger_path = _paths.ledger_json()
+    _ensure_ledger(ledger_path)
+    append_to_tasks_json(ledger_path, entry)
+    render_tasks_md(ledger_path, ledger_path.with_suffix(".md"))
 
-    # 3. Graph sync (best-effort - never blocks the ledger write)
+    # Graph sync (best-effort - never blocks the ledger write)
     _sync_to_graph(entry)
 
     # 4. Phase-transition event (gate-provenance phase 02, ledger_updated gate)
