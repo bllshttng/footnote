@@ -28,10 +28,10 @@ use tokio::sync::mpsc;
 use crate::keys::{Event, Scanner};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, BacklogCard, BlockDir, CardState,
-    Cell, ClientMsg, Color, Command, Frame, MouseEvent, ProtoError, ServerMsg, SquadMeta,
-    BUILD_VERSION, PROTO_VERSION,
+    Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent, MouseKind, ProtoError,
+    ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
 };
-use crate::tree::Rect;
+use crate::tree::{Rect, TabId};
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -486,6 +486,59 @@ impl View {
         None
     }
 
+    /// Map a left-click on chrome (the tab bar or the sideline) to what it does:
+    /// switch tab/squad, focus an agent's pane, open a new tab, or a local hint
+    /// for a row that isn't directly actionable (a work-only agent, a card).
+    /// `None` = not a chrome cell (the caller falls through to [`hit_test`]), so
+    /// clicking anywhere off the panel still reaches the pane underneath.
+    fn chrome_hit(&self, row: u16, col: u16) -> Option<ChromeHit> {
+        // Tab bar (top row): walk the same spans the renderer paints.
+        if row < TAB_BAR_ROWS {
+            let mut c = 0u16;
+            for span in self.tab_bar_spans() {
+                let w = span.text.chars().count() as u16;
+                if col >= c && col < c + w {
+                    return match span.hit? {
+                        TabHit::Tab(tid) => Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)])),
+                        TabHit::NewTab => Some(ChromeHit::Cmds(vec![Command::NewTab])),
+                    };
+                }
+                c += w;
+            }
+            return None;
+        }
+        // Sideline: the panel column minus its divider. Off/narrow => no panel.
+        let panel_w = self.panel_w();
+        if panel_w == 0 || col >= panel_w - 1 {
+            return None;
+        }
+        // Row i of display_rows() is painted at TAB_BAR_ROWS + i (draw_sideline).
+        let i = (row - TAB_BAR_ROWS) as usize;
+        match self.display_rows().get(i)? {
+            DisplayRow::Sel { row, .. } => match row.tab {
+                None => Some(ChromeHit::Cmds(vec![Command::SelectSquad(row.squad)])),
+                Some(t) => {
+                    let squad = self.layout.squads.iter().find(|s| s.id == row.squad)?;
+                    let tid = squad.tabs.get(t)?.id;
+                    Some(ChromeHit::Cmds(vec![
+                        Command::SelectSquad(row.squad),
+                        Command::SelectTab(tid),
+                    ]))
+                }
+            },
+            // A pane-hosted agent focuses its pane; a watch-only (bg/headless)
+            // row has no pane in this session, so a click can only say so.
+            DisplayRow::Agent(a) => match a.pane_id {
+                Some(pid) => Some(ChromeHit::Cmds(vec![Command::FocusPane(pid)])),
+                None => Some(ChromeHit::Notice("agent has no pane here")),
+            },
+            // Cards dispatch (a build) - too costly for a stray tap; keep it on
+            // the explicit leader+g verb.
+            DisplayRow::Card(_) => Some(ChromeHit::Notice("card - dispatch with leader+g")),
+            DisplayRow::Header(_) => None,
+        }
+    }
+
     fn set_layout(&mut self, layout: LayoutView) {
         // Frames for panes unknown to the new Layout are dead - drop them
         // (Concurrency: a frame is only ever drawn against the Layout
@@ -828,34 +881,56 @@ impl View {
         }
     }
 
-    fn draw_tab_bar(&self, cells: &mut [Cell], cols: usize) {
-        let active = self
+    /// The tab-bar spans in paint order: the active squad's name (inert), its
+    /// tabs, then a `+` new-tab affordance. The single source both `draw_tab_bar`
+    /// and `chrome_hit` walk, so a click always lands on the glyph under it.
+    fn tab_bar_spans(&self) -> Vec<TabSpan> {
+        let mut spans = Vec::new();
+        let Some(s) = self
             .layout
             .squads
             .iter()
-            .find(|s| s.id == self.layout.active_squad);
-        let mut spans: Vec<(String, u8)> = Vec::new(); // (text, flags)
-        if let Some(s) = active {
-            spans.push((format!(" {} ", s.name), cell_flags::BOLD));
-            for (i, _) in s.tabs.iter().enumerate() {
-                if i == s.active_tab {
-                    spans.push((format!("[{}]", i + 1), cell_flags::INVERSE));
-                } else {
-                    spans.push((format!(" {} ", i + 1), 0));
-                }
-            }
+            .find(|s| s.id == self.layout.active_squad)
+        else {
+            return spans;
+        };
+        spans.push(TabSpan {
+            text: format!(" {} ", s.name),
+            flags: cell_flags::BOLD,
+            hit: None,
+        });
+        for (i, t) in s.tabs.iter().enumerate() {
+            let (text, flags) = if i == s.active_tab {
+                (format!("[{}]", i + 1), cell_flags::INVERSE)
+            } else {
+                (format!(" {} ", i + 1), 0)
+            };
+            spans.push(TabSpan {
+                text,
+                flags,
+                hit: Some(TabHit::Tab(t.id)),
+            });
         }
+        spans.push(TabSpan {
+            text: " + ".to_string(),
+            flags: cell_flags::DIM,
+            hit: Some(TabHit::NewTab),
+        });
+        spans
+    }
+
+    fn draw_tab_bar(&self, cells: &mut [Cell], cols: usize) {
         let mut c = 0usize;
-        for (text, flags) in spans {
-            for ch in text.chars() {
+        'spans: for span in self.tab_bar_spans() {
+            for ch in span.text.chars() {
                 if c >= cols {
-                    return;
+                    break 'spans;
                 }
                 cells[c] = Cell {
                     c: ch,
                     fg: Color::Default,
                     bg: Color::Default,
-                    flags,
+                    flags: span.flags,
                 };
                 c += 1;
             }
@@ -1056,6 +1131,27 @@ enum DisplayRow<'a> {
     /// A work-queue backlog card (x-6f77), display-only in v1.
     Card(&'a BacklogCard),
     Header(&'static str),
+}
+
+/// One clickable span in the tab bar (label + render flags + what a click does;
+/// `None` = inert, e.g. the squad-name label).
+struct TabSpan {
+    text: String,
+    flags: u8,
+    hit: Option<TabHit>,
+}
+
+#[derive(Clone, Copy)]
+enum TabHit {
+    Tab(TabId),
+    NewTab,
+}
+
+/// What a left-click on chrome resolves to: server commands to send, or a local
+/// one-line hint for a row that isn't directly actionable.
+enum ChromeHit {
+    Cmds(Vec<Command>),
+    Notice(&'static str),
 }
 
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
@@ -1644,6 +1740,25 @@ async fn handle_stdin(
     for rep in reports {
         if rep.shift {
             continue;
+        }
+        // A left click on chrome (tab bar / sideline) switches tab/squad, focuses
+        // an agent's pane, or opens a tab - it never reaches the pane underneath.
+        if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+            match view.chrome_hit(rep.row, rep.col) {
+                Some(ChromeHit::Cmds(cmds)) => {
+                    for cmd in cmds {
+                        write_msg(sock_w, &ClientMsg::Command(cmd))
+                            .await
+                            .map_err(|e| format!("command send failed: {e}"))?;
+                    }
+                    continue;
+                }
+                Some(ChromeHit::Notice(msg)) => {
+                    view.set_notice(msg.to_string());
+                    continue;
+                }
+                None => {}
+            }
         }
         if let Some((pane, prow, pcol)) = view.hit_test(rep.row, rep.col) {
             write_msg(
@@ -2483,6 +2598,76 @@ mod tests {
         assert_eq!(view.hit_test(5, 10), None);
         // The divider column between the panes covers no pane.
         assert_eq!(view.hit_test(5, 28 + 35), None);
+    }
+
+    fn cmds(hit: Option<ChromeHit>) -> Vec<Command> {
+        match hit {
+            Some(ChromeHit::Cmds(c)) => c,
+            other => panic!("expected Cmds, got {}", chrome_hit_label(&other)),
+        }
+    }
+
+    fn chrome_hit_label(hit: &Option<ChromeHit>) -> &'static str {
+        match hit {
+            None => "None",
+            Some(ChromeHit::Cmds(_)) => "Cmds",
+            Some(ChromeHit::Notice(_)) => "Notice",
+        }
+    }
+
+    // A left click on the tab bar switches to the clicked tab, opens a new one on
+    // the `+`, and does nothing on the inert squad-name label.
+    #[test]
+    fn chrome_hit_tab_bar_routes_tabs_and_new_tab() {
+        let view = two_pane_view(); // active squad 1 "footnote", tabs 0 & 1, +.
+                                    // " footnote "=0..9, " 1 "=10..12, "[2]"=13..15, " + "=16..18.
+        assert_eq!(cmds(view.chrome_hit(0, 11)), vec![Command::SelectTab(0)]);
+        assert_eq!(cmds(view.chrome_hit(0, 14)), vec![Command::SelectTab(1)]);
+        assert_eq!(cmds(view.chrome_hit(0, 17)), vec![Command::NewTab]);
+        // The squad-name label is inert.
+        assert!(view.chrome_hit(0, 5).is_none());
+    }
+
+    // A left click on a sideline squad row switches to that squad.
+    #[test]
+    fn chrome_hit_sideline_squad_rows() {
+        let view = two_pane_view(); // no agents/cards: rows are the two squads.
+        assert_eq!(cmds(view.chrome_hit(1, 4)), vec![Command::SelectSquad(1)]);
+        assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::SelectSquad(2)]);
+        // The divider column and the pane content beyond it are not chrome hits.
+        assert!(view.chrome_hit(1, 27).is_none());
+        assert!(view.chrome_hit(1, 40).is_none());
+    }
+
+    // A pane-hosted agent row focuses its pane; a watch-only row (no pane in this
+    // session) can only surface a hint.
+    #[test]
+    fn chrome_hit_agent_rows_focus_or_hint() {
+        let hosted = AgentRow {
+            squad: Some(1),
+            name: "worker".into(),
+            pane_id: Some(10),
+            badge: Some(AgentBadge::Working),
+            reason: None,
+            exited: false,
+            answerable: None,
+        };
+        let bg = AgentRow {
+            squad: None,
+            name: "bg".into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+        };
+        let view = view_with_agents(vec![hosted, bg]);
+        // display order: squad 1 (row1), its agent "worker" (row2), squad 2
+        // (row3), then "~ agents" header (row4), orphan "bg" (row5).
+        assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::FocusPane(10)]);
+        assert!(matches!(view.chrome_hit(5, 4), Some(ChromeHit::Notice(_))));
+        // The "~ agents" header row is inert.
+        assert!(view.chrome_hit(4, 4).is_none());
     }
 
     #[test]
