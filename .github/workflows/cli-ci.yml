@@ -23,6 +23,7 @@ on:
       - scripts/lib/set-gate.sh
       - scripts/lib/paths.sh
       - scripts/ci/check-no-hardcoded-paths.sh
+      - scripts/ci/check-placement-rule.sh
       - scripts/generate-skill-bundles.sh
       - scripts/lib/parse-bundle-manifest.py
       - scripts/lint/**
@@ -41,6 +42,7 @@ on:
       - scripts/lib/set-gate.sh
       - scripts/lib/paths.sh
       - scripts/ci/check-no-hardcoded-paths.sh
+      - scripts/ci/check-placement-rule.sh
       - scripts/generate-skill-bundles.sh
       - scripts/lib/parse-bundle-manifest.py
       - scripts/lint/**
@@ -152,6 +154,9 @@ jobs:
         # the one-time move (append + verify + tombstone), isolated via
         # CLAUDE_DIR_OVERRIDE / FNO_HOME so the real dirs are never touched.
         run: bash scripts/tests/test_corrections_migrate.sh
+
+      - name: placement-rule lint self-test (ab-f063 Wave 2)
+        run: bash scripts/tests/test_check_placement_rule.sh
 
       - name: Install stable Rust toolchain (for journey tests)
         # Journey tests (e2e, emission-schema, backstop-subprocess) invoke the
@@ -272,6 +277,12 @@ jobs:
 
       - name: no hardcoded paths
         run: bash scripts/ci/check-no-hardcoded-paths.sh
+
+      - name: placement rule (ab-f063 Wave 2)
+        # No new .claude/~/.claude writes for footnote's own state, and no
+        # bare cwd-relative .fno/ writes in hooks/*.sh (the nested
+        # ~/.fno/.fno accident class the Wave 2 audit found).
+        run: bash scripts/ci/check-placement-rule.sh
 
       - name: No residual old-name patterns (rename guard)
         run: bash scripts/rename/residual-check.sh

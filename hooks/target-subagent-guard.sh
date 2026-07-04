@@ -19,6 +19,11 @@ else
     [[ "$STATUS" == "IN_PROGRESS" ]] || exit 0
 fi
 
+# REPO_ROOT-anchored (not bare cwd-relative) events.jsonl, per the placement
+# rule (ab-f063 Wave 2) - avoids the nested ~/.fno/.fno accident class.
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+EVENTS_LOG="${REPO_ROOT}/.fno/events.jsonl"
+
 INPUT=$(cat)
 
 EVENT=$(echo "$INPUT" | python3 -c "
@@ -57,7 +62,7 @@ except Exception:
             git stash store -m "$STASH_MSG" "$STASH_SHA" 2>/dev/null || true
         fi
 
-        printf '{"ts":"%s","type":"subagent_stash","agent":"%s","stash":"%s"}\n' "$TS" "$AGENT_NAME" "$STASH_MSG" >> .fno/events.jsonl 2>/dev/null
+        printf '{"ts":"%s","type":"subagent_stash","agent":"%s","stash":"%s"}\n' "$TS" "$AGENT_NAME" "$STASH_MSG" >> "$EVENTS_LOG" 2>/dev/null
         ;;
 
     SubagentStop)
@@ -71,7 +76,7 @@ except Exception:
     print('unknown')
 " 2>/dev/null || echo "unknown")
 
-        echo "{\"ts\":\"$TS\",\"type\":\"subagent_done\",\"agent\":\"$AGENT_NAME\"}" >> .fno/events.jsonl 2>/dev/null
+        echo "{\"ts\":\"$TS\",\"type\":\"subagent_done\",\"agent\":\"$AGENT_NAME\"}" >> "$EVENTS_LOG" 2>/dev/null
 
         # Pop stash if one was created for this agent
         STASH_MSG="abilities-checkpoint-before-${AGENT_NAME// /-}"
@@ -79,7 +84,7 @@ except Exception:
         if [[ -n "$STASH_REF" ]]; then
             # Don't pop - just log that a recovery point exists.
             # Popping could conflict with the agent's changes.
-            echo "{\"ts\":\"$TS\",\"type\":\"subagent_stash_available\",\"agent\":\"$AGENT_NAME\",\"ref\":\"$STASH_REF\"}" >> .fno/events.jsonl 2>/dev/null
+            echo "{\"ts\":\"$TS\",\"type\":\"subagent_stash_available\",\"agent\":\"$AGENT_NAME\",\"ref\":\"$STASH_REF\"}" >> "$EVENTS_LOG" 2>/dev/null
         fi
         ;;
 esac
