@@ -2051,11 +2051,11 @@ impl Core {
             }
             Command::FocusPane(pid) => {
                 // Locate the leaf anywhere in the session, then view+focus it.
-                let target = self.session.squads.iter().find_map(|sq| {
-                    sq.tabs
-                        .iter()
-                        .find(|t| tree::leaves(&t.root).contains(&pid))
-                        .map(|t| (sq.id, t.id))
+                let target = self.session.find_pane(pid).map(|(sid, ti)| {
+                    (
+                        sid,
+                        self.session.squad(sid).expect("live squad").tabs[ti].id,
+                    )
                 });
                 match target {
                     Some((sid, tid)) => {

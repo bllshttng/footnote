@@ -94,6 +94,8 @@ use crate::tree::{Dir, Rect, TabId};
 /// never leaves the server. The match jump + highlight reach co-viewers via the
 /// shared-scroll `Frame` + `cell_flags::SELECTED` broadcast (v7), so no new
 /// frame plumbing.
+///
+/// v13: `Command::FocusPane(pane_id)` for the sideline click-to-focus path.
 pub const PROTO_VERSION: u32 = 13;
 
 /// The crate version, carried in the handshake purely for the error message.
@@ -1149,6 +1151,7 @@ mod tests {
             ClientMsg::Command(Command::ResizeDir(Dir::Down)),
             ClientMsg::Command(Command::SelectTab(3)),
             ClientMsg::Command(Command::SelectSquad(42)),
+            ClientMsg::Command(Command::FocusPane(3)),
             ClientMsg::Query,
             ClientMsg::KillServer,
             ClientMsg::Mouse {

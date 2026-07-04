@@ -492,11 +492,13 @@ impl View {
     /// `None` = not a chrome cell (the caller falls through to [`hit_test`]), so
     /// clicking anywhere off the panel still reaches the pane underneath.
     fn chrome_hit(&self, row: u16, col: u16) -> Option<ChromeHit> {
-        // Tab bar (top row): walk the same spans the renderer paints.
+        // Tab bar (top row): walk the same spans the renderer paints. Widths are
+        // usize to match the renderer (`draw_tab_bar` accumulates in usize).
         if row < TAB_BAR_ROWS {
-            let mut c = 0u16;
+            let col = col as usize;
+            let mut c = 0usize;
             for span in self.tab_bar_spans() {
-                let w = span.text.chars().count() as u16;
+                let w = span.text.chars().count();
                 if col >= c && col < c + w {
                     return match span.hit? {
                         TabHit::Tab(tid) => Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)])),
@@ -510,6 +512,12 @@ impl View {
         // Sideline: the panel column minus its divider. Off/narrow => no panel.
         let panel_w = self.panel_w();
         if panel_w == 0 || col >= panel_w - 1 {
+            return None;
+        }
+        // The bottom row is overlaid by the status / which-key / search chrome
+        // (draw_bottom_row paints last), so a click there belongs to that chrome,
+        // not the sideline row drawn underneath it (codex P2).
+        if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
         // Row i of display_rows() is painted at TAB_BAR_ROWS + i (draw_sideline).
@@ -765,11 +773,19 @@ impl View {
     /// pane's scroll offset (the canonical `[+N]` home; the per-pane inline
     /// indicator stays so a scrolled UNFOCUSED pane is still observable),
     /// and `? for keys`. Too-short terminals draw neither (AC4-ERR).
+    /// The bottom terminal row is chrome (search line / which-key hint / status
+    /// row, painted last by `draw_bottom_row`) rather than content or a sideline
+    /// row drawn underneath. Below minimum geometry both auto-hide (AC4-ERR) and
+    /// the row is content (`content_dims` handed the server the full height, a
+    /// pane tiled into it, so blanking would erase it). The single truth shared
+    /// by the renderer and `chrome_hit` so a click matches what's painted
+    /// (codex P2).
+    fn bottom_row_is_chrome(&self) -> bool {
+        self.term.0 >= MIN_ROWS_FOR_STATUS && (self.search.is_some() || self.hint || self.status_on)
+    }
+
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
-        // Below minimum geometry BOTH the status row and the which-key hint
-        // auto-hide (AC4-ERR); the row is content and `content_dims` already
-        // handed it to the server.
-        if self.term.0 < MIN_ROWS_FOR_STATUS {
+        if !self.bottom_row_is_chrome() {
             return;
         }
         // Search line takes the bottom row when active (precedence: search >
@@ -777,15 +793,6 @@ impl View {
         // reserved row, so opening search never triggered a Resize/reflow.
         if let Some(sv) = &self.search {
             self.draw_search_line(cells, rows, cols, sv);
-            return;
-        }
-        // At adequate height the row is chrome only when the hint is up or the
-        // status row is toggled on. When neither owns it, it belongs to content:
-        // `content_dims` gave the server the full height (no status row
-        // subtracted), so a pane tiled into this row and the blit filled it -
-        // blanking here would erase it until the status row is re-enabled
-        // (codex P2).
-        if !self.hint && !self.status_on {
             return;
         }
         let r = rows - 1;
