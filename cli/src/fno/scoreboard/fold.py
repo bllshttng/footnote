@@ -384,12 +384,15 @@ def _skills_from_transcript(lines: list[str]) -> list[str]:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(obj, dict):  # valid JSON, junk shape (e.g. a bare scalar) - skip, don't crash
+            continue
         content = (obj.get("message") or {}).get("content")
         if not isinstance(content, list):
             continue
         for block in content:
             if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Skill":
-                skill = (block.get("input") or {}).get("skill")
+                input_ = block.get("input")
+                skill = input_.get("skill") if isinstance(input_, dict) else None
                 if skill:
                     found.append(skill)
     return found
@@ -402,7 +405,7 @@ def _default_read_transcript(session_id: str) -> list[str] | None:
     if not path:
         return None
     try:
-        return Path(path).read_text(encoding="utf-8").splitlines()
+        return Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
 
@@ -460,7 +463,15 @@ def _extract_skill_runs(row: dict, *, read_transcript) -> tuple[list[str], str]:
 
 
 def _new_skill_bucket() -> dict:
-    return {"runs": 0, "shipped": 0, "reverted": 0, "cost_total": 0.0, "touches_total": 0, "method": "unattributed"}
+    return {
+        "runs": 0,
+        "shipped": 0,
+        "shipped_linked": 0,  # shipped AND has graph_node_id - the only rows revert_rate can judge
+        "reverted": 0,
+        "cost_total": 0.0,
+        "touches_total": 0,
+        "methods": set(),
+    }
 
 
 def build_skill_scoreboard(
@@ -513,16 +524,19 @@ def build_skill_scoreboard(
 
     for r in windowed:
         skills, method = _extract_skill_runs(r, read_transcript=read_transcript)
-        if not skills:
-            b = buckets.setdefault(("unattributed", "-"), _new_skill_bucket())
-            b["runs"] += 1
-            continue
-        attributed += 1
-
         shipped = (r.get("termination_reason") or "").startswith("Done")
         nid = r.get("graph_node_id")
         cost = _num(r.get("cost_usd"))
         touches = touches_by_node.get(nid, 0) if nid else 0
+
+        if not skills:
+            b = buckets.setdefault(("unattributed", "-"), _new_skill_bucket())
+            b["runs"] += 1
+            b["cost_total"] += cost
+            b["touches_total"] += touches
+            continue
+        attributed += 1
+
         outcome = _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes) if (shipped and nid) else None
 
         for skill in skills:
@@ -531,11 +545,13 @@ def build_skill_scoreboard(
             b["runs"] += 1
             b["cost_total"] += cost
             b["touches_total"] += touches
-            b["method"] = method
+            b["methods"].add(method)
             if shipped:
                 b["shipped"] += 1
-                if outcome in ("reverted", "bounced"):
-                    b["reverted"] += 1
+                if nid:
+                    b["shipped_linked"] += 1
+                    if outcome in ("reverted", "bounced"):
+                        b["reverted"] += 1
 
     out_rows = []
     for (skill, version), b in buckets.items():
@@ -546,10 +562,13 @@ def build_skill_scoreboard(
                 "version": version,
                 "runs": runs,
                 "ship_rate_pct": _pct(b["shipped"], runs),
-                "revert_rate_pct": _pct(b["reverted"], b["shipped"]),
+                # denominator is shipped rows WITH a graph_node_id - a shipped row
+                # with no node linkage can never resolve an outcome, so it must not
+                # silently pad the "not reverted" side of this rate (AC honesty).
+                "revert_rate_pct": _pct(b["reverted"], b["shipped_linked"]),
                 "touches_per_run": round(b["touches_total"] / runs, 2) if runs else 0.0,
                 "cost_per_run": round(b["cost_total"] / runs, 2) if runs else 0.0,
-                "method": b["method"],
+                "method": "+".join(sorted(b["methods"])) if b["methods"] else "unattributed",
             }
         )
     out_rows.sort(key=lambda x: (-x["runs"], x["skill"]))

@@ -73,6 +73,71 @@ def test_hp_transcript_attribution_prints_runs_and_coverage():
     assert by_skill["fno:review"]["runs"] == 1
     assert by_skill["fno:review"]["ship_rate_pct"] == 100
     assert by_skill["fno:review"]["method"] == "transcript"
+    # no fractional split: a row that named 2 skills counts its full cost
+    # toward EACH of them (documented v1 approximation).
+    assert by_skill["fno:blueprint"]["cost_per_run"] == 6.0
+    assert by_skill["fno:do"]["cost_per_run"] == 6.0
+
+
+def test_hp_touch_events_join_touches_per_run():
+    from datetime import datetime
+
+    def read_transcript(sid):
+        return [_skill_line("fno:do")]
+
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+         "cost_usd": 1.0, "sessions": [UUID_A]},
+    ]
+    touches = [
+        {"type": "human_touch", "graph_node_id": "x-1", "ts": "2026-07-03T09:00:00"},
+        {"type": "human_touch", "data": {"graph_node_id": "x-1"}, "ts": "2026-07-03T09:30:00"},
+        {"type": "human_touch", "graph_node_id": "x-other", "ts": "2026-07-03T09:00:00"},
+    ]
+    sb = build_skill_scoreboard(
+        rows, [{"id": "x-1", "reverted": False}], touches,
+        since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
+    )
+    assert sb["rows"][0]["touches_per_run"] == 2.0  # only x-1's 2 touches count, not x-other's
+
+
+def test_hp_since_days_window_excludes_old_rows():
+    from datetime import datetime
+
+    def read_transcript(sid):
+        return [_skill_line("fno:do")]
+
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+         "cost_usd": 1.0, "sessions": [UUID_A]},
+        {"completed": "2020-01-01T00:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-old",
+         "cost_usd": 99.0, "sessions": [UUID_A]},
+    ]
+    sb = build_skill_scoreboard(
+        rows, [], [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
+    )
+    assert sb["coverage"]["rows"] == 1  # the 2020 row is outside the 28-day window
+    assert sb["rows"][0]["runs"] == 1
+
+
+def test_default_hooks_real_path_never_crashes(tmp_path, monkeypatch):
+    # The default (non-injected) read_transcript / resolve_skill_version hooks
+    # are what the CLI actually uses; exercise them for real instead of 100%
+    # mocking them out. A session id with no matching transcript file, and a
+    # skill with no matching SKILL.md, must both degrade cleanly.
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: tmp_path)
+    from datetime import datetime
+
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+         "cost_usd": 1.0, "sessions": [UUID_A], "phases_completed": ["do"]},
+    ]
+    sb = build_skill_scoreboard(rows, [], [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0))
+    assert sb["state"] == "ok"
+    assert sb["rows"][0]["skill"] == "fno:do"  # no transcript found -> phase-proxy fallback
+    assert sb["rows"][0]["version"] == "unknown"  # no skills/do/SKILL.md under the fake repo root
 
 
 def test_hp_cli_renders_coverage_and_table(tmp_path, monkeypatch):
@@ -104,6 +169,40 @@ def test_err_unattributed_row_never_dropped():
     assert len(sb["rows"]) == 1
     assert sb["rows"][0]["skill"] == "unattributed"
     assert sb["rows"][0]["runs"] == 1
+
+
+def test_err_unattributed_row_keeps_its_own_cost_not_zero():
+    # silent-failure-hunter finding: the unattributed bucket must accumulate the
+    # row's own cost/touches, not silently render $0.00 as if that were measured.
+    from datetime import datetime
+
+    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "NoProgress", "cost_usd": 7.0}]
+    sb = build_skill_scoreboard(
+        rows, [], [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=lambda sid: None, resolve_skill_version=lambda s, ts: "v1",
+    )
+    assert sb["rows"][0]["cost_per_run"] == 7.0
+
+
+def test_err_malformed_transcript_line_never_crashes():
+    # A valid-JSON, junk-shape line (bare scalar) or a Skill block with a
+    # non-dict `input` must degrade like every other line, never crash the fold.
+    from datetime import datetime
+
+    def read_transcript(sid):
+        return [
+            "42",  # valid JSON, not a dict
+            _skill_line("fno:do"),
+            json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": "not-a-dict"}]}}),
+        ]
+
+    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+             "cost_usd": 1.0, "sessions": [UUID_A]}]
+    sb = build_skill_scoreboard(
+        rows, [{"id": "x-1", "reverted": False}], [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
+    )
+    assert sb["rows"][0]["skill"] == "fno:do"  # the one real Skill block still folds
 
 
 def test_err_json_no_data_state(tmp_path, monkeypatch):
@@ -163,3 +262,53 @@ def test_reverted_node_lowers_revert_rate_not_ship_rate():
     row = sb["rows"][0]
     assert row["ship_rate_pct"] == 100  # both rows shipped
     assert row["revert_rate_pct"] == 50  # 1 of 2 shipped rows reverted
+
+
+def test_shipped_row_without_node_id_excluded_from_revert_denominator():
+    # silent-failure-hunter finding: a shipped row with no graph_node_id can
+    # never resolve an outcome, so it must not silently pad the "not reverted"
+    # side of revert_rate_pct (that would make an unlinked skill look safer
+    # than it's actually known to be).
+    from datetime import datetime
+
+    def read_transcript(sid):
+        return [_skill_line("fno:do")]
+
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+         "cost_usd": 1.0, "sessions": [UUID_A]},
+        {"completed": "2026-07-02T10:00:00", "termination_reason": "DonePRGreen", "cost_usd": 1.0,  # no graph_node_id
+         "sessions": [UUID_A]},
+    ]
+    graph = [{"id": "x-1", "reverted": True}]
+    sb = build_skill_scoreboard(
+        rows, graph, [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
+    )
+    row = sb["rows"][0]
+    assert row["ship_rate_pct"] == 100  # both rows shipped
+    # denominator is shipped_linked (1), not shipped (2): the unlinked row
+    # must not dilute the rate toward "safe".
+    assert row["revert_rate_pct"] == 100
+
+
+def test_mixed_attribution_methods_labeled_not_last_write_wins():
+    from datetime import datetime
+
+    def read_transcript(sid):
+        return {UUID_A: [_skill_line("fno:do")]}.get(sid)
+
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+         "cost_usd": 1.0, "sessions": [UUID_A]},
+        {"completed": "2026-07-02T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-2",
+         "cost_usd": 1.0, "phases_completed": ["do"]},  # no transcript session -> phase-proxy for the same skill
+    ]
+    graph = [{"id": "x-1", "reverted": False}, {"id": "x-2", "reverted": False}]
+    sb = build_skill_scoreboard(
+        rows, graph, [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
+    )
+    row = sb["rows"][0]
+    assert row["skill"] == "fno:do" and row["runs"] == 2
+    assert row["method"] == "phase-proxy+transcript"
