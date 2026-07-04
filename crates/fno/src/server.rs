@@ -103,8 +103,11 @@ enum MouseAction {
 /// mux-interpreting a mouse app's pane would fight its own click handling). Only
 /// SGR is honored - a mouse app that never negotiated SGR falls through to
 /// interpretation rather than receiving garbage (Domain: legacy X10 truncates at
-/// column 223). Known v1 limit: the client captures `?1002` (button + drag)
-/// only, so a `?1003` all-motion app never sees hover motion.
+/// column 223). Known limit: the client now enables `?1003` too, but consumes
+/// bare-motion (`MouseKind::Move`) LOCALLY for hover (focus-follows-mouse +
+/// sideline highlight, x-a496) and never forwards it, so a pane app's own
+/// `?1003` all-motion request still never sees hover motion - hover is a mux
+/// affordance, not passthrough.
 fn route_mouse(modes: Modes, kind: MouseKind) -> MouseAction {
     let reports_mouse = modes.mouse_click || modes.mouse_drag || modes.mouse_motion;
     if reports_mouse && modes.sgr_mouse {
@@ -116,6 +119,9 @@ fn route_mouse(modes: Modes, kind: MouseKind) -> MouseAction {
             | MouseKind::Release(_) => true,
             // Motion-while-held is only wanted by ?1002 (drag) / ?1003 (motion).
             MouseKind::Drag(_) => modes.mouse_drag || modes.mouse_motion,
+            // Bare motion is client-local hover (never forwarded); the arm is
+            // dead but honest - only a ?1003 app would want it.
+            MouseKind::Move => modes.mouse_motion,
         };
         return if wants {
             MouseAction::Passthrough
@@ -143,6 +149,9 @@ fn sgr_mouse_bytes(event: &MouseEvent) -> Vec<u8> {
         MouseKind::Release(b) => (button_code(b), true),
         // Motion bit (32) rides on top of the held button (SGR drag report).
         MouseKind::Drag(b) => (button_code(b) + 32, false),
+        // Bare motion: no-button code (3) plus the motion bit (32). Client-local
+        // hover never forwards Move, so this arm is dead but wire-correct.
+        MouseKind::Move => (3 + 32, false),
         MouseKind::WheelUp => (64, false),
         MouseKind::WheelDown => (65, false),
     };
@@ -655,13 +664,21 @@ pub(crate) fn fno_bin() -> PathBuf {
 /// digest_overlay idiom), and turn its verdict into the client notice. An empty
 /// return says nothing (the launched pane speaks for itself); every error path
 /// yields a visible notice rather than a silent no-op (x-6f77).
-async fn run_dispatch_one(session: &str) -> String {
+async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
     // Selection + spawn crosses a subprocess and a mux socket round-trip, so the
     // budget is seconds, not the digest's 800ms; a hung dispatch still fails
     // open to a notice rather than wedging.
     const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
+    // A targeted node (a clicked work-queue card, x-a496) pins `--node`; without
+    // it the porcelain picks the board's next ready node (leader+g). The claim
+    // race, lane cap, and verdict shape are identical either way.
+    let mut args = vec!["dispatch", "one", "--mux-session", session, "--json"];
+    if let Some(n) = node {
+        args.push("--node");
+        args.push(n);
+    }
     let fut = tokio::process::Command::new(fno_bin())
-        .args(["dispatch", "one", "--mux-session", session, "--json"])
+        .args(&args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -957,11 +974,11 @@ impl Core {
     /// backlog read never stalls a pane. The launched pane appears through the
     /// existing registry reader; the outcome (dispatched / no-work / lanes-full
     /// / failure) routes back as `DispatchResult` for a one-line notice.
-    fn dispatch_next(&self, id: u64) {
+    fn dispatch_next(&self, id: u64, node: Option<String>) {
         let session = self.session_name.clone();
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = run_dispatch_one(&session).await;
+            let notice = run_dispatch_one(&session, node.as_deref()).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
     }
@@ -2137,6 +2154,21 @@ impl Core {
                 self.push_layout(true);
                 Flow::Continue
             }
+            Command::DispatchNode(node) => {
+                // Targeted work-queue dispatch (a clicked card, x-a496). Reuses
+                // the leader+g porcelain pinned to `--node`; the claim race
+                // (already-worked node bounces `already-dispatching`) and lane
+                // cap live in `fno dispatch one`. Routes through CoreMsg::Command,
+                // so the read-only-observer refusal already fired upstream. An
+                // empty id (a card with no id can't exist, but fail closed) is a
+                // notice, never a spawn.
+                if node.trim().is_empty() {
+                    self.notice(client_id, "no such card");
+                } else {
+                    self.dispatch_next(client_id, Some(node));
+                }
+                Flow::Continue
+            }
             Command::CopySelection => {
                 // Keyboard copy (leader+y): the focused pane's selection, else the
                 // newest completed block (precedence + refusals in copy_source).
@@ -2299,7 +2331,7 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::DispatchNext { id } => {
-                self.dispatch_next(id);
+                self.dispatch_next(id, None);
                 Flow::Continue
             }
             CoreMsg::DispatchResult { id, notice } => {
