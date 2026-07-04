@@ -354,6 +354,50 @@ check_not_contains "T9: body's ab-bodyfake NOT dispatched" "ab-bodyfake" "$OUT9"
 check_log_present "T9: dispatch-node.sh invoked with plan_path node" "$LOG9" "dispatch-node.sh $NODE_ID"
 
 # ---------------------------------------------------------------------------
+# Test 10: epic redirect - resolved node has children (was decomposed) -> launch
+# the FIRST READY child, never the epic (node x-dfe6 / bug: autolaunched the epic
+# after decompose). ab-child001 is blocked, ab-child002 is ready -> pick 002.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Test 10: epic with a ready child -> launch the child, not the epic ---"
+SBX10="$(make_autolaunch_sandbox t10 none)"
+LOG10="$SBX10/call-log"
+EPIC10="ab-epic0001"
+cat > "$SBX10/graph.json" <<EOF
+{"entries":[
+  {"id":"${EPIC10}","_status":"ready","plan_path":"$SBX10/plan.md"},
+  {"id":"ab-child001","_status":"blocked","parent":"${EPIC10}"},
+  {"id":"ab-child002","_status":"ready","parent":"${EPIC10}"}
+]}
+EOF
+OUT10="$(GRAPH_JSON_FIXTURE="$SBX10/graph.json" run_autolaunch "$SBX10" "$SBX10/plan.md")"
+check_contains "T10: launched the first ready child" "auto-launched ab-child002" "$OUT10"
+check_contains "T10: decision line names the epic redirect" "first ready child of epic ${EPIC10}" "$OUT10"
+check_not_contains "T10: the epic itself is NOT launched" "auto-launched ${EPIC10}" "$OUT10"
+check_log_present "T10: dispatch invoked with the child" "$LOG10" "dispatch-node.sh ab-child002"
+check_log_absent "T10: dispatch NOT invoked with the epic" "$LOG10" "dispatch-node.sh ${EPIC10}"
+
+# ---------------------------------------------------------------------------
+# Test 11: epic decomposed but no child is ready yet (all claimed/blocked) -> park
+# with epic-decomposed-no-ready-child; the epic is never launched.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Test 11: epic with no ready child -> parked, nothing dispatched ---"
+SBX11="$(make_autolaunch_sandbox t11 none)"
+LOG11="$SBX11/call-log"
+EPIC11="ab-epic0002"
+cat > "$SBX11/graph.json" <<EOF
+{"entries":[
+  {"id":"${EPIC11}","_status":"ready","plan_path":"$SBX11/plan.md"},
+  {"id":"ab-c1","_status":"claimed","parent":"${EPIC11}"},
+  {"id":"ab-c2","_status":"blocked","parent":"${EPIC11}"}
+]}
+EOF
+OUT11="$(GRAPH_JSON_FIXTURE="$SBX11/graph.json" run_autolaunch "$SBX11" "$SBX11/plan.md")"
+check_contains "T11: parked with epic-decomposed reason" "epic-decomposed-no-ready-child" "$OUT11"
+check_log_absent "T11: dispatch-node.sh NOT invoked" "$LOG11" "dispatch-node.sh"
+
+# ---------------------------------------------------------------------------
 # Init-target-state.sh tests (Tests 4, 5, 6)
 # These run the REAL init script in a sandbox git repo on a feature branch.
 # ---------------------------------------------------------------------------

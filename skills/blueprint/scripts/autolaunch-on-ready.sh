@@ -150,6 +150,57 @@ if [[ -z "$node" ]]; then
   exit 0
 fi
 
+# 2b. Epic redirect (the bug this script fixes): if the resolved node was
+#     decomposed - i.e. other graph nodes carry parent==node - NEVER launch the
+#     epic itself. An epic-level /target builds every child's waves into one giant
+#     PR, undoing the split that just happened (this is the same reason `backlog
+#     next` excludes epics). Launch the first ready child instead; if children
+#     exist but none is ready yet (all claimed/blocked), park - the ready one
+#     autolaunches when its deps clear.
+#     ponytail: "first ready child" = graph order; _status==ready already encodes
+#     deps-satisfied, so no separate blocked_by walk. Graph-path resolution mirrors
+#     the tier-c block above; unreadable/absent graph -> no redirect (dispatch as-is).
+if command -v python3 >/dev/null 2>&1; then
+  if [[ -z "${GRAPH_JSON:-}" ]] && command -v fno >/dev/null 2>&1; then
+    _PATHS_SH="$(fno paths shell-stub 2>/dev/null || true)"
+    if [[ -n "$_PATHS_SH" && -f "$_PATHS_SH" ]]; then
+      # shellcheck disable=SC1090
+      source "$_PATHS_SH" 2>/dev/null || true
+    fi
+    unset _PATHS_SH
+  fi
+  _GRAPH_JSON="${GRAPH_JSON:-${GRAPH_JSON_PATH:-$HOME/.fno/graph.json}}"
+  if [[ -f "$_GRAPH_JSON" ]]; then
+    _child="$(GRAPH_JSON="$_GRAPH_JSON" NODE="$node" python3 - <<'PYEOF'
+import json, os, sys
+try:
+    with open(os.environ["GRAPH_JSON"]) as f:
+        data = json.load(f)
+except (OSError, ValueError):
+    sys.exit(0)  # unreadable/malformed graph -> no redirect, dispatch node as-is
+entries = data.get("entries", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+node = os.environ["NODE"]
+children = [e for e in entries if isinstance(e, dict) and e.get("parent") == node]
+if not children:
+    sys.exit(0)  # not an epic (no children) -> empty output, no redirect
+for e in children:
+    if e.get("_status") == "ready":
+        print(e.get("id") or "")
+        sys.exit(0)
+print("__NONE__")  # decomposed but no ready child yet
+PYEOF
+)"
+    _child="$(printf '%s' "$_child" | tr -d '[:space:]')"
+    if [[ "$_child" == "__NONE__" ]]; then
+      echo "parked $node reason=\"epic-decomposed-no-ready-child\""
+      exit 0
+    elif [[ -n "$_child" ]]; then
+      _epic_redirect="$node"
+      node="$_child"
+    fi
+  fi
+fi
+
 # 3. Ready-gate (Locked Decision 3): only `ready` nodes are up-next. A node that
 #    is blocked/deferred/idea is parked as pre-planned future work. (Need jq +
 #    fno; if either is missing we cannot gate safely, so we park, never launch.)
@@ -207,7 +258,11 @@ fi
 out="$(bash "$DISPATCH" ${DRY:+$DRY} "$node" 2>&1)"
 line="$(printf '%s\n' "$out" | grep -E '^(launched|already-running|failed|parked|skipped-done) ' | head -1)"
 case "$line" in
-  launched\ *)        echo "auto-${line}" ;;            # -> "auto-launched <node> ..."
+  launched\ *)        if [[ -n "${_epic_redirect:-}" ]]; then
+                        echo "auto-${line} (first ready child of epic ${_epic_redirect})"
+                      else
+                        echo "auto-${line}"                # -> "auto-launched <node> ..."
+                      fi ;;
   already-running\ *) echo "$line" ;;
   parked\ *)          echo "$line" ;;
   skipped-done\ *)    echo "$line" ;;
