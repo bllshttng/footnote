@@ -192,6 +192,7 @@ def test_err_malformed_transcript_line_never_crashes():
     def read_transcript(sid):
         return [
             "42",  # valid JSON, not a dict
+            json.dumps({"message": "not-a-dict"}),  # gemini finding: message must not be trusted as a dict
             _skill_line("fno:do"),
             json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": "not-a-dict"}]}}),
         ]
@@ -203,6 +204,38 @@ def test_err_malformed_transcript_line_never_crashes():
         read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
     )
     assert sb["rows"][0]["skill"] == "fno:do"  # the one real Skill block still folds
+
+
+def test_err_non_dict_touch_event_data_never_crashes():
+    # gemini finding: e.get("data") may be a non-dict; must not raise on .get.
+    from datetime import datetime
+
+    def read_transcript(sid):
+        return [_skill_line("fno:do")]
+
+    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+             "cost_usd": 1.0, "sessions": [UUID_A]}]
+    touches = ["not-a-dict", {"type": "human_touch", "data": "also-not-a-dict"}]
+    sb = build_skill_scoreboard(
+        rows, [{"id": "x-1", "reverted": False}], touches, since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
+    )
+    assert sb["rows"][0]["touches_per_run"] == 0.0
+
+
+def test_err_non_list_sessions_and_phases_never_crashes():
+    # gemini finding: `sessions`/`phases_completed` may not be lists at all.
+    from datetime import datetime
+
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "NoProgress", "cost_usd": 1.0,
+         "sessions": "not-a-list", "phases_completed": "also-not-a-list"},
+    ]
+    sb = build_skill_scoreboard(
+        rows, [], [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=lambda sid: None, resolve_skill_version=lambda s, ts: "v1",
+    )
+    assert sb["rows"][0]["skill"] == "unattributed"
 
 
 def test_err_json_no_data_state(tmp_path, monkeypatch):
@@ -312,3 +345,28 @@ def test_mixed_attribution_methods_labeled_not_last_write_wins():
     row = sb["rows"][0]
     assert row["skill"] == "fno:do" and row["runs"] == 2
     assert row["method"] == "phase-proxy+transcript"
+
+
+def test_skill_commit_history_shells_out_once_then_caches(monkeypatch, tmp_path):
+    # gemini + code-reviewer finding: resolving a skill's version must not
+    # shell out to git once per row. _skill_commit_history now fetches the
+    # full log once per (root, path) and every later call for the same pair
+    # is served from the in-memory cache.
+    import subprocess as real_subprocess
+
+    from fno.scoreboard.fold import _SKILL_COMMIT_HISTORY_CACHE, _skill_commit_history
+
+    _SKILL_COMMIT_HISTORY_CACHE.clear()
+    calls = {"n": 0}
+    real_run = real_subprocess.run
+
+    def counting_run(*args, **kwargs):
+        calls["n"] += 1
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(real_subprocess, "run", counting_run)
+
+    _skill_commit_history(tmp_path, "no/such/file.md")
+    _skill_commit_history(tmp_path, "no/such/file.md")
+    _skill_commit_history(tmp_path, "no/such/file.md")
+    assert calls["n"] == 1  # 2nd and 3rd calls hit the cache, no new subprocess

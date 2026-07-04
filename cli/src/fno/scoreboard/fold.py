@@ -386,7 +386,8 @@ def _skills_from_transcript(lines: list[str]) -> list[str]:
             continue
         if not isinstance(obj, dict):  # valid JSON, junk shape (e.g. a bare scalar) - skip, don't crash
             continue
-        content = (obj.get("message") or {}).get("content")
+        message = obj.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             continue
         for block in content:
@@ -410,12 +411,48 @@ def _default_read_transcript(session_id: str) -> list[str] | None:
         return None
 
 
+# Process-lifetime cache: skill git history is append-only, so fetching it
+# once per (repo root, path) and bisecting in memory turns version resolution
+# from O(N) git-log subprocess spawns (one per row) into O(S) (one per unique
+# skill) - the ledger already holds thousands of rows (gemini + code-reviewer
+# both flagged the naive per-row subprocess as a real latency risk).
+_SKILL_COMMIT_HISTORY_CACHE: dict[tuple[str, str], list[tuple[datetime, str]]] = {}
+
+
+def _skill_commit_history(root: Path, rel: str) -> list[tuple[datetime, str]]:
+    """All commits touching rel, oldest first: [(commit datetime, short hash), ...].
+    Empty on any git failure - never raises."""
+    import subprocess
+
+    key = (str(root), rel)
+    if key in _SKILL_COMMIT_HISTORY_CACHE:
+        return _SKILL_COMMIT_HISTORY_CACHE[key]
+    history: list[tuple[datetime, str]] = []
+    try:
+        out = subprocess.run(
+            ["git", "log", "--format=%h %aI", "--", rel],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if out.returncode == 0:
+            for line in out.stdout.splitlines():
+                h, _, iso = line.partition(" ")
+                dt = _parse_ts(iso)
+                if h and dt:
+                    history.append((dt, h))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    history.sort(key=lambda pair: pair[0])
+    _SKILL_COMMIT_HISTORY_CACHE[key] = history
+    return history
+
+
 def _default_skill_version(skill_id: str, ts_raw: str | None) -> str:
     """Best-effort git hash of the skill's SKILL.md at (or before) ts_raw.
     No git history / no such file / any subprocess failure -> "unknown",
     never an error (AC-EDGE)."""
-    import subprocess
-
     from fno.paths import resolve_repo_root
 
     name = skill_id.split(":", 1)[1] if ":" in skill_id else skill_id
@@ -426,18 +463,14 @@ def _default_skill_version(skill_id: str, ts_raw: str | None) -> str:
         return "unknown"
     if not (root / rel).exists():
         return "unknown"
-    until = ts_raw or datetime.now().isoformat()
-    try:
-        out = subprocess.run(
-            ["git", "log", "-1", "--format=%h", f"--until={until}", "--", rel],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    return out.stdout.strip() or "unknown"
+
+    until_dt = _parse_ts(ts_raw) or datetime.now()
+    best: str | None = None
+    for dt, h in _skill_commit_history(root, rel):
+        if dt > until_dt:
+            break
+        best = h
+    return best or "unknown"
 
 
 def _extract_skill_runs(row: dict, *, read_transcript) -> tuple[list[str], str]:
@@ -447,7 +480,8 @@ def _extract_skill_runs(row: dict, *, read_transcript) -> tuple[list[str], str]:
     (fallback to phases_completed), or "unattributed" (neither)."""
     from fno.cost._session_cost import UUID_RE
 
-    uuid_sessions = [s for s in (row.get("sessions") or []) if isinstance(s, str) and UUID_RE.match(s)]
+    sessions = row.get("sessions")
+    uuid_sessions = [s for s in sessions if isinstance(s, str) and UUID_RE.match(s)] if isinstance(sessions, list) else []
     found: list[str] = []
     for sid in uuid_sessions:
         lines = read_transcript(sid)
@@ -456,7 +490,8 @@ def _extract_skill_runs(row: dict, *, read_transcript) -> tuple[list[str], str]:
     if found:
         return sorted(set(found)), "transcript"
 
-    proxy = sorted({_PHASE_TO_SKILL[p] for p in (row.get("phases_completed") or []) if p in _PHASE_TO_SKILL})
+    phases = row.get("phases_completed")
+    proxy = sorted({_PHASE_TO_SKILL[p] for p in phases if p in _PHASE_TO_SKILL}) if isinstance(phases, list) else []
     if proxy:
         return proxy, "phase-proxy"
     return [], "unattributed"
@@ -515,7 +550,12 @@ def build_skill_scoreboard(
 
     touches_by_node: Counter = Counter()
     for e in touch_events:
-        nid = e.get("graph_node_id") or (e.get("data") or {}).get("graph_node_id")
+        if not isinstance(e, dict):
+            continue
+        nid = e.get("graph_node_id")
+        if not nid:
+            data = e.get("data")
+            nid = data.get("graph_node_id") if isinstance(data, dict) else None
         if nid:
             touches_by_node[nid] += 1
 
