@@ -142,10 +142,17 @@ jobs:
           cargo build --bin fno-agents
 
       - name: Schema parity check
-        # The binary is now on disk; the parity script picks it up from
-        # crates/fno-agents/target/debug/fno-agents. Python runs from the
-        # cli/.venv created by uv sync above.
-        run: bash scripts/check-event-schema-parity.sh
+        # The parity script resolves the Rust binary via `command -v fno-agents`
+        # FIRST, only then the fresh crates/fno-agents/target/debug build. If any
+        # stale fno-agents shadows PATH, the freshly-built one is ignored and the
+        # check reads an outdated --emit-schema (phantom kind drift). Prepend the
+        # fresh build dir so `command -v` resolves it, and print a diagnostic of
+        # the resolved binary + its emitted kind count for future triage.
+        run: |
+          export PATH="$PWD/crates/fno-agents/target/debug:$PATH"
+          echo "parity-diag: resolved fno-agents = $(command -v fno-agents || echo NONE)"
+          echo "parity-diag: emits newest kind (inside_leg_completed) = $(fno-agents --emit-schema 2>/dev/null | grep -c inside_leg_completed) (fresh=1, stale=0)"
+          bash scripts/check-event-schema-parity.sh
 
       - name: Registry schema parity check (ab-0baecaed)
         # Cross-language schema_version lockstep: catches a Rust-only bump of
