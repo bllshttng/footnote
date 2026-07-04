@@ -147,15 +147,25 @@ def triage_pr(
     # Auto caused_by (W4 causal links, AC4-UI): a follow-up filed from this
     # PR's findings points back at the node that shipped the PR. Prefer the
     # trigger sentinel's node_id; fall back to the graph node carrying this
-    # pr_number. Unresolvable -> nodes land without the link (manual
-    # `backlog update --caused-by` remains).
+    # pr_number - repo-scoped when ``repo`` is known, because the graph is
+    # global and bare PR numbers collide across projects. Unresolvable ->
+    # nodes land without the link (manual `backlog update --caused-by`
+    # remains).
     caused_by = origin_node_id
     if not caused_by:
+        from fno.graph._reconcile import repo_slug_from_url
+
+        def _same_repo(n: dict) -> bool:
+            if repo is None:
+                return True
+            slug = repo_slug_from_url(n.get("pr_url"))
+            return slug is not None and slug.lower() == repo.lower()
+
         caused_by = next(
             (
                 n.get("id")
                 for n in existing_nodes or []
-                if n.get("pr_number") == pr_number
+                if n.get("pr_number") == pr_number and _same_repo(n)
             ),
             None,
         )

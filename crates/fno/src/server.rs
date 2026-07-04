@@ -1731,7 +1731,11 @@ impl Core {
                 Ok(Ok(s)) if s.success()
             );
             if !ok {
-                failures.fetch_add(1, Ordering::Relaxed);
+                // Counted AND visible (never swallowed): a 100%-failing
+                // emitter silently inflates the autonomy rate, so each miss
+                // logs to the server's stderr alongside the running total.
+                let n = failures.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("fno mux: human_touch({source}) emit failed ({n} this session)");
             }
         });
     }

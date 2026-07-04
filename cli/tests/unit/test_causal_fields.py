@@ -155,29 +155,72 @@ def test_land_omits_caused_by_when_unknown(tmp_path):
 # -- reconcile revert detection --------------------------------------------------
 
 
+def _pr_url(n: int, slug: str = "o/r") -> str:
+    return f"https://github.com/{slug}/pull/{n}"
+
+
 def test_detect_reverted_nodes_matches_body_ref():
-    entries = [_node("x-aaaa", pr_number=42), _node("x-bbbb", pr_number=7)]
+    entries = [
+        _node("x-aaaa", pr_number=42, pr_url=_pr_url(42)),
+        _node("x-bbbb", pr_number=7, pr_url=_pr_url(7)),
+    ]
     merged = [{
         "number": 50,
         "title": 'Revert "feat: thing"',
         "body": "Reverts o/r#42",
+        "url": _pr_url(50),
     }]
     assert detect_reverted_nodes(merged, entries) == [("x-aaaa", 50)]
 
 
 def test_detect_reverted_nodes_ignores_non_revert_titles():
-    entries = [_node("x-aaaa", pr_number=42)]
-    merged = [{"number": 50, "title": "feat: mentions #42", "body": "see #42"}]
+    entries = [_node("x-aaaa", pr_number=42, pr_url=_pr_url(42))]
+    merged = [{"number": 50, "title": "feat: mentions #42", "body": "see #42",
+               "url": _pr_url(50)}]
     assert detect_reverted_nodes(merged, entries) == []
 
 
 def test_detect_reverted_nodes_skips_already_stamped():
-    entries = [_node("x-aaaa", pr_number=42, reverted=True)]
-    merged = [{"number": 50, "title": "Revert x", "body": "reverts #42"}]
+    entries = [_node("x-aaaa", pr_number=42, pr_url=_pr_url(42), reverted=True)]
+    merged = [{"number": 50, "title": "Revert x", "body": "reverts #42",
+               "url": _pr_url(50)}]
     assert detect_reverted_nodes(merged, entries) == []
 
 
 def test_detect_reverted_nodes_matches_additional_prs():
-    entries = [_node("x-aaaa", additional_prs=[{"number": 43}])]
-    merged = [{"number": 51, "title": 'Revert "fix"', "body": "This reverts #43."}]
+    entries = [_node("x-aaaa", additional_prs=[{"number": 43, "url": _pr_url(43)}])]
+    merged = [{"number": 51, "title": 'Revert "fix"', "body": "This reverts #43.",
+               "url": _pr_url(51)}]
     assert detect_reverted_nodes(merged, entries) == [("x-aaaa", 51)]
+
+
+def test_detect_reverted_nodes_never_crosses_repos():
+    """The graph is global: a same-numbered PR in another repo must not match."""
+    entries = [_node("x-aaaa", pr_number=42, pr_url=_pr_url(42, "other/repo"))]
+    merged = [{"number": 50, "title": 'Revert "x"', "body": "Reverts #42",
+               "url": _pr_url(50)}]
+    assert detect_reverted_nodes(merged, entries) == []
+
+
+def test_detect_reverted_nodes_cross_repo_qualifier_skipped():
+    """`Reverts other/repo#42` in the body names a foreign repo's PR."""
+    entries = [_node("x-aaaa", pr_number=42, pr_url=_pr_url(42))]
+    merged = [{"number": 50, "title": 'Revert "x"', "body": "Reverts other/repo#42",
+               "url": _pr_url(50)}]
+    assert detect_reverted_nodes(merged, entries) == []
+
+
+def test_detect_reverted_nodes_ambiguous_match_stamps_nothing():
+    entries = [
+        _node("x-aaaa", pr_number=42, pr_url=_pr_url(42)),
+        _node("x-bbbb", additional_prs=[{"number": 42, "url": _pr_url(42)}]),
+    ]
+    merged = [{"number": 50, "title": 'Revert "x"', "body": "Reverts #42",
+               "url": _pr_url(50)}]
+    assert detect_reverted_nodes(merged, entries) == []
+
+
+def test_detect_reverted_nodes_skips_numberless_gh_row():
+    entries = [_node("x-aaaa", pr_number=42, pr_url=_pr_url(42))]
+    merged = [{"title": 'Revert "x"', "body": "Reverts #42", "url": _pr_url(50)}]
+    assert detect_reverted_nodes(merged, entries) == []

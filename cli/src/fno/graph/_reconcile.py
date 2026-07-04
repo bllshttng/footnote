@@ -203,7 +203,7 @@ def query_pr_merge_state(
 # a hand-written one usually keeps the git subject. Misses are a documented
 # limitation with the manual `fno backlog update --reverted` fallback.
 _REVERT_TITLE_RE = re.compile(r"^\s*Revert\b")
-_REVERT_BODY_PR_RE = re.compile(r"\breverts\s+(?:[\w.-]+/[\w.-]+)?#(\d+)", re.IGNORECASE)
+_REVERT_BODY_PR_RE = re.compile(r"\breverts\s+(?:([\w.-]+/[\w.-]+))?#(\d+)", re.IGNORECASE)
 
 
 def fetch_recent_merged_prs(
@@ -225,7 +225,7 @@ def fetch_recent_merged_prs(
     cmd = ["gh", "pr", "list", "--state", "merged", "--limit", str(limit)]
     if repo:
         cmd += ["--repo", repo]
-    cmd += ["--json", "number,title,body"]
+    cmd += ["--json", "number,title,body,url"]
     try:
         result = runner(
             cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
@@ -250,25 +250,53 @@ def detect_reverted_nodes(
 
     A merged PR whose title starts with ``Revert`` and whose body references
     a PR number carried by a not-yet-reverted graph node names that node's
-    ship as reverted. Pure (no I/O) so tests need no gh."""
-    by_pr: dict[int, dict] = {}
+    ship as reverted. Pure (no I/O) so tests need no gh.
+
+    Matching is REPO-SCOPED: the graph is global across projects, so bare PR
+    numbers collide. A candidate node must carry a ``pr_url`` in the SAME
+    repo as the revert PR's own ``url``, a body qualifier
+    (``Reverts other/repo#N``) must match that repo, and an ambiguous match
+    (two same-repo nodes on one number) stamps nothing - the same
+    ambiguity-resolves-to-nothing rule as the W1 backfill.
+    """
+    # pr_number -> [(entry, that ref's repo slug)]; refs without a parseable
+    # pr_url are indexed with slug None and never match (conservative).
+    by_pr: dict[int, list[tuple[dict, Optional[str]]]] = {}
     for e in entries:
-        for num, _ in node_pr_refs(e):
-            by_pr.setdefault(num, e)
+        for num, url in node_pr_refs(e):
+            by_pr.setdefault(num, []).append((e, repo_slug_from_url(url)))
 
     out: list[tuple[str, int]] = []
     seen: set[str] = set()
     for pr in merged_prs:
+        number = pr.get("number")
+        if not isinstance(number, int) or number <= 0:
+            continue
         if not _REVERT_TITLE_RE.match(str(pr.get("title") or "")):
             continue
+        revert_slug = repo_slug_from_url(pr.get("url"))
+        if revert_slug is None:
+            # No repo context for the revert PR itself: refuse to match a
+            # bare number against the multi-project graph.
+            continue
         for m in _REVERT_BODY_PR_RE.finditer(str(pr.get("body") or "")):
-            node = by_pr.get(int(m.group(1)))
-            if node is None or node.get("reverted"):
-                continue
-            nid = node.get("id")
+            qualifier, target = m.group(1), int(m.group(2))
+            if qualifier and qualifier.lower() != revert_slug.lower():
+                continue  # explicit cross-repo reference: not this repo's PR
+            matches = [
+                e
+                for e, slug in by_pr.get(target, [])
+                if slug is not None
+                and slug.lower() == revert_slug.lower()
+                and not e.get("reverted")
+            ]
+            hit_ids = {e.get("id") for e in matches}
+            if len(hit_ids) != 1:
+                continue  # zero or ambiguous: stamp nothing
+            nid = hit_ids.pop()
             if isinstance(nid, str) and nid not in seen:
                 seen.add(nid)
-                out.append((nid, int(pr.get("number") or 0)))
+                out.append((nid, number))
     return out
 
 

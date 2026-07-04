@@ -184,9 +184,16 @@ def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
     node_id = None
     try:
         from fno.graph.store import read_graph
-        from fno.paths import graph_json
+        from fno.paths import graph_json, resolve_canonical_repo_root
 
+        # The graph is global across projects, so bare PR numbers collide;
+        # only nodes homed in THIS repo (node.cwd == canonical root) may
+        # claim the touch. No match -> resolution=failed, never a foreign
+        # node presented as ok.
+        root = str(resolve_canonical_repo_root())
         for e in read_graph(graph_json()):
+            if e.get("cwd") != root:
+                continue
             if e.get("pr_number") == pr_number or any(
                 isinstance(p, dict) and p.get("number") == pr_number
                 for p in e.get("additional_prs") or []
@@ -265,8 +272,10 @@ def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
     # W4 touch telemetry: a manual (tty) merge is a human steering action.
     try:
         _emit_human_touch_merge(pr_number, state_dir)
-    except Exception:
-        pass
+    except Exception as exc:
+        sys.stderr.write(
+            f"pr-merge: human_touch emit failed ({exc}); merge outcome unaffected\n"
+        )
 
     # Per-PR artifact consolidation (best-effort; degrades cleanly when the
     # script is absent, e.g. a bare pip install). The consolidator lives in the

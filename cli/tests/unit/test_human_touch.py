@@ -32,10 +32,18 @@ def _tty(monkeypatch, value: bool) -> None:
     )
 
 
+def _home_repo(monkeypatch, tmp_path: Path) -> str:
+    """Pin the canonical repo root the merge emitter scopes node matching to."""
+    root = str(tmp_path / "repo")
+    monkeypatch.setattr("fno.paths.resolve_canonical_repo_root", lambda: Path(root))
+    return root
+
+
 def test_manual_merge_emits_with_resolved_node(tmp_path, monkeypatch):
     """A tty merge emits human_touch{merge} carrying the pr's graph node."""
+    root = _home_repo(monkeypatch, tmp_path)
     graph = _fake_graph(
-        tmp_path, [{"id": "x-1234", "title": "t", "pr_number": 42}]
+        tmp_path, [{"id": "x-1234", "title": "t", "pr_number": 42, "cwd": root}]
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     _tty(monkeypatch, True)
@@ -65,7 +73,10 @@ def test_loop_merge_never_emits(tmp_path, monkeypatch):
 
 def test_manual_merge_unresolved_node_counts_as_failed(tmp_path, monkeypatch):
     """No matching node -> resolution=failed, never dropped (AC4-FR shape)."""
-    graph = _fake_graph(tmp_path, [{"id": "x-9999", "title": "t", "pr_number": 7}])
+    root = _home_repo(monkeypatch, tmp_path)
+    graph = _fake_graph(
+        tmp_path, [{"id": "x-9999", "title": "t", "pr_number": 7, "cwd": root}]
+    )
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     _tty(monkeypatch, True)
     state_dir = tmp_path / ".fno"
@@ -78,11 +89,31 @@ def test_manual_merge_unresolved_node_counts_as_failed(tmp_path, monkeypatch):
     assert rows[0]["data"]["resolution"] == "failed"
 
 
-def test_manual_merge_matches_additional_prs(tmp_path, monkeypatch):
-    """A follow-up PR recorded in additional_prs still attributes the node."""
+def test_manual_merge_never_attributes_foreign_repo_node(tmp_path, monkeypatch):
+    """A same-numbered PR on another project's node must not claim the touch."""
+    _home_repo(monkeypatch, tmp_path)
     graph = _fake_graph(
         tmp_path,
-        [{"id": "x-5678", "title": "t", "additional_prs": [{"number": 42}]}],
+        [{"id": "x-1234", "title": "t", "pr_number": 42, "cwd": "/elsewhere/proj"}],
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    _tty(monkeypatch, True)
+    state_dir = tmp_path / ".fno"
+
+    _merge._emit_human_touch_merge(42, str(state_dir))
+
+    rows = _events(state_dir / "events.jsonl")
+    assert rows[0]["data"]["graph_node_id"] is None
+    assert rows[0]["data"]["resolution"] == "failed"
+
+
+def test_manual_merge_matches_additional_prs(tmp_path, monkeypatch):
+    """A follow-up PR recorded in additional_prs still attributes the node."""
+    root = _home_repo(monkeypatch, tmp_path)
+    graph = _fake_graph(
+        tmp_path,
+        [{"id": "x-5678", "title": "t", "cwd": root,
+          "additional_prs": [{"number": 42}]}],
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     _tty(monkeypatch, True)
