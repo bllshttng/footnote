@@ -1379,6 +1379,9 @@ impl Core {
                 // An exited pane is unanswerable; drop any stale payload with
                 // the badge (x-c929).
                 answerable: if exited { None } else { a.answerable.clone() },
+                // A terminal session can't be attached (its supervisor row is
+                // being reaped): drop the attach target on exit, like the badge.
+                attach_id: if exited { None } else { a.attach_id.clone() },
             });
         }
         out
@@ -2069,6 +2072,52 @@ impl Core {
                     // other catalog-named commands.
                     None => self.notice(client_id, "no such pane"),
                 }
+                Flow::Continue
+            }
+            Command::AttachAgent(id) => {
+                // Validate the jobId shape (8 hex digits) BEFORE it reaches the
+                // argv - defense in depth even though spawn_pane_cmd never
+                // builds a shell string (the id can only ever be `claude
+                // attach`'s positional arg). A malformed id is refused
+                // fail-closed, like the other catalog-named commands.
+                if id.len() != 8 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    self.notice(client_id, "not an attachable agent");
+                    return Flow::Continue;
+                }
+                // Spawn `claude attach <id>` as a new tab in the sender's squad
+                // (mirrors NewTab): the claude supervisor PTYs the detached bg
+                // session into this pane. cwd is the squad's, like a new tab -
+                // attach connects by id, so the dir is cosmetic.
+                let (rows, cols) = self
+                    .clients
+                    .iter()
+                    .find(|c| c.id == client_id)
+                    .map(|c| c.dims)
+                    .unwrap_or((vp.rows, vp.cols));
+                let squad_cwd = self
+                    .session
+                    .squad(view.0)
+                    .map(|s| s.canonical_cwd.clone())
+                    .unwrap_or_default();
+                let argv = vec!["claude".to_string(), "attach".to_string(), id.clone()];
+                let pid = match self.spawn_pane_cmd(&argv, rows, cols, &squad_cwd) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.notice(client_id, format!("attach failed: {e}"));
+                        return Flow::Continue;
+                    }
+                };
+                let tid = self.session.mint_tab_id();
+                let Some(squad) = self.session.squad_mut(view.0) else {
+                    return Flow::Continue;
+                };
+                squad.tabs.push(Tab {
+                    id: tid,
+                    root: Node::Leaf(pid),
+                    focus: pid,
+                });
+                self.set_view(client_id, view.0, tid);
+                self.push_layout(true);
                 Flow::Continue
             }
             Command::CopySelection => {
@@ -3524,6 +3573,7 @@ mod tests {
             reason: None,
             mux: Some((sess.into(), pane)),
             answerable: None,
+            attach_id: None,
         }
     }
 
@@ -3552,8 +3602,10 @@ mod tests {
                 reason: None,
                 mux: Some(("other".into(), 5)),
                 answerable: None,
+                attach_id: None,
             },
-            // A bg worker: paneless, no squad match -> watch-only orphan.
+            // A bg worker: paneless, no squad match -> watch-only orphan, and
+            // it carries a claude jobId so the sideline can attach it.
             RegistryAgent {
                 name: "bg-worker".into(),
                 cwd: "/bg".into(),
@@ -3562,6 +3614,7 @@ mod tests {
                 reason: None,
                 mux: None,
                 answerable: None,
+                attach_id: Some("c19cd2c3".into()),
             },
         ];
         let rows = core.agent_rows();
@@ -3579,6 +3632,27 @@ mod tests {
         );
         assert_eq!(bg.pane_id, None, "a watch-only row has no pane");
         assert!(!bg.exited);
+        assert_eq!(
+            bg.attach_id.as_deref(),
+            Some("c19cd2c3"),
+            "the claude jobId must carry through so the sideline can attach it"
+        );
+    }
+
+    #[test]
+    fn attach_agent_refuses_a_malformed_jobid() {
+        // The jobId lands in `claude attach <id>`'s argv, so an out-of-shape id
+        // is refused before any pane spawns - defense in depth even though the
+        // argv is never a shell string.
+        for bad in ["short", "toolongxx", "ZZZZZZZZ", "; rm -rf /", "c19cd2c"] {
+            let mut core = empty_core();
+            let flow = core.command(1, Command::AttachAgent(bad.into()));
+            assert!(matches!(flow, Flow::Continue));
+            assert!(
+                core.panes.is_empty(),
+                "malformed jobId {bad:?} must not spawn a pane"
+            );
+        }
     }
 
     #[test]

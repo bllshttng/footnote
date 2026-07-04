@@ -34,6 +34,13 @@ pub struct RegistryAgent {
     /// when this row is `blocked` on a numbered menu the daemon could extract;
     /// `None` for a hook-badged block or a focus-only blocked prompt.
     pub answerable: Option<AnswerablePrompt>,
+    /// The `claude attach <id>` target: the claude bg-session jobId
+    /// (`claude_short_id`) that lets a paneless watch-only row be attached into
+    /// a mux pane. `None` for a row with no jobId (non-claude, or a claude row
+    /// that never recorded one). Present regardless of `mux`, but only the
+    /// watch-only (paneless) click path consumes it - a pane-hosted row focuses
+    /// its pane instead.
+    pub attach_id: Option<String>,
 }
 
 /// The registry path, resolved exactly as fno-agents' `AgentsHome::from_env`
@@ -126,6 +133,14 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                 m.get("pane_id")?.as_u64()?,
             ))
         });
+        // The claude bg jobId, when present, is the `claude attach <id>` target
+        // for a paneless row (only claude rows carry it - codex/gemini use their
+        // own session-id fields and a different lane).
+        let attach_id = row
+            .get("claude_short_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let (badge, reason, answerable) = match row.get("inside_leg") {
             Some(leg) if !leg.is_null() => {
                 let live = report_is_live(
@@ -209,6 +224,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             reason,
             mux,
             answerable,
+            attach_id,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -317,6 +333,21 @@ mod tests {
                               "received_at":"2020-01-01T00:00:00Z"}}"#);
         let rows = derive_rows(&raw, NOW).unwrap();
         assert_eq!(rows[0].badge, Some(AgentBadge::Done));
+    }
+
+    #[test]
+    fn claude_short_id_becomes_the_attach_target() {
+        // A claude bg row's jobId (`claude_short_id`) is the `claude attach <id>`
+        // target; a row without one (or with an empty one) is not attachable.
+        let raw = reg(
+            r#"{"name":"bg","cwd":"/w","status":"live","claude_short_id":"c19cd2c3"},
+               {"name":"plain","cwd":"/w","status":"live"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let bg = rows.iter().find(|r| r.name == "bg").unwrap();
+        assert_eq!(bg.attach_id.as_deref(), Some("c19cd2c3"));
+        let plain = rows.iter().find(|r| r.name == "plain").unwrap();
+        assert_eq!(plain.attach_id, None, "no jobId -> not attachable");
     }
 
     #[test]

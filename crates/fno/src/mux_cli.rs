@@ -2506,6 +2506,7 @@ mod tests {
             reason: (badge == Some(AgentBadge::Working)).then(|| "building".into()),
             mux: mux.map(|(s, p)| (s.to_string(), p)),
             answerable: None,
+            attach_id: None,
         }
     }
 
