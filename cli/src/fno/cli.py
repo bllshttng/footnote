@@ -78,6 +78,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "worktree":      ("fno.worktree_cli:app",              "Worktree management"),
     "evals":         ("fno.evals.cli:evals_app",           "Golden-task efficacy evals (run / report / diff)"),
     "pr-watch":      ("fno.pr_watch.cli:cli",              "PR-state watcher: auto-fire /pr check + /pr merged for open-PR backlog nodes"),
+    "loops":         ("fno.loops:loops_app",                "Loop level config + pause-all kill switch (pause-all/resume-all/status/ls)"),
     # Individual commands (plain functions wrapped as single-command apps) -
     "whoami":        ("fno.agent.cli:whoami_command",       "Operating-stack summary: project + fleet + walker + session + provider."),
     "status":        ("fno.agent.cli:status_command",       "Session gate satisfaction + bounded events tail + inconsistencies."),

@@ -364,6 +364,23 @@ def ledger_json() -> Path:
     return _resolve("~/.fno/") / "ledger.json"
 
 
+def loops_paused_json() -> Path:
+    """Return the path to the global loops pause-all sentinel.
+
+    Pinned global for the same reason as :func:`ledger_json`: the sentinel is
+    the single coordination point every loop tick checks, across every repo,
+    so it must never fork into a per-repo stray.
+    """
+    settings = _settings()
+    override = settings.config.paths.loops_paused_json
+    if override is not None:
+        return _resolve(override)
+    raw = os.path.expanduser(os.path.expandvars(settings.config.state_dir))
+    if os.path.isabs(raw):
+        return state_dir() / "loops-paused.json"
+    return _resolve("~/.fno/") / "loops-paused.json"
+
+
 def bus_dir() -> Path:
     """Return the cross-agent bus directory (default: ~/.fno/bus/).
 

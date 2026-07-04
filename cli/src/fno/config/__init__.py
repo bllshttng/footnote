@@ -100,6 +100,7 @@ class PathsBlock(BaseModel):
     handoffs_dir: Optional[str] = None
     retro_pending_dir: Optional[str] = None
     bus_dir: Optional[str] = None
+    loops_paused_json: Optional[str] = None
 
     @field_validator(
         "graph_json",
@@ -116,6 +117,7 @@ class PathsBlock(BaseModel):
         "handoffs_dir",
         "retro_pending_dir",
         "bus_dir",
+        "loops_paused_json",
         mode="before",
     )
     @classmethod
@@ -1669,6 +1671,30 @@ class ModelRoutingBlock(BaseModel):
         return {}
 
 
+_LOOP_LEVELS = ("report", "assisted", "unattended")
+
+
+class LoopEntry(BaseModel):
+    """One named loop's level (``config.loops.<name>``, x-ce71).
+
+    ``report`` (observe only) is the safest default, so a malformed or
+    unrecognized level fails safe to it rather than raising - a standing
+    loop must never silently upgrade its own autonomy from a config typo.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    level: str = "report"
+
+    @field_validator("level", mode="before")
+    @classmethod
+    def _coerce_level(cls, v: object) -> str:
+        if isinstance(v, str) and v.strip().lower() in _LOOP_LEVELS:
+            return v.strip().lower()
+        _LOG.warning("config.loops.<name>.level=%r invalid; using default 'report'", v)
+        return "report"
+
+
 class BatchBlock(BaseModel):
     """Batch-lane settings (nested under 'config.batch', x-8cae).
 
@@ -1859,6 +1885,7 @@ class ConfigBlock(BaseModel):
     work: WorkBlock = Field(default_factory=WorkBlock)
     model_routing: ModelRoutingBlock = Field(default_factory=ModelRoutingBlock)
     mux: MuxBlock = Field(default_factory=MuxBlock)
+    loops: dict[str, LoopEntry] = Field(default_factory=dict)
 
     @field_validator("model_routing", mode="before")
     @classmethod
@@ -1892,6 +1919,15 @@ class ConfigBlock(BaseModel):
     def _coerce_branch(cls, v: object) -> object:
         """Fail-safe: a non-mapping ``branch:`` degrades to defaults (prefix fno)."""
         if isinstance(v, (dict, BranchBlock)):
+            return v
+        return {}
+
+    @field_validator("loops", mode="before")
+    @classmethod
+    def _coerce_loops(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``loops:`` degrades to {} (every loop
+        then defaults to level "report" via LoopEntry)."""
+        if isinstance(v, dict):
             return v
         return {}
 

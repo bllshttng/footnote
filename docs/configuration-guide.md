@@ -22,6 +22,7 @@
 | `config.paths.handoffs_dir` | str (optional) | _(none)_ | never | Override path to the handoffs dir. |
 | `config.paths.retro_pending_dir` | str (optional) | _(none)_ | never | Override path to the retro-pending dir. |
 | `config.paths.bus_dir` | str (optional) | _(none)_ | never | Override path to the cross-project mail bus dir. |
+| `config.paths.loops_paused_json` | str (optional) | _(none)_ | never | Override path to the loops pause-all sentinel. |
 | `config.obsidian.enabled` | bool | `false` | always | Whether this project uses an Obsidian vault for plans/docs. |
 | `config.obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
 | `config.project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
@@ -116,3 +117,4 @@
 | `config.mux.notify_on_done` | bool | `false` | advanced | Also notify on a terminal 'done' hook transition (default off). |
 | `config.mux.attach_digest` | bool | `true` | advanced | Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on). |
 | `config.mux.attach_digest_threshold_min` | int | `10` | advanced | Minutes since last detach before the catch-up digest overlay shows (default 10). |
+| `config.loops` | dict[str, LoopEntry] | `{}` | advanced | Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report). |

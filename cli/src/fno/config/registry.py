@@ -58,6 +58,7 @@ FIELD_META: dict[str, Meta] = {
     "config.paths.handoffs_dir": Meta("never", "Override path to the handoffs dir."),
     "config.paths.retro_pending_dir": Meta("never", "Override path to the retro-pending dir."),
     "config.paths.bus_dir": Meta("never", "Override path to the cross-project mail bus dir."),
+    "config.paths.loops_paused_json": Meta("never", "Override path to the loops pause-all sentinel."),
     # --- config.obsidian.* (a real decision) ---
     "config.obsidian.enabled": Meta(
         "always", "Whether this project uses an Obsidian vault for plans/docs.",
@@ -183,6 +184,11 @@ FIELD_META: dict[str, Meta] = {
     "config.mux.notify_on_done": Meta("advanced", "Also notify on a terminal 'done' hook transition (default off).", default_source="default"),
     "config.mux.attach_digest": Meta("advanced", "Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on).", default_source="default"),
     "config.mux.attach_digest_threshold_min": Meta("advanced", "Minutes since last detach before the catch-up digest overlay shows (default 10).", default_source="default"),
+    # --- config.loops.* (x-ce71: per-loop level + pause-all substrate) ---
+    "config.loops": Meta(
+        "advanced",
+        "Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report).",
+    ),
     # --- config.parallel.* ---
     "config.parallel.max_lanes": Meta(
         "advanced",
