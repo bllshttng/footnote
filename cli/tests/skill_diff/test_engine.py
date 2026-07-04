@@ -45,6 +45,18 @@ def test_unprocessed_scopes_by_skill():
     assert engine.unprocessed_runs(evs, "fno:review") == ["r2"]
 
 
+def test_idempotency_key_is_run_id_and_skill():
+    # A shared run_id across two skills: a terminal event for blueprint must not
+    # mark the review run handled.
+    evs = [
+        _rc("shared", skill_id="fno:blueprint"),
+        _rc("shared", skill_id="fno:review"),
+        {"type": "skill_diff_proposed", "data": {"run_id": "shared", "skill_id": "fno:blueprint"}},
+    ]
+    assert engine.unprocessed_runs(evs, "fno:blueprint") == []
+    assert engine.unprocessed_runs(evs, "fno:review") == ["shared"]
+
+
 def test_findings_exclude_tool_fault():  # tool_fault rule
     evs = [_finding("r1"), _finding("r1", tool_fault=True), _finding("r1", verdict="pass")]
     got = engine.findings_for_run(evs, "r1")

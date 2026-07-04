@@ -153,22 +153,30 @@ def _apply_and_open_pr(
     Returns (pr_number|None, branch). Raises on any git/gh failure so the caller
     takes no-action rather than reporting a phantom PR.
     """
-    root = paths.resolve_repo_root()
+    root = paths.resolve_repo_root().resolve()
+    skills_root = (root / "skills").resolve()
     short_run = run_id.split("-")[-1][:12]
     branch = f"skill-diff/{skill_id.split(':')[-1]}-{short_run}"
     touched: list[str] = []
     for h in hunks:
-        f = root / h["file"]
+        # h["file"] comes from untrusted LLM output: resolve it and refuse any
+        # path that escapes the skills/ tree (traversal / absolute-path guard).
+        f = (root / h["file"]).resolve()
+        if not (f == skills_root or skills_root in f.parents):
+            raise RuntimeError(f"hunk path escapes skills/: {h['file']}")
         old, new = h.get("old_text", ""), h.get("new_text", "")
         current = f.read_text(encoding="utf-8") if f.exists() else ""
         if old:
             if old not in current:
                 raise RuntimeError(f"hunk old_text not found in {h['file']} (file drifted)")
             current = current.replace(old, new, 1)
-        else:
+        elif current:
             current = current.rstrip("\n") + "\n" + new.rstrip("\n") + "\n"
+        else:
+            # New/empty file: no leading blank line.
+            current = new.rstrip("\n") + "\n"
         f.write_text(current, encoding="utf-8")
-        touched.append(h["file"])
+        touched.append(str(f.relative_to(root)))
 
     def git(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=True)
@@ -180,7 +188,7 @@ def _apply_and_open_pr(
     if hits:
         raise RuntimeError(f"redaction guard refused open: {hits}")
 
-    git("checkout", "-b", branch)
+    git("checkout", "-B", branch)  # -B: reset if the branch exists (idempotent retry)
     git("add", *touched)
     git("commit", "-m", commit_msg)
     git("push", "-u", "origin", branch)

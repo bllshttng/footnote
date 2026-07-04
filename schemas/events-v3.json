@@ -19,7 +19,7 @@
         },
         "source": {
           "type": "string",
-          "enum": ["target", "megawalk", "megatron", "abi-loop", "hook", "subagent", "migration", "test", "backlog", "daemon", "observer"],
+          "enum": ["target", "megawalk", "megatron", "abi-loop", "hook", "subagent", "migration", "test", "backlog", "daemon", "observer", "skill_diff"],
           "description": "Producer identity for the Python/fno emitter"
         },
         "data": {

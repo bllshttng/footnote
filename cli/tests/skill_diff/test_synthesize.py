@@ -26,6 +26,34 @@ def test_hunk_defaults_are_normalized():
     assert h["old_text"] == "" and h["new_text"] == "" and h["cited_finding_ids"] == []
 
 
+def test_parse_nested_braces_not_truncated():
+    # hunks carry nested {}; a lazy regex would truncate at the first inner brace.
+    p = synthesize.parse_proposal(
+        '{"verdict":"propose_pr","hunks":['
+        '{"file":"a","new_text":"x","cited_finding_ids":["s1"]},'
+        '{"file":"b","new_text":"y","cited_finding_ids":["s2"]}],"justification":"j"}'
+    )
+    assert len(p.hunks) == 2 and p.justification == "j"
+
+
+def test_parse_fenced_with_trailing_prose():
+    p = synthesize.parse_proposal(
+        'Here is my answer:\n```json\n{"verdict":"no_diff_helps","no_diff_reason":"arch"}\n```\nDone.'
+    )
+    assert p.verdict == "no_diff_helps"
+
+
+def test_synthesize_timeout_is_parse_error(monkeypatch):
+    import subprocess as sp
+
+    def boom(*a, **k):
+        raise sp.TimeoutExpired(cmd="claude", timeout=1)
+
+    monkeypatch.setattr(sp, "run", boom)
+    with pytest.raises(synthesize.ProposalParseError):
+        synthesize.synthesize("prompt", timeout=1)
+
+
 def test_unknown_verdict_raises():
     with pytest.raises(synthesize.ProposalParseError):
         synthesize.parse_proposal('{"verdict":"ship_it"}')

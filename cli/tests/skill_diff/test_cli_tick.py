@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.skill_diff import cli
@@ -121,6 +122,17 @@ def test_assisted_uncited_hunks_take_no_diff_path(monkeypatch, tmp_path):  # AC2
     assert "no-diff-helps" in r.output and "uncited" in r.output
     ndh = [e for e in _events(p) if e["type"] == "skill_diff_no_diff_helps"]
     assert ndh[0]["data"]["reason"] == "all_hunks_uncited"
+
+
+def test_apply_refuses_path_traversal(monkeypatch, tmp_path):
+    # An LLM-supplied path that escapes skills/ must be refused before any write.
+    with pytest.raises(RuntimeError, match="escapes skills/"):
+        cli._apply_and_open_pr(
+            skill_id="fno:blueprint", run_id="obs-r1",
+            hunks=[{"file": "../../etc/passwd", "old_text": "", "new_text": "x",
+                    "cited_finding_ids": ["s1"]}],
+            body="b", cited=["s1"],
+        )
 
 
 def test_reconcile_reports_unclosed_pr(monkeypatch, tmp_path):  # AC10-FR

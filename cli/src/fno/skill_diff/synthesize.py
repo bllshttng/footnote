@@ -78,14 +78,16 @@ def parse_proposal(text: str) -> Proposal:
 
 
 def _extract_json(text: str) -> dict:
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    candidate = fence.group(1) if fence else None
-    if candidate is None:
-        # bare object: first { to the matching last }
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end <= start:
-            raise ProposalParseError("no JSON object found in synthesis output")
-        candidate = text[start : end + 1]
+    # Prefer a fenced block's inner text, else the whole text; then take the
+    # outermost { .. } by first-brace / last-brace. A lazy `\{.*?\}` regex would
+    # truncate at the first nested closing brace (the hunks list is nested), so
+    # brace-span extraction is used instead of a single regex.
+    fence = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    region = fence.group(1) if fence else text
+    start, end = region.find("{"), region.rfind("}")
+    if start == -1 or end <= start:
+        raise ProposalParseError("no JSON object found in synthesis output")
+    candidate = region[start : end + 1]
     try:
         obj = json.loads(candidate)
     except json.JSONDecodeError as exc:
@@ -163,15 +165,21 @@ def synthesize(prompt: str, *, model: str = SYNTH_MODEL, timeout: int = 900) -> 
 
     Integration seam: a one-shot ``claude -p`` is the right substrate for a
     synchronous tick that needs the result inline (not a pane, not a bg thread).
-    Raises ProposalParseError on unparseable output; the caller treats a raised
-    error / crash as a tool fault and takes no action this tick.
+    Raises ProposalParseError on unparseable output, a timeout, or a spawn
+    failure; the caller treats a raised error as a tool fault and takes no
+    action this tick (a timeout must never crash the standing loop).
     """
-    proc = subprocess.run(
-        ["claude", "-p", prompt, "--model", model],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            ["claude", "-p", prompt, "--model", model],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ProposalParseError(f"synthesis agent timed out after {timeout}s") from exc
+    except OSError as exc:
+        raise ProposalParseError(f"synthesis agent spawn failed: {exc}") from exc
     if proc.returncode != 0:
         raise ProposalParseError(f"synthesis agent exited {proc.returncode}: {proc.stderr[:300]}")
     return parse_proposal(proc.stdout)

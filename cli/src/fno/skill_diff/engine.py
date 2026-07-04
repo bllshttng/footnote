@@ -38,14 +38,17 @@ def read_events_tolerant(path: Path) -> list[dict]:
     if not path.exists():
         return []
     out: list[dict] = []
-    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            out.append(json.loads(raw))
-        except json.JSONDecodeError as exc:
-            _LOG.warning("skill-diff: skipping corrupt events.jsonl line %d: %s", lineno, exc)
+    # Iterate line-by-line rather than read_text().splitlines() - events.jsonl is
+    # append-only and grows without bound, so we never hold the whole file.
+    with path.open(encoding="utf-8") as fh:
+        for lineno, raw in enumerate(fh, start=1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                out.append(json.loads(raw))
+            except json.JSONDecodeError as exc:
+                _LOG.warning("skill-diff: skipping corrupt events.jsonl line %d: %s", lineno, exc)
     return out
 
 
@@ -59,21 +62,23 @@ def unprocessed_runs(events: list[dict], skill_id: str) -> list[str]:
     Returned oldest-first (append order of the run_complete event). The
     idempotency invariant (AC8-FR): a run_id that already produced a proposal /
     node / noop is never reprocessed, so a second concurrent tick is a no-op.
+    The key is the (run_id, skill_id) pair, so a run_id shared across skills
+    (a multi-skill sweep) is only marked handled for the skill it terminated.
     """
-    handled: set[str] = set()
+    handled: set[tuple[str, str]] = set()
     complete: list[str] = []
     for e in events:
         t = e.get("type")
         d = _data(e)
         if t in _TERMINAL_TYPES:
-            rid = d.get("run_id")
-            if rid:
-                handled.add(rid)
+            rid, sid = d.get("run_id"), d.get("skill_id")
+            if rid and sid:
+                handled.add((rid, sid))
         elif t == "skill_eval_run_complete" and d.get("skill_id") == skill_id:
             rid = d.get("run_id")
             if rid and rid not in complete:
                 complete.append(rid)
-    return [rid for rid in complete if rid not in handled]
+    return [rid for rid in complete if (rid, skill_id) not in handled]
 
 
 def run_complete_event(events: list[dict], run_id: str) -> Optional[dict]:
@@ -114,8 +119,9 @@ def failure_ranking(events: list[dict], run_id: str) -> list[dict]:
             return list(ranking)
     counts: dict[str, int] = {}
     for f in findings_for_run(events, run_id):
-        if f.get("verdict") == "fail":
-            counts[f["dimension"]] = counts.get(f["dimension"], 0) + 1
+        dim = f.get("dimension")
+        if f.get("verdict") == "fail" and dim:
+            counts[dim] = counts.get(dim, 0) + 1
     return [
         {"dimension": dim, "fail_count": n}
         for dim, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
