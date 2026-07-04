@@ -44,21 +44,21 @@ The default mode `think` takes a **free-text design seed** (or no argument, for 
 
 ## Step 2: think mode (design + BDD, default)
 
-Load [think.md](think.md) and execute it in full, in this context. That body is the canonical design-thinking flow: understand context, explore approaches, multi-perspective challenge, UI state-machine audit, the mandatory `## Failure Modes` section, and BDD acceptance criteria, then save and review the design doc.
+Load [think.md](references/think.md) and execute it in full, in this context. That body is the canonical design-thinking flow: understand context, explore approaches, multi-perspective challenge, UI state-machine audit, the mandatory `## Failure Modes` section, and BDD acceptance criteria, then save and review the design doc.
 
-**Self-reference (no recursion).** `think` is the running skill during its own default mode. The router loads the think flow **inline via Read** and follows it here. It must never re-invoke `/think` to reach its own default - that body is `think.md`, loaded directly.
+**Self-reference (no recursion).** `think` is the running skill during its own default mode. The router loads the think flow **inline via Read** and follows it here. It must never re-invoke `/think` to reach its own default - that body is `references/think.md`, loaded directly.
 
 When the think flow reaches its failure-mode step and the feature is large or risky enough to exceed the inline budget, it hands off with a copy-pasteable `/think what-if ...` line (the same router, `what-if` mode).
 
 ## Step 3: what-if mode (scenario stress-test)
 
-Load [what-if.md](what-if.md) and execute it in full, in this context. That body is the canonical scenario-exploration loop: seed -> decompose into 12 dimensions -> iterate one situation per pass -> classify -> write the two output files. When invoked with the `failure-modes` positional modifier (the form the think flow emits when it hands off), it appends a top-level `## Failure Modes` section using the Boundaries / Errors / Invariants / Concurrency vocabulary the think flow consumes.
+Load [what-if.md](references/what-if.md) and execute it in full, in this context. That body is the canonical scenario-exploration loop: seed -> decompose into 12 dimensions -> iterate one situation per pass -> classify -> write the two output files. When invoked with the `failure-modes` positional modifier (the form the think flow emits when it hands off), it appends a top-level `## Failure Modes` section using the Boundaries / Errors / Invariants / Concurrency vocabulary the think flow consumes.
 
 **Thin input is fine.** A one-line scope still runs: what-if seeds from whatever it is given and explores the highest-priority dimensions. It never crashes on sparse input - if intent is too vague it gathers context in one batched question first.
 
 ## Step 4: panel mode (multi-persona debate)
 
-Load [panel.md](panel.md) and execute it in full, in this context. That body is the canonical think-tank flow: assemble a panel of opinionated personas, run independent analysis, debate rounds with a mandatory Devil's Advocate, reach consensus, and write a ranked-recommendation report. All personas run on the main thread (no agents spawned); the user holds a seat unless `--no-user-seat` is passed.
+Load [panel.md](references/panel.md) and execute it in full, in this context. That body is the canonical think-tank flow: assemble a panel of opinionated personas, run independent analysis, debate rounds with a mandatory Devil's Advocate, reach consensus, and write a ranked-recommendation report. All personas run on the main thread (no agents spawned); the user holds a seat unless `--no-user-seat` is passed.
 
 **Handoff, not runtime invocation (router contract override).** panel.md's report step offers downstream verbs - both the default handoff options and the optional `--chain think|plan|megawalk`. In router mode those are **presented as copy-paste handoff lines** (`/think ...`, `/blueprint ...`, `/megawalk`) for the user to run next; the panel mode never invokes another skill at runtime. Routers load modes inline and dispatch only via Task/Agent, and a self-contained install may ship the `think` folder without the chained skill present, so `/think panel --chain plan ...` resolves the recommendation and then emits the `/blueprint ...` line rather than calling it.
 

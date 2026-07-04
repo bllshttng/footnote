@@ -66,7 +66,7 @@ If remaining text is empty or whitespace-only, and `continue` is not set, treat 
 
 ### 1. Interactive Setup (when no decision provided)
 
-Load [references/workflow.md](references/workflow.md) Phase 1.
+Load [workflow.md](workflow.md) Phase 1.
 
 If no decision text in arguments, ask (batched, one AskUserQuestion):
 - What decision are you trying to make?
@@ -76,7 +76,7 @@ If no decision text in arguments, ask (batched, one AskUserQuestion):
 
 ### 2. Gather Context
 
-Load [references/workflow.md](references/workflow.md) Phase 2.
+Load [workflow.md](workflow.md) Phase 2.
 
 Read project vision from settings.yaml. Read recent git log (last 20 commits).
 Check for existing think docs or plans. Build product context block for injection
@@ -84,7 +84,7 @@ into persona prompts.
 
 ### 3. Generate Personas
 
-Load [references/persona-templates.md](references/persona-templates.md).
+Load [persona-templates.md](persona-templates.md).
 
 Select set: default (product), startup, adversarial, or custom.
 Apply depth preset to trim persona count.
@@ -92,7 +92,7 @@ Announce: "Panel assembled: [list persona names and roles]"
 
 ### 4. Independent Analysis
 
-Load [references/workflow.md](references/workflow.md) Phase 4.
+Load [workflow.md](workflow.md) Phase 4.
 
 Each persona analyzes the decision independently. Process sequentially on the main
 thread. Output each persona's analysis visibly as it's produced.
@@ -110,7 +110,7 @@ Present key themes across all analyses. Ask:
 
 ### 6. Debate
 
-Load [references/workflow.md](references/workflow.md) Phase 6.
+Load [workflow.md](workflow.md) Phase 6.
 
 Run debate rounds (1-3 per depth setting, or `--rounds N` override).
 Each persona cross-examines others' findings.
@@ -119,14 +119,14 @@ Interactive pause after each round (unless `auto` mode).
 
 ### 7. Consensus
 
-Load [references/workflow.md](references/workflow.md) Phase 7.
+Load [workflow.md](workflow.md) Phase 7.
 
 Synthesize findings: aggregate by theme, rank by severity/confidence, deduplicate,
 note dissent. Produce ranked recommendations with rationale.
 
 ### 8. Report and Handoff
 
-Load [references/output-template.md](references/output-template.md).
+Load [output-template.md](output-template.md).
 
 Save report to plans directory or `.fno/think-tank-{date}-{slug}.md`.
 If `--chain`: invoke the chained skill with top recommendation.

@@ -59,8 +59,8 @@ Load references during code review execution:
 
 | Reference | Load When | Content |
 |-----------|-----------|---------|
-| [references/agent-selection.md](references/agent-selection.md) | Step 1: Detecting change types and selecting agents (ALWAYS load) | Change type detection script, conditional agent selection matrix, browser testing commands, automated check commands |
-| [references/report-template.md](references/report-template.md) | Step 6: Generating the review report (ALWAYS load) | Structured report format with agents run/skipped, automated checks, verdict |
+| [agent-selection.md](agent-selection.md) | Step 1: Detecting change types and selecting agents (ALWAYS load) | Change type detection script, conditional agent selection matrix, browser testing commands, automated check commands |
+| [report-template.md](report-template.md) | Step 6: Generating the review report (ALWAYS load) | Structured report format with agents run/skipped, automated checks, verdict |
 
 ## Execution Process (MANDATORY)
 
@@ -113,7 +113,7 @@ function based on git diff + plan alone (backward compatibility).
 
 ### Step 1: Detect Change Type and Review Tier (MANDATORY)
 
-Load [references/agent-selection.md](references/agent-selection.md) for:
+Load [agent-selection.md](agent-selection.md) for:
 1. Diff size tier detection (light/standard/full)
 2. Change type detection (frontend/backend/full-stack/docs-only)
 3. Agent selection based on both dimensions
@@ -124,7 +124,7 @@ Always run `silent-failure-hunter` and `code-reviewer` regardless of change type
 
 ### Step 3: Run Conditional Agents (Skill Decides)
 
-Based on detected change type, add appropriate agents. See [references/agent-selection.md](references/agent-selection.md) for the full conditional logic.
+Based on detected change type, add appropriate agents. See [agent-selection.md](agent-selection.md) for the full conditional logic.
 
 ### Step 3b: Confidence Scoring (MANDATORY for issues found)
 
@@ -143,7 +143,7 @@ For CLAUDE.md-related issues: validator must verify the CLAUDE.md actually calls
 
 ### Step 4: Run Automated Checks (MANDATORY)
 
-Run typecheck, lint, journey tests, integration tests, and build. See [references/agent-selection.md](references/agent-selection.md) for commands.
+Run typecheck, lint, journey tests, integration tests, and build. See [agent-selection.md](agent-selection.md) for commands.
 
 #### Anti-Pattern Scan (MANDATORY)
 
@@ -159,7 +159,7 @@ bash scripts/scan-antipatterns.sh .
 
 ### Step 5: Browser Testing (Conditional - Skill Decides)
 
-**Only if frontend changes detected.** See [references/agent-selection.md](references/agent-selection.md) for browser testing commands.
+**Only if frontend changes detected.** See [agent-selection.md](agent-selection.md) for browser testing commands.
 
 ### Step 5b: Eligibility Re-Check (if reviewing a PR)
 
@@ -174,7 +174,7 @@ gh pr view --json state,isDraft --jq '{state: .state, isDraft: .isDraft}'
 
 ### Step 6: Generate Report (MANDATORY)
 
-Load [references/report-template.md](references/report-template.md) for the structured output format.
+Load [report-template.md](report-template.md) for the structured output format.
 
 #### Goal Relevance (if settings.yaml has goals)
 

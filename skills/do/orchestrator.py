@@ -411,7 +411,7 @@ def detect_hidden_output_conflicts(plan_dir: str, task_ids: List[str]) -> Dict[s
 # Providers whose stable baseline cannot spawn concurrent Task-tool subagents,
 # so a conflict-free parallel wave still downgrades to sequential main-thread
 # dispatch. Claude and Codex support parallel subagents; Gemini's baseline is
-# sequential (skills/do/waves.md). This is the one provider fact the
+# sequential (skills/do/references/waves.md). This is the one provider fact the
 # wave-mode resolver still needs after the static capability matrix was removed.
 SEQUENTIAL_FALLBACK_PROVIDERS = frozenset({"gemini"})
 

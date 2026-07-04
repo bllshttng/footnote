@@ -76,7 +76,7 @@ Speculate creates one worktree per variation in `--mode=ephemeral` -
 the artifact we care about is the picked variation, the others get
 discarded. Path resolution flows through
 `scripts/lib/worktree-manager.sh` so `worktree_base` from settings.yaml
-is honored. See [skills/_shared/worktree.md](../../_shared/worktree.md)
+is honored. See [skills/target/references/worktree.md](../target/references/worktree.md)
 for the manual-vs-ephemeral decision matrix.
 
 ```bash

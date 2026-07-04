@@ -116,8 +116,8 @@ Three kinds, registered in `cli/src/fno/events/schema.yaml`, source `backlog`:
 - `cli/src/fno/backlog/advance.py` - the verb (resolver + decision matrix + seams) + `advance_dependents()` (G1 cross-project edge dispatch).
 - `cli/src/fno/config/__init__.py` - `AutoContinueBlock`.
 - `cli/src/fno/graph/cli.py` - `fno backlog advance` command + the reconcile trigger (both also call `advance_dependents`); `fno backlog project-root` (the unmapped-project detector G2 uses).
-- `skills/do/waves.md`, `skills/do/flat.md`, `skills/do/references/session-project-invariant.md` - the G2 session-project invariant (spawn/defer/refuse foreign waves).
-- `skills/pr/merged.md`, `skills/megawalk/SKILL.md`, `skills/megawalk/references/argument-parsing.md` - trigger + campaign-arm modifier.
+- `skills/do/references/waves.md`, `skills/do/references/flat.md`, `skills/do/references/session-project-invariant.md` - the G2 session-project invariant (spawn/defer/refuse foreign waves).
+- `skills/pr/references/merged.md`, `skills/megawalk/SKILL.md`, `skills/megawalk/references/argument-parsing.md` - trigger + campaign-arm modifier.
 - `cli/src/fno/events/schema.yaml` - the three event kinds (+ G1 `cross_project` field and reasons).
 - Tests: `cli/tests/unit/test_auto_continue.py`, `cli/tests/unit/test_advance.py`, `cli/tests/unit/test_project_root_cmd.py`, `cli/tests/integration/test_backlog_reconcile.py`.
 

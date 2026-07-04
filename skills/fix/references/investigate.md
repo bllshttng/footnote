@@ -11,8 +11,8 @@ No investigation without acceptance criteria and a failing test.
 
 Load as needed:
 
-- [references/iteration-loop.md](references/iteration-loop.md)
-- [references/verification-patterns.md](references/verification-patterns.md)
+- [iteration-loop.md](iteration-loop.md)
+- [verification-patterns.md](verification-patterns.md)
 - `track-attempt` skill when repeated approaches start failing
 
 ## Mandatory Setup

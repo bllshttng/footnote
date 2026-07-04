@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/events/test-check-pr-emits-polling.sh
 #
-# Structural test that skills/pr/check.md wires emit_polling_external_review
+# Structural test that skills/pr/references/check.md wires emit_polling_external_review
 # at both Step 2a (immediate inline check) and Step 2b (cron prompt).
 #
 # Phase 1 task 1.2 of loop-correctness-sweep (ab-83be25ea).
@@ -14,7 +14,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-SKILL="$REPO_ROOT/skills/pr/check.md"
+SKILL="$REPO_ROOT/skills/pr/references/check.md"
 
 fail=0
 

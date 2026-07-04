@@ -286,4 +286,4 @@ Slow integration tests are tagged `@pytest.mark.slow_e2e`; the 30-minute real-ti
 
 ### Migration from Shell Loop
 
-Users invoking the previous shell-driven megawalk (`/megawalk --next` / `--continue`) need no migration: the bare `/megawalk` form continues to work and now dispatches to the walker. The CLI surface adds `fno megawalk` for headless invocation (cron, CI, scripts) - see [skills/_shared/megawalk-migration.md](../../skills/_shared/megawalk-migration.md) for the surface-change history.
+Users invoking the previous shell-driven megawalk (`/megawalk --next` / `--continue`) need no migration: the bare `/megawalk` form continues to work and now dispatches to the walker. The CLI surface adds `fno megawalk` for headless invocation (cron, CI, scripts) - see [megawalk-migration.md](../../megawalk-migration.md) for the surface-change history.

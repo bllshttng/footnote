@@ -9,8 +9,8 @@
 #       dest: scripts/lib/X.sh             # relative to skills/<skill>/
 #
 #   references:   # markdown reused across skills; frontmatter stripped
-#     - source: skills/_shared/auto-merge.md
-#       dest: references/auto-merge.md
+#     - source: skills/target/references/iteration-loop.md
+#       dest: references/iteration-loop.md
 #
 #   agents:       # subagent prompts; frontmatter REWRITTEN with subagent_meta
 #     - source: skills/target/SKILL.md
@@ -71,17 +71,13 @@ bundles:
       # resolve ab-XXXX backlog node IDs to plan_path.
       - source: scripts/lib/graph-resolve.sh
         dest: scripts/lib/graph-resolve.sh
-    references:
-      # Bundled from skills/_shared/ so the target folder is self-contained.
-      # SKILL.md and references/* link to these via references/X.md (no path
-      # escapes outside the skill folder).
-      - source: skills/_shared/auto-merge.md
-        dest: references/auto-merge.md
-      - source: skills/_shared/worktree.md
-        dest: references/worktree.md
+      # auto-merge.md and worktree.md are canonical in target/references/
+      # (owned by target: "new target -> new worktree"; auto-merge is a
+      # target ship concern). They are not bundled from elsewhere. Consumers
+      # that need them declare their own references: entry sourcing them.
 
   # Cluster router: /fix. The default fix loop (SKILL.md) and the investigate
-  # flow (investigate.md) plus their references are canonical in the folder.
+  # flow (references/investigate.md) plus their references are canonical in the folder.
   # Only the shared iteration/verification references come from /target.
   - skill: fix
     files:
@@ -90,7 +86,7 @@ bundles:
       - source: skills/target/references/verification-patterns.md
         dest: references/verification-patterns.md
 
-  # Cluster router: /think. Mode bodies (think.md, what-if.md, panel.md) and
+  # Cluster router: /think. Mode bodies (references/think.md, references/what-if.md, references/panel.md) and
   # their references are canonical in the folder. Shared references come from
   # /target (iteration/verification) and /blueprint (the discovery protocol).
   - skill: think
@@ -102,7 +98,7 @@ bundles:
       - source: skills/blueprint/references/discovery-gate.md
         dest: references/discovery-gate.md
 
-  # Cluster router: /do. Mode bodies (flat.md, waves.md), orchestrator.py,
+  # Cluster router: /do. Mode bodies (references/flat.md, references/waves.md), orchestrator.py,
   # scripts/, and the wave-orchestration references are canonical in the folder.
   # Only the shared Multi-CLI tool mapping comes from /target.
   - skill: do

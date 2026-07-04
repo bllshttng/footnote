@@ -1,6 +1,6 @@
 # Do — Waves Mode (Wave Orchestration)
 
-> **Multi-CLI:** If not on Claude Code, see [references/cli-tool-mapping.md](references/cli-tool-mapping.md) for tool equivalents.
+> **Multi-CLI:** If not on Claude Code, see [cli-tool-mapping.md](cli-tool-mapping.md) for tool equivalents.
 
 Interactive orchestrator for multi-phase implementation plans. Research, waves, verification - stops and asks when things go wrong. This is the `waves` mode of `/do`; the router has already resolved the mode and is running this body inline.
 
@@ -47,7 +47,7 @@ Provider-aware execution is hook-driven. A parallel wave downgrades to sequentia
 
 Validate plan structure before execution. On ERROR: stop. On WARN: log and proceed. On PASS: proceed.
 
-Load [references/plan-validation.md](references/plan-validation.md) for the full protocol.
+Load [plan-validation.md](plan-validation.md) for the full protocol.
 
 ### 0b. Structural Context (AUTO)
 
@@ -112,7 +112,7 @@ If no execution strategy found, fall back to sequential execution of all phases.
 ### 1b. Dynamic Parallelization (automatic)
 
 If 00-INDEX.md contains a `## File Ownership Map` section, load
-[references/dynamic-parallelization.md](references/dynamic-parallelization.md)
+[dynamic-parallelization.md](dynamic-parallelization.md)
 and run the set intersection algorithm. Sequential waves with provably
 disjoint task file sets are upgraded to parallel. Only upgrades, never
 downgrades. Skip if no file ownership map found.
@@ -125,7 +125,7 @@ Check activation conditions:
 3. Plan has 2 or more phase files
 
 If all conditions met (or `research` modifier is set), load
-[references/research-protocol.md](references/research-protocol.md)
+[research-protocol.md](research-protocol.md)
 and execute the research phase before the first implementation wave.
 
 If conditions not met: skip. Implementation proceeds with existing
@@ -190,7 +190,7 @@ target-state node's `project`) and compare it to each `wave.project`:
 
 Every foreign wave prints a one-line receipt or deferral - none is silently
 skipped. Load
-[references/session-project-invariant.md](references/session-project-invariant.md)
+[session-project-invariant.md](session-project-invariant.md)
 for the full decision table, exact commands, and receipt formats.
 
 For each wave in order:
@@ -210,7 +210,7 @@ For each wave in order:
 
 **Gemini note:** Gemini should default to main-thread sequential execution. Only upgrade into project-agent dispatch when the runtime resolver confirms opt-in plus required `.gemini/agents/*.md` artifacts. If that proof is missing, record the downgrade reason and continue sequentially.
 
-See [references/wave-patterns.md](references/wave-patterns.md) for the decision tree on sequential vs parallel.
+See [wave-patterns.md](wave-patterns.md) for the decision tree on sequential vs parallel.
 
 ### 3. Spawn Task Executors
 
@@ -238,7 +238,7 @@ esac
 
 The resolver fail-closes to `do` (archer) on any unknown executor name,
 so a typo in plan frontmatter cannot silently route to the wrong subagent.
-See [references/executor-resolution.md](references/executor-resolution.md)
+See [executor-resolution.md](executor-resolution.md)
 for the full chain, the locked surface inference list, override paths,
 and failure modes.
 
@@ -297,7 +297,7 @@ not re-check or block on it.
 - Drives the full /impeccable stage pipeline with a single shared iteration budget
 - Budget: `config.executors.impeccable.max_iterations_per_task` (default 8),
   applied to the **entire stage loop** (craft -> critique -> harden -> ...),
-  not per-stage. See [references/executor-resolution.md](references/executor-resolution.md)
+  not per-stage. See [executor-resolution.md](executor-resolution.md)
   for the single-budget contract.
 - Exit verdict when ceiling trips is two-tier (SUCCESS / DONE_WITH_CONCERNS /
   FAILED), NOT a hard FAILED reflex. Score determines which tier applies.
@@ -311,7 +311,7 @@ protocols. Domain-specific checklists are in
 `skills/do/references/domain-checklists.md` - the orchestrator injects
 the appropriate one into `.fno/CONTEXT.md` before spawning the agent.
 
-If expertise was specified (e.g., `/do waves frontend`), inject expertise content into each agent prompt. Load [references/expertise-injection.md](references/expertise-injection.md) for the injection protocol.
+If expertise was specified (e.g., `/do waves frontend`), inject expertise content into each agent prompt. Load [expertise-injection.md](expertise-injection.md) for the injection protocol.
 
 ### 3a. Synthesis Protocol (MANDATORY - Before Every Dispatch)
 
@@ -330,7 +330,7 @@ When constructing a Task tool prompt for archer, the orchestrator MUST:
 
 **NEVER delegate understanding. Synthesize it.**
 
-Load [references/synthesis-checklist.md](references/synthesis-checklist.md) for the full anti-delegation rules, pre-dispatch checklist, and constraint injection protocol.
+Load [synthesis-checklist.md](synthesis-checklist.md) for the full anti-delegation rules, pre-dispatch checklist, and constraint injection protocol.
 
 **Sequential Wave:**
 ```
@@ -404,7 +404,7 @@ no `fno gate` call to make - the commits from completed tasks are the proof.
 
 After EVERY wave completion, write to .fno/STATE.md. The state file is the single source of truth for progress.
 
-Load [references/state-formats.md](references/state-formats.md) for the STATE.md schema, task return contract, and scratchpad wave results format.
+Load [state-formats.md](state-formats.md) for the STATE.md schema, task return contract, and scratchpad wave results format.
 
 ### 5a. Auto-Verify Before Done
 
@@ -421,7 +421,7 @@ If verification FAILS, report issues and do not claim done.
 
 After the existing verifier passes, dispatch a fresh worker to check
 plan-vs-implementation alignment. Load
-[references/verification-protocol.md](references/verification-protocol.md)
+[verification-protocol.md](verification-protocol.md)
 for the protocol.
 
 This checks "did we build what was planned" rather than "did tests pass."
@@ -429,13 +429,13 @@ This checks "did we build what was planned" rather than "did tests pass."
 ### 5c. Adversarial Challenge (`adversarial` only)
 
 Only when `adversarial` modifier is present. Load
-[references/adversarial-challenge.md](references/adversarial-challenge.md).
+[adversarial-challenge.md](adversarial-challenge.md).
 Challenges the implementation from three adversarial angles. If critical
 findings: fix loop (max 3 iterations). Costs extra tokens - opt-in only.
 
 ### 6. Handle Failures
 
-Load [references/error-recovery.md](references/error-recovery.md) for the full failure recovery protocol, including task attempt tracking, partial wave failure handling, and retry commands.
+Load [error-recovery.md](error-recovery.md) for the full failure recovery protocol, including task attempt tracking, partial wave failure handling, and retry commands.
 
 ## NEVER (Silent Failure Prevention)
 
@@ -480,11 +480,11 @@ If the verification command fails (not "tests fail" but "command errors"), this 
 
 ## Resume
 
-Load [references/resume-protocol.md](references/resume-protocol.md) for the full resume protocol.
+Load [resume-protocol.md](resume-protocol.md) for the full resume protocol.
 
 ## Deviation Handling
 
-Load [references/deviation-handling.md](references/deviation-handling.md) for the full deviation handling protocol.
+Load [deviation-handling.md](deviation-handling.md) for the full deviation handling protocol.
 
 ## Linear Integration (optional - requires linear plugin)
 

@@ -90,11 +90,11 @@ Defensive: a malformed or absent `00-INDEX.md` yields zero waves and prints no n
 
 ### 2b. Run the flat executor
 
-Load [flat.md](flat.md) and execute it in full, in this context. That body is the lightweight single-session flow: read the plan, resolve the executor (frontend craft pass when the surface matches), execute each numbered change atomically (evaluating kill criteria first), verify, and report. It dispatches no subagents and tracks no STATE.md - you ARE the executor.
+Load [flat.md](references/flat.md) and execute it in full, in this context. That body is the lightweight single-session flow: read the plan, resolve the executor (frontend craft pass when the surface matches), execute each numbered change atomically (evaluating kill criteria first), verify, and report. It dispatches no subagents and tracks no STATE.md - you ARE the executor.
 
 ## Step 3: waves mode (wave orchestration)
 
-Load [waves.md](waves.md) and execute it in full, in this context. That body is the canonical wave-orchestration flow: validate the plan structure, load the execution strategy from `00-INDEX.md`, optimize parallelism from the file ownership map, run waves in sequential/parallel mode, dispatch per-task executors (archer / frontend-executor) via Task/Agent, verify from a fresh perspective, and report completion.
+Load [waves.md](references/waves.md) and execute it in full, in this context. That body is the canonical wave-orchestration flow: validate the plan structure, load the execution strategy from `00-INDEX.md`, optimize parallelism from the file ownership map, run waves in sequential/parallel mode, dispatch per-task executors (archer / frontend-executor) via Task/Agent, verify from a fresh perspective, and report completion.
 
 **Self-containment (no recursion).** The router loads the waves flow **inline via Read** and follows it here. It never re-invokes a skill to reach wave orchestration; per-task work is dispatched via the Task/Agent tool.
 
