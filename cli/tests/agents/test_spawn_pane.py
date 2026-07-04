@@ -285,6 +285,22 @@ def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     assert oc_result.provider == "opencode"
     assert oc_runner.calls[0][1:4] == ["mux", "pane", "run"]
 
+    # Registry-state assertion (not just the mocked call shape): a well-formed
+    # row actually landed for both, mirroring the rigor of
+    # test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row's claude checks.
+    from fno.agents.registry import load_registry
+
+    rows = {row.name: row for row in load_registry()}
+    assert set(rows) == {"peer", "oc"}
+    agy_row = rows["peer"]
+    assert agy_row.provider == "agy"
+    assert agy_row.mux == {"session": "main", "pane_id": 7}  # FakeRunner default
+    assert agy_row.status == "live"
+    oc_row = rows["oc"]
+    assert oc_row.provider == "opencode"
+    assert oc_row.mux == {"session": "main", "pane_id": 7}
+    assert oc_row.status == "live"
+
     # aider is not pane-hostable -> refused before any mux subprocess.
     with pytest.raises(DispatchAskError, match="unknown provider 'aider'"):
         _spawn(monkeypatch, tmp_path, provider="aider", name="ai")

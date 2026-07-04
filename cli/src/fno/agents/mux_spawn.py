@@ -135,9 +135,13 @@ def build_pane_argv(
     yolo: bool,
     session_uuid: Optional[str],
 ) -> list[str]:
-    """The interactive PTY argv for ``provider`` (mirrors
-    crates/fno-agents/src/provider.rs ``create_interactive_argv``; the mux pane
-    replaces the daemon worker as the host, the argv contract is unchanged)."""
+    """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
+    pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
+    (crates/fno-agents/src/provider.rs), which builds the HEADLESS one-shot
+    form for the `--substrate headless` lane; the two intentionally differ
+    (e.g. opencode: bare ``opencode --prompt <msg>`` here vs
+    ``opencode run --auto <msg>`` there) and there is no cross-language
+    parity contract between them - don't go looking for one."""
     if provider == "claude":
         # `claude --session-id <uuid> [message]`: the pinned session id makes
         # the transcript discoverable and keys the inside-leg reports

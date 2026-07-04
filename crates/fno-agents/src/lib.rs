@@ -59,6 +59,7 @@ pub mod events;
 pub mod finalize;
 pub mod gc;
 pub mod gemini_ask;
+pub mod opencode_ask;
 pub mod kill_criteria;
 pub mod logs;
 pub mod logs_client;

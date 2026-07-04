@@ -370,8 +370,18 @@ async fn run(args: Vec<String>) -> i32 {
         if let Some(code) = maybe_run_agy_ask(&home, &params, &agent_name) {
             return code;
         }
+        // Opencode `ask` is intercepted client-side (x-51f6): opencode is
+        // pane-hosted only in v1, so a stateful resume is unsupported — this
+        // surfaces a clear error directing the caller to drive the pane
+        // directly, rather than the generic "provider required for new
+        // agent" text an existing opencode row would otherwise hit below
+        // (that text is both wrong - the agent already exists - and a dead
+        // end, since retrying with --provider opencode reproduces it).
+        if let Some(code) = maybe_run_opencode_ask(&home, &params, &agent_name) {
+            return code;
+        }
         // Unconditional flip (ab-73da4ac2): `ask` now auto-routes to this
-        // client for every provider, so an ask that matched none of the three
+        // client for every provider, so an ask that matched none of the four
         // provider hooks is a create with no/unknown `--provider`. Surface
         // Python's `select_provider` exit-2 error here rather than falling
         // through to the daemon RPC, whose `handle_ask` PTY screen is the wrong
@@ -628,6 +638,13 @@ fn maybe_run_gemini_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
 /// returns `Some(2)` with a redirect error for an agy target, else `None`.
 fn maybe_run_agy_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
     fno_agents::agy_ask::maybe_run_agy_ask(home, params, name)
+}
+
+/// Route an opencode `ask` to the client-side pane-only guard (x-51f6).
+/// opencode is hosted as a pane with no client-side stateful resume; this
+/// returns `Some(2)` with a redirect error for an opencode target, else `None`.
+fn maybe_run_opencode_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
+    fno_agents::opencode_ask::maybe_run_opencode_ask(home, params, name)
 }
 
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.

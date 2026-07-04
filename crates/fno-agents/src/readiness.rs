@@ -388,6 +388,29 @@ mod tests {
     }
 
     #[test]
+    fn opencode_stale_blocker_above_the_8_line_window_does_not_block() {
+        // A "Permission required" / progress-fill marker that has scrolled
+        // ABOVE the trailing OPENCODE_STATUS_REGION_LINES(8) window (into old
+        // reply text) must not veto readiness - only the bottom composer/
+        // status region gates it (mirrors busy_word_in_model_reply_above_
+        // status_region_does_not_block for the shared 3-line window). This
+        // fixture has 11 non-blank lines; the last 8 exclude both noise lines.
+        let d = OpencodeReadinessDetector;
+        let screen = "Permission required somewhere in old reply\n\
+                      \u{25a0}\u{25a0}\u{25a0}\u{25a0} progress marker from old scrollback\n\
+                      filler line one\n\
+                      filler line two\n\
+                      \u{2503}\n\
+                      \u{2503}  Ask anything... \"Fix a TODO in the codebase\"\n\
+                      \u{2503}\n\
+                      \u{2503}  Sisyphus - Ultraworker \u{b7} model \u{b7} medium\n\
+                      \u{2579}\u{2580}\u{2580}\u{2580}\u{2580}\n\
+                                       tab agents  ctrl+p commands\n\
+                      ~/proj:main  \u{2299} 6 MCP /status   1.14.50";
+        assert_eq!(d.is_ready(&view(screen)), Ok(true));
+    }
+
+    #[test]
     fn opencode_no_composer_edge_is_not_ready() {
         let d = OpencodeReadinessDetector;
         // A half-drawn screen / full-screen dialog with no `┃` edge must read

@@ -840,6 +840,45 @@ fn client_spawn_substrate_bg_codex_hard_errors() {
     );
 }
 
+/// x-51f6: opencode v1 hosts the pane form only. `--substrate headless
+/// --provider opencode` must hard-error (exit 2) pointing to `pane`, never
+/// silently fall through to the daemon RPC (which would attempt a retired
+/// PTY host).
+#[test]
+fn client_spawn_substrate_headless_opencode_hard_errors() {
+    let home_dir = tmpdir("cli-spawn-headless-opencode-home");
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!("skipping client_spawn_substrate_headless_opencode_hard_errors: binary not found");
+        return;
+    }
+
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "myagent",
+            "hello",
+            "--provider",
+            "opencode",
+            "--substrate",
+            "headless",
+        ])
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .output()
+        .expect("failed to run fno-agents");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "opencode --substrate headless must exit 2; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("pane"),
+        "opencode --substrate headless error must point to --substrate pane: {stderr}"
+    );
+}
+
 /// AC6-CLIENT: `spawn` without --provider must exit 2 with a usage error.
 #[test]
 fn client_spawn_no_provider_exits_2() {
