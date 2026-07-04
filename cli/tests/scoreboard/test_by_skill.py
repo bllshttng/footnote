@@ -93,13 +93,16 @@ def test_hp_touch_events_join_touches_per_run():
         {"type": "human_touch", "graph_node_id": "x-1", "ts": "2026-07-03T09:00:00"},
         {"type": "human_touch", "data": {"graph_node_id": "x-1"}, "ts": "2026-07-03T09:30:00"},
         {"type": "human_touch", "graph_node_id": "x-other", "ts": "2026-07-03T09:00:00"},
+        # codex peer review finding: a touch outside --since must not count,
+        # even though it's for the right node.
+        {"type": "human_touch", "graph_node_id": "x-1", "ts": "2020-01-01T00:00:00"},
     ]
     sb = build_skill_scoreboard(
         rows, [{"id": "x-1", "reverted": False}], touches,
         since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
         read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
     )
-    assert sb["rows"][0]["touches_per_run"] == 2.0  # only x-1's 2 touches count, not x-other's
+    assert sb["rows"][0]["touches_per_run"] == 2.0  # only x-1's 2 in-window touches count
 
 
 def test_hp_since_days_window_excludes_old_rows():
@@ -323,6 +326,60 @@ def test_shipped_row_without_node_id_excluded_from_revert_denominator():
     # denominator is shipped_linked (1), not shipped (2): the unlinked row
     # must not dilute the rate toward "safe".
     assert row["revert_rate_pct"] == 100
+
+
+def test_revert_rate_is_na_not_zero_without_causal_telemetry():
+    # codex peer review finding: a shipped+linked row whose graph carries NO
+    # causal telemetry at all (no node anywhere has `reverted`/`caused_by`)
+    # must render "n/a", not a bare 0% that looks identical to a real clean
+    # record (mirrors _survival's own w4 gate in build_scoreboard).
+    from datetime import datetime
+
+    def read_transcript(sid):
+        return [_skill_line("fno:do")]
+
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1",
+         "cost_usd": 1.0, "sessions": [UUID_A]},
+    ]
+    graph = [{"id": "x-1"}]  # exists, but carries no causal telemetry anywhere
+    sb = build_skill_scoreboard(
+        rows, graph, [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
+    )
+    assert sb["rows"][0]["revert_rate_pct"] is None
+
+
+def test_revert_rate_is_na_when_node_missing_from_graph():
+    # A graph_node_id present on the row but absent from graph_nodes entirely
+    # (deleted node, stale data) must not resolve to a false "merged_clean".
+    from datetime import datetime
+
+    def read_transcript(sid):
+        return [_skill_line("fno:do")]
+
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-missing",
+         "cost_usd": 1.0, "sessions": [UUID_A]},
+    ]
+    graph = [{"id": "x-other", "reverted": True}]  # w4 telemetry exists, but not for THIS node
+    sb = build_skill_scoreboard(
+        rows, graph, [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
+        read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
+    )
+    assert sb["rows"][0]["revert_rate_pct"] is None
+
+
+def test_cli_renders_na_for_unjudgeable_revert_rate(tmp_path, monkeypatch):
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+         "graph_node_id": "x-1", "cost_usd": 3.0, "phases_completed": ["do"]},
+    ]}))
+    _wire(monkeypatch, tmp_path, ledger)  # no graph.json -> no causal telemetry
+    res = runner.invoke(_app(), ["--by-skill"])
+    assert res.exit_code == 0, res.output
+    assert "n/a" in res.output
 
 
 def test_mixed_attribution_methods_labeled_not_last_write_wins():

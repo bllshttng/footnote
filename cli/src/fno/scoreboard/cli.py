@@ -156,9 +156,10 @@ def _render_by_skill(sb: dict) -> None:
     out("\n")
     out(f"  {'skill':<32}{'version':<10}{'runs':>6}{'ship%':>7}{'revert%':>9}{'touch/run':>11}{'cost/run':>10}  method\n")
     for row in sb["rows"]:
+        revert = f"{row['revert_rate_pct']}%" if row["revert_rate_pct"] is not None else "n/a"
         out(
             f"  {row['skill']:<32}{row['version']:<10}{row['runs']:>6}"
-            f"{row['ship_rate_pct']:>6}%{row['revert_rate_pct']:>8}%"
+            f"{row['ship_rate_pct']:>6}%{revert:>9}"
             f"{row['touches_per_run']:>11}{row['cost_per_run']:>10.2f}  {row['method']}\n"
         )
 

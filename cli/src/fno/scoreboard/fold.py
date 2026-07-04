@@ -548,9 +548,18 @@ def build_skill_scoreboard(
         if origin:
             fixes.setdefault(origin, []).append(n)
 
+    # W4 causal telemetry availability - mirrors _survival's own gate. Without
+    # it, _node_outcome's "no fix found" branch is indistinguishable from
+    # "revert data doesn't exist yet", so judging revert rate at all would
+    # silently show a clean 0% where the real answer is "unknown" (codex peer
+    # review finding).
+    w4_available = any(("reverted" in n) or n.get("caused_by") for n in graph_nodes)
+
     touches_by_node: Counter = Counter()
     for e in touch_events:
         if not isinstance(e, dict):
+            continue
+        if not _event_in_window(e, cutoff, now):  # codex finding: touches must respect --since too
             continue
         nid = e.get("graph_node_id")
         if not nid:
@@ -577,7 +586,12 @@ def build_skill_scoreboard(
             continue
         attributed += 1
 
-        outcome = _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes) if (shipped and nid) else None
+        # Judgeable only when the node actually resolves in the graph AND the
+        # graph carries causal telemetry at all - a resolvable-but-untracked
+        # node must not silently default to "merged_clean" (same gap class as
+        # _survival's w4 check, applied here per codex peer review).
+        judgeable = bool(shipped and nid and w4_available and nid in by_id)
+        outcome = _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes) if judgeable else None
 
         for skill in skills:
             version = resolve_skill_version(skill, r.get("completed"))
@@ -588,7 +602,7 @@ def build_skill_scoreboard(
             b["methods"].add(method)
             if shipped:
                 b["shipped"] += 1
-                if nid:
+                if judgeable:
                     b["shipped_linked"] += 1
                     if outcome in ("reverted", "bounced"):
                         b["reverted"] += 1
@@ -602,10 +616,10 @@ def build_skill_scoreboard(
                 "version": version,
                 "runs": runs,
                 "ship_rate_pct": _pct(b["shipped"], runs),
-                # denominator is shipped rows WITH a graph_node_id - a shipped row
-                # with no node linkage can never resolve an outcome, so it must not
-                # silently pad the "not reverted" side of this rate (AC honesty).
-                "revert_rate_pct": _pct(b["reverted"], b["shipped_linked"]),
+                # None (not 0) when nothing was judgeable - a bare 0% would be
+                # indistinguishable from "zero of N judged rows reverted", a
+                # real and different fact (AC honesty; codex peer review).
+                "revert_rate_pct": _pct(b["reverted"], b["shipped_linked"]) if b["shipped_linked"] else None,
                 "touches_per_run": round(b["touches_total"] / runs, 2) if runs else 0.0,
                 "cost_per_run": round(b["cost_total"] / runs, 2) if runs else 0.0,
                 "method": "+".join(sorted(b["methods"])) if b["methods"] else "unattributed",
