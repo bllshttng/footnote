@@ -10,7 +10,7 @@ one of three handlers based on ``kind``:
                                        the thread unread so a human still sees it.
   fyi      -> ``_handle_fyi``        - if frontmatter ``persist_to_memory: true``,
                                        write a memory file for the recipient;
-                                       otherwise append a line to convo-signals.
+                                       otherwise dismiss (mark read, no persist).
                                        Mark read in either branch.
 
 Drain runs ONCE per call and processes up to ``max_threads`` unread threads
@@ -18,7 +18,6 @@ Drain runs ONCE per call and processes up to ``max_threads`` unread threads
 """
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -178,10 +177,10 @@ def _handle_heads_up(repo_root: Path, project: str, h: ThreadHandle) -> DrainRes
 
 
 def _handle_fyi(repo_root: Path, h: ThreadHandle) -> DrainResult:
-    """Persist to memory (when persist_to_memory) or log to convo-signals."""
+    """Persist to memory (when persist_to_memory) or dismiss."""
     if h.persist_to_memory:
         return _fyi_persist_memory(repo_root, h)
-    return _fyi_log_convo_signal(repo_root, h)
+    return _fyi_dismiss(repo_root, h)
 
 
 def _fyi_persist_memory(repo_root: Path, h: ThreadHandle) -> DrainResult:
@@ -238,31 +237,12 @@ def _fyi_persist_memory(repo_root: Path, h: ThreadHandle) -> DrainResult:
     )
 
 
-def _fyi_log_convo_signal(repo_root: Path, h: ThreadHandle) -> DrainResult:
-    log_path = repo_root / ".fno" / "convo-signals.jsonl"
-    last_msg = h.messages[-1] if h.messages else None
-    body_excerpt = last_msg.body[:500] if last_msg else ""
-    entry = {
-        "event": "inbox_fyi",
-        "from": h.from_project,
-        "thread_id": h.thread_id,
-        "thread_path": str(h.path),
-        "replies_to": h.replies_to,
-        "body": body_excerpt,
-        "ts": datetime.now(tz=timezone.utc).isoformat(),
-    }
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except OSError as exc:
-        return DrainResult(
-            thread_id=h.thread_id,
-            kind="fyi",
-            action="convo_signal_write_failed",
-            thread_path=str(h.path),
-            error=f"{type(exc).__name__}: {exc}",
-        )
+def _fyi_dismiss(repo_root: Path, h: ThreadHandle) -> DrainResult:
+    """Mark a non-persisted fyi thread read without writing it anywhere.
+
+    The convo-signals capture this used to feed had zero readers; resurrect
+    only with a concrete reader in hand.
+    """
     try:
         mark_thread_read(h.path)
     except (OSError, ValueError, TimeoutError) as exc:
@@ -276,7 +256,7 @@ def _fyi_log_convo_signal(repo_root: Path, h: ThreadHandle) -> DrainResult:
     return DrainResult(
         thread_id=h.thread_id,
         kind="fyi",
-        action="logged",
+        action="dismissed",
         thread_path=str(h.path),
     )
 

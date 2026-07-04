@@ -1161,31 +1161,6 @@ class RecoveryBlock(BaseModel):
     max_nudges: int = Field(default=3, ge=1)
 
 
-class LogsBlock(BaseModel):
-    """Append-log rotation caps (nested under 'config.logs').
-
-    ``convo_signals_max_mb`` bounds ``.fno/convo-signals.jsonl`` - the largest
-    unbounded append log in ``.fno/``. It is read defensively by
-    ``hooks/convo-signal-capture.sh`` (which caps the project + global signals
-    logs after each append; an absent or malformed value degrades to the
-    default there, never raising). This schema entry exists so the knob is
-    discoverable and ``fno config set logs.convo_signals_max_mb <N>`` validates
-    instead of rejecting an 'unknown key'.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    convo_signals_max_mb: int = 5
-
-    @field_validator("convo_signals_max_mb")
-    @classmethod
-    def convo_signals_max_mb_positive(cls, v: int) -> int:
-        """A rotation cap below 1 MB would truncate the log on every append."""
-        if v < 1:
-            raise ValueError("config.logs.convo_signals_max_mb must be >= 1")
-        return v
-
-
 class HealthThresholdsBlock(BaseModel):
     """Backlog-health breach thresholds (config.health_monitor.thresholds).
 
@@ -1877,7 +1852,6 @@ class ConfigBlock(BaseModel):
     active_backlog: ActiveBacklogConfig = Field(default_factory=ActiveBacklogConfig)
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
-    logs: LogsBlock = Field(default_factory=LogsBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
     recovery: RecoveryBlock = Field(default_factory=RecoveryBlock)
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
@@ -1946,20 +1920,6 @@ class ConfigBlock(BaseModel):
         A dict passes through so field defaults/validators still apply.
         """
         if isinstance(v, (dict, RecoveryBlock)):
-            return v
-        return {}
-
-    @field_validator("logs", mode="before")
-    @classmethod
-    def _coerce_logs(cls, v: object) -> object:
-        """Fail-safe: a non-mapping ``logs:`` degrades to defaults.
-
-        Mirrors ``_coerce_auto_merge``: ``logs: 42`` (or a list, or null)
-        cannot build the block; fall back to defaults rather than raising out
-        of the whole settings load. A dict passes through so the inner field
-        validator still runs.
-        """
-        if isinstance(v, (dict, LogsBlock)):
             return v
         return {}
 

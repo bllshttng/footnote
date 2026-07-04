@@ -1,7 +1,6 @@
 """Tests for the post-2026-05 inbox drain dispatcher (3 handlers)."""
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,18 +48,16 @@ def test_question_drops_wake_signal_leaves_unread(inbox_root, repo_root):
     assert read_unread_threads("alice")[0].path == handle.path
 
 
-def test_fyi_default_logs_to_convo_signals(inbox_root, repo_root):
+def test_fyi_default_dismisses_without_persisting(inbox_root, repo_root):
     from fno.inbox.drain import drain_inbox
     from fno.inbox.store import write_new_thread, Kind, read_unread_threads
 
     write_new_thread("alice", "bob", Kind.FYI.value, "build complete")
     results = drain_inbox(repo_root, "alice")
     assert len(results) == 1
-    assert results[0].action == "logged"
+    assert results[0].action == "dismissed"
     assert results[0].kind == "fyi"
-    log = (repo_root / ".fno" / "convo-signals.jsonl").read_text()
-    entries = [json.loads(line) for line in log.strip().splitlines()]
-    assert any(e["event"] == "inbox_fyi" for e in entries)
+    assert not (repo_root / ".fno" / "convo-signals.jsonl").exists()
     # Thread is now read
     assert read_unread_threads("alice") == []
 
@@ -262,6 +259,6 @@ def test_send_kind_drains_with_fyi_semantics(inbox_root, repo_root):
     results = drain_inbox(repo_root, "alice")
     assert len(results) == 1
     assert results[0].action != "unknown_kind"
-    assert results[0].action == "logged"
+    assert results[0].action == "dismissed"
     # Thread is consumed (marked read), not stranded unread.
     assert read_unread_threads("alice") == []

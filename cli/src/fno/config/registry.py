@@ -199,8 +199,6 @@ FIELD_META: dict[str, Meta] = {
     "config.auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
     "config.auto_merge.allowed_invokers": Meta("never", "Who may trigger auto-merge."),
     "config.auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),
-    # --- config.logs.* ---
-    "config.logs.convo_signals_max_mb": Meta("never", "Rotation cap (MB) for convo-signals.jsonl."),
     # --- config.pr_watch.* ---
     "config.pr_watch.enabled": Meta("advanced", "Enable the global PR-state watcher daemon."),
     "config.pr_watch.interval_seconds": Meta("never", "PR-watcher poll interval (seconds)."),

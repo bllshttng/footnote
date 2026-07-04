@@ -74,7 +74,7 @@ def test_g4_agents_send_drain_finds_it(inbox_and_bus, runner, monkeypatch):
     # The existing drain (md-backed render of the bus) still finds and consumes it.
     results = drain_inbox(inbox_and_bus, "acme")
     assert len(results) == 1
-    assert results[0].action == "logged"
+    assert results[0].action == "dismissed"
 
 
 # ---------------------------------------------------------------------------
