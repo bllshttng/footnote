@@ -78,6 +78,7 @@ def triage_pr(
     inbox_fn=None,
     carveout_root: Optional[Path] = None,
     carveouts_readonly: bool = False,
+    origin_node_id: Optional[str] = None,
 ) -> TriageReport:
     warnings: list[str] = []
 
@@ -143,6 +144,22 @@ def triage_pr(
     existing_keys = existing_keys_from_nodes(existing_nodes or [])
     kept, skipped = dedup_candidates(cited, existing_keys=existing_keys)
 
+    # Auto caused_by (W4 causal links, AC4-UI): a follow-up filed from this
+    # PR's findings points back at the node that shipped the PR. Prefer the
+    # trigger sentinel's node_id; fall back to the graph node carrying this
+    # pr_number. Unresolvable -> nodes land without the link (manual
+    # `backlog update --caused-by` remains).
+    caused_by = origin_node_id
+    if not caused_by:
+        caused_by = next(
+            (
+                n.get("id")
+                for n in existing_nodes or []
+                if n.get("pr_number") == pr_number
+            ),
+            None,
+        )
+
     results = land_candidates(
         kept,
         mode=mode,
@@ -153,6 +170,7 @@ def triage_pr(
         cwd=cwd,
         create_fn=create_fn,
         inbox_fn=inbox_fn,
+        caused_by=caused_by,
     )
 
     return TriageReport(

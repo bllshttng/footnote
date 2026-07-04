@@ -198,6 +198,80 @@ def query_pr_merge_state(
     )
 
 
+# W4 causal links: best-effort revert detection. A GitHub revert PR titles
+# itself `Revert "..."` and auto-writes `Reverts owner/repo#N` in the body;
+# a hand-written one usually keeps the git subject. Misses are a documented
+# limitation with the manual `fno backlog update --reverted` fallback.
+_REVERT_TITLE_RE = re.compile(r"^\s*Revert\b")
+_REVERT_BODY_PR_RE = re.compile(r"\breverts\s+(?:[\w.-]+/[\w.-]+)?#(\d+)", re.IGNORECASE)
+
+
+def fetch_recent_merged_prs(
+    *,
+    repo: Optional[str] = None,
+    cwd: Optional[str] = None,
+    limit: int = 30,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    timeout_s: float = GH_QUERY_TIMEOUT_S,
+) -> list[dict]:
+    """Recently merged PRs (number/title/body) for revert detection.
+
+    Returns ``[]`` when gh is absent (reconcile auto-fires on SessionStart;
+    a gh-less machine must stay quiet). Raises :class:`ReconcileError` on a
+    real gh failure so the caller can degrade with one warning.
+    """
+    if _gh_executable() is None:
+        return []
+    cmd = ["gh", "pr", "list", "--state", "merged", "--limit", str(limit)]
+    if repo:
+        cmd += ["--repo", repo]
+    cmd += ["--json", "number,title,body"]
+    try:
+        result = runner(
+            cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ReconcileError(f"gh pr list failed: {exc}") from exc
+    if result.returncode != 0:
+        raise ReconcileError(
+            f"gh pr list failed (rc={result.returncode}): {(result.stderr or '').strip()}"
+        )
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
+    return rows if isinstance(rows, list) else []
+
+
+def detect_reverted_nodes(
+    merged_prs: list[dict], entries: list[dict]
+) -> list[tuple[str, int]]:
+    """(node_id, revert_pr_number) pairs to stamp ``reverted: true``.
+
+    A merged PR whose title starts with ``Revert`` and whose body references
+    a PR number carried by a not-yet-reverted graph node names that node's
+    ship as reverted. Pure (no I/O) so tests need no gh."""
+    by_pr: dict[int, dict] = {}
+    for e in entries:
+        for num, _ in node_pr_refs(e):
+            by_pr.setdefault(num, e)
+
+    out: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for pr in merged_prs:
+        if not _REVERT_TITLE_RE.match(str(pr.get("title") or "")):
+            continue
+        for m in _REVERT_BODY_PR_RE.finditer(str(pr.get("body") or "")):
+            node = by_pr.get(int(m.group(1)))
+            if node is None or node.get("reverted"):
+                continue
+            nid = node.get("id")
+            if isinstance(nid, str) and nid not in seen:
+                seen.add(nid)
+                out.append((nid, int(pr.get("number") or 0)))
+    return out
+
+
 def scan_merge_drift(
     entries: list[dict],
     *,

@@ -18,6 +18,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
@@ -207,6 +208,13 @@ def test_emit_isolation_writes_only_to_owning_cwd(tmp_path):
 # ---------------------------------------------------------------------------
 # CLI end-to-end: closing a drifted node emits the event (AC1-HP)
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_revert_fetch(monkeypatch):
+    """Keep reconcile hermetic: never shell `gh pr list` from tests. W4 revert
+    detection has its own unit tests (test_causal_fields.py)."""
+    monkeypatch.setattr(rec, "fetch_recent_merged_prs", lambda **kw: [])
+
 
 def _patch_graph_path(monkeypatch, graph_path: Path) -> None:
     import fno.graph._constants as gc

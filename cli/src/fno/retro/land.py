@@ -59,12 +59,17 @@ def _default_create(
     cwd: Optional[str],
     domain: str = "code",
     queued: bool = False,
+    caused_by: Optional[str] = None,
 ) -> str:
     """Create a backlog node through the locked path.
 
     When ``queued`` is True the node is created ALREADY queued (queued_at set in
     the SAME mutation), so interactive mode never has a create-succeeded-but-
     queue-failed window that would leave a node active and bypass the human ack.
+
+    ``caused_by`` (W4 causal links) stamps the origin node id on the created
+    node in the same mutation, but only when that node actually exists in the
+    graph - a stale sentinel id is silently skipped rather than dangled.
     """
     from fno.graph._constants import mint_node_id
     from fno.graph.cli import _build_backlog_node, _graph_path
@@ -87,6 +92,8 @@ def _default_create(
         if queued:
             node["queued_at"] = datetime.now(timezone.utc).isoformat()
             node["queued_reason"] = "retro-triage (interactive): awaiting human ack"
+        if caused_by and any(e.get("id") == caused_by for e in entries):
+            node["caused_by"] = caused_by
         entries.append(node)
         return entries
 
@@ -127,6 +134,7 @@ def land_candidates(
     domain: str = "code",
     create_fn: Optional[CreateFn] = None,
     inbox_fn: Optional[InboxFn] = None,
+    caused_by: Optional[str] = None,
 ) -> list[LandResult]:
     """Land each candidate per mode/tier. Per-node failures are recorded (not raised)
     so partial progress persists and a re-run dedups what landed (AC4-FR)."""
@@ -154,6 +162,9 @@ def land_candidates(
             # Interactive nodes are created ALREADY queued in one mutation, so
             # there is no create-ok/queue-fail window that could leave a node
             # active and bypass the human ack (adopt-stays-pure).
+            # caused_by rides only when known, so injected create_fn fakes with
+            # fixed signatures (tests) stay call-compatible.
+            causal_kwargs = {"caused_by": caused_by} if caused_by else {}
             node_id = create_fn(
                 title=c.title,
                 details=details,
@@ -162,6 +173,7 @@ def land_candidates(
                 cwd=node_cwd,
                 domain=domain,
                 queued=interactive,
+                **causal_kwargs,
             )
         except Exception as exc:  # lock timeout etc. -> record, keep going
             results.append(LandResult("failed", c, error=str(exc)))
