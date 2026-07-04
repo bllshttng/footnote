@@ -881,6 +881,52 @@ fn client_spawn_substrate_headless_opencode_hard_errors() {
     );
 }
 
+/// x-51f6 peer-review fix: `--substrate bg --provider opencode` must point at
+/// `--substrate pane` (the only substrate that actually works for opencode),
+/// never at `--substrate headless` (opencode refuses that too - the generic
+/// bg error's default advice would be a dead end).
+#[test]
+fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_pane() {
+    let home_dir = tmpdir("cli-spawn-bg-opencode-home");
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!(
+            "skipping client_spawn_substrate_bg_opencode_hard_errors_pointing_to_pane: binary not found"
+        );
+        return;
+    }
+
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "myagent",
+            "hello",
+            "--provider",
+            "opencode",
+            "--substrate",
+            "bg",
+        ])
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .output()
+        .expect("failed to run fno-agents");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "opencode --substrate bg must exit 2; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("pane"),
+        "opencode --substrate bg error must point to --substrate pane: {stderr}"
+    );
+    assert!(
+        !stderr.contains("use --substrate headless"),
+        "opencode --substrate bg error must NOT direct the caller to --substrate headless \
+         (a dead end - opencode refuses that too): {stderr}"
+    );
+}
+
 /// AC6-CLIENT: `spawn` without --provider must exit 2 with a usage error.
 #[test]
 fn client_spawn_no_provider_exits_2() {

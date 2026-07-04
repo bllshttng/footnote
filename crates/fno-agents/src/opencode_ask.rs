@@ -33,7 +33,7 @@ pub fn maybe_run_opencode_ask(
     }
     eprintln!(
         "fno-agents: opencode has no stateful 'ask' resume (pane-hosted, no client-side dispatch); \
-         drive the pane directly with 'fno mux pane send <session> <pane> --text <prompt>'."
+         drive the pane directly with 'fno mux pane send <pane> --session <session> --text <prompt>'."
     );
     Some(2)
 }

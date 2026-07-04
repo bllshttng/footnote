@@ -833,6 +833,17 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             ))
         }
 
+        // opencode bg: pointing this at the generic (other,"bg") message below
+        // would tell the caller to use --substrate headless, which opencode
+        // ALSO refuses (the arm above) - a dead-end loop identical to the one
+        // the ask-refusal fix addressed. Point at the real working substrate.
+        ("opencode", "bg") => {
+            eprintln!(
+                "substrate 'bg' (detached interactive thread) is claude-only; opencode has no detached-thread or headless substrate - use --substrate pane"
+            );
+            Some(2)
+        }
+
         // bg is claude-only (Locked Decision 2): codex/gemini/agy have no
         // detached-interactive substrate. Hard error pointing to headless;
         // never a silent substrate swap.
