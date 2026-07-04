@@ -8,7 +8,12 @@ from pathlib import Path
 
 from filelock import FileLock
 
-_DEFAULT_WORKERS_FILE = Path(".fno") / "workers.jsonl"
+
+def _default_workers_file() -> Path:
+    """``<repo>/.fno/workers.jsonl``, anchored to the repo root (never CWD)."""
+    from fno.paths import project_log
+
+    return project_log("workers.jsonl")
 
 
 def register_worker(
@@ -37,7 +42,7 @@ def register_worker(
         The entry dict that was written.
     """
     if workers_file is None:
-        workers_file = _DEFAULT_WORKERS_FILE
+        workers_file = _default_workers_file()
 
     workers_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -71,7 +76,7 @@ def read_workers(workers_file: Path | None = None) -> list[dict]:
         List of worker entry dicts (all rows, including abandoned/completed).
     """
     if workers_file is None:
-        workers_file = _DEFAULT_WORKERS_FILE
+        workers_file = _default_workers_file()
 
     if not workers_file.exists():
         return []
@@ -112,7 +117,7 @@ def update_worker_status(
         True if the worker was found and updated, False otherwise.
     """
     if workers_file is None:
-        workers_file = _DEFAULT_WORKERS_FILE
+        workers_file = _default_workers_file()
 
     if not workers_file.exists():
         return False

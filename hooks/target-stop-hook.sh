@@ -82,8 +82,8 @@ if [[ -z "$BIN" ]]; then
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg sid "$SESSION_ID" \
         '{ts:$ts,type:"loop_check_binary_missing",source:"hook",data:{session_id:$sid}}')
-    mkdir -p ".fno" "${HOME}/.fno" 2>/dev/null || true
-    echo "$EVENT" >> ".fno/events.jsonl" 2>/dev/null || true
+    mkdir -p "${REPO_ROOT}/.fno" "${HOME}/.fno" 2>/dev/null || true
+    echo "$EVENT" >> "${REPO_ROOT}/.fno/events.jsonl" 2>/dev/null || true
     echo "$EVENT" >> "${HOME}/.fno/events.jsonl" 2>/dev/null || true
     echo "target stop-hook: WARNING: fno-agents binary not found; allowing session to continue" >&2
     echo "target stop-hook: install with: cargo install --path crates/fno-agents --bins" >&2
@@ -103,7 +103,8 @@ fi
 # materialized by bash before exec, so an old binary simply ignores its stdin
 # and the captured exit code is the binary's own. (Trailing newline added by
 # <<< is harmless: serde_json tolerates trailing whitespace.)
-mkdir -p ".fno" 2>/dev/null || true
+mkdir -p "${REPO_ROOT}/.fno" 2>/dev/null || true
+LOOP_CHECK_LOG="${REPO_ROOT}/.fno/loop-check.stderr.log"
 DECISION_JSON=""
 verb_rc=0
 DECISION_JSON=$("$BIN" loop-check \
@@ -111,13 +112,13 @@ DECISION_JSON=$("$BIN" loop-check \
     --transcript "$TRANSCRIPT_PATH" \
     --cwd "$PWD" \
     --hook-input-stdin \
-    2>>".fno/loop-check.stderr.log" <<<"$HOOK_INPUT") || verb_rc=$?
+    2>>"$LOOP_CHECK_LOG" <<<"$HOOK_INPUT") || verb_rc=$?
 
 if [[ $verb_rc -ne 0 ]]; then
     echo "target stop-hook: WARNING: fno-agents loop-check exited $verb_rc; allowing session to continue" >&2
     # Surface the verb's own stderr (the 2>> redirect above hides it from the
     # operator otherwise) - last lines name the actual cause.
-    tail -n 5 ".fno/loop-check.stderr.log" >&2 2>/dev/null || true
+    tail -n 5 "$LOOP_CHECK_LOG" >&2 2>/dev/null || true
     exit 0
 fi
 
@@ -164,7 +165,7 @@ if [[ -n "$TERMINATION_REASON" ]]; then
         --cwd "$PWD" \
         --reason "$TERMINATION_REASON" 2>&1)" || FINALIZE_RC=$?
     if [[ -n "$FINALIZE_OUT" ]]; then
-        printf '%s\n' "$FINALIZE_OUT" >> ".fno/finalize.stderr.log" 2>/dev/null || true
+        printf '%s\n' "$FINALIZE_OUT" >> "${REPO_ROOT}/.fno/finalize.stderr.log" 2>/dev/null || true
     fi
     if [[ $FINALIZE_RC -ne 0 ]] || printf '%s' "$FINALIZE_OUT" | grep -qi 'failed'; then
         echo "target stop-hook: finalize note (non-blocking): $(printf '%s' "$FINALIZE_OUT" | tail -n 3)" >&2

@@ -56,9 +56,10 @@ const SHIP_REASONS: &[&str] = &["DonePRGreen", "DoneAdvisory"];
 /// Terminal reasons that signal a STUCK session: the loop-check verb saw no
 /// forward progress, or the budget cap tripped, and let the session exit
 /// without shipping. These get a postmortem artifact the autocorrect monthly
-/// review consumes via `~/.claude/corrections.log` (ab-1a92b677: re-homed here
-/// after the control-plane wedge dropped the old stop-hook generator). A ship
-/// or a benign NoWork/Interrupted/Aborted terminal is not "stuck".
+/// review consumes via `~/.fno/corrections.log` (ab-1a92b677: re-homed here
+/// after the control-plane wedge dropped the old stop-hook generator; moved
+/// again from ~/.claude/ to ~/.fno/ per the placement rule, ab-f063 Wave 2).
+/// A ship or a benign NoWork/Interrupted/Aborted terminal is not "stuck".
 const POSTMORTEM_REASONS: &[&str] = &["NoProgress", "Budget"];
 
 // ── arg parsing ─────────────────────────────────────────────────────────────
@@ -803,7 +804,10 @@ fn handoff_cost_line(cwd: &Path, transcript_uuid: &str) -> String {
 ///   2. `$HANDOFFS_DIR`
 ///   3. `config.paths.handoffs_dir` from project then global settings.yaml,
 ///      with `~` and `{project}` expanded (skipped if it still has `{...}`)
-///   4. fallback `~/.fno/handoffs/<project>`
+///   4. vault-derived `<vault>/internal/<project>/handoffs/` when
+///      `obsidian.enabled` + `obsidian.vault` are set (placement rule,
+///      ab-f063 Wave 2 - mirrors `paths.handoffs_dir()` in the Python CLI)
+///   5. fallback `~/.fno/handoffs/<project>`
 ///
 /// Pure-Rust resolution: it never shells `fno`, so the verb keeps its Python-CLI
 /// independence (it only ever runs the in-package metric modules via
@@ -829,17 +833,121 @@ fn resolve_handoffs_dir(
     if let Some(h) = home {
         candidates.push(h.join(".fno/settings.yaml"));
     }
-    for sp in candidates {
-        if let Some(raw) = read_path_setting(&sp, "handoffs_dir") {
+    for sp in &candidates {
+        if let Some(raw) = read_path_setting(sp, "handoffs_dir") {
             if let Some(expanded) = expand_handoffs_template(&raw, home, &project) {
                 return expanded;
             }
+        }
+    }
+    if let Some(vault) = resolve_obsidian_vault(&candidates) {
+        if let Some(vroot) = resolve_vault_root(&vault, home) {
+            return vroot.join("internal").join(&project).join("handoffs");
         }
     }
     let base = home
         .map(Path::to_path_buf)
         .unwrap_or_else(|| cwd.to_path_buf());
     base.join(".fno/handoffs").join(project)
+}
+
+/// One file's `obsidian:` block, keyed per-field so a caller can merge across
+/// project/global candidates the same way `fno.config._deep_merge` merges
+/// settings.yaml: per KEY, not per file. `None` in either field means that
+/// file's `obsidian:` block (if any) did not set that key, so the caller
+/// should keep looking in the next, lower-priority candidate - NOT that the
+/// key is false/absent overall (codex review, PR #185: a project file that
+/// sets only `enabled: false` must still inherit `vault:` from global, and
+/// must NOT let its own absence of an opinion fall through to a lower-priority
+/// file that re-enables obsidian).
+#[derive(Default)]
+struct ObsidianBlock {
+    enabled: Option<bool>,
+    vault: Option<String>,
+}
+
+/// Scan one settings.yaml for its (single) `obsidian:` block. Indent-aware
+/// (unlike `read_path_setting`) because `enabled:`/`vault:` are generic key
+/// names reused by other settings.yaml sections (`post_merge.enabled`,
+/// `think_spawn.enabled`, ...); a flat scan would risk picking up an
+/// unrelated section's value.
+fn read_obsidian_block(path: &Path) -> ObsidianBlock {
+    let mut block = ObsidianBlock::default();
+    let Ok(content) = fs::read_to_string(path) else {
+        return block;
+    };
+    let mut block_indent: Option<usize> = None;
+    for line in content.lines() {
+        // Strip inline comments before matching/parsing (consistent with
+        // read_path_setting and yaml_scalar_at in this same file) - otherwise
+        // "obsidian: # comment" fails the block-header match, and a comment
+        // on the vault: line gets folded into the resolved path (gemini
+        // review, PR #185).
+        let t = line.split('#').next().unwrap_or("").trim();
+        if t.is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if let Some(bi) = block_indent {
+            if indent <= bi {
+                break; // dedented out of the obsidian: block
+            }
+            if let Some(rest) = t.strip_prefix("enabled:") {
+                block.enabled = Some(rest.trim().eq_ignore_ascii_case("true"));
+            } else if let Some(rest) = t.strip_prefix("vault:") {
+                let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+                if !v.is_empty() && !v.eq_ignore_ascii_case("null") {
+                    block.vault = Some(v.to_string());
+                }
+            }
+        } else if t == "obsidian:" {
+            block_indent = Some(indent);
+        }
+    }
+    block
+}
+
+/// Resolve `obsidian.enabled` + `obsidian.vault`, merged key-by-key across
+/// `candidates` in priority order (project before global) - matching
+/// `fno.config._deep_merge` semantics, NOT "first file with an opinion wins
+/// wholesale". Returns the vault name only when the merged `enabled` is true
+/// AND a `vault` value was found somewhere in the chain.
+fn resolve_obsidian_vault(candidates: &[PathBuf]) -> Option<String> {
+    let mut enabled: Option<bool> = None;
+    let mut vault: Option<String> = None;
+    for sp in candidates {
+        let block = read_obsidian_block(sp);
+        if enabled.is_none() {
+            enabled = block.enabled;
+        }
+        if vault.is_none() {
+            vault = block.vault;
+        }
+        if enabled.is_some() && vault.is_some() {
+            break;
+        }
+    }
+    if enabled == Some(true) {
+        vault
+    } else {
+        None
+    }
+}
+
+/// Expand a vault name to its filesystem root - mirrors `paths.vault_root()`:
+/// a bare name (e.g. `c3po`) maps to `~/c3po`; an already-absolute or
+/// `~`-prefixed value is honored as-is.
+fn resolve_vault_root(vault: &str, home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(rest) = vault.strip_prefix("~/") {
+        return home.map(|h| h.join(rest));
+    }
+    if vault == "~" {
+        return home.map(Path::to_path_buf);
+    }
+    if Path::new(vault).is_absolute() {
+        return Some(PathBuf::from(vault));
+    }
+    home.map(|h| h.join(vault))
 }
 
 /// Read a `<key>:` path value from a settings.yaml (any indent level). The
@@ -1234,17 +1342,25 @@ fn assistant_text_blocks(val: &Value) -> String {
     String::new()
 }
 
-/// Best-effort: append a pointer line to `~/.claude/corrections.log` so the
+/// Best-effort: append a pointer line to `~/.fno/corrections.log` so the
 /// autocorrect monthly review picks the postmortem up. Only writes when the log
 /// already exists (the autocorrect feature creates it) - never creates it.
 /// Format mirrors the pre-wedge generator:
 /// `{ts} | S1 | target-postmortem | {path} | {reason}: {detail_truncated}`.
+///
+/// Lives under ~/.fno/, not ~/.claude/, per the placement rule (ab-f063 Wave
+/// 2). Resolution order mirrors scripts/lib/corrections-lock.sh's
+/// corrections_log_path(): POSTMORTEM_CORRECTIONS_LOG override, then
+/// FNO_HOME, then home-relative default.
 fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &str, detail: &str) {
     let log = match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
         Some(p) => PathBuf::from(p),
-        None => match home {
-            Some(h) => h.join(".claude/corrections.log"),
-            None => return,
+        None => match std::env::var_os("FNO_HOME") {
+            Some(p) => PathBuf::from(p).join("corrections.log"),
+            None => match home {
+                Some(h) => h.join(".fno/corrections.log"),
+                None => return,
+            },
         },
     };
     if !log.is_file() {
@@ -1413,6 +1529,184 @@ mod tests {
         )
         .unwrap();
         assert_eq!(prior_finalize_ship(&log, "S1"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrections_pointer_prefers_fno_home_over_claude_dir() {
+        // ab-f063 Wave 2: corrections.log lives under ~/.fno/, not ~/.claude/.
+        // FNO_HOME must win over a bare `home` fallback so an operator's
+        // override (and the shared bash corrections_log_path() convention)
+        // stays in sync with this Rust writer.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fno_home = std::env::temp_dir().join(format!("fin-corr-fh-{}", std::process::id()));
+        let unused_home = std::env::temp_dir().join(format!("fin-corr-uh-{}", std::process::id()));
+        let _ = fs::create_dir_all(&fno_home);
+        let _ = fs::create_dir_all(&unused_home);
+        let log_path = fno_home.join("corrections.log");
+        fs::write(&log_path, "").unwrap();
+
+        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
+        std::env::set_var("FNO_HOME", &fno_home);
+        append_corrections_pointer(
+            Some(&unused_home),
+            Path::new("/tmp/pm.md"),
+            "Budget",
+            "detail",
+        );
+        std::env::remove_var("FNO_HOME");
+
+        let contents = fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("target-postmortem"), "{contents}");
+        // The old ~/.claude/ location must not be touched.
+        assert!(!unused_home.join(".claude").exists());
+        let _ = fs::remove_dir_all(&fno_home);
+        let _ = fs::remove_dir_all(&unused_home);
+    }
+
+    #[test]
+    fn corrections_pointer_falls_back_to_home_dot_fno() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("fin-corr-home-{}", std::process::id()));
+        let fno_dir = home.join(".fno");
+        fs::create_dir_all(&fno_dir).unwrap();
+        let log_path = fno_dir.join("corrections.log");
+        fs::write(&log_path, "").unwrap();
+
+        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
+        std::env::remove_var("FNO_HOME");
+        append_corrections_pointer(Some(&home), Path::new("/tmp/pm.md"), "NoProgress", "d");
+
+        let contents = fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("target-postmortem"), "{contents}");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_uses_vault_when_obsidian_enabled() {
+        // ab-f063 Wave 2: no explicit handoffs_dir override, obsidian enabled
+        // with a vault -> <vault>/internal/<project>/handoffs/, matching
+        // paths.handoffs_dir() in the Python CLI (not the old ~/.fno/handoffs
+        // fallback).
+        let dir = std::env::temp_dir().join(format!("fin-hd-vault-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: true\n    vault: myvault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_ignores_vault_when_obsidian_disabled() {
+        // obsidian.enabled: false must NOT take the vault branch even though
+        // vault: is set - falls through to the ~/.fno/handoffs/<project> default.
+        let dir = std::env::temp_dir().join(format!("fin-hd-novault-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: false\n    vault: myvault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join(".fno/handoffs/demo"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_indent_scan_ignores_other_sections_enabled_key() {
+        // A generic `enabled:` key in an earlier, unrelated section must not be
+        // mistaken for obsidian.enabled (flat-scan-by-key would get this wrong;
+        // the indent-aware block scan must not).
+        let dir = std::env::temp_dir().join(format!("fin-hd-indent-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  post_merge:\n    enabled: false\n  obsidian:\n    enabled: true\n    vault: myvault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_project_disabled_wins_over_global_enabled() {
+        // codex review, PR #185: project explicitly sets obsidian.enabled:
+        // false while GLOBAL enables it with a vault. fno.config._deep_merge
+        // merges per-key with project winning, so the merged `enabled` is
+        // false and handoffs must NOT resolve into the vault - a per-file
+        // "first file with an opinion wins wholesale" scan gets this wrong
+        // (it would see project's block, find no vault key there, and keep
+        // scanning into global's enabled:true+vault).
+        let dir = std::env::temp_dir().join(format!("fin-hd-proj-off-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: false\n",
+        );
+        write_settings(
+            &home,
+            "config:\n  obsidian:\n    enabled: true\n    vault: myvault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join(".fno/handoffs/demo"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_inherits_global_vault_when_project_only_sets_enabled() {
+        // The other half of the same merge: project enables obsidian but
+        // does not itself set a vault, so `vault` should inherit from the
+        // global file - per-key merge, not "project's block has no vault so
+        // give up".
+        let dir = std::env::temp_dir().join(format!("fin-hd-proj-inherit-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: true\n",
+        );
+        write_settings(&home, "config:\n  obsidian:\n    vault: myvault\n");
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_vault_scan_strips_inline_comments() {
+        // gemini review, PR #185: "obsidian: # comment" must still match the
+        // block header, and a comment on the vault: line must not get folded
+        // into the resolved path.
+        let dir = std::env::temp_dir().join(format!("fin-hd-inlinecmt-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian: # vault settings\n    enabled: true # on\n    vault: myvault # personal vault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -56,7 +56,10 @@ if [[ -z "${POSTMORTEMS_DIR:-}" ]] && command -v fno >/dev/null 2>&1; then
     unset _PATHS_SH
 fi
 OUTPUT_DIR="${OUTPUT_DIR_ARG:-${POSTMORTEMS_DIR:-$HOME/.fno/postmortems}}"
-CORRECTIONS_LOG="${POSTMORTEM_CORRECTIONS_LOG:-$HOME/.claude/corrections.log}"
+# corrections.log lives under ~/.fno/ (placement rule, ab-f063 Wave 2), not
+# ~/.claude/. Inlined (not sourced from scripts/lib/) so this driver skill
+# stays self-contained per AGENTS.md - no scripts/ path escapes.
+CORRECTIONS_LOG="${POSTMORTEM_CORRECTIONS_LOG:-${FNO_HOME:-$HOME/.fno}/corrections.log}"
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 

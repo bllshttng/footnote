@@ -178,7 +178,7 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
     # HANDOFFS_DIR: vault-aware persistent location for target session handoffs.
     # Mirrors paths.handoffs_dir() resolution:
     #   override        -> emit override (template-resolved at codegen if needed)
-    #   obsidian on     -> {vault}/fno/{project}/handoffs/ (resolved at codegen)
+    #   obsidian on     -> <vault>/internal/<project>/handoffs/ (resolved at codegen)
     #   default         -> $STATE_DIR/handoffs/<basename of $REPO_ROOT>
     # The default uses a shell command substitution so the checked-in stub stays
     # machine-stable; the project name resolves at source-time from the consumer's
@@ -233,6 +233,14 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
     lines.append("paths_inbox_thread() {")
     lines.append('  local thread="$1"')
     lines.append('  echo "${INBOX_DIR}/${thread}"')
+    lines.append("}")
+    lines.append("")
+    lines.append("# Mirrors fno.paths.project_log(): <repo>/.fno/<name>, anchored to")
+    lines.append("# $REPO_ROOT (never CWD). Hooks route ad-hoc .fno/ writes through this")
+    lines.append("# instead of hand-building \".fno/\" + name strings.")
+    lines.append("paths_project_log() {")
+    lines.append('  local name="$1"')
+    lines.append('  echo "${REPO_ROOT}/.fno/${name}"')
     lines.append("}")
     lines.append("")
 

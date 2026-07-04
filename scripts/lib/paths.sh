@@ -31,3 +31,11 @@ paths_inbox_thread() {
   local thread="$1"
   echo "${INBOX_DIR}/${thread}"
 }
+
+# Mirrors fno.paths.project_log(): <repo>/.fno/<name>, anchored to
+# $REPO_ROOT (never CWD). Hooks route ad-hoc .fno/ writes through this
+# instead of hand-building ".fno/" + name strings.
+paths_project_log() {
+  local name="$1"
+  echo "${REPO_ROOT}/.fno/${name}"
+}

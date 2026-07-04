@@ -455,9 +455,11 @@ def handoffs_dir(project_root: Optional[Path] = None) -> Path:
 
     Resolution order:
       1. ``config.paths.handoffs_dir`` explicit override (template-expanded).
-      2. ``{vault}/fno/{project}/handoffs/`` when ``obsidian.enabled`` and
-         ``obsidian.vault`` are set (survives worktree archive; lives in
-         the user's Obsidian vault).
+      2. ``<vault>/internal/<project>/handoffs/`` when ``obsidian.enabled``
+         and ``obsidian.vault`` are set (placement rule, ab-f063 Wave 2:
+         handoffs are prose, so they live in the vault's ``internal/``
+         subtree alongside plans and design docs - not a top-level
+         ``<vault>/fno/`` namespace).
       3. ``state_dir()/handoffs/<project>/`` fallback when no vault
          (survives worktree archive; lives in the global state dir).
     """
@@ -465,14 +467,16 @@ def handoffs_dir(project_root: Optional[Path] = None) -> Path:
     override = settings.config.paths.handoffs_dir
     if override is not None:
         return _resolve(override, project_root=project_root)
-    if settings.config.obsidian.enabled and settings.config.obsidian.vault:
-        return _resolve("{vault}/fno/{project}/handoffs/", project_root=project_root)
     pid = settings.config.project.id
     if pid:
         project_name = pid
     else:
         root = project_root or resolve_repo_root()
         project_name = root.name
+    if settings.config.obsidian.enabled and settings.config.obsidian.vault:
+        vroot = vault_root()
+        if vroot is not None:
+            return vroot / "internal" / project_name / "handoffs"
     return state_dir() / "handoffs" / project_name
 
 
@@ -564,6 +568,22 @@ def inbox_dir(project_root: Optional[Path] = None) -> Path:
         return _resolve(override, project_root=project_root)
     root = project_root or resolve_repo_root()
     return (root / ".fno" / "inbox").resolve()
+
+
+def project_log(name: str, project_root: Optional[Path] = None) -> Path:
+    """Return ``<repo>/.fno/<name>`` for a project-local log/state file.
+
+    Anchored to :func:`resolve_repo_root` (never CWD) so a hook or CLI
+    subcommand invoked from any subdirectory of the repo lands on the same
+    file. This is the single accessor ad-hoc writers (events.jsonl,
+    finalize.stderr.log, worktree-log.jsonl, inbox-errors.jsonl, ...) route
+    through instead of hand-building ``".fno/" + name`` strings, per the
+    placement rule (state lives only under ``~/.fno/``, ``<project>/.fno/``,
+    or ``internal/<project>/``). Callers needing a nested path (e.g.
+    ``"claims/foo.lock"``) pass the sub-path as part of ``name``.
+    """
+    root = project_root or resolve_repo_root()
+    return (root / ".fno" / name).resolve()
 
 
 _INBOX_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")

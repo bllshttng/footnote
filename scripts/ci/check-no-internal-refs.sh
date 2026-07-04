@@ -53,6 +53,7 @@ ALLOWLIST=(
     "docs/architecture/cross-project-inbox.md"
     "docs/guides/cross-project-inbox.md"
     "docs/guides/reading-shipped-plans.md"
+    "docs/path-config.md"
     "docs/system-architecture.md"
     "docs/triage.md"
 )

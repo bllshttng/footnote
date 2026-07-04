@@ -61,8 +61,11 @@ if [[ "$ERROR_TYPE" == "rate_limit" || "$STATUS_CODE" == "429" ]]; then
     rm -f "${STATE_FILE}.bak"
 fi
 
-# Log to events
+# Log to events. REPO_ROOT-anchored (not bare cwd-relative), per the
+# placement rule (ab-f063 Wave 2) - avoids the nested ~/.fno/.fno accident
+# class when this hook fires with an unexpected cwd.
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-printf '{"ts":"%s","type":"stop_failure","error_type":"%s","status_code":"%s"}\n' "$TS" "$ERROR_TYPE" "$STATUS_CODE" >> .fno/events.jsonl 2>/dev/null
+printf '{"ts":"%s","type":"stop_failure","error_type":"%s","status_code":"%s"}\n' "$TS" "$ERROR_TYPE" "$STATUS_CODE" >> "${REPO_ROOT}/.fno/events.jsonl" 2>/dev/null
 
 exit 0

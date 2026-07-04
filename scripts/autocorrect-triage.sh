@@ -9,7 +9,7 @@
 # a ```diff fence, runs git apply. Otherwise prints the proposed text and
 # tells the user where to apply it manually.
 #
-# On reject: appends to ~/.claude/corrections-rejected.log so subsequent
+# On reject: appends to ~/.fno/corrections-rejected.log so subsequent
 # reviewers don't propose the same change.
 #
 # On CONVERT-TO-VERIFIER (action c): requires the patch to mention both
@@ -22,9 +22,13 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/corrections-lock.sh
+source "$SCRIPT_DIR/lib/corrections-lock.sh"
+
 CLAUDE_DIR="${CLAUDE_DIR_OVERRIDE:-$HOME/.claude}"
 PATCHES_DIR="$CLAUDE_DIR/proposed-patches"
-REJECTED_LOG="$CLAUDE_DIR/corrections-rejected.log"
+REJECTED_LOG="$(corrections_rejected_log_path)"
 MALFORMED_LOG="$CLAUDE_DIR/corrections-malformed.log"
 
 REVIEW_ID=""
@@ -276,6 +280,7 @@ for item_file in "${ITEMS[@]}"; do
     r|R)
       TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
       SOURCE_LINE=$(grep -E '^[0-9]+\. Source:' "$item_file" | head -1)
+      mkdir -p "$(dirname "$REJECTED_LOG")"
       printf '%s | rejected | %s\n' "$TIMESTAMP" "$SOURCE_LINE" >> "$REJECTED_LOG"
       chmod 600 "$REJECTED_LOG" 2>/dev/null || true
       echo "autocorrect-triage: rejected; logged to $REJECTED_LOG" >&2

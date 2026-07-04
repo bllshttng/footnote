@@ -26,7 +26,6 @@ import yaml
 from fno import _subprocess_util
 from fno.inbox.store import (
     ThreadHandle,
-    _git_root,
     resolve_project,
 )
 
@@ -378,13 +377,14 @@ def triage_thread(
     if settings is None:
         settings = read_triage_settings(cwd=cwd)
 
+    from fno.paths import project_log
+
     effective_cwd = cwd if cwd is not None else Path.cwd()
     receiver = resolve_project(cwd=effective_cwd, override=project_override)
-    git_root = _git_root()
 
     prompt = _build_prompt(handle, receiver, effective_cwd)
-    errors_path = git_root / ".fno" / "inbox-errors.jsonl"
-    log_path = git_root / ".fno" / "triage-log.jsonl"
+    errors_path = project_log("inbox-errors.jsonl")
+    log_path = project_log("triage-log.jsonl")
 
     last_error: Optional[Exception] = None
 

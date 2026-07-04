@@ -1064,14 +1064,16 @@ def resolve_project(
 
 def log_inbox_error(reason: str, **extra) -> None:
     """Append a JSON line to ``.fno/inbox-errors.jsonl``."""
-    errors_dir = _git_root() / ".fno"
-    errors_dir.mkdir(parents=True, exist_ok=True)
+    from fno.paths import project_log
+
+    errors_path = project_log("inbox-errors.jsonl")
+    errors_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "reason": reason,
         **extra,
     }
-    with (errors_dir / "inbox-errors.jsonl").open("a", encoding="utf-8") as f:
+    with errors_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 
 
