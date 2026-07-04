@@ -4279,6 +4279,7 @@ def cmd_reconcile(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
+        emit_human_touch_for_record,
         emit_session_satisfied_for_record,
         scan_merge_drift,
         write_retro_sentinel,
@@ -4392,6 +4393,11 @@ def cmd_reconcile(
             # re-block. Best-effort + non-fatal: a failure here logs and continues
             # (the defensive stop-hook probe is the backstop).
             emit_session_satisfied_for_record(record)
+
+            # W4 touch telemetry: an out-of-band merge is a human steering
+            # action no loop performed. Once per node - reconcile only ever
+            # closes a node once (AC4-EDGE).
+            emit_human_touch_for_record(record)
 
             closed.append({
                 "node_id": record.node_id,

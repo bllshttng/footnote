@@ -171,6 +171,51 @@ def _emit_session_satisfied(pr_url: str, state_dir: str) -> None:
         )
 
 
+def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
+    """Emit ``human_touch{source:merge}`` for a MANUAL merge (W4 telemetry).
+
+    Only a human at a terminal counts: the autonomous loop's ship gate runs
+    this same followup path with no tty and must not inflate the touch count,
+    so the gate is stdin-isatty. Best-effort: a failure prints a diagnostic
+    and never changes the merge outcome.
+    """
+    if not sys.stdin.isatty():
+        return
+    node_id = None
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+
+        for e in read_graph(graph_json()):
+            if e.get("pr_number") == pr_number or any(
+                isinstance(p, dict) and p.get("number") == pr_number
+                for p in e.get("additional_prs") or []
+            ):
+                node_id = e.get("id")
+                break
+    except Exception:
+        node_id = None
+    try:
+        from pathlib import Path
+
+        from fno.events import _build, append_event
+
+        event = _build(
+            "human_touch",
+            "target",
+            {
+                "graph_node_id": node_id,
+                "source": "merge",
+                "resolution": "ok" if node_id else "failed",
+            },
+        )
+        append_event(event, events_path=Path(state_dir) / "events.jsonl")
+    except Exception as exc:  # noqa: BLE001 - best-effort, surface a diagnostic
+        sys.stderr.write(
+            f"pr-merge: human_touch emit failed ({exc}); merge outcome unaffected\n"
+        )
+
+
 def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
     state_dir = _repo_state_dir(cwd)
     state_file = os.path.join(state_dir, "target-state.md")
@@ -214,6 +259,12 @@ def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
         if res.ok:
             pr_url = res.stdout.strip()
         _emit_session_satisfied(pr_url, state_dir)
+    except Exception:
+        pass
+
+    # W4 touch telemetry: a manual (tty) merge is a human steering action.
+    try:
+        _emit_human_touch_merge(pr_number, state_dir)
     except Exception:
         pass
 

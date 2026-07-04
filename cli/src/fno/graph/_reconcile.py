@@ -440,3 +440,39 @@ def emit_session_satisfied_for_record(
         )
         return None
     return events_path
+
+
+def emit_human_touch_for_record(record: MergeDriftRecord) -> Optional[Path]:
+    """Emit ``human_touch{source:merge}`` for a node reconcile just closed (W4).
+
+    An out-of-band merge (web merge button, bare ``gh pr merge``) is a human
+    steering action no loop performed. Reconcile closes a node exactly once (a
+    closed node is no longer scanned), so this fires once per node with no
+    separate idempotence ledger (AC4-EDGE). Best-effort: a failure prints a
+    diagnostic and never aborts the close.
+    """
+    try:
+        from fno.events import _build, append_event
+
+        event = _build(
+            "human_touch",
+            "backlog",
+            {
+                "graph_node_id": record.node_id,
+                "source": "merge",
+                "resolution": "ok",
+            },
+        )
+        if isinstance(record.cwd, str) and record.cwd:
+            events_path = Path(record.cwd) / ".fno" / "events.jsonl"
+            append_event(event, events_path=events_path)
+            return events_path
+        append_event(event)
+        return None
+    except Exception as exc:  # best-effort: never abort the close on emit failure
+        print(
+            f"reconcile: human_touch emit failed for {record.node_id}: "
+            f"{type(exc).__name__}: {exc}; merge close unaffected",
+            file=sys.stderr,
+        )
+        return None
