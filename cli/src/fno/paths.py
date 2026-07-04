@@ -343,12 +343,25 @@ def graph_json() -> Path:
 
 
 def ledger_json() -> Path:
-    """Return the path to ledger.json."""
+    """Return the path to ledger.json.
+
+    Pinned global: the ledger is cross-project by definition (one row per
+    terminal session across every repo), so it must never fork into a
+    per-repo stray. An explicit ``config.paths.ledger_json`` override wins
+    (tests/sandboxes set it). Otherwise it follows ``config.state_dir`` only
+    when that is an absolute anchor - the ``~/.fno`` default and test
+    sandboxes both are; a *relative* (project-/CWD-anchored) ``state_dir``
+    would land the ledger inside a repo checkout, so it falls back to the
+    user-global ``~/.fno`` instead.
+    """
     settings = _settings()
     override = settings.config.paths.ledger_json
     if override is not None:
         return _resolve(override)
-    return state_dir() / "ledger.json"
+    raw = os.path.expanduser(os.path.expandvars(settings.config.state_dir))
+    if os.path.isabs(raw):
+        return state_dir() / "ledger.json"
+    return _resolve("~/.fno/") / "ledger.json"
 
 
 def bus_dir() -> Path:

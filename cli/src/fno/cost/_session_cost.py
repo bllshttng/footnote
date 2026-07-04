@@ -45,6 +45,7 @@ from pathlib import Path
 # sibling module (not a repo-relative sys.path hack) is the whole point of the
 # move: run from the installed wheel in /tmp with no repo on disk, this binds
 # the in-package cost_tracker, never a stray repo copy.
+from fno import paths as _paths
 from fno.cost.cost_tracker import (
     FALLBACK_MODELS_SEEN,
     PRICING,
@@ -466,8 +467,18 @@ def print_metrics(metrics: SessionMetrics, as_json: bool = False):
 
 # --- Backfill support ---
 
-LEDGER_JSON_PATH = Path.home() / ".fno" / "ledger.json"
-LEDGER_MD_PATH = Path.home() / ".fno" / "ledger.md"
+# Single resolution path: the ledger is cross-project, so it always routes
+# through the pinned-global paths.ledger_json(). Resolved lazily (not at module
+# load) so importing this module stays pydantic-free - the bare-python metric
+# harnesses (tests/metrics/*.py) import it without fno's deps installed.
+def _ledger_json() -> Path:
+    return _paths.ledger_json()
+
+
+def _ledger_md() -> Path:
+    return _ledger_json().with_suffix(".md")
+
+
 _OLD_TASKS_PATH = Path.home() / ".fno" / "tasks.json"
 _OLD_TASKS_MD = Path.home() / ".fno" / "tasks.md"
 
@@ -568,12 +579,12 @@ def render_tasks_md(entries: list[dict]) -> str:
 
 def backfill_tasks_json(dry_run: bool = True):
     """Recalculate costs for all tasks.json entries using branch-level attribution."""
-    if not LEDGER_JSON_PATH.exists():
-        print(f"No ledger.json found at {LEDGER_JSON_PATH}")
+    if not _ledger_json().exists():
+        print(f"No ledger.json found at {_ledger_json()}")
         return
 
     try:
-        data = json.loads(LEDGER_JSON_PATH.read_text())
+        data = json.loads(_ledger_json().read_text())
     except json.JSONDecodeError as e:
         print(f"Error: ledger.json is corrupt: {e}", file=sys.stderr)
         sys.exit(1)
@@ -631,41 +642,41 @@ def backfill_tasks_json(dry_run: bool = True):
 
     # Atomic write: temp file then rename to prevent corruption on interrupt
     tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=LEDGER_JSON_PATH.parent, suffix=".tmp"
+        dir=_ledger_json().parent, suffix=".tmp"
     )
     try:
         with os.fdopen(tmp_fd, "w") as tmp_f:
             tmp_f.write(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp_path, LEDGER_JSON_PATH)
+        os.replace(tmp_path, _ledger_json())
     except Exception:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
-    print(f"\n  Updated {LEDGER_JSON_PATH}")
+    print(f"\n  Updated {_ledger_json()}")
 
     # Render MD from JSON
     md_content = render_tasks_md(entries)
-    LEDGER_MD_PATH.write_text(md_content + "\n")
-    print(f"  Rendered {LEDGER_MD_PATH}")
+    _ledger_md().write_text(md_content + "\n")
+    print(f"  Rendered {_ledger_md()}")
 
 
 def render_tasks_from_json():
     """Render tasks.md from tasks.json without recalculating costs."""
-    if not LEDGER_JSON_PATH.exists():
-        print(f"No ledger.json found at {LEDGER_JSON_PATH}")
+    if not _ledger_json().exists():
+        print(f"No ledger.json found at {_ledger_json()}")
         return
 
     try:
-        data = json.loads(LEDGER_JSON_PATH.read_text())
+        data = json.loads(_ledger_json().read_text())
     except json.JSONDecodeError as e:
         print(f"Error: ledger.json is corrupt: {e}", file=sys.stderr)
         sys.exit(1)
     entries = data if isinstance(data, list) else data.get("entries", [])
     md_content = render_tasks_md(entries)
-    LEDGER_MD_PATH.write_text(md_content + "\n")
-    print(f"  Rendered {len(entries)} entries to {LEDGER_MD_PATH}")
+    _ledger_md().write_text(md_content + "\n")
+    print(f"  Rendered {len(entries)} entries to {_ledger_md()}")
 
 
 def print_branch_breakdown(path: str, session_id: str):
@@ -698,7 +709,7 @@ def print_by_provider(ledger_path: Path | None = None) -> None:
     Entries without a provider_id field are bucketed under "unattributed"
     for backward compatibility with pre-substrate sessions.
     """
-    path = ledger_path or LEDGER_JSON_PATH
+    path = ledger_path or _ledger_json()
     if not path.exists():
         print(f"No ledger.json found at {path}")
         return

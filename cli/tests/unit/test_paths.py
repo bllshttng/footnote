@@ -300,6 +300,28 @@ def test_ledger_json_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert result.name == "ledger.json"
 
 
+def test_ledger_json_pinned_global_ignores_relative_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ledger is cross-project and must NOT fork into a per-repo
+    stray. A relative (project-/CWD-anchored) state_dir must not drag the
+    ledger into the repo checkout; it stays anchored to the user-global
+    ~/.fno. An absolute state_dir (the default and test sandboxes) is honored.
+    """
+    monkeypatch.chdir(tmp_path)
+    _set_settings(
+        monkeypatch, tmp_path, "schema_version: 1\nconfig:\n  state_dir: .fno/\n"
+    )
+
+    from fno.paths import ledger_json
+
+    result = ledger_json()
+    # Pinned to ~/.fno, NOT tmp_path/.fno (which is where a relative state_dir
+    # would land graph.json/events under CWD).
+    assert result == (Path.home() / ".fno" / "ledger.json").resolve()
+    assert tmp_path not in result.parents
+
+
 def test_briefs_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """AC1-HP: briefs_dir() returns ~/.fno/briefs."""
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
