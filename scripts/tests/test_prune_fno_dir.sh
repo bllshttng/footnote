@@ -88,12 +88,21 @@ if [[ $RC -ne 0 ]]; then pass "rc=$RC (expected non-zero)"; else fail "rc=0 on m
 echo "T06: investigate items advertised but not touched"
 F=$(fixture_dir t06)
 mkdir -p "$F/abilities/signals"
-: > "$F/abilities/convo-signals.jsonl"
 OUT=$(FNO_DIR="$F/abilities" bash "$PRUNE" --apply 2>&1)
-if echo "$OUT" | grep -q "convo-signals"; then pass "convo-signals listed"; else fail "convo-signals missing from advisory output"; fi
+if echo "$OUT" | grep -q "signals/"; then pass "signals/ listed"; else fail "signals/ missing from advisory output"; fi
 if echo "$OUT" | grep -q "INVESTIGATE"; then pass "INVESTIGATE header present"; else fail "INVESTIGATE header missing"; fi
-if [[ -f "$F/abilities/convo-signals.jsonl" ]]; then pass "convo-signals.jsonl untouched"; else fail "convo-signals.jsonl was modified"; fi
 if [[ -d "$F/abilities/signals" ]]; then pass "signals/ untouched"; else fail "signals/ was modified"; fi
+rm -rf "$F"
+
+# ---- T06b: convo-signals.jsonl + evals-history.jsonl are delete targets (capture removed) ----
+echo "T06b: convo-signals.jsonl + evals-history.jsonl deleted on --apply"
+F=$(fixture_dir t06b)
+: > "$F/abilities/convo-signals.jsonl"
+: > "$F/abilities/evals-history.jsonl"
+OUT=$(FNO_DIR="$F/abilities" bash "$PRUNE" --apply 2>&1)
+if echo "$OUT" | grep -q "convo-signals.jsonl"; then pass "convo-signals.jsonl listed as delete candidate"; else fail "convo-signals.jsonl missing from delete output"; fi
+if [[ ! -e "$F/abilities/convo-signals.jsonl" ]]; then pass "convo-signals.jsonl deleted"; else fail "convo-signals.jsonl still present"; fi
+if [[ ! -e "$F/abilities/evals-history.jsonl" ]]; then pass "evals-history.jsonl deleted"; else fail "evals-history.jsonl still present"; fi
 rm -rf "$F"
 
 # ---- T07: unknown flag exits with usage error ----

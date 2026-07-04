@@ -7,9 +7,9 @@
 # without touching anything. Pass --apply to actually perform the work.
 #
 # The audit also flagged "investigate" items that need user judgment
-# before any code touches them (rotation policy for convo-signals.jsonl,
-# the ~/.fno/.fno/ nested duplicate, the orphan SUMMARY.md,
-# etc.). This script lists those items but does NOT modify them.
+# before any code touches them (the ~/.fno/.fno/ nested duplicate, the
+# orphan SUMMARY.md, etc.). This script lists those items but does NOT
+# modify them.
 #
 # Acceptance:
 #   - Idempotent: running twice with --apply leaves the directory in the
@@ -99,6 +99,8 @@ DELETE_TARGETS=(
   "ledger.json.bak.pre-143-backfill"
   "do-target-stop-hook.log"
   ".DS_Store"
+  "convo-signals.jsonl"
+  "evals-history.jsonl"
 )
 
 # Files dispositioned "archive" by the audit. Each entry is moved to
@@ -111,7 +113,6 @@ ARCHIVE_TARGETS=(
 # never touched by the script; they print as advisory output so the user
 # remembers to handle them in a separate, more deliberate PR.
 INVESTIGATE_NOTES=(
-  "convo-signals.jsonl - 42 MB+; needs a rotation policy, not deletion"
   "signals/ - empty dir; confirm no future hook depends on it"
   "SUMMARY.md - March 20 orphan; verify no skill still reads it"
   ".fno/ (nested) - root-cause the hook that created the duplicate before pruning"

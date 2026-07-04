@@ -1050,3 +1050,38 @@ def test_mux_front_door_report_states(
     assert report["mux_front_door"] == expected
     assert report["mux_binary"] == (mux if mux else None)
     assert report["path_fno"] == which_fno
+
+
+# ---------------------------------------------------------------------------
+# Orphan-file report (Group 3 GC)
+# ---------------------------------------------------------------------------
+
+
+def test_orphan_report_empty_on_clean_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    (tmp_path / "project").mkdir()
+    monkeypatch.chdir(tmp_path / "project")
+    assert doctor._orphan_report() == []
+
+
+def test_orphan_report_finds_leftover_files_in_both_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    (home / ".fno").mkdir(parents=True)
+    (project / ".fno").mkdir(parents=True)
+    (home / ".fno" / "convo-signals.jsonl").write_text("")
+    (home / ".fno" / "tasks.json").write_text("")
+    (project / ".fno" / "convo-signals.jsonl").write_text("")
+
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.chdir(project)
+
+    report = doctor._orphan_report()
+    assert str(home / ".fno" / "convo-signals.jsonl") in report
+    assert str(home / ".fno" / "tasks.json") in report
+    assert str(project / ".fno" / "convo-signals.jsonl") in report
+    assert len(report) == 3

@@ -20,10 +20,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCAN_DIRS = ["cli/src/fno", "scripts", "hooks", "crates"]
 
 # scripts/prune-fno-dir.sh intentionally names these deleted basenames in its
-# disposition table (they are its DELETE_TARGETS) - that is the janitor doing
-# its job, not a stale reference.
+# disposition table (they are its DELETE_TARGETS), and cli/src/fno/doctor.py
+# names them in its orphan-file detector - both are the janitor doing its
+# job, not a stale reference.
 ALLOWLIST_FILES = {
     "scripts/prune-fno-dir.sh",
+    "cli/src/fno/doctor.py",
 }
 
 _DELETED_REFS_RE = re.compile(
