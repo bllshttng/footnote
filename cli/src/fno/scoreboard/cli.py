@@ -15,6 +15,7 @@ from fno.scoreboard.fold import (
     BrokenLedger,
     build_calibration,
     build_scoreboard,
+    build_skill_scoreboard,
     load_ledger_rows,
     read_graph_nodes,
     read_jsonl_events,
@@ -31,6 +32,15 @@ def scoreboard_command(
             "Verifier calibration: join verifier_verdict events to per-node "
             "outcomes (merged_clean/bounced/reverted) and print the confusion "
             "table. All-time (ignores --since); gated on >=10 verdicts."
+        ),
+    ),
+    by_skill: bool = typer.Option(
+        False,
+        "--by-skill",
+        help=(
+            "Skill-outcome attribution: which skill (+version) ran in which "
+            "session, joined to runs/ship-rate/revert-rate/touches/cost per "
+            "skill+version, with a coverage line for how many runs attributed."
         ),
     ),
 ) -> None:
@@ -61,6 +71,20 @@ def scoreboard_command(
             typer.echo(_json.dumps(cal, indent=2))
             return
         _render_calibration(cal)
+        return
+
+    if by_skill:
+        sb = build_skill_scoreboard(
+            rows,
+            read_graph_nodes(graph_path),
+            read_jsonl_events(events_paths, {"human_touch"}),
+            since_days=since,
+            now=datetime.now(),
+        )
+        if json_out:
+            typer.echo(_json.dumps(sb, indent=2))
+            return
+        _render_by_skill(sb)
         return
 
     touch_events = read_jsonl_events(events_paths, {"human_touch"})
@@ -110,6 +134,34 @@ def _render_calibration(cal: dict) -> None:
         f"\n  false-positive (pass -> bounced/reverted): "
         f"{fp['count']}/{fp['of_pass']} ({fp['rate_pct']}%)\n"
     )
+
+
+def _render_by_skill(sb: dict) -> None:
+    out = sys.stdout.write
+    win = sb["since_days"]
+    if sb["state"] == "no_data":
+        out(f"fno scoreboard --by-skill (last {win}d)\n\n  no terminal sessions in window.\n")
+        return
+
+    cov = sb["coverage"]
+    out(f"fno scoreboard --by-skill (last {win}d)\n\n")
+    out("Coverage\n")
+    out(f"  rows in window:      {cov['rows']}\n")
+    out(f"  attributed:          {cov['attributed_pct']}%\n")
+    if cov["attributed_pct"] < 100:
+        out(
+            f"  ! rows below reflect {cov['attributed_pct']}% attribution coverage - "
+            "unattributed rows are listed, never dropped.\n"
+        )
+    out("\n")
+    out(f"  {'skill':<32}{'version':<10}{'runs':>6}{'ship%':>7}{'revert%':>9}{'touch/run':>11}{'cost/run':>10}  method\n")
+    for row in sb["rows"]:
+        revert = f"{row['revert_rate_pct']}%" if row["revert_rate_pct"] is not None else "n/a"
+        out(
+            f"  {row['skill']:<32}{row['version']:<10}{row['runs']:>6}"
+            f"{row['ship_rate_pct']:>6}%{revert:>9}"
+            f"{row['touches_per_run']:>11}{row['cost_per_run']:>10.2f}  {row['method']}\n"
+        )
 
 
 def _render(sb: dict) -> None:

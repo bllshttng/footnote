@@ -348,6 +348,293 @@ def build_calibration(verdict_events: list[dict], rows: list[dict], graph_nodes:
     }
 
 
+# ── skill-outcome attribution (x-4829, loops roadmap W1) ────────────────────
+#
+# NO new events, NO new state files (telemetry locked rule) - this folds two
+# things that already exist: the Skill tool_use blocks Claude Code already
+# writes into ~/.claude/projects/*/<session>.jsonl transcripts (primary,
+# real skill identity), and the ledger's own `phases_completed` list (v1
+# proxy for the pipeline-driver skills, when a row carries no transcript-
+# loadable session). A row with neither is an explicit "unattributed" bucket,
+# never silently dropped (mirrors the calibration fold's honesty rule).
+
+# think/plan/do/review/docs/ship/external are /target's own phase names;
+# ship+external both route through /pr (create vs check) so they collapse to
+# one skill id.
+_PHASE_TO_SKILL = {
+    "think": "fno:think",
+    "plan": "fno:blueprint",
+    "do": "fno:do",
+    "review": "fno:review",
+    "docs": "fno:ship-docs",
+    "ship": "fno:pr",
+    "external": "fno:pr",
+}
+
+
+def _skills_from_transcript(lines: list[str]) -> list[str]:
+    """Scan transcript JSONL lines for Skill tool_use blocks; return the
+    `input.skill` id of each (duplicates kept - callers dedupe if needed)."""
+    found: list[str] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):  # valid JSON, junk shape (e.g. a bare scalar) - skip, don't crash
+            continue
+        message = obj.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Skill":
+                input_ = block.get("input")
+                skill = input_.get("skill") if isinstance(input_, dict) else None
+                if skill:
+                    found.append(skill)
+    return found
+
+
+def _default_read_transcript(session_id: str) -> list[str] | None:
+    from fno.cost._session_cost import find_transcript
+
+    path = find_transcript(session_id)
+    if not path:
+        return None
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+
+
+# Process-lifetime cache: skill git history is append-only, so fetching it
+# once per (repo root, path) and bisecting in memory turns version resolution
+# from O(N) git-log subprocess spawns (one per row) into O(S) (one per unique
+# skill) - the ledger already holds thousands of rows (gemini + code-reviewer
+# both flagged the naive per-row subprocess as a real latency risk).
+_SKILL_COMMIT_HISTORY_CACHE: dict[tuple[str, str], list[tuple[datetime, str]]] = {}
+
+
+def _skill_commit_history(root: Path, rel: str) -> list[tuple[datetime, str]]:
+    """All commits touching rel, oldest first: [(commit datetime, short hash), ...].
+    Empty on any git failure - never raises."""
+    import subprocess
+
+    key = (str(root), rel)
+    if key in _SKILL_COMMIT_HISTORY_CACHE:
+        return _SKILL_COMMIT_HISTORY_CACHE[key]
+    history: list[tuple[datetime, str]] = []
+    try:
+        out = subprocess.run(
+            ["git", "log", "--format=%h %aI", "--", rel],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if out.returncode == 0:
+            for line in out.stdout.splitlines():
+                h, _, iso = line.partition(" ")
+                dt = _parse_ts(iso)
+                if h and dt:
+                    history.append((dt, h))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    history.sort(key=lambda pair: pair[0])
+    _SKILL_COMMIT_HISTORY_CACHE[key] = history
+    return history
+
+
+def _default_skill_version(skill_id: str, ts_raw: str | None) -> str:
+    """Best-effort git hash of the skill's SKILL.md at (or before) ts_raw.
+    No git history / no such file / any subprocess failure -> "unknown",
+    never an error (AC-EDGE)."""
+    from fno.paths import resolve_repo_root
+
+    name = skill_id.split(":", 1)[1] if ":" in skill_id else skill_id
+    rel = f"skills/{name}/SKILL.md"
+    try:
+        root = resolve_repo_root()
+    except Exception:
+        return "unknown"
+    if not (root / rel).exists():
+        return "unknown"
+
+    until_dt = _parse_ts(ts_raw) or datetime.now()
+    best: str | None = None
+    for dt, h in _skill_commit_history(root, rel):
+        if dt > until_dt:
+            break
+        best = h
+    return best or "unknown"
+
+
+def _extract_skill_runs(row: dict, *, read_transcript) -> tuple[list[str], str]:
+    """Return (distinct skill ids, method) for one ledger row.
+
+    method is "transcript" (real Skill tool_use found), "phase-proxy"
+    (fallback to phases_completed), or "unattributed" (neither)."""
+    from fno.cost._session_cost import UUID_RE
+
+    sessions = row.get("sessions")
+    uuid_sessions = [s for s in sessions if isinstance(s, str) and UUID_RE.match(s)] if isinstance(sessions, list) else []
+    found: list[str] = []
+    for sid in uuid_sessions:
+        lines = read_transcript(sid)
+        if lines:
+            found.extend(_skills_from_transcript(lines))
+    if found:
+        return sorted(set(found)), "transcript"
+
+    phases = row.get("phases_completed")
+    proxy = sorted({_PHASE_TO_SKILL[p] for p in phases if p in _PHASE_TO_SKILL}) if isinstance(phases, list) else []
+    if proxy:
+        return proxy, "phase-proxy"
+    return [], "unattributed"
+
+
+def _new_skill_bucket() -> dict:
+    return {
+        "runs": 0,
+        "shipped": 0,
+        "shipped_linked": 0,  # shipped AND has graph_node_id - the only rows revert_rate can judge
+        "reverted": 0,
+        "cost_total": 0.0,
+        "touches_total": 0,
+        "methods": set(),
+    }
+
+
+def build_skill_scoreboard(
+    rows: list[dict],
+    graph_nodes: list[dict],
+    touch_events: list[dict],
+    *,
+    since_days: int,
+    now: datetime,
+    read_transcript=None,
+    resolve_skill_version=None,
+) -> dict:
+    """Join session -> skill(s) -> node -> outcome/touches/cost. Pure except
+    for the two injectable I/O hooks (transcript read, git-hash resolve),
+    which default to the real implementations.
+
+    Cost and touch counts are attributed in full to every skill found in a
+    row (no fractional split across skills sharing one session) - a session
+    that ran two skills counts fully toward both. ponytail: acceptable v1
+    approximation; split later if a skill's numbers look inflated."""
+    read_transcript = read_transcript or _default_read_transcript
+    resolve_skill_version = resolve_skill_version or _default_skill_version
+
+    cutoff = now - timedelta(days=since_days)
+
+    def _in_window(ts_raw) -> bool:
+        dt = _parse_ts(ts_raw)
+        return dt is not None and cutoff <= dt <= now
+
+    windowed = [r for r in rows if _in_window(r.get("completed"))]
+    total = len(windowed)
+    if total == 0:
+        return {"state": "no_data", "since_days": since_days, "rows": 0}
+
+    by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
+    fixes: dict[str, list[dict]] = {}
+    for n in graph_nodes:
+        origin = n.get("caused_by")
+        if origin:
+            fixes.setdefault(origin, []).append(n)
+
+    # W4 causal telemetry availability - mirrors _survival's own gate. Without
+    # it, _node_outcome's "no fix found" branch is indistinguishable from
+    # "revert data doesn't exist yet", so judging revert rate at all would
+    # silently show a clean 0% where the real answer is "unknown" (codex peer
+    # review finding).
+    w4_available = any(("reverted" in n) or n.get("caused_by") for n in graph_nodes)
+
+    touches_by_node: Counter = Counter()
+    for e in touch_events:
+        if not isinstance(e, dict):
+            continue
+        if not _event_in_window(e, cutoff, now):  # codex finding: touches must respect --since too
+            continue
+        nid = e.get("graph_node_id")
+        if not nid:
+            data = e.get("data")
+            nid = data.get("graph_node_id") if isinstance(data, dict) else None
+        if nid:
+            touches_by_node[nid] += 1
+
+    buckets: dict[tuple[str, str], dict] = {}
+    attributed = 0
+
+    for r in windowed:
+        skills, method = _extract_skill_runs(r, read_transcript=read_transcript)
+        shipped = (r.get("termination_reason") or "").startswith("Done")
+        nid = r.get("graph_node_id")
+        cost = _num(r.get("cost_usd"))
+        touches = touches_by_node.get(nid, 0) if nid else 0
+
+        if not skills:
+            b = buckets.setdefault(("unattributed", "-"), _new_skill_bucket())
+            b["runs"] += 1
+            b["cost_total"] += cost
+            b["touches_total"] += touches
+            continue
+        attributed += 1
+
+        # Judgeable only when the node actually resolves in the graph AND the
+        # graph carries causal telemetry at all - a resolvable-but-untracked
+        # node must not silently default to "merged_clean" (same gap class as
+        # _survival's w4 check, applied here per codex peer review).
+        judgeable = bool(shipped and nid and w4_available and nid in by_id)
+        outcome = _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes) if judgeable else None
+
+        for skill in skills:
+            version = resolve_skill_version(skill, r.get("completed"))
+            b = buckets.setdefault((skill, version), _new_skill_bucket())
+            b["runs"] += 1
+            b["cost_total"] += cost
+            b["touches_total"] += touches
+            b["methods"].add(method)
+            if shipped:
+                b["shipped"] += 1
+                if judgeable:
+                    b["shipped_linked"] += 1
+                    if outcome in ("reverted", "bounced"):
+                        b["reverted"] += 1
+
+    out_rows = []
+    for (skill, version), b in buckets.items():
+        runs = b["runs"]
+        out_rows.append(
+            {
+                "skill": skill,
+                "version": version,
+                "runs": runs,
+                "ship_rate_pct": _pct(b["shipped"], runs),
+                # None (not 0) when nothing was judgeable - a bare 0% would be
+                # indistinguishable from "zero of N judged rows reverted", a
+                # real and different fact (AC honesty; codex peer review).
+                "revert_rate_pct": _pct(b["reverted"], b["shipped_linked"]) if b["shipped_linked"] else None,
+                "touches_per_run": round(b["touches_total"] / runs, 2) if runs else 0.0,
+                "cost_per_run": round(b["cost_total"] / runs, 2) if runs else 0.0,
+                "method": "+".join(sorted(b["methods"])) if b["methods"] else "unattributed",
+            }
+        )
+    out_rows.sort(key=lambda x: (-x["runs"], x["skill"]))
+
+    return {
+        "state": "ok",
+        "since_days": since_days,
+        "coverage": {"rows": total, "attributed_pct": _pct(attributed, total)},
+        "rows": out_rows,
+    }
+
+
 if __name__ == "__main__":
     # ponytail self-check: the fold's load-bearing invariants, no framework.
     now = datetime(2026, 7, 3, 20, 0, 0)
@@ -390,4 +677,25 @@ if __name__ == "__main__":
     _os.write(_fd, b'{"entries": null}'); _os.close(_fd)
     assert load_ledger_rows(Path(_p)) == []
     _os.unlink(_p)
+
+    # --by-skill: transcript-scan wins over phase-proxy; neither -> unattributed
+    def _fake_read(sid):
+        return [json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "fno:review"}}]}})]
+
+    skill_rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 4.0,
+         "sessions": ["11111111-1111-1111-1111-111111111111"]},
+        {"completed": "2026-07-02T10:00:00", "termination_reason": "NoProgress", "phases_completed": ["do"], "cost_usd": 1.0},
+        {"completed": "2026-07-01T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-9", "cost_usd": 2.0},
+    ]
+    sb3 = build_skill_scoreboard(
+        skill_rows, [{"id": "x-1", "reverted": False}], [],
+        since_days=28, now=now, read_transcript=_fake_read, resolve_skill_version=lambda s, ts: "abc123",
+    )
+    by_skill = {r["skill"]: r for r in sb3["rows"]}
+    assert by_skill["fno:review"]["method"] == "transcript" and by_skill["fno:review"]["runs"] == 1, sb3
+    assert by_skill["fno:do"]["method"] == "phase-proxy" and by_skill["fno:do"]["runs"] == 1, sb3
+    assert by_skill["unattributed"]["runs"] == 1, sb3
+    assert sb3["coverage"]["attributed_pct"] == 67, sb3  # 2 of 3 rows attributed
+
     print("fold self-check OK")
