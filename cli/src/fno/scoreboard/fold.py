@@ -262,6 +262,92 @@ def _event_in_window(e: dict, cutoff, now) -> bool:
     return dt is None or cutoff <= dt <= now  # undated events count in (best-effort)
 
 
+# ── verifier calibration (W6 x-f063) ────────────────────────────────────────
+
+_CALIBRATION_MIN_VERDICTS = 10
+_COUNTABLE_VERDICTS = ("pass", "concerns", "fail")
+_OUTCOMES = ("merged_clean", "bounced", "reverted")
+
+
+def _node_outcome(nid: str, shipped_at, by_id: dict, fixes: dict) -> str:
+    """Derive a shipped node's outcome from the W4/W5 signals: `reverted` flag,
+    else a caused_by fix-node within the follow-up window -> bounced, else
+    merged_clean. Un-time-boundable fixes count against the node (conservative,
+    mirrors _survival)."""
+    if by_id.get(nid, {}).get("reverted"):
+        return "reverted"
+    for fx in fixes.get(nid, []):
+        fx_at = _parse_ts(fx.get("created_at"))
+        if shipped_at and fx_at:
+            if timedelta(0) <= (fx_at - shipped_at) <= timedelta(days=_SURVIVAL_FOLLOWUP_DAYS):
+                return "bounced"
+        else:
+            return "bounced"
+    return "merged_clean"
+
+
+def build_calibration(verdict_events: list[dict], rows: list[dict], graph_nodes: list[dict]) -> dict:
+    """Join verifier_verdict events to per-node outcomes. Pure; no I/O.
+
+    Latest verdict per node wins (events arrive in append order). error /
+    not_applicable finals are excluded from the table and reported as counts so
+    the denominator stays honest; verdicts with no graph_node_id likewise. The
+    table is gated on >= _CALIBRATION_MIN_VERDICTS countable verdicts (AC6-UI).
+    """
+    final: dict[str, str] = {}
+    unattributed = 0
+    for e in verdict_events:
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        v = data.get("verdict")
+        if v not in _COUNTABLE_VERDICTS and v not in ("error", "not_applicable"):
+            continue
+        nid = data.get("graph_node_id")
+        if not nid:
+            unattributed += 1
+            continue
+        final[nid] = v  # append order: last write wins
+
+    excluded = dict(Counter(v for v in final.values() if v not in _COUNTABLE_VERDICTS))
+    counted = {nid: v for nid, v in final.items() if v in _COUNTABLE_VERDICTS}
+    n = len(counted)
+    base = {"n": n, "excluded": excluded, "unattributed": unattributed}
+    if n < _CALIBRATION_MIN_VERDICTS:
+        return {"state": "insufficient", "need": _CALIBRATION_MIN_VERDICTS, **base}
+
+    by_id = {g.get("id"): g for g in graph_nodes if g.get("id")}
+    fixes: dict[str, list[dict]] = {}
+    for g in graph_nodes:
+        origin = g.get("caused_by")
+        if origin:
+            fixes.setdefault(origin, []).append(g)
+    ship_ts: dict[str, datetime] = {}
+    for r in rows:
+        nid = r.get("graph_node_id")
+        if nid and (r.get("termination_reason") or "").startswith("Done"):
+            dt = _parse_ts(r.get("completed"))
+            if dt and (nid not in ship_ts or dt > ship_ts[nid]):
+                ship_ts[nid] = dt
+
+    table = {v: {o: 0 for o in _OUTCOMES} for v in _COUNTABLE_VERDICTS}
+    for nid, v in counted.items():
+        table[v][_node_outcome(nid, ship_ts.get(nid), by_id, fixes)] += 1
+    # Coverage-honesty (fold rule): a node with no timestamped Done-row gets a
+    # conservative outcome (any caused_by fix counts as bounced, however old),
+    # so surface how many outcomes were derived untimed rather than letting a
+    # ledger gap silently bias the headline rate.
+    untimed = sum(1 for nid in counted if nid not in ship_ts)
+    # The rate the whole task exists to measure: verdict pass -> bad outcome.
+    fp = table["pass"]["bounced"] + table["pass"]["reverted"]
+    passes = sum(table["pass"].values())
+    return {
+        "state": "ok",
+        **base,
+        "untimed_outcomes": untimed,
+        "table": table,
+        "false_positive": {"count": fp, "of_pass": passes, "rate_pct": _pct(fp, passes)},
+    }
+
+
 if __name__ == "__main__":
     # ponytail self-check: the fold's load-bearing invariants, no framework.
     now = datetime(2026, 7, 3, 20, 0, 0)

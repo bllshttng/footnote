@@ -14,6 +14,7 @@ from typing import Optional
 KIND_CARVEOUT = "carveout"
 KIND_REVIEW = "review"
 KIND_DEFERRED = "deferred_finding"
+KIND_POSTMORTEM = "postmortem"
 
 # Landing tiers (severity-tiered, Locked Decision #5).
 TIER_NODE = "node"

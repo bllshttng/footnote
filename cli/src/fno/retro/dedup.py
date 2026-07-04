@@ -25,8 +25,10 @@ _BADGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)|!\[[^\]]*\]")
 _WS_RE = re.compile(r"\s+")
 
 # Machine trailer land writes into node details; read back here for dedup.
+# `None` is a legal pr: postmortem-sourced nodes (W6 6.2) have no PR, and their
+# trailer must round-trip so a failed consumed_at stamp still dedups on rerun.
 _TRAILER_RE = re.compile(
-    r"<!--\s*retro-triage\s+source_pr=(?P<pr>\d+)\s+finding_hash=(?P<hash>[0-9a-f]+)\s*-->"
+    r"<!--\s*retro-triage\s+source_pr=(?P<pr>\d+|None)\s+finding_hash=(?P<hash>[0-9a-f]+)\s*-->"
 )
 
 

@@ -135,6 +135,67 @@ def classify_item(item: RawItem, *, body_cap: int = BODY_CAP) -> Candidate:
     )
 
 
+# ── postmortem disposition (W6 6.2, rule-first per Discretion #7) ────────────
+
+DISPOSITION_NODE = "node"
+DISPOSITION_INBOX = "inbox"
+DISPOSITION_ARCHIVE = "archive"
+
+# One-off: a specific cancel / interrupt / transient - archived, no work filed.
+_PM_ONEOFF_RE = re.compile(r"cancel|interrupt|abort", re.IGNORECASE)
+# Wedge-class: a named, repeatable failure mode worth a backlog node.
+_PM_WEDGE_RE = re.compile(
+    r"split.?brain|wedge|respawn\s+loop|orphan|deadlock|"
+    r"stale\W+(\w+\W+){0,3}claim|claim\W+(\w+\W+){0,3}stale|budget\s+blowout",
+    re.IGNORECASE,
+)
+
+
+def classify_postmortem(item: RawItem, *, body_cap: int = BODY_CAP) -> "tuple[str, Candidate | None]":
+    """Rule-first disposition for one postmortem: exactly one of
+    (node, inbox, archive). Ambiguous -> inbox: surface, don't guess.
+
+    Returns ``(disposition, candidate)``; candidate is None for archive.
+    Postmortems have no PR, so candidates are built directly (the cite is the
+    postmortem file itself, carried in source_id) rather than through the
+    PR-cited classify_item path.
+    """
+    # Archive only on an EXPLICIT one-off reason kind. A reason-less postmortem
+    # whose gist merely mentions cancel-ish words (e.g. quoting the
+    # .target-cancelled sentinel) is ambiguous, and ambiguous never archives -
+    # it falls through to the wedge check / inbox (sigma P3).
+    reason = item.subkind or ""
+    if _PM_ONEOFF_RE.search(reason):
+        return DISPOSITION_ARCHIVE, None
+
+    wedge = bool(_PM_WEDGE_RE.search(item.text or ""))
+    tier = TIER_NODE if wedge else TIER_INBOX
+    title = (item.title_hint or "").strip() or _clean_line(item.text)
+    title = title or "(untitled postmortem)"
+    if len(title) > TITLE_CAP:
+        title = title[: TITLE_CAP - 1].rstrip() + "…"
+
+    body = (item.text or "").strip()
+    marker = "\n\n[... truncated; full text in the postmortem file ...]"
+    cite = f"Source: {item.source_id}"
+    budget = max(body_cap - len(marker) - len(cite) - 2, 200)
+    if len(body) > budget:
+        body = body[:budget].rstrip() + marker
+    return (
+        DISPOSITION_NODE if wedge else DISPOSITION_INBOX,
+        Candidate(
+            title=title,
+            body=f"{body}\n\n{cite}" if body else cite,
+            tier=tier,
+            priority="p2" if wedge else DEFAULT_PRIORITY,
+            source_pr=None,
+            source_id=item.source_id,
+            finding_text=item.text or "",
+            extra={"kind": item.kind, "subkind": item.subkind},
+        ),
+    )
+
+
 def classify(items: list[RawItem], *, body_cap: int = BODY_CAP) -> "tuple[list[Candidate], list[Candidate]]":
     """Classify all items. Returns (cited_candidates, uncited_rejects)."""
     cited: list[Candidate] = []

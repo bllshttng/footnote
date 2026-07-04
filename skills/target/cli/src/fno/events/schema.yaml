@@ -2066,6 +2066,30 @@ event_types:
           enum: [ok, failed]
           description: "ok when graph_node_id resolved (pane FNO_NODE provenance / graph pr_number match / reconcile record); failed otherwise."
 
+  - name: verifier_verdict
+    description: "Ship-gate verifier advisory verdict (W6 x-f063): the plan-AC check ran against the ship diff at finalize time. Advisory only - no code path may gate a ship on it (Locked Decision #6). One event per ship; `fno scoreboard --calibration` joins these to per-node outcomes to measure the verifier's false-positive rate before anyone proposes flipping it to a gate. error = the verifier itself failed (spawn/timeout/parse); not_applicable = doc ship, no plan bound, or no ACs to check."
+    sources: [target, test]
+    data:
+      required: [graph_node_id, verdict, source]
+      properties:
+        graph_node_id:
+          type: [string, "null"]
+          description: "Node the ship belongs to; null when the manifest carried none (present-null required field, same convention as human_touch)."
+        verdict:
+          type: string
+          enum: [pass, concerns, fail, error, not_applicable]
+          description: "The verifier's judgment of plan ACs vs the origin/main...HEAD diff."
+        source:
+          type: string
+          enum: [ship-gate]
+          description: "Execution site; ship-gate is the only emitter today."
+        pr_number:
+          type: [integer, "null"]
+          description: "PR the ship landed as (best-effort gh lookup; null offline)."
+        session_id:
+          type: string
+          description: "Target session that shipped; joins to the ledger row."
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:
