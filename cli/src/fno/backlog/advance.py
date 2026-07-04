@@ -796,10 +796,16 @@ def _walker_key() -> str:
 
 
 def _claim_is_live(key: str) -> bool:
+    # "occupied" for dispatch: a live OR a suspect claim (x-ba4b) blocks
+    # selection. suspect = TTL-unexpired, dead pid (respawned worker); the TTL
+    # still protects the slot, so selection must skip it, never steal.
     from fno.claims.core import claim_status
 
     try:
-        return claim_status(key, root=_claims_root_for(key)).get("state") == "live"
+        return claim_status(key, root=_claims_root_for(key)).get("state") in (
+            "live",
+            "suspect",
+        )
     except Exception:  # noqa: BLE001 - a probe error must not crash advance
         return False
 
@@ -1067,9 +1073,11 @@ def _walker_live_at(project_root: str) -> bool:
     from fno.claims.core import claim_status
 
     try:
+        # live OR suspect (x-ba4b): a suspect walker claim is still an occupied
+        # lane; treat it as live so we never double-launch into that repo.
         return claim_status(
             f"walker:{project_root}", root=Path(project_root)
-        ).get("state") == "live"
+        ).get("state") in ("live", "suspect")
     except Exception:  # noqa: BLE001 - a probe error must not block dispatch
         return False
 

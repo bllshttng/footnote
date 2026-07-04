@@ -677,10 +677,12 @@ def _parse_short_id(stdout: str) -> str:
 
 
 def _claim_is_live(key: str) -> bool:
+    # A suspect claim (x-ba4b: TTL-unexpired, dead pid) counts as occupied too,
+    # so a respawned worker's dispatch reservation still dedups.
     from fno.claims.core import claim_status
 
     try:
-        return claim_status(key).get("state") == "live"
+        return claim_status(key).get("state") in ("live", "suspect")
     except Exception:  # noqa: BLE001 - a probe error must not crash the birth hook
         return False
 

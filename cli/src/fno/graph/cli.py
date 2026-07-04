@@ -1622,7 +1622,9 @@ def _release_node_lockfile(node_id: str) -> str:
             )
             return "lockfile left (corrupted)"
 
-        # state == "live": only release if it is ours.
+        # state == "live" or "suspect" (x-ba4b): only release if it is ours -
+        # a suspect claim (TTL-unexpired, dead pid) is still owned, so a peer's
+        # is left intact and only our own is cleared.
         holder = status.get("holder") or ""
         sid = _invoking_session_id()
         mine = bool(sid) and (holder == f"target-session:{sid}" or sid in holder)

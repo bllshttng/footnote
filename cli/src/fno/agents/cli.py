@@ -525,8 +525,10 @@ def cmd_spawn_guard(
                       now held by ``--holder`` (the line carries reservation_key +
                       reservation_holder); under ``--no-reserve`` no reservation is
                       taken.
-    - already-running a live ``node:<id>`` claim (reason=live-claim, holder=<owner>)
-                      OR a racing dispatcher already holds ``dispatch:<id>``
+    - already-running a live ``node:<id>`` claim (reason=live-claim, holder=<owner>),
+                      a suspect claim (reason=suspect-claim: TTL-unexpired dead pid,
+                      a respawned worker - the caller maps this to skipped-contested,
+                      x-ba4b), OR a racing dispatcher already holds ``dispatch:<id>``
                       (reason=reservation-held). No reservation acquired.
     - corrupted       the ``node:<id>`` claim is corrupted; launch nothing.
     - error           the claim probe failed or the reservation could not be
@@ -594,6 +596,15 @@ def cmd_spawn_guard(
         )
     if state == "live":
         _emit("already-running", reason="live-claim", holder=info.get("holder") or "unknown")
+    if state == "suspect":
+        # x-ba4b: TTL-unexpired, dead pid (respawned worker). The TTL still
+        # protects the slot, so dispatch must skip-not-steal. The caller maps
+        # reason=suspect-claim to a `skipped-contested` outcome and advances.
+        _emit(
+            "already-running",
+            reason="suspect-claim",
+            holder=info.get("holder") or "unknown",
+        )
     if state == "corrupted":
         _emit(
             "corrupted",

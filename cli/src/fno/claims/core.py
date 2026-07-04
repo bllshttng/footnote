@@ -338,8 +338,12 @@ def _existing_is_live(existing: Claim) -> bool:
     whose recorded pid is alive on this host is LIVE and must NOT be reclaimed
     by a peer (otherwise a suspended-but-alive session's node is stolen). One
     predicate means acquire and ``status``/``list`` can never diverge.
+
+    SUSPECT (x-ba4b) counts as live here: a TTL-unexpired claim with a dead pid
+    is a respawned worker's protected slot, so acquire must refuse it exactly
+    like LIVE (never steal). Only TTL expiry (-> STALE) makes it reclaimable.
     """
-    return classify(existing) == ClaimState.LIVE
+    return classify(existing) in (ClaimState.LIVE, ClaimState.SUSPECT)
 
 
 def _atomic_replace(path: Path, content: str) -> None:
@@ -471,8 +475,8 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
 
     Keys in the returned dict:
         key:       echo of input
-        state:     one of free | live | stale | corrupted
-        holder:    string (only when state in {live, stale})
+        state:     one of free | live | suspect | stale | corrupted
+        holder:    string (only when state in {live, suspect, stale})
         pid, host, acquired_at, expires_at, reason, metadata: when readable
         error:     string (only when state == corrupted)
     """
@@ -542,7 +546,10 @@ def list_claims(
 
         status = claim_status(key, root=root)
         state = status.get("state")
-        if state == ClaimState.LIVE.value:
+        # SUSPECT (x-ba4b) is an active, TTL-protected claim - it must count
+        # alongside LIVE so lane accounting (advance._live_lane_domains) does not
+        # under-count a slot held by a respawned worker and over-dispatch.
+        if state in {ClaimState.LIVE.value, ClaimState.SUSPECT.value}:
             out.append(status)
         elif include_stale and state in {
             ClaimState.STALE.value,

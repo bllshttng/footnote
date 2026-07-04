@@ -63,8 +63,13 @@ const ACQUIRE_MAX_ATTEMPTS: usize = 5;
 pub enum ClaimState {
     /// No claim file exists.
     Free,
-    /// Claim exists and its holder is verifiably alive (or TTL unexpired).
+    /// Claim exists and its holder is verifiably alive.
     Live,
+    /// TTL unexpired but the holder is NOT provably alive (dead/replaced pid).
+    /// A respawned worker whose supervisor pid died reads here: the TTL still
+    /// protects the claim, so it is treated like `Live` for acquire/dispatch
+    /// (never stolen) - only TTL expiry (-> `Stale`) frees it.
+    Suspect,
     /// Claim exists but the holder is dead/expired (recoverable).
     Stale,
     /// Claim file present but unreadable (parse/schema failure).
@@ -76,6 +81,7 @@ impl ClaimState {
         match self {
             ClaimState::Free => "free",
             ClaimState::Live => "live",
+            ClaimState::Suspect => "suspect",
             ClaimState::Stale => "stale",
             ClaimState::Corrupted => "corrupted",
         }
@@ -362,6 +368,13 @@ fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
 /// INCLUDING the hybrid arm: an expired-TTL claim whose recorded pid is a
 /// live process on this host is still LIVE — a suspended-but-alive session
 /// must not have its claim reclaimed by a peer).
+///
+/// SUSPECT arm (x-ba4b): a TTL claim still inside its window whose recorded pid
+/// is NOT a live process reads `Suspect`, not `Live`. Dead-pid-but-unexpired is
+/// the respawned-worker case (supervisor pid died, session lives on): the TTL
+/// keeps protecting the slot, so acquire/dispatch treat it like `Live` (never
+/// steal), but the distinct state lets init/dispatch branch on it. Only TTL
+/// expiry frees the claim (-> `Stale`); pid death alone never does.
 pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
     let now = now.unwrap_or_else(now_ms);
     if is_expired(rec, now) {
@@ -378,7 +391,13 @@ pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
             ClaimState::Stale
         };
     }
-    ClaimState::Live
+    // TTL claim, still inside its window: live pid => Live, dead/replaced pid
+    // => Suspect (TTL-protected, not stealable).
+    if is_live(rec) {
+        ClaimState::Live
+    } else {
+        ClaimState::Suspect
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -732,7 +751,12 @@ pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
             );
         }
 
-        if classify(&existing, None) != ClaimState::Live {
+        // Suspect (TTL-unexpired, dead pid) refuses exactly like Live: the TTL
+        // still protects a respawned worker's slot, so we never reclaim it.
+        if !matches!(
+            classify(&existing, None),
+            ClaimState::Live | ClaimState::Suspect
+        ) {
             match recover_stale(&path, key, holder, &opts, events_dir.as_deref()) {
                 RecoverResult::Done(outcome) => return outcome,
                 RecoverResult::Retry => continue,
@@ -874,8 +898,11 @@ fn recover_stale_locked(
         ));
     }
 
-    if classify(&existing, None) == ClaimState::Live {
-        // Raced — now it's live.
+    if matches!(
+        classify(&existing, None),
+        ClaimState::Live | ClaimState::Suspect
+    ) {
+        // Raced — now it's live (or a TTL-protected suspect); back off, no steal.
         return RecoverResult::Done(AcquireOutcome::HeldByOther {
             holder: existing.holder,
             pid: existing.pid,
@@ -969,6 +996,106 @@ pub fn status(key: &str, root: Option<&Path>) -> (ClaimState, Option<ClaimRecord
     }
 }
 
+/// Parse a human TTL string ("1h" / "30m" / "3600s" / bare digits) to
+/// milliseconds. BARE digits are SECONDS (parity with the Python `_parse_ttl`
+/// and the `sleep` convention), not milliseconds. Returns `None` on garbage or
+/// a non-positive result, so the caller falls back to a default.
+pub fn parse_ttl_ms(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult) = if let Some(n) = s.strip_suffix('h') {
+        (n, 3_600_000)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60_000)
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n, 1_000)
+    } else {
+        (s, 1_000) // bare number = seconds
+    };
+    num.trim()
+        .parse::<i64>()
+        .ok()
+        .map(|v| v.saturating_mul(mult))
+        .filter(|v| *v > 0)
+}
+
+/// Best-effort lease renewal (x-ba4b): reset a live TTL claim's `expires_at` to
+/// `now + ttl_ms`, but ONLY if the on-disk holder still matches `holder`.
+/// `fno-agents loop-check` calls this on every stop with the manifest's own
+/// TTL, so a respawned worker (whose supervisor pid died) keeps its claim fresh
+/// under any pid with no separate heartbeat.
+///
+/// The deadline is `now + ttl_ms` (a FIXED window, never a growing span): using
+/// the claim's `expires_at - acquired_at` would compound, because `acquired_at`
+/// is preserved while `expires_at` moves forward, leaving a dead session's claim
+/// over-extended for hours. Only `expires_at` changes — `acquired_at`, `pid`,
+/// `host`, `reason`, `metadata` are preserved, so PID-reuse detection is intact.
+///
+/// The whole mutate runs under the SAME per-claim recovery mutex `acquire` uses
+/// for stale recovery, and re-reads inside the lock, so a renew can never clobber
+/// a peer's concurrent stale-reclaim. An already-expired claim is NOT renewed
+/// (it is reclaimable; resurrecting it would race a legitimate recovery).
+///
+/// Returns `Ok(true)` when renewed, `Ok(false)` on a benign no-op (missing /
+/// gone / corrupted / held-by-other / PID-liveness / already-expired claim, or a
+/// peer holding the recovery mutex), and `Err(_)` only on a real write failure.
+pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Result<bool, String> {
+    if key.is_empty() || holder.is_empty() {
+        return Err("key and holder must be non-empty".into());
+    }
+    if ttl_ms <= 0 {
+        return Err("ttl_ms must be positive".into());
+    }
+    let path = claim_path(key, root)?;
+    // Cheap pre-check outside the mutex: skip the lock for the common
+    // not-ours/absent/PID-liveness cases so idle stops stay lock-free.
+    match read_claim_file(&path) {
+        Ok(rec) if rec.holder == holder && rec.expires_at.is_some() => {}
+        Ok(_) => return Ok(false),
+        Err(ReadError::GoneAway) => return Ok(false),
+        Err(ReadError::Corrupted(_)) => return Ok(false),
+    }
+    let recovery_lock = path.with_file_name(format!(
+        "{}.recovery.d",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    // A peer holding the mutex is mid-reclaim; back off (best-effort) rather
+    // than race it. A missed renewal only shortens the lease.
+    if std::fs::create_dir(&recovery_lock).is_err() {
+        return Ok(false);
+    }
+    let result = renew_locked(&path, holder, ttl_ms);
+    let _ = std::fs::remove_dir(&recovery_lock);
+    result
+}
+
+/// Critical section of [`renew`]: re-read under the mutex (the holder may have
+/// changed while we grabbed it), then extend only a still-live, still-ours claim.
+fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> {
+    let mut existing = match read_claim_file(path) {
+        Ok(rec) => rec,
+        Err(ReadError::GoneAway) => return Ok(false),
+        Err(ReadError::Corrupted(_)) => return Ok(false),
+    };
+    if existing.holder != holder {
+        return Ok(false); // a peer reclaimed it while we took the lock
+    }
+    if existing.expires_at.is_none() {
+        return Ok(false); // PID-liveness claim: no TTL to extend
+    }
+    if is_expired(&existing, now_ms()) {
+        return Ok(false); // reclaimable already; do not resurrect + race recovery
+    }
+    existing.expires_at = Some(now_ms() + ttl_ms);
+    let payload = serialize_claim(&existing)?;
+    atomic_replace(path, &payload)?;
+    Ok(true)
+}
+
 /// Process-global lock serializing every test (in ANY module) that mutates
 /// `FNO_CLAIMS_ROOT` / `PATH` / `FNO_BIN`. Env vars are process-global and the
 /// crate test suite runs multithreaded, so a per-module lock lets a daemon test
@@ -1004,6 +1131,141 @@ mod tests {
         text.lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
+    }
+
+    // ---- lease renewal (x-ba4b) -----------------------------------------
+
+    fn read_claim(root: &TempDir, key: &str) -> ClaimRecord {
+        read_claim_file(&lockfile(root, key)).unwrap()
+    }
+
+    #[test]
+    fn parse_ttl_ms_matches_python_units() {
+        // BARE digits are SECONDS (parity with Python _parse_ttl / sleep).
+        assert_eq!(parse_ttl_ms("2h"), Some(7_200_000));
+        assert_eq!(parse_ttl_ms("30m"), Some(1_800_000));
+        assert_eq!(parse_ttl_ms("3600s"), Some(3_600_000));
+        assert_eq!(parse_ttl_ms("120"), Some(120_000)); // 120 seconds, not ms
+        assert_eq!(parse_ttl_ms("  1h "), Some(3_600_000));
+        assert_eq!(parse_ttl_ms(""), None);
+        assert_eq!(parse_ttl_ms("abc"), None);
+        assert_eq!(parse_ttl_ms("0"), None); // non-positive rejected
+    }
+
+    #[test]
+    fn renew_resets_deadline_to_now_plus_ttl_and_preserves_acquired_at() {
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        match acquire("node:x-renew", "target-session:me", o) {
+            AcquireOutcome::Acquired(_) => {}
+            other => panic!("{other:?}"),
+        };
+        let before = read_claim(&td, "node:x-renew").expires_at.unwrap();
+        let acquired_at = read_claim(&td, "node:x-renew").acquired_at;
+        std::thread::sleep(Duration::from_millis(2));
+        let t0 = now_ms();
+        assert_eq!(
+            renew(
+                "node:x-renew",
+                "target-session:me",
+                120_000,
+                Some(td.path())
+            ),
+            Ok(true)
+        );
+        let after = read_claim(&td, "node:x-renew");
+        let exp = after.expires_at.unwrap();
+        // Deadline is now + ttl (a FIXED window), strictly later than before.
+        assert!(exp > before, "before={before} after={exp}");
+        assert!(
+            (exp - (t0 + 120_000)).abs() < 1_000,
+            "deadline must be ~now+ttl, got {exp} vs {}",
+            t0 + 120_000
+        );
+        assert_eq!(after.acquired_at, acquired_at, "acquired_at preserved");
+    }
+
+    #[test]
+    fn renew_deadline_does_not_grow_across_repeated_renewals() {
+        // Regression for the span-growth bug (codex P1): renewing N times must
+        // NOT compound the window. Each renewal pins expires_at to now+ttl.
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        let _ = acquire("node:x-grow", "target-session:me", o);
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(2));
+            assert_eq!(
+                renew("node:x-grow", "target-session:me", 120_000, Some(td.path())),
+                Ok(true)
+            );
+        }
+        let exp = read_claim(&td, "node:x-grow").expires_at.unwrap();
+        // After 5 renewals the deadline is still ~now+120s, NOT now+(5*elapsed)+120s.
+        assert!(
+            exp - now_ms() < 121_000,
+            "deadline grew across renewals: {}ms out",
+            exp - now_ms()
+        );
+    }
+
+    #[test]
+    fn renew_is_noop_for_wrong_holder() {
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        let _ = acquire("node:x-other", "target-session:owner", o);
+        let before = read_claim(&td, "node:x-other").expires_at.unwrap();
+        // A peer must never extend a claim it does not hold.
+        assert_eq!(
+            renew(
+                "node:x-other",
+                "target-session:intruder",
+                120_000,
+                Some(td.path())
+            ),
+            Ok(false)
+        );
+        assert_eq!(read_claim(&td, "node:x-other").expires_at.unwrap(), before);
+    }
+
+    #[test]
+    fn renew_is_noop_for_expired_pid_liveness_and_missing_claim() {
+        let td = TempDir::new().unwrap();
+        // Missing claim -> Ok(false).
+        assert_eq!(
+            renew("node:x-absent", "h", 120_000, Some(td.path())),
+            Ok(false)
+        );
+        // PID-liveness claim (no ttl_ms) has no expires_at to extend -> Ok(false).
+        let _ = acquire("session:pidonly", "h", opts_in(&td));
+        assert!(read_claim(&td, "session:pidonly").expires_at.is_none());
+        assert_eq!(
+            renew("session:pidonly", "h", 120_000, Some(td.path())),
+            Ok(false)
+        );
+        // An already-expired claim is NOT resurrected (it is reclaimable).
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(60_000);
+        let _ = acquire("node:x-expired", "target-session:me", o);
+        // Hand-write an expired deadline for our own claim.
+        let mut rec = read_claim(&td, "node:x-expired");
+        rec.expires_at = Some(now_ms() - 1);
+        atomic_replace(
+            &lockfile(&td, "node:x-expired"),
+            &serialize_claim(&rec).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            renew(
+                "node:x-expired",
+                "target-session:me",
+                60_000,
+                Some(td.path())
+            ),
+            Ok(false)
+        );
     }
 
     // ---- encoding parity (contract item 1) ------------------------------
@@ -1192,10 +1454,25 @@ mod tests {
             classify(&record(me, now, None, "elsewhere.example"), Some(now)),
             ClaimState::Stale
         );
-        // Unexpired TTL is live regardless of pid.
+        // Unexpired TTL + LIVE pid -> LIVE.
+        assert_eq!(
+            classify(&record(me, now, Some(now + 60_000), &host), Some(now)),
+            ClaimState::Live
+        );
+        // SUSPECT arm (x-ba4b): unexpired TTL + dead/replaced pid -> SUSPECT
+        // (was LIVE). A respawned worker's slot stays TTL-protected, but the
+        // distinct state lets init/dispatch refuse-and-skip rather than steal.
         assert_eq!(
             classify(&record(-1, now, Some(now + 60_000), &host), Some(now)),
-            ClaimState::Live
+            ClaimState::Suspect
+        );
+        // SUSPECT is off-host too: unexpired TTL but a foreign host pid.
+        assert_eq!(
+            classify(
+                &record(me, now, Some(now + 60_000), "elsewhere.example"),
+                Some(now)
+            ),
+            ClaimState::Suspect
         );
         // HYBRID arm: expired TTL + live recorded pid -> LIVE.
         assert_eq!(

@@ -148,7 +148,9 @@ class ClaimAdapter:
         """
         try:
             info = claim_status(f"node:{node_id}")
-            return info.get("state") == "live"
+            # live OR suspect (x-ba4b): a suspect claim (TTL-unexpired, dead pid)
+            # is a respawned worker's slot - treat as occupied, never re-dispatch.
+            return info.get("state") in ("live", "suspect")
         except Exception as exc:
             log.warning(
                 "pr-watch: claim_status failed for node %s (%s); treating as live (fail-safe)",

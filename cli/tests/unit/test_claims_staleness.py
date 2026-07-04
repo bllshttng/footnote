@@ -164,14 +164,33 @@ def test_classify_stale_ttl_expired_remote_host():
     assert classify(claim) == ClaimState.STALE
 
 
-def test_classify_live_ttl_unexpired_regardless_of_pid():
-    """AC4-ERR: an unexpired TTL claim is LIVE even if the PID is dead -
-    the TTL is the contract within the window, not PID-liveness."""
+def test_classify_live_ttl_unexpired_with_live_pid():
+    """Unexpired TTL + live pid -> LIVE (the normal in-window case)."""
+    claim = _live_claim(expires_at=now_ms() + 60_000)  # live pid via _live_claim
+    assert classify(claim) == ClaimState.LIVE
+
+
+def test_classify_suspect_ttl_unexpired_dead_pid():
+    """SUSPECT arm (x-ba4b): unexpired TTL + dead pid -> SUSPECT, not LIVE.
+
+    The respawned-worker case: the supervisor pid died but the session lives on
+    inside its TTL window. Before x-ba4b this returned LIVE; now the distinct
+    SUSPECT state lets init/dispatch refuse-and-skip (never steal) while the TTL
+    still protects the slot. Only TTL expiry (-> STALE) frees it."""
     dead_pid = 999_999
     while psutil.pid_exists(dead_pid):
         dead_pid += 1
     claim = _live_claim(pid=dead_pid, expires_at=now_ms() + 60_000)
-    assert classify(claim) == ClaimState.LIVE
+    assert classify(claim) == ClaimState.SUSPECT
+
+
+def test_classify_suspect_ttl_unexpired_remote_host():
+    """Unexpired TTL on another host -> SUSPECT: same-host pid arm can't prove
+    liveness, but the TTL still protects the slot (not stealable, not stale)."""
+    claim = _live_claim(
+        host="some-other-host-that-does-not-exist", expires_at=now_ms() + 60_000
+    )
+    assert classify(claim) == ClaimState.SUSPECT
 
 
 # ---------------------------------------------------------------------------

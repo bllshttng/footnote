@@ -118,6 +118,34 @@ def test_corrupted_claim_verdict_no_reservation(claims_tmp):
     assert claim_status("dispatch:x-dddd")["state"] == "free"
 
 
+# --- x-ba4b: suspect claim -> skip-not-steal ---------------------------------
+
+
+def test_suspect_claim_already_running_no_reservation(claims_tmp):
+    """A TTL-unexpired claim with a dead pid (respawned worker) reads suspect;
+    spawn-guard must report already-running/reason=suspect-claim and take NO
+    reservation, so the dispatcher maps it to skipped-contested and never steals."""
+    import psutil
+
+    dead_pid = 999_999
+    while psutil.pid_exists(dead_pid):
+        dead_pid += 1
+    # TTL unexpired + dead pid -> classify() == suspect.
+    acquire_claim(
+        "node:x-9999", "target-session:respawned", pid=dead_pid, ttl_ms=180_000
+    )
+    assert claim_status("node:x-9999")["state"] == "suspect"
+
+    res = _invoke("x-9999", "--holder", "dispatch-node:333", "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["verdict"] == "already-running"
+    assert obj["reason"] == "suspect-claim"
+    assert obj["holder"] == "target-session:respawned"
+    # No reservation was taken - the node stays for the live worker.
+    assert claim_status("dispatch:x-9999")["state"] == "free"
+
+
 # --- AC2-EDGE: racing dispatcher serializes ----------------------------------
 
 

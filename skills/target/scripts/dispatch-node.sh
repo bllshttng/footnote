@@ -18,14 +18,15 @@
 #   main so a dispatch from a linked worktree does not inherit that worktree.
 #
 # Per-node outcome lines (stdout; one per node; NEVER silent):
-#   launched        <node> name=<agent> session=<sid> hint="fno agents logs <agent>"
-#   already-running <node> reason="live target worker holds node:<id> (<holder>)"
-#   parked          <node> reason="blocked|deferred|<status> (not up-next)"
-#   skipped-done    <node> reason="already done|superseded"
-#   failed          <node> reason="<why>"
-#   deferred-cap    <node> reason="--max <N> reached"
+#   launched         <node> name=<agent> session=<sid> hint="fno agents logs <agent>"
+#   already-running  <node> reason="live target worker holds node:<id> (<holder>)"
+#   skipped-contested <node> reason="suspect claim (respawned worker); advancing" (x-ba4b)
+#   parked           <node> reason="blocked|deferred|<status> (not up-next)"
+#   skipped-done     <node> reason="already done|superseded"
+#   failed           <node> reason="<why>"
+#   deferred-cap     <node> reason="--max <N> reached"
 # Summary (last line):
-#   summary: launched=<n> parked=<n> already=<n> done=<n> failed=<n> capped=<n>[ nothing-up-next]
+#   summary: launched=<n> parked=<n> already=<n> skipped=<n> done=<n> failed=<n> capped=<n>[ nothing-up-next]
 #
 # Invariants (Failure Modes section of the plan):
 #   - The bg worker is ALWAYS dispatched via
@@ -45,8 +46,8 @@
 set -uo pipefail
 
 # ---- deps -------------------------------------------------------------------
-command -v fno >/dev/null 2>&1 || { echo "failed: - reason=\"fno not on PATH\"" >&2; echo "summary: launched=0 parked=0 already=0 done=0 failed=1 capped=0"; exit 1; }
-command -v jq  >/dev/null 2>&1 || { echo "failed: - reason=\"jq not on PATH\""  >&2; echo "summary: launched=0 parked=0 already=0 done=0 failed=1 capped=0"; exit 1; }
+command -v fno >/dev/null 2>&1 || { echo "failed: - reason=\"fno not on PATH\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 1; }
+command -v jq  >/dev/null 2>&1 || { echo "failed: - reason=\"jq not on PATH\""  >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 1; }
 
 # Canonical MAIN checkout for deterministic --fresh isolation (x-73ca). The
 # git-common-dir's parent is the main checkout even when the dispatcher runs
@@ -93,7 +94,7 @@ if [[ "$ALL_READY" -eq 1 ]]; then
   ready_json="$(fno backlog ready 2>/dev/null)"; ready_rc=$?
   if [[ "$ready_rc" -ne 0 ]]; then
     echo "failed --all-ready reason=\"fno backlog ready exited $ready_rc; not treating as an empty backlog\""
-    echo "summary: launched=0 parked=0 already=0 done=0 failed=1 capped=0"
+    echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"
     exit 1
   fi
   # bash 3.2 (macOS) has no `mapfile`. Capture the ids into a var, then iterate
@@ -107,7 +108,7 @@ if [[ "$ALL_READY" -eq 1 ]]; then
 fi
 
 if [[ "${#NODES[@]}" -eq 0 ]]; then
-  echo "summary: launched=0 parked=0 already=0 done=0 failed=0 capped=0 nothing-up-next"
+  echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=0 capped=0 nothing-up-next"
   exit 0
 fi
 
@@ -116,7 +117,7 @@ if [[ "$ALL_READY" -eq 1 ]]; then
 fi
 
 # ---- per-node dispatch ------------------------------------------------------
-n_launched=0; n_parked=0; n_already=0; n_done=0; n_failed=0; n_capped=0
+n_launched=0; n_parked=0; n_already=0; n_skipped=0; n_done=0; n_failed=0; n_capped=0
 
 for id in "${NODES[@]}"; do
   # --max soft cap: once reached, report the remainder rather than dropping silently.
@@ -232,10 +233,18 @@ for id in "${NODES[@]}"; do
       if [[ "$reason" == "live-claim" ]]; then
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
         echo "already-running $id reason=\"live target worker holds node:$id ($holder)\""
+        n_already=$((n_already + 1))
+      elif [[ "$reason" == "suspect-claim" ]]; then
+        # x-ba4b: TTL-unexpired dead-pid claim (a respawned worker). Contested
+        # liveness degrades to SKIP, never steal and never park the lane -
+        # advance to the next unblocked ready node.
+        holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null || true)"
+        echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
+        n_skipped=$((n_skipped + 1))
       else
         echo "already-running $id reason=\"a peer dispatcher holds $res_key (racing launch)\""
+        n_already=$((n_already + 1))
       fi
-      n_already=$((n_already + 1))
       continue ;;
     corrupted)
       # The worker's init-side `fno claim acquire` cannot reclaim a corrupted
@@ -416,7 +425,7 @@ for id in "${NODES[@]}"; do
   n_launched=$((n_launched + 1))
 done
 
-echo "summary: launched=$n_launched parked=$n_parked already=$n_already done=$n_done failed=$n_failed capped=$n_capped"
+echo "summary: launched=$n_launched parked=$n_parked already=$n_already skipped=$n_skipped done=$n_done failed=$n_failed capped=$n_capped"
 # Exit non-zero only when nothing launched AND at least one hard failure, so a
 # caller can detect a total dispatch failure while a mixed batch still exits 0.
 if [[ "$n_launched" -eq 0 && "$n_failed" -gt 0 ]]; then

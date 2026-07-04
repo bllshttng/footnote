@@ -457,6 +457,64 @@ if ! _init_acquire_lock; then
 fi
 trap _init_release_lock EXIT
 
+# ── Contested-liveness activity probe (x-ba4b) ───────────────────────
+# The steal guard for the stale-session archive below. A free/stale node claim
+# is NOT sufficient to archive a prior manifest and reclaim: the observed bug
+# (x-e780) was a live session working under a dead supervisor pid whose claim
+# read non-live, then got archived+stolen. This probe asks the second question:
+# does the worktree show FRESH activity? Newest mtime among git-tracked-modified
+# files + the .fno/scratchpad tree (a live /target writes there continuously).
+# Within the window => a live session is here => refuse (contested), never steal.
+# Sets _ACTIVITY_EVIDENCE for the BLOCKED message; returns 0 iff fresh.
+# Window default 15m; override via TARGET_CLAIM_ACTIVITY_WINDOW or, when wired,
+# config.claims.activity_window.
+# NOTE: mtime is the ONLY signal on purpose - "a process cwd'd in the worktree"
+# is unusable here because init's OWN parent (the target session) is legitimately
+# cwd'd in the worktree, so it would false-positive on every run and strand
+# genuinely-dead nodes. mtime measures actual work, not mere presence.
+# Validate the env override is a bare integer (seconds); a non-numeric value
+# like "15m" or "abc" must NOT reach the `(( now - newest < window ))` arithmetic
+# (it would abort under set -u). Fall through to config, then the 900s default.
+_ACTIVITY_WINDOW="${TARGET_CLAIM_ACTIVITY_WINDOW:-}"
+if ! [[ "$_ACTIVITY_WINDOW" =~ ^[0-9]+$ ]]; then
+  _cfg_win="$(fno config get config.claims.activity_window 2>/dev/null || true)"
+  if [[ "$_cfg_win" =~ ^[0-9]+$ ]]; then _ACTIVITY_WINDOW="$_cfg_win"; else _ACTIVITY_WINDOW=900; fi
+  unset _cfg_win
+fi
+_ACTIVITY_EVIDENCE=""
+
+_stat_mtime() {  # portable epoch-seconds mtime; 0 if absent/unreadable
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+}
+
+_worktree_has_fresh_activity() {
+  local root="$1" window="$2" now newest=0 mt f
+  now="$(date -u +%s)"
+  # git-tracked files modified vs HEAD (staged + unstaged).
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    [[ -e "$root/$f" ]] || continue
+    mt="$(_stat_mtime "$root/$f")"
+    if (( mt > newest )); then newest="$mt"; _ACTIVITY_EVIDENCE="modified $f"; fi
+  done < <(git -C "$root" diff --name-only HEAD 2>/dev/null || true)
+  # scratchpad tree - a live /target session writes here continuously.
+  if [[ -d "$root/.fno/scratchpad" ]]; then
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      mt="$(_stat_mtime "$f")"
+      if (( mt > newest )); then newest="$mt"; _ACTIVITY_EVIDENCE="scratchpad ${f##*/}"; fi
+    done < <(find "$root/.fno/scratchpad" -type f 2>/dev/null || true)
+  fi
+  # AC1-EDGE: borderline mtimes err toward "fresh" (skip is cheap, steal is not)
+  # via strict `<` against the window, and clock skew that makes a file appear in
+  # the future (mt > now) yields a negative age that also trips the guard.
+  if (( newest > 0 )) && (( now - newest < window )); then
+    _ACTIVITY_EVIDENCE="$_ACTIVITY_EVIDENCE ($(( now - newest ))s ago, window ${window}s)"
+    return 0
+  fi
+  return 1
+}
+
 # ── Stale-session archive ────────────────────────────────────────────
 # Archive a prior session's manifest so the fresh-init branch runs cleanly.
 # Two orphan signals, checked in order:
@@ -487,13 +545,39 @@ if [[ -f "$STATE_FILE" ]]; then
     COMPLETE|BLOCKED|ABORTED) _STALE_REASON="status $_STALE_STATUS" ;;
   esac
   if [[ -z "$_STALE_REASON" && -n "$_STALE_CLAIM_KEY" ]]; then
-    # `fno claim status --json` is single-line; parse `state` and reap only on a
-    # definitively-not-live verdict. Empty (error/unparseable) -> do NOT reap.
+    # `fno claim status --json` is single-line; parse `state`. The reap decision
+    # is now two-factor (x-ba4b), because a not-live claim ALONE is not proof the
+    # slot is abandoned - the bug (x-e780) was a live session under a dead pid:
+    #   live | suspect -> preserve. The claim is protected (suspect = TTL-
+    #     unexpired dead pid, a respawned worker); never archive+steal.
+    #   "" (error/unparseable) -> preserve (degrade-safe; do NOT reap on a bad
+    #     probe, exactly as before).
+    #   free | stale | corrupted -> a reap CANDIDATE, but only when the worktree
+    #     shows NO fresh activity. Fresh activity => a live session is working
+    #     here; refuse as `contested` (the claim-wait BLOCKED contract: the
+    #     caller relays REASON/UNBLOCKS_AFTER and stops) rather than steal.
     _CLAIM_STATE=$(fno claim status "$_STALE_CLAIM_KEY" --json 2>/dev/null \
       | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' || true)
-    if [[ -n "$_CLAIM_STATE" && "$_CLAIM_STATE" != "live" ]]; then
-      _STALE_REASON="dead claim $_STALE_CLAIM_KEY ($_CLAIM_STATE)"
-    fi
+    case "${_CLAIM_STATE:-}" in
+      free|stale|corrupted)
+        # Reap CANDIDATE, gated on activity below.
+        if _worktree_has_fresh_activity "$REPO_ROOT" "$_ACTIVITY_WINDOW"; then
+          # Contested: a live session owns this worktree despite a
+          # $_CLAIM_STATE claim. Emit the BLOCKED contract and STOP - never
+          # archive a live session's manifest, never reclaim its node.
+          _NODE_ID="${_STALE_CLAIM_KEY#node:}"
+          echo "RESULT: BLOCKED" >&1
+          echo "TASK: ${TARGET_INPUT:-unknown}" >&1
+          echo "REASON: contested - $_STALE_CLAIM_KEY reads '$_CLAIM_STATE' but the worktree shows fresh activity (${_ACTIVITY_EVIDENCE}); refusing to archive a live session's manifest and steal its node" >&1
+          echo "UNBLOCKS_AFTER: the live session releases $_STALE_CLAIM_KEY or its worktree activity ages past ${_ACTIVITY_WINDOW}s" >&1
+          exit 0
+        fi
+        _STALE_REASON="dead claim $_STALE_CLAIM_KEY ($_CLAIM_STATE); no fresh worktree activity" ;;
+      *)
+        # "" (probe error) | live | suspect | any UNKNOWN/future state -> preserve
+        # (degrade-safe: only a KNOWN not-live state is ever a reap candidate).
+        : ;;
+    esac
   fi
   if [[ -n "$_STALE_REASON" ]]; then
     _ARCHIVE_PATH="$STATE_DIR/target-state.terminal.$(date -u +%Y%m%dT%H%M%SZ).md"
