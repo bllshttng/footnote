@@ -479,10 +479,6 @@ def _ledger_md() -> Path:
     return _ledger_json().with_suffix(".md")
 
 
-_OLD_TASKS_PATH = Path.home() / ".fno" / "tasks.json"
-_OLD_TASKS_MD = Path.home() / ".fno" / "tasks.md"
-
-
 def render_tasks_md(entries: list[dict]) -> str:
     """Render tasks.json entries as a human-readable markdown file."""
     lines = [

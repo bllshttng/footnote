@@ -136,7 +136,7 @@ Bug in plan → fix inline, note in SUMMARY.md. Minor enhancement (<15 min) → 
 - **Self-containment (CI-enforced):** driver skills (`/target`, `/megawalk`) must be portable — no `${REPO_ROOT}/scripts/` refs, no `../../scripts/` or `../../<sibling>/` path escapes, no runtime `Skill()` calls between drivers. Cross-skill reuse happens at BUILD TIME via `skill-bundles.yaml` + `fno bundle` (`fno bundle check` gates freshness).
 - **Context forking:** `/pr create` runs forked on Haiku (mechanical PR-description generation) to preserve main context.
 - **TDD:** write failing test → red → minimal code → green → verify state → atomic commit.
-- **Testing:** `python skills/do/orchestrator.py --help`; `./scripts/validate-test-first.sh`; `./scripts/metrics/analyze.sh`.
+- **Testing:** `python skills/do/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
 
 ## Plugin installation
 

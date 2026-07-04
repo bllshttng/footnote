@@ -536,14 +536,10 @@ Utility scripts in `scripts/`.
 |--------|---------|
 | `validate-test-first.sh` | Validates TDD discipline in commits |
 | `run-target-loop.sh` | Cross-session external loop runner |
-| `metrics/analyze.sh` | Subagent cost and performance analysis |
 
 ```bash
 # Validate test-first discipline
 ./scripts/validate-test-first.sh
-
-# Analyze subagent metrics
-./scripts/metrics/analyze.sh
 ```
 
 ---

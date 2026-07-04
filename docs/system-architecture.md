@@ -72,7 +72,7 @@ graph TB
     subgraph "Scripts Layer"
         VAL["Validation<br/>validate-plan.sh<br/>validate-test-first.sh<br/>validate-roadmap.sh<br/>scan-antipatterns.sh"]
         ORC["Orchestration<br/>orchestrator.py<br/>run-target-loop.sh"]
-        MET["Metrics<br/>analyze.sh<br/>cost-tracker.sh<br/>register-task.py"]
+        MET["Metrics<br/>cost-tracker.sh<br/>register-task.py"]
     end
 
     CMD --> WF
