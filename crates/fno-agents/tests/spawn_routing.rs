@@ -849,7 +849,9 @@ fn client_spawn_substrate_headless_opencode_hard_errors() {
     let home_dir = tmpdir("cli-spawn-headless-opencode-home");
     let bin = find_client_bin();
     if !bin.exists() {
-        eprintln!("skipping client_spawn_substrate_headless_opencode_hard_errors: binary not found");
+        eprintln!(
+            "skipping client_spawn_substrate_headless_opencode_hard_errors: binary not found"
+        );
         return;
     }
 
