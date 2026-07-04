@@ -589,7 +589,7 @@ fn pid_alive(pid: u32) -> bool {
 /// Resolve the `fno` binary: `$FNO_BIN`, else the running executable itself (the
 /// mux server IS the `fno` binary - it forwards non-native verbs like `dispatch`
 /// to Python), else bare `fno` on PATH.
-fn fno_bin() -> PathBuf {
+pub(crate) fn fno_bin() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_BIN") {
         return PathBuf::from(v);
     }

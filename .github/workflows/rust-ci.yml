@@ -131,13 +131,28 @@ jobs:
 
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
-        run: cargo build --bin fno-agents
+        # Force a fresh fno-agents build. This job's Cargo cache key is keyed
+        # only on Cargo.lock, so a source-only KNOWN_EVENT_KINDS change (which
+        # does not touch Cargo.lock) restores a stale target/ that cargo's mtime
+        # fingerprint treats as fresh - serving an outdated --emit-schema to the
+        # parity check below and reporting phantom kind drift. `clean -p` drops
+        # only fno-agents' own artifacts; every dependency stays cached.
+        run: |
+          cargo clean -p fno-agents
+          cargo build --bin fno-agents
 
       - name: Schema parity check
-        # The binary is now on disk; the parity script picks it up from
-        # crates/fno-agents/target/debug/fno-agents. Python runs from the
-        # cli/.venv created by uv sync above.
-        run: bash scripts/check-event-schema-parity.sh
+        # The parity script resolves the Rust binary via `command -v fno-agents`
+        # FIRST, only then the fresh crates/fno-agents/target/debug build. If any
+        # stale fno-agents shadows PATH, the freshly-built one is ignored and the
+        # check reads an outdated --emit-schema (phantom kind drift). Prepend the
+        # fresh build dir so `command -v` resolves it, and print a diagnostic of
+        # the resolved binary + its emitted kind count for future triage.
+        run: |
+          export PATH="$PWD/crates/fno-agents/target/debug:$PATH"
+          echo "parity-diag: resolved fno-agents = $(command -v fno-agents || echo NONE)"
+          echo "parity-diag: emits newest kind (inside_leg_completed) = $(fno-agents --emit-schema 2>/dev/null | grep -c inside_leg_completed) (fresh=1, stale=0)"
+          bash scripts/check-event-schema-parity.sh
 
       - name: Registry schema parity check (ab-0baecaed)
         # Cross-language schema_version lockstep: catches a Rust-only bump of
