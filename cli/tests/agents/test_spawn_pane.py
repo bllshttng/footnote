@@ -236,12 +236,52 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     # x-51f6 US2: bare `opencode` is the TUI; the message rides --prompt (the
     # positional is a PROJECT PATH, not a prompt), --auto only under yolo,
     # and never the headless `run` subcommand.
+    # x-c772: opencode is always launched with a model (the z-ai/glm-5.2 default).
     opencode = build_pane_argv("opencode", "task", tmp_path, False, "ignored")
-    assert opencode == ["opencode", "--prompt", "task"]
-    assert build_pane_argv("opencode", "", tmp_path, False, None) == ["opencode"]
+    assert opencode == ["opencode", "--prompt", "task", "--model", "z-ai/glm-5.2"]
+    assert build_pane_argv("opencode", "", tmp_path, False, None) == [
+        "opencode",
+        "--model",
+        "z-ai/glm-5.2",
+    ]
     opencode_yolo = build_pane_argv("opencode", "task", tmp_path, True, None)
-    assert opencode_yolo == ["opencode", "--prompt", "task", "--auto"]
+    assert opencode_yolo == [
+        "opencode",
+        "--prompt",
+        "task",
+        "--model",
+        "z-ai/glm-5.2",
+        "--auto",
+    ]
     assert "run" not in opencode and "--session-id" not in opencode
+
+
+def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
+    # x-c772: an explicit --model reaches every pane provider's TUI flag
+    # (opencode included, now that it is spawnable). Exact passthrough; opencode
+    # uses the provider/model form and always carries a model (z-ai/glm-5.2 default).
+    from fno.agents.mux_spawn import _OPENCODE_DEFAULT_MODEL, build_pane_argv
+
+    cases = [
+        ("claude", "u", "opus"),
+        ("codex", None, "gpt-5.5"),
+        ("gemini", None, "gemini-3-pro"),
+        ("agy", None, "some-model"),
+        ("opencode", None, "anthropic/claude-opus-4-8"),
+    ]
+    for provider, sid, model in cases:
+        argv = build_pane_argv(provider, "t", tmp_path, False, sid, model)
+        assert argv[argv.index("--model") + 1] == model, provider
+
+    # claude/codex/gemini/agy: None/empty model -> no --model flag.
+    for p in ("claude", "codex", "gemini", "agy"):
+        assert "--model" not in build_pane_argv(p, "t", tmp_path, False, None, None)
+        assert "--model" not in build_pane_argv(p, "t", tmp_path, False, None, "")
+
+    # opencode ALWAYS carries a model: None/empty falls back to the default.
+    for m in (None, ""):
+        argv = build_pane_argv("opencode", "t", tmp_path, False, None, m)
+        assert argv[argv.index("--model") + 1] == _OPENCODE_DEFAULT_MODEL
 
 
 def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) -> None:

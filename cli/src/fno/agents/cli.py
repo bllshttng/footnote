@@ -357,9 +357,11 @@ def cmd_spawn(
     model: str | None = typer.Option(
         None, "--model", "-m",
         help=(
-            "Model to run the worker on. Forwarded as --model <m> to the "
-            "provider CLI (claude --bg/-p, codex exec, gemini, agy); exact "
-            "passthrough, no fuzzy resolution. Unset = provider default."
+            "Model for the worker, forwarded as --model <m> to the provider's "
+            "own CLI (exact passthrough, no fuzzy resolution). On the default "
+            "pane substrate every provider honors it (claude/codex/gemini/agy/"
+            "opencode); on --substrate bg/headless it reaches claude and agy. "
+            "Unset = provider default; opencode defaults to z-ai/glm-5.2."
         ),
     ),
     node: str | None = typer.Option(
@@ -431,6 +433,7 @@ def cmd_spawn(
                 cwd=workdir,
                 yolo=yolo,
                 role=role,
+                model=model,
                 provenance=resolve_provenance(node, slug, plan),
             )
         except DispatchAskError as exc:
