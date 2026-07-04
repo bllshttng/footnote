@@ -85,6 +85,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "done":          ("fno.done.cli:done_command",         "Mark a backlog node as done."),
     "find":          ("fno.graph.cli:cmd_find",            "Fuzzy search across graph entries."),
     "research":      ("fno.research:research_command",     "Retrieve + store: ddgs backbone -> self-fetch -> sources.jsonl."),
+    "scoreboard":    ("fno.scoreboard.cli:scoreboard_command", "Read-only telemetry: stop-cause, spend, autonomy, survival, coverage."),
     "new":           ("fno.graph.cli:cmd_new",             "Create a new graph entry without a plan file."),
     "test":          ("fno.test_cmd:test_command",         "Run pytest honestly: worktree-pinned PYTHONPATH, rtk-bypassed, real exit code."),
     "update":        ("fno.update:update_command",         "Reinstall fno from its source directory."),
