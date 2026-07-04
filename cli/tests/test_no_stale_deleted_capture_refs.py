@@ -23,9 +23,16 @@ SCAN_DIRS = ["cli/src/fno", "scripts", "hooks", "crates"]
 # disposition table (they are its DELETE_TARGETS), and cli/src/fno/doctor.py
 # names them in its orphan-file detector - both are the janitor doing its
 # job, not a stale reference.
+#
+# cli/src/fno/cost/_session_cost.py keeps "tasks.json"/"tasks.md" in its own
+# docstrings and --help text: those describe the (unrenamed) function family
+# render_tasks_md()/backfill_tasks_json(), which already routes through
+# paths.ledger_json() internally (ab-58645f63) - renaming the functions
+# themselves is a separate refactor, out of scope for this GC pass.
 ALLOWLIST_FILES = {
     "scripts/prune-fno-dir.sh",
     "cli/src/fno/doctor.py",
+    "cli/src/fno/cost/_session_cost.py",
 }
 
 _DELETED_REFS_RE = re.compile(
@@ -36,6 +43,8 @@ _DELETED_REFS_RE = re.compile(
     r"|evals-history\.jsonl"
     r"|metrics/analyze\.sh"
     r"|\bmetrics\.jsonl\b"
+    r"|\btasks\.json\b"
+    r"|\btasks\.md\b"
 )
 
 
@@ -57,7 +66,9 @@ def _is_test_or_historical(rel: str) -> bool:
 
 
 def _iter_source_lines():
-    exts = {".py", ".sh", ".rs", ".bash"}
+    # .json is included so a hook re-registration (hooks/hooks.json) would be
+    # caught, not just the .sh hook script itself.
+    exts = {".py", ".sh", ".rs", ".bash", ".json"}
     for d in SCAN_DIRS:
         base = REPO_ROOT / d
         if not base.exists():

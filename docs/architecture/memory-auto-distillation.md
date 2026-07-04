@@ -1,5 +1,11 @@
 # Memory auto-distillation
 
+> **Historical.** `distill-session.sh` was deprecated to a stub (see
+> `memory-system.md`'s "Why we deprecated Haiku distillation") and
+> `convo-signals.jsonl` has since been removed entirely (zero readers).
+> This page describes a pipeline that no longer runs; kept for context on
+> why the two-checkpoint main-thread memory pass replaced it.
+
 ## What it does
 
 When a target session ends with `status: COMPLETE`, the stop hook fires

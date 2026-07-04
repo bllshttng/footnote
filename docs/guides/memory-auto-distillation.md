@@ -1,5 +1,10 @@
 # Auto-distilled memory: how-to
 
+> **Historical.** This Haiku-distillation pipeline was deprecated (see
+> `docs/architecture/memory-system.md`) and its `convo-signals.jsonl`
+> input has since been removed entirely. Memory is now written by a
+> two-checkpoint main-thread pass instead; kept for context.
+
 When a `/target` session ends with `<promise>MISSION COMPLETE: ...</promise>`,
 footnote now auto-distills the session into memory entries without you
 asking.

@@ -145,8 +145,6 @@ link_file ".fno/settings.yaml"
 # link_file for it here - a link would re-share exactly the keys it exists to
 # diverge. Absent by default (= shared behavior); seed one only when a worktree
 # needs its own value.
-link_file ".fno/tasks.json"
-link_file ".fno/tasks.md"
 link_file ".fno/ledger.json"
 # ledger.md is the kanban rendering paired with ledger.json. Skip-if-missing
 # until the renderer has run at least once on the canonical.

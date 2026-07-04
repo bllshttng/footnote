@@ -101,6 +101,7 @@ DELETE_TARGETS=(
   ".DS_Store"
   "convo-signals.jsonl"
   "evals-history.jsonl"
+  "metrics.jsonl"
 )
 
 # Files dispositioned "archive" by the audit. Each entry is moved to
