@@ -153,6 +153,20 @@ def test_replay_happy_path_emits_tagged_finding(monkeypatch, tmp_path):
     assert completes[0]["data"]["coverage_pct"] == 100
 
 
+def test_already_scored_tolerates_non_dict_json_lines(tmp_path):
+    # A bare scalar/array line must not AttributeError on e.get("type").
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        "123\n"
+        '"a string"\n'
+        "[1, 2]\n"
+        + json.dumps({"type": "skill_eval_finding", "data": {"run_id": "r1", "corpus_item_id": "s1", "skill_ref": None}})
+        + "\n"
+    )
+    assert cli._already_scored("r1", None, "s1", [events]) is True
+    assert cli._already_scored("r1", None, "other", [events]) is False
+
+
 def test_replay_concurrent_holder_refuses_without_stomping(monkeypatch, tmp_path):
     item = _item("s-rep", "x-rep", None)
     _wire_replay(monkeypatch, tmp_path, item)

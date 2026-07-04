@@ -457,7 +457,9 @@ def _already_scored(run_id: str, skill_ref: Optional[str], corpus_item: str, eve
                     e = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                d = e.get("data") if isinstance(e, dict) else None
+                if not isinstance(e, dict):
+                    continue  # a bare JSON scalar/array is not an event row
+                d = e.get("data")
                 if (
                     e.get("type") == "skill_eval_finding"
                     and isinstance(d, dict)
