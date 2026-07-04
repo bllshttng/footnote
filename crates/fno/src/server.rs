@@ -595,10 +595,19 @@ const TOUCH_COALESCE_WINDOW: Duration = Duration::from_secs(5);
 /// Whether an inject emit should fire now for `pane` (recording `now`), or be
 /// coalesced into the burst whose start time is already stored.
 fn touch_coalesce(last: &mut HashMap<u64, Instant>, pane: u64, now: Instant) -> bool {
-    match last.get(&pane) {
-        Some(&t) if now.duration_since(t) < TOUCH_COALESCE_WINDOW => false,
-        _ => {
-            last.insert(pane, now);
+    match last.entry(pane) {
+        std::collections::hash_map::Entry::Occupied(mut e) => {
+            // saturating: a `now` behind the stored instant (clock quirks
+            // under virtualization) coalesces instead of panicking.
+            if now.saturating_duration_since(*e.get()) < TOUCH_COALESCE_WINDOW {
+                false
+            } else {
+                e.insert(now);
+                true
+            }
+        }
+        std::collections::hash_map::Entry::Vacant(v) => {
+            v.insert(now);
             true
         }
     }

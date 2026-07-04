@@ -181,6 +181,10 @@ def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
     """
     if not sys.stdin.isatty():
         return
+    # The CLI already rejects non-positive PR args (_PR_RE); this keeps the
+    # helper safe for any future caller (0/negative must never match a node).
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        return
     node_id = None
     try:
         from fno.graph.store import read_graph

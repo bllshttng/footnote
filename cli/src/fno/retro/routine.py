@@ -152,7 +152,9 @@ def triage_pr(
     # nodes land without the link (manual `backlog update --caused-by`
     # remains).
     caused_by = origin_node_id
-    if not caused_by:
+    # pr_number 0 is the synthetic-path placeholder (`int(... or 0)` upstream);
+    # it must never match a node.
+    if not caused_by and isinstance(pr_number, int) and pr_number > 0:
         from fno.graph._reconcile import repo_slug_from_url
 
         def _same_repo(n: dict) -> bool:
