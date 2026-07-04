@@ -1104,7 +1104,10 @@ mod tests {
             "expected extended deadline, before={before} after={:?}",
             after.expires_at
         );
-        assert_eq!(after.acquired_at, acquired_at, "acquired_at must be preserved");
+        assert_eq!(
+            after.acquired_at, acquired_at,
+            "acquired_at must be preserved"
+        );
     }
 
     #[test]
@@ -1126,10 +1129,7 @@ mod tests {
     fn renew_is_noop_for_pid_liveness_and_missing_claim() {
         let td = TempDir::new().unwrap();
         // Missing claim -> Ok(false).
-        assert_eq!(
-            renew("node:x-absent", "h", Some(td.path())),
-            Ok(false)
-        );
+        assert_eq!(renew("node:x-absent", "h", Some(td.path())), Ok(false));
         // PID-liveness claim (no ttl_ms) has no expires_at to extend -> Ok(false).
         let _ = acquire("session:pidonly", "h", opts_in(&td));
         assert!(read_claim(&td, "session:pidonly").expires_at.is_none());
@@ -1336,7 +1336,10 @@ mod tests {
         );
         // SUSPECT is off-host too: unexpired TTL but a foreign host pid.
         assert_eq!(
-            classify(&record(me, now, Some(now + 60_000), "elsewhere.example"), Some(now)),
+            classify(
+                &record(me, now, Some(now + 60_000), "elsewhere.example"),
+                Some(now)
+            ),
             ClaimState::Suspect
         );
         // HYBRID arm: expired TTL + live recorded pid -> LIVE.

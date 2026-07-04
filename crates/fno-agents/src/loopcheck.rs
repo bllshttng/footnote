@@ -1764,9 +1764,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // can never steal, and any failure is a warning that just shortens the lease
     // (the loop never blocks on it). Root=None routes node:<id> to the global
     // claims root inside renew.
-    if let (Some(key), Some(holder)) =
-        (&manifest.target_claim_key, &manifest.target_claim_holder)
-    {
+    if let (Some(key), Some(holder)) = (&manifest.target_claim_key, &manifest.target_claim_holder) {
         match crate::claims::renew(key, holder, None) {
             Ok(_) => {}
             Err(e) => eprintln!("loop-check: lease renewal for {key} failed (non-fatal): {e}"),
