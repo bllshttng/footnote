@@ -237,6 +237,28 @@ validate_event() {
         fi
     fi
 
+    # skill_eval_finding: dimension + verdict enum checks (observer harness,
+    # x-57a5) - same chokepoint rationale as mission_complete/human_touch above.
+    if [[ "$type" == "skill_eval_finding" ]]; then
+        local dim verdict enum_match
+        dim=$(jq -r '.data.dimension // empty' <<<"$payload" 2>/dev/null)
+        if [[ -n "$dim" ]]; then
+            enum_match=$(jq -r --arg d "$dim" '.event_types[] | select(.name == "skill_eval_finding") | .data.properties.dimension.enum[]? | select(. == $d)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
+            if [[ -z "$enum_match" ]]; then
+                _ev_warn "unknown dimension: $dim"
+                return 1
+            fi
+        fi
+        verdict=$(jq -r '.data.verdict // empty' <<<"$payload" 2>/dev/null)
+        if [[ -n "$verdict" ]]; then
+            enum_match=$(jq -r --arg v "$verdict" '.event_types[] | select(.name == "skill_eval_finding") | .data.properties.verdict.enum[]? | select(. == $v)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
+            if [[ -z "$enum_match" ]]; then
+                _ev_warn "unknown verdict: $verdict"
+                return 1
+            fi
+        fi
+    fi
+
     # Size cap: encode data and check bytes.
     local max_bytes data_size
     max_bytes=$(jq -r '.limits.max_data_bytes // 65536' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
