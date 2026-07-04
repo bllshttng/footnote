@@ -53,6 +53,8 @@ config:
     bus_dir: null
     # Override path to the loops pause-all sentinel.
     loops_paused_json: null
+    # Override path to the observer harness digest dir.
+    observer_reports_dir: null
   obsidian:
     # Whether this project uses an Obsidian vault for plans/docs.
     enabled: false

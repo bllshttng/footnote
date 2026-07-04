@@ -101,6 +101,7 @@ class PathsBlock(BaseModel):
     retro_pending_dir: Optional[str] = None
     bus_dir: Optional[str] = None
     loops_paused_json: Optional[str] = None
+    observer_reports_dir: Optional[str] = None
 
     @field_validator(
         "graph_json",
@@ -118,6 +119,7 @@ class PathsBlock(BaseModel):
         "retro_pending_dir",
         "bus_dir",
         "loops_paused_json",
+        "observer_reports_dir",
         mode="before",
     )
     @classmethod
@@ -1685,6 +1687,12 @@ class LoopEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     level: Literal["report", "assisted", "unattended"] = "report"
+    # Aggregate per-run spend ceiling (x-57a5's observer harness is the first
+    # consumer: config.loops.observer_harness.budget_usd_per_run). Generic on
+    # LoopEntry rather than observer-specific so any future loop with its own
+    # spend can reuse the same key. A non-positive/malformed value fails safe
+    # to the default rather than silently uncapping a loop's spend.
+    budget_usd_per_run: float = 30.0
 
     @field_validator("level", mode="before")
     @classmethod
@@ -1693,6 +1701,18 @@ class LoopEntry(BaseModel):
             return v.strip().lower()
         _LOG.warning("config.loops.<name>.level=%r invalid; using default 'report'", v)
         return "report"
+
+    @field_validator("budget_usd_per_run", mode="before")
+    @classmethod
+    def _coerce_budget(cls, v: object) -> float:
+        try:
+            f = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            f = -1.0
+        if f <= 0:
+            _LOG.warning("config.loops.<name>.budget_usd_per_run=%r invalid; using default 30.0", v)
+            return 30.0
+        return f
 
 
 class BatchBlock(BaseModel):

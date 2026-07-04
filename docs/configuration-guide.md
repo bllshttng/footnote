@@ -23,6 +23,7 @@
 | `config.paths.retro_pending_dir` | str (optional) | _(none)_ | never | Override path to the retro-pending dir. |
 | `config.paths.bus_dir` | str (optional) | _(none)_ | never | Override path to the cross-project mail bus dir. |
 | `config.paths.loops_paused_json` | str (optional) | _(none)_ | never | Override path to the loops pause-all sentinel. |
+| `config.paths.observer_reports_dir` | str (optional) | _(none)_ | never | Override path to the observer harness digest dir. |
 | `config.obsidian.enabled` | bool | `false` | always | Whether this project uses an Obsidian vault for plans/docs. |
 | `config.obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
 | `config.project.id` | str (optional) | _(none)_ | advanced | Project identifier. |

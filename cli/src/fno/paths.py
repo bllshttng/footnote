@@ -382,6 +382,36 @@ def loops_paused_json() -> Path:
     return _resolve("~/.fno/") / "loops-paused.json"
 
 
+def observer_reports_dir(project_root: Optional[Path] = None) -> Path:
+    """Return the directory where the observer harness writes its
+    human-readable digests (x-57a5, ``<skill>-<date>.md``).
+
+    Resolution order mirrors :func:`handoffs_dir`:
+      1. ``config.paths.observer_reports_dir`` explicit override.
+      2. ``<vault>/internal/<project>/observer-reports/`` when
+         ``obsidian.enabled`` and ``obsidian.vault`` are set - the digest is
+         prose for the milestone narrative, same placement rule as plans and
+         handoffs (Locked Decision 12: state only in ``~/.fno`` /
+         ``<project>/.fno`` / ``internal/<project.id>/``).
+      3. ``state_dir()/observer-reports/<project>/`` fallback when no vault.
+    """
+    settings = _settings()
+    override = settings.config.paths.observer_reports_dir
+    if override is not None:
+        return _resolve(override, project_root=project_root)
+    pid = settings.config.project.id
+    if pid:
+        project_name = pid
+    else:
+        root = project_root or resolve_repo_root()
+        project_name = root.name
+    if settings.config.obsidian.enabled and settings.config.obsidian.vault:
+        vroot = vault_root()
+        if vroot is not None:
+            return vroot / "internal" / project_name / "observer-reports"
+    return state_dir() / "observer-reports" / project_name
+
+
 def bus_dir() -> Path:
     """Return the cross-agent bus directory (default: ~/.fno/bus/).
 
