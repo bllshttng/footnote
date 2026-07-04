@@ -199,12 +199,16 @@ def stamp_ledger(session_id: str, verdict: str, ledger_path: Path) -> bool:
         os.close(lock_fd)
 
 
-def already_recorded(session_id: str, events_path: Path) -> bool:
-    """True when this session already has a verifier_verdict event (AC6-HP
-    exactly-one): a retried finalize fire (e.g. after a partial-failure
-    session_finalize_failed) must not double-emit or re-spend on a spawn."""
+def recorded_verdict(session_id: str, events_path: Path) -> Optional[str]:
+    """The verdict this session already recorded in an events log, else None
+    (AC6-HP exactly-one): a retried finalize fire (e.g. after a partial-failure
+    session_finalize_failed) must not re-spend on a spawn, but it DOES reuse
+    the recorded verdict to backfill any sink the prior run failed to write
+    (codex P2: skipping outright left a missing global event / ledger field
+    unrepaired forever)."""
     if not session_id or not events_path.exists():
-        return False
+        return None
+    verdict = None
     try:
         for line in events_path.read_text(encoding="utf-8").splitlines():
             try:
@@ -217,10 +221,14 @@ def already_recorded(session_id: str, events_path: Path) -> bool:
                 and isinstance(e.get("data"), dict)
                 and e["data"].get("session_id") == session_id
             ):
-                return True
+                verdict = e["data"].get("verdict") or verdict
     except OSError:
-        return False
-    return False
+        return None
+    return verdict
+
+
+def already_recorded(session_id: str, events_path: Path) -> bool:
+    return recorded_verdict(session_id, events_path) is not None
 
 
 def _pr_number(cwd: Path) -> Optional[int]:
@@ -275,16 +283,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     cwd = Path(args.cwd).resolve()
     project_events = Path(args.events) if args.events else cwd / ".fno" / "events.jsonl"
 
-    if already_recorded(args.session_id, project_events):
-        print("verify_advise: verdict already recorded for this session; skipping")
-        return 0
-
-    verdict = decide_verdict(
-        reason=args.reason, plan_path=args.plan_path, cwd=cwd, session_id=args.session_id
-    )
+    prior = recorded_verdict(args.session_id, project_events)
+    if prior:
+        # Exactly-once on the SPAWN; recording stays self-healing. Reuse the
+        # recorded verdict and fall through so any sink the prior run failed
+        # to write (global log, ledger field) is backfilled below.
+        print(f"verify_advise: verdict already recorded ({prior}); backfilling missing sinks")
+        verdict = prior
+    else:
+        verdict = decide_verdict(
+            reason=args.reason, plan_path=args.plan_path, cwd=cwd, session_id=args.session_id
+        )
 
     # Record: event first (canonical), ledger field second (denormalized).
-    # Each step best-effort; a recording failure still exits 0.
+    # Each step best-effort and per-sink idempotent; a failure still exits 0.
     try:
         from fno import paths as _paths
 
@@ -296,13 +308,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         events_paths = [project_events]
         if global_events != project_events:
             events_paths.append(global_events)
-        emit_verdict_event(
-            verdict=verdict,
-            node_id=args.node_id or None,
-            pr_number=_pr_number(cwd),
-            session_id=args.session_id,
-            events_paths=events_paths,
-        )
+        missing = [p for p in events_paths if not already_recorded(args.session_id, p)]
+        if missing:
+            emit_verdict_event(
+                verdict=verdict,
+                node_id=args.node_id or None,
+                pr_number=_pr_number(cwd),
+                session_id=args.session_id,
+                events_paths=missing,
+            )
     except Exception as exc:
         print(f"verify_advise: event emit failed: {exc}", file=sys.stderr)
 

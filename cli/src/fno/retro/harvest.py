@@ -951,8 +951,12 @@ def harvest_postmortems(
             reason = m.group(1) if m else ""
 
         gist = "\n".join(text.splitlines()[:_PM_GIST_LINES])[:_PM_GIST_CHARS]
-        invocation = str(fm.get("target_invocation") or "").strip()
-        hint = f"postmortem {reason or 'unknown'}: {invocation}".strip().rstrip(":")
+        # Title must be per-entry unique: the finalize.rs format carries no
+        # target_invocation, and the inbox tier dedups on (where, title), so a
+        # generic "postmortem Budget" would collapse distinct entries (codex
+        # P2). The filename stem (date + session prefix) is unique by design.
+        invocation = str(fm.get("target_invocation") or "").strip() or path.stem
+        hint = f"postmortem {reason or 'unknown'}: {invocation}"
         items.append(
             RawItem(
                 kind=KIND_POSTMORTEM,

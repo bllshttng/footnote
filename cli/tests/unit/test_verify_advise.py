@@ -232,16 +232,20 @@ def test_already_recorded(tmp_path: Path) -> None:
     assert va.already_recorded("sid-1", tmp_path / "missing.jsonl") is False
 
 
-def test_main_skips_when_already_recorded(tmp_path: Path, monkeypatch, capsys) -> None:
-    """A retried finalize fire must not double-emit or re-spend on a spawn."""
+def test_retried_fire_backfills_without_respawn(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A retried finalize fire must not re-spend on a spawn, but DOES reuse the
+    recorded verdict to backfill sinks the prior run failed to write (codex P2)."""
     _plan_with_acs(tmp_path)
     events = tmp_path / "ev.jsonl"
     events.write_text(_verdict_line("sid-1") + "\n", encoding="utf-8")
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": [{"session_id": "sid-1"}]}), encoding="utf-8")
 
     def no_spawn(*a, **k):
         raise AssertionError("spawn must not run on a retried fire")
 
     monkeypatch.setattr(va, "run_verifier", no_spawn)
+    monkeypatch.setattr(va, "_pr_number", lambda cwd: None)
     rc = va.main(
         [
             "--plan-path", "plan.md",
@@ -250,13 +254,24 @@ def test_main_skips_when_already_recorded(tmp_path: Path, monkeypatch, capsys) -
             "--cwd", str(tmp_path),
             "--events", str(events),
             "--global-events", str(tmp_path / "gev.jsonl"),
-            "--ledger", str(tmp_path / "ledger.json"),
+            "--ledger", str(ledger),
         ]
     )
     assert rc == 0
     assert "already recorded" in capsys.readouterr().out
-    assert len(events.read_text().splitlines()) == 1  # no second event
-    assert not (tmp_path / "gev.jsonl").exists()
+    assert len(events.read_text().splitlines()) == 1  # project log NOT duplicated
+    # The missing global event and ledger field are repaired with the PRIOR verdict.
+    gev = json.loads((tmp_path / "gev.jsonl").read_text().splitlines()[0])
+    assert gev["data"]["verdict"] == "pass" and gev["data"]["session_id"] == "sid-1"
+    assert json.loads(ledger.read_text())["entries"][0]["verifier_verdict"] == "pass"
+
+
+def test_recorded_verdict_returns_latest(tmp_path: Path) -> None:
+    events = tmp_path / "ev.jsonl"
+    first = _verdict_line("sid-1")
+    second = first.replace('"verdict": "pass"', '"verdict": "concerns"')
+    events.write_text(first + "\n" + second + "\n", encoding="utf-8")
+    assert va.recorded_verdict("sid-1", events) == "concerns"
 
 
 # -- main: exit 0 everywhere (AC6-ERR) ---------------------------------------

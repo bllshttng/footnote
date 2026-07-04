@@ -67,6 +67,16 @@ def test_harvest_reads_both_formats(tmp_path: Path) -> None:
     assert legacy.kind == KIND_POSTMORTEM and legacy.subkind == "user_cancel"
     assert "/target ab-9dd70ad2" in (legacy.title_hint or "")
     assert fin.subkind == "NoProgress" and "split-brain" in fin.text
+    # No target_invocation in the finalize format -> the unique filename stem
+    # keeps same-reason entries from colliding in the inbox (where,title) dedup.
+    assert "b-finalize" in (fin.title_hint or "")
+
+
+def test_same_reason_postmortems_get_distinct_titles(tmp_path: Path) -> None:
+    _write(tmp_path, "a.md", FINALIZE_FMT)
+    _write(tmp_path, "b.md", FINALIZE_FMT)
+    a, b = harvest_postmortems(tmp_path)
+    assert a.title_hint != b.title_hint
 
 
 def test_harvest_skips_consumed(tmp_path: Path) -> None:
