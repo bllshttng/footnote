@@ -43,14 +43,14 @@ footnote/
 | `/target "feature"` | End-to-end: think → blueprint → do → review → ship |
 | `/target path/to/plan` \| `/target <node-id>` | Execute an existing plan, or a backlog node by id (resolves via `~/.fno/graph.json`) |
 | `/target L "feature"` | Large size: full ceremony including adversarial |
-| `/target auto-merge "..."` | Auto-merge once external review passes (opt-in). [skills/_shared/auto-merge.md](skills/_shared/auto-merge.md) |
+| `/target auto-merge "..."` | Auto-merge once external review passes (opt-in). [skills/target/references/auto-merge.md](skills/target/references/auto-merge.md) |
 | `/megawalk` | Loop the ready backlog until done. `/megawalk roadmap <vision.md>` generates a backlog first |
 | `/blueprint <doc-path>` | Mutate a design doc in place (Execution Strategy + File Ownership + kill_criteria). `quick "..."` for a flat single-file plan |
 | `/do` | Execute a plan: `flat` (default) or `waves` |
 | `/think` \| `/review` \| `/fix` \| `/tdd` \| `/triage` \| `/setup` | Design / review / fix-loop / TDD / spec-ordering / config wizard |
 | `/pr create` \| `check` \| `merged` | Open a PR (Haiku worker) / poll+implement external review / post-merge ritual |
 
-Surface evolution (one-liners; see linked docs): bare `/megawalk` replaced `continue`/`next`/`adopt --batch` ([megawalk-migration](skills/_shared/megawalk-migration.md)); `/blueprint` mutates the design doc in place rather than making a folder plan ([lean-blueprint](docs/architecture/lean-blueprint.md)); an approved native Plan-Mode plan is picked up by the next bare `/target`, which backfills the gates' required structure ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
+Surface evolution (one-liners; see linked docs): bare `/megawalk` replaced `continue`/`next`/`adopt --batch` ([megawalk-migration](docs/architecture/megawalk-migration.md)); `/blueprint` mutates the design doc in place rather than making a folder plan ([lean-blueprint](docs/architecture/lean-blueprint.md)); an approved native Plan-Mode plan is picked up by the next bare `/target`, which backfills the gates' required structure ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
 
 ## Backlog (`fno backlog`)
 

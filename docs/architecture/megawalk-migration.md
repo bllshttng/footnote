@@ -81,5 +81,3 @@ Unknown IDs soft-fail: the resolver echoes the arg back with a stderr warning, a
 Quick plans (single `.md` files under `plans/`) now write `HANDOFF.md`, `COMPLETION.md`, `.completed/`, and `scratchpad-archive/` to `{plan_path}.artifacts/` instead of the parent `plans/` directory. Folder plans are unchanged (artifacts live inside the folder, which already namespaces them).
 
 Before, two back-to-back quick plans on `plans/a.md` then `plans/b.md` would silently overwrite each other's artifacts in the shared `plans/` root. After the sidecar change, each plan keeps its own artifact folder alongside the plan file.
-
-See [auto-merge.md](auto-merge.md) for the other shared reference in this folder.

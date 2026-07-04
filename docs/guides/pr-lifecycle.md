@@ -52,4 +52,4 @@ When `target` ships a feature it runs review, then `pr create`, then (unless you
 
 - [Target pipeline](target.md) - the full loop and its flags
 - [Cross-model review](../architecture/cross-model-review.md) - how `peer` routes to another provider
-- [Auto-merge](../../skills/_shared/auto-merge.md) - opting into merge-on-green
+- [Auto-merge](../../skills/target/references/auto-merge.md) - opting into merge-on-green

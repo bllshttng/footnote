@@ -75,14 +75,14 @@ The acceptance-criteria gate that runs before `/do waves` is documented there to
 
 The LLM treats this as "if the surrounding work needs the detail, read the reference; otherwise skip it." This is the standard pattern across the footnote skills - the diet extends the convention rather than inventing a new one.
 
-## De-duplication against `skills/_shared/`
+## De-duplication across skills
 
-Cross-skill content (cross-project coordination, discovery gate, kill criteria, completion gate protocol) lives in `skills/_shared/`. Per-skill references stay in `skills/{name}/references/`. The split is by audience, not by alphabetical order:
+Cross-skill content (cross-project coordination, discovery gate, kill criteria, completion gate protocol) lives canonically in its **owning skill's** `references/` dir and is bundled into each consumer's `references/` at build time via `skill-bundles.yaml`. Per-skill references stay in `skills/{name}/references/`. The split is by audience:
 
-- Used by exactly one skill → `skills/{skill}/references/{topic}.md`
-- Used by two or more skills → `skills/_shared/{topic}.md`
+- Used by exactly one skill → `skills/{skill}/references/{topic}.md` (canonical, not bundled)
+- Used by two or more skills → canonical in the primary owner's `skills/{owner}/references/{topic}.md`; each consumer declares a `references:` bundle entry sourcing it (e.g. `iteration-loop.md` is owned by `target` and bundled into `fix` and `think`; `worktree.md` is owned by `target` because "new target -> new worktree")
 
-Before creating a new reference, check `skills/_shared/` for an existing canonical version. Pointers from the lean `SKILL.md` should target the shared reference rather than create a duplicate.
+Before creating a new reference, check the owning skill's `references/` for an existing canonical version. Pointers from the lean `SKILL.md` should target the local (bundled) `references/{topic}.md`, never a cross-skill path escape.
 
 ## The behavior-parity bar
 
@@ -144,6 +144,6 @@ Behavior parity verified by smoke test (silent-failure-hunter + code-reviewer ag
 | `skills/target/references/` | 14 new + 18 pre-existing per-topic detail files. |
 | `skills/megawalk/SKILL.md` | Lean orchestrator (323 lines). HARD-GATE + state machine + design principles + subcommand outlines. |
 | `skills/megawalk/references/` | 6 new + 6 pre-existing per-topic detail files. |
-| `skills/_shared/auto-merge.md` | Cross-skill auto-merge protocol (referenced from both). |
-| `skills/_shared/megawalk-migration.md` | Removed-form migration history (referenced from megawalk). |
+| `skills/target/references/auto-merge.md` | Auto-merge protocol (owned by target). |
+| `docs/architecture/megawalk-migration.md` | Removed-form migration history (owned by megawalk). |
 | `docs/architecture/skill-body-diet.md` | This document - the pattern itself. |

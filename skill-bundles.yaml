@@ -9,8 +9,8 @@
 #       dest: scripts/lib/X.sh             # relative to skills/<skill>/
 #
 #   references:   # markdown reused across skills; frontmatter stripped
-#     - source: skills/_shared/auto-merge.md
-#       dest: references/auto-merge.md
+#     - source: skills/target/references/iteration-loop.md
+#       dest: references/iteration-loop.md
 #
 #   agents:       # subagent prompts; frontmatter REWRITTEN with subagent_meta
 #     - source: skills/target/SKILL.md
@@ -71,14 +71,10 @@ bundles:
       # resolve ab-XXXX backlog node IDs to plan_path.
       - source: scripts/lib/graph-resolve.sh
         dest: scripts/lib/graph-resolve.sh
-    references:
-      # Bundled from skills/_shared/ so the target folder is self-contained.
-      # SKILL.md and references/* link to these via references/X.md (no path
-      # escapes outside the skill folder).
-      - source: skills/_shared/auto-merge.md
-        dest: references/auto-merge.md
-      - source: skills/_shared/worktree.md
-        dest: references/worktree.md
+      # auto-merge.md and worktree.md are canonical in target/references/
+      # (owned by target: "new target -> new worktree"; auto-merge is a
+      # target ship concern). They are not bundled from elsewhere. Consumers
+      # that need them declare their own references: entry sourcing them.
 
   # Cluster router: /fix. The default fix loop (SKILL.md) and the investigate
   # flow (references/investigate.md) plus their references are canonical in the folder.

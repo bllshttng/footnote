@@ -51,7 +51,7 @@ Use the shared worktree manager - it handles `worktree_base` resolution
 from settings.yaml (so projects with `~/conductor/workspaces/<project>`
 configured don't end up under `.claude/worktrees/`), branch naming,
 and idempotent re-creation. See
-[skills/_shared/worktree.md](../../_shared/worktree.md) for the
+[skills/target/references/worktree.md](../../target/references/worktree.md) for the
 decision matrix.
 
 ```bash
