@@ -90,7 +90,12 @@ def _sentinel_is_live(node_id: str) -> bool:
 
     key = f"reconcile:{node_id}"
     try:
-        return claim_status(key, root=_claims_root_for(key)).get("state") == "live"
+        # live OR suspect (x-ba4b) => occupied; a suspect reservation (TTL-
+        # unexpired, dead pid) must still dedup so reconcile never double-fires.
+        return claim_status(key, root=_claims_root_for(key)).get("state") in (
+            "live",
+            "suspect",
+        )
     except Exception:  # noqa: BLE001 - a probe error must not crash the caller
         return False
 
