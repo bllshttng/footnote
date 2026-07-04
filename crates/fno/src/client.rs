@@ -528,10 +528,11 @@ impl View {
                 Some(t) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad)?;
                     let tid = squad.tabs.get(t)?.id;
-                    Some(ChromeHit::Cmds(vec![
-                        Command::SelectSquad(row.squad),
-                        Command::SelectTab(tid),
-                    ]))
+                    // SelectTab already resolves the squad server-side (find_tab
+                    // -> set_view), so one command switches squad+tab in a single
+                    // layout push - sending SelectSquad first would flicker
+                    // through the squad's previously-active tab (gemini review).
+                    Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)]))
                 }
             },
             // A pane-hosted agent focuses its pane; a watch-only (bg/headless)
@@ -2675,6 +2676,39 @@ mod tests {
         assert!(matches!(view.chrome_hit(5, 4), Some(ChromeHit::Notice(_))));
         // The "~ agents" header row is inert.
         assert!(view.chrome_hit(4, 4).is_none());
+    }
+
+    // A click on the bottom row belongs to the status/which-key/search chrome
+    // painted over it, never the sideline row drawn underneath (codex P2).
+    #[test]
+    fn chrome_hit_bottom_chrome_row_is_swallowed() {
+        // Enough agents that display_rows() reaches the last terminal row.
+        let agents: Vec<AgentRow> = (0..40)
+            .map(|i| AgentRow {
+                squad: Some(1),
+                name: format!("a{i}"),
+                pane_id: Some(100 + i),
+                badge: None,
+                reason: None,
+                exited: false,
+                answerable: None,
+            })
+            .collect();
+        let view = view_with_agents(agents);
+        let bottom = view.term.0 - 1; // last terminal row
+        assert!(view.bottom_row_is_chrome(), "status row on by default");
+        assert!(
+            view.display_rows().len() > (bottom - TAB_BAR_ROWS) as usize,
+            "sideline is long enough to underlie the bottom row"
+        );
+        // The row under the cursor maps to a real display row, yet the click is
+        // swallowed because the bottom row is chrome.
+        assert!(view.chrome_hit(bottom, 4).is_none());
+        // With the status row toggled off, that same row is a live sideline hit.
+        let mut view = view;
+        view.status_on = false;
+        assert!(!view.bottom_row_is_chrome());
+        assert!(view.chrome_hit(bottom, 4).is_some());
     }
 
     #[test]
