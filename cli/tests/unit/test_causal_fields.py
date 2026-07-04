@@ -152,6 +152,59 @@ def test_land_omits_caused_by_when_unknown(tmp_path):
     assert results[0].outcome == "active"
 
 
+def test_default_create_stamps_caused_by_in_graph(tmp_graph):
+    """AC4-UI: the durable node in the graph carries the causal link."""
+    from fno.retro.land import _default_create
+
+    _seed(tmp_graph, [_node("ab-00000001")])
+    nid = _default_create(
+        title="follow-up", details="d", priority="p2",
+        project=None, cwd=None, caused_by="ab-00000001",
+    )
+    created = next(n for n in _read(tmp_graph) if n["id"] == nid)
+    assert created["caused_by"] == "ab-00000001"
+
+
+def test_default_create_skips_stale_caused_by(tmp_graph):
+    """A sentinel naming a node that no longer exists lands without the link."""
+    from fno.retro.land import _default_create
+
+    nid = _default_create(
+        title="follow-up", details="d", priority="p2",
+        project=None, cwd=None, caused_by="ab-deadbeef",
+    )
+    created = next(n for n in _read(tmp_graph) if n["id"] == nid)
+    assert created.get("caused_by") is None
+
+
+def test_triage_caused_by_falls_back_to_pr_number_match(tmp_path):
+    """No sentinel node_id: the origin resolves from the repo-scoped pr match."""
+    from fno.retro.routine import triage_pr
+
+    seen: list[dict] = []
+
+    def create(**kw):
+        seen.append(kw)
+        return "ab-new1"
+
+    comments = [{"id": "c1", "body": "![high] real finding", "reviewer": "g[bot]"}]
+    triage_pr(
+        repo_root=tmp_path,
+        pr_number=42,
+        mode="autonomous",
+        comments=comments,
+        existing_nodes=[
+            {"id": "ab-other1", "pr_number": 42,
+             "pr_url": "https://github.com/other/repo/pull/42"},
+            {"id": "ab-origin1", "pr_number": 42,
+             "pr_url": "https://github.com/o/r/pull/42"},
+        ],
+        repo="o/r",
+        create_fn=create,
+    )
+    assert seen and seen[0]["caused_by"] == "ab-origin1"
+
+
 # -- reconcile revert detection --------------------------------------------------
 
 
