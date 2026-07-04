@@ -427,7 +427,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
 /// relative to the binary, PYTHONPATH is left untouched, and the installed
 /// `fno` package is used.
 fn py_module(cwd: &Path) -> Command {
-    let mut cmd = Command::new("python3");
+    let mut cmd = Command::new(py_interpreter());
     cmd.current_dir(cwd);
     if let Some(src) = repo_cli_src() {
         let joined = match std::env::var_os("PYTHONPATH") {
@@ -461,6 +461,30 @@ fn repo_cli_src() -> Option<String> {
         }
     }
     None
+}
+
+/// The interpreter finalize's Python helpers run under. In a source checkout,
+/// prefer the repo's `cli/.venv` python: bare `python3` on PATH (e.g. Homebrew's
+/// `/opt/homebrew/opt/python@3.x`) resolves the `fno` package off PYTHONPATH but
+/// lacks fno's third-party deps (pydantic, ...), so `import fno.config` raised
+/// ModuleNotFoundError and every terminal finalize logged `ledger record failed`
+/// / `stamp failed` and wrote no termination_reason row (the ledger-trust gap,
+/// epic x-f063 Wave 1). The venv has both fno and its deps. PYTHONPATH entries
+/// still precede site-packages, so the finalize_e2e stub package keeps
+/// precedence over the venv's installed `fno`. Falls back to `python3` when no
+/// venv is found (installed-wheel or bare environment).
+fn py_interpreter() -> String {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return "python3".to_string(),
+    };
+    for anc in exe.ancestors() {
+        let venv = anc.join("cli/.venv/bin/python3");
+        if venv.is_file() {
+            return venv.to_string_lossy().into_owned();
+        }
+    }
+    "python3".to_string()
 }
 
 /// Run `python3 -m fno.cost._session_cost` for cost, then
@@ -730,12 +754,14 @@ fn handoff_cost_line(cwd: &Path, transcript_uuid: &str) -> String {
     if transcript_uuid.is_empty() {
         return "(unavailable)".into();
     }
-    match Command::new("python3")
+    // Route through py_module so this shares the interpreter + PYTHONPATH
+    // resolution used by the ledger write; a raw `python3` here (no PYTHONPATH,
+    // no venv) was the source of the recurring `handoff cost: ... exit` errors.
+    match py_module(cwd)
         .arg("-m")
         .arg("fno.cost._session_cost")
         .arg("--json")
         .arg(transcript_uuid)
-        .current_dir(cwd)
         .output()
     {
         Ok(out) if out.status.success() => {
