@@ -27,6 +27,11 @@
 #       session-cost.py). They keep their home-anchored ledger literal
 #       (~/.fno/ledger.json), which is exactly what paths.ledger_json() defaults
 #       to; the move-not-rewrite preserved them verbatim (no logic change).
+#   - doctor.py - the orphan-file report deliberately checks the DEFAULT
+#       (unconfigured) ~/.fno, not a configured override: it is an advisory
+#       hygiene check for stray files at the standard location, and routing
+#       through paths.state_dir() would pull in the settings loader's git
+#       subprocess call on every `fno doctor` invocation.
 #   - test_*.py                       - sandboxed tests
 #   - scripts/metrics/*.py            - standalone analysis scripts (not in CLI)
 #   - scripts/discovery-brief.py      - standalone script with docstring reference
@@ -110,6 +115,7 @@ PY_HITS=$(
     | grep -v 'sigma_dispatch\.py' \
     | grep -v 'cost/_register\.py' \
     | grep -v 'cost/_session_cost\.py' \
+    | grep -v 'doctor\.py' \
     || true
 )
 add_violation "Python bare Path.home() / \".fno\" violations in cli/src/fno/:" "$PY_HITS"
