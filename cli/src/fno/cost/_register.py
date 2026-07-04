@@ -463,8 +463,8 @@ def build_entry(
     if account_id is not None:
         entry["account_id"] = account_id
 
-    # termination_reason (step 6, ab-f8e5f214): WHY this session ended
-    # (DonePRGreen | DoneAdvisory | Budget | NoProgress | Interrupted | Aborted
+    # termination_reason (step 6): WHY this session ended (DonePRGreen |
+    # DoneAdvisory | DoneBatched | Budget | NoProgress | Interrupted | Aborted
     # | delegated). Written by `fno-agents finalize` on every terminal exit;
     # omitted when a legacy caller does not supply it so old rows stay unchanged.
     if termination_reason:

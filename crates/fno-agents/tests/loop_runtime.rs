@@ -647,6 +647,10 @@ fn parse_termination_reason_serde_roundtrip() {
             "DoneAdvisory",
             fno_agents::loopcheck::TerminationReason::DoneAdvisory,
         ),
+        (
+            "DoneBatched",
+            fno_agents::loopcheck::TerminationReason::DoneBatched,
+        ),
         ("NoWork", fno_agents::loopcheck::TerminationReason::NoWork),
         ("Budget", fno_agents::loopcheck::TerminationReason::Budget),
         (
