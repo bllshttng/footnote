@@ -107,6 +107,25 @@ def test_manual_merge_never_attributes_foreign_repo_node(tmp_path, monkeypatch):
     assert rows[0]["data"]["resolution"] == "failed"
 
 
+def test_manual_merge_ambiguous_match_counts_as_failed(tmp_path, monkeypatch):
+    """Two same-repo nodes on one PR number: never attribute arbitrarily."""
+    root = _home_repo(monkeypatch, tmp_path)
+    graph = _fake_graph(tmp_path, [
+        {"id": "x-1111", "title": "a", "pr_number": 42, "cwd": root},
+        {"id": "x-2222", "title": "b", "cwd": root,
+         "additional_prs": [{"number": 42}]},
+    ])
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    _tty(monkeypatch, True)
+    state_dir = tmp_path / ".fno"
+
+    _merge._emit_human_touch_merge(42, str(state_dir))
+
+    rows = _events(state_dir / "events.jsonl")
+    assert rows[0]["data"]["graph_node_id"] is None
+    assert rows[0]["data"]["resolution"] == "failed"
+
+
 def test_manual_merge_matches_additional_prs(tmp_path, monkeypatch):
     """A follow-up PR recorded in additional_prs still attributes the node."""
     root = _home_repo(monkeypatch, tmp_path)

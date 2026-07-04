@@ -90,3 +90,4 @@
 {"expect":"valid","reason":"human_touch inject null node (resolution failed, counted not dropped)","event":{"ts":"2026-07-04T00:00:00Z","type":"human_touch","source":"daemon","data":{"graph_node_id":null,"source":"inject","resolution":"failed"}}}
 {"expect":"valid","reason":"human_touch merge from reconcile","event":{"ts":"2026-07-04T00:00:00Z","type":"human_touch","source":"backlog","data":{"graph_node_id":"x-bbbb","source":"merge","resolution":"ok"}}}
 {"expect":"invalid","reason":"human_touch missing resolution","event":{"ts":"2026-07-04T00:00:00Z","type":"human_touch","source":"daemon","data":{"graph_node_id":"x-aaaa","source":"inject"}}}
+{"expect":"invalid","reason":"human_touch missing graph_node_id (required-nullable: must be present, may be null)","event":{"ts":"2026-07-04T00:00:00Z","type":"human_touch","source":"daemon","data":{"source":"inject","resolution":"ok"}}}

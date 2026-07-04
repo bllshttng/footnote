@@ -192,9 +192,10 @@ def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
 
         # The graph is global across projects, so bare PR numbers collide;
         # only nodes homed in THIS repo (node.cwd == canonical root) may
-        # claim the touch. No match -> resolution=failed, never a foreign
-        # node presented as ok.
+        # claim the touch, and only an UNAMBIGUOUS match does (two same-repo
+        # nodes on one number -> resolution=failed, never an arbitrary pick).
         root = str(resolve_canonical_repo_root())
+        hits = set()
         for e in read_graph(graph_json()):
             if e.get("cwd") != root:
                 continue
@@ -202,8 +203,8 @@ def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
                 isinstance(p, dict) and p.get("number") == pr_number
                 for p in e.get("additional_prs") or []
             ):
-                node_id = e.get("id")
-                break
+                hits.add(e.get("id"))
+        node_id = hits.pop() if len(hits) == 1 else None
     except Exception:
         node_id = None
     try:

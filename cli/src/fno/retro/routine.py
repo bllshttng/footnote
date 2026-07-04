@@ -153,24 +153,23 @@ def triage_pr(
     # remains).
     caused_by = origin_node_id
     # pr_number 0 is the synthetic-path placeholder (`int(... or 0)` upstream);
-    # it must never match a node.
-    if not caused_by and isinstance(pr_number, int) and pr_number > 0:
+    # it must never match a node. Fail closed without repo context: the graph
+    # is global, so a bare-number match against it can cross projects. And an
+    # ambiguous same-repo match (two nodes on one number) links nothing - the
+    # same exactly-one-or-nothing rule as revert detection.
+    if not caused_by and repo and isinstance(pr_number, int) and pr_number > 0:
         from fno.graph._reconcile import repo_slug_from_url
 
         def _same_repo(n: dict) -> bool:
-            if repo is None:
-                return True
             slug = repo_slug_from_url(n.get("pr_url"))
             return slug is not None and slug.lower() == repo.lower()
 
-        caused_by = next(
-            (
-                n.get("id")
-                for n in existing_nodes or []
-                if n.get("pr_number") == pr_number and _same_repo(n)
-            ),
-            None,
-        )
+        hits = {
+            n.get("id")
+            for n in existing_nodes or []
+            if n.get("pr_number") == pr_number and _same_repo(n)
+        }
+        caused_by = hits.pop() if len(hits) == 1 else None
 
     results = land_candidates(
         kept,

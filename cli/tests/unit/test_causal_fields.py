@@ -205,6 +205,59 @@ def test_triage_caused_by_falls_back_to_pr_number_match(tmp_path):
     assert seen and seen[0]["caused_by"] == "ab-origin1"
 
 
+def test_triage_caused_by_fallback_fails_closed_without_repo(tmp_path):
+    """No repo context: the global-graph bare-number fallback must not fire."""
+    from fno.retro.routine import triage_pr
+
+    seen: list[dict] = []
+
+    def create(**kw):
+        seen.append(kw)
+        return "ab-new1"
+
+    comments = [{"id": "c1", "body": "![high] real finding", "reviewer": "g[bot]"}]
+    triage_pr(
+        repo_root=tmp_path,
+        pr_number=42,
+        mode="autonomous",
+        comments=comments,
+        existing_nodes=[
+            {"id": "ab-origin1", "pr_number": 42,
+             "pr_url": "https://github.com/o/r/pull/42"},
+        ],
+        repo=None,
+        create_fn=create,
+    )
+    assert seen and "caused_by" not in seen[0]
+
+
+def test_triage_caused_by_fallback_ambiguous_links_nothing(tmp_path):
+    from fno.retro.routine import triage_pr
+
+    seen: list[dict] = []
+
+    def create(**kw):
+        seen.append(kw)
+        return "ab-new1"
+
+    comments = [{"id": "c1", "body": "![high] real finding", "reviewer": "g[bot]"}]
+    triage_pr(
+        repo_root=tmp_path,
+        pr_number=42,
+        mode="autonomous",
+        comments=comments,
+        existing_nodes=[
+            {"id": "ab-one11", "pr_number": 42,
+             "pr_url": "https://github.com/o/r/pull/42"},
+            {"id": "ab-two22", "pr_number": 42,
+             "pr_url": "https://github.com/o/r/pull/42"},
+        ],
+        repo="o/r",
+        create_fn=create,
+    )
+    assert seen and "caused_by" not in seen[0]
+
+
 # -- reconcile revert detection --------------------------------------------------
 
 
