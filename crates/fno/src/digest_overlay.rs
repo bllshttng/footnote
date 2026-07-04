@@ -85,6 +85,15 @@ pub fn attach_digest_enabled(cwd: &Path) -> bool {
         .unwrap_or(true)
 }
 
+/// `config.mux.hover_focus` (default ON) — the focus-follows-mouse off-switch
+/// (x-a496). Latched once at client startup. Lives here because this module owns
+/// the `fno` crate's `config.mux.*` reader (mirrors `attach_digest_enabled`).
+pub fn hover_focus_enabled(cwd: &Path) -> bool {
+    mux_str(cwd, "hover_focus")
+        .and_then(|v| parse_bool(&v))
+        .unwrap_or(true)
+}
+
 /// `config.mux.attach_digest_threshold_min` (default 10) as seconds.
 pub fn threshold_secs(cwd: &Path) -> u64 {
     mux_str(cwd, "attach_digest_threshold_min")
