@@ -9,6 +9,7 @@ the sentinel file is the only coordination point.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Optional
 
@@ -17,6 +18,8 @@ from pydantic import BaseModel, ConfigDict
 
 from fno import paths
 from fno.config import load_settings
+
+_LOG = logging.getLogger(__name__)
 
 loops_app = typer.Typer(
     name="loops", no_args_is_help=True, help="Loop level config + pause-all kill switch."
@@ -62,27 +65,36 @@ def is_expired(state: PauseState, *, now: Optional[int] = None) -> bool:
 def read_pause_state() -> Optional[PauseState]:
     """Read the raw sentinel from disk, ignoring TTL expiry.
 
-    Returns None if absent or corrupted. Callers that need "is a loop
-    actually paused right now" should use :func:`loops_paused` instead - this
-    raw form exists so ``status`` can report "expired" rather than a bare
-    "not paused".
+    Returns None if absent or corrupted (logged) - callers that need to fail
+    CLOSED on corruption (:func:`loops_paused`, ``status``) check
+    ``paths.loops_paused_json().is_file()`` themselves first to tell "absent"
+    apart from "present but unreadable".
     """
     p = paths.loops_paused_json()
     if not p.is_file():
         return None
     try:
         return PauseState.model_validate(json.loads(p.read_text(encoding="utf-8")))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        _LOG.warning("loops-paused sentinel at %s is unreadable: %s", p, exc)
         return None
 
 
 def loops_paused() -> bool:
-    """True if a live (non-expired) pause-all sentinel exists.
+    """True if the pause-all sentinel is in effect.
 
     Every loop tick calls this first; paused = log one line and exit 0.
+    Fails CLOSED: a present-but-corrupted sentinel counts as paused (assume
+    the worst) rather than letting every loop silently resume - this
+    primitive exists to be a safety rail, not a best-effort convenience.
     """
+    p = paths.loops_paused_json()
+    if not p.is_file():
+        return False
     state = read_pause_state()
-    return state is not None and not is_expired(state)
+    if state is None:
+        return True  # present but unreadable: fail closed
+    return not is_expired(state)
 
 
 def pause_all(*, who: str, ttl_ms: Optional[int] = None) -> PauseState:
@@ -117,9 +129,11 @@ def _last_tick(name: str) -> Optional[str]:
     """
     from fno.events.log import read_events
 
+    events_path = paths.project_log("events.jsonl")
     try:
-        events = read_events(paths.project_log("events.jsonl"))
-    except (OSError, ValueError):
+        events = read_events(events_path)
+    except (OSError, ValueError) as exc:
+        _LOG.warning("could not read %s for loop tick lookup: %s", events_path, exc)
         return None
     last: Optional[str] = None
     for event in events:
@@ -171,9 +185,13 @@ def cmd_resume_all() -> None:
 @loops_app.command("status")
 def cmd_status() -> None:
     """Show the current pause-all sentinel, including an expired one."""
+    p = paths.loops_paused_json()
+    if not p.is_file():
+        typer.echo("not paused")
+        return
     state = read_pause_state()
     if state is None:
-        typer.echo("not paused")
+        typer.echo(f"sentinel at {p} is corrupted; failing closed (treated as paused) - investigate")
         return
     if is_expired(state):
         typer.echo(f"expired (was paused by {state.who} at {state.paused_at})")

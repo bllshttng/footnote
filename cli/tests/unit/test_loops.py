@@ -67,6 +67,36 @@ def test_expired_ttl_reads_as_not_paused(isolated_home):
     assert loops_paused() is False
 
 
+def test_corrupted_sentinel_fails_closed(isolated_home):
+    """A present-but-unparseable sentinel must count as paused, not resumed.
+
+    This is a kill switch: the safe failure direction is fail-closed (assume
+    the worst) rather than silently letting every loop tick proceed as if
+    nothing were paused.
+    """
+    from fno import paths
+    from fno.loops import loops_paused
+
+    p = paths.loops_paused_json()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("not valid json{{{", encoding="utf-8")
+    assert loops_paused() is True
+
+
+def test_cli_status_reports_corrupted_sentinel(isolated_home):
+    from fno import paths
+    from fno.loops import loops_app
+
+    p = paths.loops_paused_json()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("not valid json{{{", encoding="utf-8")
+
+    result = runner.invoke(loops_app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "corrupted" in result.output
+    assert "treated as paused" in result.output
+
+
 def test_status_reports_expired_for_stale_ttl(isolated_home):
     from fno.loops import is_expired, pause_all, read_pause_state
 

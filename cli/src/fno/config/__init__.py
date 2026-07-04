@@ -38,7 +38,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -1684,7 +1684,7 @@ class LoopEntry(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    level: str = "report"
+    level: Literal["report", "assisted", "unattended"] = "report"
 
     @field_validator("level", mode="before")
     @classmethod
