@@ -611,11 +611,14 @@ impl View {
     }
 
     /// Fold one bare-motion (hover) report into the sideline highlight and the
-    /// focus-follows-mouse debounce (x-a496). Returns the pane to focus once the
-    /// pointer has SETTLED on a new pane past [`HOVER_DEBOUNCE`], else `None`.
-    /// Pure state plus the passed clock read, so the debounce is unit-testable;
-    /// the caller sends the `FocusPane`. `now` is threaded in for that reason.
-    fn on_hover(&mut self, row: u16, col: u16, now: Instant) -> Option<u64> {
+    /// focus-follows-mouse debounce state (x-a496). Does NOT fire focus - it only
+    /// records which pane the pointer is settling on and when it first landed
+    /// there; the select loop's settle timer commits the focus once the pointer
+    /// rests past [`HOVER_DEBOUNCE`]. Firing CANNOT be reactive here: ?1003 stops
+    /// reporting the instant the pointer stops, so "land in a pane and rest" (the
+    /// primary gesture) emits no further event to fire on - only a timer can.
+    /// `now` records the landing instant for that timer's deadline.
+    fn on_hover(&mut self, row: u16, col: u16, now: Instant) {
         // Highlight is highlight-only and always on (never switches the view);
         // a cell off the sideline text column clears it.
         self.hover_row = self.sideline_row_at(row, col);
@@ -624,38 +627,34 @@ impl View {
         // (chrome/divider/sideline => None), so hovering the sideline never
         // steals focus - only moving over pane content does.
         if !self.hover_focus {
-            return None;
+            self.hover_pending = None;
+            return;
         }
         match self.hit_test(row, col).map(|(p, _, _)| p) {
-            // Over chrome, or already on the focused pane: nothing to follow, and
-            // reset the debounce so a later settle can't fire a stale target.
-            None => {
-                self.hover_pending = None;
-                None
-            }
-            Some(p) if p == self.layout.focus => {
-                self.hover_pending = None;
-                None
-            }
-            Some(p) => match self.hover_pending {
-                // Same pane still under the pointer: fire once it has held long
-                // enough, then clear (the next Layout makes p the focus, after
-                // which the p==focus arm clears anyway - so no re-fire).
-                Some((pending, t0)) if pending == p => {
-                    if now.duration_since(t0) >= HOVER_DEBOUNCE {
-                        self.hover_pending = None;
-                        Some(p)
-                    } else {
-                        None
-                    }
-                }
-                // A new pane (or the first hover): start the settle clock.
-                _ => {
+            // Over chrome, or already on the focused pane: nothing to settle onto.
+            None => self.hover_pending = None,
+            Some(p) if p == self.layout.focus => self.hover_pending = None,
+            // Keep the original landing instant while the pointer stays on the
+            // same pane, so continued motion WITHIN it doesn't keep pushing the
+            // settle deadline forward (that would starve a slow drag of focus);
+            // only a NEW pane restarts the clock, which also coalesces a fast
+            // sweep - each pane crossed replaces the last, so only the pane the
+            // pointer rests on survives to the timer.
+            Some(p) => {
+                if !matches!(self.hover_pending, Some((pending, _)) if pending == p) {
                     self.hover_pending = Some((p, now));
-                    None
                 }
-            },
+            }
         }
+    }
+
+    /// The settle timer fired (x-a496): if a pane is still pending and is not
+    /// already the focus, claim it (clearing the pending state) and return it for
+    /// the caller to `FocusPane`. `None` when the pointer left the pane before
+    /// the deadline or it already became the focus.
+    fn take_settled_hover(&mut self) -> Option<u64> {
+        let (pane, _) = self.hover_pending.take()?;
+        (pane != self.layout.focus).then_some(pane)
     }
 
     fn set_layout(&mut self, layout: LayoutView) {
@@ -1681,6 +1680,10 @@ async fn attach_and_run(
         } else {
             leader_since.map(|t| t + HINT_DELAY)
         };
+        // Focus-follows-mouse settle (x-a496): a pending hover target commits at
+        // its landing time + the debounce, re-armed each loop from the latest
+        // pending, so a fast sweep's earlier panes are dropped before they fire.
+        let hover_deadline = view.hover_pending.map(|(_, t0)| t0 + HOVER_DEBOUNCE);
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -1870,6 +1873,21 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            _ = async {
+                match hover_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if hover_deadline.is_some() => {
+                // The pointer rested on the pending pane past the debounce
+                // (x-a496): commit focus. The server replies with a Layout that
+                // redraws, so no local compose is needed here.
+                if let Some(pane) = view.take_settled_hover() {
+                    if let Err(e) = write_msg(&mut sock_w, &ClientMsg::Command(Command::FocusPane(pane))).await {
+                        break Err(format!("hover-focus send failed: {e}"));
+                    }
+                }
+            }
         }
     };
     drop(guard); // restore the terminal BEFORE printing the notice
@@ -1908,16 +1926,12 @@ async fn handle_stdin(
         if rep.shift {
             continue;
         }
-        // Bare motion is hover (x-a496): update the sideline highlight + the
-        // focus-follows-mouse debounce, and swallow it - a Move is never
-        // forwarded to a pane. The debounce coalesces the 1003 report flood so a
-        // fast sweep fires at most one FocusPane, for the pane it settles on.
+        // Bare motion is hover (x-a496): record the sideline highlight + the
+        // focus-follows-mouse settle target, and swallow it - a Move is never
+        // forwarded to a pane. The actual FocusPane is committed by the select
+        // loop's settle timer (a rested pointer emits no further motion event).
         if matches!(rep.kind, MouseKind::Move) {
-            if let Some(pane) = view.on_hover(rep.row, rep.col, Instant::now()) {
-                write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pane)))
-                    .await
-                    .map_err(|e| format!("hover-focus send failed: {e}"))?;
-            }
+            view.on_hover(rep.row, rep.col, Instant::now());
             continue;
         }
         // A left click on chrome (tab bar / sideline) switches tab/squad, focuses
@@ -2838,61 +2852,83 @@ mod tests {
     }
 
     #[test]
-    fn hover_focus_follows_settled_pane() {
-        // AC1-HP: move over a non-focused pane and settle -> exactly one
-        // FocusPane fires, and a continued hover does not re-fire.
+    fn hover_focus_settles_on_a_landed_pane() {
+        // AC1-HP: land in a non-focused pane and rest. on_hover records the
+        // pending target on the SINGLE landing event (the land-and-stop gesture
+        // emits nothing further); the settle timer then commits it once, and
+        // take_settled_hover clears so it cannot re-fire.
         let mut view = two_pane_view(); // focus 11; pane 10 at outer col 28..
         let t0 = Instant::now();
+        view.on_hover(5, 30, t0);
         assert_eq!(
-            view.on_hover(5, 30, t0),
-            None,
-            "first move starts the clock"
-        );
-        assert_eq!(
-            view.on_hover(5, 31, t0 + HOVER_DEBOUNCE),
+            view.hover_pending.map(|(p, _)| p),
             Some(10),
-            "settled past the window -> focus follows"
+            "landing recorded on one event"
         );
         assert_eq!(
-            view.on_hover(5, 31, t0 + HOVER_DEBOUNCE),
-            None,
-            "cleared after firing; the same instant does not re-fire"
+            view.take_settled_hover(),
+            Some(10),
+            "timer commits the pane"
+        );
+        assert_eq!(view.take_settled_hover(), None, "cleared: no re-fire");
+    }
+
+    #[test]
+    fn hover_focus_keeps_landing_time_while_on_same_pane() {
+        // Continued motion WITHIN the pane must not push the settle deadline
+        // forward (else a slow drag never settles): the landing instant is kept.
+        let mut view = two_pane_view();
+        let t0 = Instant::now();
+        view.on_hover(5, 30, t0);
+        view.on_hover(5, 31, t0 + Duration::from_millis(40)); // still moving in 10
+        assert_eq!(
+            view.hover_pending,
+            Some((10, t0)),
+            "same pane -> original landing time preserved"
         );
     }
 
     #[test]
     fn hover_focus_coalesces_fast_sweep_to_settled_pane() {
-        // AC2-FR: a fast sweep across three panes inside the debounce window
-        // fires exactly one FocusPane, for the pane it settles on - not one per
-        // pane crossed. Sweep 11 -> 12, settle on 12; pane 11 never fires.
-        let mut view = three_pane_view();
+        // AC2-FR: a fast sweep across three panes leaves ONLY the pane the pointer
+        // rests on pending, so the timer fires one FocusPane - not one per pane.
+        // Each new pane replaces the last before its deadline; 11 is dropped.
+        let mut view = three_pane_view(); // focus 10; sweep 11 -> 12
         let t0 = Instant::now();
-        assert_eq!(view.on_hover(5, 55, t0), None, "land on 11: start clock");
+        view.on_hover(5, 55, t0); // land on 11
+        view.on_hover(5, 80, t0 + Duration::from_millis(10)); // sweep to 12: 11 dropped
         assert_eq!(
-            view.on_hover(5, 80, t0 + Duration::from_millis(10)),
-            None,
-            "sweep to 12 before 11 settled: 11 abandoned, clock restarts on 12"
-        );
-        assert_eq!(
-            view.on_hover(5, 82, t0 + Duration::from_millis(70)),
+            view.hover_pending.map(|(p, _)| p),
             Some(12),
-            "12 settled -> one FocusPane, to the pane it landed on"
+            "only 12 survives the sweep"
         );
+        assert_eq!(view.take_settled_hover(), Some(12), "one FocusPane, to 12");
     }
 
     #[test]
     fn hover_focus_off_switch_disables_follow() {
-        // AC3-EDGE: config.mux.hover_focus=false -> focus never follows, however
-        // long the pointer settles. The sideline highlight is unaffected (it is
-        // independent of the focus-follows switch).
+        // AC3-EDGE: config.mux.hover_focus=false -> nothing ever becomes pending,
+        // so the timer has nothing to commit. The sideline highlight is
+        // unaffected (it is independent of the focus-follows switch).
         let mut view = two_pane_view();
         view.hover_focus = false;
         let t0 = Instant::now();
-        assert_eq!(view.on_hover(5, 30, t0), None);
-        assert_eq!(view.on_hover(5, 31, t0 + HOVER_DEBOUNCE * 2), None);
+        view.on_hover(5, 30, t0);
+        assert_eq!(view.hover_pending, None, "no settle target while disabled");
+        assert_eq!(view.take_settled_hover(), None);
         // Highlight still tracks the sideline.
         view.on_hover(2, 5, t0);
         assert_eq!(view.hover_row, Some(1));
+    }
+
+    #[test]
+    fn hover_focus_does_not_settle_on_the_focused_pane() {
+        // Hovering the already-focused pane is a no-op: no pending target, so the
+        // timer never fires a redundant FocusPane to the current focus.
+        let mut view = two_pane_view(); // focus 11 at outer col 64..
+        view.on_hover(5, 70, Instant::now());
+        assert_eq!(view.hover_pending, None);
+        assert_eq!(view.take_settled_hover(), None);
     }
 
     #[test]
