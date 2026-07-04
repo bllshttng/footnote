@@ -945,6 +945,19 @@ pub fn gemini_session_id_from_blob(blob: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// The provider roster: every provider name the Rust side accepts — the spawn
+/// gates in `bin/client.rs`, the registry-acceptance check in `client_verbs`,
+/// and [`for_name`] all ride THIS list (x-51f6 US1: one source of truth, no
+/// per-site `matches!` copies). Python's mirror is `READABLE_PROVIDERS` in
+/// `cli/src/fno/agents/providers/__init__.py`; a cli test asserts the two stay
+/// identical. Every name here MUST have a [`for_name`] arm (test-enforced).
+pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "agy"];
+
+/// The roster joined for error messages ("claude, codex, gemini, agy").
+pub fn known_providers_csv() -> String {
+    KNOWN_PROVIDERS.join(", ")
+}
+
 /// Resolve a provider impl by its stable name (`"claude"` / `"codex"` /
 /// `"gemini"`). Returns `None` for an unknown provider so callers (e.g.
 /// reconcile) can treat the probe as inconclusive rather than guessing. The
@@ -1147,7 +1160,12 @@ mod tests {
         // for_name is the LD8 single registration point; a copy-paste slip
         // (e.g. "codex" => GeminiProvider) would pass every other test, so
         // assert each name resolves to a provider reporting that same name.
-        for name in ["claude", "codex", "gemini"] {
+        // Iterating KNOWN_PROVIDERS (x-51f6 US1 / AC1-FR) makes this the
+        // roster-parity gate too: a name added to the const without a
+        // for_name arm fails here, and the consolidation can never silently
+        // narrow the roster (the old hardcoded list had already drifted —
+        // it missed agy).
+        for name in KNOWN_PROVIDERS.iter().copied() {
             let p = for_name(name).unwrap_or_else(|| panic!("for_name({name}) returned None"));
             assert_eq!(
                 p.name(),

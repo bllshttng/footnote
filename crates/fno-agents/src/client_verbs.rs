@@ -346,8 +346,9 @@ fn read_jsonl(path: &Path) -> (Vec<(String, Value)>, usize) {
 
 /// Providers + statuses the Python registry loader accepts (registry.py
 /// `KNOWN_PROVIDERS` / `KNOWN_STATUSES`). A row outside these makes
-/// `load_registry` raise `RegistryVersionError`.
-const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "agy"];
+/// `load_registry` raise `RegistryVersionError`. The roster is the shared
+/// [`crate::provider::KNOWN_PROVIDERS`] (x-51f6 US1: one source of truth).
+use crate::provider::KNOWN_PROVIDERS;
 /// Valid registry statuses. `registry.status` is a projection of
 /// `state.status` (LD10), so it can be ANY [`crate::AgentStatus`] variant —
 /// the daemon writes `live` on spawn and `exited` on child exit (the latter
@@ -1155,7 +1156,11 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     let provider = entry.get("provider").and_then(Value::as_str).unwrap_or("");
     let events_path = trace_events_path(home);
 
-    if provider == "codex" || provider == "gemini" || provider == "agy" {
+    // Every non-claude provider refuses attach (claude is the only provider
+    // with a persistent `--bg` session to attach to). `!= "claude"` instead of
+    // an allowlist so a provider added to the roster inherits the refusal
+    // rather than falling through to a claude-shaped attach (x-51f6 US1).
+    if provider != "claude" {
         eprintln!(
             "{provider} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output. Cross-provider attach is planned for the Phase 6 supervisor."
         );

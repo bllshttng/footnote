@@ -15,6 +15,7 @@ use fno_agents::client::{
 use fno_agents::drift::drift_warning;
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
+use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 
@@ -406,15 +407,17 @@ async fn run(args: Vec<String>) -> i32 {
             match params.get("provider").and_then(|v| v.as_str()) {
                 None => {
                     eprintln!(
-                        "provider is required to spawn a new agent {}; pass --provider one of: claude, codex, gemini, agy",
-                        py_repr(&agent_name)
+                        "provider is required to spawn a new agent {}; pass --provider one of: {}",
+                        py_repr(&agent_name),
+                        known_providers_csv()
                     );
                     return 2;
                 }
-                Some(p) if !matches!(p, "claude" | "codex" | "gemini" | "agy") => {
+                Some(p) if !KNOWN_PROVIDERS.contains(&p) => {
                     eprintln!(
-                        "unknown provider {}; supported: claude, codex, gemini, agy",
-                        py_repr(p)
+                        "unknown provider {}; supported: {}",
+                        py_repr(p),
+                        known_providers_csv()
                     );
                     return 2;
                 }
@@ -683,8 +686,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         Some(p) => p,
         None => {
             eprintln!(
-                "provider is required to spawn a new agent {}; pass --provider one of: claude, codex, gemini, agy",
-                py_repr(name)
+                "provider is required to spawn a new agent {}; pass --provider one of: {}",
+                py_repr(name),
+                known_providers_csv()
             );
             return Some(2);
         }
@@ -720,10 +724,11 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
 
     // Validate the provider FIRST so an unknown provider is a client-side
     // error (exit 2) for every substrate, never a fall-through to the daemon.
-    if !matches!(provider, "claude" | "codex" | "gemini" | "agy") {
+    if !KNOWN_PROVIDERS.contains(&provider) {
         eprintln!(
-            "unknown provider {}; supported: claude, codex, gemini, agy",
-            py_repr(provider)
+            "unknown provider {}; supported: {}",
+            py_repr(provider),
+            known_providers_csv()
         );
         return Some(2);
     }
@@ -825,19 +830,20 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
 /// prints to stderr verbatim). Never routes to the daemon (Locked Decision 3).
 fn unresolvable_ask_exit(params: &Value, name: &str) -> i32 {
     use fno_agents::claude_ask::py_repr;
-    const KNOWN: [&str; 4] = ["claude", "codex", "gemini", "agy"];
     let provider_param = params.get("provider").and_then(|v| v.as_str());
     let msg = match provider_param {
         // `select_provider` validates the requested provider FIRST, so an
         // unknown `--provider` surfaces the "unknown provider" error.
-        Some(p) if !KNOWN.contains(&p) => format!(
-            "unknown provider {}; supported: claude, codex, gemini, agy",
-            py_repr(p)
+        Some(p) if !KNOWN_PROVIDERS.contains(&p) => format!(
+            "unknown provider {}; supported: {}",
+            py_repr(p),
+            known_providers_csv()
         ),
         // New agent with no resolvable provider.
         _ => format!(
-            "provider is required for new agent {}; pass --provider one of: claude, codex, gemini, agy",
-            py_repr(name)
+            "provider is required for new agent {}; pass --provider one of: {}",
+            py_repr(name),
+            known_providers_csv()
         ),
     };
     eprintln!("{}", msg);
@@ -1295,10 +1301,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 .get("substrate")
                 .and_then(Value::as_str)
                 .unwrap_or("pane");
-            let pty_capable = matches!(
-                params.get("provider").and_then(Value::as_str),
-                Some("claude") | Some("codex") | Some("gemini") | Some("agy")
-            );
+            let pty_capable = params
+                .get("provider")
+                .and_then(Value::as_str)
+                .is_some_and(|p| KNOWN_PROVIDERS.contains(&p));
             if substrate == "pane" && pty_capable {
                 apply_interactive_defaults(&mut params);
             }
