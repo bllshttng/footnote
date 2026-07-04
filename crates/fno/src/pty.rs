@@ -229,7 +229,10 @@ fn open_pty(rows: u16, cols: u16) -> Result<portable_pty::PtyPair, PtyError> {
 /// `TERM`, `FNO_SESSION` (AC3-HP: the nested-attach guard and kill-server both
 /// read it), `FNO_PANE` (4a-G2: the pane's own id, so an agent hosted in a
 /// pane can name itself to the registry and an in-pane spawn can address its
-/// host), and the launch cwd when it is still a directory.
+/// host), `FNO_PANE_EPOCH` (a per-spawn nanosecond token so the turn-marker
+/// hook can tell THE pane host from a nested `claude -p` that
+/// inherited FNO_PANE - pane ids recycle across server restarts, the epoch
+/// does not), and the launch cwd when it is still a directory.
 fn base_command(
     program: &OsStr,
     cwd: Option<&std::path::Path>,
@@ -240,6 +243,14 @@ fn base_command(
     cmd.env("TERM", "xterm-256color");
     cmd.env("FNO_SESSION", session);
     cmd.env("FNO_PANE", pane_id.to_string());
+    // Unique per pane-host spawn: descendants (incl. a nested claude) inherit
+    // the same value, so the hook's first-writer pin is keyed to THIS host and
+    // a recycled pane_id after a server restart gets a fresh key.
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    cmd.env("FNO_PANE_EPOCH", epoch.to_string());
     if let Some(dir) = cwd.filter(|d| d.is_dir()) {
         cmd.cwd(dir);
     }
@@ -593,7 +604,8 @@ mod tests {
     async fn server_spine_pane_env_carries_session_and_pane_id() {
         // 4a-G2: FNO_PANE joins FNO_SESSION in every pane child env, so a
         // hosted agent can name its own pane and an in-pane spawn inherits
-        // the session.
+        // the session. FNO_PANE_EPOCH rides along, non-empty, so the
+        // turn-marker hook's first-writer pin has a per-spawn freshness key.
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
         let shell = PtyShell::spawn(
@@ -607,8 +619,10 @@ mod tests {
             exit_tx,
         )
         .expect("spawns");
+        // A non-empty epoch prints as `epoch-<digits>-epochend`; an unset one
+        // would collapse to `epoch--epochend`, which the assertion rejects.
         shell
-            .write_input(b"echo mark-$FNO_SESSION-$FNO_PANE-end\r")
+            .write_input(b"echo mark-$FNO_SESSION-$FNO_PANE-end epoch-$FNO_PANE_EPOCH-epochend\r")
             .unwrap();
         let mut seen = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -616,7 +630,12 @@ mod tests {
             match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
                 Ok(Some((_, chunk))) => {
                     seen.extend_from_slice(&chunk);
-                    if String::from_utf8_lossy(&seen).contains("mark-envtest-31-end") {
+                    let text = String::from_utf8_lossy(&seen);
+                    if text.contains("mark-envtest-31-end") && text.contains("-epochend") {
+                        assert!(
+                            !text.contains("epoch--epochend"),
+                            "FNO_PANE_EPOCH must be non-empty: {text:?}"
+                        );
                         return;
                     }
                 }
