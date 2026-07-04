@@ -714,8 +714,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         .get("yolo")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    // claude --bg (x-571f per-node pin) and agy honor an optional --model
-    // (appended to the worker argv); codex/gemini and claude --headless ignore it.
+    // Optional --model, forwarded to every provider's own --model (x-c772
+    // wired codex/gemini/claude-headless; claude --bg was x-571f). Exact
+    // passthrough appended to the worker argv.
     let model = params.get("model").and_then(|v| v.as_str());
 
     // Validate the provider FIRST so an unknown provider is a client-side
@@ -780,16 +781,18 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 &cwd,
                 yolo,
                 timeout,
+                model,
             ))
         }
 
         // codex/gemini/agy headless: the client-side one-shot (codex --exec /
-        // gemini -p / agy -p).
+        // gemini -p / agy -p). x-c772: --model is forwarded to each (exact
+        // passthrough to the provider CLI's own --model).
         ("codex", "headless") => emit!(dispatch_codex_once(
-            home, name, message, from_name, &cwd, yolo, timeout,
+            home, name, message, from_name, &cwd, yolo, timeout, model,
         )),
         ("gemini", "headless") => emit!(dispatch_gemini_once(
-            home, name, message, from_name, &cwd, yolo, timeout,
+            home, name, message, from_name, &cwd, yolo, timeout, model,
         )),
         ("agy", "headless") => {
             // agy is stateless (plain text, no session id): a one-shot `agy -p`.
@@ -1188,12 +1191,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("force".into(), Value::Bool(true));
             }
             "--model" | "-m" => {
-                // claude --bg (x-571f per-node pin) and agy honor an exact model
-                // name; codex/gemini and claude --headless ignore the param.
-                // Forwarded so `spawn --substrate bg --model <m>` reaches
-                // dispatch_claude_spawn and `--provider agy --once --model <name>`
-                // reaches dispatch_agy_once (codex P2). -m is the mobile short
-                // (x-c772).
+                // Exact model name forwarded to the provider CLI's own --model:
+                // claude --bg/-p, codex exec, gemini, agy (x-c772 wired the
+                // headless one-shots; claude --bg was x-571f). -m is the mobile
+                // short. No fuzzy resolution.
                 params.insert("model".into(), str_arg(&mut it, "-m/--model")?);
             }
             "--from-name" => {

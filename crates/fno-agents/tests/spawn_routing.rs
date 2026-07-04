@@ -442,6 +442,7 @@ fn spawn_codex_once_happy_path() {
         &cwd,
         false,
         Some(Duration::from_secs(10)),
+        None,
     );
 
     match old_path {
@@ -501,7 +502,7 @@ fn spawn_codex_once_collision_exits_2() {
     // Seed a pre-existing agent.
     seed_registry(&home, "taken", "codex");
 
-    let out = dispatch_codex_once(&home, "taken", "msg", "abilities", &cwd, false, None);
+    let out = dispatch_codex_once(&home, "taken", "msg", "abilities", &cwd, false, None, None);
 
     assert_eq!(out.exit_code, 2, "collision must exit 2: {}", out.stderr);
     assert!(
@@ -535,6 +536,7 @@ fn spawn_codex_once_create_failure_no_registry_entry() {
         &cwd,
         false,
         Some(Duration::from_secs(3)),
+        None,
     );
 
     match old_path {
@@ -580,6 +582,7 @@ fn spawn_gemini_once_happy_path() {
         &cwd,
         false,
         Some(Duration::from_secs(10)),
+        None,
     );
 
     match old_path {

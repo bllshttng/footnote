@@ -184,7 +184,16 @@ fn rust_gemini(
 
     let timeout = Some(std::time::Duration::from_secs(timeout_sec));
     let result = if mode == "create" {
-        gemini_create(cwd, prompt, from_name, yolo, output_path, timeout, None)
+        gemini_create(
+            cwd,
+            prompt,
+            from_name,
+            yolo,
+            output_path,
+            timeout,
+            None,
+            None,
+        )
     } else {
         gemini_resume(
             session_id.unwrap_or(""),

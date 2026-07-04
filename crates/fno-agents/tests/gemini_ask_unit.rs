@@ -67,7 +67,7 @@ fn build_argv_create_default_is_never_prompt() {
     // provider exists), so assert the host-INDEPENDENT invariants: the stable
     // prefix + the never-prompt axis (--approval-mode yolo always present) and
     // NEVER a prompting mode (default/auto_edit).
-    let argv = build_argv_create("[from: alice]\n\nhello", false, None);
+    let argv = build_argv_create("[from: alice]\n\nhello", false, None, None);
     assert_eq!(argv[0], "gemini");
     assert_eq!(argv[1], "--skip-trust");
     assert_eq!(argv[2], "-p");
@@ -83,23 +83,36 @@ fn build_argv_create_default_is_never_prompt() {
 }
 
 #[test]
+fn build_argv_create_forwards_model() {
+    // x-c772: an explicit --model reaches `gemini --model <m>`; None/empty = none.
+    let argv = build_argv_create("msg", false, None, Some("gemini-3-pro"));
+    let i = argv
+        .iter()
+        .position(|a| a == "--model")
+        .expect("--model present");
+    assert_eq!(argv[i + 1], "gemini-3-pro");
+    let argv_none = build_argv_create("msg", false, None, Some(""));
+    assert!(!argv_none.iter().any(|a| a == "--model"));
+}
+
+#[test]
 fn build_argv_create_no_cd_flag() {
     // gemini pins cwd via Popen(cwd=...), not a -C argv token.
-    let argv = build_argv_create("msg", false, None);
+    let argv = build_argv_create("msg", false, None, None);
     assert!(!argv.contains(&"-C".to_string()));
     assert!(!argv.contains(&"--resume".to_string()));
 }
 
 #[test]
 fn build_argv_create_yolo_replaces_approval_mode() {
-    let argv = build_argv_create("msg", true, None);
+    let argv = build_argv_create("msg", true, None, None);
     assert!(argv.contains(&"--yolo".to_string()));
     assert!(!argv.contains(&"--approval-mode".to_string()));
 }
 
 #[test]
 fn build_argv_create_with_session_id_appends_flag() {
-    let argv = build_argv_create("msg", false, Some("uuid-abc"));
+    let argv = build_argv_create("msg", false, Some("uuid-abc"), None);
     // --session-id <uuid> appended after the sandbox flags.
     let pos = argv
         .iter()
@@ -111,7 +124,7 @@ fn build_argv_create_with_session_id_appends_flag() {
 #[test]
 fn build_argv_create_empty_session_id_omits_flag() {
     // Python: `if session_id:` is falsy for "" -> no flag.
-    let argv = build_argv_create("msg", false, Some(""));
+    let argv = build_argv_create("msg", false, Some(""), None);
     assert!(!argv.contains(&"--session-id".to_string()));
 }
 

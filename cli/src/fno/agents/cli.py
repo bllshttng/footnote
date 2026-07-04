@@ -357,9 +357,9 @@ def cmd_spawn(
     model: str | None = typer.Option(
         None, "--model", "-m",
         help=(
-            "Per-node model pin (x-571f). Appended as --model <m> to the "
-            "claude --bg (and agy) worker argv; unset = provider default. "
-            "codex/gemini and claude --headless ignore it."
+            "Model to run the worker on. Forwarded as --model <m> to the "
+            "provider CLI (claude --bg/-p, codex exec, gemini, agy); exact "
+            "passthrough, no fuzzy resolution. Unset = provider default."
         ),
     ),
     node: str | None = typer.Option(
