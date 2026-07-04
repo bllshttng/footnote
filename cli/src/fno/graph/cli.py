@@ -1548,10 +1548,13 @@ def cmd_update(
             if caused_by.lower() == "null":
                 node["caused_by"] = None
             else:
-                if _find_node(entries, caused_by) is None:
+                origin = _find_node(entries, caused_by)
+                if origin is None:
                     typer.echo(f"Error: --caused-by node {caused_by} not found", err=True)
                     raise typer.Exit(code=1)
-                node["caused_by"] = caused_by
+                # Store the resolved id, not the raw input (which may be a
+                # prefix/bare-hex form _find_node normalized).
+                node["caused_by"] = origin["id"]
         if fixes_pr is not None:
             node["fixes_pr"] = None if fixes_pr == 0 else int(fixes_pr)
         if reverted is not None:
