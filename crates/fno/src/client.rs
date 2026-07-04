@@ -184,45 +184,61 @@ fn spawn_server(path: &Path) -> Result<(), String> {
 /// that overruns the budget all leave injection on (the default). The bound
 /// matters because this runs synchronously inside `spawn_server`, *before* the
 /// client's spawn-connect wait loop exists - nothing downstream would rescue an
-/// unbounded `.output()`, so a slow or wedged config read would freeze `fno`
-/// startup with no notice. On timeout the child is killed and reaped; stdout is
-/// read only after the child exits on its own, so a lingering grandchild holding
-/// the pipe cannot re-introduce the hang.
+/// unbounded read, so a slow or wedged config read would freeze `fno` startup
+/// with no notice.
+///
+/// Capture stdout to a FILE, not a pipe. A pipe read blocks until EOF (every
+/// write-end closed), so a descendant of `fno config get` that inherits stdout
+/// and outlives the direct child would hang the read even after `try_wait`
+/// reports the child gone - re-introducing the very freeze the bound exists to
+/// prevent (peer + sigma review). A file read never blocks on EOF; the bounded
+/// try_wait/kill still caps the child's own runtime.
 fn shell_integration_off() -> bool {
-    use std::io::Read;
     const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(3);
+    // 0700 per-user dir (never world-writable /tmp); pid-unique name for this
+    // one-shot at server birth. Removed on every return path.
+    let dir = crate::proto::mux_dir();
+    if crate::proto::ensure_private_dir(&dir).is_err() {
+        return false;
+    }
+    let out_path = dir.join(format!("shell-integration-{}.out", std::process::id()));
+    let out_file = match std::fs::File::create(&out_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
     let mut child = match std::process::Command::new(crate::server::fno_bin())
         .args(["config", "get", "mux.shell_integration"])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
+        .stdout(out_file)
         .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => {
+            let _ = std::fs::remove_file(&out_path);
+            return false;
+        }
     };
     let deadline = Instant::now() + CONFIG_READ_TIMEOUT;
-    loop {
+    let off = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut out = String::new();
-                return status.success()
-                    && child
-                        .stdout
-                        .take()
-                        .and_then(|mut s| s.read_to_string(&mut out).ok())
-                        .map(|_| config_says_off(&out))
+                break status.success()
+                    && std::fs::read_to_string(&out_path)
+                        .map(|s| config_says_off(&s))
                         .unwrap_or(false);
             }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                break false;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => return false,
+            Err(_) => break false,
         }
-    }
+    };
+    let _ = std::fs::remove_file(&out_path);
+    off
 }
 
 /// The one off-switch, matched exactly like the Rust pane-spawn side
