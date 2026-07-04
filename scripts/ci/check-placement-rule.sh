@@ -173,7 +173,6 @@ crates/fno-agents/src/bin/client.rs
 crates/fno-agents/tests/claude_ask_dispatch.rs
 crates/fno-agents/tests/claude_ask_parity.rs
 hooks/cache-keepalive-inject.sh
-hooks/convo-signal-capture.sh
 hooks/corrections-git-postcommit.sh
 hooks/session-start.sh
 hooks/worktree-setup.sh

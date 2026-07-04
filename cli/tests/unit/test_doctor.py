@@ -1085,3 +1085,21 @@ def test_orphan_report_finds_leftover_files_in_both_dirs(
     assert str(home / ".fno" / "tasks.json") in report
     assert str(project / ".fno" / "convo-signals.jsonl") in report
     assert len(report) == 3
+
+
+def test_orphan_report_degrades_on_unresolvable_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deleted-out-from-under-us cwd (e.g. an archived worktree) must not
+    crash the whole `fno doctor` invocation - just skip that dir."""
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    (home / ".fno" / "convo-signals.jsonl").write_text("")
+
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(
+        doctor.Path, "cwd", classmethod(lambda cls: (_ for _ in ()).throw(OSError("gone")))
+    )
+
+    report = doctor._orphan_report()
+    assert str(home / ".fno" / "convo-signals.jsonl") in report

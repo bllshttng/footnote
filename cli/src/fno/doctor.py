@@ -520,9 +520,15 @@ def _orphan_report() -> list[str]:
     Checks the default global state dir (``~/.fno``, not a configured
     override - this is a lightweight advisory check, not a path-config-aware
     operation) and the project ``.fno/`` dir. Returns an empty list on a
-    clean machine; never raises.
+    clean machine, or if either dir can't be resolved (e.g. cwd deleted out
+    from under a running shell); never raises.
     """
-    dirs = [Path.home() / ".fno", Path.cwd() / ".fno"]
+    dirs: list[Path] = []
+    for get_dir in (Path.home, Path.cwd):
+        try:
+            dirs.append(get_dir() / ".fno")
+        except OSError:
+            continue
 
     found: set[str] = set()
     for d in dirs:
