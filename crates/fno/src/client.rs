@@ -535,11 +535,16 @@ impl View {
                     Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)]))
                 }
             },
-            // A pane-hosted agent focuses its pane; a watch-only (bg/headless)
-            // row has no pane in this session, so a click can only say so.
+            // A pane-hosted agent focuses its pane. A watch-only (bg/headless)
+            // row has no pane here, but a claude bg row carries an attach id -
+            // a click attaches it into a fresh pane. A watch-only row with no
+            // attach target (non-claude, or no jobId) can only say so.
             DisplayRow::Agent(a) => match a.pane_id {
                 Some(pid) => Some(ChromeHit::Cmds(vec![Command::FocusPane(pid)])),
-                None => Some(ChromeHit::Notice("agent has no pane here")),
+                None => match &a.attach_id {
+                    Some(id) => Some(ChromeHit::Cmds(vec![Command::AttachAgent(id.clone())])),
+                    None => Some(ChromeHit::Notice("agent has no pane here")),
+                },
             },
             // Cards dispatch (a build) - too costly for a stray tap; keep it on
             // the explicit leader+g verb.
@@ -2659,21 +2664,40 @@ mod tests {
             reason: None,
             exited: false,
             answerable: None,
+            attach_id: None,
         };
-        let bg = AgentRow {
+        // A watch-only bg row with a claude jobId: a click attaches it.
+        let bg_attach = AgentRow {
             squad: None,
-            name: "bg".into(),
+            name: "bg-claude".into(),
             pane_id: None,
             badge: None,
             reason: None,
             exited: false,
             answerable: None,
+            attach_id: Some("c19cd2c3".into()),
         };
-        let view = view_with_agents(vec![hosted, bg]);
+        // A watch-only row with no attach target: a click can only hint.
+        let bg_plain = AgentRow {
+            squad: None,
+            name: "bg-other".into(),
+            pane_id: None,
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+        };
+        let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // display order: squad 1 (row1), its agent "worker" (row2), squad 2
-        // (row3), then "~ agents" header (row4), orphan "bg" (row5).
+        // (row3), "~ agents" header (row4), orphan "bg-claude" (row5), orphan
+        // "bg-other" (row6).
         assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::FocusPane(10)]);
-        assert!(matches!(view.chrome_hit(5, 4), Some(ChromeHit::Notice(_))));
+        assert_eq!(
+            cmds(view.chrome_hit(5, 4)),
+            vec![Command::AttachAgent("c19cd2c3".into())]
+        );
+        assert!(matches!(view.chrome_hit(6, 4), Some(ChromeHit::Notice(_))));
         // The "~ agents" header row is inert.
         assert!(view.chrome_hit(4, 4).is_none());
     }
@@ -2692,6 +2716,7 @@ mod tests {
                 reason: None,
                 exited: false,
                 answerable: None,
+                attach_id: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -2918,6 +2943,7 @@ mod tests {
                     reason: Some("perm prompt".into()),
                     exited: false,
                     answerable: None,
+                    attach_id: None,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -2927,6 +2953,7 @@ mod tests {
                     reason: None,
                     exited: true,
                     answerable: None,
+                    attach_id: None,
                 },
                 AgentRow {
                     squad: None,
@@ -2936,6 +2963,7 @@ mod tests {
                     reason: None,
                     exited: false,
                     answerable: None,
+                    attach_id: None,
                 },
             ],
             focus_node: None,
@@ -3195,6 +3223,7 @@ mod tests {
             reason: None,
             exited: false,
             answerable: ans,
+            attach_id: None,
         }
     }
 

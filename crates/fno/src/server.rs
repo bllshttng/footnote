@@ -1379,6 +1379,15 @@ impl Core {
                 // An exited pane is unanswerable; drop any stale payload with
                 // the badge (x-c929).
                 answerable: if exited { None } else { a.answerable.clone() },
+                // The attach target rides ONLY a live watch-only row: a
+                // pane-hosted row focuses its pane instead (wire contract), and
+                // a terminal session can't be attached (its supervisor row is
+                // being reaped). Drop it in both cases, like the badge.
+                attach_id: if exited || pane_id.is_some() {
+                    None
+                } else {
+                    a.attach_id.clone()
+                },
             });
         }
         out
@@ -2069,6 +2078,63 @@ impl Core {
                     // other catalog-named commands.
                     None => self.notice(client_id, "no such pane"),
                 }
+                Flow::Continue
+            }
+            Command::AttachAgent(id) => {
+                // Validate the jobId shape (8 hex digits) BEFORE it reaches the
+                // argv - defense in depth even though spawn_pane_cmd never
+                // builds a shell string (the id can only ever be `claude
+                // attach`'s positional arg). A malformed id is refused
+                // fail-closed, like the other catalog-named commands.
+                if id.len() != 8 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    self.notice(client_id, "not an attachable agent");
+                    return Flow::Continue;
+                }
+                // Attach ONLY a session actually surfaced in this sideline: a
+                // live watch-only row (paneless, not exited) whose jobId matches
+                // - the same catalog-membership refusal FocusPane/SelectTab use,
+                // so a stale or never-surfaced id can never drive a spawn.
+                let known = self.agents.iter().any(|a| {
+                    a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id.as_str())
+                });
+                if !known {
+                    self.notice(client_id, "no such agent");
+                    return Flow::Continue;
+                }
+                // Spawn `claude attach <id>` as a new tab in the sender's squad
+                // (mirrors NewTab): the claude supervisor PTYs the detached bg
+                // session into this pane. cwd is the squad's, like a new tab -
+                // attach connects by id, so the dir is cosmetic.
+                let (rows, cols) = self
+                    .clients
+                    .iter()
+                    .find(|c| c.id == client_id)
+                    .map(|c| c.dims)
+                    .unwrap_or((vp.rows, vp.cols));
+                let squad_cwd = self
+                    .session
+                    .squad(view.0)
+                    .map(|s| s.canonical_cwd.clone())
+                    .unwrap_or_default();
+                let argv = vec!["claude".to_string(), "attach".to_string(), id.clone()];
+                let pid = match self.spawn_pane_cmd(&argv, rows, cols, &squad_cwd) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.notice(client_id, format!("attach failed: {e}"));
+                        return Flow::Continue;
+                    }
+                };
+                let tid = self.session.mint_tab_id();
+                let Some(squad) = self.session.squad_mut(view.0) else {
+                    return Flow::Continue;
+                };
+                squad.tabs.push(Tab {
+                    id: tid,
+                    root: Node::Leaf(pid),
+                    focus: pid,
+                });
+                self.set_view(client_id, view.0, tid);
+                self.push_layout(true);
                 Flow::Continue
             }
             Command::CopySelection => {
@@ -3524,11 +3590,95 @@ mod tests {
             reason: None,
             mux: Some((sess.into(), pane)),
             answerable: None,
+            attach_id: None,
         }
     }
 
     fn agent(pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         agent_in("main", pane, badge, exited)
+    }
+
+    #[test]
+    fn watch_only_bg_row_surfaces_while_foreign_pane_is_skipped() {
+        // An `fno agents spawn --substrate bg` worker writes a paneless
+        // (`mux: None`) registry row. It MUST surface as a watch-only AgentRow,
+        // even alongside a pane row hosted by another mux session. The
+        // session-id skip in `agent_rows()` only eats ANOTHER session's live
+        // pane; it must never drop a paneless bg/headless row. Guards a future
+        // membership-first rewrite of `agent_rows()` from re-dropping bg rows.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        core.agents = vec![
+            // A pane hosted by ANOTHER session -> that session's server renders
+            // it; correctly skipped here.
+            RegistryAgent {
+                name: "foreign-pane".into(),
+                cwd: "/other".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: Some(("other".into(), 5)),
+                answerable: None,
+                attach_id: None,
+            },
+            // A bg worker: paneless, no squad match -> watch-only orphan, and
+            // it carries a claude jobId so the sideline can attach it.
+            RegistryAgent {
+                name: "bg-worker".into(),
+                cwd: "/bg".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+                attach_id: Some("c19cd2c3".into()),
+            },
+        ];
+        let rows = core.agent_rows();
+        assert!(
+            !rows.iter().any(|r| r.name == "foreign-pane"),
+            "a pane hosted by another session must be skipped"
+        );
+        let bg = rows
+            .iter()
+            .find(|r| r.name == "bg-worker")
+            .expect("a paneless bg row must surface as a watch-only row");
+        assert_eq!(
+            bg.squad, None,
+            "an unmatched bg row is an orphan (squad None)"
+        );
+        assert_eq!(bg.pane_id, None, "a watch-only row has no pane");
+        assert!(!bg.exited);
+        assert_eq!(
+            bg.attach_id.as_deref(),
+            Some("c19cd2c3"),
+            "the claude jobId must carry through so the sideline can attach it"
+        );
+    }
+
+    #[test]
+    fn attach_agent_refuses_unknown_or_malformed_jobid() {
+        // The jobId lands in `claude attach <id>`'s argv, so an out-of-shape id
+        // is refused before any pane spawns (argv defense in depth). A
+        // well-formed id that names no surfaced watch-only row is refused too
+        // (catalog membership, like the sibling FocusPane/SelectTab commands) -
+        // here `empty_core` has no agents, so even valid-shape "deadbeef" fails.
+        for bad in [
+            "short",
+            "toolongxx",
+            "ZZZZZZZZ",
+            "; rm -rf /",
+            "c19cd2c",
+            "deadbeef",
+        ] {
+            let mut core = empty_core();
+            let flow = core.command(1, Command::AttachAgent(bad.into()));
+            assert!(matches!(flow, Flow::Continue));
+            assert!(
+                core.panes.is_empty(),
+                "un-surfaced/malformed jobId {bad:?} must not spawn a pane"
+            );
+        }
     }
 
     #[test]

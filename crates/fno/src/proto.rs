@@ -96,7 +96,9 @@ use crate::tree::{Dir, Rect, TabId};
 /// frame plumbing.
 ///
 /// v13: `Command::FocusPane(pane_id)` for the sideline click-to-focus path.
-pub const PROTO_VERSION: u32 = 13;
+/// v14: `Command::AttachAgent(id)` + `AgentRow.attach_id` for the sideline
+/// click-to-attach path (a watch-only claude bg row -> `claude attach <id>`).
+pub const PROTO_VERSION: u32 = 14;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -364,6 +366,14 @@ pub struct AgentRow {
     /// answer overlay. `#[serde(default)]` keeps a v8 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answerable: Option<AnswerablePrompt>,
+    /// (v14) The `claude attach <id>` target for a watch-only row: the claude
+    /// bg jobId. Present only when `pane_id` is `None` (a paneless bg/headless
+    /// claude row) and the registry recorded a jobId; lets a sideline click
+    /// attach the detached session into a fresh mux pane instead of dead-ending
+    /// on a notice. `None` for a pane-hosted row (it focuses its pane) or a
+    /// non-attachable row. `#[serde(default)]` keeps a v13 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_id: Option<String>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -434,7 +444,7 @@ pub enum AgentBadge {
 /// catalog; `SelectSquad` names a squad id from the same catalog - the
 /// server rejects stale values fail-closed (BEL + notice), so a client racing
 /// a layout change can never corrupt state.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Command {
     SplitH,
     SplitV,
@@ -457,6 +467,13 @@ pub enum Command {
     /// agent rows (the sideline click path); a stale id is refused fail-closed
     /// with a notice, like the other catalog-named commands.
     FocusPane(u64),
+    /// (v14) Attach a watch-only claude bg session into a fresh mux pane by its
+    /// jobId (`AgentRow.attach_id`): the server spawns `claude attach <id>` as a
+    /// new tab in the sender's squad and switches the sender to it. The id is
+    /// validated (8 hex digits) before it reaches the argv - a malformed id is
+    /// refused fail-closed with a notice, and the argv is never a shell string,
+    /// so the value can only ever be `claude attach`'s positional arg.
+    AttachAgent(String),
 }
 
 /// Server -> client.
@@ -1152,6 +1169,7 @@ mod tests {
             ClientMsg::Command(Command::SelectTab(3)),
             ClientMsg::Command(Command::SelectSquad(42)),
             ClientMsg::Command(Command::FocusPane(3)),
+            ClientMsg::Command(Command::AttachAgent("c19cd2c3".into())),
             ClientMsg::Query,
             ClientMsg::KillServer,
             ClientMsg::Mouse {
@@ -1207,6 +1225,19 @@ mod tests {
             let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
             assert_eq!(decoded, msg);
         }
+    }
+
+    #[test]
+    fn agent_row_from_v13_json_defaults_attach_id_none() {
+        // A pre-v14 (v13) AgentRow omits `attach_id` entirely (skip-when-None).
+        // A v14 reader must decode it as `None`, never fail - the wire
+        // back-compat that lets the version skew window hold.
+        let v13 = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(v13).unwrap();
+        assert_eq!(row.attach_id, None);
+        assert_eq!(row.answerable, None);
+        assert_eq!(row.name, "bg");
     }
 
     #[test]
@@ -1280,6 +1311,7 @@ mod tests {
                             fingerprint: [7u8; 32],
                             region_lines: 8,
                         }),
+                        attach_id: None,
                     },
                     AgentRow {
                         squad: None,
@@ -1289,6 +1321,7 @@ mod tests {
                         reason: None,
                         exited: true,
                         answerable: None,
+                        attach_id: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
