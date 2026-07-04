@@ -303,7 +303,7 @@ def test_ledger_json_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_ledger_json_pinned_global_ignores_relative_state_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """x-bb53: the ledger is cross-project and must NOT fork into a per-repo
+    """The ledger is cross-project and must NOT fork into a per-repo
     stray. A relative (project-/CWD-anchored) state_dir must not drag the
     ledger into the repo checkout; it stays anchored to the user-global
     ~/.fno. An absolute state_dir (the default and test sandboxes) is honored.

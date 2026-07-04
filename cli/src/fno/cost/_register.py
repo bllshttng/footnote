@@ -935,7 +935,7 @@ def register_entry(entry: dict) -> None:
     across every repo), so there is a single writer path: the global
     ``paths.ledger_json()``. The former project-local dual-write (a stray
     ``<root_path>/.fno/ledger.json``) was the split-brain that corrupted
-    node-level joins; it is removed (x-bb53 / epic x-f063 Wave 1).
+    node-level joins; it is removed.
     """
     ledger_path = _paths.ledger_json()
     _ensure_ledger(ledger_path)

@@ -468,7 +468,7 @@ def print_metrics(metrics: SessionMetrics, as_json: bool = False):
 # --- Backfill support ---
 
 # Single resolution path: the ledger is cross-project, so it always routes
-# through the pinned-global paths.ledger_json() (x-bb53 / epic x-f063 Wave 1).
+# through the pinned-global paths.ledger_json().
 LEDGER_JSON_PATH = _paths.ledger_json()
 LEDGER_MD_PATH = LEDGER_JSON_PATH.with_suffix(".md")
 _OLD_TASKS_PATH = Path.home() / ".fno" / "tasks.json"

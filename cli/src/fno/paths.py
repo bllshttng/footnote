@@ -352,7 +352,7 @@ def ledger_json() -> Path:
     when that is an absolute anchor - the ``~/.fno`` default and test
     sandboxes both are; a *relative* (project-/CWD-anchored) ``state_dir``
     would land the ledger inside a repo checkout, so it falls back to the
-    user-global ``~/.fno`` instead (epic x-f063 Wave 1, x-bb53).
+    user-global ``~/.fno`` instead.
     """
     settings = _settings()
     override = settings.config.paths.ledger_json

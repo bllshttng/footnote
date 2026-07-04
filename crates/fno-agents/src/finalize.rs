@@ -468,11 +468,11 @@ fn repo_cli_src() -> Option<String> {
 /// `/opt/homebrew/opt/python@3.x`) resolves the `fno` package off PYTHONPATH but
 /// lacks fno's third-party deps (pydantic, ...), so `import fno.config` raised
 /// ModuleNotFoundError and every terminal finalize logged `ledger record failed`
-/// / `stamp failed` and wrote no termination_reason row (the ledger-trust gap,
-/// epic x-f063 Wave 1). The venv has both fno and its deps. PYTHONPATH entries
-/// still precede site-packages, so the finalize_e2e stub package keeps
-/// precedence over the venv's installed `fno`. Falls back to `python3` when no
-/// venv is found (installed-wheel or bare environment).
+/// / `stamp failed` and wrote no termination_reason row. The venv has both fno
+/// and its deps. PYTHONPATH entries still precede site-packages, so the
+/// finalize_e2e stub package keeps precedence over the venv's installed `fno`.
+/// Falls back to `python3` when no venv is found (installed-wheel or bare
+/// environment).
 fn py_interpreter() -> String {
     let exe = match std::env::current_exe() {
         Ok(p) => p,

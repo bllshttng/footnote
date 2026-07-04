@@ -2,10 +2,9 @@
 """Report ledger telemetry coverage: % of rows carrying termination_reason and
 graph_node_id.
 
-Epic x-f063 Wave 1 (ledger trust). The finalize gap's acceptance is measured,
-not asserted: terminal sessions should reach 100% termination_reason coverage.
-This is the fold that measures it (and the seed of Wave 5's scoreboard coverage
-line). Read-only.
+The finalize coverage gap's acceptance is measured, not asserted: terminal
+sessions should reach 100% termination_reason coverage. This is the fold that
+measures it (and the seed of a future scoreboard coverage line). Read-only.
 
 Usage:
     python3 scripts/metrics/ledger-coverage.py              # last 7 days

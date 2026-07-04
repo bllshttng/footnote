@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-off: fold the stray project-local ledger fork into the global ledger.
 
-Epic x-f063 Wave 1 (ledger trust). ``register_entry()`` used to dual-write a
+``register_entry()`` used to dual-write a
 project-local ``<repo>/.fno/ledger.json`` alongside the global
 ``~/.fno/ledger.json`` - the split-brain that forked node-level joins and left
 a stray project-local ledger in the repo checkout. The dual-write is removed
