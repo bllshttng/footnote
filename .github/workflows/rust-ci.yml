@@ -131,7 +131,15 @@ jobs:
 
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
-        run: cargo build --bin fno-agents
+        # Force a fresh fno-agents build. This job's Cargo cache key is keyed
+        # only on Cargo.lock, so a source-only KNOWN_EVENT_KINDS change (which
+        # does not touch Cargo.lock) restores a stale target/ that cargo's mtime
+        # fingerprint treats as fresh - serving an outdated --emit-schema to the
+        # parity check below and reporting phantom kind drift. `clean -p` drops
+        # only fno-agents' own artifacts; every dependency stays cached.
+        run: |
+          cargo clean -p fno-agents
+          cargo build --bin fno-agents
 
       - name: Schema parity check
         # The binary is now on disk; the parity script picks it up from
