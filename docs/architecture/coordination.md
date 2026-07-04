@@ -94,10 +94,14 @@ is that contested or ambiguous liveness degrades to **skip**, never to
   separate heartbeat. Renewal is best-effort; a missed renewal only shortens
   the lease, never blocks the loop.
 - **`fno target init`** may archive-and-reclaim a prior manifest only when the
-  lockfile is `free`/`stale` AND the worktree shows no fresh activity within
-  `config.claims.activity_window` (default 15m). A `suspect` claim, or fresh
-  worktree activity, makes init refuse as `contested` (`RESULT: BLOCKED`)
-  rather than steal.
+  lockfile is `free`/`stale`/`corrupted` AND the worktree shows no fresh activity
+  within `config.claims.activity_window` (default 15m, env override
+  `TARGET_CLAIM_ACTIVITY_WINDOW`). Freshness is the newest mtime among
+  git-tracked-modified files and the `.fno/scratchpad` tree - a live `/target`
+  writes there continuously. (Deliberately mtime-only: init's own parent process
+  is legitimately cwd'd in the worktree, so a "process cwd'd here" check would
+  false-positive every run.) A `suspect` claim, or fresh activity, makes init
+  refuse as `contested` (`RESULT: BLOCKED`) rather than steal.
 
 The live lockfile holder is the only ownership truth: the `target_claim_*`
 manifest fields are an init-time snapshot and graph `_status: claimed` names no
