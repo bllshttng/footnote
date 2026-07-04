@@ -1858,6 +1858,11 @@ class MuxBlock(BaseModel):
     # attach (and the Rust reader parses it as u64, silently rejecting negatives
     # to the default), so pin the floor at 1 minute here.
     attach_digest_threshold_min: int = Field(default=10, ge=1)
+    # Focus-follows-mouse over coding panes (x-a496): hovering a pane makes it the
+    # keyboard focus after a short settle. Read straight from settings.yaml by the
+    # interactive Rust client (same split-brain as attach_digest); modeled here so
+    # the off-switch is discoverable via `fno config get/set`.
+    hover_focus: bool = True
 
     @field_validator("shell_integration", mode="before")
     @classmethod

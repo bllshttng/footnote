@@ -185,6 +185,7 @@ FIELD_META: dict[str, Meta] = {
     "config.mux.notify_on_done": Meta("advanced", "Also notify on a terminal 'done' hook transition (default off).", default_source="default"),
     "config.mux.attach_digest": Meta("advanced", "Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on).", default_source="default"),
     "config.mux.attach_digest_threshold_min": Meta("advanced", "Minutes since last detach before the catch-up digest overlay shows (default 10).", default_source="default"),
+    "config.mux.hover_focus": Meta("advanced", "Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).", default_source="default"),
     # --- config.loops.* (x-ce71: per-loop level + pause-all substrate) ---
     "config.loops": Meta(
         "advanced",
