@@ -145,7 +145,12 @@ pub fn sandbox_flag(yolo: bool, sandbox_available: Option<bool>) -> Vec<String> 
 /// (gemini pins sessions to cwd), NOT an argv flag. `session_id` is appended
 /// only when truthy (Python: `if session_id:`); a `None`/empty id lets gemini
 /// auto-generate and we capture it from the response.
-pub fn build_argv_create(full_prompt: &str, yolo: bool, session_id: Option<&str>) -> Vec<String> {
+pub fn build_argv_create(
+    full_prompt: &str,
+    yolo: bool,
+    session_id: Option<&str>,
+    model: Option<&str>,
+) -> Vec<String> {
     let mut argv = vec![
         "gemini".to_string(),
         "--skip-trust".to_string(),
@@ -154,6 +159,12 @@ pub fn build_argv_create(full_prompt: &str, yolo: bool, session_id: Option<&str>
         "--output-format".to_string(),
         "json".to_string(),
     ];
+    // x-c772: an explicit --model is forwarded to `gemini --model <m>`
+    // (empty/None = gemini default). Exact passthrough, no fuzzy resolution.
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        argv.push("--model".to_string());
+        argv.push(m.to_string());
+    }
     argv.extend(sandbox_flag(yolo, None));
     if let Some(sid) = session_id {
         if !sid.is_empty() {
@@ -602,6 +613,7 @@ pub fn gemini_create(
     output_path: &Path,
     timeout: Option<Duration>,
     agent_self: Option<&str>,
+    model: Option<&str>,
 ) -> Result<GeminiResult, GeminiAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
     // ab-994222ee: the create/exec path is the autonomous headless lane. Default
@@ -611,7 +623,7 @@ pub fn gemini_create(
         yolo,
         crate::agents_config::headless_yolo_enabled("gemini", cwd),
     );
-    let argv = build_argv_create(&full_prompt, eff, None);
+    let argv = build_argv_create(&full_prompt, eff, None, model);
     // gemini pins sessions to cwd via Popen(cwd=...), so create passes popen_cwd.
     run_gemini(&argv, output_path, timeout, true, Some(cwd), agent_self)
 }
@@ -832,6 +844,7 @@ pub fn dispatch_gemini_once(
     cwd: &Path,
     yolo: bool,
     timeout: Option<Duration>,
+    model: Option<&str>,
 ) -> AskOutcome {
     use crate::claude_ask::py_repr;
 
@@ -902,6 +915,7 @@ pub fn dispatch_gemini_once(
         cwd,
         yolo,
         timeout,
+        model,
     );
     if inner.exit_code != 0 {
         return inner;
@@ -957,6 +971,7 @@ fn dispatch_create(
     cwd: &Path,
     yolo: bool,
     timeout: Option<Duration>,
+    model: Option<&str>,
 ) -> AskOutcome {
     let output_path = derive_log_path(home, name);
     let timeout_sec = timeout.unwrap_or(DEFAULT_FOLLOWUP_TIMEOUT);
@@ -969,6 +984,7 @@ fn dispatch_create(
         &output_path,
         Some(timeout_sec),
         Some(name),
+        model,
     ) {
         Ok(r) => r,
         Err(e) => {

@@ -123,7 +123,12 @@ pub fn sandbox_flag_resume(yolo: bool) -> Vec<String> {
 /// `full_prompt` should already have been built via `inject_from_name`.
 /// The subprocess cwd is NOT set via Popen(cwd=...) on the create path
 /// (the `-C` flag handles it); Python codex.create passes `popen_cwd=None`.
-pub fn build_argv_create(cwd: &Path, full_prompt: &str, yolo: bool) -> Vec<String> {
+pub fn build_argv_create(
+    cwd: &Path,
+    full_prompt: &str,
+    yolo: bool,
+    model: Option<&str>,
+) -> Vec<String> {
     // Approval is a GLOBAL flag and must precede `exec`; sandbox is an `exec`
     // flag and follows it. See `approval_flag` / `sandbox_flag`.
     let mut argv = vec!["codex".to_string()];
@@ -135,6 +140,12 @@ pub fn build_argv_create(cwd: &Path, full_prompt: &str, yolo: bool) -> Vec<Strin
         cwd.to_string_lossy().to_string(),
         "--skip-git-repo-check".to_string(),
     ]);
+    // x-c772: an explicit --model is forwarded to `codex exec --model <m>`
+    // (empty/None = codex default). Exact passthrough, no fuzzy resolution.
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        argv.push("--model".to_string());
+        argv.push(m.to_string());
+    }
     argv.extend(sandbox_flag(yolo));
     argv.push(full_prompt.to_string());
     argv
@@ -688,6 +699,7 @@ pub fn codex_create(
     output_path: &Path,
     timeout: Option<Duration>,
     agent_self: Option<&str>,
+    model: Option<&str>,
 ) -> Result<CodexResult, CodexAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
     // ab-994222ee: the create/exec path is the autonomous headless lane. codex
@@ -697,7 +709,7 @@ pub fn codex_create(
         yolo,
         crate::agents_config::headless_yolo_enabled("codex", cwd),
     );
-    let argv = build_argv_create(cwd, &full_prompt, eff);
+    let argv = build_argv_create(cwd, &full_prompt, eff, model);
     run_codex(&argv, output_path, timeout, true, None, agent_self)
 }
 
@@ -929,6 +941,7 @@ pub fn dispatch_codex_once(
     cwd: &Path,
     yolo: bool,
     timeout: Option<Duration>,
+    model: Option<&str>,
 ) -> AskOutcome {
     use crate::claude_ask::py_repr;
 
@@ -999,6 +1012,7 @@ pub fn dispatch_codex_once(
         cwd,
         yolo,
         timeout,
+        model,
     );
     if inner.exit_code != 0 {
         // create failed; dispatch_create only writes the registry post-success,
@@ -1052,6 +1066,7 @@ fn dispatch_create(
     cwd: &Path,
     yolo: bool,
     timeout: Option<Duration>,
+    model: Option<&str>,
 ) -> AskOutcome {
     let output_path = derive_log_path(home, name);
     let timeout_sec = timeout.unwrap_or(DEFAULT_FOLLOWUP_TIMEOUT);
@@ -1064,6 +1079,7 @@ fn dispatch_create(
         &output_path,
         Some(timeout_sec),
         Some(name),
+        model,
     ) {
         Ok(r) => r,
         Err(e) => {

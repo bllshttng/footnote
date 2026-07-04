@@ -396,6 +396,11 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
         if a in ("--once", "-o"):
             # The pre-substrate spelling of headless: a one-shot, never a pane.
             return False
+        if a in ("--headless", "-H"):
+            # Ergonomic shortcut for --substrate headless (x-c772): one-shot,
+            # never a pane. Must be honored here or a `-H` spawn would route to
+            # the pane back half.
+            return False
         if a == "--substrate":
             substrate = next(it, "")
         elif a.startswith("--substrate="):
@@ -415,7 +420,9 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(a == "--role" or a.startswith("--role=") for a in args)
+    return any(
+        a in ("--role", "-r") or a.startswith("--role=") for a in args
+    )
 
 
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:

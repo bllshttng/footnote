@@ -303,6 +303,14 @@ def cmd_spawn(
             "ref); bg/headless keep their existing lanes."
         ),
     ),
+    headless: bool = typer.Option(
+        False, "--headless", "-H",
+        help=(
+            "Shortcut for --substrate headless: a one-shot (-p/--exec) worker. "
+            "Mobile-friendly (no '--substrate' to type; -H is one hyphen). "
+            "Wins over --substrate; equivalent to the legacy --once/-o."
+        ),
+    ),
     cwd: str | None = typer.Option(
         None, "--cwd", "-c", help="Working directory for the agent subprocess."
     ),
@@ -337,7 +345,7 @@ def cmd_spawn(
         help="Opt out of --fresh: keep the worker in the caller's cwd.",
     ),
     role: str | None = typer.Option(
-        None, "--role",
+        None, "--role", "-r",
         help=(
             "Routing role for per-spawn model selection (x-d2fe). Auxiliary "
             "roles (coordinate|tidy|orient|consolidate) route to a secondary "
@@ -347,7 +355,7 @@ def cmd_spawn(
         ),
     ),
     model: str | None = typer.Option(
-        None, "--model",
+        None, "--model", "-m",
         help=(
             "Model for the worker, forwarded as --model <m> to the provider's "
             "own CLI (exact passthrough, no fuzzy resolution). On the default "
@@ -401,6 +409,11 @@ def cmd_spawn(
     # spawns out of the binary route), `bg`/`headless` keep their existing
     # lanes. Validate to parity with the Rust client (exit 2 on a bad value);
     # headless still maps onto the `once` lever.
+    # --headless / -H is the ergonomic shortcut for --substrate headless (x-c772,
+    # mobile: no '--substrate' to type). It wins over an explicit --substrate so
+    # `-H` alone always resolves to the one-shot lane.
+    if headless:
+        substrate = "headless"
     if substrate not in ("pane", "bg", "headless"):
         print(
             f"--substrate must be one of: pane, bg, headless (got {substrate})",

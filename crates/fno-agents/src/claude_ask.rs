@@ -1708,6 +1708,7 @@ pub fn dispatch_claude_headless(
     cwd: &Path,
     _yolo: bool,
     timeout: Option<Duration>,
+    model: Option<&str>,
 ) -> AskOutcome {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -1727,6 +1728,12 @@ pub fn dispatch_claude_headless(
         "-p".into(),
         "--dangerously-skip-permissions".into(),
     ];
+    // x-c772: an explicit --model is forwarded to `claude -p --model <m>`
+    // (empty/None = claude default). Exact passthrough, no fuzzy resolution.
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        argv.push("--model".to_string());
+        argv.push(m.to_string());
+    }
     if !use_stdin {
         argv.push(effective.to_string());
     }

@@ -821,5 +821,7 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
 def test_is_role_bearing_spawn_predicate() -> None:
     assert rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--role", "tidy"])
     assert rr._is_role_bearing_spawn("spawn", ["spawn", "--role=orient"])
+    # x-c772: -r is the mobile short for --role; must also stay Python-only.
+    assert rr._is_role_bearing_spawn("spawn", ["spawn", "w", "-r", "tidy"])
     assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--provider", "claude"])
     assert not rr._is_role_bearing_spawn("ask", ["ask", "--role", "tidy"])
