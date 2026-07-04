@@ -840,11 +840,9 @@ fn resolve_handoffs_dir(
             }
         }
     }
-    for sp in &candidates {
-        if let Some(vault) = read_obsidian_vault(sp) {
-            if let Some(vroot) = resolve_vault_root(&vault, home) {
-                return vroot.join("internal").join(&project).join("handoffs");
-            }
+    if let Some(vault) = resolve_obsidian_vault(&candidates) {
+        if let Some(vroot) = resolve_vault_root(&vault, home) {
+            return vroot.join("internal").join(&project).join("handoffs");
         }
     }
     let base = home
@@ -853,17 +851,32 @@ fn resolve_handoffs_dir(
     base.join(".fno/handoffs").join(project)
 }
 
-/// Read `obsidian.vault` from a settings.yaml, but only when `obsidian.enabled`
-/// is also true - mirrors `paths.vault_root()` in the Python CLI (both must be
-/// set). Indent-aware (unlike `read_path_setting`) because `enabled:`/`vault:`
-/// are generic key names reused by other settings.yaml sections
-/// (`post_merge.enabled`, `think_spawn.enabled`, ...); a flat scan would risk
-/// picking up an unrelated section's value.
-fn read_obsidian_vault(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
+/// One file's `obsidian:` block, keyed per-field so a caller can merge across
+/// project/global candidates the same way `fno.config._deep_merge` merges
+/// settings.yaml: per KEY, not per file. `None` in either field means that
+/// file's `obsidian:` block (if any) did not set that key, so the caller
+/// should keep looking in the next, lower-priority candidate - NOT that the
+/// key is false/absent overall (codex review, PR #185: a project file that
+/// sets only `enabled: false` must still inherit `vault:` from global, and
+/// must NOT let its own absence of an opinion fall through to a lower-priority
+/// file that re-enables obsidian).
+#[derive(Default)]
+struct ObsidianBlock {
+    enabled: Option<bool>,
+    vault: Option<String>,
+}
+
+/// Scan one settings.yaml for its (single) `obsidian:` block. Indent-aware
+/// (unlike `read_path_setting`) because `enabled:`/`vault:` are generic key
+/// names reused by other settings.yaml sections (`post_merge.enabled`,
+/// `think_spawn.enabled`, ...); a flat scan would risk picking up an
+/// unrelated section's value.
+fn read_obsidian_block(path: &Path) -> ObsidianBlock {
+    let mut block = ObsidianBlock::default();
+    let Ok(content) = fs::read_to_string(path) else {
+        return block;
+    };
     let mut block_indent: Option<usize> = None;
-    let mut enabled = false;
-    let mut vault: Option<String> = None;
     for line in content.lines() {
         // Strip inline comments before matching/parsing (consistent with
         // read_path_setting and yaml_scalar_at in this same file) - otherwise
@@ -880,18 +893,41 @@ fn read_obsidian_vault(path: &Path) -> Option<String> {
                 break; // dedented out of the obsidian: block
             }
             if let Some(rest) = t.strip_prefix("enabled:") {
-                enabled = rest.trim().eq_ignore_ascii_case("true");
+                block.enabled = Some(rest.trim().eq_ignore_ascii_case("true"));
             } else if let Some(rest) = t.strip_prefix("vault:") {
                 let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
                 if !v.is_empty() && !v.eq_ignore_ascii_case("null") {
-                    vault = Some(v.to_string());
+                    block.vault = Some(v.to_string());
                 }
             }
         } else if t == "obsidian:" {
             block_indent = Some(indent);
         }
     }
-    if enabled {
+    block
+}
+
+/// Resolve `obsidian.enabled` + `obsidian.vault`, merged key-by-key across
+/// `candidates` in priority order (project before global) - matching
+/// `fno.config._deep_merge` semantics, NOT "first file with an opinion wins
+/// wholesale". Returns the vault name only when the merged `enabled` is true
+/// AND a `vault` value was found somewhere in the chain.
+fn resolve_obsidian_vault(candidates: &[PathBuf]) -> Option<String> {
+    let mut enabled: Option<bool> = None;
+    let mut vault: Option<String> = None;
+    for sp in candidates {
+        let block = read_obsidian_block(sp);
+        if enabled.is_none() {
+            enabled = block.enabled;
+        }
+        if vault.is_none() {
+            vault = block.vault;
+        }
+        if enabled.is_some() && vault.is_some() {
+            break;
+        }
+    }
+    if enabled == Some(true) {
         vault
     } else {
         None
@@ -1602,6 +1638,54 @@ mod tests {
             &cwd,
             "config:\n  project:\n    id: demo\n  post_merge:\n    enabled: false\n  obsidian:\n    enabled: true\n    vault: myvault\n",
         );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_project_disabled_wins_over_global_enabled() {
+        // codex review, PR #185: project explicitly sets obsidian.enabled:
+        // false while GLOBAL enables it with a vault. fno.config._deep_merge
+        // merges per-key with project winning, so the merged `enabled` is
+        // false and handoffs must NOT resolve into the vault - a per-file
+        // "first file with an opinion wins wholesale" scan gets this wrong
+        // (it would see project's block, find no vault key there, and keep
+        // scanning into global's enabled:true+vault).
+        let dir = std::env::temp_dir().join(format!("fin-hd-proj-off-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: false\n",
+        );
+        write_settings(
+            &home,
+            "config:\n  obsidian:\n    enabled: true\n    vault: myvault\n",
+        );
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(got, home.join(".fno/handoffs/demo"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_inherits_global_vault_when_project_only_sets_enabled() {
+        // The other half of the same merge: project enables obsidian but
+        // does not itself set a vault, so `vault` should inherit from the
+        // global file - per-key merge, not "project's block has no vault so
+        // give up".
+        let dir = std::env::temp_dir().join(format!("fin-hd-proj-inherit-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(
+            &cwd,
+            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: true\n",
+        );
+        write_settings(&home, "config:\n  obsidian:\n    vault: myvault\n");
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
         let _ = fs::remove_dir_all(&dir);

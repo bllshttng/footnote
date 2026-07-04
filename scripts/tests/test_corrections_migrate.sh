@@ -56,6 +56,12 @@ if head -1 "$D/claude/corrections.log" | grep -q '^# migrated to '; then
 else
     fail "old file not tombstoned: $(cat "$D/claude/corrections.log")"
 fi
+NEW_MODE=$(stat -f "%Lp" "$D/fno/corrections.log" 2>/dev/null || stat -c "%a" "$D/fno/corrections.log" 2>/dev/null)
+if [[ "$NEW_MODE" == "600" ]]; then
+    pass "new file created at mode 600"
+else
+    fail "new file mode is $NEW_MODE, expected 600"
+fi
 rm -rf "$D"
 
 # ---- T03: new file already has content -> old content appended, not clobbered ----

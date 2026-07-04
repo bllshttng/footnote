@@ -42,6 +42,10 @@ _migrate_one() {
   old_lines=$(wc -l < "$old" | tr -d ' ')
   before_lines=$( (wc -l < "$new" 2>/dev/null || echo 0) | tr -d ' ')
   cat "$old" >> "$new"
+  # corrections-log-init.sh's mode-0600 invariant applies here too - a fresh
+  # $new created by this append otherwise lands at the umask default (codex
+  # review, PR #185).
+  chmod 600 "$new" 2>/dev/null || true
   after_lines=$(wc -l < "$new" | tr -d ' ')
   _corrections_release_lock "$lock_dir"
 
