@@ -1,6 +1,6 @@
 # corrections.log format reference
 
-Canonical artifact: `~/.claude/corrections.log`. One line per correction event. Line-delimited so a single corrupted line cannot poison the file.
+Canonical artifact: `~/.fno/corrections.log`. One line per correction event. Line-delimited so a single corrupted line cannot poison the file.
 
 ## Line shape
 
@@ -82,10 +82,10 @@ Newlines inside DETAILS are not allowed. If the source produces multi-line conte
 
 Two writers appending simultaneously is rare but possible (e.g. parallel commits across worktrees, watcher firing while a verifier writes). All writers MUST hold an exclusive lock before appending.
 
-The implementation in `scripts/lib/corrections-lock.sh` uses a `mkdir`-based mutex on `~/.claude/corrections.log.lock.d` for cross-platform consistency (macOS lacks `flock(1)`; we use the same approach on Linux so the contract is identical). Acquire timeout defaults to 1s. The lock dir is PID-stamped so a crashed holder is reclaimable: a future acquirer reaps the directory if the recorded PID is dead AND mtime is older than 60s. A SIGTERM/SIGINT trap inside `corrections_lock_append` releases the lock mid-append so daemon restarts cannot leak the lock.
+The implementation in `scripts/lib/corrections-lock.sh` uses a `mkdir`-based mutex on `~/.fno/corrections.log.lock.d` for cross-platform consistency (macOS lacks `flock(1)`; we use the same approach on Linux so the contract is identical). Acquire timeout defaults to 1s. The lock dir is PID-stamped so a crashed holder is reclaimable: a future acquirer reaps the directory if the recorded PID is dead AND mtime is older than 60s. A SIGTERM/SIGINT trap inside `corrections_lock_append` releases the lock mid-append so daemon restarts cannot leak the lock.
 
 ## Reading the log
 
-The log is meant to be human-readable: `tail -20 ~/.claude/corrections.log` should be informative without any post-processing.
+The log is meant to be human-readable: `tail -20 ~/.fno/corrections.log` should be informative without any post-processing.
 
 For machine consumption, the packet builder parses lines and groups by SOURCE. Lines with malformed shape (wrong field count, unknown severity) are skipped with a stderr warning and do not poison the file.

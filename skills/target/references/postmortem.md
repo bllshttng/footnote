@@ -27,13 +27,13 @@ A single file at `~/.fno/postmortems/{YYYY-MM-DD}-{session_id_short}.md` with:
 - `## Last output of failed phase` (last 50 lines of the failing phase's artifact body OR the stop-hook log)
 - `## Hypotheses` (deterministic, templated from a lookup table keyed on `blocked_reason.kind`)
 
-A one-line entry is also appended to `~/.claude/corrections.log` (when present, which it will be once the autocorrect feature is in steady state):
+A one-line entry is also appended to `~/.fno/corrections.log` (when present, which it will be once the autocorrect feature is in steady state):
 
 ```
 2026-04-27T15:32:04Z | S1 | target-postmortem | ~/.fno/postmortems/2026-04-27-f31156b3.md | test_failure: 3 tests failing in src/auth/login.test.ts
 ```
 
-The autocorrect monthly review reads `~/.claude/corrections.log` and follows the link to the postmortem.
+The autocorrect monthly review reads `~/.fno/corrections.log` and follows the link to the postmortem.
 
 ## Manual invocation (rare)
 

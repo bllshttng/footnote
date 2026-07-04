@@ -56,9 +56,10 @@ const SHIP_REASONS: &[&str] = &["DonePRGreen", "DoneAdvisory"];
 /// Terminal reasons that signal a STUCK session: the loop-check verb saw no
 /// forward progress, or the budget cap tripped, and let the session exit
 /// without shipping. These get a postmortem artifact the autocorrect monthly
-/// review consumes via `~/.claude/corrections.log` (ab-1a92b677: re-homed here
-/// after the control-plane wedge dropped the old stop-hook generator). A ship
-/// or a benign NoWork/Interrupted/Aborted terminal is not "stuck".
+/// review consumes via `~/.fno/corrections.log` (ab-1a92b677: re-homed here
+/// after the control-plane wedge dropped the old stop-hook generator; moved
+/// again from ~/.claude/ to ~/.fno/ per the placement rule, ab-f063 Wave 2).
+/// A ship or a benign NoWork/Interrupted/Aborted terminal is not "stuck".
 const POSTMORTEM_REASONS: &[&str] = &["NoProgress", "Budget"];
 
 // ── arg parsing ─────────────────────────────────────────────────────────────
@@ -1234,17 +1235,25 @@ fn assistant_text_blocks(val: &Value) -> String {
     String::new()
 }
 
-/// Best-effort: append a pointer line to `~/.claude/corrections.log` so the
+/// Best-effort: append a pointer line to `~/.fno/corrections.log` so the
 /// autocorrect monthly review picks the postmortem up. Only writes when the log
 /// already exists (the autocorrect feature creates it) - never creates it.
 /// Format mirrors the pre-wedge generator:
 /// `{ts} | S1 | target-postmortem | {path} | {reason}: {detail_truncated}`.
+///
+/// Lives under ~/.fno/, not ~/.claude/, per the placement rule (ab-f063 Wave
+/// 2). Resolution order mirrors scripts/lib/corrections-lock.sh's
+/// corrections_log_path(): POSTMORTEM_CORRECTIONS_LOG override, then
+/// FNO_HOME, then home-relative default.
 fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &str, detail: &str) {
     let log = match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
         Some(p) => PathBuf::from(p),
-        None => match home {
-            Some(h) => h.join(".claude/corrections.log"),
-            None => return,
+        None => match std::env::var_os("FNO_HOME") {
+            Some(p) => PathBuf::from(p).join("corrections.log"),
+            None => match home {
+                Some(h) => h.join(".fno/corrections.log"),
+                None => return,
+            },
         },
     };
     if !log.is_file() {
@@ -1414,6 +1423,55 @@ mod tests {
         .unwrap();
         assert_eq!(prior_finalize_ship(&log, "S1"), None);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrections_pointer_prefers_fno_home_over_claude_dir() {
+        // ab-f063 Wave 2: corrections.log lives under ~/.fno/, not ~/.claude/.
+        // FNO_HOME must win over a bare `home` fallback so an operator's
+        // override (and the shared bash corrections_log_path() convention)
+        // stays in sync with this Rust writer.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fno_home = std::env::temp_dir().join(format!("fin-corr-fh-{}", std::process::id()));
+        let unused_home = std::env::temp_dir().join(format!("fin-corr-uh-{}", std::process::id()));
+        let _ = fs::create_dir_all(&fno_home);
+        let _ = fs::create_dir_all(&unused_home);
+        let log_path = fno_home.join("corrections.log");
+        fs::write(&log_path, "").unwrap();
+
+        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
+        std::env::set_var("FNO_HOME", &fno_home);
+        append_corrections_pointer(Some(&unused_home), Path::new("/tmp/pm.md"), "Budget", "detail");
+        std::env::remove_var("FNO_HOME");
+
+        let contents = fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("target-postmortem"), "{contents}");
+        // The old ~/.claude/ location must not be touched.
+        assert!(!unused_home.join(".claude").exists());
+        let _ = fs::remove_dir_all(&fno_home);
+        let _ = fs::remove_dir_all(&unused_home);
+    }
+
+    #[test]
+    fn corrections_pointer_falls_back_to_home_dot_fno() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("fin-corr-home-{}", std::process::id()));
+        let fno_dir = home.join(".fno");
+        fs::create_dir_all(&fno_dir).unwrap();
+        let log_path = fno_dir.join("corrections.log");
+        fs::write(&log_path, "").unwrap();
+
+        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
+        std::env::remove_var("FNO_HOME");
+        append_corrections_pointer(Some(&home), Path::new("/tmp/pm.md"), "NoProgress", "d");
+
+        let contents = fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("target-postmortem"), "{contents}");
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # corrections-lock.sh - shared locking helper for corrections.log writers.
 #
-# Source this from any writer that appends to ~/.claude/corrections.log.
+# Source this from any writer that appends to ~/.fno/corrections.log.
 # Provides corrections_lock_append() which acquires an exclusive lock,
 # appends the given line, and releases.
 #
@@ -153,9 +153,21 @@ corrections_lock_append() {
 }
 
 # corrections_log_path - resolve the log path with environment override.
+#
+# Lives under ~/.fno/ (global state root), not ~/.claude/, per the
+# placement rule (ab-f063 Wave 2): footnote's own state is never written
+# under .claude/ or ~/.claude/. FNO_HOME is the same override
+# paths.py's plugin-root resolver and hooks/session-start.sh honor, so a
+# test redirecting FNO_HOME isolates this too.
 corrections_log_path() {
-  local claude_dir="${CLAUDE_DIR_OVERRIDE:-$HOME/.claude}"
-  printf '%s\n' "$claude_dir/corrections.log"
+  local fno_home="${FNO_HOME:-$HOME/.fno}"
+  printf '%s\n' "$fno_home/corrections.log"
+}
+
+# corrections_rejected_log_path - resolve corrections-rejected.log, same root.
+corrections_rejected_log_path() {
+  local fno_home="${FNO_HOME:-$HOME/.fno}"
+  printf '%s\n' "$fno_home/corrections-rejected.log"
 }
 
 # corrections_escape_details <text> - sanitise free-text for the DETAILS field.

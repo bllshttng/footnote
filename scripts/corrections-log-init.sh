@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# corrections-log-init.sh - ensure ~/.claude/corrections.log exists with mode 0600.
+# corrections-log-init.sh - ensure ~/.fno/corrections.log exists with mode 0600.
 #
 # Idempotent: safe to run any number of times. Creates the file on first run,
 # verifies mode on subsequent runs and corrects if drifted.
@@ -9,16 +9,16 @@
 
 set -euo pipefail
 
-CLAUDE_DIR="${CLAUDE_DIR_OVERRIDE:-$HOME/.claude}"
-LOG_PATH="$CLAUDE_DIR/corrections.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/corrections-lock.sh
+source "$SCRIPT_DIR/lib/corrections-lock.sh"
 
-# ~/.claude must exist. We do not create it - if it doesn't exist, Claude Code
-# is not installed and this loop has nothing to do.
-if [[ ! -d "$CLAUDE_DIR" ]]; then
-  echo "corrections-log-init: $CLAUDE_DIR does not exist; refusing to bootstrap" >&2
-  echo "corrections-log-init: install Claude Code first, or set CLAUDE_DIR_OVERRIDE" >&2
-  exit 1
-fi
+LOG_PATH="$(corrections_log_path)"
+FNO_HOME_DIR="$(dirname "$LOG_PATH")"
+
+# Unlike the old ~/.claude location, ~/.fno is owned by footnote itself, so
+# it's safe to create lazily rather than refusing when absent.
+mkdir -p "$FNO_HOME_DIR"
 
 if [[ -f "$LOG_PATH" ]]; then
   # Verify mode 0600. Use stat with platform-specific format.

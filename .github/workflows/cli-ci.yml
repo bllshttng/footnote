@@ -146,6 +146,13 @@ jobs:
           bash tests/lib/test_rotate_append_log.sh
           bash scripts/tests/test_prune_fno_dir.sh
 
+      - name: corrections.log placement migration (ab-f063 Wave 2)
+        # corrections.log / corrections-rejected.log moved from ~/.claude/ to
+        # ~/.fno/ per the placement rule; corrections-migrate-to-fno.sh does
+        # the one-time move (append + verify + tombstone), isolated via
+        # CLAUDE_DIR_OVERRIDE / FNO_HOME so the real dirs are never touched.
+        run: bash scripts/tests/test_corrections_migrate.sh
+
       - name: Install stable Rust toolchain (for journey tests)
         # Journey tests (e2e, emission-schema, backstop-subprocess) invoke the
         # REAL fno-agents binary. Install the toolchain here; the build step
