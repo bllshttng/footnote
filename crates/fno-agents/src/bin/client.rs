@@ -1187,13 +1187,14 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--force" | "-F" => {
                 params.insert("force".into(), Value::Bool(true));
             }
-            "--model" => {
+            "--model" | "-m" => {
                 // claude --bg (x-571f per-node pin) and agy honor an exact model
                 // name; codex/gemini and claude --headless ignore the param.
                 // Forwarded so `spawn --substrate bg --model <m>` reaches
                 // dispatch_claude_spawn and `--provider agy --once --model <name>`
-                // reaches dispatch_agy_once (codex P2).
-                params.insert("model".into(), str_arg(&mut it, "--model")?);
+                // reaches dispatch_agy_once (codex P2). -m is the mobile short
+                // (x-c772).
+                params.insert("model".into(), str_arg(&mut it, "-m/--model")?);
             }
             "--from-name" => {
                 // NOTE: --from-name is accepted and forwarded to the daemon, but
@@ -2804,6 +2805,28 @@ mod tests {
                 );
                 assert!(params.get("host_mode").is_none(), "{flag}: no host_mode");
             }
+        }
+    }
+
+    #[test]
+    fn spawn_model_short_m_parses_like_long() {
+        // x-c772: -m is the mobile short for --model.
+        for flag in ["--model", "-m"] {
+            let args = vec![
+                "wk".to_string(),
+                "--provider".to_string(),
+                "claude".to_string(),
+                "--substrate".to_string(),
+                "bg".to_string(),
+                flag.to_string(),
+                "opus".to_string(),
+            ];
+            let (_m, params) = build_request("spawn", &args).unwrap();
+            assert_eq!(
+                params.get("model").and_then(|v| v.as_str()),
+                Some("opus"),
+                "{flag} sets model"
+            );
         }
     }
 

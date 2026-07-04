@@ -420,7 +420,9 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(a == "--role" or a.startswith("--role=") for a in args)
+    return any(
+        a in ("--role", "-r") or a.startswith("--role=") for a in args
+    )
 
 
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:

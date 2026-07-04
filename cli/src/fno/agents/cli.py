@@ -345,7 +345,7 @@ def cmd_spawn(
         help="Opt out of --fresh: keep the worker in the caller's cwd.",
     ),
     role: str | None = typer.Option(
-        None, "--role",
+        None, "--role", "-r",
         help=(
             "Routing role for per-spawn model selection (x-d2fe). Auxiliary "
             "roles (coordinate|tidy|orient|consolidate) route to a secondary "
@@ -355,7 +355,7 @@ def cmd_spawn(
         ),
     ),
     model: str | None = typer.Option(
-        None, "--model",
+        None, "--model", "-m",
         help=(
             "Per-node model pin (x-571f). Appended as --model <m> to the "
             "claude --bg (and agy) worker argv; unset = provider default. "
