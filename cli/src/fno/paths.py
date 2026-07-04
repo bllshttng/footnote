@@ -566,6 +566,22 @@ def inbox_dir(project_root: Optional[Path] = None) -> Path:
     return (root / ".fno" / "inbox").resolve()
 
 
+def project_log(name: str, project_root: Optional[Path] = None) -> Path:
+    """Return ``<repo>/.fno/<name>`` for a project-local log/state file.
+
+    Anchored to :func:`resolve_repo_root` (never CWD) so a hook or CLI
+    subcommand invoked from any subdirectory of the repo lands on the same
+    file. This is the single accessor ad-hoc writers (events.jsonl,
+    finalize.stderr.log, worktree-log.jsonl, inbox-errors.jsonl, ...) route
+    through instead of hand-building ``".fno/" + name`` strings, per the
+    placement rule (state lives only under ``~/.fno/``, ``<project>/.fno/``,
+    or ``internal/<project>/``). Callers needing a nested path (e.g.
+    ``"claims/foo.lock"``) pass the sub-path as part of ``name``.
+    """
+    root = project_root or resolve_repo_root()
+    return (root / ".fno" / name).resolve()
+
+
 _INBOX_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 

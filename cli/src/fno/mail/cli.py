@@ -254,7 +254,9 @@ def _count_acked_24h(threads: list[ThreadHandle]) -> int:
 
 
 def _count_errors_24h(repo_root: Path) -> int:
-    errors_path = repo_root / ".fno" / "inbox-errors.jsonl"
+    from fno.paths import project_log
+
+    errors_path = project_log("inbox-errors.jsonl", project_root=repo_root)
     if not errors_path.exists():
         return 0
     cutoff = datetime.now(tz=timezone.utc).timestamp() - 86400

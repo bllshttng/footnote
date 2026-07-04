@@ -41,7 +41,7 @@ VALID_KINDS: Tuple[str, ...] = ("deferred", "oos-bug", BACKFILL_KIND)
 # and the triage harvest re-derives the real reasoning from the cited source.
 DESCRIPTION_CAP = 8000
 
-CARVEOUTS_RELPATH = ".fno/carveouts.jsonl"
+CARVEOUTS_NAME = "carveouts.jsonl"
 
 
 def resolve_carveout_root() -> Path:
@@ -204,8 +204,10 @@ def add_carveout(
         truncated=truncated,
     )
 
+    from fno.paths import project_log
+
     ledger_root = storage_root if storage_root is not None else repo_root
-    path = ledger_root / CARVEOUTS_RELPATH
+    path = project_log(CARVEOUTS_NAME, project_root=ledger_root)
     try:
         _append_jsonl(path, json.dumps(asdict(cv), separators=(",", ":")))
     except OSError as exc:
@@ -236,7 +238,9 @@ def read_carveouts(
     would otherwise drop a real backfill with no signal). Read-only: never
     mutates the ledger.
     """
-    path = root / CARVEOUTS_RELPATH
+    from fno.paths import project_log
+
+    path = project_log(CARVEOUTS_NAME, project_root=root)
     if not path.exists():
         return []
     try:
@@ -272,10 +276,12 @@ def consume_carveouts(repo_root: Path, ids: "set[str] | list[str]") -> int:
     Rewrites the file under the same mkdir mutex as the writer. A malformed line
     is preserved (never silently dropped). Best-effort: returns 0 on any error.
     """
+    from fno.paths import project_log
+
     want = {str(i) for i in ids}
     if not want:
         return 0
-    path = repo_root / CARVEOUTS_RELPATH
+    path = project_log(CARVEOUTS_NAME, project_root=repo_root)
     if not path.exists():
         return 0
 

@@ -235,5 +235,13 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
     lines.append('  echo "${INBOX_DIR}/${thread}"')
     lines.append("}")
     lines.append("")
+    lines.append("# Mirrors fno.paths.project_log(): <repo>/.fno/<name>, anchored to")
+    lines.append("# $REPO_ROOT (never CWD). Hooks route ad-hoc .fno/ writes through this")
+    lines.append("# instead of hand-building \".fno/\" + name strings.")
+    lines.append("paths_project_log() {")
+    lines.append('  local name="$1"')
+    lines.append('  echo "${REPO_ROOT}/.fno/${name}"')
+    lines.append("}")
+    lines.append("")
 
     return "\n".join(lines)

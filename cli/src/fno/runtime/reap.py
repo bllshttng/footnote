@@ -126,8 +126,8 @@ def reap_dead_workers(
         {"reaped": int, "active": int, "completed": int, "dry_run": bool}
     """
     if workers_file is None:
-        from fno.runtime.registry import _DEFAULT_WORKERS_FILE
-        workers_file = _DEFAULT_WORKERS_FILE
+        from fno.runtime.registry import _default_workers_file
+        workers_file = _default_workers_file()
 
     if artifacts_dir is None:
         artifacts_dir = workers_file.parent / "artifacts"
