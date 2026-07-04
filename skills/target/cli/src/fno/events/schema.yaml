@@ -38,7 +38,7 @@ envelope:
       # branch B pattern ^(daemon|worker:.+)$; the enum here covers the common
       # fixed-string sources only. The bash validator builds a regex from this enum,
       # so worker:<id> is checked at the parity-script layer, not here.
-      enum: [target, megawalk, megatron, abi-loop, hook, subagent, migration, test, backlog, daemon, observer]
+      enum: [target, megawalk, megatron, abi-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff]
       description: "Producer identity; consumers route on this. See events-v3.json branch B for worker:<id> pattern sources."
     data:
       type: object
@@ -2168,6 +2168,116 @@ event_types:
         skill_ref:
           type: [string, "null"]
           description: "Git ref under test; absent/null for a retrospective sweep against HEAD, present for a replay batch."
+
+  - name: loop_tick
+    description: "A standing loop (x-ce71 substrate) ran one tick. The proposer (x-0ca7) is the first live loop to emit this; fno loops ls reads it for the last-tick column. Emitted whether or not the tick did anything (paused / no-work ticks still record)."
+    sources: [skill_diff, test]
+    data:
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: "The loop's config.loops.<name> key, e.g. skill_diff_proposer."
+        level:
+          type: string
+          description: "The loop's resolved level at tick time (report|assisted|unattended)."
+        outcome:
+          type: string
+          description: "One word: paused | no-work | noop | proposed | no-diff-helps | report."
+
+  - name: skill_diff_proposed
+    description: "Skill-diff proposer (x-0ca7): a cited diff to a skill's files was opened as a PR through the normal review gate. One per (run_id, skill_id) - the idempotency key the next tick scans for."
+    sources: [skill_diff, test]
+    data:
+      required: [run_id, skill_id, pr_number, branch, cited_finding_ids, added_lines, removed_lines]
+      properties:
+        run_id:
+          type: string
+          description: "The observer run_complete run_id this diff responds to."
+        skill_id:
+          type: string
+          description: "Skill the diff targets, e.g. fno:blueprint."
+        skill_version_observed:
+          type: string
+          description: "Skill SKILL.md hash the observer scored against (from run_complete), or 'unknown'."
+        skill_version_proposed_against:
+          type: string
+          description: "Skill SKILL.md hash the proposer actually diffed against at run time (AC9-FR: may differ if the file drifted since the observer's snapshot)."
+        pr_number:
+          type: [integer, "null"]
+          description: "The opened PR number; null if gh lookup failed after a successful push."
+        branch:
+          type: string
+          description: "The feature branch the diff landed on."
+        cited_finding_ids:
+          type: array
+          description: "Every finding_id cited across the surviving hunks (citation invariant: non-empty)."
+        added_lines:
+          type: integer
+          description: "Lines added across the diff (bloat-tracker input)."
+        removed_lines:
+          type: integer
+          description: "Lines removed/modified across the diff (0 = additive-only)."
+        justification:
+          type: [string, "null"]
+          description: "Present when the diff was additive-only over threshold (AC4-UI); null otherwise."
+
+  - name: skill_diff_no_diff_helps
+    description: "Skill-diff proposer (x-0ca7): the proposer concluded no diff helps (local-maxima ceiling AC7-EDGE, or every hunk dropped as uncited AC2-ERR) and filed a backlog node instead of opening a PR. Records the idempotency key so the run_id is not reprocessed."
+    sources: [skill_diff, test]
+    data:
+      required: [run_id, skill_id, reason]
+      properties:
+        run_id:
+          type: string
+          description: "The observer run_complete run_id."
+        skill_id:
+          type: string
+          description: "Skill evaluated."
+        reason:
+          type: string
+          description: "Why no diff was proposed: local_maxima | all_hunks_uncited | synth_no_diff | redaction_refused."
+        filed_node_id:
+          type: [string, "null"]
+          description: "The backlog node filed (architectural finding), or null if filing failed (retried next tick)."
+
+  - name: skill_diff_noop
+    description: "Skill-diff proposer (x-0ca7): an observer run had zero actionable findings (AC6-EDGE). A lightweight record so the run_id is not reprocessed on the next tick - no diff, no PR, no node."
+    sources: [skill_diff, test]
+    data:
+      required: [run_id, skill_id]
+      properties:
+        run_id:
+          type: string
+          description: "The observer run_complete run_id closed as a no-op."
+        skill_id:
+          type: string
+          description: "Skill evaluated."
+        reason:
+          type: string
+          description: "zero_findings | zero_failures."
+
+  - name: skill_diff_eval_closed
+    description: "Skill-diff proposer (x-0ca7): a proposer-authored PR merged and the observer re-ran over the same corpus slice, producing a before/after delta - the receipt that the loop actually closed (Locked Decision 7 / AC10-FR)."
+    sources: [skill_diff, test]
+    data:
+      required: [pr_number, skill_id, run_id_before]
+      properties:
+        pr_number:
+          type: integer
+          description: "The merged proposer PR."
+        skill_id:
+          type: string
+          description: "Skill the diff targeted."
+        run_id_before:
+          type: string
+          description: "The observer run that motivated the diff."
+        run_id_after:
+          type: [string, "null"]
+          description: "The post-merge re-eval run; null if the re-run has been scheduled but not yet completed."
+        score_delta:
+          type: [number, "null"]
+          description: "fail_count(before) - fail_count(after) on the top dimension; null until run_id_after lands. STRUCTURAL only on replay pairs (Review Amendment A1)."
 
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
