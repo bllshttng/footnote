@@ -10,14 +10,14 @@ AC5-FR  mid-append partial -> single retry recovers rather than crashing.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 import typer
 from typer.testing import CliRunner
 
 from fno.scoreboard import cli as sb_cli
-from fno.scoreboard.fold import BrokenLedger, build_scoreboard, load_ledger_rows
+from fno.scoreboard.fold import BrokenLedger, _parse_ts, build_scoreboard, load_ledger_rows
 
 runner = CliRunner()
 NOW = datetime(2026, 7, 3, 20, 0, 0)
@@ -124,6 +124,27 @@ def test_edge_missing_ledger_is_no_data(tmp_path, monkeypatch):
     assert "no terminal sessions" in res.output
 
 
+# --- review hardening (gemini PR #186) --------------------------------------
+def test_since_below_one_rejected(tmp_path, monkeypatch):
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, []))
+    res = runner.invoke(_app(), ["--since", "0"])
+    assert res.exit_code != 0  # typer.BadParameter
+
+
+def test_malformed_cost_does_not_crash(tmp_path, monkeypatch):
+    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "cost_usd": "not-a-number"}]
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
+    res = runner.invoke(_app(), ["--json"])
+    assert res.exit_code == 0
+    assert json.loads(res.output)["spend"]["ship_terminal_usd"] == 0.0
+
+
+def test_aware_offset_timestamp_normalizes_to_utc():
+    # +02:00 at 12:00 is 10:00 UTC - must convert, not just strip tzinfo.
+    assert _parse_ts("2026-07-03T12:00:00+02:00") == datetime(2026, 7, 3, 10, 0, 0)
+    assert _parse_ts("2026-07-03T12:00:00Z") == datetime(2026, 7, 3, 12, 0, 0)
+
+
 # --- real-data fold (regression) --------------------------------------------
 def test_live_ledger_shape_folds_without_crash():
     """Fold the real 2000+ row ledger (any window) - proves the schema the
@@ -135,7 +156,7 @@ def test_live_ledger_shape_folds_without_crash():
     if not live.exists():
         pytest.skip("no live ledger on this machine")
     rows = load_ledger_rows(live)
-    sb = build_scoreboard(rows, [], [], since_days=3650, now=datetime.now())
+    sb = build_scoreboard(rows, [], [], since_days=3650, now=datetime.now(timezone.utc).replace(tzinfo=None))
     assert sb["state"] in {"full", "partial", "no_data"}
     if sb["state"] != "no_data":
         cov = sb["coverage"]

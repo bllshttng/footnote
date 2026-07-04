@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json as _json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import typer
 
@@ -22,10 +22,12 @@ from fno.scoreboard.fold import (
 
 def scoreboard_command(
     since: int = typer.Option(28, "--since", help="Window in days (default 28)."),
-    json_out: bool = typer.Option(False, "--json", help="Emit the scoreboard as JSON."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the scoreboard as JSON."),
 ) -> None:
     """Fold ledger + events + graph into a stop-cause / spend / autonomy /
     survival scoreboard, with a mandatory coverage line."""
+    if since < 1:
+        raise typer.BadParameter("--since must be at least 1 (days).")
     from fno import paths as _paths
 
     ledger_path = _paths.ledger_json()
@@ -42,7 +44,10 @@ def scoreboard_command(
     touch_events = read_jsonl_events(events_paths, {"human_touch"})
     graph_nodes = read_graph_nodes(graph_path)
 
-    sb = build_scoreboard(rows, touch_events, graph_nodes, since_days=since, now=datetime.now())
+    # Naive UTC throughout: aware timestamps (events carry `...Z`) are converted
+    # to UTC before their tzinfo is stripped (see fold._parse_ts).
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    sb = build_scoreboard(rows, touch_events, graph_nodes, since_days=since, now=now)
 
     if json_out:
         typer.echo(_json.dumps(sb, indent=2))

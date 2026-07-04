@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import time
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # termination_reason -> outcome class. "Done*" is a delivered ship; the wedge
@@ -41,7 +41,7 @@ def load_ledger_rows(path: Path, *, _retry: bool = True) -> list[dict]:
     """Load ledger.json rows. Retry once on a parse error (AC5-FR); a second
     failure raises BrokenLedger (AC5-ERR). Missing file = empty (fresh install)."""
     try:
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return []
     except json.JSONDecodeError as e:
@@ -62,7 +62,7 @@ def read_jsonl_events(paths: list[Path], kinds: set[str]) -> list[dict]:
         if not p.exists():
             continue
         try:
-            with p.open() as f:
+            with p.open(encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -82,8 +82,8 @@ def read_graph_nodes(path: Path) -> list[dict]:
     """Best-effort graph read for the optional survival signal. A missing or
     unreadable graph is not fatal - survival just degrades to n/a."""
     try:
-        data = json.loads(Path(path).read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # missing / unreadable / non-utf8 / bad json
         return []
     nodes = data.get("entries", data.get("nodes", data)) if isinstance(data, dict) else data
     if isinstance(nodes, dict):
@@ -92,16 +92,31 @@ def read_graph_nodes(path: Path) -> list[dict]:
 
 
 def _parse_ts(raw) -> datetime | None:
+    """Parse an ISO timestamp to naive UTC. Aware timestamps (events carry a
+    `...Z` / offset) are converted to UTC before their tzinfo is stripped, so an
+    offset like `+02:00` is not silently mis-read as UTC. Naive strings (the
+    ledger's `completed`) are taken as-is."""
     if not isinstance(raw, str) or not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _pct(n: int, d: int) -> int:
     return round(100 * n / d) if d else 0
+
+
+def _num(v) -> float:
+    """Coerce a possibly-malformed ledger cost to float; junk -> 0.0."""
+    try:
+        return float(v or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def build_scoreboard(
@@ -139,7 +154,7 @@ def build_scoreboard(
 
     ship_cost = wedge_cost = other_cost = 0.0
     for r in windowed:
-        cost = r.get("cost_usd") or 0.0
+        cost = _num(r.get("cost_usd"))  # a malformed cost never crashes the fold
         tr = r.get("termination_reason")
         if tr and tr.startswith("Done"):
             ship_cost += cost
@@ -229,7 +244,11 @@ def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict]
 
 
 def _event_in_window(e: dict, cutoff, now) -> bool:
-    dt = _parse_ts(e.get("ts") or (e.get("data") or {}).get("ts"))
+    ts_raw = e.get("ts")
+    if not ts_raw:
+        data = e.get("data")
+        ts_raw = data.get("ts") if isinstance(data, dict) else None
+    dt = _parse_ts(ts_raw)
     return dt is None or cutoff <= dt <= now  # undated events count in (best-effort)
 
 
@@ -263,4 +282,9 @@ if __name__ == "__main__":
     sb2 = build_scoreboard(ship_only, [{"type": "human_touch", "ts": "2026-07-03T09:00:00"}], g, since_days=28, now=now)
     assert sb2["survival"]["available"] is True and sb2["survival"]["survived"] == 1, sb2
     assert sb2["autonomy"]["available"] is True and sb2["autonomy"]["touches"] == 1, sb2
+
+    # aware timestamps convert to UTC before the tzinfo is stripped
+    assert _parse_ts("2026-07-03T12:00:00+02:00") == datetime(2026, 7, 3, 10, 0, 0)
+    # a malformed cost never crashes the fold
+    assert _num("junk") == 0.0 and _num(None) == 0.0 and _num("5.5") == 5.5
     print("fold self-check OK")
