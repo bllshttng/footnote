@@ -14,6 +14,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,12 +26,18 @@ from fno import paths as _paths
 _OLD_TASKS_PATH = Path.home() / ".fno" / "tasks.json"
 
 def _ensure_ledger(ledger_path: Path):
-    """Migrate from _OLD_TASKS_PATH to ledger_path on first access."""
+    """Migrate from _OLD_TASKS_PATH to ledger_path on first access.
+
+    Runs before append_to_tasks_json creates the parent, and ledger_path is
+    now a resolved (possibly non-default) location, so ensure the parent
+    exists and use shutil.move to survive a cross-filesystem state_dir.
+    """
     try:
         if not ledger_path.exists() and _OLD_TASKS_PATH.exists():
-            _OLD_TASKS_PATH.rename(ledger_path)
-    except FileNotFoundError:
-        pass  # Concurrent process already renamed
+            ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(_OLD_TASKS_PATH), str(ledger_path))
+    except (FileNotFoundError, OSError):
+        pass  # Concurrent process already moved it, or the move failed (best-effort)
 
 
 def safe_number(val, as_type: str = "float", decimals: int = 2):
@@ -814,8 +821,12 @@ def _sync_to_graph(entry: dict) -> None:
     if not node_id:
         return
 
+    # sys.executable, not bare "python3": the graph sync must run under the same
+    # interpreter as this process (which has fno + its deps), matching the
+    # render + finalize interpreter fix. A bare PATH python3 could lack pydantic
+    # and fail the graph sync with ModuleNotFoundError.
     update_args = [
-        "python3", str(roadmap_script), "update", node_id,
+        sys.executable, str(roadmap_script), "update", node_id,
         "--completed",
         "--pr-number", str(pr_number),
     ]
@@ -825,7 +836,8 @@ def _sync_to_graph(entry: dict) -> None:
 
     try:
         result = subprocess.run(
-            update_args, capture_output=True, text=True, timeout=10, check=False
+            update_args, capture_output=True, text=True, timeout=10, check=False,
+            cwd=str(repo_root),
         )
         if result.returncode == 0:
             print(
