@@ -116,6 +116,15 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
          open('calls.log','a').write('stamp-plan %s\\n' % sub)\n",
     )
     .unwrap();
+    // fno.verify_advise stub (W6): record the full argv so the ship tests can
+    // assert the flag shape finalize passes (a rename on either side of the
+    // Rust->Python boundary fails here, not silently in production).
+    fs::write(
+        pypath.join("fno/verify_advise.py"),
+        "import sys\n\
+         open('calls.log','a').write('verify-advise %s\\n' % ' '.join(sys.argv[1:]))\n",
+    )
+    .unwrap();
 
     Env {
         _tmp: tmp,
@@ -207,6 +216,10 @@ fn finalize_ledger_every_exit() {
         "non-ship reason must NOT stamp: {c}"
     );
     assert!(
+        !c.contains("verify-advise"),
+        "non-ship reason must NOT run the verifier advisory: {c}"
+    );
+    assert!(
         handoff_files(&env).is_empty(),
         "non-ship reason must NOT write a handoff"
     );
@@ -259,6 +272,26 @@ fn finalize_ship_gated() {
     );
     assert!(c.contains("stamp-plan stamp"), "stamp must fire: {c}");
     assert!(c.contains("stamp-plan graduate"), "graduate must fire: {c}");
+    // W6 verifier advisory rides the ship branch with the manifest's fields;
+    // this line is the Rust->Python flag-shape contract (a flag rename on
+    // either side fails here).
+    let adv = c
+        .lines()
+        .find(|l| l.starts_with("verify-advise"))
+        .expect("ship fire runs verify_advise");
+    for want in [
+        "--node-id ab-testnode",
+        "--session-id S-ship",
+        "--reason DonePRGreen",
+        "--plan-path plan.md",
+        "--events",
+        "--global-events",
+    ] {
+        assert!(
+            adv.contains(want),
+            "verify-advise argv missing {want}: {adv}"
+        );
+    }
     assert_eq!(handoff_files(&env).len(), 1, "exactly one handoff artifact");
     let handoff = fs::read_to_string(&handoff_files(&env)[0]).unwrap();
     assert!(
@@ -440,6 +473,35 @@ fn finalize_nonship_then_ship_runs_ship_sideeffects() {
         calls(&env).matches("stamp-plan stamp").count(),
         1,
         "stamp ran exactly once across all fires"
+    );
+}
+
+/// W6 never-wedge lock: a FAILING verifier advisory (exit 1) must not hold
+/// session_finalized open for retry, must not appear in failed_steps, and must
+/// not raise the exit code. The advisory is log-only by contract.
+#[test]
+fn finalize_verify_advise_failure_never_wedges() {
+    let env = setup("S-advfail", false);
+    fs::write(
+        env.pypath.join("fno/verify_advise.py"),
+        "import sys\n\
+         open('calls.log','a').write('verify-advise FAIL\\n')\n\
+         sys.stderr.write('advisory exploded')\n\
+         sys.exit(1)\n",
+    )
+    .unwrap();
+    let out = run_finalize(&env, "DonePRGreen");
+    assert!(out.status.success(), "advisory failure must not raise exit");
+    assert!(calls(&env).contains("verify-advise FAIL"), "advisory ran");
+    assert_eq!(
+        count_event(&env.events, "session_finalized", "S-advfail"),
+        1,
+        "session_finalized still emitted despite the advisory failure"
+    );
+    assert_eq!(
+        count_event(&env.events, "session_finalize_failed", "S-advfail"),
+        0,
+        "advisory failure never lands in failed_steps"
     );
 }
 

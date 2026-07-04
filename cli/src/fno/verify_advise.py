@@ -175,6 +175,30 @@ def stamp_ledger(session_id: str, verdict: str, ledger_path: Path) -> bool:
         os.close(lock_fd)
 
 
+def already_recorded(session_id: str, events_path: Path) -> bool:
+    """True when this session already has a verifier_verdict event (AC6-HP
+    exactly-one): a retried finalize fire (e.g. after a partial-failure
+    session_finalize_failed) must not double-emit or re-spend on a spawn."""
+    if not session_id or not events_path.exists():
+        return False
+    try:
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(e, dict)
+                and e.get("type") == "verifier_verdict"
+                and isinstance(e.get("data"), dict)
+                and e["data"].get("session_id") == session_id
+            ):
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _pr_number(cwd: Path) -> Optional[int]:
     try:
         out = subprocess.run(
@@ -219,6 +243,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     cwd = Path(args.cwd).resolve()
+    project_events = Path(args.events) if args.events else cwd / ".fno" / "events.jsonl"
+
+    if already_recorded(args.session_id, project_events):
+        print("verify_advise: verdict already recorded for this session; skipping")
+        return 0
+
     verdict = decide_verdict(
         reason=args.reason, plan_path=args.plan_path, cwd=cwd, session_id=args.session_id
     )
@@ -228,7 +258,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         from fno import paths as _paths
 
-        project_events = Path(args.events) if args.events else cwd / ".fno" / "events.jsonl"
         global_events = (
             Path(args.global_events)
             if args.global_events

@@ -179,6 +179,60 @@ def test_stamp_ledger_no_row_or_missing_file(tmp_path: Path) -> None:
     assert va.stamp_ledger("", "pass", ledger) is False  # empty session id
 
 
+# -- exactly-once guard (AC6-HP) ----------------------------------------------
+
+def _verdict_line(session_id: str) -> str:
+    return json.dumps(
+        {
+            "ts": "2026-07-04T00:00:00Z",
+            "type": "verifier_verdict",
+            "source": "target",
+            "data": {
+                "graph_node_id": "x-47ab",
+                "verdict": "pass",
+                "source": "ship-gate",
+                "session_id": session_id,
+            },
+        }
+    )
+
+
+def test_already_recorded(tmp_path: Path) -> None:
+    events = tmp_path / "ev.jsonl"
+    events.write_text("not json\n" + _verdict_line("sid-1") + "\n", encoding="utf-8")
+    assert va.already_recorded("sid-1", events) is True
+    assert va.already_recorded("sid-2", events) is False  # different session
+    assert va.already_recorded("", events) is False  # no session id: can't dedup
+    assert va.already_recorded("sid-1", tmp_path / "missing.jsonl") is False
+
+
+def test_main_skips_when_already_recorded(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A retried finalize fire must not double-emit or re-spend on a spawn."""
+    _plan_with_acs(tmp_path)
+    events = tmp_path / "ev.jsonl"
+    events.write_text(_verdict_line("sid-1") + "\n", encoding="utf-8")
+
+    def no_spawn(*a, **k):
+        raise AssertionError("spawn must not run on a retried fire")
+
+    monkeypatch.setattr(va, "run_verifier", no_spawn)
+    rc = va.main(
+        [
+            "--plan-path", "plan.md",
+            "--session-id", "sid-1",
+            "--reason", "DonePRGreen",
+            "--cwd", str(tmp_path),
+            "--events", str(events),
+            "--global-events", str(tmp_path / "gev.jsonl"),
+            "--ledger", str(tmp_path / "ledger.json"),
+        ]
+    )
+    assert rc == 0
+    assert "already recorded" in capsys.readouterr().out
+    assert len(events.read_text().splitlines()) == 1  # no second event
+    assert not (tmp_path / "gev.jsonl").exists()
+
+
 # -- main: exit 0 everywhere (AC6-ERR) ---------------------------------------
 
 def test_main_exits_zero_on_happy_path(tmp_path: Path, monkeypatch, capsys) -> None:

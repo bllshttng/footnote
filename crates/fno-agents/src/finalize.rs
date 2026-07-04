@@ -362,6 +362,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // W6 verifier advisory (x-f063): AC-vs-diff verdict, recorded then
         // ignored. Log-only and never pushed to `failed` - an advisory must
         // never wedge the loop or hold session_finalized open for retry.
+        // Events paths are forwarded so the module's per-session exactly-once
+        // guard reads the same log finalize writes (a retried fire after a
+        // partial failure must not double-emit or re-spend on a spawn).
         let mut adv = py_module(&cwd);
         adv.arg("-m")
             .arg("fno.verify_advise")
@@ -372,7 +375,11 @@ pub fn run_finalize(args: &[String]) -> i32 {
             .arg("--session-id")
             .arg(&session_id)
             .arg("--reason")
-            .arg(&reason);
+            .arg(&reason)
+            .arg("--events")
+            .arg(&project_events)
+            .arg("--global-events")
+            .arg(&global_events);
         match adv.output() {
             Ok(out) if !out.status.success() => eprintln!(
                 "finalize: verify_advise exit {:?}: {}",
