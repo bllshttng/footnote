@@ -177,6 +177,19 @@ def validate(event: dict[str, Any]) -> None:
                 f"(allowed: {allowed_data_sources})"
             )
 
+    # Same chokepoint rationale as session_satisfied above: the generic emit
+    # CLI is the only writer for two of the three human_touch emitters (the mux
+    # shells out), so a typo'd source/resolution must fail here, not land.
+    if type_name == "human_touch":
+        type_props = type_spec["data"]["properties"]
+        for field in ("source", "resolution"):
+            allowed = type_props[field]["enum"]
+            if data.get(field) not in allowed:
+                raise ValidationError(
+                    f"unknown human_touch data.{field}: {data.get(field)!r} "
+                    f"(allowed: {allowed})"
+                )
+
     serialized = _json.dumps(data, separators=(",", ":")).encode("utf-8")
     if len(serialized) > MAX_DATA_BYTES:
         raise ValidationError(

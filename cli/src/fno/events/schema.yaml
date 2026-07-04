@@ -2048,6 +2048,24 @@ event_types:
           type: integer
           description: "The nudge count at which the cap was reached (== config.recovery.max_nudges)."
 
+  - name: human_touch
+    description: "A human steered an agent-managed node (W4 touch telemetry). Emitted at exactly three choke points: mux keystroke injection into an agent pane (source=inject, coalesced per pane), answer-queue submission (source=answer), and a manual merge (source=merge: tty `fno pr merge` or reconcile closing an out-of-band merge). Observing never counts; steering always counts. Emit is fire-and-forget non-fatal: a failed emit must never touch the steering path."
+    sources: [daemon, target, backlog, test]
+    data:
+      required: [source, resolution]
+      properties:
+        graph_node_id:
+          type: string
+          description: "Node the steering targeted; null when resolution=failed (provenance missing). Null events are counted, not dropped - dropped events are the silent failure."
+        source:
+          type: string
+          enum: [inject, answer, merge]
+          description: "Which steering choke point fired."
+        resolution:
+          type: string
+          enum: [ok, failed]
+          description: "ok when graph_node_id resolved (pane FNO_NODE provenance / graph pr_number match / reconcile record); failed otherwise."
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:
