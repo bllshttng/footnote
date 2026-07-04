@@ -1509,7 +1509,12 @@ mod tests {
 
         std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
         std::env::set_var("FNO_HOME", &fno_home);
-        append_corrections_pointer(Some(&unused_home), Path::new("/tmp/pm.md"), "Budget", "detail");
+        append_corrections_pointer(
+            Some(&unused_home),
+            Path::new("/tmp/pm.md"),
+            "Budget",
+            "detail",
+        );
         std::env::remove_var("FNO_HOME");
 
         let contents = fs::read_to_string(&log_path).unwrap();
