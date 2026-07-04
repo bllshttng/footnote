@@ -3,8 +3,10 @@
 `tick`      one loop iteration: scan observer events -> propose a cited diff PR,
             file a no-diff-helps node, or close a run as a no-op. Level-gated
             (report = dry-run and default; assisted = actually open the PR).
-`reconcile` AC10-FR backstop: find merged proposer PRs with no eval-closed
-            receipt and report/schedule the re-eval.
+`reconcile` AC10-FR loop-closer: find merged proposer PRs with no eval-closed
+            receipt, replay the targeted corpus items at the merge commit, fold a
+            before/after delta, and emit skill_diff_eval_closed. `--pr-number`
+            scopes to one PR (merge-trigger); bare sweeps (periodic backstop).
 """
 from __future__ import annotations
 
@@ -380,12 +382,22 @@ def tick(
 # --------------------------------------------------------------------------- #
 
 @skill_diff_app.command("reconcile")
-def reconcile() -> None:
-    """Detect merged proposer PRs with no eval-closed receipt (AC10-FR).
+def reconcile(
+    pr_number: Optional[int] = typer.Option(
+        None, "--pr-number", "--pr",
+        help="Scope to one merged proposer PR (the fast merge-trigger path); "
+             "omit for a full sweep of every un-closed proposer PR.",
+    ),
+) -> None:
+    """Close the skill-diff loop: re-eval merged proposer PRs, emit the receipt (AC10-FR).
 
-    Report-only: lists proposer PRs that merged but never produced a
-    ``skill_diff_eval_closed`` event, so the eval-after-merge loop can be
-    re-scheduled. Never retries silently forever - it just surfaces the gap.
+    Detect-AND-run. For each merged proposer PR with no ``skill_diff_eval_closed``
+    receipt, replay the exact corpus items the diff targeted at the merge commit,
+    fold a before/after ``score_delta`` on the top failure dimension, and emit
+    ``skill_diff_eval_closed``. Two callers key idempotency on the receipt's
+    presence, so firing both (merge-trigger + periodic backstop) never
+    double-emits: ``--pr-number`` scopes to the just-merged PR; the bare form
+    sweeps. One status line per PR, never a silent exit-0.
     """
     events = engine.read_events_tolerant(_events_paths()[0])
     proposed = {
@@ -398,15 +410,133 @@ def reconcile() -> None:
         for e in events
         if e.get("type") == "skill_diff_eval_closed"
     }
-    open_gaps = [pr for pr in proposed if pr not in closed]
-    if not open_gaps:
-        print("reconcile: no un-closed proposer PRs")
-        return
+    if pr_number is not None:
+        if pr_number not in proposed:
+            print(f"reconcile: PR#{pr_number} is not a known proposer PR (no skill_diff_proposed event)")
+            return
+        if pr_number in closed:
+            print(f"reconcile: PR#{pr_number} already has an eval-closed receipt (no-op)")
+            return
+        open_gaps = [pr_number]
+    else:
+        open_gaps = [pr for pr in proposed if pr not in closed]
+        if not open_gaps:
+            print("reconcile: no un-closed proposer PRs")
+            return
+
     for pr in open_gaps:
-        d = proposed[pr]
-        merged = _pr_merged(pr)
-        state = "merged" if merged else "not-yet-merged"
-        print(f"reconcile: PR#{pr} ({d.get('skill_id')}, run {d.get('run_id')}) {state}, no eval-closed")
+        print(f"reconcile: {_reeval_pr(pr, proposed[pr], events)}")
+
+
+def _replay_set(events: list[dict], run_id_before: str, skill_id: str, top_dim: Optional[str]) -> list[str]:
+    """The corpus items the diff was supposed to fix: the before run's failing
+    findings on the top dimension only (Locked Decision 4). Order-preserving
+    dedup - the smallest honest measurement and the cost bound."""
+    if not top_dim:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for f in engine.findings_for_run(events, run_id_before, skill_id):  # tool_fault already excluded
+        if f.get("dimension") == top_dim and f.get("verdict") == "fail":
+            cid = f.get("corpus_item_id")
+            if cid and cid not in seen:
+                seen.add(cid)
+                out.append(cid)
+    return out
+
+
+def _reeval_pr(pr: int, proposed: dict, events: list[dict]) -> str:
+    """Re-eval one merged-unclosed proposer PR; return its one-line report status.
+
+    Emits ``skill_diff_eval_closed`` on success. Emits NOTHING (leaving the PR
+    detectable as unclosed for the next tick) on: not-yet-merged, paused, or a
+    replay batch that produced no usable verdict (AC3-ERR degrade-not-crash).
+    The after-run's ``skill_eval_run_complete`` (with ``skill_ref``) is emitted by
+    the observer replays themselves - reconcile only orchestrates and folds.
+    """
+    skill_id = proposed.get("skill_id") or "unknown"
+    run_id_before = proposed.get("run_id")
+
+    # /review proposals have no historical thread state to score finding_precision
+    # against (Review Amendment A2): log-and-skip, no replay, no receipt.
+    if skill_id == "fno:review":
+        return f"PR#{pr} ({skill_id}) outcome-pending (review-skill)"
+
+    if not _pr_merged(pr):
+        return f"PR#{pr} ({skill_id}, run {run_id_before}) not-yet-merged, no eval-closed"
+
+    # Pause gate BEFORE any replay spend (AC8-FR); replay honors it too, but we
+    # never even spawn while paused.
+    if loops_paused():
+        return f"PR#{pr} ({skill_id}) paused, left unclosed for a later tick"
+
+    if not run_id_before:
+        return f"PR#{pr} ({skill_id}) malformed proposed event (no run_id), skipped"
+
+    top = engine.top_dimension(events, run_id_before, skill_id)
+    ranking = engine.failure_ranking(events, run_id_before, skill_id)
+    before_fail = ranking[0]["fail_count"] if ranking else 0
+    replay_set = _replay_set(events, run_id_before, skill_id, top)
+
+    # AC5-EDGE: nothing failing on the top dimension -> replay nothing; close with
+    # a null after-run and a zero delta.
+    if not replay_set:
+        _emit("skill_diff_eval_closed", {
+            "pr_number": pr, "skill_id": skill_id,
+            "run_id_before": run_id_before, "run_id_after": None, "score_delta": 0,
+        })
+        return f"PR#{pr} ({skill_id}) re-evaluated: no failing items on {top or 'top'} dim, delta=0"
+
+    merge_sha = _merge_sha(pr) or "origin/main"  # record which ref actually ran
+    run_id_after = _mint_run_id(skill_id)
+    for corpus_item in replay_set:
+        _run_replay(corpus_item, merge_sha, run_id_after)
+
+    # Re-read: the replays appended their findings (+ their own skill_ref-tagged
+    # run_completes) since we last read events.
+    events_after = engine.read_events_tolerant(_events_paths()[0])
+    usable = engine.findings_for_run(events_after, run_id_after, skill_id)  # tool_fault excluded
+
+    # AC3-ERR: the whole batch produced no usable (non-tool-fault) verdict - every
+    # spawn errored / gh was unreachable. Emit no receipt; the PR stays unclosed
+    # so the next tick retries.
+    if not usable:
+        return f"PR#{pr} ({skill_id}) replay batch failed, left unclosed for retry"
+
+    after_fail = sum(1 for f in usable if f.get("dimension") == top and f.get("verdict") == "fail")
+    score_delta = before_fail - after_fail
+    _emit("skill_diff_eval_closed", {
+        "pr_number": pr, "skill_id": skill_id,
+        "run_id_before": run_id_before, "run_id_after": run_id_after, "score_delta": score_delta,
+    })
+    return (f"PR#{pr} ({skill_id}) re-evaluated: delta={score_delta} "
+            f"(before={before_fail} after={after_fail}, ref={merge_sha[:12]})")
+
+
+def _mint_run_id(skill_id: str) -> str:
+    """A fresh after-run id sharing the observer's ``obs-<skill_id>-<UTC>`` shape
+    but no lineage with run_id_before."""
+    from fno.observer.cli import _mint_run_id as _observer_mint
+
+    return _observer_mint(skill_id)
+
+
+def _run_replay(corpus_item: str, skill_ref: str, run_id_after: str) -> int:
+    """Spawn one observer replay of a corpus item at the candidate ref, under the
+    shared after-run id. The heavy machinery (isolated worktree, claim, detective
+    isolation scan, per-item scoring, its own skill_ref-tagged run_complete) is
+    the observer's; reconcile only loops it. Injectable seam for tests; returns
+    the subprocess rc (non-zero == that item did not score)."""
+    try:
+        p = subprocess.run(
+            ["fno", "observer", "replay", "--skill", "blueprint",
+             "--corpus-item", corpus_item, "--skill-ref", skill_ref, "--run-id", run_id_after],
+            cwd=paths.resolve_repo_root(), capture_output=True, text=True, timeout=900,
+        )
+        return p.returncode
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _LOG.warning("skill-diff: replay of %s failed: %s", corpus_item, exc)
+        return 1
 
 
 def _pr_merged(pr_number: int) -> Optional[bool]:
@@ -417,5 +547,18 @@ def _pr_merged(pr_number: int) -> Optional[bool]:
             cwd=paths.resolve_repo_root(), capture_output=True, text=True, check=True,
         )
         return out.stdout.strip() == "MERGED"
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _merge_sha(pr_number: int) -> Optional[str]:
+    """Best-effort merge commit SHA to pin the candidate ref; None when gh is
+    unavailable (caller falls back to origin/main and records that)."""
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "mergeCommit", "-q", ".mergeCommit.oid"],
+            cwd=paths.resolve_repo_root(), capture_output=True, text=True, check=True,
+        )
+        return out.stdout.strip() or None
     except (OSError, subprocess.CalledProcessError):
         return None
