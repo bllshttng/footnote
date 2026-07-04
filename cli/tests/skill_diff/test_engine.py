@@ -39,6 +39,18 @@ def test_unprocessed_and_idempotency():  # AC8-FR
     assert engine.unprocessed_runs(evs, "fno:blueprint") == []
 
 
+def test_unprocessed_excludes_skill_ref_runs():  # AC6-EDGE (x-ed13 Locked Decision 5)
+    # A skill_ref-tagged run_complete is a replay/candidate eval (an
+    # eval-after-merge after-run, or a manual `fno observer replay`), never a
+    # bare sweep - it must NOT be a proposer trigger, else the loop re-opens.
+    evs = [
+        _rc("sweep1"),
+        {"type": "skill_eval_run_complete",
+         "data": {"run_id": "after1", "skill_id": "fno:blueprint", "skill_ref": "deadbeef"}},
+    ]
+    assert engine.unprocessed_runs(evs, "fno:blueprint") == ["sweep1"]  # after1 excluded
+
+
 def test_unprocessed_scopes_by_skill():
     evs = [_rc("r1", skill_id="fno:blueprint"), _rc("r2", skill_id="fno:review")]
     assert engine.unprocessed_runs(evs, "fno:blueprint") == ["r1"]

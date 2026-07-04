@@ -64,6 +64,12 @@ def unprocessed_runs(events: list[dict], skill_id: str) -> list[str]:
     node / noop is never reprocessed, so a second concurrent tick is a no-op.
     The key is the (run_id, skill_id) pair, so a run_id shared across skills
     (a multi-skill sweep) is only marked handled for the skill it terminated.
+
+    A run_complete carrying ``skill_ref`` is a REPLAY/candidate eval (an
+    eval-after-merge re-run, or a manual ``fno observer replay``), never a bare
+    sweep - it must NOT trigger the proposer (x-ed13 Locked Decision 5), else a
+    closed loop re-opens: propose -> merge -> eval-after-merge -> propose ...
+    Only ``skill_ref``-absent run_completes (real sweeps) are candidate triggers.
     """
     handled: set[tuple[str, str]] = set()
     complete: list[str] = []
@@ -74,7 +80,7 @@ def unprocessed_runs(events: list[dict], skill_id: str) -> list[str]:
             rid, sid = d.get("run_id"), d.get("skill_id")
             if rid and sid:
                 handled.add((rid, sid))
-        elif t == "skill_eval_run_complete" and d.get("skill_id") == skill_id:
+        elif t == "skill_eval_run_complete" and d.get("skill_id") == skill_id and not d.get("skill_ref"):
             rid = d.get("run_id")
             if rid and rid not in complete:
                 complete.append(rid)
@@ -280,6 +286,10 @@ if __name__ == "__main__":  # pragma: no cover - smoke self-check
          "dimension": "structural_validity", "verdict": "fail", "tool_fault": True}},
     ]
     assert unprocessed_runs(evs, "fno:blueprint") == ["r1"]
+    # A skill_ref-tagged run_complete (a replay/candidate eval) is NOT a trigger.
+    evs_ref = evs + [{"type": "skill_eval_run_complete", "data": {"run_id": "after1",
+                      "skill_id": "fno:blueprint", "skill_ref": "deadbeef"}}]
+    assert unprocessed_runs(evs_ref, "fno:blueprint") == ["r1"]  # after1 excluded
     assert len(findings_for_run(evs, "r1")) == 1  # tool_fault excluded
     assert has_actionable_findings(evs, "r1")
     assert top_dimension(evs, "r1") == "structural_validity"
