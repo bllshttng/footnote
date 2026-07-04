@@ -238,7 +238,7 @@ for id in "${NODES[@]}"; do
         # x-ba4b: TTL-unexpired dead-pid claim (a respawned worker). Contested
         # liveness degrades to SKIP, never steal and never park the lane -
         # advance to the next unblocked ready node.
-        holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
+        holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null || true)"
         echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
         n_skipped=$((n_skipped + 1))
       else
