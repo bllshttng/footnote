@@ -94,7 +94,9 @@ use crate::tree::{Dir, Rect, TabId};
 /// never leaves the server. The match jump + highlight reach co-viewers via the
 /// shared-scroll `Frame` + `cell_flags::SELECTED` broadcast (v7), so no new
 /// frame plumbing.
-pub const PROTO_VERSION: u32 = 12;
+///
+/// v13: `Command::FocusPane(pane_id)` for the sideline click-to-focus path.
+pub const PROTO_VERSION: u32 = 13;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -449,6 +451,12 @@ pub enum Command {
     /// block-select -> leader+y composition; the mouse path copies on release).
     /// A no-op `Notice` when nothing is selected.
     CopySelection,
+    /// (v13) Focus a pane by id, wherever it lives: the server scans every
+    /// squad/tab for the leaf, switches the sender's view to that squad+tab, and
+    /// sets the tab focus to it. Names a `pane_id` from the last `Layout`'s
+    /// agent rows (the sideline click path); a stale id is refused fail-closed
+    /// with a notice, like the other catalog-named commands.
+    FocusPane(u64),
 }
 
 /// Server -> client.
@@ -1143,6 +1151,7 @@ mod tests {
             ClientMsg::Command(Command::ResizeDir(Dir::Down)),
             ClientMsg::Command(Command::SelectTab(3)),
             ClientMsg::Command(Command::SelectSquad(42)),
+            ClientMsg::Command(Command::FocusPane(3)),
             ClientMsg::Query,
             ClientMsg::KillServer,
             ClientMsg::Mouse {

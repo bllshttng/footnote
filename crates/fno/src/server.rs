@@ -2049,6 +2049,28 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::FocusPane(pid) => {
+                // Locate the leaf anywhere in the session, then view+focus it.
+                let target = self.session.find_pane(pid).map(|(sid, ti)| {
+                    (
+                        sid,
+                        self.session.squad(sid).expect("live squad").tabs[ti].id,
+                    )
+                });
+                match target {
+                    Some((sid, tid)) => {
+                        self.set_view(client_id, sid, tid);
+                        if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
+                            tab.focus = pid;
+                        }
+                        self.push_layout(true);
+                    }
+                    // The pane exited racing the click; fail-closed like the
+                    // other catalog-named commands.
+                    None => self.notice(client_id, "no such pane"),
+                }
+                Flow::Continue
+            }
             Command::CopySelection => {
                 // Keyboard copy (leader+y): the focused pane's selection, else the
                 // newest completed block (precedence + refusals in copy_source).
