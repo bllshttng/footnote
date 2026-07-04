@@ -14,6 +14,11 @@
 #   T4  done without a manifest is D only (no re-open)
 #   T5  non-pane (no FNO_PANE) emits nothing
 #   T6  old server (no FNO_PANE_EPOCH) degrades to the presence gate (emits)
+#   T7  empty pin (half-failed create) degrades to emit, not permanent silence
+#   T8  symlinked rendezvous dir degrades to emit, no hijack of the link target
+#   T9  path-traversal FNO_SESSION is sanitized, pin stays contained
+#   T10 malformed payload still emits (markers independent of the parse)
+#   T11 non-numeric FNO_PANE degrades to emit, no path escape
 
 set -uo pipefail
 
@@ -111,6 +116,24 @@ sink9="$TMP/sink9"
     FNO_PANE=9 FNO_PANE_EPOCH=9000 FNO_SESSION="../../escape" bash "$HOOK" working ) >/dev/null 2>&1
 { has '133;C' <"$sink9" && [[ -z "$(find "$TMP" -maxdepth 1 -name '*escape*' 2>/dev/null)" ]]; } \
   && pass "T9 traversal FNO_SESSION sanitized, pin stays contained" || fail "T9 expected contained pin (no escape at TMP root)"
+
+# T10: a malformed payload (no session_id) must NOT suppress markers -- the pane
+# host still emits via the presence-gate degrade (regression guard for the parse
+# reorder); only the state report is skipped.
+RT4="$TMP/run4"; mkdir -p "$RT4"; sink10="$TMP/sink10"
+( cd "$TMP" && printf '{}' | \
+    FNO_TURN_MARKER_TTY="$sink10" XDG_RUNTIME_DIR="$RT4" FNO_AGENTS_BIN="$STUB" \
+    FNO_PANE=10 FNO_PANE_EPOCH=10000 FNO_SESSION=main bash "$HOOK" working ) >/dev/null 2>&1
+has '133;C' <"$sink10" && pass "T10 malformed payload still emits (markers independent of parse)" || fail "T10 expected emit on malformed payload"
+
+# T11: a non-numeric (traversal) FNO_PANE is rejected -> degrade to emit, no file
+# escapes the rendezvous dir.
+RT5="$TMP/run5"; mkdir -p "$RT5"; sink11="$TMP/sink11"
+( cd "$TMP" && printf '{"session_id":"host-11"}' | \
+    FNO_TURN_MARKER_TTY="$sink11" XDG_RUNTIME_DIR="$RT5" FNO_AGENTS_BIN="$STUB" \
+    FNO_PANE="../../pwn" FNO_PANE_EPOCH=11000 FNO_SESSION=main bash "$HOOK" working ) >/dev/null 2>&1
+{ has '133;C' <"$sink11" && [[ -z "$(find "$TMP" -maxdepth 1 -name '*pwn*' 2>/dev/null)" ]]; } \
+  && pass "T11 non-numeric FNO_PANE degrades to emit, no escape" || fail "T11 expected contained degrade-emit"
 
 printf '[inside-leg] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

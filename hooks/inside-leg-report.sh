@@ -81,12 +81,18 @@ except Exception:
 if not sid:
     sys.exit(0)
 print(f"{sid}\t{time.monotonic_ns()}")
-' <<<"$INPUT" 2>/dev/null) || exit 0
-[[ -z "$PARSED" ]] && exit 0
+' <<<"$INPUT" 2>/dev/null) || PARSED=""
 
-SESSION_ID="${PARSED%%$'\t'*}"
-SEQ="${PARSED##*$'\t'}"
-[[ -z "$SESSION_ID" || -z "$SEQ" ]] && exit 0
+# Keep marker emission INDEPENDENT of the parse: on a malformed/empty payload (or
+# no python3) SESSION_ID stays empty and the pane host still emits via the
+# presence-gate degrade. Only the state report (which needs both fields) is
+# skipped, below. A clean parse yields "<session_id>\t<seq>".
+SESSION_ID=""
+SEQ=""
+if [[ "$PARSED" == *$'\t'* ]]; then
+  SESSION_ID="${PARSED%%$'\t'*}"
+  SEQ="${PARSED##*$'\t'}"
+fi
 
 # Turn boundary -> OSC 133 marker, mux panes only, and only from THE pane host.
 # The sink is /dev/tty (the pane PTY, this process's controlling terminal);
@@ -116,20 +122,21 @@ is_pane_host() {
   # rather than writing somewhere unsafe.
   local base="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
   local dir="${base%/}/fno-turn-pins-${EUID:-0}"
-  # Atomic create: plain `mkdir` (no -p) fails if the path already exists, even
-  # as a symlink, so there is no check-then-create TOCTOU. On a pre-existing
-  # path, trust it only if it is a real, self-owned, non-symlink directory. The
-  # parent (base) always exists, so -p is unnecessary.
-  # Create atomically with restricted perms (-m 700), so there is no loose-perms
-  # window. On a pre-existing path, trust it only if it is a real, self-owned,
-  # non-symlink dir, and force 700 there since we did not create it.
+  # Create atomically with restricted perms (-m 700): no loose-perms window and
+  # no check-then-create TOCTOU (plain `mkdir`, no -p, fails if the path exists,
+  # even as a symlink). On a pre-existing path, trust it only if it is a real,
+  # self-owned, non-symlink dir, and force 700 there since we did not create it.
+  # The parent (base) always exists, so -p is unnecessary.
   if ! mkdir -m 700 "$dir" 2>/dev/null; then
     [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] || return 0
     chmod 700 "$dir" 2>/dev/null || true
   fi
-  # Sanitize FNO_SESSION of any path-traversal (`/`, `.`) so a hostile env cannot
-  # steer the pin write outside the rendezvous dir. Deterministic, so a host and
-  # its nested claude still compute the same pin path.
+  # Every pin path component is env-controlled, so a hostile env could smuggle
+  # `/` or `..` to steer the write outside the dir. FNO_PANE/FNO_PANE_EPOCH are
+  # numeric by contract (pty.rs), so require digits (degrade-to-emit otherwise);
+  # FNO_SESSION is a free-form name, so sanitize its separators. Deterministic,
+  # so a host and its nested claude still compute the same pin path.
+  [[ "$FNO_PANE" =~ ^[0-9]+$ && "$FNO_PANE_EPOCH" =~ ^[0-9]+$ ]] || return 0
   local safe_session="${FNO_SESSION:-_}"; safe_session="${safe_session//[\/.]/_}"
   local pin="${dir}/${safe_session}-${FNO_PANE}-${FNO_PANE_EPOCH}"
   # noclobber makes the create fail if the pin exists -> exactly one winner.
@@ -141,9 +148,12 @@ is_pane_host() {
   # host into permanent silence. A real nested claude always wrote a non-empty
   # id, so it still mismatches below and stays silent.
   [[ -s "$pin" ]] || return 0
-  # `read` builtin, not a `cat` subprocess: this runs on every turn boundary.
+  # `read` builtin, not a `cat` subprocess: this runs on every turn boundary. An
+  # unreadable/corrupt pin (I/O error, non-regular) leaves pinned_id empty ->
+  # degrade-to-emit, never latch the host silent on a read failure.
   local pinned_id=""
   read -r pinned_id <"$pin" 2>/dev/null || true
+  [[ -n "$pinned_id" ]] || return 0
   [[ "$pinned_id" == "$SESSION_ID" ]]
 }
 
@@ -170,6 +180,10 @@ if [[ -n "${FNO_PANE:-}" ]] && is_pane_host; then
       ;;
   esac
 fi
+
+# The state report needs a parsed session id + seq; a malformed/empty payload
+# already emitted the marker above, so just skip the report here.
+[[ -z "$SESSION_ID" || -z "$SEQ" ]] && exit 0
 
 # Resolve the fno-agents binary, most-local first (mirrors target-stop-hook.sh).
 BIN=""
