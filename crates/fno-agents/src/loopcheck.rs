@@ -227,6 +227,15 @@ fn normalize_reviewer(raw: &str) -> String {
     raw.trim().trim_start_matches('/').to_string()
 }
 
+/// Fail-closed sentinel for a structurally-malformed `reviewers:` value (e.g. a
+/// `{...}` mapping). Python raises loudly on such a value; the Rust parser must
+/// NOT silently drop it to an empty list (= no gate, fail OPEN). Instead it
+/// stores this sentinel so the gate stays active but UNSATISFIABLE - the NUL
+/// byte can never appear in an emitted `review_attestation.reviewer`, so no
+/// evidence ever clears it (codex peer review P1; mirrors x-4baa's
+/// UNRESOLVED_PEER_SENTINEL).
+const MALFORMED_REVIEWERS_SENTINEL: &str = "\u{0}malformed-reviewers";
+
 /// A `config.review.peers` entry. `provider` is kept for messaging; the gate
 /// only uses the resolved posting `identity` (own, or the shared peer_identity).
 #[derive(Debug, Default, Clone)]
@@ -456,15 +465,23 @@ fn parse_settings(content: &str) -> Settings {
                             .filter(|r| !r.is_empty())
                             .collect();
                     }
-                    ListForm::Malformed => {
-                        if let Some(one) = scalar_as_singleton(rest) {
+                    ListForm::Malformed => match scalar_as_singleton(rest) {
+                        // A clean bare scalar (`reviewers: sigma`) is one entry.
+                        Some(one) => {
                             s.reviewers = one
                                 .iter()
                                 .map(|r| normalize_reviewer(r))
                                 .filter(|r| !r.is_empty())
                                 .collect();
                         }
-                    }
+                        // A structurally-malformed value (`reviewers: {a: b}`)
+                        // fails CLOSED, not open: keep the gate active but
+                        // unsatisfiable (Python raises here; Rust must not drop
+                        // to no-gate). codex peer review P1.
+                        None => {
+                            s.reviewers = vec![MALFORMED_REVIEWERS_SENTINEL.to_string()];
+                        }
+                    },
                 }
             } else if let Some(rest) = trimmed.strip_prefix("peers:") {
                 match classify_list_rhs(rest) {
@@ -959,10 +976,13 @@ fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &s
     let Ok(content) = std::fs::read_to_string(events_path) else {
         return false; // no evidence file -> gate unmet (fail closed)
     };
-    // Single pass (gemini review): collect the normalized reviewer of every
-    // head-pinned passing attestation into a set, then require each requested
-    // reviewer be present - O(lines), not O(reviewers x lines).
-    let mut attested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Single pass (gemini review): record the LATEST verdict per reviewer at the
+    // current head. events.jsonl is append-ordered, so a later attestation
+    // supersedes an earlier one for the same reviewer - a `fail` posted after a
+    // `pass` must revoke it, and a re-run `pass` after a `fail` must restore it
+    // (codex peer review P1: a later fail was previously ignored). A reviewer is
+    // satisfied iff its latest head-pinned verdict is exactly `pass`. O(lines).
+    let mut latest_pass: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     for line in content.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -973,16 +993,14 @@ fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &s
         if val.pointer("/data/head_sha").and_then(|v| v.as_str()) != Some(head_sha) {
             continue;
         }
-        if val.pointer("/data/verdict").and_then(|v| v.as_str()) != Some("pass") {
-            continue;
-        }
         if let Some(r) = val.pointer("/data/reviewer").and_then(|v| v.as_str()) {
-            attested.insert(r.trim_start_matches('/').to_string());
+            let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
+            latest_pass.insert(r.trim_start_matches('/').to_string(), is_pass);
         }
     }
     reviewers
         .iter()
-        .all(|entry| attested.contains(entry.trim_start_matches('/')))
+        .all(|entry| latest_pass.get(entry.trim_start_matches('/')) == Some(&true))
 }
 
 /// Run done() reads. Returns Ok(PrInfo) or Err((read_name, stderr_tail)) on gh failure.
@@ -4204,6 +4222,52 @@ mod tests {
             &["sigma".to_string(), "declare".to_string()],
             "h"
         ));
+    }
+
+    #[test]
+    fn parse_settings_reviewers_malformed_mapping_fails_closed() {
+        // A `{...}` mapping value must NOT drop to no-gate (Python raises here);
+        // Rust stores an unsatisfiable sentinel so the gate stays active but can
+        // never clear (codex peer review P1).
+        let s = parse_settings("config:\n  review:\n    reviewers: {a: b}\n");
+        assert_eq!(s.reviewers, vec![MALFORMED_REVIEWERS_SENTINEL.to_string()]);
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_events(tmp.path(), &[]);
+        assert!(
+            !reviewers_all_attested(&p, &s.reviewers, "h"),
+            "a malformed-reviewers sentinel must never be satisfiable"
+        );
+    }
+
+    #[test]
+    fn reviewers_all_attested_latest_verdict_wins() {
+        // events.jsonl is append-ordered: a later attestation supersedes an
+        // earlier one for the same reviewer at the same head (codex peer P1).
+        let tmp = tempfile::tempdir().unwrap();
+        // pass THEN fail -> latest is fail -> unsatisfied.
+        let pf = write_events(
+            tmp.path(),
+            &[
+                r#"{"ts":"t1","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"h","verdict":"pass"}}"#,
+                r#"{"ts":"t2","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"h","verdict":"fail"}}"#,
+            ],
+        );
+        assert!(
+            !reviewers_all_attested(&pf, &["sigma".to_string()], "h"),
+            "a fail posted after a pass must revoke it"
+        );
+        // fail THEN pass -> latest is pass -> satisfied (re-review cleared it).
+        let fp = write_events(
+            tmp.path(),
+            &[
+                r#"{"ts":"t1","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"h","verdict":"fail"}}"#,
+                r#"{"ts":"t2","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"h","verdict":"pass"}}"#,
+            ],
+        );
+        assert!(
+            reviewers_all_attested(&fp, &["sigma".to_string()], "h"),
+            "a pass posted after a fail must restore satisfaction"
+        );
     }
 
     #[test]

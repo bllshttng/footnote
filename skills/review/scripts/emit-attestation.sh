@@ -22,8 +22,11 @@ head_sha="$(git rev-parse HEAD 2>/dev/null)" || {
   exit 1
 }
 
-# fno event emit validates the envelope + required data fields before writing.
-fno event emit -t review_attestation -s target \
-  -d "{\"reviewer\":\"$reviewer\",\"head_sha\":\"$head_sha\",\"verdict\":\"$verdict\"}"
+# Build the data object with jq so a reviewer/verdict value can never break the
+# JSON (codex peer review P2). fno event emit then validates envelope + required
+# fields + the verdict enum before writing.
+data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict}')"
+fno event emit -t review_attestation -s target -d "$data"
 
 echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict" >&2
