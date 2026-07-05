@@ -454,41 +454,50 @@ fn parse_settings(content: &str) -> Settings {
             continue;
         }
 
-        // peers block items: a scalar `- codex` or a map `- provider: codex`
-        // (with an optional `identity:` sub-key on the following deeper line).
+        // peers block items: a scalar `- codex` or a map entry whose keys can
+        // appear in EITHER order (`- provider: codex` then `identity: x`, OR
+        // `- identity: x` then `provider: codex`). Key order is arbitrary in
+        // YAML and PyYAML / `fno config set` emits keys alphabetically, so
+        // `identity` lands BEFORE `provider` - the map parser must not assume
+        // an order (gemini HIGH on #205).
         if in_config && collecting_peers {
+            let unquote = |v: &str| -> String {
+                strip_inline_comment(v.trim())
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string()
+            };
             if trimmed.starts_with('-') {
+                // A `-` starts a new entry. Its inline `key: value` (if any)
+                // seeds either field; a scalar seeds the provider.
                 let item = strip_inline_comment(trimmed.trim_start_matches('-').trim()).trim();
-                // Map form: `- provider: codex` (optionally `identity:` inline
-                // too, though identity usually follows on the next line).
-                if let Some(prov) = item.strip_prefix("provider:") {
-                    let provider = prov
-                        .trim()
-                        .trim_matches(|c| c == '"' || c == '\'')
-                        .to_string();
-                    if !provider.is_empty() {
-                        s.peers.push(PeerEntry {
-                            provider,
-                            identity: None,
-                        });
-                    }
+                let mut entry = PeerEntry::default();
+                if let Some(v) = item.strip_prefix("provider:") {
+                    entry.provider = unquote(v);
+                } else if let Some(v) = item.strip_prefix("identity:") {
+                    entry.identity = Some(unquote(v)).filter(|s| !s.is_empty());
                 } else if !item.is_empty() {
-                    // Scalar form: `- codex`.
-                    s.peers.push(PeerEntry {
-                        provider: item.trim_matches(|c| c == '"' || c == '\'').to_string(),
-                        identity: None,
-                    });
+                    entry.provider = unquote(item);
+                }
+                if !entry.provider.is_empty() || entry.identity.is_some() {
+                    s.peers.push(entry);
                 }
                 continue;
             }
-            // A map sub-key line (`identity: fno-codex-bot`) attaches to the
-            // most recent peer entry. token_env is not needed by the
-            // login-based gate; any other deeper line is ignored.
-            if let Some(rest) = trimmed.strip_prefix("identity:") {
-                let id = strip_inline_comment(rest.trim())
-                    .trim_matches(|c| c == '"' || c == '\'')
-                    .to_string();
+            // A map sub-key line fills whichever field the `-` line did not.
+            // token_env is not needed by the login-based gate; other lines are
+            // ignored.
+            if let Some(v) = trimmed.strip_prefix("provider:") {
                 if let Some(last) = s.peers.last_mut() {
+                    let p = unquote(v);
+                    if last.provider.is_empty() && !p.is_empty() {
+                        last.provider = p;
+                    }
+                }
+                continue;
+            }
+            if let Some(v) = trimmed.strip_prefix("identity:") {
+                if let Some(last) = s.peers.last_mut() {
+                    let id = unquote(v);
                     if !id.is_empty() {
                         last.identity = Some(id);
                     }
@@ -3978,6 +3987,21 @@ mod tests {
         assert_eq!(s.peers[0].provider, "codex");
         assert_eq!(s.peers[0].identity.as_deref(), Some("fno-codex-bot"));
         assert_eq!(s.peers[1].provider, "gemini");
+    }
+
+    #[test]
+    fn parse_settings_peers_map_identity_before_provider() {
+        // PyYAML sorts keys alphabetically, so `fno config set` emits
+        // `identity:` BEFORE `provider:`. The map parser must be order-agnostic
+        // (gemini HIGH on #205) - otherwise the provider is misparsed and the
+        // per-peer identity is lost.
+        let yaml = "config:\n  review:\n    peers:\n    - identity: fno-codex-bot\n      provider: codex\n    - provider: gemini\n      identity: fno-gemini-bot\n";
+        let s = parse_settings(yaml);
+        assert_eq!(s.peers.len(), 2);
+        assert_eq!(s.peers[0].provider, "codex");
+        assert_eq!(s.peers[0].identity.as_deref(), Some("fno-codex-bot"));
+        assert_eq!(s.peers[1].provider, "gemini");
+        assert_eq!(s.peers[1].identity.as_deref(), Some("fno-gemini-bot"));
     }
 
     #[test]

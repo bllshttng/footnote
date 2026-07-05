@@ -87,8 +87,11 @@ main() {
     || die "gh pr review (body) failed for PR #$pr (gate stays unmet)"
 
   # Post each P1 as an inline blocking comment carrying the badge markup.
+  # Guard the empty case explicitly: `"${p1s[@]:-}"` trips set -u on an empty
+  # array in Bash 3.2 (macOS ships it) - gemini MEDIUM on #205.
   local f
-  for f in "${p1s[@]:-}"; do
+  if [[ ${#p1s[@]} -gt 0 ]]; then
+   for f in "${p1s[@]}"; do
     [[ -n "$f" ]] || continue
     local path line msg
     path="${f%%:*}"; local rest="${f#*:}"; line="${rest%%:*}"; msg="${rest#*:}"
@@ -100,7 +103,8 @@ main() {
       -F line="$line" \
       -f side=RIGHT >/dev/null \
       || die "gh api inline comment failed ($path:$line) for PR #$pr (gate stays unmet)"
-  done
+   done
+  fi
 
   echo "post-peer-review: posted $provider review as gate identity (${#p1s[@]} P1 inline)"
 }
