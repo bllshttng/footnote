@@ -1092,17 +1092,25 @@ fn read_pr_info(
     // an optional blocking finding), but its presence is never required.
     // x-e703: the gate is a strict conjunction over the union of GitHub-login
     // evidence (github_apps/peers via optional_bots+required_bots) AND the
-    // local-attestation `reviewers`. Each satisfied by its own evidence source.
+    // local-attestation `reviewers`. Each satisfied by its own evidence source,
+    // so the two skips are INDEPENDENT: `no_external` (and an empty login set)
+    // skips only the EXTERNAL GitHub-login reads - it is scoped to external
+    // review (control-plane-loop.md step 2), NOT the local attestation gate. A
+    // repo that pins `reviewers: [sigma]` still requires that local pass even
+    // when a session runs `--no-external` to skip usage-wedged App bots
+    // (fixes a fail-open the sigma review caught). `reviewers` is empty for
+    // every pre-x-e703 config, so `reviewers_all_attested` is vacuously true
+    // there and this changes nothing for them.
     let login_gate_active = !required_bots.is_empty() || !optional_bots.is_empty();
-    let review_skipped = no_external || (!login_gate_active && reviewers.is_empty());
-    let (latest_review_ts, reviewed, missing_bots, unaddressed_findings) = if review_skipped {
-        ("none".to_string(), true, Vec::new(), Vec::new()) // skip reads, treat as reviewed
-    } else if !login_gate_active {
-        // reviewers-only gate: no GitHub logins to poll, so skip the gh review
-        // reads entirely (fewer calls + no spurious gh-error block for a
-        // solo/claude-only harness). Evidence is the head-pinned attestation.
-        let reviewed = reviewers_all_attested(events_path, reviewers, head_sha);
-        ("none".to_string(), reviewed, Vec::new(), Vec::new())
+    let login_skipped = no_external || !login_gate_active;
+    let reviewers_ok = reviewers_all_attested(events_path, reviewers, head_sha);
+    let (latest_review_ts, reviewed, missing_bots, unaddressed_findings) = if login_skipped {
+        // No GitHub logins to poll (nothing configured, or no_external): skip
+        // the gh review reads entirely (fewer calls + no spurious gh-error
+        // block). The local attestation gate still applies - reviewers_ok is
+        // true when unconfigured, so a login-only or no-gate config is
+        // unaffected.
+        ("none".to_string(), reviewers_ok, Vec::new(), Vec::new())
     } else {
         // Read 3: top-level reviews + issue comments
         let reviews_out = Command::new(gh_bin)
@@ -1209,9 +1217,7 @@ fn read_pr_info(
         // x-e703: the login gate AND the local-attestation reviewers gate must
         // both clear. reviewers is usually empty (vacuously true) so this is a
         // no-op for login-only configs.
-        let reviewed = info.all_required_passed()
-            && unaddressed.is_empty()
-            && reviewers_all_attested(events_path, reviewers, head_sha);
+        let reviewed = info.all_required_passed() && unaddressed.is_empty() && reviewers_ok;
         (activity_ts, reviewed, info.missing_bots, unaddressed)
     };
 
@@ -1224,7 +1230,10 @@ fn read_pr_info(
         reviewed,
         missing_bots,
         unaddressed_findings,
-        review_skipped,
+        // Telemetry only (no decision reads this): "no review gate of any kind
+        // applied" = the login reads were skipped AND no local reviewers gate.
+        // A reviewers-only config did gate, so it is NOT review_skipped.
+        review_skipped: login_skipped && reviewers.is_empty(),
     })
 }
 

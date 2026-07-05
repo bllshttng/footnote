@@ -2421,6 +2421,171 @@ fn ac3_edge_no_external_orthogonal_to_required_bots() {
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 }
 
+// ── x-e703: config.review.reviewers local-attestation gate ──────────────────
+
+/// The green() git+gh mock's HEAD (== headRefOid, so head_shipped passes). An
+/// attestation must carry this exact sha to satisfy the head-pin.
+const GREEN_HEAD: &str = "deadbeefdeadbeefdeadbeefdeadbeef00000001";
+
+/// AC3-HP: a `reviewers: [sigma]` gate with NO matching attestation holds the
+/// session closed even when the PR is green, CI passes, and HEAD is shipped -
+/// the local attestation is required, absence fails closed.
+#[test]
+fn reviewers_gate_blocks_without_attestation() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/settings.yaml");
+    fs::write(
+        &settings_path,
+        "config:\n  review:\n    reviewers:\n      - sigma\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-rvw-block", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(
+        d.decision, "block",
+        "reviewers gate with no attestation must block: {}",
+        d.message
+    );
+    assert!(d.termination_reason.is_none());
+}
+
+/// AC3-HP / AC8-HP: the gate clears once a head-pinned `review_attestation`
+/// (reviewer sigma, verdict pass, head_sha == current HEAD) exists.
+#[test]
+fn reviewers_gate_clears_with_head_pinned_attestation() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/settings.yaml");
+    fs::write(
+        &settings_path,
+        "config:\n  review:\n    reviewers:\n      - sigma\n",
+    )
+    .unwrap();
+    // The attestation lands in the project events log loop-check reads.
+    fs::write(
+        cwd.join(".fno/events.jsonl"),
+        format!(
+            "{{\"ts\":\"2026-06-05T00:10:00Z\",\"type\":\"review_attestation\",\"source\":\"target\",\"data\":{{\"reviewer\":\"sigma\",\"head_sha\":\"{GREEN_HEAD}\",\"verdict\":\"pass\"}}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-rvw-pass", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(
+        d.decision, "allow",
+        "a head-pinned sigma attestation must clear the gate: {}",
+        d.message
+    );
+    assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
+}
+
+/// The fix (sigma review, silent-failure-hunter MEDIUM): `no_external` is
+/// scoped to EXTERNAL GitHub-bot review; it must NOT bypass the LOCAL
+/// `reviewers` attestation gate. A session that skips wedged App bots with
+/// no_external still owes its configured local sigma pass.
+#[test]
+fn no_external_still_honors_reviewers_gate() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/settings.yaml");
+    fs::write(
+        &settings_path,
+        "config:\n  review:\n    reviewers:\n      - sigma\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    // no_external: true - but reviewers is set and no attestation exists.
+    fs::write(
+        &manifest_path,
+        "---\nsession_id: sess-rvw-noext\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_external: true\n---\n",
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(
+        d.decision, "block",
+        "no_external must NOT bypass the local reviewers gate: {}",
+        d.message
+    );
+    assert!(d.termination_reason.is_none());
+}
+
 /// AC3-FR: recovery from an accidental empty list - restoring the bot list
 /// re-enforces the gate on the next fire with no state migration.
 #[test]
