@@ -597,6 +597,32 @@ class ReviewBlock(BaseModel):
                     "and config.review.peer_identity is unset; peers must post "
                     f"under a distinct machine account: {needs_shared!r}"
                 )
+        # A `claude` peer is only a real cross-model reviewer when it names a
+        # model route (e.g. {provider: claude, model: "zai,glm-5.2"}): the claude
+        # CLI is only transport, and the routed model (GLM) is genuinely distinct
+        # from the Claude author. A bare `claude` peer (no route) IS the author's
+        # own model, which defeats the "distinct model" trust invariant - reject
+        # it at load, fail-closed, rather than let it masquerade as a peer.
+        for e in self.peers:
+            prov: object
+            model: object
+            if isinstance(e, str):
+                prov, model = e, None
+            elif isinstance(e, dict):
+                prov, model = e.get("provider"), e.get("model")
+            else:
+                continue
+            if (
+                isinstance(prov, str)
+                and prov.strip().lower() == "claude"
+                and not (isinstance(model, str) and model.strip())
+            ):
+                raise ValueError(
+                    "config.review.peers has a claude peer with no model route "
+                    "(it would otherwise be the same model as the author, "
+                    "breaking the distinct-model trust invariant); name a route, "
+                    f'e.g. {{provider: claude, model: "zai,glm-5.2"}}: {e!r}'
+                )
         return self
 
     @field_validator("external_reviewers", mode="before")
