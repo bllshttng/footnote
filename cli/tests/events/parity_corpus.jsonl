@@ -109,3 +109,4 @@
 {"expect":"invalid","reason":"skill_diff_eval_closed missing run_id_before","event":{"ts":"2026-07-04T00:00:00Z","type":"skill_diff_eval_closed","source":"skill_diff","data":{"pr_number":201,"skill_id":"fno:blueprint"}}}
 {"expect":"valid","reason":"review_attestation head-pinned pass","event":{"ts":"2026-07-05T09:30:42Z","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"abc123","verdict":"pass"}}}
 {"expect":"invalid","reason":"review_attestation missing head_sha","event":{"ts":"2026-07-05T09:30:42Z","type":"review_attestation","source":"target","data":{"reviewer":"sigma","verdict":"pass"}}}
+{"expect":"invalid","reason":"review_attestation out-of-enum verdict","event":{"ts":"2026-07-05T09:30:42Z","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"abc123","verdict":"maybe"}}}

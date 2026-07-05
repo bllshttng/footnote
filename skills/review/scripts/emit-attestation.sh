@@ -15,7 +15,7 @@ set -euo pipefail
 
 reviewer="${1:?reviewer name required (sigma|code-review|declare)}"
 verdict="${2:-pass}"
-reviewer="${reviewer#/}" # normalize a leading slash, parity with both parsers
+while [[ "$reviewer" == /* ]]; do reviewer="${reviewer#/}"; done # strip ALL leading slashes (parity with both parsers' lstrip / trim_start_matches)
 
 head_sha="$(git rev-parse HEAD 2>/dev/null)" || {
   echo "emit-attestation: not a git repo (cannot head-pin); no event emitted" >&2

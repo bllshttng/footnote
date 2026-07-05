@@ -259,6 +259,20 @@ validate_event() {
         fi
     fi
 
+    # review_attestation: verdict enum check (x-e703 trust-core gate event) -
+    # mirrors the Python validator so a producer typo fails loud in both.
+    if [[ "$type" == "review_attestation" ]]; then
+        local ra_verdict enum_match
+        ra_verdict=$(jq -r '.data.verdict // empty' <<<"$payload" 2>/dev/null)
+        if [[ -n "$ra_verdict" ]]; then
+            enum_match=$(jq -r --arg v "$ra_verdict" '.event_types[] | select(.name == "review_attestation") | .data.properties.verdict.enum[]? | select(. == $v)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
+            if [[ -z "$enum_match" ]]; then
+                _ev_warn "unknown verdict: $ra_verdict"
+                return 1
+            fi
+        fi
+    fi
+
     # Size cap: encode data and check bytes.
     local max_bytes data_size
     max_bytes=$(jq -r '.limits.max_data_bytes // 65536' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
