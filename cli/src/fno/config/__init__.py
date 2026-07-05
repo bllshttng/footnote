@@ -1645,6 +1645,12 @@ class ModelProvider(BaseModel):
     base_url: str = ""
     api_key_env: str = ""
     api_key_file: Optional[str] = None
+    # Cheaper model for the background (haiku) tier so judgment-light background
+    # traffic runs cheap while opus/sonnet stay on the role model. Unset (None)
+    # keeps the role model on every tier. The built-in zai provider defaults it
+    # to glm-4.5-air; set it here to override or to give another provider a
+    # cheap background model.
+    haiku_model: Optional[str] = None
 
 
 class ModelRoutingBlock(BaseModel):

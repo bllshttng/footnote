@@ -20,10 +20,17 @@ consumers and a future codex/openai lane, not for a claude worker. A provider
 whose ``protocol`` is not ``anthropic`` is skipped here with a notice.
 
 Claude Code internally requests opus/sonnet/haiku tiers (background tasks use
-haiku). Setting ALL of ``ANTHROPIC_MODEL`` + the three ``ANTHROPIC_DEFAULT_*``
-tier vars to the routed model sends the WHOLE worker to the secondary provider,
-so no Anthropic usage is recorded (AC1-HP). An operator who wants differentiated
-tiers (cheaper haiku) overrides specific vars via ``extra_env``.
+haiku). Setting ``ANTHROPIC_MODEL`` + the three ``ANTHROPIC_DEFAULT_*`` tier
+vars to the routed model sends the WHOLE worker to the secondary provider, so no
+Anthropic usage is recorded (AC1-HP). The background (haiku) tier defaults to
+the provider's cheaper ``haiku_model`` (zai -> ``glm-4.5-air``) so judgment-light
+background traffic runs cheap on the SAME secondary provider; opus/sonnet stay
+on the role model. A provider with no ``haiku_model`` keeps the role model on
+every tier. Operators can further differentiate any tier via ``extra_env``.
+
+A routed model name carrying the ``[1m]`` suffix (1M-context) also gets
+``CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`` injected, or the 1M window is
+silently lost; an explicit ``extra_env`` value wins.
 
 Two non-negotiable invariants:
 
@@ -52,6 +59,13 @@ DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/anthropic"
 # (drift-guarded by test_config_defaults_match_module_constants).
 DEFAULT_SECONDARY_MODEL = "glm-5.2"
 
+# Cheaper model for the background (haiku) tier of the built-in zai provider.
+# Claude Code runs background tasks on haiku; routing the haiku tier to this
+# cheaper GLM keeps judgment-light background traffic cheap while opus/sonnet
+# stay on the role model. Kept in lockstep with the schema default
+# (drift-guarded by test_config_defaults_match_module_constants).
+DEFAULT_ZAI_HAIKU_MODEL = "glm-4.5-air"
+
 # Built-in providers so a bare key (e.g. ZAI_API_KEY) routes with zero config.
 # A config.model_routing.providers entry of the same name overrides per-field.
 _DEFAULT_PROVIDERS: dict[str, dict[str, Optional[str]]] = {
@@ -60,6 +74,7 @@ _DEFAULT_PROVIDERS: dict[str, dict[str, Optional[str]]] = {
         "base_url": DEFAULT_ZAI_BASE_URL,
         "api_key_env": "ZAI_API_KEY",
         "api_key_file": None,
+        "haiku_model": DEFAULT_ZAI_HAIKU_MODEL,
     },
 }
 
@@ -225,6 +240,19 @@ def resolve_route(
     route = {"ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_AUTH_TOKEN": key}
     for k in _MODEL_ENV_KEYS:
         route[k] = model
+    # Item 1: route the background (haiku) tier to the provider's cheaper
+    # haiku_model (zai -> glm-4.5-air). Still the SAME secondary provider
+    # (base_url + token), so the whole worker stays off Anthropic; only the
+    # background model is cheaper. A provider with no haiku_model keeps the role
+    # model on the haiku tier (no regression, never an empty/invalid id).
+    haiku_model = provider.get("haiku_model")
+    if haiku_model:
+        route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haiku_model
+    # Item 2: a routed model carrying the [1m] suffix needs the 1M-context
+    # compact window or it silently loses the window. Injected before extra_env
+    # so an explicit extra_env value still wins.
+    if model.endswith("[1m]"):
+        route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
     # extra_env (timeouts, flags, per-tier model overrides) merged last so an
     # operator can differentiate tiers or tune the routed worker.
     for k, v in (getattr(block, "extra_env", None) or {}).items():

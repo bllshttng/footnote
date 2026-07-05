@@ -48,11 +48,12 @@ def test_consolidate_routes_to_zai_anthropic_endpoint() -> None:
     # The Anthropic-compatible endpoint (a claude worker speaks Anthropic).
     assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert route["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
-    # All tiers set so the whole worker (incl. background haiku) stays on GLM.
+    # opus/sonnet/default stay on the role model; the background haiku tier
+    # drops to the provider's cheaper glm-4.5-air (still the same zai provider).
     assert route["ANTHROPIC_MODEL"] == "glm-5.2"
     assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2"
     assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.2"
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"
 
 
 @pytest.mark.parametrize("role", ["coordinate", "tidy", "orient", "consolidate"])
@@ -305,3 +306,91 @@ def test_config_defaults_match_module_constants() -> None:
     assert mr._DEFAULT_PROVIDERS["zai"]["base_url"] == mr.DEFAULT_ZAI_BASE_URL
     assert mr.DEFAULT_ZAI_BASE_URL == "https://api.z.ai/api/anthropic"
     assert mr.DEFAULT_SECONDARY_MODEL == "glm-5.2"
+    assert mr._DEFAULT_PROVIDERS["zai"]["haiku_model"] == mr.DEFAULT_ZAI_HAIKU_MODEL
+    assert mr.DEFAULT_ZAI_HAIKU_MODEL == "glm-4.5-air"
+
+
+# ---------------------------------------------------------------------------
+# Item 1: per-tier routed model (background haiku -> cheaper glm-4.5-air)
+# ---------------------------------------------------------------------------
+
+
+def test_zai_haiku_tier_defaults_to_cheaper_model() -> None:
+    route = mr.resolve_route(
+        "consolidate", settings=_settings(), env={"ZAI_API_KEY": "k"}
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"
+
+
+def test_per_provider_haiku_override_wins_over_builtin_default() -> None:
+    route = mr.resolve_route(
+        "tidy",
+        settings=_settings(providers={"zai": {"haiku_model": "glm-tiny"}}),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-tiny"
+    # opus/sonnet/default unaffected by the haiku override.
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_provider_without_haiku_override_keeps_role_model_on_haiku() -> None:
+    # deepseek has no haiku_model, so the haiku tier keeps the role model
+    # (no regression to an empty/invalid id).
+    route = mr.resolve_route(
+        "tidy",
+        settings=_settings(
+            providers={
+                "deepseek": {
+                    "protocol": "anthropic",
+                    "base_url": "https://api.deepseek.com/anthropic",
+                    "api_key_env": "DEEPSEEK_API_KEY",
+                }
+            },
+            roles={"tidy": "deepseek,deepseek-chat"},
+        ),
+        env={"DEEPSEEK_API_KEY": "dsk"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "deepseek-chat"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-chat"
+
+
+# ---------------------------------------------------------------------------
+# Item 2: carry the [1m] 1M-context compact window automatically
+# ---------------------------------------------------------------------------
+
+
+def test_one_m_suffix_injects_compact_window() -> None:
+    route = mr.resolve_route(
+        "tidy",
+        settings=_settings(roles={"tidy": "zai,glm-5.2[1m]"}),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "1000000"
+
+
+def test_non_one_m_model_injects_no_compact_window() -> None:
+    route = mr.resolve_route(
+        "consolidate", settings=_settings(), env={"ZAI_API_KEY": "k"}
+    )
+    assert route is not None
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in route
+
+
+def test_extra_env_compact_window_wins_over_injection() -> None:
+    route = mr.resolve_route(
+        "tidy",
+        settings=_settings(
+            roles={"tidy": "zai,glm-5.2[1m]"},
+            extra_env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000"},
+        ),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
