@@ -907,7 +907,7 @@ impl Core {
                 let (squad_id, tab_id, cwd) = match self.session.find_pane(pid) {
                     Some((sid, ti)) => {
                         let sq = self.session.squad(sid).expect("find_pane live squad");
-                        (sid, sq.tabs[ti].id, sq.canonical_cwd.clone())
+                        (sid, sq.tabs[ti].id, sq.canonical_cwd().to_string())
                     }
                     None => (0, 0, String::new()),
                 };
@@ -961,7 +961,7 @@ impl Core {
             None => {
                 let sid = self.next_squad_id;
                 self.next_squad_id += 1;
-                self.session.add_squad(sid, squad_key, tab);
+                self.session.add_squad(sid, vec![squad_key], None, tab);
             }
         }
         // Keep any attached client's view consistent; a script-only session
@@ -1056,7 +1056,8 @@ impl Core {
                         let tid = self.session.mint_tab_id();
                         self.session.add_squad(
                             sid,
-                            key,
+                            vec![key],
+                            None,
                             Tab {
                                 id: tid,
                                 root: Node::Leaf(pid),
@@ -1313,18 +1314,20 @@ impl Core {
             .session
             .squads
             .iter()
-            .map(|s| s.canonical_cwd.clone())
+            .map(|s| s.canonical_cwd().to_string())
             .collect();
-        let names = squad::display_names(&cwds);
+        let derived = squad::display_names(&cwds);
         let squads = self
             .session
             .squads
             .iter()
-            .zip(names)
-            .map(|(s, name)| SquadMeta {
+            .zip(derived)
+            .map(|(s, derived)| SquadMeta {
                 id: s.id,
-                name,
-                canonical_cwd: s.canonical_cwd.clone(),
+                // An explicit workspace name wins; an attach-born squad falls
+                // back to the origin-basename label (disambiguated).
+                name: s.name.clone().unwrap_or(derived),
+                canonical_cwd: s.canonical_cwd().to_string(),
                 tabs: s
                     .tabs
                     .iter()
@@ -1383,16 +1386,16 @@ impl Core {
                     (squad, Some(*pane), a.exited || pane_dead)
                 }
                 None => {
+                    // Watch-only (paneless) rows have no membership to match on,
+                    // so fall back to cwd - now tested against ANY of the squad's
+                    // origins (exact or child), not a single canonical_cwd, so a
+                    // multi-origin squad still claims a worker under any of its
+                    // paths (change #5, AC2-EDGE).
                     let squad = self
                         .session
                         .squads
                         .iter()
-                        .find(|s| {
-                            a.cwd == s.canonical_cwd
-                                || a.cwd
-                                    .strip_prefix(&s.canonical_cwd)
-                                    .is_some_and(|rest| rest.starts_with('/'))
-                        })
+                        .find(|s| s.owns_path(&a.cwd))
                         .map(|s| s.id);
                     (squad, None, a.exited)
                 }
@@ -1712,7 +1715,7 @@ impl Core {
             .session
             .find_pane(pane)
             .and_then(|(sid, _)| self.session.squad(sid))
-            .map(|sq| sq.canonical_cwd.clone());
+            .map(|sq| sq.canonical_cwd().to_string());
         let node = self
             .panes
             .get(&pane)
@@ -1916,7 +1919,7 @@ impl Core {
                 let squad_cwd = self
                     .session
                     .squad(view.0)
-                    .map(|s| s.canonical_cwd.clone())
+                    .map(|s| s.canonical_cwd().to_string())
                     .unwrap_or_default();
                 let pid = match self.spawn_pane(rows, cols, &squad_cwd) {
                     Ok(p) => p,
@@ -1986,7 +1989,7 @@ impl Core {
                 let squad_cwd = self
                     .session
                     .squad(view.0)
-                    .map(|s| s.canonical_cwd.clone())
+                    .map(|s| s.canonical_cwd().to_string())
                     .unwrap_or_default();
                 let pid = match self.spawn_pane(rows, cols, &squad_cwd) {
                     Ok(p) => p,
@@ -2144,7 +2147,7 @@ impl Core {
                 let squad_cwd = self
                     .session
                     .squad(view.0)
-                    .map(|s| s.canonical_cwd.clone())
+                    .map(|s| s.canonical_cwd().to_string())
                     .unwrap_or_default();
                 let argv = vec!["claude".to_string(), "attach".to_string(), id.clone()];
                 let pid = match self.spawn_pane_cmd(&argv, rows, cols, &squad_cwd) {
@@ -2186,6 +2189,57 @@ impl Core {
                 } else {
                     self.notice(client_id, "card not ready to dispatch");
                 }
+                Flow::Continue
+            }
+            Command::NewSquad { name, origin } => {
+                // Explicit named-workspace creation (Unit 2). A blank/whitespace
+                // name is refused fail-closed - nothing is created (AC1-ERR,
+                // epic Boundaries), same shape as the other catalog commands.
+                let name = name.trim();
+                if name.is_empty() {
+                    self.notice(client_id, "name required");
+                    return Flow::Continue;
+                }
+                // Seed the shell at the given origin, else the sender's current
+                // squad cwd (a new workspace opens where you are). PTY-first
+                // ordering (Locked 7): a spawn failure mutates no model. Consume
+                // `origin` into the origins vec once, then seed the shell at
+                // origins[0] (else the sender's current squad cwd).
+                let origins: Vec<String> = origin.into_iter().collect();
+                let cwd = origins.first().cloned().unwrap_or_else(|| {
+                    self.session
+                        .squad(view.0)
+                        .map(|s| s.canonical_cwd().to_string())
+                        .unwrap_or_default()
+                });
+                let (rows, cols) = self
+                    .clients
+                    .iter()
+                    .find(|c| c.id == client_id)
+                    .map(|c| c.dims)
+                    .unwrap_or((vp.rows, vp.cols));
+                let pid = match self.spawn_pane(rows, cols, &cwd) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.notice(client_id, format!("new workspace failed: {e}"));
+                        return Flow::Continue;
+                    }
+                };
+                let sid = self.next_squad_id;
+                self.next_squad_id += 1;
+                let tid = self.session.mint_tab_id();
+                self.session.add_squad(
+                    sid,
+                    origins,
+                    Some(name.to_string()),
+                    Tab {
+                        id: tid,
+                        root: Node::Leaf(pid),
+                        focus: pid,
+                    },
+                );
+                self.set_view(client_id, sid, tid);
+                self.push_layout(true);
                 Flow::Continue
             }
             Command::CopySelection => {
@@ -3708,6 +3762,94 @@ mod tests {
     }
 
     #[test]
+    fn agent_rows_match_pane_hosted_by_membership_and_watch_only_by_origins() {
+        // Change #5. A pane-hosted agent's row renders under the squad its pane
+        // lives in (membership), REGARDLESS of the pane's cwd (AC1-HP). A
+        // watch-only row falls back to cwd, now against ANY origin exact-or-child
+        // (AC2-EDGE), so a multi-origin squad claims a worker under origins[1].
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        // Squad 1: origin far from the pane's registry cwd ("/w" via agent_in).
+        core.session.add_squad(
+            1,
+            vec!["/origins/one".into()],
+            None,
+            Tab {
+                id: 1,
+                root: Node::Leaf(42),
+                focus: 42,
+            },
+        );
+        // Squad 2: two origins; a watch-only row's cwd is a child of the SECOND.
+        core.session.add_squad(
+            2,
+            vec!["/grp/frontend".into(), "/grp/backend".into()],
+            Some("stack".into()),
+            Tab {
+                id: 2,
+                root: Node::Leaf(50),
+                focus: 50,
+            },
+        );
+        core.agents = vec![
+            // Pane-hosted in THIS session at pane 42 (which lives in squad 1),
+            // but its registry cwd "/w" matches no origin - membership must win.
+            agent_in("main", 42, None, false),
+            RegistryAgent {
+                name: "watcher".into(),
+                cwd: "/grp/backend/sub/dir".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+                attach_id: None,
+            },
+        ];
+        let rows = core.agent_rows();
+        let hosted = rows.iter().find(|r| r.pane_id == Some(42)).unwrap();
+        assert_eq!(
+            hosted.squad,
+            Some(1),
+            "a pane-hosted agent matches by membership even when its cwd matches no origin"
+        );
+        let watcher = rows.iter().find(|r| r.name == "watcher").unwrap();
+        assert_eq!(
+            watcher.squad,
+            Some(2),
+            "a watch-only row matches a squad via a child of origins[1]"
+        );
+    }
+
+    #[test]
+    fn new_squad_rejects_a_blank_name_and_creates_nothing() {
+        // Change #2 / AC1-ERR: a whitespace-only name is refused fail-closed -
+        // no squad, no pane. PTY-free: the reject returns before any spawn.
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        let flow = core.command(
+            1,
+            Command::NewSquad {
+                name: "   ".into(),
+                origin: None,
+            },
+        );
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(core.session.squads.len(), 1, "blank name creates no squad");
+        assert!(core.panes.is_empty(), "blank name spawns no pane");
+    }
+
+    #[test]
     fn attach_agent_refuses_unknown_or_malformed_jobid() {
         // The jobId lands in `claude attach <id>`'s argv, so an out-of-shape id
         // is refused before any pane spawns (argv defense in depth). A
@@ -3861,7 +4003,8 @@ mod tests {
         // the squad-cwd-basename fallback decides the node id.
         core.session.add_squad(
             1,
-            "/tmp/worktrees/x-aff6".into(),
+            vec!["/tmp/worktrees/x-aff6".into()],
+            None,
             Tab {
                 id: 1,
                 root: Node::Leaf(7),
@@ -3870,7 +4013,8 @@ mod tests {
         );
         core.session.add_squad(
             2,
-            "/tmp/worktrees/footnote".into(),
+            vec!["/tmp/worktrees/footnote".into()],
+            None,
             Tab {
                 id: 2,
                 root: Node::Leaf(8),
