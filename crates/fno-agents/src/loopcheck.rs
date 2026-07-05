@@ -959,22 +959,30 @@ fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &s
     let Ok(content) = std::fs::read_to_string(events_path) else {
         return false; // no evidence file -> gate unmet (fail closed)
     };
-    reviewers.iter().all(|entry| {
-        let want = entry.trim_start_matches('/');
-        content.lines().any(|line| {
-            let Ok(val) = serde_json::from_str::<Value>(line) else {
-                return false;
-            };
-            val.get("type").and_then(|v| v.as_str()) == Some("review_attestation")
-                && val
-                    .pointer("/data/reviewer")
-                    .and_then(|v| v.as_str())
-                    .map(|r| r.trim_start_matches('/'))
-                    == Some(want)
-                && val.pointer("/data/head_sha").and_then(|v| v.as_str()) == Some(head_sha)
-                && val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass")
-        })
-    })
+    // Single pass (gemini review): collect the normalized reviewer of every
+    // head-pinned passing attestation into a set, then require each requested
+    // reviewer be present - O(lines), not O(reviewers x lines).
+    let mut attested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in content.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        if val.pointer("/data/head_sha").and_then(|v| v.as_str()) != Some(head_sha) {
+            continue;
+        }
+        if val.pointer("/data/verdict").and_then(|v| v.as_str()) != Some("pass") {
+            continue;
+        }
+        if let Some(r) = val.pointer("/data/reviewer").and_then(|v| v.as_str()) {
+            attested.insert(r.trim_start_matches('/').to_string());
+        }
+    }
+    reviewers
+        .iter()
+        .all(|entry| attested.contains(entry.trim_start_matches('/')))
 }
 
 /// Run done() reads. Returns Ok(PrInfo) or Err((read_name, stderr_tail)) on gh failure.
