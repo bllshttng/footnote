@@ -2542,21 +2542,22 @@ async fn create_keys(
             }
             SearchKey::Byte(b) => match b {
                 b'\r' | b'\n' => {
-                    let name = view.create.clone().unwrap_or_default();
-                    let name = name.trim();
-                    if !name.is_empty() {
-                        write_msg(
-                            sock_w,
-                            &ClientMsg::Command(Command::NewSquad {
-                                name: name.to_string(),
-                                origin: None,
-                            }),
-                        )
-                        .await
-                        .map_err(|e| format!("new-squad send failed: {e}"))?;
-                        view.create = None;
-                        view.create_esc.clear();
-                        break;
+                    // Validate on a reference; only allocate when actually sending.
+                    if let Some(name) = view.create.as_deref().map(str::trim) {
+                        if !name.is_empty() {
+                            write_msg(
+                                sock_w,
+                                &ClientMsg::Command(Command::NewSquad {
+                                    name: name.to_string(),
+                                    origin: None,
+                                }),
+                            )
+                            .await
+                            .map_err(|e| format!("new-squad send failed: {e}"))?;
+                            view.create = None;
+                            view.create_esc.clear();
+                            break;
+                        }
                     }
                     // Empty name: keep the overlay open (AC2-FR shape - a failed
                     // create leaves the input intact).

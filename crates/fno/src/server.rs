@@ -2202,8 +2202,11 @@ impl Core {
                 }
                 // Seed the shell at the given origin, else the sender's current
                 // squad cwd (a new workspace opens where you are). PTY-first
-                // ordering (Locked 7): a spawn failure mutates no model.
-                let cwd = origin.clone().unwrap_or_else(|| {
+                // ordering (Locked 7): a spawn failure mutates no model. Consume
+                // `origin` into the origins vec once, then seed the shell at
+                // origins[0] (else the sender's current squad cwd).
+                let origins: Vec<String> = origin.into_iter().collect();
+                let cwd = origins.first().cloned().unwrap_or_else(|| {
                     self.session
                         .squad(view.0)
                         .map(|s| s.canonical_cwd().to_string())
@@ -2227,7 +2230,7 @@ impl Core {
                 let tid = self.session.mint_tab_id();
                 self.session.add_squad(
                     sid,
-                    origin.into_iter().collect(),
+                    origins,
                     Some(name.to_string()),
                     Tab {
                         id: tid,
