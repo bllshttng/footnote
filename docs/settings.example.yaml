@@ -258,9 +258,9 @@ config:
     # Workspace -> project topology map (config.work.workspaces.<slug>.projects[]).
     workspaces: {}
   model_routing:
-    # Route auxiliary roles (coordinate/tidy/orient/consolidate) to a secondary provider at spawn.
+    # Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) to a secondary provider at spawn.
     enabled: true
-    # Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file}); 'zai' is built in.
+    # Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in.
     providers: {}
     # Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7').
     roles: {}

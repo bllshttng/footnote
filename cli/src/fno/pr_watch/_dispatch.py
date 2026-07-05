@@ -17,6 +17,7 @@ import logging
 import os
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
@@ -94,14 +95,25 @@ def _ensure_onboarding_bypass() -> None:
         return
     data["hasCompletedOnboarding"] = True
     # Atomic write: ~/.claude.json is claude's central config (may hold tokens);
-    # a truncate-then-write killed mid-flight would corrupt it. Write a sibling
-    # temp and os.replace. The temp is per-process (concurrent fires don't share
-    # it) and inherits the original's mode (default 0600 for a new file) so a
-    # 0600 credential file is never downgraded to a umask-derived 0644.
-    tmp = p.with_name(f".claude.json.fno-tmp.{os.getpid()}")
+    # a truncate-then-write killed mid-flight would corrupt it. mkstemp creates
+    # the temp 0600 up front (no world-readable window while it holds the config
+    # contents), in the same dir so os.replace is atomic; chmod then restores the
+    # original mode (default 0600 for a new file) so a 0600 credential file is
+    # never downgraded.
     try:
         mode = stat.S_IMODE(p.stat().st_mode) if p.exists() else 0o600
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        mode = 0o600
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(p.parent), prefix=".claude.json.fno-tmp."
+        )
+    except OSError:
+        return
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2))
         os.chmod(tmp, mode)
         os.replace(tmp, p)
     except OSError:

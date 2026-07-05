@@ -285,11 +285,13 @@ class CodexRoute(NamedTuple):
 
 
 def _toml_literal(value: str) -> Optional[str]:
-    """Wrap ``value`` as a TOML literal string (single-quoted, no escapes). A
-    value containing a single quote or newline can't be a literal string and is
-    controlled config we won't try to escape; return None so the caller bails
-    fail-safe rather than emitting malformed TOML into the codex argv."""
-    if "'" in value or "\n" in value or "\r" in value:
+    """Wrap ``value`` as a TOML literal string (single-quoted, no escapes), or
+    None if it can't be embedded safely. Rejects a single quote (would break the
+    literal string) AND any control char - notably NUL, which would otherwise
+    survive into the codex argv and make ``subprocess`` raise ``ValueError:
+    embedded null byte``, breaking resolve_codex_route's never-raise contract.
+    These are controlled config values we won't try to escape; bail fail-safe."""
+    if "'" in value or any(ord(c) < 0x20 for c in value):
         return None
     return f"'{value}'"
 

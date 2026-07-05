@@ -411,13 +411,15 @@ def test_codex_route_bails_on_unsafe_provider_name() -> None:
     assert notes
 
 
-def test_codex_route_bails_on_unquotable_value() -> None:
-    # A base_url with a single quote can't be a TOML literal string -> bail.
+@pytest.mark.parametrize("bad_url", ["https://x/v4'inject", "https://x/v4\x00", "https://x\nv4", "https://x\tv4"])
+def test_codex_route_bails_on_unquotable_value(bad_url: str) -> None:
+    # A value with a single quote OR any control char (incl. NUL, which would
+    # otherwise make subprocess raise) can't be embedded -> bail fail-safe.
     s = _settings(
         providers={
             "oai": {
                 "protocol": "openai",
-                "base_url": "https://x/v4'inject",
+                "base_url": bad_url,
                 "api_key_env": "OPENAI_API_KEY",
             }
         },
