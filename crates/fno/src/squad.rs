@@ -68,7 +68,10 @@ impl Squad {
     /// is never auto-joined.
     pub fn owns_path(&self, path: &str) -> bool {
         self.origins.iter().any(|o| {
-            path == o || path.strip_prefix(o.as_str()).is_some_and(|r| r.starts_with('/'))
+            path == o
+                || path
+                    .strip_prefix(o.as_str())
+                    .is_some_and(|r| r.starts_with('/'))
         })
     }
 }
@@ -142,7 +145,13 @@ impl Session {
     /// pane's PTY (atomic split ordering, Locked Decision 7). `name` is `Some`
     /// only for an explicit `NewSquad`; an attach-born squad passes `None` and
     /// derives its label from `origins`.
-    pub fn add_squad(&mut self, id: u64, origins: Vec<String>, name: Option<String>, first_tab: Tab) {
+    pub fn add_squad(
+        &mut self,
+        id: u64,
+        origins: Vec<String>,
+        name: Option<String>,
+        first_tab: Tab,
+    ) {
         // A caller-built tab id must never collide with a future mint.
         self.next_tab_id = self.next_tab_id.max(first_tab.id);
         self.squads.push(Squad {
