@@ -112,6 +112,9 @@ FIELD_META: dict[str, Meta] = {
     "config.review.optional_apps": Meta(
         "advanced", "Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it.",
     ),
+    "config.review.reviewers": Meta(
+        "advanced", "Local-attestation reviewers (sigma | /code-review | declare) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot.",
+    ),
     "config.review.peers": Meta(
         "advanced", "Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries.",
     ),

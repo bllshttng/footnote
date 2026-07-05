@@ -381,3 +381,61 @@ def test_optional_apps_scalar_and_mapping_parity(
         "schema_version: 1\nconfig:\n  review:\n    optional_apps: {a: b}\n",
     )
     assert mapping.config.review.optional_apps == []
+
+
+# --- reviewers: local-attestation gate (x-e703, Phase 2) ---
+
+
+def test_reviewers_defaults_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent -> [] (no reviewers gate)."""
+    settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
+    assert settings.config.review.reviewers == []
+
+
+def test_reviewers_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A one-entry reviewers list is exposed verbatim (AC2-HP)."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    reviewers:\n      - sigma\n",
+    )
+    assert settings.config.review.reviewers == ["sigma"]
+
+
+def test_reviewers_scalar_coerces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    reviewers: sigma\n",
+    )
+    assert settings.config.review.reviewers == ["sigma"]
+
+
+def test_reviewers_strips_leading_slash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/code-review` and `code-review` are the same reviewer (slash stripped)."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    reviewers: [/code-review, declare]\n",
+    )
+    assert settings.config.review.reviewers == ["code-review", "declare"]
+
+
+def test_reviewers_unresolvable_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unresolvable reviewer name raises loudly naming it (AC2-ERR / AC3-ERR):
+    a typo must never silently drop to a never-green gate."""
+    with pytest.raises(Exception) as excinfo:
+        _load(
+            tmp_path,
+            monkeypatch,
+            "schema_version: 1\nconfig:\n  review:\n    reviewers: [teleport]\n",
+        )
+    assert "teleport" in str(excinfo.value)
