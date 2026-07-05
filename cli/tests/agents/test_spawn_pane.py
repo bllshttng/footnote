@@ -525,3 +525,56 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
         "mux_session": "main",
         "pane_id": 9,
     }
+
+
+# ---------------------------------------------------------------------------
+# _mesh_env_wrapper: a routed pane scrubs the parent's Anthropic creds (x-db50)
+# ---------------------------------------------------------------------------
+
+
+def test_mesh_env_wrapper_routed_pane_scrubs_anthropic_creds(monkeypatch):
+    """A routed role must prefix `env -u ANTHROPIC_API_KEY -u
+    CLAUDE_CODE_OAUTH_TOKEN` so a parent API key / subscription OAuth token
+    cannot override the routed AUTH_TOKEN."""
+    from fno.agents import mux_spawn
+    from fno.agents import model_routing
+
+    monkeypatch.setattr(
+        model_routing,
+        "resolve_route",
+        lambda role, **kw: {
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "zk",
+            "ANTHROPIC_MODEL": "glm-5.2",
+        },
+    )
+    wrapped = mux_spawn._mesh_env_wrapper("w", "claude", "coordinate", ["claude"])
+    assert wrapped[0] == "env"
+    # -u flags precede any KEY=VAL assignment (env parses options first).
+    assert "-u" in wrapped
+    ui = wrapped.index("-u")
+    unset_region = wrapped[ui : ui + 4]
+    assert "ANTHROPIC_API_KEY" in unset_region
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in unset_region
+    first_assign = next(i for i, t in enumerate(wrapped) if "=" in t)
+    assert ui < first_assign  # unsets before assignments
+    assert "ANTHROPIC_AUTH_TOKEN=zk" in wrapped
+
+
+def test_mesh_env_wrapper_unrouted_pane_adds_no_unset(monkeypatch):
+    """No role -> no route -> no `-u` scrub (byte-identical to today)."""
+    from fno.agents import mux_spawn
+
+    wrapped = mux_spawn._mesh_env_wrapper("w", "claude", None, ["claude"])
+    assert "-u" not in wrapped
+    assert wrapped[0] == "env"
+
+
+def test_mesh_env_wrapper_role_without_key_adds_no_unset(monkeypatch):
+    """A routed role that resolves to None (no key) must not scrub either."""
+    from fno.agents import mux_spawn
+    from fno.agents import model_routing
+
+    monkeypatch.setattr(model_routing, "resolve_route", lambda role, **kw: None)
+    wrapped = mux_spawn._mesh_env_wrapper("w", "claude", "coordinate", ["claude"])
+    assert "-u" not in wrapped

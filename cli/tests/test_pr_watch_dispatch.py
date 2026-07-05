@@ -1448,11 +1448,15 @@ class TestPostMergeRouting:
         does not hang on the login wall."""
         from fno.pr_watch._dispatch import fire_skill
 
+        import stat as _stat
+
         home = tmp_path / "home"
         home.mkdir()
-        (home / ".claude.json").write_text(
+        cj = home / ".claude.json"
+        cj.write_text(
             json.dumps({"hasCompletedOnboarding": False, "other": 1}), encoding="utf-8"
         )
+        cj.chmod(0o600)  # a credential-bearing file is typically 0600
         monkeypatch.setenv("HOME", str(home))
 
         fire_skill(
@@ -1462,9 +1466,11 @@ class TestPostMergeRouting:
             runner=self._capturing_runner({}),
             resolve_route_fn=lambda role: dict(self._GLM_ROUTE),
         )
-        data = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+        data = json.loads(cj.read_text(encoding="utf-8"))
         assert data["hasCompletedOnboarding"] is True
         assert data["other"] == 1  # other keys preserved
+        # The 0600 mode must survive the rewrite (never downgraded to 0644).
+        assert _stat.S_IMODE(cj.stat().st_mode) == 0o600
 
     def test_routed_fire_creates_claude_json_when_absent(self, tmp_path, monkeypatch):
         """A cold env with no ~/.claude.json: the routed fire creates one with
@@ -1485,6 +1491,10 @@ class TestPostMergeRouting:
         cj = home / ".claude.json"
         assert cj.exists()
         assert json.loads(cj.read_text(encoding="utf-8"))["hasCompletedOnboarding"] is True
+        # A newly-created credential file must be 0600, not umask-derived.
+        import stat as _stat
+
+        assert _stat.S_IMODE(cj.stat().st_mode) == 0o600
 
     def test_unrouted_fire_does_not_touch_onboarding(self, tmp_path, monkeypatch):
         """An unrouted (Anthropic) fire must not rewrite the user's claude.json."""

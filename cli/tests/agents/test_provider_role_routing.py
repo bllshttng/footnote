@@ -36,9 +36,11 @@ def test_cheap_role_merges_zai_env(
     from fno.agents.providers import claude as claude_mod
 
     monkeypatch.setenv("ZAI_API_KEY", "zk-secret")
-    # A stale Anthropic key in the parent env must be cleared on a route so
-    # the z.ai auth token is the one that wins.
+    # A stale Anthropic credential in the parent env must be cleared on a route
+    # (both the API key AND a subscription OAuth token) so the z.ai auth token
+    # is the one that wins.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stale")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-sub-stale")
 
     captured: Dict[str, Any] = {}
     monkeypatch.setattr(claude_mod, "_subprocess_run", _fake_run(captured))
@@ -53,6 +55,7 @@ def test_cheap_role_merges_zai_env(
     assert env["ANTHROPIC_MODEL"] == "glm-5.2"
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"  # cheap bg tier
     assert "ANTHROPIC_API_KEY" not in env  # stale key cleared on route
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env  # subscription token cleared too
     # FNO_AGENT_* injection still happens alongside the route.
     assert env["FNO_AGENT_SELF"] == "dreamer"
 
