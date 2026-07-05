@@ -37,8 +37,9 @@ use crate::agents_view::{self, RegistryAgent};
 use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
-    BacklogCard, BindOutcome, BlockDir, BlockSel, ClientMsg, Command, ControlVerb, Frame,
-    MouseButton, MouseEvent, MouseKind, PaneInfo, ServerMsg, SquadMeta, TabMeta, WaitOutcome,
+    BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
+    Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, ServerMsg, SquadMeta, TabMeta,
+    WaitOutcome,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, RemoveOutcome, Resolver, Session};
@@ -700,6 +701,18 @@ async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
             }
         }
     }
+}
+
+/// Whether `node` (an id or slug) names a READY card in the server's backlog
+/// snapshot (x-a496, codex peer review). A targeted card dispatch must refuse a
+/// blocked / in-flight / unknown node - the same nodes `leader+g` would never
+/// select - so a click cannot start work with unmet deps even if the client's
+/// (staler) Layout still showed it ready. Pure so the gate is unit-testable
+/// without touching the subprocess spawn.
+fn card_ready_to_dispatch(backlog: &[BacklogCard], node: &str) -> bool {
+    backlog
+        .iter()
+        .any(|c| (c.id == node || c.slug == node) && c.state == CardState::Ready)
 }
 
 /// Map a `fno dispatch one --json` verdict to the one-line client notice.
@@ -2159,13 +2172,19 @@ impl Core {
                 // the leader+g porcelain pinned to `--node`; the claim race
                 // (already-worked node bounces `already-dispatching`) and lane
                 // cap live in `fno dispatch one`. Routes through CoreMsg::Command,
-                // so the read-only-observer refusal already fired upstream. An
-                // empty id (a card with no id can't exist, but fail closed) is a
-                // notice, never a spawn.
-                if node.trim().is_empty() {
-                    self.notice(client_id, "no such card");
-                } else {
+                // so the read-only-observer refusal already fired upstream.
+                //
+                // Re-check readiness against the server's OWN backlog snapshot
+                // (codex peer review): the client already gates the confirm to a
+                // ready card, but the server's snapshot is fresher, so a card that
+                // went blocked/in-flight between the client's Layout and the click
+                // is refused here - it must not start work leader+g would never
+                // pick. An unknown or non-ready id fails closed to a notice, like
+                // the other catalog-named commands (and covers an empty id).
+                if card_ready_to_dispatch(&self.backlog, &node) {
                     self.dispatch_next(client_id, Some(node));
+                } else {
+                    self.notice(client_id, "card not ready to dispatch");
                 }
                 Flow::Continue
             }
@@ -3711,6 +3730,46 @@ mod tests {
                 "un-surfaced/malformed jobId {bad:?} must not spawn a pane"
             );
         }
+    }
+
+    #[test]
+    fn card_ready_gate_only_passes_ready_cards() {
+        // x-a496 (codex peer review): a targeted dispatch only proceeds for a
+        // READY card named by id or slug; blocked / in-flight / unknown ids are
+        // refused, so a click can't start work leader+g would skip.
+        let card = |id: &str, slug: &str, state| BacklogCard {
+            id: id.into(),
+            slug: slug.into(),
+            priority: "p2".into(),
+            state,
+        };
+        let backlog = [
+            card("x-rdy", "ready-slug", CardState::Ready),
+            card("x-blk", "blk-slug", CardState::Blocked),
+            card("x-fly", "fly-slug", CardState::InFlight),
+        ];
+        assert!(card_ready_to_dispatch(&backlog, "x-rdy"), "ready by id");
+        assert!(
+            card_ready_to_dispatch(&backlog, "ready-slug"),
+            "ready by slug"
+        );
+        assert!(
+            !card_ready_to_dispatch(&backlog, "x-blk"),
+            "blocked refused"
+        );
+        assert!(
+            !card_ready_to_dispatch(&backlog, "x-fly"),
+            "in-flight refused"
+        );
+        assert!(
+            !card_ready_to_dispatch(&backlog, "x-nope"),
+            "unknown refused"
+        );
+        assert!(!card_ready_to_dispatch(&backlog, ""), "empty refused");
+        assert!(
+            !card_ready_to_dispatch(&[], "x-rdy"),
+            "empty backlog refused"
+        );
     }
 
     #[test]

@@ -579,16 +579,24 @@ impl View {
                     None => Some(ChromeHit::Notice("agent has no pane here")),
                 },
             },
-            // A card starts a targeted session (x-a496) - too costly for a stray
-            // tap, so it opens a one-keypress confirm rather than dispatching now.
-            DisplayRow::Card(c) => Some(ChromeHit::Confirm(ConfirmAction {
-                node: c.id.clone(),
-                label: if c.slug.is_empty() {
-                    c.id.clone()
-                } else {
-                    c.slug.clone()
-                },
-            })),
+            // Only a READY card starts a session (x-a496) - the same nodes
+            // leader+g would pick. Dispatching a blocked card (unmet deps) or an
+            // in-flight one (already being worked) is work leader+g never selects,
+            // so those say why instead of opening the confirm (codex peer review).
+            // Still too costly for a stray tap, so a ready card opens a
+            // one-keypress confirm rather than dispatching now.
+            DisplayRow::Card(c) => match c.state {
+                CardState::Ready => Some(ChromeHit::Confirm(ConfirmAction {
+                    node: c.id.clone(),
+                    label: if c.slug.is_empty() {
+                        c.id.clone()
+                    } else {
+                        c.slug.clone()
+                    },
+                })),
+                CardState::Blocked => Some(ChromeHit::Notice("card blocked - unmet deps")),
+                CardState::InFlight => Some(ChromeHit::Notice("card already in flight")),
+            },
             DisplayRow::Header(_) => None,
         }
     }
@@ -1926,6 +1934,15 @@ async fn handle_stdin(
         if rep.shift {
             continue;
         }
+        // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
+        // click / scroll cancels it and is SWALLOWED - it must never leak to a
+        // pane underneath (the confirm prompt spans the full-width bottom row) nor
+        // silently open a second card's confirm (codex peer review). Hover (Move)
+        // still falls through to update the highlight beneath the prompt.
+        if view.confirm.is_some() && !matches!(rep.kind, MouseKind::Move) {
+            view.confirm = None;
+            continue;
+        }
         // Bare motion is hover (x-a496): record the sideline highlight + the
         // focus-follows-mouse settle target, and swallow it - a Move is never
         // forwarded to a pane. The actual FocusPane is committed by the select
@@ -3011,6 +3028,50 @@ mod tests {
             }
             other => panic!("expected Confirm, got {}", chrome_hit_label(&other)),
         }
+    }
+
+    #[test]
+    fn chrome_hit_non_ready_card_is_notice_not_confirm() {
+        // A blocked/in-flight card is NOT dispatchable (codex peer review): the
+        // click is a local notice, never a Confirm that would start work leader+g
+        // would skip. Two cards: blocked (index 2), in-flight (index 3).
+        let mut view = two_pane_view();
+        let card = |id: &str, state| BacklogCard {
+            id: id.into(),
+            slug: String::new(),
+            priority: "p2".into(),
+            state,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(
+                11,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 72,
+                },
+            )],
+            focus: 11,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: vec![
+                card("x-blk", CardState::Blocked),
+                card("x-fly", CardState::InFlight),
+            ],
+        });
+        // display_rows: [squad, Header, blocked card, in-flight card] -> rows 3, 4.
+        assert!(
+            matches!(view.chrome_hit(3, 5), Some(ChromeHit::Notice(_))),
+            "blocked card -> notice, not confirm"
+        );
+        assert!(
+            matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
+            "in-flight card -> notice, not confirm"
+        );
     }
 
     fn cmds(hit: Option<ChromeHit>) -> Vec<Command> {
