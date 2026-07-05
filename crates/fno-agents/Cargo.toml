@@ -1,5 +1,6 @@
 [package]
 name = "fno-agents"
+# Keep in lockstep with crates/fno and cli (Python).
 version = "0.2.1"
 edition = "2021"
 # MSRV: std's File::lock/lock_shared/try_lock/unlock stabilized in Rust 1.89
