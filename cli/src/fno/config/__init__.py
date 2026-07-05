@@ -38,7 +38,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -460,7 +460,7 @@ class ReviewBlock(BaseModel):
     required_bots: Optional[list[str]] = None
     # Harness peers that run a CLI locally and post a real PR review under
     # peer_identity. Scalar (`codex`) or map (`{provider, identity, token_env}`).
-    peers: list = Field(default_factory=list)
+    peers: list[Any] = Field(default_factory=list)  # str provider or {provider,...} map
     # The distinct login peers post under (must not be the author account) and
     # the env var holding that identity's PAT. Required whenever `peers` is set.
     peer_identity: Optional[str] = None
