@@ -75,15 +75,39 @@ node_id="${parsed%%$'\t'*}"
 offer_cmd="${parsed#*$'\t'}"
 [[ -n "$node_id" ]] || exit 0
 
-# Resolve-guard: suppress a phantom offer whose node no longer resolves in the
-# backlog -- removed, superseded, or a never-persisted legacy-prefix id. There is
-# nothing to /think about, so surfacing it just nags the operator (recurring with
-# orphaned `ab-`-prefixed offers). The cursor already advanced above, so this
-# never re-fires for that offer. Degrade to surfacing when `fno` is unavailable,
-# so a missing resolver never suppresses a real offer. Run from $REPO_ROOT so
-# resolution is deterministic even if config.paths.graph_json is project-local.
-if command -v fno >/dev/null 2>&1 && ! ( cd "$REPO_ROOT" && fno backlog get "$node_id" ) >/dev/null 2>&1; then
-    exit 0
+# Resolve + in-progress guard: suppress an offer that should not reach the
+# operator. Two cases, both from one `fno backlog get`:
+#   (a) PHANTOM  -- the node no longer resolves (removed / superseded / a
+#       never-persisted legacy-prefix id). Keyed off the command's EXIT CODE.
+#   (b) UNDERWAY -- the node is already being worked: it has a PR, or a
+#       lifecycle state past just-born (claimed / next / done / superseded). A
+#       born-with-why /think only makes sense on a just-born, not-yet-started
+#       node; once it is claimed or has a PR the "why" conversation already
+#       happened, so re-offering just spawns a DUPLICATE /think on a live
+#       session (observed: x-ef41 offered in an unrelated session AND in its
+#       own, while claimed + PR open). Keyed off the resolved JSON.
+# Degrade to surfacing whenever `fno` is unavailable or its output cannot be
+# parsed, so a missing/garbled resolver never eats a real fresh offer. Run from
+# $REPO_ROOT so resolution is deterministic even if graph_json is project-local.
+if command -v fno >/dev/null 2>&1; then
+    if node_json=$( cd "$REPO_ROOT" && fno backlog get "$node_id" 2>/dev/null ); then
+        # Resolved. Suppress only if the node is already underway; a parse
+        # failure or unknown shape exits 1 -> surface (fail safe).
+        if printf '%s' "$node_json" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)  # unparseable -> do NOT suppress
+underway = bool(d.get("pr_number")) or d.get("_status") in {"claimed", "next", "done", "superseded"}
+sys.exit(0 if underway else 1)
+' 2>/dev/null; then
+            exit 0
+        fi
+    else
+        # Unresolvable -> phantom, suppress.
+        exit 0
+    fi
 fi
 
 # Fall back to the router-valid dispatch form if the event carried no offer_line.
