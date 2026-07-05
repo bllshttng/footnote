@@ -277,5 +277,7 @@ config:
     attach_digest: true
     # Minutes since last detach before the catch-up digest overlay shows (default 10).
     attach_digest_threshold_min: 10
+    # Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).
+    hover_focus: true
   # Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report).
   loops: {}
