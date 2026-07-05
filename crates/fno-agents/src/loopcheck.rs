@@ -210,6 +210,21 @@ struct Settings {
     /// one still holds the gate until addressed ("honor if present"). None =
     /// no optional reviewers.
     optional_apps: Option<Vec<String>>,
+    /// config.review.reviewers (x-e703, Phase 2): local reviewer names (sigma |
+    /// code-review | declare) satisfied by a head-pinned `review_attestation`
+    /// event in events.jsonl, NOT a GitHub login. Empty = no reviewers gate
+    /// (additive to the login gate; no "declared empty" distinction needed). A
+    /// leading '/' is stripped on store so `/code-review` == `code-review`.
+    /// Resolvability is validated Python-side; Rust fails closed by matching
+    /// evidence, so an unresolvable name is simply never satisfied.
+    reviewers: Vec<String>,
+}
+
+/// Normalize a config.review.reviewers entry / an event's reviewer name: strip a
+/// leading '/' so `/code-review` and `code-review` name the same reviewer
+/// (parity with the Python validator). Quote/comment stripping is the caller's.
+fn normalize_reviewer(raw: &str) -> String {
+    raw.trim().trim_start_matches('/').to_string()
 }
 
 /// A `config.review.peers` entry. `provider` is kept for messaging; the gate
@@ -298,6 +313,9 @@ fn parse_settings(content: &str) -> Settings {
     let mut collecting_required_bots = false;
     let mut collecting_github_apps = false;
     let mut collecting_optional_apps = false;
+    // config.review.reviewers block items (x-e703). Distinct from
+    // `collecting_reviewers`, which is the top-level config.external_reviewers.
+    let mut collecting_review_reviewers = false;
     let mut collecting_peers = false;
 
     // Derive the file's indent unit from the first indented line instead of
@@ -327,6 +345,7 @@ fn parse_settings(content: &str) -> Settings {
             collecting_required_bots = false;
             collecting_github_apps = false;
             collecting_optional_apps = false;
+            collecting_review_reviewers = false;
             collecting_peers = false;
             if !in_config {
                 in_budget = false;
@@ -357,6 +376,7 @@ fn parse_settings(content: &str) -> Settings {
             collecting_required_bots = false;
             collecting_github_apps = false;
             collecting_optional_apps = false;
+            collecting_review_reviewers = false;
             collecting_peers = false;
             if !in_budget {
                 in_attended = false;
@@ -391,6 +411,7 @@ fn parse_settings(content: &str) -> Settings {
             collecting_required_bots = false;
             collecting_github_apps = false;
             collecting_optional_apps = false;
+            collecting_review_reviewers = false;
             collecting_peers = false;
             if let Some(rest) = trimmed.strip_prefix("required_bots:") {
                 // Strip a trailing YAML inline comment first (codex P2 on
@@ -419,6 +440,31 @@ fn parse_settings(content: &str) -> Settings {
                     ListForm::Block => collecting_optional_apps = true,
                     ListForm::Inline(items) => s.optional_apps = Some(items),
                     ListForm::Malformed => s.optional_apps = scalar_as_singleton(rest),
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("reviewers:") {
+                // config.review.reviewers (x-e703): local-attestation gate. No
+                // "declared empty" semantic (additive to the login gate), so an
+                // explicit `[]` just leaves the list empty. A leading '/' is
+                // stripped so `/code-review` == `code-review`.
+                match classify_list_rhs(rest) {
+                    ListForm::Empty => {}
+                    ListForm::Block => collecting_review_reviewers = true,
+                    ListForm::Inline(items) => {
+                        s.reviewers = items
+                            .iter()
+                            .map(|r| normalize_reviewer(r))
+                            .filter(|r| !r.is_empty())
+                            .collect();
+                    }
+                    ListForm::Malformed => {
+                        if let Some(one) = scalar_as_singleton(rest) {
+                            s.reviewers = one
+                                .iter()
+                                .map(|r| normalize_reviewer(r))
+                                .filter(|r| !r.is_empty())
+                                .collect();
+                        }
+                    }
                 }
             } else if let Some(rest) = trimmed.strip_prefix("peers:") {
                 match classify_list_rhs(rest) {
@@ -481,6 +527,21 @@ fn parse_settings(content: &str) -> Settings {
                     &mut s.required_bots
                 };
                 target.get_or_insert_with(Vec::new).push(bot);
+            }
+            continue;
+        }
+
+        // reviewers block items: "- sigma" under config.review.reviewers (item
+        // indent 4 key-aligned OR 6 nested, same as the login collectors). A
+        // leading '/' is normalized off so `/code-review` == `code-review`.
+        if in_config && collecting_review_reviewers && trimmed.starts_with('-') {
+            let name = normalize_reviewer(
+                strip_inline_comment(trimmed.trim_start_matches('-').trim())
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\''),
+            );
+            if !name.is_empty() {
+                s.reviewers.push(name);
             }
             continue;
         }
@@ -879,7 +940,45 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
+/// True iff EVERY reviewer is satisfied by a head-pinned `review_attestation`
+/// event (x-e703, Phase 2). A reviewer is satisfied when events.jsonl carries a
+/// line with `type == "review_attestation"`, `data.reviewer` matching (leading
+/// '/' stripped on both sides), `data.head_sha == head_sha`, and
+/// `data.verdict == "pass"`. This is the trust-core seam: today loop-check reads
+/// events.jsonl only for prior `loop_check` fires; here it reads a local
+/// attestation into the `reviewed` decision.
+///
+/// Fail closed everywhere: an empty/unreadable events file, a stale head_sha
+/// (attestation for a prior commit), or a `fail` verdict leaves the reviewer
+/// UNSATISFIED, mirroring how a missing bot review holds the login gate. An
+/// empty reviewer list is vacuously satisfied (no reviewers gate).
+fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &str) -> bool {
+    if reviewers.is_empty() {
+        return true;
+    }
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        return false; // no evidence file -> gate unmet (fail closed)
+    };
+    reviewers.iter().all(|entry| {
+        let want = entry.trim_start_matches('/');
+        content.lines().any(|line| {
+            let Ok(val) = serde_json::from_str::<Value>(line) else {
+                return false;
+            };
+            val.get("type").and_then(|v| v.as_str()) == Some("review_attestation")
+                && val
+                    .pointer("/data/reviewer")
+                    .and_then(|v| v.as_str())
+                    .map(|r| r.trim_start_matches('/'))
+                    == Some(want)
+                && val.pointer("/data/head_sha").and_then(|v| v.as_str()) == Some(head_sha)
+                && val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass")
+        })
+    })
+}
+
 /// Run done() reads. Returns Ok(PrInfo) or Err((read_name, stderr_tail)) on gh failure.
+#[allow(clippy::too_many_arguments)]
 fn read_pr_info(
     gh_bin: &str,
     cwd: &Path,
@@ -888,6 +987,9 @@ fn read_pr_info(
     required_bots: &[String],
     optional_bots: &[String],
     external_reviewers: &[String],
+    reviewers: &[String],
+    head_sha: &str,
+    events_path: &Path,
 ) -> Result<PrInfo, (String, String)> {
     // Read 1: PR state + number + head OID
     let pr_view_out = Command::new(gh_bin)
@@ -988,9 +1090,19 @@ fn read_pr_info(
     // Skip the review reads only when there is NOTHING to honor: no required
     // login AND no optional login. An optional-only gate still reads (to catch
     // an optional blocking finding), but its presence is never required.
-    let review_skipped = no_external || (required_bots.is_empty() && optional_bots.is_empty());
+    // x-e703: the gate is a strict conjunction over the union of GitHub-login
+    // evidence (github_apps/peers via optional_bots+required_bots) AND the
+    // local-attestation `reviewers`. Each satisfied by its own evidence source.
+    let login_gate_active = !required_bots.is_empty() || !optional_bots.is_empty();
+    let review_skipped = no_external || (!login_gate_active && reviewers.is_empty());
     let (latest_review_ts, reviewed, missing_bots, unaddressed_findings) = if review_skipped {
         ("none".to_string(), true, Vec::new(), Vec::new()) // skip reads, treat as reviewed
+    } else if !login_gate_active {
+        // reviewers-only gate: no GitHub logins to poll, so skip the gh review
+        // reads entirely (fewer calls + no spurious gh-error block for a
+        // solo/claude-only harness). Evidence is the head-pinned attestation.
+        let reviewed = reviewers_all_attested(events_path, reviewers, head_sha);
+        ("none".to_string(), reviewed, Vec::new(), Vec::new())
     } else {
         // Read 3: top-level reviews + issue comments
         let reviews_out = Command::new(gh_bin)
@@ -1094,7 +1206,12 @@ fn read_pr_info(
         // inline-only review traffic advances the fingerprint (closes the
         // false-NoProgress hole).
         let activity_ts = max_ts(&info.latest_ts, &inline_ts);
-        let reviewed = info.all_required_passed() && unaddressed.is_empty();
+        // x-e703: the login gate AND the local-attestation reviewers gate must
+        // both clear. reviewers is usually empty (vacuously true) so this is a
+        // no-op for login-only configs.
+        let reviewed = info.all_required_passed()
+            && unaddressed.is_empty()
+            && reviewers_all_attested(events_path, reviewers, head_sha);
         (activity_ts, reviewed, info.missing_bots, unaddressed)
     };
 
@@ -2106,6 +2223,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
             if local.optional_apps.is_some() {
                 merged.optional_apps = local.optional_apps;
             }
+            if !local.reviewers.is_empty() {
+                merged.reviewers = local.reviewers;
+            }
             if !local.peers.is_empty() {
                 merged.peers = local.peers;
             }
@@ -2565,6 +2685,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
             &required_bots,
             &optional_bots,
             &settings.external_reviewers,
+            &settings.reviewers,
+            &head_sha,
+            &project_events,
         );
 
         match done_result {
@@ -2794,6 +2917,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_done(
     gh_bin: &str,
     cwd: &Path,
@@ -2802,6 +2926,9 @@ fn run_done(
     required_bots: &[String],
     optional_bots: &[String],
     external_reviewers: &[String],
+    reviewers: &[String],
+    head_sha: &str,
+    events_path: &Path,
 ) -> Result<PrInfo, (String, String)> {
     read_pr_info(
         gh_bin,
@@ -2811,6 +2938,9 @@ fn run_done(
         required_bots,
         optional_bots,
         external_reviewers,
+        reviewers,
+        head_sha,
+        events_path,
     )
 }
 
@@ -3945,6 +4075,118 @@ mod tests {
             scalar.optional_apps,
             Some(vec!["chatgpt-codex-connector".to_string()])
         );
+    }
+
+    // --- reviewers: local-attestation gate (x-e703, Phase 2) ---
+
+    #[test]
+    fn parse_settings_reviewers_forms() {
+        // Inline, block-under, key-aligned (PyYAML), bare scalar all parse; a
+        // leading '/' is normalized off (parity with the Python validator).
+        let inline = parse_settings("config:\n  review:\n    reviewers: [sigma, /code-review]\n");
+        assert_eq!(
+            inline.reviewers,
+            vec!["sigma".to_string(), "code-review".to_string()]
+        );
+        let block = parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n");
+        assert_eq!(block.reviewers, vec!["sigma".to_string()]);
+        let key_aligned = parse_settings("config:\n  review:\n    reviewers:\n    - declare\n");
+        assert_eq!(key_aligned.reviewers, vec!["declare".to_string()]);
+        let scalar = parse_settings("config:\n  review:\n    reviewers: /code-review\n");
+        assert_eq!(scalar.reviewers, vec!["code-review".to_string()]);
+        let absent = parse_settings("config:\n  review:\n    github_apps: []\n");
+        assert!(absent.reviewers.is_empty());
+    }
+
+    #[test]
+    fn parse_settings_reviewers_distinct_from_external_reviewers() {
+        // config.external_reviewers (indent-2) and config.review.reviewers
+        // (indent-4) must not cross-contaminate their block-list items.
+        let yaml = "config:\n  external_reviewers:\n    - gemini\n  review:\n    reviewers:\n      - sigma\n";
+        let s = parse_settings(yaml);
+        assert_eq!(s.external_reviewers, vec!["gemini".to_string()]);
+        assert_eq!(s.reviewers, vec!["sigma".to_string()]);
+    }
+
+    fn write_events(dir: &Path, lines: &[&str]) -> std::path::PathBuf {
+        let p = dir.join("events.jsonl");
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        p
+    }
+
+    #[test]
+    fn reviewers_all_attested_empty_is_vacuously_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("nonexistent.jsonl");
+        assert!(reviewers_all_attested(&p, &[], "abc"));
+    }
+
+    #[test]
+    fn reviewers_all_attested_head_pinned_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_events(
+            tmp.path(),
+            &[
+                r#"{"ts":"t","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"abc123","verdict":"pass"}}"#,
+            ],
+        );
+        assert!(reviewers_all_attested(&p, &["sigma".to_string()], "abc123"));
+    }
+
+    #[test]
+    fn reviewers_all_attested_stale_head_is_unsatisfied() {
+        // Head-pin: a pass for a PRIOR commit must not satisfy the current HEAD
+        // (AC1-EDGE / AC8-HP). A new commit invalidates the old attestation.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_events(
+            tmp.path(),
+            &[
+                r#"{"ts":"t","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+            ],
+        );
+        assert!(!reviewers_all_attested(&p, &["sigma".to_string()], "NEW"));
+    }
+
+    #[test]
+    fn reviewers_all_attested_fail_and_missing_are_unsatisfied() {
+        let tmp = tempfile::tempdir().unwrap();
+        // fail verdict -> unsatisfied
+        let fail = write_events(
+            tmp.path(),
+            &[
+                r#"{"ts":"t","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"h","verdict":"fail"}}"#,
+            ],
+        );
+        assert!(!reviewers_all_attested(&fail, &["sigma".to_string()], "h"));
+        // missing file -> fail closed
+        let gone = tmp.path().join("gone.jsonl");
+        assert!(!reviewers_all_attested(&gone, &["sigma".to_string()], "h"));
+    }
+
+    #[test]
+    fn reviewers_all_attested_conjunction_and_slash_normalized() {
+        // Every reviewer must be attested (strict conjunction); a '/'-prefixed
+        // config entry matches an event that emits the bare name and vice-versa.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_events(
+            tmp.path(),
+            &[
+                r#"{"ts":"t","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"h","verdict":"pass"}}"#,
+                r#"{"ts":"t","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"h","verdict":"pass"}}"#,
+            ],
+        );
+        // Both present -> satisfied ('/code-review' config vs 'code-review' event).
+        assert!(reviewers_all_attested(
+            &p,
+            &["sigma".to_string(), "/code-review".to_string()],
+            "h"
+        ));
+        // One missing -> unsatisfied.
+        assert!(!reviewers_all_attested(
+            &p,
+            &["sigma".to_string(), "declare".to_string()],
+            "h"
+        ));
     }
 
     #[test]
