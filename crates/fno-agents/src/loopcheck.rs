@@ -190,13 +190,28 @@ struct Settings {
     ci_declared_none: bool,
     /// config.external_reviewers list
     external_reviewers: Vec<String>,
-    /// config.review.required_bots (grilled decision 5 / step 2).
-    /// None = key absent -> code default applies.
+    /// config.review.github_apps (x-4baa; the GitHub App bot logins gate).
+    /// None = key absent -> code default (empty, no gate).
     /// Some([]) = explicitly `[]` -> declared no-review-gate path.
-    /// Some(list) = every listed bot must have a completed review pass.
-    /// A malformed value (scalar, bare key with no items) stays None so the
-    /// gate fails closed to the code default (AC3-ERR).
+    /// Some(list) = every listed login must have a completed review pass.
+    github_apps: Option<Vec<String>>,
+    /// config.review.required_bots: legacy alias for `github_apps` (a straight
+    /// rename). `github_apps` wins when both are set. Same fail-closed rules.
     required_bots: Option<Vec<String>>,
+    /// config.review.peers (x-4baa): harness peers that post a real PR review
+    /// under `peer_identity` (or their own map `identity`). loop-check only
+    /// needs each peer's posting identity - the gate is login-based.
+    peers: Vec<PeerEntry>,
+    /// config.review.peer_identity: the shared login peers post under.
+    peer_identity: Option<String>,
+}
+
+/// A `config.review.peers` entry. `provider` is kept for messaging; the gate
+/// only uses the resolved posting `identity` (own, or the shared peer_identity).
+#[derive(Debug, Default, Clone)]
+struct PeerEntry {
+    provider: String,
+    identity: Option<String>,
 }
 
 /// Strip a trailing YAML inline comment (` # ...`) from a raw scalar value
@@ -213,6 +228,39 @@ fn strip_inline_comment(raw: &str) -> &str {
     }
 }
 
+/// The shape of a YAML list value's inline RHS (after `key:`), used by the
+/// github_apps / required_bots / peers parsers so they classify identically.
+enum ListForm {
+    /// `key: []` - explicit empty list.
+    Empty,
+    /// `key: ["a", "b"]` - inline list, items parsed.
+    Inline(Vec<String>),
+    /// bare `key:` - block-list items follow at deeper indent.
+    Block,
+    /// a scalar / anything else - malformed, caller fails closed.
+    Malformed,
+}
+
+/// Classify the inline RHS of a list key (comment already strippable).
+fn classify_list_rhs(rest: &str) -> ListForm {
+    let raw = strip_inline_comment(rest.trim());
+    if raw == "[]" {
+        ListForm::Empty
+    } else if raw.is_empty() {
+        ListForm::Block
+    } else if raw.starts_with('[') && raw.ends_with(']') {
+        let inner = &raw[1..raw.len() - 1];
+        let items: Vec<String> = inner
+            .split(',')
+            .map(|p| p.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        ListForm::Inline(items)
+    } else {
+        ListForm::Malformed
+    }
+}
+
 /// Minimal indentation-aware settings.yaml parser.
 /// Handles nested `config.budget.attended/unattended` blocks plus flat keys.
 fn parse_settings(content: &str) -> Settings {
@@ -225,6 +273,8 @@ fn parse_settings(content: &str) -> Settings {
     let mut in_review = false;
     let mut collecting_reviewers = false;
     let mut collecting_required_bots = false;
+    let mut collecting_github_apps = false;
+    let mut collecting_peers = false;
 
     // Derive the file's indent unit from the first indented line instead of
     // assuming 2 spaces, so a 4-space-indented settings.yaml parses
@@ -251,6 +301,8 @@ fn parse_settings(content: &str) -> Settings {
             in_config = trimmed.starts_with("config:");
             collecting_reviewers = false;
             collecting_required_bots = false;
+            collecting_github_apps = false;
+            collecting_peers = false;
             if !in_config {
                 in_budget = false;
                 in_attended = false;
@@ -278,6 +330,8 @@ fn parse_settings(content: &str) -> Settings {
             in_review = trimmed.starts_with("review:");
             collecting_reviewers = trimmed.starts_with("external_reviewers:");
             collecting_required_bots = false;
+            collecting_github_apps = false;
+            collecting_peers = false;
             if !in_budget {
                 in_attended = false;
                 in_unattended = false;
@@ -301,56 +355,125 @@ fn parse_settings(content: &str) -> Settings {
 
         // indent == 4: inside config.review
         if in_config && in_review && indent == 4 {
+            // A new indent-4 key ends any in-flight list collection. Set the
+            // specific collecting flag in each branch below.
+            collecting_required_bots = false;
+            collecting_github_apps = false;
+            collecting_peers = false;
             if let Some(rest) = trimmed.strip_prefix("required_bots:") {
                 // Strip a trailing YAML inline comment first (codex P2 on
                 // #448): `required_bots: []  # no review gate` must parse as
                 // the declared-empty form, not fall through to malformed.
-                let raw = strip_inline_comment(rest.trim());
-                if raw == "[]" {
-                    // Explicit empty list: the ONLY way to declare the
-                    // no-review-gate path (US3). Never inferred.
-                    s.required_bots = Some(Vec::new());
-                    collecting_required_bots = false;
-                } else if raw.is_empty() {
-                    // Block-list form: items follow at deeper indent. Until an
-                    // item arrives this stays None - a bare key with nothing
-                    // under it is malformed and fails closed to the code
-                    // default rather than accidentally disabling the gate.
-                    collecting_required_bots = true;
-                } else if raw.starts_with('[') && raw.ends_with(']') {
-                    // Inline list form: required_bots: ["a", "b"]
-                    let inner = &raw[1..raw.len() - 1];
-                    let items: Vec<String> = inner
-                        .split(',')
-                        .map(|p| p.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
-                        .filter(|p| !p.is_empty())
-                        .collect();
-                    s.required_bots = Some(items);
-                    collecting_required_bots = false;
-                } else {
-                    // Scalar / malformed -> fail closed to the code default
-                    eprintln!(
-                        "loop-check: malformed config.review.required_bots '{raw}' (not a list) - using code default"
-                    );
-                    s.required_bots = None;
-                    collecting_required_bots = false;
+                match classify_list_rhs(rest) {
+                    ListForm::Empty => s.required_bots = Some(Vec::new()),
+                    ListForm::Block => collecting_required_bots = true,
+                    ListForm::Inline(items) => s.required_bots = Some(items),
+                    ListForm::Malformed => {
+                        eprintln!(
+                            "loop-check: malformed config.review.required_bots (not a list) - ignoring"
+                        );
+                        s.required_bots = None;
+                    }
                 }
-            } else {
-                collecting_required_bots = false;
+            } else if let Some(rest) = trimmed.strip_prefix("github_apps:") {
+                match classify_list_rhs(rest) {
+                    ListForm::Empty => s.github_apps = Some(Vec::new()),
+                    ListForm::Block => collecting_github_apps = true,
+                    ListForm::Inline(items) => s.github_apps = Some(items),
+                    ListForm::Malformed => {
+                        eprintln!(
+                            "loop-check: malformed config.review.github_apps (not a list) - ignoring"
+                        );
+                        s.github_apps = None;
+                    }
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("peers:") {
+                match classify_list_rhs(rest) {
+                    // Inline scalars only (`peers: [codex, gemini]`); maps need
+                    // the block form. Empty/malformed leave peers empty.
+                    ListForm::Empty | ListForm::Malformed => {}
+                    ListForm::Block => collecting_peers = true,
+                    ListForm::Inline(items) => {
+                        s.peers = items
+                            .into_iter()
+                            .map(|provider| PeerEntry {
+                                provider,
+                                identity: None,
+                            })
+                            .collect();
+                    }
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("peer_identity:") {
+                let id = strip_inline_comment(rest.trim())
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string();
+                if !id.is_empty() {
+                    s.peer_identity = Some(id);
+                }
             }
             continue;
         }
 
-        // Required-bots list items: "- login" under config.review.required_bots
-        if in_config && collecting_required_bots && trimmed.starts_with('-') {
+        // required_bots / github_apps list items: "- login" under their key.
+        if in_config && (collecting_required_bots || collecting_github_apps)
+            && trimmed.starts_with('-')
+        {
             let bot = strip_inline_comment(trimmed.trim_start_matches('-').trim())
                 .trim()
                 .trim_matches(|c| c == '"' || c == '\'')
                 .to_string();
             if !bot.is_empty() {
-                s.required_bots.get_or_insert_with(Vec::new).push(bot);
+                let target = if collecting_github_apps {
+                    &mut s.github_apps
+                } else {
+                    &mut s.required_bots
+                };
+                target.get_or_insert_with(Vec::new).push(bot);
             }
             continue;
+        }
+
+        // peers block items: a scalar `- codex` or a map `- provider: codex`
+        // (with an optional `identity:` sub-key on the following deeper line).
+        if in_config && collecting_peers {
+            if trimmed.starts_with('-') {
+                let item = strip_inline_comment(trimmed.trim_start_matches('-').trim()).trim();
+                // Map form: `- provider: codex` (optionally `identity:` inline
+                // too, though identity usually follows on the next line).
+                if let Some(prov) = item.strip_prefix("provider:") {
+                    let provider = prov
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .to_string();
+                    if !provider.is_empty() {
+                        s.peers.push(PeerEntry {
+                            provider,
+                            identity: None,
+                        });
+                    }
+                } else if !item.is_empty() {
+                    // Scalar form: `- codex`.
+                    s.peers.push(PeerEntry {
+                        provider: item.trim_matches(|c| c == '"' || c == '\'').to_string(),
+                        identity: None,
+                    });
+                }
+                continue;
+            }
+            // A map sub-key line (`identity: fno-codex-bot`) attaches to the
+            // most recent peer entry. token_env is not needed by the
+            // login-based gate; any other deeper line is ignored.
+            if let Some(rest) = trimmed.strip_prefix("identity:") {
+                let id = strip_inline_comment(rest.trim())
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string();
+                if let Some(last) = s.peers.last_mut() {
+                    if !id.is_empty() {
+                        last.identity = Some(id);
+                    }
+                }
+                continue;
+            }
         }
 
         // indent == 6: inside attended/unattended blocks
@@ -960,22 +1083,58 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
 /// Known bot logins that count as reviewers when external_reviewers is not configured.
 const KNOWN_BOTS: &[&str] = &["chatgpt-codex-connector", "gemini-code-assist"];
 
-/// Default must-have-reviewed list when config.review.required_bots is absent.
+/// Default must-have-reviewed list when config.review.github_apps is absent.
 /// EMPTY for fresh installs: a clone with no review configuration completes on
 /// PR + CI green without hanging on a review bot it has never set up (a fresh
 /// `/target` otherwise runs to the budget cap waiting for a codex review that
 /// never arrives). Maintainers who want an external-review gate pin it
-/// explicitly via config.review.required_bots (e.g. ["chatgpt-codex-connector"]).
+/// explicitly via config.review.github_apps (e.g. ["chatgpt-codex-connector"]).
 const DEFAULT_REQUIRED_BOTS: &[&str] = &[];
 
+/// A login that no real GitHub account can equal, pushed when a `peers` entry
+/// has no resolvable posting identity so the gate stays UNMET (fail closed)
+/// rather than silently going green without that reviewer (x-4baa).
+const UNRESOLVED_PEER_SENTINEL: &str = "\u{0}fno-peer-without-identity\u{0}";
+
+/// The set of expected review logins that must have passed for the gate to
+/// clear (x-4baa): `github_apps` (or its legacy `required_bots` alias) UNION
+/// the resolved posting identity of each `peers` entry. loop-check stays
+/// login-based; a peer with no resolvable identity fails closed via a sentinel.
 fn resolved_required_bots(settings: &Settings) -> Vec<String> {
-    match &settings.required_bots {
-        Some(list) => list.clone(),
-        None => DEFAULT_REQUIRED_BOTS
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+    // github_apps wins over the legacy required_bots alias when both are set.
+    if settings.github_apps.is_some() && settings.required_bots.is_some() {
+        eprintln!(
+            "loop-check: both config.review.github_apps and required_bots set - using github_apps"
+        );
     }
+    let mut logins: Vec<String> = match settings.github_apps.as_ref().or(settings.required_bots.as_ref()) {
+        Some(list) => list.clone(),
+        None => DEFAULT_REQUIRED_BOTS.iter().map(|s| s.to_string()).collect(),
+    };
+
+    // Each peer contributes its posting identity to the expected-login set.
+    // Shared identity (scalar peers) collapses to one login; per-peer map
+    // identities each add their own. A dedup keeps a shared identity single.
+    for peer in &settings.peers {
+        let id = peer
+            .identity
+            .clone()
+            .or_else(|| settings.peer_identity.clone());
+        match id {
+            Some(id) if !logins.iter().any(|l| l == &id) => logins.push(id),
+            Some(_) => {} // already present (shared identity)
+            None => {
+                eprintln!(
+                    "loop-check: config.review.peers entry '{}' has no posting identity (peer_identity unset) - gate fails closed",
+                    peer.provider
+                );
+                if !logins.iter().any(|l| l == UNRESOLVED_PEER_SENTINEL) {
+                    logins.push(UNRESOLVED_PEER_SENTINEL.to_string());
+                }
+            }
+        }
+    }
+    logins
 }
 
 /// Case-insensitive substring match so a configured short name ("codex") or a
@@ -1851,6 +2010,15 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // Some([]) is a meaningful project-local override (declared
                 // no-review-gate), so presence - not non-emptiness - wins.
                 merged.required_bots = local.required_bots;
+            }
+            if local.github_apps.is_some() {
+                merged.github_apps = local.github_apps;
+            }
+            if !local.peers.is_empty() {
+                merged.peers = local.peers;
+            }
+            if local.peer_identity.is_some() {
+                merged.peer_identity = local.peer_identity;
             }
         }
         merged
@@ -3623,6 +3791,119 @@ mod tests {
             ..Default::default()
         };
         assert!(resolved_required_bots(&empty).is_empty());
+    }
+
+    // --- github_apps rename + required_bots alias (x-4baa US3/US4) ---
+
+    #[test]
+    fn parse_settings_github_apps_block_list() {
+        let yaml = "config:\n  review:\n    github_apps:\n      - chatgpt-codex-connector\n";
+        let s = parse_settings(yaml);
+        assert_eq!(
+            s.github_apps,
+            Some(vec!["chatgpt-codex-connector".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_settings_github_apps_inline_and_empty() {
+        let s = parse_settings("config:\n  review:\n    github_apps: [a, b]\n");
+        assert_eq!(s.github_apps, Some(vec!["a".to_string(), "b".to_string()]));
+        let e = parse_settings("config:\n  review:\n    github_apps: []\n");
+        assert_eq!(e.github_apps, Some(Vec::new()));
+    }
+
+    #[test]
+    fn resolved_github_apps_wins_over_required_bots_alias() {
+        // Both set -> github_apps wins (Locked Decision 2).
+        let s = Settings {
+            github_apps: Some(vec!["new-bot".to_string()]),
+            required_bots: Some(vec!["old-bot".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(resolved_required_bots(&s), vec!["new-bot".to_string()]);
+        // required_bots-only still gates (legacy alias, AC2-HP).
+        let legacy = Settings {
+            required_bots: Some(vec!["old-bot".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(resolved_required_bots(&legacy), vec!["old-bot".to_string()]);
+    }
+
+    // --- peers -> gate union (x-4baa US4) ---
+
+    #[test]
+    fn parse_settings_peers_inline_scalars() {
+        let yaml = "config:\n  review:\n    peers: [codex, gemini]\n    peer_identity: fno-peer-bot\n";
+        let s = parse_settings(yaml);
+        assert_eq!(s.peers.len(), 2);
+        assert_eq!(s.peers[0].provider, "codex");
+        assert_eq!(s.peer_identity.as_deref(), Some("fno-peer-bot"));
+    }
+
+    #[test]
+    fn parse_settings_peers_block_maps_with_identity() {
+        let yaml = "config:\n  review:\n    peers:\n      - provider: codex\n        identity: fno-codex-bot\n      - gemini\n";
+        let s = parse_settings(yaml);
+        assert_eq!(s.peers.len(), 2);
+        assert_eq!(s.peers[0].provider, "codex");
+        assert_eq!(s.peers[0].identity.as_deref(), Some("fno-codex-bot"));
+        assert_eq!(s.peers[1].provider, "gemini");
+        assert_eq!(s.peers[1].identity, None);
+    }
+
+    #[test]
+    fn resolved_peers_shared_identity_collapses_to_one_login() {
+        // Scalar peers share peer_identity -> the gate is that one login on top
+        // of github_apps (AC1-HP: no App bot, just the peer identity).
+        let s = Settings {
+            github_apps: Some(Vec::new()),
+            peers: vec![
+                PeerEntry { provider: "codex".into(), identity: None },
+                PeerEntry { provider: "gemini".into(), identity: None },
+            ],
+            peer_identity: Some("fno-peer-bot".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolved_required_bots(&s), vec!["fno-peer-bot".to_string()]);
+    }
+
+    #[test]
+    fn resolved_peers_per_entry_identities_each_add_a_login() {
+        let s = Settings {
+            github_apps: Some(vec!["chatgpt-codex-connector".into()]),
+            peers: vec![
+                PeerEntry { provider: "codex".into(), identity: Some("fno-codex-bot".into()) },
+                PeerEntry { provider: "gemini".into(), identity: Some("fno-gemini-bot".into()) },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolved_required_bots(&s),
+            vec![
+                "chatgpt-codex-connector".to_string(),
+                "fno-codex-bot".to_string(),
+                "fno-gemini-bot".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolved_peers_without_identity_fails_closed() {
+        // A peer with no resolvable identity injects an unmatchable sentinel so
+        // the gate can never go green (fail closed), rather than silently
+        // dropping the reviewer (fail open).
+        let s = Settings {
+            github_apps: Some(Vec::new()),
+            peers: vec![PeerEntry { provider: "codex".into(), identity: None }],
+            peer_identity: None,
+            ..Default::default()
+        };
+        let logins = resolved_required_bots(&s);
+        assert!(logins.iter().any(|l| l == UNRESOLVED_PEER_SENTINEL));
+        // The sentinel matches no real login, so missing_bots stays non-empty.
+        assert!(!login_matches_bot("fno-peer-bot", UNRESOLVED_PEER_SENTINEL));
+        assert!(!login_matches_bot("chatgpt-codex-connector[bot]", UNRESOLVED_PEER_SENTINEL));
     }
 
     #[test]
