@@ -269,12 +269,15 @@ fn classify_list_rhs(rest: &str) -> ListForm {
 
 /// A bare scalar RHS (`key: value`) as a single-item login list. Used when a
 /// list key was written scalar-form: it must GATE on that one login, never
-/// silently fail open to "no gate" (codex P1 on #205). Empty -> None.
+/// silently fail open to "no gate" (codex P1 on #205). A structurally-malformed
+/// value (a `{...}` flow mapping) is NOT a login - degrade to None so both
+/// parsers agree (Python's typed reader drops a mapping to None too; codex P1 on
+/// the two-parser-agreement invariant). Empty -> None.
 fn scalar_as_singleton(rest: &str) -> Option<Vec<String>> {
     let v = strip_inline_comment(rest.trim())
         .trim_matches(|c| c == '"' || c == '\'')
         .to_string();
-    if v.is_empty() {
+    if v.is_empty() || v.contains('{') || v.contains('}') {
         None
     } else {
         Some(vec![v])
@@ -3898,6 +3901,20 @@ mod tests {
     // --- github_apps rename + required_bots alias (x-4baa US3/US4) ---
 
     // --- optional_apps: honored-if-present, never required (x-4baa) ---
+
+    #[test]
+    fn parse_settings_structural_scalar_degrades_like_python() {
+        // A `{...}` flow-mapping value is not a login: scalar_as_singleton
+        // returns None so the Rust reader agrees with Python's typed reader
+        // (which drops a mapping to None), honoring the two-parser invariant
+        // (codex P1 on #205). A numeric scalar stays a singleton (parity too).
+        assert_eq!(scalar_as_singleton(" {login: codex}"), None);
+        assert_eq!(scalar_as_singleton(" 123"), Some(vec!["123".to_string()]));
+        let g = parse_settings("config:\n  review:\n    github_apps: {login: codex}\n");
+        assert_eq!(g.github_apps, None, "a mapping is not a login gate");
+        let o = parse_settings("config:\n  review:\n    optional_apps: {a: b}\n");
+        assert_eq!(o.optional_apps, None);
+    }
 
     #[test]
     fn parse_settings_optional_apps_forms() {

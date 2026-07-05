@@ -490,18 +490,21 @@ class ReviewBlock(BaseModel):
     def coerce_malformed_to_default(cls, v: object) -> object:
         """Coerce a bare scalar to a single-login list; fail closed on other junk.
 
-        A bracket-less scalar (`github_apps: codex`) is a single-login gate, NOT
-        a silent no-gate: a typo must still GATE on that login rather than fail
-        OPEN (codex P1 on #205; parity with the Rust reader + `peers`). Only a
-        genuinely un-listable value (mapping, number) degrades to "absent".
+        A bracket-less scalar (`github_apps: codex`, or a stray number) is a
+        single-login gate, NOT a silent no-gate: a typo must still GATE on that
+        login rather than fail OPEN (codex P1 on #205; parity with the Rust
+        text reader, which singleton-izes any scalar). Only a genuinely
+        un-listable value (a mapping, or a bare bool) degrades to "absent".
         """
         if v is None or isinstance(v, list):
             return v
-        if isinstance(v, str):
-            return [v]
+        # bool is nonsense here (and str(True) != the Rust reader's "true"); the
+        # Rust reader also rejects `{...}` mappings via scalar_as_singleton.
+        if not isinstance(v, bool) and isinstance(v, (str, int, float)):
+            return [str(v)]
         _LOG.warning(
             "settings.yaml: config.review.github_apps/required_bots is not a "
-            "list or string (%r); ignoring it",
+            "list or scalar login (%r); ignoring it",
             v,
         )
         return None
@@ -518,13 +521,15 @@ class ReviewBlock(BaseModel):
         """
         if v is None:
             return []
-        if isinstance(v, str):
-            return [v]
         if isinstance(v, list):
             return v
+        # A scalar login coerces to a one-item list (parity with the Rust text
+        # reader). bool / mapping is not a login -> [] (no optional).
+        if not isinstance(v, bool) and isinstance(v, (str, int, float)):
+            return [str(v)]
         _LOG.warning(
-            "settings.yaml: config.review.optional_apps is not a list or string "
-            "(%r); ignoring it",
+            "settings.yaml: config.review.optional_apps is not a list or scalar "
+            "login (%r); ignoring it",
             v,
         )
         return []

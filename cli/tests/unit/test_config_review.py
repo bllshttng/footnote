@@ -335,3 +335,49 @@ def test_optional_apps_defaults_empty(
     """Absent -> [] (no optional reviewers), independent of the required gate."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
     assert settings.config.review.optional_apps == []
+
+
+# --- parser parity on non-string malformed values (codex P1 on #205) ---
+
+
+def test_github_apps_numeric_scalar_gates_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stray numeric scalar becomes a (never-matching) singleton, matching the
+    Rust text reader - a required-gate typo fails CLOSED, not open to no-gate."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    github_apps: 123\n",
+    )
+    assert settings.config.review.github_apps == ["123"]
+
+
+def test_github_apps_mapping_degrades_like_rust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mapping is not a login list -> None, agreeing with the Rust reader
+    (which rejects a `{...}` scalar via scalar_as_singleton)."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    github_apps: {login: codex}\n",
+    )
+    assert settings.config.review.github_apps is None
+
+
+def test_optional_apps_scalar_and_mapping_parity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    numeric = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    optional_apps: 123\n",
+    )
+    assert numeric.config.review.optional_apps == ["123"]
+    mapping = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    optional_apps: {a: b}\n",
+    )
+    assert mapping.config.review.optional_apps == []

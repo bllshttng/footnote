@@ -82,7 +82,13 @@ main() {
     || die "cannot resolve the peer identity from \$$token_env (gh api user failed); a peer must post under a verifiable distinct account"
   pr_author="$(GH_TOKEN="$tok" gh pr view "$pr" --json author -q .author.login 2>/dev/null)" \
     || die "gh pr view (author) failed for PR #$pr (gate stays unmet)"
-  [[ -n "$my_login" && "$my_login" != "$pr_author" ]] \
+  # GitHub logins are case-insensitive: normalize both before comparing so a
+  # cased alias (Fno-Peer-Bot vs fno-peer-bot) can't sneak a self-review past
+  # the anti-gaming check (codex P2 on #205). tr for Bash 3.2 (no ${v,,}).
+  local my_lc author_lc
+  my_lc="$(printf '%s' "$my_login" | tr '[:upper:]' '[:lower:]')"
+  author_lc="$(printf '%s' "$pr_author" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$my_login" && "$my_lc" != "$author_lc" ]] \
     || die "peer identity '$my_login' IS the PR author - a peer must post under a DISTINCT machine account (a self-review cannot gate)"
 
   # Idempotency: skip if a review with this exact marker already exists. The
