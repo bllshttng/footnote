@@ -46,6 +46,7 @@
 | `config.review.peer_identity` | str (optional) | _(none)_ | advanced | The distinct machine-account login peers post their review under (must not be the author account). |
 | `config.review.peer_token_env` | str (optional) | _(none)_ | advanced | Env var holding the PAT for peer_identity used to post peer reviews to the PR. |
 | `config.review.optional_apps` | list[str] | `[]` | advanced | Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it. |
+| `config.review.reviewers` | list[str] | `[]` | advanced | Local-attestation reviewers (sigma | /code-review | declare) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot. |
 | `config.review.external_reviewers` | list[str] | `[]` | always | Which AI reviewers /pr requests a review from (the INVOCATION list). |
 | `config.review.agent_providers` | dict[str, str] | `{}` | never | Per-agent provider routing for the cross-model review panel. |
 | `config.review.cross_model.enabled` | bool | `false` | advanced | Enable cross-model (codex/gemini) second-opinion review. |
