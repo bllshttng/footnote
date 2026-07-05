@@ -85,6 +85,36 @@ Cron checks fire at +5 and +10 minutes after invocation. These are not configura
 via settings.yaml - the timing matches typical reviewer response times (1-5 min for
 fast reviewers, up to 10 min for slower ones).
 
+## Step 0b: Post harness peers (`config.review.peers`)
+
+`external_reviewers` (Step 0) are GitHub Apps that review on GitHub on their
+own. **Peers** are different: `config.review.peers` names harness CLIs
+(`codex` / `gemini`) that YOU run locally and post as a real PR review under
+`config.review.peer_identity`, so they satisfy the login-based loop-check gate
+even when an App bot is usage-wedged. Drive this once per check cycle, BEFORE
+polling, so the peer reviews are present when the gate reads.
+
+```bash
+PEERS="$(fno config get config.review.peers 2>/dev/null || echo '')"
+```
+
+If `PEERS` is empty, skip this step. Otherwise, for EACH configured peer
+provider, run the posting mode of the peer skill against this PR:
+
+- Invoke `/review peer <N> <provider> --post` (Skill). It runs the provider
+  locally, then posts the verbatim review + P1 inline badges under
+  `peer_identity` via `scripts/post-peer-review.sh` (idempotent per PR-head;
+  fails loud on any `gh` error).
+
+**Fail closed on partial coverage (Concurrency invariant).** When several peers
+share one `peer_identity`, loop-check sees a single login and cannot tell codex
+from gemini. So if ANY listed peer did not post (its CLI failed / abstained /
+the post errored), you MUST stop and report it - do NOT treat the `peers` bucket
+as satisfied because a co-listed peer posted under the shared identity. A user
+who wants the gate itself to enforce per-peer coverage gives each peer its own
+`{provider, identity}` map entry. Never mark the gate met on a peer that did
+not actually post.
+
 ## Philosophy
 
 - **Err on the side of implementation** - We won't do it later
@@ -581,4 +611,4 @@ Always use `$REVIEWER_BOT` (with `[bot]` suffix) for `gh api` commands.
 
 ## After review: completion signal
 
-When review resolves (all blocking findings addressed in-thread and pushed), nothing needs to be emitted or sealed: the stop hook's `done()` check reads the PR's review state from GitHub directly inside `fno-agents loop-check` (ab-d0337fbc + step 2 ab-f1c5a9ed). Specifically it verifies (a) every bot in `config.review.required_bots` has a completed review pass and (b) every blocking inline finding on `/pulls/N/comments` has a qualifying in-thread ack (Step 8a's replies + your fix commits). The bot reviews, per-thread replies, and fix commits in PR history ARE the completion evidence.
+When review resolves (all blocking findings addressed in-thread and pushed), nothing needs to be emitted or sealed: the stop hook's `done()` check reads the PR's review state from GitHub directly inside `fno-agents loop-check` (ab-d0337fbc + step 2 ab-f1c5a9ed). Specifically it verifies (a) every expected review login - `config.review.github_apps` (the legacy `required_bots` aliases it) plus each `config.review.peers` posting identity - has a completed review pass and (b) every blocking inline finding on `/pulls/N/comments` has a qualifying in-thread ack (Step 8a's replies + your fix commits). The bot reviews, per-thread replies, and fix commits in PR history ARE the completion evidence.
