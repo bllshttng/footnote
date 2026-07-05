@@ -42,7 +42,7 @@
 | `config.research.output_dir` | str (optional) | _(none)_ | advanced | Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses). |
 | `config.review.github_apps` | list[str] (optional) | _(none)_ | advanced | GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots. |
 | `config.review.required_bots` | list[str] (optional) | _(none)_ | never | Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set. |
-| `config.review.peers` | list | `[]` | advanced | Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries. |
+| `config.review.peers` | list[Any] | `[]` | advanced | Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries. |
 | `config.review.peer_identity` | str (optional) | _(none)_ | advanced | The distinct machine-account login peers post their review under (must not be the author account). |
 | `config.review.peer_token_env` | str (optional) | _(none)_ | advanced | Env var holding the PAT for peer_identity used to post peer reviews to the PR. |
 | `config.review.external_reviewers` | list[str] | `[]` | always | Which AI reviewers /pr requests a review from (the INVOCATION list). |
