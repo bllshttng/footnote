@@ -224,6 +224,51 @@ def test_non_anthropic_protocol_provider_skipped_for_claude_lane() -> None:
 
 
 # ---------------------------------------------------------------------------
+# resolve_explicit_route: the peer lane names (provider, model) directly (x-ef41)
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_route_builds_zai_env_for_glm_peer() -> None:
+    route = mr.resolve_explicit_route(
+        "zai", "glm-5.2", settings=_settings(), env={"ZAI_API_KEY": "zk"}
+    )
+    assert route is not None
+    assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert route["ANTHROPIC_AUTH_TOKEN"] == "zk"
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_explicit_route_ignores_protected_roles_and_enabled_flag() -> None:
+    # An explicit peer opt-in is not role auto-routing: neither the disabled
+    # global flag nor PROTECTED_ROLES applies (there is no role).
+    route = mr.resolve_explicit_route(
+        "zai", "glm-5.2", settings=_settings(enabled=False), env={"ZAI_API_KEY": "k"}
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_explicit_route_no_key_fails_safe() -> None:
+    # No z.ai key -> None (the peer skips GLM; never silently Anthropic-billed).
+    notes, sink = _collector()
+    route = mr.resolve_explicit_route(
+        "zai", "glm-5.2", settings=_settings(), env={}, notice=sink
+    )
+    assert route is None
+    assert notes
+
+
+@pytest.mark.parametrize("provider,model", [("", "glm-5.2"), ("zai", ""), ("zai", "  ")])
+def test_explicit_route_rejects_empty_target(provider: str, model: str) -> None:
+    assert (
+        mr.resolve_explicit_route(
+            provider, model, settings=_settings(), env={"ZAI_API_KEY": "k"}
+        )
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
 # AC4-FR: fail-safe fallback (no key -> None + notice, never raises)
 # ---------------------------------------------------------------------------
 

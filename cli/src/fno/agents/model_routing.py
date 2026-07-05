@@ -204,12 +204,29 @@ def resolve_route(
     if target is None:
         return None  # not a routed role -> primary model
     pname, model = target
+    return _route_for_target(pname, model, block, env, notice, ctx=f"role {name!r}")
 
+
+def _route_for_target(
+    pname: str,
+    model: str,
+    block: "ModelRoutingBlock",
+    env: Mapping[str, str],
+    notice: Optional[Callable[[str], object]],
+    *,
+    ctx: str,
+) -> Optional[dict[str, str]]:
+    """Build the routed ``ANTHROPIC_*`` env for an explicit ``(provider, model)``.
+
+    Shared by ``resolve_route`` (role -> target) and ``resolve_explicit_route``
+    (peer lane names the target directly). Returns None (fail-safe, never raises)
+    when the provider is unknown/non-anthropic/keyless. ``ctx`` names the caller
+    ("role 'consolidate'" / "peer 'zai'") for the fail-safe notices."""
     provider = _resolve_provider(pname, block)
     if provider is None:
         _emit(
             notice,
-            f"model-routing: provider {pname!r} for role {name!r} is not "
+            f"model-routing: provider {pname!r} for {ctx} is not "
             f"configured; using the primary model",
         )
         return None
@@ -236,7 +253,7 @@ def resolve_route(
     if not key:
         _emit(
             notice,
-            f"model-routing: no API key for provider {pname!r} (role {name!r}); "
+            f"model-routing: no API key for provider {pname!r} ({ctx}); "
             f"falling back to the primary Anthropic model",
         )
         return None
@@ -262,6 +279,40 @@ def resolve_route(
     for k, v in (getattr(block, "extra_env", None) or {}).items():
         route[str(k)] = str(v)
     return route
+
+
+def resolve_explicit_route(
+    provider: str,
+    model: str,
+    *,
+    settings: "Optional[SettingsModel]" = None,
+    env: Optional[Mapping[str, str]] = None,
+    notice: Optional[Callable[[str], object]] = None,
+) -> Optional[dict[str, str]]:
+    """Resolve the routed ``ANTHROPIC_*`` env for an explicit ``provider,model``.
+
+    The peer lane (``config.review.peers`` entry ``{provider: claude, model:
+    "zai,glm-5.2"}``) names its route directly rather than via a role, so it
+    bypasses both the role->target lookup AND the ``PROTECTED_ROLES`` / global
+    ``enabled`` role-auto-routing policy (an explicit peer opt-in is not
+    auto-routing). It reuses the SAME provider-registry key/env logic as
+    ``resolve_route`` so the z.ai env-var contract lives in exactly one place.
+
+    Returns None (fail-safe, never raises) when the provider is unknown,
+    non-anthropic, or keyless - the caller (peer skill) then skips the GLM peer
+    rather than silently falling back to the Anthropic-billed author model.
+    """
+    pname = _normalize(provider)
+    if not pname or not (model or "").strip():
+        return None
+    if env is None:
+        import os
+
+        env = os.environ
+    block = _routing_block(settings)
+    return _route_for_target(
+        pname, model.strip(), block, env, notice, ctx=f"peer {pname!r}"
+    )
 
 
 # Default codex wire protocol for a third-party OpenAI-compatible endpoint
