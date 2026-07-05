@@ -165,13 +165,16 @@ def _tests_line(project_root: Path) -> str:
 
 
 def _required_bots(project_root: Path) -> List[str]:
-    """The must-have-reviewed bot list: None -> code default; [] -> no gate."""
+    """The must-have-reviewed login list: None/[] -> no gate (cv-6537099f).
+
+    Reads config.review.github_apps (the legacy required_bots aliases it). The
+    effective default matches the Rust loop-check: absent == [] == no review
+    gate (PR + CI only), not the old ["chatgpt-codex-connector"].
+    """
     from fno.config import load_settings_for_repo
 
-    bots = load_settings_for_repo(project_root).config.review.required_bots
-    if bots is None:
-        return ["chatgpt-codex-connector"]
-    return list(bots)
+    bots = load_settings_for_repo(project_root).config.review.github_apps
+    return list(bots) if bots else []
 
 
 def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) -> str:
@@ -186,8 +189,8 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
         return "advisory: written + eval-green (no PR)"
     try:
         bots = _required_bots(project_root)
-    except Exception:  # noqa: BLE001 - degrade to the code default
-        bots = ["chatgpt-codex-connector"]
+    except Exception:  # noqa: BLE001 - degrade to the no-gate default
+        bots = []
     bots_str = ", ".join(bots) if bots else "none (PR + CI only)"
     line = f"PR + CI green + reviewed by [{bots_str}]"
     if _is("attended", "false"):

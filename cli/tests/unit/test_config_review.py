@@ -1,16 +1,20 @@
 """Tests for config.review - the loop-check review-gate config block.
 
 Covers the Python half of control-plane step 2 (ab-f1c5a9ed): the
-`config.review.required_bots` schema. The authoritative consumer is the Rust
-`fno-agents loop-check` verb (its own hand-rolled parser is tested in
-crates/fno-agents); this block exists so `fno config get` and the Pydantic
-schema agree on the key's shape and fail-closed semantics.
+`config.review.github_apps` schema (x-4baa; `required_bots` is now a legacy
+alias). The authoritative consumer is the Rust `fno-agents loop-check` verb
+(its own hand-rolled parser is tested in crates/fno-agents); this block exists
+so `fno config get` and the Pydantic schema agree on the key's shape and
+fail-closed semantics.
 
 Semantics under test:
-  - key absent  -> None (Rust applies the code default
-    ["chatgpt-codex-connector"]; Python must not invent a default list)
+  - key absent  -> None (no review gate; the Rust effective default is [],
+    cv-6537099f - Python must not invent a default list)
   - explicit [] -> [] (the declared no-review-gate path, US3)
-  - non-list    -> None + warning (fail closed to the code default, AC3-ERR)
+  - non-list    -> None + warning (fail closed, AC3-ERR)
+  - required_bots is a legacy alias for github_apps (github_apps wins if both)
+  - peers scalar-or-map coercion; a map missing `provider` or a peers block
+    with no posting identity fails LOUD (fail closed, not a silent skip)
 """
 from __future__ import annotations
 
@@ -173,3 +177,125 @@ def test_review_cross_model_non_mapping_fails_safe(
         "schema_version: 1\nconfig:\n  review:\n    cross_model: 42\n",
     )
     assert settings.config.review.cross_model.enabled is False
+
+
+# --- github_apps rename + required_bots alias (x-4baa US1) ---
+
+
+def test_github_apps_canonical_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """github_apps is read verbatim and mirrored onto the required_bots alias."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    github_apps:\n"
+        "      - chatgpt-codex-connector\n",
+    )
+    assert settings.config.review.github_apps == ["chatgpt-codex-connector"]
+    assert settings.config.review.required_bots == ["chatgpt-codex-connector"]
+
+
+def test_required_bots_aliases_github_apps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy required_bots-only config populates github_apps identically (AC2-HP)."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    required_bots:\n"
+        "      - chatgpt-codex-connector\n",
+    )
+    assert settings.config.review.github_apps == ["chatgpt-codex-connector"]
+
+
+def test_github_apps_wins_over_required_bots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When both are set, github_apps wins (Locked Decision 2)."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n"
+        "    github_apps: [new-bot]\n    required_bots: [old-bot]\n",
+    )
+    assert settings.config.review.github_apps == ["new-bot"]
+    assert settings.config.review.required_bots == ["new-bot"]
+
+
+def test_github_apps_absent_is_no_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent -> None (no gate); the old chatgpt-codex-connector default is gone."""
+    settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
+    assert settings.config.review.github_apps is None
+
+
+# --- peers / peer_identity / peer_token_env (x-4baa US2) ---
+
+
+def test_peers_scalar_coerces_to_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n"
+        "    peers: codex\n    peer_identity: fno-peer-bot\n",
+    )
+    assert settings.config.review.peers == ["codex"]
+    assert settings.config.review.peer_identity == "fno-peer-bot"
+
+
+def test_peers_list_and_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n"
+        "    peers: [codex, gemini]\n    peer_identity: fno-peer-bot\n"
+        "    peer_token_env: GH_PEER_TOKEN\n",
+    )
+    assert settings.config.review.peers == ["codex", "gemini"]
+    assert settings.config.review.peer_token_env == "GH_PEER_TOKEN"
+
+
+def test_peers_map_entry_with_own_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-peer identity map does not require the shared peer_identity."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    peers:\n"
+        "      - provider: codex\n        identity: fno-codex-bot\n",
+    )
+    assert settings.config.review.peers == [
+        {"provider": "codex", "identity": "fno-codex-bot"}
+    ]
+
+
+def test_peers_map_missing_provider_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A map entry with no `provider` is a loud config error, not a silent skip."""
+    with pytest.raises(Exception, match="provider"):
+        _load(
+            tmp_path,
+            monkeypatch,
+            "schema_version: 1\nconfig:\n  review:\n    peers:\n"
+            "      - identity: fno-codex-bot\n    peer_identity: x\n",
+        )
+
+
+def test_peers_without_identity_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """peers set with no posting identity can never clear -> fail closed at load."""
+    with pytest.raises(Exception, match="peer_identity"):
+        _load(
+            tmp_path,
+            monkeypatch,
+            "schema_version: 1\nconfig:\n  review:\n    peers: [codex]\n",
+        )

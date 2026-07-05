@@ -1293,12 +1293,12 @@ class TestPerRepoReviewers:
 
         def fake_load_settings_a():
             s = MagicMock()
-            s.config.review.required_bots = ["codex"]
+            s.config.review.github_apps = ["codex"]
             return s
 
         def fake_load_settings_b():
             s = MagicMock()
-            s.config.review.required_bots = ["gemini"]
+            s.config.review.github_apps = ["gemini"]
             return s
 
         # We need to verify _reviewers_for calls load_settings with the repo_dir
@@ -1310,15 +1310,15 @@ class TestPerRepoReviewers:
             call_log.append(repo_root)
             if repo_root == repo_a:
                 s = MagicMock()
-                s.config.review.required_bots = ["codex"]
+                s.config.review.github_apps = ["codex"]
                 return s
             elif repo_root == repo_b:
                 s = MagicMock()
-                s.config.review.required_bots = ["gemini"]
+                s.config.review.github_apps = ["gemini"]
                 return s
             else:
                 s = MagicMock()
-                s.config.review.required_bots = []
+                s.config.review.github_apps = []
                 return s
 
         with patch("fno.pr_watch.cli.load_settings_for_repo", fake_load_settings):

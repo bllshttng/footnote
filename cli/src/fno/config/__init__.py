@@ -421,25 +421,50 @@ class CrossModelBlock(BaseModel):
 class ReviewBlock(BaseModel):
     """External-review gate settings (nested under 'config.review').
 
-    `required_bots` is the must-have-reviewed list consumed by the
-    `fno-agents loop-check` review gate (control-plane step 2, ab-f1c5a9ed):
-    a session terminates DonePRGreen only when every listed bot has at least
-    one completed review pass and no unaddressed blocking finding.
+    `github_apps` is the must-have-reviewed list of GitHub App bot logins
+    consumed by the `fno-agents loop-check` review gate (control-plane step 2,
+    ab-f1c5a9ed): a session terminates DonePRGreen only when every listed login
+    has at least one completed review pass and no unaddressed blocking finding.
 
     Semantics (mirrors the Rust-side parser in loopcheck.rs):
-      - key absent (None)  -> code default ["chatgpt-codex-connector"]
+      - key absent (None)  -> no review gate (PR + CI only); a fresh install
+                              completes without hanging on a bot it never set up.
+                              The effective Rust default is [] (cv-6537099f); the
+                              old ["chatgpt-codex-connector"] docstring was wrong.
       - explicit []        -> declared no-review-gate path (PR + CI only),
                               mirroring ci.declared_none; never auto-detected
-      - non-empty list     -> every listed bot must pass
+      - non-empty list     -> every listed login must pass
+
+    `peers` are harness peers (codex/gemini/...) run locally that post a real PR
+    review under `peer_identity` (a distinct machine account, not the author).
+    Each entry is a provider scalar (`codex`) or a map (`{provider, identity,
+    token_env}`). The gate is the union of `github_apps` and the resolved peer
+    identities (loop-check stays login-based; per-peer coverage is the posting
+    pipeline's job for a shared identity). Phase 1: `reviewers` (local
+    attestation) is a follow-up node.
+
+    `required_bots` is a legacy alias for `github_apps` (a straight rename).
+    Existing configs are unchanged; if both are set, `github_apps` wins.
 
     Distinct from `config.external_reviewers` (the recognition/matching
-    list): that list says which logins count as bots; this one says which
-    bots are REQUIRED to have reviewed.
+    list): that list says which logins count as bots; `github_apps` says which
+    logins are REQUIRED to have reviewed.
     """
 
     model_config = ConfigDict(extra="ignore")
 
+    # The GATE: GitHub App bot logins that must have reviewed (canonical).
+    github_apps: Optional[list[str]] = None
+    # Legacy alias for github_apps; resolved into github_apps by the validator
+    # below (github_apps wins if both set). Kept readable for back-compat.
     required_bots: Optional[list[str]] = None
+    # Harness peers that run a CLI locally and post a real PR review under
+    # peer_identity. Scalar (`codex`) or map (`{provider, identity, token_env}`).
+    peers: list = Field(default_factory=list)
+    # The distinct login peers post under (must not be the author account) and
+    # the env var holding that identity's PAT. Required whenever `peers` is set.
+    peer_identity: Optional[str] = None
+    peer_token_env: Optional[str] = None
     # The INVOCATION list (Locked Decision 2): which AI reviewers /pr requests a
     # review from (gemini | codex | coderabbit | claude | none). Distinct from
     # required_bots (the GATE: which GitHub bot logins must have reviewed before
@@ -456,23 +481,88 @@ class ReviewBlock(BaseModel):
     agent_providers: dict[str, str] = Field(default_factory=dict)
     cross_model: CrossModelBlock = Field(default_factory=CrossModelBlock)
 
-    @field_validator("required_bots", mode="before")
+    @field_validator("github_apps", "required_bots", mode="before")
     @classmethod
     def coerce_malformed_to_default(cls, v: object) -> object:
-        """Fail closed to the code default on a non-list value (AC3-ERR).
+        """Fail closed to "absent" on a non-list value.
 
         A scalar or mapping here is operator error; treating it as "absent"
-        keeps the gate on its default rather than failing the whole settings
-        load (the Rust reader does the same).
+        keeps the gate on its (no-gate) default rather than failing the whole
+        settings load (the Rust reader does the same).
         """
         if v is None or isinstance(v, list):
             return v
         _LOG.warning(
-            "settings.yaml: config.review.required_bots is not a list (%r); "
-            "using the code default",
+            "settings.yaml: config.review.github_apps/required_bots is not a "
+            "list (%r); ignoring it",
             v,
         )
         return None
+
+    @field_validator("peers", mode="before")
+    @classmethod
+    def coerce_peers(cls, v: object) -> object:
+        """Accept a scalar or a list of scalar-or-map entries; fail LOUD on a
+        map entry missing `provider`.
+
+        A bare string (`peers: codex`) coerces to a single-item list. A map
+        entry must carry `provider` (the CLI to run); a missing `provider` is a
+        loud config error, NOT a silent skip (a silently-dropped peer would
+        fail open - the gate would go green without that reviewer).
+        """
+        if v is None:
+            return []
+        if isinstance(v, (str, dict)):
+            v = [v]
+        if not isinstance(v, list):
+            raise ValueError(
+                f"config.review.peers must be a scalar or list (got {v!r})"
+            )
+        for entry in v:
+            if isinstance(entry, dict) and "provider" not in entry:
+                raise ValueError(
+                    "config.review.peers map entry is missing 'provider': "
+                    f"{entry!r}"
+                )
+            if not isinstance(entry, (str, dict)):
+                raise ValueError(
+                    f"config.review.peers entry must be a string or map: {entry!r}"
+                )
+        return v
+
+    @model_validator(mode="after")
+    def resolve_github_apps_alias(self) -> "ReviewBlock":
+        """`required_bots` is a legacy alias for `github_apps`; github_apps wins.
+
+        Both readable afterwards (kept in sync) so old readers of
+        `required_bots` and new readers of `github_apps` see the same value.
+        """
+        if self.github_apps is not None and self.required_bots is not None:
+            _LOG.warning(
+                "settings.yaml: both config.review.github_apps and the legacy "
+                "config.review.required_bots are set; using github_apps",
+            )
+        elif self.github_apps is None and self.required_bots is not None:
+            self.github_apps = self.required_bots
+        # Keep the alias readable and consistent with the canonical field.
+        self.required_bots = self.github_apps
+        # A peer needs an identity to post under: its own (map `identity`) or
+        # the shared `peer_identity`. Fail loud if any peer has neither - a
+        # peers gate with no resolvable login can never clear (fail-closed
+        # forever), so surface it at load rather than wedging the loop.
+        if self.peers and not self.peer_identity:
+            needs_shared = [
+                e
+                for e in self.peers
+                if not (isinstance(e, dict) and e.get("identity"))
+            ]
+            if needs_shared:
+                raise ValueError(
+                    "config.review.peers has an entry with no posting identity "
+                    "and config.review.peer_identity is unset; peers must post "
+                    f"under a distinct machine account: {needs_shared!r}"
+                )
+        return self
 
     @field_validator("external_reviewers", mode="before")
     @classmethod
