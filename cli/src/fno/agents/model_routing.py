@@ -79,8 +79,12 @@ _DEFAULT_PROVIDERS: dict[str, dict[str, Optional[str]]] = {
 }
 
 # Roles routed to a secondary provider by default (provider 'zai', the default
-# model). The config roles map overrides per role.
-DEFAULT_ROUTED_ROLES = ("coordinate", "tidy", "orient", "consolidate")
+# model). The config roles map overrides per role. ``post-merge`` is the
+# recurring, judgment-light post-merge ritual fire (reconcile / retro / triage);
+# its dangerous state mutations stay deterministic CLI, so a weaker model only
+# writes prose + picks triage. Routable, NOT protected (fail-safe to Anthropic
+# without a key, like every routed role).
+DEFAULT_ROUTED_ROLES = ("coordinate", "tidy", "orient", "consolidate", "post-merge")
 
 # Roles the secondary provider must NEVER touch (writes a diff / renders a
 # correctness verdict). Hard guard, enforced before any config is read.

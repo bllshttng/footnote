@@ -67,6 +67,35 @@ class TickResult:
 _ENV_SEAM = "PR_WATCH_FIRE_CMD"
 _DEFAULT_MODEL = "claude-haiku-4-5"
 
+# The post-merge ritual (verb ``merged``) is judgment-light and cost-sensitive,
+# so it fires under a routable identity: with a keyed secondary provider it runs
+# on GLM; without one it fail-safes to the primary Anthropic model. The review
+# fire (``check``) implements external review and stays on the default model.
+_ROLE_FOR_VERB: dict[str, str] = {"merged": "post-merge"}
+
+
+def _ensure_onboarding_bypass() -> None:
+    """Pre-set ``~/.claude.json`` ``hasCompletedOnboarding`` so a cold headless
+    routed fire does not hang on the "Log in to Anthropic" wall (a non-Anthropic
+    endpoint can trip it in launchd). Idempotent and best-effort: only flips a
+    missing/false value, never raises."""
+    p = Path.home() / ".claude.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict) or data.get("hasCompletedOnboarding") is True:
+        return
+    data["hasCompletedOnboarding"] = True
+    # Atomic write: ~/.claude.json is claude's central config; a truncate-then-write
+    # killed mid-flight would corrupt it. Write a sibling temp and os.replace.
+    try:
+        tmp = p.with_suffix(".json.fno-tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        return
+
 
 def fire_skill(
     verb: Verb,
@@ -76,6 +105,7 @@ def fire_skill(
     model: str = _DEFAULT_MODEL,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     env_seam: str = _ENV_SEAM,
+    resolve_route_fn: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> DispatchResult:
     """Fire a headless ``claude --print`` for one PR and return the result.
 
@@ -89,9 +119,34 @@ def fire_skill(
     command is built as ``["<seam>"]`` (a single-token override); the runner
     receives it like any other call.
 
+    The ``merged`` verb fires under the routable ``post-merge`` role: when a
+    secondary provider is keyed, ``resolve_route`` returns the GLM env and the
+    fire runs on GLM (with the routed ``ANTHROPIC_MODEL`` env governing the
+    model, so no ``--model`` flag is passed). Without a key it fail-safes to the
+    primary model, byte-identical to today. ``resolve_route_fn`` is an injectable
+    seam for tests.
+
     SUCCESS = rc == 0 AND parsed ``is_error`` is ``False``.
     Every other outcome is a failure.
     """
+    # Resolve the routed env for this verb's role (post-merge is routable;
+    # check is not). None -> unrouted, primary model, env unchanged (fail-safe).
+    route: Optional[dict] = None
+    role = _ROLE_FOR_VERB.get(verb)
+    if role:
+        _route_fn = resolve_route_fn
+        if _route_fn is None:
+            from fno.agents.model_routing import resolve_route
+
+            _route_fn = lambda r: resolve_route(  # noqa: E731
+                r, notice=lambda m: log.info("pr-watch model-routing: %s", m)
+            )
+        try:
+            route = _route_fn(role)
+        except Exception as exc:  # fail-safe: routing must never break a fire
+            log.warning("pr-watch: resolve_route(%s) failed: %s", role, exc)
+            route = None
+
     seam_cmd = os.environ.get(env_seam)
 
     if seam_cmd:
@@ -106,9 +161,22 @@ def fire_skill(
             "json",
             "--dangerously-skip-permissions",
         ]
-        if model:
+        # When routed, the routed ANTHROPIC_MODEL env governs the model; a
+        # --model flag would name an Anthropic id the GLM endpoint lacks.
+        if model and not route:
             cmd += ["--model", model]
         cmd.append(f"/fno:pr {verb} {pr_number}")
+
+    run_kwargs: dict[str, Any] = {}
+    if route:
+        # Cold headless routed fire: bypass the onboarding wall, then hand the
+        # routed env (parent env + route, stale ANTHROPIC_API_KEY dropped so the
+        # routed auth token wins) to the runner.
+        _ensure_onboarding_bypass()
+        spawn_env = dict(os.environ)
+        spawn_env.pop("ANTHROPIC_API_KEY", None)
+        spawn_env.update(route)
+        run_kwargs["env"] = spawn_env
 
     try:
         result = runner(
@@ -117,6 +185,7 @@ def fire_skill(
             text=True,
             check=False,
             cwd=str(repo_dir),
+            **run_kwargs,
         )
     except subprocess.TimeoutExpired as exc:
         log.warning("fire_skill %s #%d timed out: %s", verb, pr_number, exc)

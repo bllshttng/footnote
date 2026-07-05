@@ -56,11 +56,25 @@ def test_consolidate_routes_to_zai_anthropic_endpoint() -> None:
     assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"
 
 
-@pytest.mark.parametrize("role", ["coordinate", "tidy", "orient", "consolidate"])
+@pytest.mark.parametrize(
+    "role", ["coordinate", "tidy", "orient", "consolidate", "post-merge"]
+)
 def test_all_default_routed_roles_route_when_keyed(role: str) -> None:
     route = mr.resolve_route(role, settings=_settings(), env={"ZAI_API_KEY": "k"})
     assert route is not None
     assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_post_merge_is_routable_not_protected() -> None:
+    # Item 3: the post-merge ritual routes to GLM by default (judgment-light),
+    # but must NOT be a protected role (it stays overridable / fail-safe).
+    assert "post-merge" in mr.DEFAULT_ROUTED_ROLES
+    assert "post-merge" not in mr.PROTECTED_ROLES
+
+
+def test_post_merge_fails_safe_without_key() -> None:
+    # No key -> primary Anthropic model (the ritual still fires, on Anthropic).
+    assert mr.resolve_route("post-merge", settings=_settings(), env={}) is None
 
 
 def test_role_is_case_and_space_insensitive() -> None:
