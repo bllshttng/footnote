@@ -301,3 +301,37 @@ def test_peers_without_identity_fails_loud(
             monkeypatch,
             "schema_version: 1\nconfig:\n  review:\n    peers: [codex]\n",
         )
+
+
+# --- optional_apps: honored-if-present, never required (x-4baa) ---
+
+
+def test_optional_apps_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    optional_apps:\n"
+        "      - chatgpt-codex-connector\n",
+    )
+    assert settings.config.review.optional_apps == ["chatgpt-codex-connector"]
+
+
+def test_optional_apps_scalar_coerces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    optional_apps: chatgpt-codex-connector\n",
+    )
+    assert settings.config.review.optional_apps == ["chatgpt-codex-connector"]
+
+
+def test_optional_apps_defaults_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent -> [] (no optional reviewers), independent of the required gate."""
+    settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
+    assert settings.config.review.optional_apps == []

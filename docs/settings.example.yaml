@@ -106,6 +106,8 @@ config:
     peer_identity: null
     # Env var holding the PAT for peer_identity used to post peer reviews to the PR.
     peer_token_env: null
+    # Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it.
+    optional_apps: []
     # Which AI reviewers /pr requests a review from (the INVOCATION list).
     external_reviewers: []
     # Per-agent provider routing for the cross-model review panel.

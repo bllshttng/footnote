@@ -109,6 +109,9 @@ FIELD_META: dict[str, Meta] = {
     "config.review.required_bots": Meta(
         "never", "Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set.",
     ),
+    "config.review.optional_apps": Meta(
+        "advanced", "Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it.",
+    ),
     "config.review.peers": Meta(
         "advanced", "Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries.",
     ),

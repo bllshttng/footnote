@@ -465,6 +465,10 @@ class ReviewBlock(BaseModel):
     # the env var holding that identity's PAT. Required whenever `peers` is set.
     peer_identity: Optional[str] = None
     peer_token_env: Optional[str] = None
+    # Reviewer logins honored-if-present but NOT required (x-4baa): the gate
+    # never waits for them (their absence never blocks - kills the App-bot
+    # usage-limit wedge), but a blocking finding from one still holds the gate.
+    optional_apps: list[str] = Field(default_factory=list)
     # The INVOCATION list (Locked Decision 2): which AI reviewers /pr requests a
     # review from (gemini | codex | coderabbit | claude | none). Distinct from
     # required_bots (the GATE: which GitHub bot logins must have reviewed before
@@ -501,6 +505,29 @@ class ReviewBlock(BaseModel):
             v,
         )
         return None
+
+    @field_validator("optional_apps", mode="before")
+    @classmethod
+    def coerce_optional_apps(cls, v: object) -> object:
+        """Accept a scalar or list; fail-safe a junk value to [] (no optional).
+
+        A bare string (`optional_apps: chatgpt-codex-connector`) coerces to a
+        one-item list. Unlike the required gate, degrading a malformed optional
+        list to [] is safe: it only drops honored-if-present reviewers, never
+        weakens a REQUIRED gate.
+        """
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, list):
+            return v
+        _LOG.warning(
+            "settings.yaml: config.review.optional_apps is not a list or string "
+            "(%r); ignoring it",
+            v,
+        )
+        return []
 
     @field_validator("peers", mode="before")
     @classmethod

@@ -204,6 +204,12 @@ struct Settings {
     peers: Vec<PeerEntry>,
     /// config.review.peer_identity: the shared login peers post under.
     peer_identity: Option<String>,
+    /// config.review.optional_apps: reviewer logins honored-if-present but NOT
+    /// required. The gate never WAITS for them (their absence never blocks -
+    /// this kills the App-bot usage-limit wedge), but a blocking finding from
+    /// one still holds the gate until addressed ("honor if present"). None =
+    /// no optional reviewers.
+    optional_apps: Option<Vec<String>>,
 }
 
 /// A `config.review.peers` entry. `provider` is kept for messaging; the gate
@@ -288,6 +294,7 @@ fn parse_settings(content: &str) -> Settings {
     let mut collecting_reviewers = false;
     let mut collecting_required_bots = false;
     let mut collecting_github_apps = false;
+    let mut collecting_optional_apps = false;
     let mut collecting_peers = false;
 
     // Derive the file's indent unit from the first indented line instead of
@@ -316,6 +323,7 @@ fn parse_settings(content: &str) -> Settings {
             collecting_reviewers = false;
             collecting_required_bots = false;
             collecting_github_apps = false;
+            collecting_optional_apps = false;
             collecting_peers = false;
             if !in_config {
                 in_budget = false;
@@ -345,6 +353,7 @@ fn parse_settings(content: &str) -> Settings {
             collecting_reviewers = trimmed.starts_with("external_reviewers:");
             collecting_required_bots = false;
             collecting_github_apps = false;
+            collecting_optional_apps = false;
             collecting_peers = false;
             if !in_budget {
                 in_attended = false;
@@ -378,6 +387,7 @@ fn parse_settings(content: &str) -> Settings {
             // specific collecting flag in each branch below.
             collecting_required_bots = false;
             collecting_github_apps = false;
+            collecting_optional_apps = false;
             collecting_peers = false;
             if let Some(rest) = trimmed.strip_prefix("required_bots:") {
                 // Strip a trailing YAML inline comment first (codex P2 on
@@ -399,6 +409,13 @@ fn parse_settings(content: &str) -> Settings {
                     ListForm::Block => collecting_github_apps = true,
                     ListForm::Inline(items) => s.github_apps = Some(items),
                     ListForm::Malformed => s.github_apps = scalar_as_singleton(rest),
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("optional_apps:") {
+                match classify_list_rhs(rest) {
+                    ListForm::Empty => s.optional_apps = Some(Vec::new()),
+                    ListForm::Block => collecting_optional_apps = true,
+                    ListForm::Inline(items) => s.optional_apps = Some(items),
+                    ListForm::Malformed => s.optional_apps = scalar_as_singleton(rest),
                 }
             } else if let Some(rest) = trimmed.strip_prefix("peers:") {
                 match classify_list_rhs(rest) {
@@ -442,9 +459,10 @@ fn parse_settings(content: &str) -> Settings {
             continue;
         }
 
-        // required_bots / github_apps list items: "- login" under their key.
+        // required_bots / github_apps / optional_apps list items: "- login"
+        // under their key (item indent 4 key-aligned OR 6 nested).
         if in_config
-            && (collecting_required_bots || collecting_github_apps)
+            && (collecting_required_bots || collecting_github_apps || collecting_optional_apps)
             && trimmed.starts_with('-')
         {
             let bot = strip_inline_comment(trimmed.trim_start_matches('-').trim())
@@ -454,6 +472,8 @@ fn parse_settings(content: &str) -> Settings {
             if !bot.is_empty() {
                 let target = if collecting_github_apps {
                     &mut s.github_apps
+                } else if collecting_optional_apps {
+                    &mut s.optional_apps
                 } else {
                     &mut s.required_bots
                 };
@@ -863,6 +883,7 @@ fn read_pr_info(
     ci_declared_none: bool,
     no_external: bool,
     required_bots: &[String],
+    optional_bots: &[String],
     external_reviewers: &[String],
 ) -> Result<PrInfo, (String, String)> {
     // Read 1: PR state + number + head OID
@@ -961,7 +982,10 @@ fn read_pr_info(
     // no_external OR the repo declares `required_bots: []` (the no-review-gate
     // path, US3 - mirrors ci.declared_none; PR + CI carry the gate). The two
     // skips are orthogonal: one is per-session, the other repo config.
-    let review_skipped = no_external || required_bots.is_empty();
+    // Skip the review reads only when there is NOTHING to honor: no required
+    // login AND no optional login. An optional-only gate still reads (to catch
+    // an optional blocking finding), but its presence is never required.
+    let review_skipped = no_external || (required_bots.is_empty() && optional_bots.is_empty());
     let (latest_review_ts, reviewed, missing_bots, unaddressed_findings) = if review_skipped {
         ("none".to_string(), true, Vec::new(), Vec::new()) // skip reads, treat as reviewed
     } else {
@@ -979,7 +1003,17 @@ fn read_pr_info(
         let reviews_json: Value = serde_json::from_slice(&reviews_out.stdout)
             .map_err(|_| ("pr_reviews_parse".to_string(), String::new()))?;
 
+        // PRESENCE is required-only: an optional login's absence must never
+        // create a missing_bot (never wait for it). FINDINGS honor the union:
+        // an optional login's blocking P1 still holds the gate ("honor if
+        // present"). A dedup keeps a login that is in both lists counted once.
         let info = compute_review_info(&reviews_json, required_bots);
+        let mut findings_bots: Vec<String> = required_bots.to_vec();
+        for b in optional_bots {
+            if !findings_bots.iter().any(|x| x == b) {
+                findings_bots.push(b.clone());
+            }
+        }
 
         // Read 4: inline review comments (NEW in step 2). Codex's P1s land on
         // the /pulls/N/comments REST endpoint, which `gh pr view --json
@@ -1049,7 +1083,7 @@ fn read_pr_info(
         let (inline_ts, unaddressed) = compute_unaddressed_findings(
             &inline_comments,
             &commit_dates,
-            required_bots,
+            &findings_bots,
             external_reviewers,
         );
 
@@ -1180,6 +1214,13 @@ fn resolved_required_bots(settings: &Settings) -> Vec<String> {
         }
     }
     logins
+}
+
+/// The OPTIONAL reviewer logins (config.review.optional_apps): honored-if-
+/// present but never required. Their blocking findings hold the gate, but their
+/// absence never does (x-4baa "honor if present"). Empty when unset.
+fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
+    settings.optional_apps.clone().unwrap_or_default()
 }
 
 /// Case-insensitive substring match so a configured short name ("codex") or a
@@ -2059,6 +2100,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
             if local.github_apps.is_some() {
                 merged.github_apps = local.github_apps;
             }
+            if local.optional_apps.is_some() {
+                merged.optional_apps = local.optional_apps;
+            }
             if !local.peers.is_empty() {
                 merged.peers = local.peers;
             }
@@ -2071,6 +2115,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
     // Resolve the must-have-reviewed list once (code default when unset).
     let required_bots = resolved_required_bots(&settings);
+    let optional_bots = resolved_optional_bots(&settings);
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -2515,6 +2560,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
             settings.ci_declared_none,
             manifest.no_external,
             &required_bots,
+            &optional_bots,
             &settings.external_reviewers,
         );
 
@@ -2751,6 +2797,7 @@ fn run_done(
     ci_declared_none: bool,
     no_external: bool,
     required_bots: &[String],
+    optional_bots: &[String],
     external_reviewers: &[String],
 ) -> Result<PrInfo, (String, String)> {
     read_pr_info(
@@ -2759,6 +2806,7 @@ fn run_done(
         ci_declared_none,
         no_external,
         required_bots,
+        optional_bots,
         external_reviewers,
     )
 }
@@ -3848,6 +3896,56 @@ mod tests {
     }
 
     // --- github_apps rename + required_bots alias (x-4baa US3/US4) ---
+
+    // --- optional_apps: honored-if-present, never required (x-4baa) ---
+
+    #[test]
+    fn parse_settings_optional_apps_forms() {
+        // Inline, block-under, key-aligned (PyYAML), and bare-scalar all parse.
+        let inline =
+            parse_settings("config:\n  review:\n    optional_apps: [chatgpt-codex-connector]\n");
+        assert_eq!(
+            inline.optional_apps,
+            Some(vec!["chatgpt-codex-connector".to_string()])
+        );
+        let block = parse_settings(
+            "config:\n  review:\n    optional_apps:\n      - chatgpt-codex-connector\n",
+        );
+        assert_eq!(
+            block.optional_apps,
+            Some(vec!["chatgpt-codex-connector".to_string()])
+        );
+        let key_aligned = parse_settings(
+            "config:\n  review:\n    optional_apps:\n    - chatgpt-codex-connector\n",
+        );
+        assert_eq!(
+            key_aligned.optional_apps,
+            Some(vec!["chatgpt-codex-connector".to_string()])
+        );
+        let scalar =
+            parse_settings("config:\n  review:\n    optional_apps: chatgpt-codex-connector\n");
+        assert_eq!(
+            scalar.optional_apps,
+            Some(vec!["chatgpt-codex-connector".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolved_optional_is_separate_from_required() {
+        // An optional-only config leaves the REQUIRED set empty (never waited
+        // on) while the optional set carries the honored-if-present login.
+        let s = parse_settings(
+            "config:\n  review:\n    github_apps: []\n    optional_apps: [chatgpt-codex-connector]\n",
+        );
+        assert!(
+            resolved_required_bots(&s).is_empty(),
+            "optional must not be required"
+        );
+        assert_eq!(
+            resolved_optional_bots(&s),
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+    }
 
     #[test]
     fn parse_settings_github_apps_block_list() {
