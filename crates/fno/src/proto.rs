@@ -101,7 +101,7 @@ use crate::tree::{Dir, Rect, TabId};
 /// v15: `MouseKind::Move` (1003 any-motion hover reports) drives focus-follows-
 /// mouse; `Command::DispatchNode(id)` starts a targeted interactive session from
 /// a clicked work-queue card (the confirm path).
-pub const PROTO_VERSION: u32 = 15;
+pub const PROTO_VERSION: u32 = 16;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -489,6 +489,14 @@ pub enum Command {
     /// guarantee all hold exactly as leader+g. Value over `DispatchNext`: the
     /// operator picks WHICH card, not just "next".
     DispatchNode(String),
+    /// (v16) Create a NAMED squad (a workspace) explicitly, bypassing the
+    /// attach cwd-resolution path entirely (Unit 2). The server rejects a
+    /// blank/whitespace-only `name` with a notice (nothing created); otherwise
+    /// it seeds a squad named `name` with `origins = origin.into_iter().collect()`
+    /// and one shell tab rooted at `origin` (or the creating client's squad
+    /// cwd), then switches the sender's view onto it. The `+` sideline button
+    /// sends this after the name-input overlay.
+    NewSquad { name: String, origin: Option<String> },
 }
 
 /// Server -> client.

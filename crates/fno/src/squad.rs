@@ -31,17 +31,46 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 // Container model
 // ---------------------------------------------------------------------------
 
-/// One squad: a canonical-cwd-keyed group of tabs. Identity is `id`
-/// (session-scoped, monotonic, never reused - Locked Decision 6); the
-/// grouping key is `canonical_cwd` (resolved PATH, never the basename - two
-/// repos sharing a basename stay distinct). Display naming happens at Layout
-/// build via [`display_names`].
+/// One squad: a NAMED grouping of tabs (a workspace). Identity is `id`
+/// (session-scoped, monotonic, never reused - Locked Decision 6), NOT a cwd:
+/// two squads may now share OR lack an origin path without merging or
+/// orphaning. `origins` are the paths this squad groups (`origins.first()` is
+/// the optional source-origination path, kept as an attach-time convenience);
+/// a squad born from an explicit `NewSquad` carries a user-given `name`, while
+/// an auto-created (attach) squad leaves `name` `None` and derives its display
+/// label from `origins` via [`display_names`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Squad {
     pub id: u64,
-    pub canonical_cwd: String,
+    /// The paths this squad groups. Empty for a named squad created with no
+    /// origin; one entry for an attach-born or single-origin squad; several
+    /// for the epic's multi-origin north star.
+    pub origins: Vec<String>,
+    /// A user-given workspace name (explicit `NewSquad`), or `None` when the
+    /// display label derives from `origins`.
+    pub name: Option<String>,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+}
+
+impl Squad {
+    /// The source-origination path (`origins.first()`), or `""` for a named
+    /// squad with no origin. Reads at call sites that only ever want the one
+    /// primary path (a new pane's cwd, the status-row label) without churning
+    /// through the whole `origins` vec.
+    pub fn canonical_cwd(&self) -> &str {
+        self.origins.first().map(String::as_str).unwrap_or("")
+    }
+
+    /// Whether `path` is one of this squad's origins or a child of one. The
+    /// shared predicate behind attach origin-matching and the watch-only
+    /// agent→squad fallback: an empty-origin (named) squad owns nothing, so it
+    /// is never auto-joined.
+    pub fn owns_path(&self, path: &str) -> bool {
+        self.origins.iter().any(|o| {
+            path == o || path.strip_prefix(o.as_str()).is_some_and(|r| r.starts_with('/'))
+        })
+    }
 }
 
 /// The server's whole layout world: squads in creation order (stable sideline
@@ -99,24 +128,27 @@ impl Session {
         self.squads.iter_mut().find(|s| s.id == id)
     }
 
-    /// Squad identity keys on the resolved PATH (Invariant: worktree attaches
-    /// converge; same-basename repos stay distinct).
-    pub fn find_by_cwd(&self, canonical_cwd: &str) -> Option<u64> {
-        self.squads
-            .iter()
-            .find(|s| s.canonical_cwd == canonical_cwd)
-            .map(|s| s.id)
+    /// The squad whose `origins` own `cwd` (exact or child path): worktree
+    /// attaches still converge on the resolved repo root, and an attach from a
+    /// subdir of a named squad's origin joins it rather than spawning a new
+    /// squad. Named (empty-origin) squads own nothing, so they are bypassed
+    /// here - explicit creation is the only way into them.
+    pub fn find_by_cwd(&self, cwd: &str) -> Option<u64> {
+        self.squads.iter().find(|s| s.owns_path(cwd)).map(|s| s.id)
     }
 
     /// Register a fresh squad (with its first tab already built) and make it
     /// active. The caller allocates `id` and has already spawned the first
-    /// pane's PTY (atomic split ordering, Locked Decision 7).
-    pub fn add_squad(&mut self, id: u64, canonical_cwd: String, first_tab: Tab) {
+    /// pane's PTY (atomic split ordering, Locked Decision 7). `name` is `Some`
+    /// only for an explicit `NewSquad`; an attach-born squad passes `None` and
+    /// derives its label from `origins`.
+    pub fn add_squad(&mut self, id: u64, origins: Vec<String>, name: Option<String>, first_tab: Tab) {
         // A caller-built tab id must never collide with a future mint.
         self.next_tab_id = self.next_tab_id.max(first_tab.id);
         self.squads.push(Squad {
             id,
-            canonical_cwd,
+            origins,
+            name,
             tabs: vec![first_tab],
             active_tab: 0,
         });
@@ -338,9 +370,9 @@ mod tests {
         let mut s = Session::default();
         let (t1, t2) = (s.mint_tab_id(), s.mint_tab_id());
         assert!(t1 > 0 && t2 > t1, "ids are monotonic and never 0");
-        s.add_squad(1, "/a".into(), tab(&[10]));
+        s.add_squad(1, vec!["/a".into()], None, tab(&[10]));
         s.squad_mut(1).unwrap().tabs.push(tab(&[11]));
-        s.add_squad(2, "/b".into(), tab(&[20]));
+        s.add_squad(2, vec!["/b".into()], None, tab(&[20]));
         assert_eq!(s.find_tab(10), Some((1, 0)));
         assert_eq!(s.find_tab(11), Some((1, 1)));
         assert_eq!(s.find_tab(20), Some((2, 0)));
@@ -356,19 +388,44 @@ mod tests {
     #[test]
     fn squad_add_and_find_by_canonical_cwd() {
         let mut s = Session::default();
-        s.add_squad(1, "/code/footnote".into(), tab(&[10]));
-        s.add_squad(2, "/code/other".into(), tab(&[20]));
+        s.add_squad(1, vec!["/code/footnote".into()], None, tab(&[10]));
+        s.add_squad(2, vec!["/code/other".into()], None, tab(&[20]));
         assert_eq!(s.find_by_cwd("/code/footnote"), Some(1));
         assert_eq!(s.find_by_cwd("/code/none"), None);
+        // Child-path attach joins the owning squad rather than spawning a new
+        // one (change #4); a bare-prefix non-child (`/code/footnote-2`) does not.
+        assert_eq!(s.find_by_cwd("/code/footnote/sub/dir"), Some(1));
+        assert_eq!(s.find_by_cwd("/code/footnote-2"), None);
         assert_eq!(s.active_squad, Some(2), "a fresh squad becomes active");
         assert_eq!(s.find_pane(10), Some((1, 0)));
         assert_eq!(s.find_pane(99), None);
     }
 
     #[test]
+    fn squad_named_squads_stay_distinct_on_shared_or_empty_origins() {
+        // AC1-EDGE (epic Invariants: identity is the stable id, not cwd). Two
+        // named squads with the SAME origin, and two with NO origin, remain
+        // distinct squads keyed on id - never merged or orphaned.
+        let mut s = Session::default();
+        s.add_squad(1, vec!["/shared".into()], Some("work".into()), tab(&[10]));
+        s.add_squad(2, vec!["/shared".into()], Some("play".into()), tab(&[20]));
+        s.add_squad(3, vec![], Some("scratch-a".into()), tab(&[30]));
+        s.add_squad(4, vec![], Some("scratch-b".into()), tab(&[40]));
+        assert_eq!(s.squads.len(), 4, "shared/empty origins never collapse");
+        // A named squad's `canonical_cwd()` degrades to "" when it has no
+        // origin, and it owns no path (attach can never auto-join it).
+        assert_eq!(s.squad(3).unwrap().canonical_cwd(), "");
+        assert!(!s.squad(3).unwrap().owns_path("/anything"));
+        // Shared-origin squads are BOTH owners; find_by_cwd returns the first
+        // (deterministic), and the second still exists independently.
+        assert_eq!(s.squad(1).unwrap().canonical_cwd(), "/shared");
+        assert!(s.squad(2).unwrap().owns_path("/shared/deep"));
+    }
+
+    #[test]
     fn squad_remove_tab_clamps_active_and_cascades() {
         let mut s = Session::default();
-        s.add_squad(1, "/a".into(), tab(&[10]));
+        s.add_squad(1, vec!["/a".into()], None, tab(&[10]));
         s.squad_mut(1).unwrap().tabs.push(tab(&[11]));
         s.squad_mut(1).unwrap().tabs.push(tab(&[12]));
         s.squad_mut(1).unwrap().active_tab = 2;
@@ -387,8 +444,8 @@ mod tests {
     #[test]
     fn squad_remove_last_tab_falls_back_to_surviving_squad() {
         let mut s = Session::default();
-        s.add_squad(1, "/a".into(), tab(&[10]));
-        s.add_squad(2, "/b".into(), tab(&[20]));
+        s.add_squad(1, vec!["/a".into()], None, tab(&[10]));
+        s.add_squad(2, vec!["/b".into()], None, tab(&[20]));
         assert_eq!(s.active_squad, Some(2));
         assert_eq!(s.remove_tab(2, 0), RemoveOutcome::SquadRemoved);
         assert_eq!(s.active_squad, Some(1), "active falls back to a survivor");
