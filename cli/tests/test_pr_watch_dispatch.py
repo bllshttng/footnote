@@ -1330,3 +1330,187 @@ class TestPerRepoReviewers:
         # Verify that load_settings_for_repo was called with the repo dirs
         assert repo_a in call_log, f"load_settings_for_repo not called with repo_a; calls: {call_log}"
         assert repo_b in call_log, f"load_settings_for_repo not called with repo_b; calls: {call_log}"
+
+
+# ---------------------------------------------------------------------------
+# Item 3: the post-merge ritual fires under the routable post-merge role
+# ---------------------------------------------------------------------------
+
+
+class TestPostMergeRouting:
+    """The ``merged`` fire routes to GLM when a route resolves; ``check`` never
+    routes; without a route both fail-safe to today's behavior."""
+
+    _GLM_ROUTE = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "zk-secret",
+        "ANTHROPIC_MODEL": "glm-5.2",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
+    }
+
+    def _capturing_runner(self, captured):
+        def runner(cmd, **kw):
+            captured["cmd"] = cmd
+            captured["env"] = kw.get("env")
+            return _claude_ok_response()
+
+        return runner
+
+    def test_merged_fire_carries_glm_env_when_routed(self, tmp_path, monkeypatch):
+        """AC: with post-merge routed, the ritual fire carries the GLM env and
+        drops the stale ANTHROPIC_API_KEY so the routed token wins."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stale")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-sub-stale")
+        captured = {}
+        result = fire_skill(
+            "merged",
+            5,
+            tmp_path,
+            runner=self._capturing_runner(captured),
+            resolve_route_fn=lambda role: dict(self._GLM_ROUTE),
+        )
+        assert result.ok is True
+        env = captured["env"]
+        assert env is not None
+        assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
+        assert env["ANTHROPIC_MODEL"] == "glm-5.2"
+        assert "ANTHROPIC_API_KEY" not in env  # stale key dropped on route
+        # Subscription OAuth token dropped too, else it would win over the route.
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+        # A routed fire must NOT pin --model (the GLM endpoint lacks the id).
+        assert "--model" not in captured["cmd"]
+
+    def test_merged_fire_routes_by_post_merge_role(self, tmp_path):
+        """The role handed to resolve_route for the merged verb is post-merge."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        seen = {}
+
+        def route_fn(role):
+            seen["role"] = role
+            return dict(self._GLM_ROUTE)
+
+        fire_skill("merged", 5, tmp_path, runner=self._capturing_runner({}), resolve_route_fn=route_fn)
+        assert seen["role"] == "post-merge"
+
+    def test_merged_fire_failsafe_without_route_keeps_default_model(self, tmp_path):
+        """AC: without a key (route is None) the fire is byte-identical to today:
+        default --model, no env override."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        captured = {}
+        result = fire_skill(
+            "merged",
+            5,
+            tmp_path,
+            runner=self._capturing_runner(captured),
+            resolve_route_fn=lambda role: None,
+        )
+        assert result.ok is True
+        assert captured["env"] is None  # unrouted -> parent env inherited
+        assert "--model" in captured["cmd"]
+
+    def test_check_verb_never_routes(self, tmp_path):
+        """AC: the review fire (check) implements external review and must never
+        route, even if a route fn would return one."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        called = {"n": 0}
+
+        def route_fn(role):
+            called["n"] += 1
+            return dict(self._GLM_ROUTE)
+
+        captured = {}
+        fire_skill("check", 7, tmp_path, runner=self._capturing_runner(captured), resolve_route_fn=route_fn)
+        assert called["n"] == 0  # check has no routable role -> fn never consulted
+        assert captured["env"] is None
+        assert "--model" in captured["cmd"]
+
+    def test_routing_failure_falls_back_and_still_fires(self, tmp_path):
+        """A resolve_route that raises must not break the fire (fail-safe)."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        def boom(role):
+            raise RuntimeError("routing exploded")
+
+        captured = {}
+        result = fire_skill("merged", 5, tmp_path, runner=self._capturing_runner(captured), resolve_route_fn=boom)
+        assert result.ok is True
+        assert captured["env"] is None  # degraded to unrouted
+        assert "--model" in captured["cmd"]
+
+    def test_routed_fire_presets_onboarding_bypass(self, tmp_path, monkeypatch):
+        """AC: a cold headless routed fire pre-sets hasCompletedOnboarding so it
+        does not hang on the login wall."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        import stat as _stat
+
+        home = tmp_path / "home"
+        home.mkdir()
+        cj = home / ".claude.json"
+        cj.write_text(
+            json.dumps({"hasCompletedOnboarding": False, "other": 1}), encoding="utf-8"
+        )
+        cj.chmod(0o600)  # a credential-bearing file is typically 0600
+        monkeypatch.setenv("HOME", str(home))
+
+        fire_skill(
+            "merged",
+            5,
+            tmp_path,
+            runner=self._capturing_runner({}),
+            resolve_route_fn=lambda role: dict(self._GLM_ROUTE),
+        )
+        data = json.loads(cj.read_text(encoding="utf-8"))
+        assert data["hasCompletedOnboarding"] is True
+        assert data["other"] == 1  # other keys preserved
+        # The 0600 mode must survive the rewrite (never downgraded to 0644).
+        assert _stat.S_IMODE(cj.stat().st_mode) == 0o600
+
+    def test_routed_fire_creates_claude_json_when_absent(self, tmp_path, monkeypatch):
+        """A cold env with no ~/.claude.json: the routed fire creates one with
+        the onboarding flag rather than silently doing nothing."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        home = tmp_path / "home"
+        home.mkdir()  # no .claude.json inside
+        monkeypatch.setenv("HOME", str(home))
+
+        fire_skill(
+            "merged",
+            5,
+            tmp_path,
+            runner=self._capturing_runner({}),
+            resolve_route_fn=lambda role: dict(self._GLM_ROUTE),
+        )
+        cj = home / ".claude.json"
+        assert cj.exists()
+        assert json.loads(cj.read_text(encoding="utf-8"))["hasCompletedOnboarding"] is True
+        # A newly-created credential file must be 0600, not umask-derived.
+        import stat as _stat
+
+        assert _stat.S_IMODE(cj.stat().st_mode) == 0o600
+
+    def test_unrouted_fire_does_not_touch_onboarding(self, tmp_path, monkeypatch):
+        """An unrouted (Anthropic) fire must not rewrite the user's claude.json."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        home = tmp_path / "home"
+        home.mkdir()
+        original = json.dumps({"hasCompletedOnboarding": False})
+        (home / ".claude.json").write_text(original, encoding="utf-8")
+        monkeypatch.setenv("HOME", str(home))
+
+        fire_skill(
+            "merged",
+            5,
+            tmp_path,
+            runner=self._capturing_runner({}),
+            resolve_route_fn=lambda role: None,
+        )
+        assert (home / ".claude.json").read_text(encoding="utf-8") == original

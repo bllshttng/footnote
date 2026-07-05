@@ -20,10 +20,17 @@ consumers and a future codex/openai lane, not for a claude worker. A provider
 whose ``protocol`` is not ``anthropic`` is skipped here with a notice.
 
 Claude Code internally requests opus/sonnet/haiku tiers (background tasks use
-haiku). Setting ALL of ``ANTHROPIC_MODEL`` + the three ``ANTHROPIC_DEFAULT_*``
-tier vars to the routed model sends the WHOLE worker to the secondary provider,
-so no Anthropic usage is recorded (AC1-HP). An operator who wants differentiated
-tiers (cheaper haiku) overrides specific vars via ``extra_env``.
+haiku). Setting ``ANTHROPIC_MODEL`` + the three ``ANTHROPIC_DEFAULT_*`` tier
+vars to the routed model sends the WHOLE worker to the secondary provider, so no
+Anthropic usage is recorded (AC1-HP). The background (haiku) tier defaults to
+the provider's cheaper ``haiku_model`` (zai -> ``glm-4.5-air``) so judgment-light
+background traffic runs cheap on the SAME secondary provider; opus/sonnet stay
+on the role model. A provider with no ``haiku_model`` keeps the role model on
+every tier. Operators can further differentiate any tier via ``extra_env``.
+
+A routed model name carrying the ``[1m]`` suffix (1M-context) also gets
+``CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`` injected, or the 1M window is
+silently lost; an explicit ``extra_env`` value wins.
 
 Two non-negotiable invariants:
 
@@ -37,7 +44,7 @@ Two non-negotiable invariants:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Mapping, Optional
+from typing import TYPE_CHECKING, Callable, Mapping, NamedTuple, Optional
 
 if TYPE_CHECKING:
     from fno.config import ModelRoutingBlock, SettingsModel
@@ -52,6 +59,13 @@ DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/anthropic"
 # (drift-guarded by test_config_defaults_match_module_constants).
 DEFAULT_SECONDARY_MODEL = "glm-5.2"
 
+# Cheaper model for the background (haiku) tier of the built-in zai provider.
+# Claude Code runs background tasks on haiku; routing the haiku tier to this
+# cheaper GLM keeps judgment-light background traffic cheap while opus/sonnet
+# stay on the role model. Kept in lockstep with the schema default
+# (drift-guarded by test_config_defaults_match_module_constants).
+DEFAULT_ZAI_HAIKU_MODEL = "glm-4.5-air"
+
 # Built-in providers so a bare key (e.g. ZAI_API_KEY) routes with zero config.
 # A config.model_routing.providers entry of the same name overrides per-field.
 _DEFAULT_PROVIDERS: dict[str, dict[str, Optional[str]]] = {
@@ -60,12 +74,17 @@ _DEFAULT_PROVIDERS: dict[str, dict[str, Optional[str]]] = {
         "base_url": DEFAULT_ZAI_BASE_URL,
         "api_key_env": "ZAI_API_KEY",
         "api_key_file": None,
+        "haiku_model": DEFAULT_ZAI_HAIKU_MODEL,
     },
 }
 
 # Roles routed to a secondary provider by default (provider 'zai', the default
-# model). The config roles map overrides per role.
-DEFAULT_ROUTED_ROLES = ("coordinate", "tidy", "orient", "consolidate")
+# model). The config roles map overrides per role. ``post-merge`` is the
+# recurring, judgment-light post-merge ritual fire (reconcile / retro / triage);
+# its dangerous state mutations stay deterministic CLI, so a weaker model only
+# writes prose + picks triage. Routable, NOT protected (fail-safe to Anthropic
+# without a key, like every routed role).
+DEFAULT_ROUTED_ROLES = ("coordinate", "tidy", "orient", "consolidate", "post-merge")
 
 # Roles the secondary provider must NEVER touch (writes a diff / renders a
 # correctness verdict). Hard guard, enforced before any config is read.
@@ -225,11 +244,166 @@ def resolve_route(
     route = {"ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_AUTH_TOKEN": key}
     for k in _MODEL_ENV_KEYS:
         route[k] = model
+    # Item 1: route the background (haiku) tier to the provider's cheaper
+    # haiku_model (zai -> glm-4.5-air). Still the SAME secondary provider
+    # (base_url + token), so the whole worker stays off Anthropic; only the
+    # background model is cheaper. A provider with no haiku_model keeps the role
+    # model on the haiku tier (no regression, never an empty/invalid id).
+    haiku_model = provider.get("haiku_model")
+    if haiku_model:
+        route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haiku_model
+    # Item 2: a routed model carrying the [1m] suffix needs the 1M-context
+    # compact window or it silently loses the window. Injected before extra_env
+    # so an explicit extra_env value still wins.
+    if model.endswith("[1m]"):
+        route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
     # extra_env (timeouts, flags, per-tier model overrides) merged last so an
     # operator can differentiate tiers or tune the routed worker.
     for k, v in (getattr(block, "extra_env", None) or {}).items():
         route[str(k)] = str(v)
     return route
+
+
+# Default codex wire protocol for a third-party OpenAI-compatible endpoint
+# (z.ai's paas/v4 speaks Chat Completions). Codex's own default is "responses"
+# (OpenAI's API); a routed third-party provider almost always wants "chat".
+DEFAULT_CODEX_WIRE_API = "chat"
+
+
+class CodexRoute(NamedTuple):
+    """Codex-lane (OpenAI-protocol) routing result.
+
+    Codex does NOT read ``OPENAI_BASE_URL`` from the env; a custom endpoint is
+    selected via inline ``-c`` config (``model_providers.<name>=...`` +
+    ``model_provider=<name>`` + ``model=<model>``), with the API key supplied in
+    the ``env_key`` env var the config names. ``env`` is merged into the codex
+    spawn env; ``config_args`` is prepended to the codex argv as global flags.
+    """
+
+    env: dict[str, str]
+    config_args: list[str]
+
+
+def _toml_literal(value: str) -> Optional[str]:
+    """Wrap ``value`` as a TOML literal string (single-quoted, no escapes), or
+    None if it can't be embedded safely. Rejects a single quote (would break the
+    literal string) AND any control char - notably NUL, which would otherwise
+    survive into the codex argv and make ``subprocess`` raise ``ValueError:
+    embedded null byte``, breaking resolve_codex_route's never-raise contract.
+    These are controlled config values we won't try to escape; bail fail-safe."""
+    if "'" in value or any(ord(c) < 0x20 for c in value):
+        return None
+    return f"'{value}'"
+
+
+def resolve_codex_route(
+    role: Optional[str],
+    *,
+    settings: "Optional[SettingsModel]" = None,
+    env: Optional[Mapping[str, str]] = None,
+    notice: Optional[Callable[[str], object]] = None,
+) -> Optional[CodexRoute]:
+    """Resolve codex-lane routing for ``role`` against an OpenAI-protocol
+    provider, or ``None`` (use codex's default config, change nothing).
+
+    Mirrors :func:`resolve_route`'s fail-safe contract: a protected role, a
+    disabled block, an unrouted role, an unconfigured provider, a NON-openai
+    provider (that belongs to the claude lane), a missing base_url/key, or a
+    value that can't be safely embedded in TOML all return ``None`` (with a
+    one-line notice where a misconfiguration is worth surfacing). Never raises.
+    """
+    name = _normalize(role)
+    if not name or name in PROTECTED_ROLES:
+        return None
+
+    if env is None:
+        import os
+
+        env = os.environ
+
+    block = _routing_block(settings)
+    if not getattr(block, "enabled", True):
+        return None
+
+    target = _role_target(name, block)
+    if target is None:
+        return None
+    pname, model = target
+
+    provider = _resolve_provider(pname, block)
+    if provider is None:
+        _emit(
+            notice,
+            f"model-routing (codex): provider {pname!r} for role {name!r} is "
+            f"not configured; using the default codex model",
+        )
+        return None
+
+    protocol = (provider.get("protocol") or "anthropic").lower()
+    if protocol != "openai":
+        # An anthropic provider belongs to the claude lane, not here. Silent
+        # None (not an error): a role shared across lanes just no-ops on codex.
+        return None
+
+    base_url = provider.get("base_url") or ""
+    if not base_url:
+        _emit(notice, f"model-routing (codex): provider {pname!r} has no base_url")
+        return None
+
+    api_key_env = provider.get("api_key_env") or "OPENAI_API_KEY"
+    key = _resolve_key(provider, env)
+    if not key:
+        _emit(
+            notice,
+            f"model-routing (codex): no API key for provider {pname!r} "
+            f"(role {name!r}); using the default codex model",
+        )
+        return None
+
+    # The provider name becomes a TOML table key (model_providers.<pname>) and a
+    # config value; only a bareword identifier is safe in the -c argument.
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", pname):
+        _emit(
+            notice,
+            f"model-routing (codex): provider name {pname!r} is not a safe codex "
+            f"provider id; using the default codex model",
+        )
+        return None
+
+    wire_api = provider.get("wire_api") or DEFAULT_CODEX_WIRE_API
+
+    # Build the inline model-provider config. Every embedded value is a TOML
+    # literal string; a value we can't embed safely aborts the route.
+    lits = {
+        "base_url": _toml_literal(base_url),
+        "env_key": _toml_literal(api_key_env),
+        "wire_api": _toml_literal(wire_api),
+        "provider": _toml_literal(pname),
+        "model": _toml_literal(model),
+    }
+    if any(v is None for v in lits.values()):
+        _emit(
+            notice,
+            f"model-routing (codex): provider {pname!r} has a value that can't "
+            f"be embedded in TOML; using the default codex model",
+        )
+        return None
+
+    provider_table = (
+        f"model_providers.{pname}={{ base_url = {lits['base_url']}, "
+        f"env_key = {lits['env_key']}, wire_api = {lits['wire_api']} }}"
+    )
+    config_args = [
+        "-c",
+        provider_table,
+        "-c",
+        f"model_provider={lits['provider']}",
+        "-c",
+        f"model={lits['model']}",
+    ]
+    return CodexRoute(env={api_key_env: key}, config_args=config_args)
 
 
 def _routing_block(settings: "Optional[SettingsModel]") -> "ModelRoutingBlock":

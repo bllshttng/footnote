@@ -388,6 +388,7 @@ def _run_codex(
     expect_session: bool,
     popen_cwd: Optional[Path] = None,
     agent_self: Optional[str] = None,
+    route_env: Optional[dict[str, str]] = None,
 ) -> CodexResult:
     """Shared subprocess driver for :func:`create` and :func:`resume`.
 
@@ -439,10 +440,15 @@ def _run_codex(
     # from inside this codex session attribute back to the parent agent.
     # When agent_self is None (direct caller, no parent context) we pass
     # env=None so the child inherits the parent process env unchanged.
-    if agent_self is not None:
+    if agent_self is not None or route_env:
         spawn_env: Optional[dict[str, str]] = dict(os.environ)
-        spawn_env["FNO_AGENT_SELF"] = agent_self
-        spawn_env["FNO_AGENT_PROVIDER"] = "codex"
+        if agent_self is not None:
+            spawn_env["FNO_AGENT_SELF"] = agent_self
+            spawn_env["FNO_AGENT_PROVIDER"] = "codex"
+        if route_env:
+            # Codex-lane routing (x-db50 Item 4): the api key named by the
+            # model_provider's env_key. The base_url/model ride the -c config.
+            spawn_env.update(route_env)
     else:
         spawn_env = None
 
@@ -614,6 +620,7 @@ def create(
     timeout: Optional[float] = None,
     agent_self: Optional[str] = None,
     headless_yolo: Optional[bool] = None,
+    role: Optional[str] = None,
 ) -> CodexResult:
     """Spawn ``codex exec --json --cd <cwd> --skip-git-repo-check ...``.
 
@@ -631,10 +638,24 @@ def create(
     """
     full_prompt = inject_from_name(prompt, from_name)
     eff_yolo = _effective_yolo(yolo, headless_yolo)
+    # Role-based routing (x-db50 Item 4). An openai-protocol provider routes the
+    # codex lane via inline `-c` config (codex ignores OPENAI_BASE_URL); the api
+    # key rides the spawn env. None (no role / non-openai provider / missing key)
+    # changes nothing (fail-safe). `-c` flags are GLOBAL, so they precede `exec`.
+    config_args: list[str] = []
+    route_env: dict[str, str] = {}
+    if role:
+        from fno.agents.model_routing import resolve_codex_route
+
+        codex_route = resolve_codex_route(role, notice=_stderr_warn)
+        if codex_route is not None:
+            config_args = codex_route.config_args
+            route_env = codex_route.env
     # Approval is a GLOBAL flag and must precede `exec`; sandbox is an `exec`
     # flag and follows it. See `approval_flag` / `sandbox_flag`.
     argv = [
         "codex",
+        *config_args,
         *approval_flag(eff_yolo),
         "exec", "--json",
         "-C", str(cwd),
@@ -649,6 +670,7 @@ def create(
         expect_session=True,
         popen_cwd=None,
         agent_self=agent_self,
+        route_env=route_env or None,
     )
 
 

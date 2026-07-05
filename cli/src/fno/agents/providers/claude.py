@@ -202,13 +202,15 @@ def bg_create(
     # provider key merges ANTHROPIC_BASE_URL/AUTH_TOKEN + the model env vars so
     # the worker runs on the secondary provider (z.ai GLM, ...); no role /
     # production role / missing key returns None and changes nothing
-    # (fail-safe). Clear any stale ANTHROPIC_API_KEY so the routed auth token is
-    # the credential that wins for the routed worker.
+    # (fail-safe). Clear any parent Anthropic credential (a stale API key OR a
+    # subscription OAuth token) so the routed auth token is the one that wins;
+    # otherwise a lingering credential sends the routed worker back to Anthropic.
     from fno.agents.model_routing import resolve_route
 
     route = resolve_route(role, notice=lambda m: print(m, file=sys.stderr))
     if route:
         spawn_env.pop("ANTHROPIC_API_KEY", None)
+        spawn_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         spawn_env.update(route)
 
     start = time.monotonic()

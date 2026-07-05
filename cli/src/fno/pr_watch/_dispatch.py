@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
@@ -67,6 +69,60 @@ class TickResult:
 _ENV_SEAM = "PR_WATCH_FIRE_CMD"
 _DEFAULT_MODEL = "claude-haiku-4-5"
 
+# The post-merge ritual (verb ``merged``) is judgment-light and cost-sensitive,
+# so it fires under a routable identity: with a keyed secondary provider it runs
+# on GLM; without one it fail-safes to the primary Anthropic model. The review
+# fire (``check``) implements external review and stays on the default model.
+_ROLE_FOR_VERB: dict[str, str] = {"merged": "post-merge"}
+
+
+def _ensure_onboarding_bypass() -> None:
+    """Pre-set ``~/.claude.json`` ``hasCompletedOnboarding`` so a cold headless
+    routed fire does not hang on the "Log in to Anthropic" wall (a non-Anthropic
+    endpoint can trip it in launchd). Idempotent and best-effort: only flips a
+    missing/false value, never raises."""
+    p = Path.home() / ".claude.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # A cold environment may have no ~/.claude.json at all; create a minimal
+        # one carrying the flag (claude fills the rest on first run) so the fire
+        # still clears the onboarding wall.
+        data = {}
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict) or data.get("hasCompletedOnboarding") is True:
+        return
+    data["hasCompletedOnboarding"] = True
+    # Atomic write: ~/.claude.json is claude's central config (may hold tokens);
+    # a truncate-then-write killed mid-flight would corrupt it. mkstemp creates
+    # the temp 0600 up front (no world-readable window while it holds the config
+    # contents), in the same dir so os.replace is atomic; chmod then restores the
+    # original mode (default 0600 for a new file) so a 0600 credential file is
+    # never downgraded.
+    try:
+        mode = stat.S_IMODE(p.stat().st_mode) if p.exists() else 0o600
+    except OSError:
+        mode = 0o600
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(p.parent), prefix=".claude.json.fno-tmp."
+        )
+    except OSError:
+        return
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2))
+        os.chmod(tmp, mode)
+        os.replace(tmp, p)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return
+
 
 def fire_skill(
     verb: Verb,
@@ -76,6 +132,7 @@ def fire_skill(
     model: str = _DEFAULT_MODEL,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     env_seam: str = _ENV_SEAM,
+    resolve_route_fn: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> DispatchResult:
     """Fire a headless ``claude --print`` for one PR and return the result.
 
@@ -89,9 +146,43 @@ def fire_skill(
     command is built as ``["<seam>"]`` (a single-token override); the runner
     receives it like any other call.
 
+    The ``merged`` verb fires under the routable ``post-merge`` role: when a
+    secondary provider is keyed, ``resolve_route`` returns the GLM env and the
+    fire runs on GLM (with the routed ``ANTHROPIC_MODEL`` env governing the
+    model, so no ``--model`` flag is passed). Without a key it fail-safes to the
+    primary model, byte-identical to today. ``resolve_route_fn`` is an injectable
+    seam for tests.
+
     SUCCESS = rc == 0 AND parsed ``is_error`` is ``False``.
     Every other outcome is a failure.
     """
+    # Resolve the routed env for this verb's role (post-merge is routable;
+    # check is not). None -> unrouted, primary model, env unchanged (fail-safe).
+    route: Optional[dict] = None
+    role = _ROLE_FOR_VERB.get(verb)
+    if role:
+        _route_fn = resolve_route_fn
+        if _route_fn is None:
+            from fno.agents.model_routing import resolve_route
+            from fno.config import load_settings_for_repo
+
+            # Resolve the ROUTED repo's settings (per-repo config.model_routing),
+            # not the watcher's global settings; fall back to global on failure.
+            try:
+                _repo_settings = load_settings_for_repo(repo_dir)
+            except Exception:
+                _repo_settings = None
+            _route_fn = lambda r: resolve_route(  # noqa: E731
+                r,
+                settings=_repo_settings,
+                notice=lambda m: log.info("pr-watch model-routing: %s", m),
+            )
+        try:
+            route = _route_fn(role)
+        except Exception as exc:  # fail-safe: routing must never break a fire
+            log.warning("pr-watch: resolve_route(%s) failed: %s", role, exc)
+            route = None
+
     seam_cmd = os.environ.get(env_seam)
 
     if seam_cmd:
@@ -106,9 +197,26 @@ def fire_skill(
             "json",
             "--dangerously-skip-permissions",
         ]
-        if model:
+        # When routed, the routed ANTHROPIC_MODEL env governs the model; a
+        # --model flag would name an Anthropic id the GLM endpoint lacks.
+        if model and not route:
             cmd += ["--model", model]
         cmd.append(f"/fno:pr {verb} {pr_number}")
+
+    run_kwargs: dict[str, Any] = {}
+    if route:
+        # Cold headless routed fire: bypass the onboarding wall, then hand the
+        # routed env (parent env + route, stale ANTHROPIC_API_KEY dropped so the
+        # routed auth token wins) to the runner.
+        _ensure_onboarding_bypass()
+        spawn_env = dict(os.environ)
+        # Drop the parent's Anthropic creds so the routed AUTH_TOKEN wins: a
+        # lingering API key OR a subscription OAuth token would otherwise send
+        # the fire to Anthropic instead of the routed provider.
+        spawn_env.pop("ANTHROPIC_API_KEY", None)
+        spawn_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        spawn_env.update(route)
+        run_kwargs["env"] = spawn_env
 
     try:
         result = runner(
@@ -117,6 +225,7 @@ def fire_skill(
             text=True,
             check=False,
             cwd=str(repo_dir),
+            **run_kwargs,
         )
     except subprocess.TimeoutExpired as exc:
         log.warning("fire_skill %s #%d timed out: %s", verb, pr_number, exc)

@@ -109,8 +109,8 @@
 | `config.collision.severity_thresholds.medium_count` | float | `2` | never | Collision scoring: medium-severity shared-file count. |
 | `config.collision.severity_thresholds.medium_ratio` | float | `0.25` | never | Collision scoring: medium-severity shared-file ratio. |
 | `config.work.workspaces` | dict[str, WorkspaceEntry] | `{}` | advanced | Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). |
-| `config.model_routing.enabled` | bool | `true` | advanced | Route auxiliary roles (coordinate/tidy/orient/consolidate) to a secondary provider at spawn. |
-| `config.model_routing.providers` | dict[str, ModelProvider] | `{}` | never | Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file}); 'zai' is built in. |
+| `config.model_routing.enabled` | bool | `true` | advanced | Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) to a secondary provider at spawn. |
+| `config.model_routing.providers` | dict[str, ModelProvider] | `{}` | never | Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in. |
 | `config.model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7'). |
 | `config.model_routing.extra_env` | dict[str, str] | `{}` | never | Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides). |
 | `config.mux.shell_integration` | str | `mux-panes` | advanced | Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc. |

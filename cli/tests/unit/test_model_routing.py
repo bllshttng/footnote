@@ -48,18 +48,33 @@ def test_consolidate_routes_to_zai_anthropic_endpoint() -> None:
     # The Anthropic-compatible endpoint (a claude worker speaks Anthropic).
     assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert route["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
-    # All tiers set so the whole worker (incl. background haiku) stays on GLM.
+    # opus/sonnet/default stay on the role model; the background haiku tier
+    # drops to the provider's cheaper glm-4.5-air (still the same zai provider).
     assert route["ANTHROPIC_MODEL"] == "glm-5.2"
     assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2"
     assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.2"
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"
 
 
-@pytest.mark.parametrize("role", ["coordinate", "tidy", "orient", "consolidate"])
+@pytest.mark.parametrize(
+    "role", ["coordinate", "tidy", "orient", "consolidate", "post-merge"]
+)
 def test_all_default_routed_roles_route_when_keyed(role: str) -> None:
     route = mr.resolve_route(role, settings=_settings(), env={"ZAI_API_KEY": "k"})
     assert route is not None
     assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_post_merge_is_routable_not_protected() -> None:
+    # Item 3: the post-merge ritual routes to GLM by default (judgment-light),
+    # but must NOT be a protected role (it stays overridable / fail-safe).
+    assert "post-merge" in mr.DEFAULT_ROUTED_ROLES
+    assert "post-merge" not in mr.PROTECTED_ROLES
+
+
+def test_post_merge_fails_safe_without_key() -> None:
+    # No key -> primary Anthropic model (the ritual still fires, on Anthropic).
+    assert mr.resolve_route("post-merge", settings=_settings(), env={}) is None
 
 
 def test_role_is_case_and_space_insensitive() -> None:
@@ -299,9 +314,224 @@ def test_protected_roles_constant_is_locked() -> None:
     assert "review-verdict" in mr.PROTECTED_ROLES
 
 
+# ---------------------------------------------------------------------------
+# Item 4: codex-lane (OpenAI-protocol) routing via inline -c config
+# ---------------------------------------------------------------------------
+
+
+def _openai_settings(model: str = "glm-5.2", **extra: object) -> SettingsModel:
+    """A settings block with an openai-protocol provider routed to `tidy`."""
+    prov = {
+        "zai-openai": {
+            "protocol": "openai",
+            "base_url": "https://api.z.ai/api/coding/paas/v4",
+            "api_key_env": "OPENAI_API_KEY",
+            **extra,
+        }
+    }
+    return _settings(providers=prov, roles={"tidy": f"zai-openai,{model}"})
+
+
+def test_codex_route_returns_config_and_env_for_openai_provider() -> None:
+    route = mr.resolve_codex_route(
+        "tidy", settings=_openai_settings(), env={"OPENAI_API_KEY": "oai-key"}
+    )
+    assert route is not None
+    assert route.env == {"OPENAI_API_KEY": "oai-key"}
+    # Codex config: provider table + selection + model, all as -c flags.
+    joined = " ".join(route.config_args)
+    assert route.config_args[0] == "-c"
+    assert "model_providers.zai-openai=" in joined
+    assert "base_url = 'https://api.z.ai/api/coding/paas/v4'" in joined
+    assert "env_key = 'OPENAI_API_KEY'" in joined
+    assert "wire_api = 'chat'" in joined  # default for a third-party endpoint
+    assert "model_provider='zai-openai'" in joined
+    assert "model='glm-5.2'" in joined
+
+
+def test_codex_route_honors_configured_wire_api() -> None:
+    route = mr.resolve_codex_route(
+        "tidy",
+        settings=_openai_settings(wire_api="responses"),
+        env={"OPENAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert "wire_api = 'responses'" in " ".join(route.config_args)
+
+
+def test_codex_route_none_for_anthropic_provider() -> None:
+    # The default zai provider is anthropic-protocol -> belongs to the claude
+    # lane, so the codex lane returns None (no cross-lane leakage).
+    assert (
+        mr.resolve_codex_route("tidy", settings=_settings(), env={"ZAI_API_KEY": "k"})
+        is None
+    )
+
+
+def test_codex_route_none_without_key() -> None:
+    notes, sink = _collector()
+    route = mr.resolve_codex_route(
+        "tidy", settings=_openai_settings(), env={}, notice=sink
+    )
+    assert route is None
+    assert notes
+
+
+@pytest.mark.parametrize("role", ["implement", "review-verdict"])
+def test_codex_route_never_routes_protected_role(role: str) -> None:
+    s = _settings(
+        providers={
+            "oai": {
+                "protocol": "openai",
+                "base_url": "https://x/v4",
+                "api_key_env": "OPENAI_API_KEY",
+            }
+        },
+        roles={role: "oai,glm-5.2"},
+    )
+    assert mr.resolve_codex_route(role, settings=s, env={"OPENAI_API_KEY": "k"}) is None
+
+
+def test_codex_route_bails_on_unsafe_provider_name() -> None:
+    notes, sink = _collector()
+    s = _settings(
+        providers={
+            "b ad": {
+                "protocol": "openai",
+                "base_url": "https://x/v4",
+                "api_key_env": "OPENAI_API_KEY",
+            }
+        },
+        roles={"tidy": "b ad,glm-5.2"},
+    )
+    route = mr.resolve_codex_route(
+        "tidy", settings=s, env={"OPENAI_API_KEY": "k"}, notice=sink
+    )
+    assert route is None
+    assert notes
+
+
+@pytest.mark.parametrize("bad_url", ["https://x/v4'inject", "https://x/v4\x00", "https://x\nv4", "https://x\tv4"])
+def test_codex_route_bails_on_unquotable_value(bad_url: str) -> None:
+    # A value with a single quote OR any control char (incl. NUL, which would
+    # otherwise make subprocess raise) can't be embedded -> bail fail-safe.
+    s = _settings(
+        providers={
+            "oai": {
+                "protocol": "openai",
+                "base_url": bad_url,
+                "api_key_env": "OPENAI_API_KEY",
+            }
+        },
+        roles={"tidy": "oai,glm-5.2"},
+    )
+    assert mr.resolve_codex_route("tidy", settings=s, env={"OPENAI_API_KEY": "k"}) is None
+
+
+def test_claude_lane_still_skips_openai_provider() -> None:
+    # The claude lane (resolve_route) must still return None for an openai
+    # provider (no cross-lane leakage, both directions).
+    notes, sink = _collector()
+    assert (
+        mr.resolve_route(
+            "tidy", settings=_openai_settings(), env={"OPENAI_API_KEY": "k"}, notice=sink
+        )
+        is None
+    )
+    assert any("protocol" in n for n in notes)
+
+
 def test_config_defaults_match_module_constants() -> None:
     # Drift guard: the built-in zai endpoint + default model must agree with the
     # module fallback constants.
     assert mr._DEFAULT_PROVIDERS["zai"]["base_url"] == mr.DEFAULT_ZAI_BASE_URL
     assert mr.DEFAULT_ZAI_BASE_URL == "https://api.z.ai/api/anthropic"
     assert mr.DEFAULT_SECONDARY_MODEL == "glm-5.2"
+    assert mr._DEFAULT_PROVIDERS["zai"]["haiku_model"] == mr.DEFAULT_ZAI_HAIKU_MODEL
+    assert mr.DEFAULT_ZAI_HAIKU_MODEL == "glm-4.5-air"
+
+
+# ---------------------------------------------------------------------------
+# Item 1: per-tier routed model (background haiku -> cheaper glm-4.5-air)
+# ---------------------------------------------------------------------------
+
+
+def test_zai_haiku_tier_defaults_to_cheaper_model() -> None:
+    route = mr.resolve_route(
+        "consolidate", settings=_settings(), env={"ZAI_API_KEY": "k"}
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"
+
+
+def test_per_provider_haiku_override_wins_over_builtin_default() -> None:
+    route = mr.resolve_route(
+        "tidy",
+        settings=_settings(providers={"zai": {"haiku_model": "glm-tiny"}}),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-tiny"
+    # opus/sonnet/default unaffected by the haiku override.
+    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+
+
+def test_provider_without_haiku_override_keeps_role_model_on_haiku() -> None:
+    # deepseek has no haiku_model, so the haiku tier keeps the role model
+    # (no regression to an empty/invalid id).
+    route = mr.resolve_route(
+        "tidy",
+        settings=_settings(
+            providers={
+                "deepseek": {
+                    "protocol": "anthropic",
+                    "base_url": "https://api.deepseek.com/anthropic",
+                    "api_key_env": "DEEPSEEK_API_KEY",
+                }
+            },
+            roles={"tidy": "deepseek,deepseek-chat"},
+        ),
+        env={"DEEPSEEK_API_KEY": "dsk"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "deepseek-chat"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-chat"
+
+
+# ---------------------------------------------------------------------------
+# Item 2: carry the [1m] 1M-context compact window automatically
+# ---------------------------------------------------------------------------
+
+
+def test_one_m_suffix_injects_compact_window() -> None:
+    route = mr.resolve_route(
+        "tidy",
+        settings=_settings(roles={"tidy": "zai,glm-5.2[1m]"}),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "1000000"
+
+
+def test_non_one_m_model_injects_no_compact_window() -> None:
+    route = mr.resolve_route(
+        "consolidate", settings=_settings(), env={"ZAI_API_KEY": "k"}
+    )
+    assert route is not None
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in route
+
+
+def test_extra_env_compact_window_wins_over_injection() -> None:
+    route = mr.resolve_route(
+        "tidy",
+        settings=_settings(
+            roles={"tidy": "zai,glm-5.2[1m]"},
+            extra_env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000"},
+        ),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"

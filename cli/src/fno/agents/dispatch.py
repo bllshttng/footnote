@@ -674,6 +674,7 @@ def _codex_create_path(
     yolo: bool,
     timeout_sec: float,
     lock_handle,
+    role: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new codex agent under the per-agent flock.
 
@@ -701,6 +702,7 @@ def _codex_create_path(
             output_path=output_path,
             timeout=timeout_sec,
             agent_self=name,
+            role=role,
         )
     except codex_mod.NoSessionIdError as exc:
         events.emit(
@@ -1849,6 +1851,7 @@ def dispatch_spawn(
                             else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
                         ),
                         lock_handle=lock_handle,
+                        role=role,
                     )
                 else:
                     # gemini --once

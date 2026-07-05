@@ -246,6 +246,7 @@ def _mesh_env_wrapper(
     are dropped so an ad-hoc pane exports nothing new (the starship module hides
     absent vars via ``when``)."""
     pairs = [f"FNO_AGENT_SELF={name}", f"FNO_AGENT_PROVIDER={provider}"]
+    unset: list[str] = []
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")
@@ -254,10 +255,15 @@ def _mesh_env_wrapper(
 
         route = resolve_route(role)
         if route:
+            # Scrub the parent's Anthropic creds so the routed AUTH_TOKEN wins:
+            # a lingering API key or subscription OAuth token would otherwise
+            # override it and send the routed pane back to Anthropic. `env -u`
+            # on an unset var is a harmless no-op.
+            unset = ["-u", "ANTHROPIC_API_KEY", "-u", "CLAUDE_CODE_OAUTH_TOKEN"]
             pairs += [f"{k}={v}" for k, v in route.items()]
     if provenance:
         pairs += [f"{k}={v}" for k, v in provenance.items() if v]
-    return ["env", *pairs, *argv]
+    return ["env", *unset, *pairs, *argv]
 
 
 def resolve_provenance(
