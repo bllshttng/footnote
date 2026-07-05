@@ -333,6 +333,7 @@ class TestCliTickIntegration:
             mock_cfg_pr_watch.max_age_days = 14
             mock_cfg_pr_watch.model = "claude-haiku-4-5"
             mock_cfg_review = MagicMock()
+            mock_cfg_review.github_apps = []  # canonical field (required_bots aliases it)
             mock_cfg_review.required_bots = []
             mock_cfg = MagicMock()
             mock_cfg.pr_watch = mock_cfg_pr_watch

@@ -134,16 +134,20 @@ def test_notify_parked_logs_warning_on_exception(caplog: pytest.LogCaptureFixtur
 
 
 # ---------------------------------------------------------------------------
-# AC4-HP: _reviewers_for returns configured required_bots
+# AC4-HP: _reviewers_for returns configured github_apps
 # ---------------------------------------------------------------------------
 
 
 def test_reviewers_for_returns_required_bots(tmp_path: Path) -> None:
-    """AC4-HP: _reviewers_for returns config.review.required_bots for a repo dir."""
+    """AC4-HP: _reviewers_for returns config.review.github_apps for a repo dir.
+
+    (github_apps is the canonical field after the x-4baa rename; required_bots
+    is a legacy alias resolved into it.)
+    """
     from fno.pr_watch.cli import _reviewers_for
 
     fake_settings = MagicMock()
-    fake_settings.config.review.required_bots = ["codex", "gemini"]
+    fake_settings.config.review.github_apps = ["codex", "gemini"]
 
     with patch("fno.pr_watch.cli.load_settings_for_repo", return_value=fake_settings):
         result = _reviewers_for(tmp_path)

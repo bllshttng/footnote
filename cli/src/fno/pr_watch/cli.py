@@ -98,14 +98,15 @@ def _reviewers_for(repo_dir: Path) -> list[str]:
     """Return the configured external reviewers for a given repo root.
 
     Loads settings scoped to ``repo_dir`` so each candidate PR uses its own
-    repo's ``config.review.required_bots`` rather than the daemon's cwd.
-    Falls back to [] when none are configured (review-dispatch skipped;
-    merge-dispatch still works).  Logs a warning on error so a broken
-    settings.yaml is visible rather than silently disabling review-dispatch.
+    repo's ``config.review.github_apps`` (aka the legacy ``required_bots``)
+    rather than the daemon's cwd.  Falls back to [] when none are configured
+    (review-dispatch skipped; merge-dispatch still works).  Logs a warning on
+    error so a broken settings.yaml is visible rather than silently disabling
+    review-dispatch.
     """
     try:
         s = load_settings_for_repo(repo_dir)
-        bots = s.config.review.required_bots
+        bots = s.config.review.github_apps
         return list(bots) if bots else []
     except Exception as exc:
         log.warning(

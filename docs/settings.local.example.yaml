@@ -25,6 +25,17 @@ config:
     enabled: false         # set true + a vault area name to route docs there
     # vault: my-vault
 
+  # Per-project override of the completion review gate (falls back to global /
+  # code default when absent). Only set what differs for THIS repo.
+  # review:
+  #   github_apps:               # App-bot logins that MUST review before 'done'
+  #     - gemini-code-assist     #   (empty list = no hard gate; PR + CI only)
+  #   optional_apps:             # honored-if-present: counted if it reviews, never waited on
+  #     - chatgpt-codex-connector  #   (so a usage-wedged App bot can't stall the loop)
+  #   peers: [codex, gemini]     # or gate on a locally-run CLI review under a distinct
+  #   peer_identity: fno-peer-bot  #   machine account (needs a PAT in peer_token_env)
+  #   peer_token_env: GH_PEER_TOKEN
+
   # --- recommended per-project workflow toggles (code default: false) ---
   target:
     auto_launch_on_blueprint: true   # /blueprint then auto-kicks /target

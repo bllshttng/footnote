@@ -96,8 +96,18 @@ config:
     # Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses).
     output_dir: null
   review:
-    # GitHub bot logins that must have reviewed before the ship gate goes green (the GATE).
+    # GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots.
+    github_apps: null
+    # Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set.
     required_bots: null
+    # Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries.
+    peers: []
+    # The distinct machine-account login peers post their review under (must not be the author account).
+    peer_identity: null
+    # Env var holding the PAT for peer_identity used to post peer reviews to the PR.
+    peer_token_env: null
+    # Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it.
+    optional_apps: []
     # Which AI reviewers /pr requests a review from (the INVOCATION list).
     external_reviewers: []
     # Per-agent provider routing for the cross-model review panel.

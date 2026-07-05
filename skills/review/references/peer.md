@@ -30,6 +30,11 @@ review from the bot account and never satisfies a `required_bots` gate.
 - **provider** (optional, trailing word): `codex` (default) or `gemini`. `claude`
   is rejected - it has no `--once` one-shot lane (see Hard rules).
 - **base** (optional): override the diff base (default `origin/main`).
+- **`--post`** (optional flag): after getting the review, POST it to the PR
+  under `config.review.peer_identity` so it satisfies the login-based loop-check
+  gate. This is the ONE mode where a peer review is a gate, not advisory (see
+  step 6 and Hard rule 4). Requires a PR-number target, `peer_identity`, and a
+  PAT in `config.review.peer_token_env`.
 
 ## Flow: RESOLVE -> BRIEF -> SPAWN (agent is the runner) -> RELAY -> OFFER
 
@@ -133,6 +138,41 @@ Do not auto-apply. Summarize the P1/P2 findings and ask whether to address them.
 On a yes, fix them like any other review feedback. P3 nits are optional - call
 them out, let the user choose.
 
+### 6. POST (only with `--post`) - the one gating mode
+
+Default `/review peer` is advisory (step 5 ends it). With `--post`, after a
+successful relay you POST the review to the PR under the harness peer identity
+so it counts toward the loop-check gate (`config.review.peers`). This is the
+deliberate, opt-in relaxation of Hard rule 4.
+
+Preconditions (all required; if any is missing, STOP and say why - never fake a
+post):
+- the target is a PR number (a branch/bare target has no PR to post to),
+- `config.review.peer_identity` is set (the distinct machine-account login),
+- `config.review.peer_token_env` names an env var holding that account's PAT.
+
+Then hand the relayed provider output to the posting helper, which posts the
+body verbatim as a COMMENTED review under the identity and each P1 as an inline
+blocking comment with the exact badge loop-check reads, idempotently per
+PR-head, failing loud on any `gh` error:
+
+```bash
+# $REVIEW_FILE holds the verbatim provider output from step 3.
+# Extract each blocking finding you identified as `path:line:message` and pass
+# it with --p1 (repeatable). The helper embeds the P1 badge markup itself.
+bash "${SKILL_DIR}/scripts/post-peer-review.sh" \
+  --pr "$N" --provider "$PROVIDER" \
+  --token-env "$(fno config get config.review.peer_token_env)" \
+  --body-file "$REVIEW_FILE" \
+  --p1 "src/foo.rs:42:Null deref when the cache is cold" \
+  --p1 "src/bar.py:88:Off-by-one drops the last row"
+```
+
+On a **provider-failed** or **post-failed** outcome the helper exits non-zero
+and prints why; relay that verbatim. The gate then stays UNMET with a stated
+reason (fail closed) - it never silently "passes". A peer whose CLI produced no
+review, or whose post to GitHub failed, must be reported, not papered over.
+
 ## Hard rules (non-negotiable)
 
 1. **The agent runs the spawn, never the user.** The entire value is that the
@@ -144,9 +184,13 @@ them out, let the user choose.
    bg threads, not one-shots). If the user asks for a claude review, point them at
    `/review sigma` (internal Claude panel) or a normal Claude subagent - do not try
    to force `--once`.
-4. **Advisory, not a gate.** This review is from a coding account, not the bot
-   account. It never satisfies a `required_bots` review gate and must not be
-   presented as if it does. A human still merges.
+4. **Advisory by default; a gate only with `--post`.** Bare `/review peer` is a
+   coding-account read that never satisfies a review gate. With `--post` it is
+   posted under the distinct `peer_identity` (NOT the author account) and DOES
+   gate via `config.review.peers` - the identity's login is what loop-check
+   matches, and its P1 inline comments block. It must post the provider output
+   verbatim (Hard rule 2 still holds: never invent or soften a finding), and it
+   must fail loud rather than mark the gate met on a post that did not happen.
 
 ## Multi-CLI
 
