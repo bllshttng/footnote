@@ -435,7 +435,8 @@ fn parse_settings(content: &str) -> Settings {
         }
 
         // required_bots / github_apps list items: "- login" under their key.
-        if in_config && (collecting_required_bots || collecting_github_apps)
+        if in_config
+            && (collecting_required_bots || collecting_github_apps)
             && trimmed.starts_with('-')
         {
             let bot = strip_inline_comment(trimmed.trim_start_matches('-').trim())
@@ -1127,9 +1128,16 @@ fn resolved_required_bots(settings: &Settings) -> Vec<String> {
             "loop-check: both config.review.github_apps and required_bots set - using github_apps"
         );
     }
-    let mut logins: Vec<String> = match settings.github_apps.as_ref().or(settings.required_bots.as_ref()) {
+    let mut logins: Vec<String> = match settings
+        .github_apps
+        .as_ref()
+        .or(settings.required_bots.as_ref())
+    {
         Some(list) => list.clone(),
-        None => DEFAULT_REQUIRED_BOTS.iter().map(|s| s.to_string()).collect(),
+        None => DEFAULT_REQUIRED_BOTS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     };
 
     // Each peer contributes its posting identity to the expected-login set.
@@ -3854,7 +3862,8 @@ mod tests {
 
     #[test]
     fn parse_settings_peers_inline_scalars() {
-        let yaml = "config:\n  review:\n    peers: [codex, gemini]\n    peer_identity: fno-peer-bot\n";
+        let yaml =
+            "config:\n  review:\n    peers: [codex, gemini]\n    peer_identity: fno-peer-bot\n";
         let s = parse_settings(yaml);
         assert_eq!(s.peers.len(), 2);
         assert_eq!(s.peers[0].provider, "codex");
@@ -3879,8 +3888,14 @@ mod tests {
         let s = Settings {
             github_apps: Some(Vec::new()),
             peers: vec![
-                PeerEntry { provider: "codex".into(), identity: None },
-                PeerEntry { provider: "gemini".into(), identity: None },
+                PeerEntry {
+                    provider: "codex".into(),
+                    identity: None,
+                },
+                PeerEntry {
+                    provider: "gemini".into(),
+                    identity: None,
+                },
             ],
             peer_identity: Some("fno-peer-bot".into()),
             ..Default::default()
@@ -3893,8 +3908,14 @@ mod tests {
         let s = Settings {
             github_apps: Some(vec!["chatgpt-codex-connector".into()]),
             peers: vec![
-                PeerEntry { provider: "codex".into(), identity: Some("fno-codex-bot".into()) },
-                PeerEntry { provider: "gemini".into(), identity: Some("fno-gemini-bot".into()) },
+                PeerEntry {
+                    provider: "codex".into(),
+                    identity: Some("fno-codex-bot".into()),
+                },
+                PeerEntry {
+                    provider: "gemini".into(),
+                    identity: Some("fno-gemini-bot".into()),
+                },
             ],
             ..Default::default()
         };
@@ -3966,7 +3987,10 @@ mod tests {
         // dropping the reviewer (fail open).
         let s = Settings {
             github_apps: Some(Vec::new()),
-            peers: vec![PeerEntry { provider: "codex".into(), identity: None }],
+            peers: vec![PeerEntry {
+                provider: "codex".into(),
+                identity: None,
+            }],
             peer_identity: None,
             ..Default::default()
         };
@@ -3974,7 +3998,10 @@ mod tests {
         assert!(logins.iter().any(|l| l == UNRESOLVED_PEER_SENTINEL));
         // The sentinel matches no real login, so missing_bots stays non-empty.
         assert!(!login_matches_bot("fno-peer-bot", UNRESOLVED_PEER_SENTINEL));
-        assert!(!login_matches_bot("chatgpt-codex-connector[bot]", UNRESOLVED_PEER_SENTINEL));
+        assert!(!login_matches_bot(
+            "chatgpt-codex-connector[bot]",
+            UNRESOLVED_PEER_SENTINEL
+        ));
     }
 
     #[test]
