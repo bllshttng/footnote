@@ -353,8 +353,13 @@ fn parse_settings(content: &str) -> Settings {
             continue;
         }
 
-        // indent == 4: inside config.review
-        if in_config && in_review && indent == 4 {
+        // indent == 4: inside config.review. Guard on `!starts_with('-')` so a
+        // KEY-ALIGNED block-sequence item (`- login` at the SAME indent as its
+        // key, which is exactly what PyYAML / `fno config set` writes) is NOT
+        // treated as a new key here - it falls through to the item collectors
+        // below. Without this guard those items are dropped and the gate fails
+        // OPEN for any github_apps/peers written by the CLI (x-4baa review).
+        if in_config && in_review && indent == 4 && !trimmed.starts_with('-') {
             // A new indent-4 key ends any in-flight list collection. Set the
             // specific collecting flag in each branch below.
             collecting_required_bots = false;
@@ -389,9 +394,7 @@ fn parse_settings(content: &str) -> Settings {
                 }
             } else if let Some(rest) = trimmed.strip_prefix("peers:") {
                 match classify_list_rhs(rest) {
-                    // Inline scalars only (`peers: [codex, gemini]`); maps need
-                    // the block form. Empty/malformed leave peers empty.
-                    ListForm::Empty | ListForm::Malformed => {}
+                    ListForm::Empty => {}
                     ListForm::Block => collecting_peers = true,
                     ListForm::Inline(items) => {
                         s.peers = items
@@ -401,6 +404,23 @@ fn parse_settings(content: &str) -> Settings {
                                 identity: None,
                             })
                             .collect();
+                    }
+                    ListForm::Malformed => {
+                        // A bare scalar `peers: codex` is a single-item peers
+                        // list, matching Python's coerce_peers. Treat it as one
+                        // provider (NOT a silent drop - that would fail OPEN and
+                        // diverge from Python, which blesses the scalar form).
+                        // Identity still resolves via peer_identity, else the
+                        // sentinel fails the gate closed downstream.
+                        let provider = strip_inline_comment(rest.trim())
+                            .trim_matches(|c| c == '"' || c == '\'')
+                            .to_string();
+                        if !provider.is_empty() {
+                            s.peers = vec![PeerEntry {
+                                provider,
+                                identity: None,
+                            }];
+                        }
                     }
                 }
             } else if let Some(rest) = trimmed.strip_prefix("peer_identity:") {
@@ -3886,6 +3906,57 @@ mod tests {
                 "fno-gemini-bot".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn parse_settings_github_apps_key_aligned_items() {
+        // PyYAML / `fno config set` writes block-sequence items at the SAME
+        // indent as the key (default_flow_style=False). These MUST parse, or
+        // the gate fails OPEN for any github_apps written by the CLI.
+        let yaml = "config:\n  review:\n    github_apps:\n    - chatgpt-codex-connector\n    peers:\n    - codex\n    peer_identity: fno-peer-bot\n";
+        let s = parse_settings(yaml);
+        assert_eq!(
+            s.github_apps,
+            Some(vec!["chatgpt-codex-connector".to_string()]),
+            "key-aligned github_apps item must be collected"
+        );
+        assert_eq!(s.peers.len(), 1, "key-aligned peers item must be collected");
+        assert_eq!(s.peers[0].provider, "codex");
+        assert_eq!(s.peer_identity.as_deref(), Some("fno-peer-bot"));
+    }
+
+    #[test]
+    fn parse_settings_required_bots_key_aligned_items() {
+        // Regression for the same drop on the legacy alias.
+        let yaml = "config:\n  review:\n    required_bots:\n    - chatgpt-codex-connector\n";
+        let s = parse_settings(yaml);
+        assert_eq!(
+            s.required_bots,
+            Some(vec!["chatgpt-codex-connector".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_settings_peers_bare_scalar_is_one_provider() {
+        // `peers: codex` (scalar) matches Python's coerce_peers -> one peer,
+        // NOT a silent drop (which would fail open + diverge from Python).
+        let yaml = "config:\n  review:\n    peers: codex\n    peer_identity: fno-peer-bot\n";
+        let s = parse_settings(yaml);
+        assert_eq!(s.peers.len(), 1);
+        assert_eq!(s.peers[0].provider, "codex");
+        // The gate then resolves on the shared identity (fail-closed if unset).
+        assert_eq!(resolved_required_bots(&s), vec!["fno-peer-bot".to_string()]);
+    }
+
+    #[test]
+    fn parse_settings_peers_key_aligned_maps() {
+        // Key-aligned map entries (PyYAML block map under a key-aligned seq).
+        let yaml = "config:\n  review:\n    peers:\n    - provider: codex\n      identity: fno-codex-bot\n    - gemini\n";
+        let s = parse_settings(yaml);
+        assert_eq!(s.peers.len(), 2);
+        assert_eq!(s.peers[0].provider, "codex");
+        assert_eq!(s.peers[0].identity.as_deref(), Some("fno-codex-bot"));
+        assert_eq!(s.peers[1].provider, "gemini");
     }
 
     #[test]
