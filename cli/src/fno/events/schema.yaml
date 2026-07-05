@@ -96,6 +96,27 @@ event_types:
           type: string
     consumers: [hooks/megawalk-stop-hook.sh]
 
+  - name: review_attestation
+    description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, head_sha == current HEAD, and verdict == pass. Head-pinning is mandatory - a pass on an old commit must not count after new commits land."
+    sources: [target, subagent, hook, test]
+    data:
+      required: [reviewer, head_sha, verdict]
+      properties:
+        reviewer:
+          type: string
+          description: "The reviewer name matching a config.review.reviewers entry (sigma | code-review | declare; a leading '/' is stripped by both parsers)."
+        head_sha:
+          type: string
+          description: "The git HEAD sha the reviewer reviewed. loop-check head-pins on this: it must equal the current HEAD or the attestation does not satisfy the gate."
+        verdict:
+          type: string
+          enum: [pass, fail]
+          description: "pass satisfies the gate entry; fail (or an absent attestation) holds it (fail closed)."
+        session_id:
+          type: string
+          description: "Emitting session id (optional; observability)."
+    consumers: [fno-agents loop-check]
+
   - name: mission_started
     description: "Megatron mission entered RUNNING state."
     sources: [megatron]
