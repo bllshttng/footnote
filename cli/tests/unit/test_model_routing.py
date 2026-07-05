@@ -314,6 +314,131 @@ def test_protected_roles_constant_is_locked() -> None:
     assert "review-verdict" in mr.PROTECTED_ROLES
 
 
+# ---------------------------------------------------------------------------
+# Item 4: codex-lane (OpenAI-protocol) routing via inline -c config
+# ---------------------------------------------------------------------------
+
+
+def _openai_settings(model: str = "glm-5.2", **extra: object) -> SettingsModel:
+    """A settings block with an openai-protocol provider routed to `tidy`."""
+    prov = {
+        "zai-openai": {
+            "protocol": "openai",
+            "base_url": "https://api.z.ai/api/coding/paas/v4",
+            "api_key_env": "OPENAI_API_KEY",
+            **extra,
+        }
+    }
+    return _settings(providers=prov, roles={"tidy": f"zai-openai,{model}"})
+
+
+def test_codex_route_returns_config_and_env_for_openai_provider() -> None:
+    route = mr.resolve_codex_route(
+        "tidy", settings=_openai_settings(), env={"OPENAI_API_KEY": "oai-key"}
+    )
+    assert route is not None
+    assert route.env == {"OPENAI_API_KEY": "oai-key"}
+    # Codex config: provider table + selection + model, all as -c flags.
+    joined = " ".join(route.config_args)
+    assert route.config_args[0] == "-c"
+    assert "model_providers.zai-openai=" in joined
+    assert "base_url = 'https://api.z.ai/api/coding/paas/v4'" in joined
+    assert "env_key = 'OPENAI_API_KEY'" in joined
+    assert "wire_api = 'chat'" in joined  # default for a third-party endpoint
+    assert "model_provider='zai-openai'" in joined
+    assert "model='glm-5.2'" in joined
+
+
+def test_codex_route_honors_configured_wire_api() -> None:
+    route = mr.resolve_codex_route(
+        "tidy",
+        settings=_openai_settings(wire_api="responses"),
+        env={"OPENAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert "wire_api = 'responses'" in " ".join(route.config_args)
+
+
+def test_codex_route_none_for_anthropic_provider() -> None:
+    # The default zai provider is anthropic-protocol -> belongs to the claude
+    # lane, so the codex lane returns None (no cross-lane leakage).
+    assert (
+        mr.resolve_codex_route("tidy", settings=_settings(), env={"ZAI_API_KEY": "k"})
+        is None
+    )
+
+
+def test_codex_route_none_without_key() -> None:
+    notes, sink = _collector()
+    route = mr.resolve_codex_route(
+        "tidy", settings=_openai_settings(), env={}, notice=sink
+    )
+    assert route is None
+    assert notes
+
+
+@pytest.mark.parametrize("role", ["implement", "review-verdict"])
+def test_codex_route_never_routes_protected_role(role: str) -> None:
+    s = _settings(
+        providers={
+            "oai": {
+                "protocol": "openai",
+                "base_url": "https://x/v4",
+                "api_key_env": "OPENAI_API_KEY",
+            }
+        },
+        roles={role: "oai,glm-5.2"},
+    )
+    assert mr.resolve_codex_route(role, settings=s, env={"OPENAI_API_KEY": "k"}) is None
+
+
+def test_codex_route_bails_on_unsafe_provider_name() -> None:
+    notes, sink = _collector()
+    s = _settings(
+        providers={
+            "b ad": {
+                "protocol": "openai",
+                "base_url": "https://x/v4",
+                "api_key_env": "OPENAI_API_KEY",
+            }
+        },
+        roles={"tidy": "b ad,glm-5.2"},
+    )
+    route = mr.resolve_codex_route(
+        "tidy", settings=s, env={"OPENAI_API_KEY": "k"}, notice=sink
+    )
+    assert route is None
+    assert notes
+
+
+def test_codex_route_bails_on_unquotable_value() -> None:
+    # A base_url with a single quote can't be a TOML literal string -> bail.
+    s = _settings(
+        providers={
+            "oai": {
+                "protocol": "openai",
+                "base_url": "https://x/v4'inject",
+                "api_key_env": "OPENAI_API_KEY",
+            }
+        },
+        roles={"tidy": "oai,glm-5.2"},
+    )
+    assert mr.resolve_codex_route("tidy", settings=s, env={"OPENAI_API_KEY": "k"}) is None
+
+
+def test_claude_lane_still_skips_openai_provider() -> None:
+    # The claude lane (resolve_route) must still return None for an openai
+    # provider (no cross-lane leakage, both directions).
+    notes, sink = _collector()
+    assert (
+        mr.resolve_route(
+            "tidy", settings=_openai_settings(), env={"OPENAI_API_KEY": "k"}, notice=sink
+        )
+        is None
+    )
+    assert any("protocol" in n for n in notes)
+
+
 def test_config_defaults_match_module_constants() -> None:
     # Drift guard: the built-in zai endpoint + default model must agree with the
     # module fallback constants.

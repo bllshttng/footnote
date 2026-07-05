@@ -274,6 +274,68 @@ def test_create_argv_shape_pin(tmp_path, fake_popen):
     assert call_args.kwargs["bufsize"] == 1
 
 
+def test_create_routed_openai_provider_injects_config_and_env(
+    tmp_path, fake_popen, monkeypatch
+):
+    """Item 4 (x-db50): a routed role with an openai-protocol provider prepends
+    the `-c` model_provider config (before `exec`) and injects the api key env."""
+    from fno.agents import model_routing
+
+    monkeypatch.setattr(
+        model_routing,
+        "resolve_codex_route",
+        lambda role, **kw: model_routing.CodexRoute(
+            env={"OPENAI_API_KEY": "oai-key"},
+            config_args=[
+                "-c",
+                "model_providers.zai-openai={ base_url = 'https://z/v4', "
+                "env_key = 'OPENAI_API_KEY', wire_api = 'chat' }",
+                "-c",
+                "model_provider='zai-openai'",
+                "-c",
+                "model='glm-5.2'",
+            ],
+        ),
+    )
+    codex_mod.create(
+        cwd=Path("/tmp/work"),
+        prompt="do this",
+        from_name="fno",
+        yolo=False,
+        output_path=tmp_path / "output.jsonl",
+        headless_yolo=False,
+        role="tidy",
+    )
+    call_args = fake_popen.call_args
+    argv = call_args.args[0]
+    # The -c config flags are GLOBAL: they must precede `exec`.
+    assert argv[0] == "codex"
+    assert "-c" in argv and argv.index("-c") < argv.index("exec")
+    assert any("model_provider='zai-openai'" in a for a in argv)
+    assert any("model='glm-5.2'" in a for a in argv)
+    # The api key rides the spawn env (codex reads it via env_key).
+    assert call_args.kwargs["env"]["OPENAI_API_KEY"] == "oai-key"
+
+
+def test_create_unrouted_leaves_argv_and_env_default(tmp_path, fake_popen, monkeypatch):
+    """No role -> no codex route -> argv/env byte-identical to today (no -c,
+    inherit parent env)."""
+    codex_mod.create(
+        cwd=Path("/tmp/work"),
+        prompt="do this",
+        from_name="fno",
+        yolo=False,
+        output_path=tmp_path / "output.jsonl",
+        headless_yolo=False,
+    )
+    call_args = fake_popen.call_args
+    argv = call_args.args[0]
+    assert "-c" not in argv
+    assert argv[:2] == ["codex", "--ask-for-approval"]
+    # No agent_self, no route -> env is None (inherit parent unchanged).
+    assert call_args.kwargs["env"] is None
+
+
 def test_create_yolo_swaps_sandbox_for_dangerous_bypass(tmp_path, fake_popen):
     codex_mod.create(
         cwd=Path("/tmp"),

@@ -1651,6 +1651,11 @@ class ModelProvider(BaseModel):
     # to glm-4.5-air; set it here to override or to give another provider a
     # cheap background model.
     haiku_model: Optional[str] = None
+    # Codex/OpenAI-lane only (protocol == "openai"): the codex wire protocol for
+    # this provider's endpoint. Third-party OpenAI-compatible endpoints (e.g.
+    # z.ai's paas/v4) speak Chat Completions -> "chat"; leave unset to default
+    # to "chat" when routing a codex-lane spawn. Ignored on the anthropic lane.
+    wire_api: Optional[str] = None
 
 
 class ModelRoutingBlock(BaseModel):
