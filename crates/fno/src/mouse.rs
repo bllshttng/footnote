@@ -8,9 +8,13 @@
 use crate::proto::{MouseButton, MouseKind};
 
 /// The escape that enables SGR mouse reporting: 1002 (button press/release +
-/// drag motion) with the 1006 extended encoding. The client keeps this on for
-/// its whole lifetime; `client::MODE_RESET` turns it back off on exit.
-pub const ENABLE: &[u8] = b"\x1b[?1002h\x1b[?1006h";
+/// drag motion) and 1003 (any-motion tracking, so a bare pointer move with no
+/// button held is reported for hover - focus-follows-mouse + sideline highlight)
+/// with the 1006 extended encoding. The client keeps this on for its whole
+/// lifetime; `client::MODE_RESET` (which lists 1003l) turns it back off on exit.
+/// 1003 reports every cell the pointer crosses; the client's hover debounce is
+/// what makes that flood safe.
+pub const ENABLE: &[u8] = b"\x1b[?1002h\x1b[?1003h\x1b[?1006h";
 
 /// The 3-byte SGR mouse prefix `ESC [ <`. Unambiguous - nothing else the
 /// terminal sends begins with it - so a trailing partial can be carried across
@@ -115,12 +119,16 @@ fn parse_sgr(s: &[u8]) -> Sgr {
         } else {
             MouseKind::WheelDown
         }
+    } else if cb & 32 != 0 && cb & 3 == 3 {
+        // Motion bit set with the no-button code (cb=35 + modifiers): 1003
+        // any-motion tracking with nothing held. This is hover, not a drag.
+        MouseKind::Move
     } else {
         let button = match cb & 3 {
             0 => MouseButton::Left,
             1 => MouseButton::Middle,
             2 => MouseButton::Right,
-            _ => return Sgr::Malformed, // 3 = no-button code, not used by SGR
+            _ => return Sgr::Malformed, // 3 = no-button code, only valid with motion (Move above)
         };
         if cb & 32 != 0 {
             MouseKind::Drag(button)
@@ -178,6 +186,25 @@ mod tests {
         );
         assert_eq!(one(b"\x1b[<64;1;1M").0[0].kind, MouseKind::WheelUp);
         assert_eq!(one(b"\x1b[<65;1;1M").0[0].kind, MouseKind::WheelDown);
+    }
+
+    #[test]
+    fn no_button_motion_parses_as_move() {
+        // cb = 32 (motion) | 3 (no-button code) = 35: 1003 any-motion hover.
+        // Distinct from a drag (cb=32|button, e.g. 32 parsed above as Drag(Left)).
+        let (r, _) = one(b"\x1b[<35;10;5M");
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            r[0],
+            MouseReport {
+                row: 4,
+                col: 9,
+                kind: MouseKind::Move,
+                shift: false
+            }
+        );
+        // A shifted move still decodes (cb = 35 | 4 = 39) - the client drops it.
+        assert_eq!(one(b"\x1b[<39;2;2M").0[0].kind, MouseKind::Move);
     }
 
     #[test]

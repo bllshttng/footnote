@@ -98,7 +98,10 @@ use crate::tree::{Dir, Rect, TabId};
 /// v13: `Command::FocusPane(pane_id)` for the sideline click-to-focus path.
 /// v14: `Command::AttachAgent(id)` + `AgentRow.attach_id` for the sideline
 /// click-to-attach path (a watch-only claude bg row -> `claude attach <id>`).
-pub const PROTO_VERSION: u32 = 14;
+/// v15: `MouseKind::Move` (1003 any-motion hover reports) drives focus-follows-
+/// mouse; `Command::DispatchNode(id)` starts a targeted interactive session from
+/// a clicked work-queue card (the confirm path).
+pub const PROTO_VERSION: u32 = 15;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -260,6 +263,10 @@ pub enum MouseKind {
     Release(MouseButton),
     /// Motion with a button held (mouse-drag; drives selection mux-side).
     Drag(MouseButton),
+    /// (v15) Motion with NO button held (1003 any-motion tracking): hover.
+    /// Client-local - drives focus-follows-mouse and sideline highlight; never
+    /// forwarded to a pane PTY.
+    Move,
     WheelUp,
     WheelDown,
 }
@@ -474,6 +481,14 @@ pub enum Command {
     /// refused fail-closed with a notice, and the argv is never a shell string,
     /// so the value can only ever be `claude attach`'s positional arg.
     AttachAgent(String),
+    /// (v15) Start a targeted interactive session on a clicked work-queue card's
+    /// node (id or slug), behind the client's one-keypress confirm. Reuses the
+    /// `DispatchNext` porcelain (`fno dispatch one`) pinned to `--node`, so the
+    /// lane cap, the same-node claim race (a node claimed between click and Enter
+    /// bounces `already-dispatching`), and the "read-only observer refused"
+    /// guarantee all hold exactly as leader+g. Value over `DispatchNext`: the
+    /// operator picks WHICH card, not just "next".
+    DispatchNode(String),
 }
 
 /// Server -> client.
@@ -1170,6 +1185,7 @@ mod tests {
             ClientMsg::Command(Command::SelectSquad(42)),
             ClientMsg::Command(Command::FocusPane(3)),
             ClientMsg::Command(Command::AttachAgent("c19cd2c3".into())),
+            ClientMsg::Command(Command::DispatchNode("x-a496".into())),
             ClientMsg::Query,
             ClientMsg::KillServer,
             ClientMsg::Mouse {
@@ -1186,6 +1202,14 @@ mod tests {
                     row: 0,
                     col: 0,
                     kind: MouseKind::WheelUp,
+                },
+            },
+            ClientMsg::Mouse {
+                pane: 5,
+                event: MouseEvent {
+                    row: 1,
+                    col: 6,
+                    kind: MouseKind::Move,
                 },
             },
             ClientMsg::Mouse {

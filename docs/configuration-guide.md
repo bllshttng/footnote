@@ -118,4 +118,5 @@
 | `config.mux.notify_on_done` | bool | `false` | advanced | Also notify on a terminal 'done' hook transition (default off). |
 | `config.mux.attach_digest` | bool | `true` | advanced | Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on). |
 | `config.mux.attach_digest_threshold_min` | int | `10` | advanced | Minutes since last detach before the catch-up digest overlay shows (default 10). |
+| `config.mux.hover_focus` | bool | `true` | advanced | Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on). |
 | `config.loops` | dict[str, LoopEntry] | `{}` | advanced | Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report). |

@@ -59,6 +59,12 @@ const HINT_DELAY: Duration = Duration::from_millis(400);
 /// Transient notice lifetime on the tab bar.
 const NOTICE_TTL: Duration = Duration::from_secs(3);
 
+/// How long the pointer must settle on one new pane before focus follows it
+/// (x-a496). 1003 reports every crossed cell, so a fast sweep produces a burst;
+/// only a pane that stays under the pointer this long steals focus, coalescing
+/// the burst to one `FocusPane` for the pane the pointer lands on.
+const HOVER_DEBOUNCE: Duration = Duration::from_millis(50);
+
 /// Run the client for `session`. Returns the process exit code.
 pub fn run(session: &str) -> i32 {
     match run_inner(session) {
@@ -375,6 +381,29 @@ struct View {
     /// arrow sequence can never half-close the search or leak its tail into the
     /// pane (same split-arrow safety as [`View::sel_esc`]).
     search_esc: Vec<u8>,
+    /// (x-a496) `config.mux.hover_focus`: focus-follows-mouse over panes.
+    /// Latched once at startup (default on); false disables the hover pre-pass.
+    hover_focus: bool,
+    /// (x-a496) Focus-follows-mouse debounce: the pane the pointer is settling on
+    /// and when it first landed there. `FocusPane` fires once the same pane holds
+    /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
+    hover_pending: Option<(u64, Instant)>,
+    /// (x-a496) The `display_rows()` index the pointer is hovering in the
+    /// sideline, painted with the selector's INVERSE bar. Highlight-only - never
+    /// switches the viewed squad/tab. `None` off the panel.
+    hover_row: Option<usize>,
+    /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
+    /// display label. While `Some`, keys route to the confirm (Enter dispatches,
+    /// any other key cancels) and the bottom row shows the prompt.
+    confirm: Option<ConfirmAction>,
+}
+
+/// A pending work-queue card dispatch awaiting the operator's one-keypress
+/// confirm (x-a496): `node` is the id `Command::DispatchNode` targets, `label`
+/// the slug/id shown in the prompt.
+struct ConfirmAction {
+    node: String,
+    label: String,
 }
 
 /// Client-local in-scrollback search state (v12, x-e780).
@@ -411,6 +440,10 @@ impl View {
             notice: None,
             search: None,
             search_esc: Vec::new(),
+            hover_focus: true,
+            hover_pending: None,
+            hover_row: None,
+            confirm: None,
         }
     }
 
@@ -546,11 +579,90 @@ impl View {
                     None => Some(ChromeHit::Notice("agent has no pane here")),
                 },
             },
-            // Cards dispatch (a build) - too costly for a stray tap; keep it on
-            // the explicit leader+g verb.
-            DisplayRow::Card(_) => Some(ChromeHit::Notice("card - dispatch with leader+g")),
+            // Only a READY card starts a session (x-a496) - the same nodes
+            // leader+g would pick. Dispatching a blocked card (unmet deps) or an
+            // in-flight one (already being worked) is work leader+g never selects,
+            // so those say why instead of opening the confirm (codex peer review).
+            // Still too costly for a stray tap, so a ready card opens a
+            // one-keypress confirm rather than dispatching now.
+            DisplayRow::Card(c) => match c.state {
+                CardState::Ready => Some(ChromeHit::Confirm(ConfirmAction {
+                    node: c.id.clone(),
+                    label: if c.slug.is_empty() {
+                        c.id.clone()
+                    } else {
+                        c.slug.clone()
+                    },
+                })),
+                CardState::Blocked => Some(ChromeHit::Notice("card blocked - unmet deps")),
+                CardState::InFlight => Some(ChromeHit::Notice("card already in flight")),
+            },
             DisplayRow::Header(_) => None,
         }
+    }
+
+    /// The `display_rows()` index a hover cell falls on in the sideline, or
+    /// `None` when the cell is not a sideline text cell - a pane, the divider
+    /// column, the tab bar, or the bottom chrome row. Mirrors [`chrome_hit`]'s
+    /// sideline geometry exactly so the highlight lands where a click would
+    /// (x-a496).
+    fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
+        let panel_w = self.panel_w();
+        if panel_w == 0 || col >= panel_w - 1 || row < TAB_BAR_ROWS {
+            return None;
+        }
+        if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
+            return None;
+        }
+        let i = (row - TAB_BAR_ROWS) as usize;
+        (i < self.display_rows().len()).then_some(i)
+    }
+
+    /// Fold one bare-motion (hover) report into the sideline highlight and the
+    /// focus-follows-mouse debounce state (x-a496). Does NOT fire focus - it only
+    /// records which pane the pointer is settling on and when it first landed
+    /// there; the select loop's settle timer commits the focus once the pointer
+    /// rests past [`HOVER_DEBOUNCE`]. Firing CANNOT be reactive here: ?1003 stops
+    /// reporting the instant the pointer stops, so "land in a pane and rest" (the
+    /// primary gesture) emits no further event to fire on - only a timer can.
+    /// `now` records the landing instant for that timer's deadline.
+    fn on_hover(&mut self, row: u16, col: u16, now: Instant) {
+        // Highlight is highlight-only and always on (never switches the view);
+        // a cell off the sideline text column clears it.
+        self.hover_row = self.sideline_row_at(row, col);
+
+        // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
+        // (chrome/divider/sideline => None), so hovering the sideline never
+        // steals focus - only moving over pane content does.
+        if !self.hover_focus {
+            self.hover_pending = None;
+            return;
+        }
+        match self.hit_test(row, col).map(|(p, _, _)| p) {
+            // Over chrome, or already on the focused pane: nothing to settle onto.
+            None => self.hover_pending = None,
+            Some(p) if p == self.layout.focus => self.hover_pending = None,
+            // Keep the original landing instant while the pointer stays on the
+            // same pane, so continued motion WITHIN it doesn't keep pushing the
+            // settle deadline forward (that would starve a slow drag of focus);
+            // only a NEW pane restarts the clock, which also coalesces a fast
+            // sweep - each pane crossed replaces the last, so only the pane the
+            // pointer rests on survives to the timer.
+            Some(p) => {
+                if !matches!(self.hover_pending, Some((pending, _)) if pending == p) {
+                    self.hover_pending = Some((p, now));
+                }
+            }
+        }
+    }
+
+    /// The settle timer fired (x-a496): if a pane is still pending and is not
+    /// already the focus, claim it (clearing the pending state) and return it for
+    /// the caller to `FocusPane`. `None` when the pointer left the pane before
+    /// the deadline or it already became the focus.
+    fn take_settled_hover(&mut self) -> Option<u64> {
+        let (pane, _) = self.hover_pending.take()?;
+        (pane != self.layout.focus).then_some(pane)
     }
 
     fn set_layout(&mut self, layout: LayoutView) {
@@ -577,6 +689,22 @@ impl View {
                 .filter(|a| is_blocked_row(a))
                 .count();
             self.answers = if n == 0 { None } else { Some(cur.min(n - 1)) };
+        }
+        // Hover highlight re-anchors to a live display row on a layout push
+        // (x-a496, AC3-FR): a dropped row must not leave the bar on a stale index.
+        // Clear (not clamp) - a re-clamp would slide the highlight to an unrelated
+        // row the pointer isn't over; the next Move re-establishes it.
+        if let Some(hr) = self.hover_row {
+            if hr >= self.display_rows().len() {
+                self.hover_row = None;
+            }
+        }
+        // Drop a pending focus-follow whose target pane vanished, so a settle can
+        // never fire `FocusPane` at a dead id (the server would refuse it anyway).
+        if let Some((pane, _)) = self.hover_pending {
+            if !self.layout.panes.iter().any(|(id, _)| *id == pane) {
+                self.hover_pending = None;
+            }
         }
     }
 
@@ -787,11 +915,18 @@ impl View {
     /// by the renderer and `chrome_hit` so a click matches what's painted
     /// (codex P2).
     fn bottom_row_is_chrome(&self) -> bool {
-        self.term.0 >= MIN_ROWS_FOR_STATUS && (self.search.is_some() || self.hint || self.status_on)
+        self.term.0 >= MIN_ROWS_FOR_STATUS
+            && (self.confirm.is_some() || self.search.is_some() || self.hint || self.status_on)
     }
 
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
         if !self.bottom_row_is_chrome() {
+            return;
+        }
+        // A card-dispatch confirm is modal - it owns the row above everything
+        // else while the operator decides (x-a496).
+        if let Some(c) = &self.confirm {
+            self.draw_confirm_line(cells, rows, cols, &c.label);
             return;
         }
         // Search line takes the bottom row when active (precedence: search >
@@ -866,6 +1001,24 @@ impl View {
             for (i, ch) in help.chars().enumerate() {
                 put(cells, start + i, ch, cell_flags::DIM);
             }
+        }
+    }
+
+    /// Paint the card-dispatch confirm prompt over the bottom row (x-a496).
+    /// Blank first (the x-5041 divider-bleed gotcha), then the BOLD prompt.
+    fn draw_confirm_line(&self, cells: &mut [Cell], rows: usize, cols: usize, label: &str) {
+        let r = rows - 1;
+        for c in 0..cols {
+            cells[r * cols + c] = Cell::default();
+        }
+        let text = format!(" start session on {label}? ⏎/esc");
+        for (i, ch) in text.chars().take(cols).enumerate() {
+            cells[r * cols + i] = Cell {
+                c: ch,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: cell_flags::BOLD,
+            };
         }
     }
 
@@ -1102,7 +1255,10 @@ impl View {
                 }
                 DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM, false),
             };
-            if selected {
+            // The selector cursor OR the mouse hover paints the INVERSE bar
+            // (x-a496); hover is highlight-only and shares the selector's look.
+            let highlit = selected || self.hover_row == Some(i);
+            if highlit {
                 flags |= cell_flags::INVERSE;
             }
             for (j, ch) in text.chars().take(text_w).enumerate() {
@@ -1114,7 +1270,7 @@ impl View {
                 };
             }
             // Pad the highlight across the row so the cursor reads as a bar.
-            if selected {
+            if highlit {
                 for j in text.chars().count().min(text_w)..text_w {
                     cells[r * cols + j].flags |= cell_flags::INVERSE;
                 }
@@ -1160,11 +1316,13 @@ enum TabHit {
     NewTab,
 }
 
-/// What a left-click on chrome resolves to: server commands to send, or a local
-/// one-line hint for a row that isn't directly actionable.
+/// What a left-click on chrome resolves to: server commands to send, a local
+/// one-line hint for a row that isn't directly actionable, or a pending confirm
+/// (a work-queue card, x-a496 - dispatch is too costly for a silent tap).
 enum ChromeHit {
     Cmds(Vec<Command>),
     Notice(&'static str),
+    Confirm(ConfirmAction),
 }
 
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
@@ -1351,6 +1509,9 @@ async fn attach_and_run(
             backlog: Vec::new(),
         },
     );
+    // Latch the focus-follows-mouse off-switch once (x-a496); a direct
+    // settings.yaml read (fail-open to on), the digest_overlay idiom.
+    view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
     let (c_rows, c_cols) = view.content_dims();
     write_msg(
         &mut sock_w,
@@ -1527,6 +1688,10 @@ async fn attach_and_run(
         } else {
             leader_since.map(|t| t + HINT_DELAY)
         };
+        // Focus-follows-mouse settle (x-a496): a pending hover target commits at
+        // its landing time + the debounce, re-armed each loop from the latest
+        // pending, so a fast sweep's earlier panes are dropped before they fire.
+        let hover_deadline = view.hover_pending.map(|(_, t0)| t0 + HOVER_DEBOUNCE);
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -1716,6 +1881,21 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            _ = async {
+                match hover_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if hover_deadline.is_some() => {
+                // The pointer rested on the pending pane past the debounce
+                // (x-a496): commit focus. The server replies with a Layout that
+                // redraws, so no local compose is needed here.
+                if let Some(pane) = view.take_settled_hover() {
+                    if let Err(e) = write_msg(&mut sock_w, &ClientMsg::Command(Command::FocusPane(pane))).await {
+                        break Err(format!("hover-focus send failed: {e}"));
+                    }
+                }
+            }
         }
     };
     drop(guard); // restore the terminal BEFORE printing the notice
@@ -1754,8 +1934,26 @@ async fn handle_stdin(
         if rep.shift {
             continue;
         }
+        // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
+        // click / scroll cancels it and is SWALLOWED - it must never leak to a
+        // pane underneath (the confirm prompt spans the full-width bottom row) nor
+        // silently open a second card's confirm (codex peer review). Hover (Move)
+        // still falls through to update the highlight beneath the prompt.
+        if view.confirm.is_some() && !matches!(rep.kind, MouseKind::Move) {
+            view.confirm = None;
+            continue;
+        }
+        // Bare motion is hover (x-a496): record the sideline highlight + the
+        // focus-follows-mouse settle target, and swallow it - a Move is never
+        // forwarded to a pane. The actual FocusPane is committed by the select
+        // loop's settle timer (a rested pointer emits no further motion event).
+        if matches!(rep.kind, MouseKind::Move) {
+            view.on_hover(rep.row, rep.col, Instant::now());
+            continue;
+        }
         // A left click on chrome (tab bar / sideline) switches tab/squad, focuses
-        // an agent's pane, or opens a tab - it never reaches the pane underneath.
+        // an agent's pane, opens a tab, or opens a card-dispatch confirm - it
+        // never reaches the pane underneath.
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
             match view.chrome_hit(rep.row, rep.col) {
                 Some(ChromeHit::Cmds(cmds)) => {
@@ -1768,6 +1966,12 @@ async fn handle_stdin(
                 }
                 Some(ChromeHit::Notice(msg)) => {
                     view.set_notice(msg.to_string());
+                    continue;
+                }
+                // A card click opens the confirm (x-a496); the next keypress
+                // (Enter dispatches, else cancels) resolves it via confirm_keys.
+                Some(ChromeHit::Confirm(action)) => {
+                    view.confirm = Some(action);
                     continue;
                 }
                 None => {}
@@ -1805,6 +2009,9 @@ async fn handle_stdin(
         // coalesced keypresses both dying with the overlay.
         view.overlay = false;
         return Ok(StdinFlow::Continue);
+    }
+    if view.confirm.is_some() {
+        return confirm_keys(view, &passthrough, sock_w).await;
     }
     if view.selector.is_some() {
         return selector_keys(view, &passthrough, sock_w).await;
@@ -1946,6 +2153,30 @@ async fn handle_stdin(
                 let _ = raw_out(b"\x07");
             }
         }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Card-dispatch confirm keys (x-a496): Enter (CR/LF) as the first byte sends
+/// the targeted `DispatchNode`; any other key cancels. The whole chunk is
+/// swallowed (like the overlay dismiss) so an arrow's escape tail can't leak
+/// into a pane. `take()` clears the confirm either way, so a stale prompt can
+/// never resurrect a second dispatch.
+async fn confirm_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let Some(action) = view.confirm.take() else {
+        return Ok(StdinFlow::Continue);
+    };
+    if matches!(bytes.first(), Some(b'\r') | Some(b'\n')) {
+        write_msg(
+            sock_w,
+            &ClientMsg::Command(Command::DispatchNode(action.node)),
+        )
+        .await
+        .map_err(|e| format!("dispatch-node send failed: {e}"))?;
     }
     Ok(StdinFlow::Continue)
 }
@@ -2613,6 +2844,236 @@ mod tests {
         assert_eq!(view.hit_test(5, 28 + 35), None);
     }
 
+    // A three-pane layout over two_pane_view's geometry (focus on pane 10, so
+    // 11 and 12 are both hover targets). Panes tile the 72-col content area:
+    // 10 -> outer 28.., 11 -> outer 52.., 12 -> outer 76...
+    fn three_pane_view() -> View {
+        let mut view = two_pane_view();
+        let rect = |x| Rect {
+            x,
+            y: 0,
+            rows: 29,
+            cols: 23,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(10, rect(0)), (11, rect(24)), (12, rect(48))],
+            focus: 10,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        view
+    }
+
+    #[test]
+    fn hover_focus_settles_on_a_landed_pane() {
+        // AC1-HP: land in a non-focused pane and rest. on_hover records the
+        // pending target on the SINGLE landing event (the land-and-stop gesture
+        // emits nothing further); the settle timer then commits it once, and
+        // take_settled_hover clears so it cannot re-fire.
+        let mut view = two_pane_view(); // focus 11; pane 10 at outer col 28..
+        let t0 = Instant::now();
+        view.on_hover(5, 30, t0);
+        assert_eq!(
+            view.hover_pending.map(|(p, _)| p),
+            Some(10),
+            "landing recorded on one event"
+        );
+        assert_eq!(
+            view.take_settled_hover(),
+            Some(10),
+            "timer commits the pane"
+        );
+        assert_eq!(view.take_settled_hover(), None, "cleared: no re-fire");
+    }
+
+    #[test]
+    fn hover_focus_keeps_landing_time_while_on_same_pane() {
+        // Continued motion WITHIN the pane must not push the settle deadline
+        // forward (else a slow drag never settles): the landing instant is kept.
+        let mut view = two_pane_view();
+        let t0 = Instant::now();
+        view.on_hover(5, 30, t0);
+        view.on_hover(5, 31, t0 + Duration::from_millis(40)); // still moving in 10
+        assert_eq!(
+            view.hover_pending,
+            Some((10, t0)),
+            "same pane -> original landing time preserved"
+        );
+    }
+
+    #[test]
+    fn hover_focus_coalesces_fast_sweep_to_settled_pane() {
+        // AC2-FR: a fast sweep across three panes leaves ONLY the pane the pointer
+        // rests on pending, so the timer fires one FocusPane - not one per pane.
+        // Each new pane replaces the last before its deadline; 11 is dropped.
+        let mut view = three_pane_view(); // focus 10; sweep 11 -> 12
+        let t0 = Instant::now();
+        view.on_hover(5, 55, t0); // land on 11
+        view.on_hover(5, 80, t0 + Duration::from_millis(10)); // sweep to 12: 11 dropped
+        assert_eq!(
+            view.hover_pending.map(|(p, _)| p),
+            Some(12),
+            "only 12 survives the sweep"
+        );
+        assert_eq!(view.take_settled_hover(), Some(12), "one FocusPane, to 12");
+    }
+
+    #[test]
+    fn hover_focus_off_switch_disables_follow() {
+        // AC3-EDGE: config.mux.hover_focus=false -> nothing ever becomes pending,
+        // so the timer has nothing to commit. The sideline highlight is
+        // unaffected (it is independent of the focus-follows switch).
+        let mut view = two_pane_view();
+        view.hover_focus = false;
+        let t0 = Instant::now();
+        view.on_hover(5, 30, t0);
+        assert_eq!(view.hover_pending, None, "no settle target while disabled");
+        assert_eq!(view.take_settled_hover(), None);
+        // Highlight still tracks the sideline.
+        view.on_hover(2, 5, t0);
+        assert_eq!(view.hover_row, Some(1));
+    }
+
+    #[test]
+    fn hover_focus_does_not_settle_on_the_focused_pane() {
+        // Hovering the already-focused pane is a no-op: no pending target, so the
+        // timer never fires a redundant FocusPane to the current focus.
+        let mut view = two_pane_view(); // focus 11 at outer col 64..
+        view.on_hover(5, 70, Instant::now());
+        assert_eq!(view.hover_pending, None);
+        assert_eq!(view.take_settled_hover(), None);
+    }
+
+    #[test]
+    fn hover_highlights_sideline_row_without_switching_squad() {
+        // change #3 AC1-UI + AC2-EDGE: hovering a sideline row sets hover_row and
+        // the active squad/tab never change; moving off the panel clears it.
+        let mut view = two_pane_view(); // rows: 0 footnote (active), 1 herdr
+        let before = view.layout.active_squad;
+        view.on_hover(2, 5, Instant::now()); // outer row 2 = herdr row (index 1)
+        assert_eq!(view.hover_row, Some(1));
+        assert_eq!(
+            view.layout.active_squad, before,
+            "hover never switches squad"
+        );
+        view.on_hover(5, 40, Instant::now()); // onto pane content
+        assert_eq!(view.hover_row, None, "off the panel clears the highlight");
+    }
+
+    #[test]
+    fn layout_push_clears_stale_hover_row() {
+        // change #3 AC3-FR: a layout push that drops the hovered row must not
+        // leave the highlight on a now-out-of-range index.
+        let mut view = two_pane_view();
+        view.hover_row = Some(1); // the herdr row
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)], // herdr dropped -> 1 row
+            active_squad: 1,
+            panes: vec![(
+                11,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 72,
+                },
+            )],
+            focus: 11,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        assert_eq!(view.hover_row, None);
+    }
+
+    #[test]
+    fn chrome_hit_card_opens_confirm_with_node() {
+        // change #4: a work-queue card click resolves to a Confirm carrying the
+        // node id and its display label (slug preferred), not a silent dispatch.
+        let mut view = two_pane_view();
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(
+                11,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 72,
+                },
+            )],
+            focus: 11,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: vec![BacklogCard {
+                id: "x-a496".into(),
+                slug: "hover-cards".into(),
+                priority: "p2".into(),
+                state: CardState::Ready,
+            }],
+        });
+        // display_rows: [footnote squad, Header, Card] -> the card is index 2,
+        // painted at outer row TAB_BAR_ROWS + 2 = 3.
+        match view.chrome_hit(3, 5) {
+            Some(ChromeHit::Confirm(a)) => {
+                assert_eq!(a.node, "x-a496");
+                assert_eq!(a.label, "hover-cards");
+            }
+            other => panic!("expected Confirm, got {}", chrome_hit_label(&other)),
+        }
+    }
+
+    #[test]
+    fn chrome_hit_non_ready_card_is_notice_not_confirm() {
+        // A blocked/in-flight card is NOT dispatchable (codex peer review): the
+        // click is a local notice, never a Confirm that would start work leader+g
+        // would skip. Two cards: blocked (index 2), in-flight (index 3).
+        let mut view = two_pane_view();
+        let card = |id: &str, state| BacklogCard {
+            id: id.into(),
+            slug: String::new(),
+            priority: "p2".into(),
+            state,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(
+                11,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 72,
+                },
+            )],
+            focus: 11,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: vec![
+                card("x-blk", CardState::Blocked),
+                card("x-fly", CardState::InFlight),
+            ],
+        });
+        // display_rows: [squad, Header, blocked card, in-flight card] -> rows 3, 4.
+        assert!(
+            matches!(view.chrome_hit(3, 5), Some(ChromeHit::Notice(_))),
+            "blocked card -> notice, not confirm"
+        );
+        assert!(
+            matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
+            "in-flight card -> notice, not confirm"
+        );
+    }
+
     fn cmds(hit: Option<ChromeHit>) -> Vec<Command> {
         match hit {
             Some(ChromeHit::Cmds(c)) => c,
@@ -2625,6 +3086,7 @@ mod tests {
             None => "None",
             Some(ChromeHit::Cmds(_)) => "Cmds",
             Some(ChromeHit::Notice(_)) => "Notice",
+            Some(ChromeHit::Confirm(_)) => "Confirm",
         }
     }
 

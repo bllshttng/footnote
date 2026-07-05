@@ -42,6 +42,17 @@ config:
   model_routing:
     enabled: true          # role/provider routing
 
+  # The fno mux (terminal multiplexer) UX knobs - machine-wide, so global is
+  # their home. All default ON except notify_on_done; listed here so you know
+  # they exist (the mux has no other discovery surface). Flip any to change it.
+  mux:
+    hover_focus: true               # focus-follows-mouse: hover a pane to type in it (false = click to focus)
+    shell_integration: mux-panes    # inject OSC 133 block markers into mux-spawned shells; 'off' to disable
+    attach_digest: true             # 'while you were gone' catch-up overlay when you re-attach after an absence
+    attach_digest_threshold_min: 10 # ...only after an absence longer than this many minutes
+    notify_on_blocked: true         # OS notification when an agent badge enters 'blocked'
+    notify_on_done: false           # ...and on a terminal 'done' (opt-in - flip to true to hear about finishes)
+
 # Read by hooks/worktree-setup.sh from the TOP-LEVEL `worktree:` block (the hook
 # greps it with sed; it never looks under config:). Keep this key here.
 worktree:
