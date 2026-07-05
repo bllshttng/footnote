@@ -73,16 +73,18 @@ def test_review_required_bots_explicit_empty(
     assert settings.config.review.required_bots == []
 
 
-def test_review_required_bots_scalar_fails_closed(
+def test_review_required_bots_scalar_is_singleton(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A non-list value coerces to None (code default) instead of erroring (AC3-ERR)."""
+    """A bare scalar gates on that one login (parity with the Rust reader); a
+    bracket-less typo must not fail OPEN to no-gate (codex P1 on #205)."""
     settings = _load(
         tmp_path,
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    required_bots: gemini\n",
     )
-    assert settings.config.review.required_bots is None
+    assert settings.config.review.required_bots == ["gemini"]
+    assert settings.config.review.github_apps == ["gemini"]
 
 
 def test_review_bare_key_fails_closed(

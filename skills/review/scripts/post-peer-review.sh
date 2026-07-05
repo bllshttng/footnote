@@ -73,22 +73,33 @@ main() {
     || die "gh pr view failed for PR #$pr (gate stays unmet)"
   local marker; marker="$(head_marker "$provider" "$head_sha")"
 
-  # Idempotency: skip if a review with this exact marker already exists.
+  # Anti-gaming (codex P1 on #205): the peer MUST post under an account distinct
+  # from the PR author, or a misconfigured peer_identity == author would self-
+  # certify the gate. Verify the token's own login is not the PR author. Fail
+  # CLOSED if either read fails (never post under an unverifiable identity).
+  local my_login pr_author
+  my_login="$(GH_TOKEN="$tok" gh api user -q .login 2>/dev/null)" \
+    || die "cannot resolve the peer identity from \$$token_env (gh api user failed); a peer must post under a verifiable distinct account"
+  pr_author="$(GH_TOKEN="$tok" gh pr view "$pr" --json author -q .author.login 2>/dev/null)" \
+    || die "gh pr view (author) failed for PR #$pr (gate stays unmet)"
+  [[ -n "$my_login" && "$my_login" != "$pr_author" ]] \
+    || die "peer identity '$my_login' IS the PR author - a peer must post under a DISTINCT machine account (a self-review cannot gate)"
+
+  # Idempotency: skip if a review with this exact marker already exists. The
+  # marker is written LAST (after every required post below), so its presence
+  # means the whole post succeeded - a partial failure leaves no marker and the
+  # next run re-posts everything (codex P1 on #205).
   if GH_TOKEN="$tok" gh api "repos/{owner}/{repo}/pulls/$pr/reviews" --paginate \
         -q '.[].body' 2>/dev/null | grep -qF "$marker"; then
     echo "post-peer-review: $provider review already posted for $head_sha (skip)"
     return 0
   fi
 
-  # Post the verbatim body as a COMMENTED review under the peer identity.
-  local body_tmp; body_tmp="$(mktemp)"; trap 'rm -f "$body_tmp"' EXIT
-  { cat "$body_file"; printf '\n\n%s\n' "$marker"; } > "$body_tmp"
-  GH_TOKEN="$tok" gh pr review "$pr" --comment --body-file "$body_tmp" \
-    || die "gh pr review (body) failed for PR #$pr (gate stays unmet)"
-
-  # Post each P1 as an inline blocking comment carrying the badge markup.
-  # Guard the empty case explicitly: `"${p1s[@]:-}"` trips set -u on an empty
-  # array in Bash 3.2 (macOS ships it) - gemini MEDIUM on #205.
+  # Post each P1 as an inline blocking comment carrying the badge markup FIRST,
+  # BEFORE the marker-bearing body, so a failed P1 post can never be masked by a
+  # marker (which would clear the gate with no blocking finding). Guard the
+  # empty case explicitly: `"${p1s[@]:-}"` trips set -u on an empty array in
+  # Bash 3.2 (macOS ships it) - gemini MEDIUM on #205.
   local f
   if [[ ${#p1s[@]} -gt 0 ]]; then
    for f in "${p1s[@]}"; do
@@ -106,7 +117,14 @@ main() {
    done
   fi
 
-  echo "post-peer-review: posted $provider review as gate identity (${#p1s[@]} P1 inline)"
+  # Post the verbatim body as a COMMENTED review under the peer identity LAST,
+  # carrying the idempotency marker - only reached once all P1s above succeeded.
+  local body_tmp; body_tmp="$(mktemp)"; trap 'rm -f "$body_tmp"' EXIT
+  { cat "$body_file"; printf '\n\n%s\n' "$marker"; } > "$body_tmp"
+  GH_TOKEN="$tok" gh pr review "$pr" --comment --body-file "$body_tmp" \
+    || die "gh pr review (body) failed for PR #$pr (gate stays unmet)"
+
+  echo "post-peer-review: posted $provider review as gate identity ($my_login, ${#p1s[@]} P1 inline)"
 }
 
 main "$@"

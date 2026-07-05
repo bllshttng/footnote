@@ -484,17 +484,20 @@ class ReviewBlock(BaseModel):
     @field_validator("github_apps", "required_bots", mode="before")
     @classmethod
     def coerce_malformed_to_default(cls, v: object) -> object:
-        """Fail closed to "absent" on a non-list value.
+        """Coerce a bare scalar to a single-login list; fail closed on other junk.
 
-        A scalar or mapping here is operator error; treating it as "absent"
-        keeps the gate on its (no-gate) default rather than failing the whole
-        settings load (the Rust reader does the same).
+        A bracket-less scalar (`github_apps: codex`) is a single-login gate, NOT
+        a silent no-gate: a typo must still GATE on that login rather than fail
+        OPEN (codex P1 on #205; parity with the Rust reader + `peers`). Only a
+        genuinely un-listable value (mapping, number) degrades to "absent".
         """
         if v is None or isinstance(v, list):
             return v
+        if isinstance(v, str):
+            return [v]
         _LOG.warning(
             "settings.yaml: config.review.github_apps/required_bots is not a "
-            "list (%r); ignoring it",
+            "list or string (%r); ignoring it",
             v,
         )
         return None

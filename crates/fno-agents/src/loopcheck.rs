@@ -261,6 +261,20 @@ fn classify_list_rhs(rest: &str) -> ListForm {
     }
 }
 
+/// A bare scalar RHS (`key: value`) as a single-item login list. Used when a
+/// list key was written scalar-form: it must GATE on that one login, never
+/// silently fail open to "no gate" (codex P1 on #205). Empty -> None.
+fn scalar_as_singleton(rest: &str) -> Option<Vec<String>> {
+    let v = strip_inline_comment(rest.trim())
+        .trim_matches(|c| c == '"' || c == '\'')
+        .to_string();
+    if v.is_empty() {
+        None
+    } else {
+        Some(vec![v])
+    }
+}
+
 /// Minimal indentation-aware settings.yaml parser.
 /// Handles nested `config.budget.attended/unattended` blocks plus flat keys.
 fn parse_settings(content: &str) -> Settings {
@@ -373,24 +387,18 @@ fn parse_settings(content: &str) -> Settings {
                     ListForm::Empty => s.required_bots = Some(Vec::new()),
                     ListForm::Block => collecting_required_bots = true,
                     ListForm::Inline(items) => s.required_bots = Some(items),
-                    ListForm::Malformed => {
-                        eprintln!(
-                            "loop-check: malformed config.review.required_bots (not a list) - ignoring"
-                        );
-                        s.required_bots = None;
-                    }
+                    // A bare scalar `required_bots: codex` is a single-login
+                    // gate (parity with the peers scalar + Python), NOT a silent
+                    // no-gate: a bracket-less typo must still GATE on that login,
+                    // never fail open (codex P1 on #205).
+                    ListForm::Malformed => s.required_bots = scalar_as_singleton(rest),
                 }
             } else if let Some(rest) = trimmed.strip_prefix("github_apps:") {
                 match classify_list_rhs(rest) {
                     ListForm::Empty => s.github_apps = Some(Vec::new()),
                     ListForm::Block => collecting_github_apps = true,
                     ListForm::Inline(items) => s.github_apps = Some(items),
-                    ListForm::Malformed => {
-                        eprintln!(
-                            "loop-check: malformed config.review.github_apps (not a list) - ignoring"
-                        );
-                        s.github_apps = None;
-                    }
+                    ListForm::Malformed => s.github_apps = scalar_as_singleton(rest),
                 }
             } else if let Some(rest) = trimmed.strip_prefix("peers:") {
                 match classify_list_rhs(rest) {
@@ -3744,12 +3752,20 @@ mod tests {
         );
     }
 
-    /// AC3-ERR: a non-list value fails closed to the code default (None).
+    /// A bare scalar `required_bots: gemini` GATES on that one login (parity
+    /// with peers + Python), rather than failing OPEN to no-gate on a
+    /// bracket-less typo (codex P1 on #205).
     #[test]
-    fn parse_settings_required_bots_scalar_malformed_defaults() {
+    fn parse_settings_required_bots_scalar_is_singleton() {
         let yaml = "config:\n  review:\n    required_bots: gemini\n";
         let s = parse_settings(yaml);
-        assert_eq!(s.required_bots, None, "scalar must fail closed to default");
+        assert_eq!(s.required_bots, Some(vec!["gemini".to_string()]));
+        // github_apps behaves identically.
+        let g = parse_settings("config:\n  review:\n    github_apps: chatgpt-codex-connector\n");
+        assert_eq!(
+            g.github_apps,
+            Some(vec!["chatgpt-codex-connector".to_string()])
+        );
     }
 
     /// A bare `required_bots:` key with no items is malformed (YAML null, not
@@ -3789,9 +3805,10 @@ mod tests {
             Some(vec!["chatgpt-codex-connector".to_string()])
         );
 
-        // A scalar with a comment is still malformed -> default.
+        // A scalar (with a trailing comment stripped) coerces to a single-login
+        // gate, not no-gate (codex P1 on #205).
         let scalar = parse_settings("config:\n  review:\n    required_bots: gemini # oops\n");
-        assert_eq!(scalar.required_bots, None);
+        assert_eq!(scalar.required_bots, Some(vec!["gemini".to_string()]));
     }
 
     #[test]
