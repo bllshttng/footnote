@@ -396,6 +396,14 @@ struct View {
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
     confirm: Option<ConfirmAction>,
+    /// (x-9e5e) The pending new-workspace name buffer, `Some` while the `+`
+    /// create overlay is open. Keys divert to [`create_keys`]: printable append,
+    /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
+    /// Esc cancels. Client-local like `search`: opening reserves no row.
+    create: Option<String>,
+    /// Pending escape bytes in create-overlay mode (same split-arrow safety as
+    /// [`View::search_esc`]).
+    create_esc: Vec<u8>,
 }
 
 /// A pending work-queue card dispatch awaiting the operator's one-keypress
@@ -444,6 +452,8 @@ impl View {
             hover_pending: None,
             hover_row: None,
             confirm: None,
+            create: None,
+            create_esc: Vec::new(),
         }
     }
 
@@ -598,6 +608,8 @@ impl View {
                 CardState::InFlight => Some(ChromeHit::Notice("card already in flight")),
             },
             DisplayRow::Header(_) => None,
+            // The `+` footer opens the name-input overlay (x-9e5e).
+            DisplayRow::NewSquad => Some(ChromeHit::OpenCreate),
         }
     }
 
@@ -916,7 +928,11 @@ impl View {
     /// (codex P2).
     fn bottom_row_is_chrome(&self) -> bool {
         self.term.0 >= MIN_ROWS_FOR_STATUS
-            && (self.confirm.is_some() || self.search.is_some() || self.hint || self.status_on)
+            && (self.confirm.is_some()
+                || self.create.is_some()
+                || self.search.is_some()
+                || self.hint
+                || self.status_on)
     }
 
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
@@ -927,6 +943,24 @@ impl View {
         // else while the operator decides (x-a496).
         if let Some(c) = &self.confirm {
             self.draw_confirm_line(cells, rows, cols, &c.label);
+            return;
+        }
+        // The new-workspace name input overlays the row while open (x-9e5e),
+        // above search/hint/status - the operator is mid-entry.
+        if let Some(name) = &self.create {
+            let r = rows - 1;
+            for c in 0..cols {
+                cells[r * cols + c] = Cell::default();
+            }
+            let text = format!(" new workspace: {name}_");
+            for (i, ch) in text.chars().take(cols).enumerate() {
+                cells[r * cols + i] = Cell {
+                    c: ch,
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: cell_flags::BOLD,
+                };
+            }
             return;
         }
         // Search line takes the bottom row when active (precedence: search >
@@ -1156,6 +1190,9 @@ impl View {
                     .map(DisplayRow::Agent),
             );
         }
+        // The `+` create-workspace affordance sits directly under the squad list
+        // (x-9e5e), above the agents/work-queue sections.
+        out.push(DisplayRow::NewSquad);
         let orphans: Vec<&AgentRow> = self
             .layout
             .agents
@@ -1254,6 +1291,7 @@ impl View {
                     (format!("  {glyph} {label} {}", c.priority), flags, false)
                 }
                 DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM, false),
+                DisplayRow::NewSquad => ("+ new workspace".to_string(), cell_flags::DIM, false),
             };
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); hover is highlight-only and shares the selector's look.
@@ -1300,6 +1338,9 @@ enum DisplayRow<'a> {
     /// A work-queue backlog card (x-6f77), display-only in v1.
     Card(&'a BacklogCard),
     Header(&'static str),
+    /// The `+` create-workspace affordance (x-9e5e), a footer under the squad
+    /// list. A click opens the name-input overlay.
+    NewSquad,
 }
 
 /// One clickable span in the tab bar (label + render flags + what a click does;
@@ -1323,6 +1364,8 @@ enum ChromeHit {
     Cmds(Vec<Command>),
     Notice(&'static str),
     Confirm(ConfirmAction),
+    /// Open the new-workspace name-input overlay (x-9e5e); the `+` footer.
+    OpenCreate,
 }
 
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
@@ -1974,6 +2017,13 @@ async fn handle_stdin(
                     view.confirm = Some(action);
                     continue;
                 }
+                // The `+` footer opens the name-input overlay (x-9e5e); the next
+                // keys route to create_keys (Enter sends NewSquad, Esc cancels).
+                Some(ChromeHit::OpenCreate) => {
+                    view.create = Some(String::new());
+                    view.create_esc.clear();
+                    continue;
+                }
                 None => {}
             }
         }
@@ -2018,6 +2068,9 @@ async fn handle_stdin(
     }
     if view.answers.is_some() {
         return answer_keys(view, &passthrough, sock_w).await;
+    }
+    if view.create.is_some() {
+        return create_keys(view, &passthrough, sock_w).await;
     }
     if view.search.is_some() {
         return search_keys(view, &passthrough, sock_w).await;
@@ -2461,6 +2514,72 @@ async fn search_keys(
     Ok(StdinFlow::Continue)
 }
 
+/// New-workspace name-input keys (x-9e5e). Reuses the search input's split-arrow
+/// folding: printable ASCII appends, Backspace pops, Enter sends
+/// [`Command::NewSquad`] with the typed name (an empty name keeps the overlay
+/// open - the server would reject it, and keeping it open avoids the round trip),
+/// Esc cancels locally. The whole chunk is swallowed so an arrow's escape tail
+/// never leaks into a pane.
+async fn create_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.create_esc);
+    let keys = fold_search_input(&mut esc, bytes);
+    view.create_esc = esc;
+    for key in keys {
+        // Re-read the mode each key: an Esc mid-chunk closes it, and the rest of
+        // the chunk must be swallowed, never forwarded.
+        if view.create.is_none() {
+            break;
+        }
+        match key {
+            SearchKey::Esc => {
+                view.create = None;
+                view.create_esc.clear();
+                break;
+            }
+            SearchKey::Byte(b) => match b {
+                b'\r' | b'\n' => {
+                    let name = view.create.clone().unwrap_or_default();
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        write_msg(
+                            sock_w,
+                            &ClientMsg::Command(Command::NewSquad {
+                                name: name.to_string(),
+                                origin: None,
+                            }),
+                        )
+                        .await
+                        .map_err(|e| format!("new-squad send failed: {e}"))?;
+                        view.create = None;
+                        view.create_esc.clear();
+                        break;
+                    }
+                    // Empty name: keep the overlay open (AC2-FR shape - a failed
+                    // create leaves the input intact).
+                }
+                0x7f | 0x08 => {
+                    if let Some(buf) = view.create.as_mut() {
+                        buf.pop();
+                    }
+                }
+                0x20..=0x7e => {
+                    if let Some(buf) = view.create.as_mut() {
+                        if buf.len() < MAX_SEARCH_QUERY {
+                            buf.push(b as char);
+                        }
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
 /// Answer-overlay keys (x-c929): a digit answers the selected blocked pane
 /// (sending [`ClientMsg::PaneAnswer`] with the daemon-pinned option keystroke -
 /// focus unchanged), `n`/`N` (and j/k/arrows) cycle the blocked queue, Enter
@@ -2766,7 +2885,7 @@ mod tests {
             (30, 100),
             "main".into(),
             LayoutView {
-                squads: vec![meta(1, "footnote", 2, 1), meta(2, "herdr", 1, 0)],
+                squads: vec![meta(1, "footnote", 2, 1), meta(2, "notes", 1, 0)],
                 active_squad: 1,
                 panes: vec![
                     (
@@ -2812,7 +2931,7 @@ mod tests {
         assert!(lines[0].contains("[2]"), "{:?}", lines[0]);
         // Sideline: both squads listed with carets.
         assert!(lines[1].contains("▸ footnote"), "{:?}", lines[1]);
-        assert!(lines[2].contains("▸ herdr"), "{:?}", lines[2]);
+        assert!(lines[2].contains("▸ notes"), "{:?}", lines[2]);
         // Content row: pane a, the 1-cell divider, pane b - at the offsets
         // implied by (tab bar 1 row, panel 28 cols).
         let row1: Vec<char> = lines[1].chars().collect();
@@ -2952,9 +3071,9 @@ mod tests {
     fn hover_highlights_sideline_row_without_switching_squad() {
         // change #3 AC1-UI + AC2-EDGE: hovering a sideline row sets hover_row and
         // the active squad/tab never change; moving off the panel clears it.
-        let mut view = two_pane_view(); // rows: 0 footnote (active), 1 herdr
+        let mut view = two_pane_view(); // rows: 0 footnote (active), 1 notes
         let before = view.layout.active_squad;
-        view.on_hover(2, 5, Instant::now()); // outer row 2 = herdr row (index 1)
+        view.on_hover(2, 5, Instant::now()); // outer row 2 = notes row (index 1)
         assert_eq!(view.hover_row, Some(1));
         assert_eq!(
             view.layout.active_squad, before,
@@ -2969,9 +3088,11 @@ mod tests {
         // change #3 AC3-FR: a layout push that drops the hovered row must not
         // leave the highlight on a now-out-of-range index.
         let mut view = two_pane_view();
-        view.hover_row = Some(1); // the herdr row
+        // With one squad, display_rows is [squad, + new workspace] (len 2), so a
+        // hover on index 2 is now stale and must be cleared by the push.
+        view.hover_row = Some(2);
         view.set_layout(LayoutView {
-            squads: vec![meta(1, "footnote", 2, 1)], // herdr dropped -> 1 row
+            squads: vec![meta(1, "footnote", 2, 1)], // second squad dropped
             active_squad: 1,
             panes: vec![(
                 11,
@@ -3019,9 +3140,9 @@ mod tests {
                 state: CardState::Ready,
             }],
         });
-        // display_rows: [footnote squad, Header, Card] -> the card is index 2,
-        // painted at outer row TAB_BAR_ROWS + 2 = 3.
-        match view.chrome_hit(3, 5) {
+        // display_rows: [footnote squad, + new workspace, Header, Card] -> the
+        // card is index 3, painted at outer row TAB_BAR_ROWS + 3 = 4.
+        match view.chrome_hit(4, 5) {
             Some(ChromeHit::Confirm(a)) => {
                 assert_eq!(a.node, "x-a496");
                 assert_eq!(a.label, "hover-cards");
@@ -3063,13 +3184,14 @@ mod tests {
                 card("x-fly", CardState::InFlight),
             ],
         });
-        // display_rows: [squad, Header, blocked card, in-flight card] -> rows 3, 4.
+        // display_rows: [squad, + new workspace, Header, blocked, in-flight]
+        // -> the cards paint at outer rows 4, 5.
         assert!(
-            matches!(view.chrome_hit(3, 5), Some(ChromeHit::Notice(_))),
+            matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
             "blocked card -> notice, not confirm"
         );
         assert!(
-            matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
+            matches!(view.chrome_hit(5, 5), Some(ChromeHit::Notice(_))),
             "in-flight card -> notice, not confirm"
         );
     }
@@ -3087,6 +3209,7 @@ mod tests {
             Some(ChromeHit::Cmds(_)) => "Cmds",
             Some(ChromeHit::Notice(_)) => "Notice",
             Some(ChromeHit::Confirm(_)) => "Confirm",
+            Some(ChromeHit::OpenCreate) => "OpenCreate",
         }
     }
 
@@ -3152,16 +3275,18 @@ mod tests {
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // display order: squad 1 (row1), its agent "worker" (row2), squad 2
-        // (row3), "~ agents" header (row4), orphan "bg-claude" (row5), orphan
-        // "bg-other" (row6).
+        // (row3), "+ new workspace" footer (row4), "~ agents" header (row5),
+        // orphan "bg-claude" (row6), orphan "bg-other" (row7).
         assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::FocusPane(10)]);
         assert_eq!(
-            cmds(view.chrome_hit(5, 4)),
+            cmds(view.chrome_hit(6, 4)),
             vec![Command::AttachAgent("c19cd2c3".into())]
         );
-        assert!(matches!(view.chrome_hit(6, 4), Some(ChromeHit::Notice(_))));
+        assert!(matches!(view.chrome_hit(7, 4), Some(ChromeHit::Notice(_))));
         // The "~ agents" header row is inert.
-        assert!(view.chrome_hit(4, 4).is_none());
+        assert!(view.chrome_hit(5, 4).is_none());
+        // The "+ new workspace" footer opens the create overlay.
+        assert!(matches!(view.chrome_hit(4, 4), Some(ChromeHit::OpenCreate)));
     }
 
     // A click on the bottom row belongs to the status/which-key/search chrome
@@ -3391,7 +3516,7 @@ mod tests {
         let mut view = two_pane_view();
         let panes = view.layout.panes.clone();
         view.set_layout(LayoutView {
-            squads: vec![meta(1, "footnote", 2, 1), meta(2, "herdr", 1, 0)],
+            squads: vec![meta(1, "footnote", 2, 1), meta(2, "notes", 1, 0)],
             active_squad: 1,
             panes,
             focus: 11,
@@ -3434,8 +3559,8 @@ mod tests {
         let frame = view.compose();
         let text = frame_text(&frame);
         let lines: Vec<&str> = text.lines().collect();
-        // Row order: footnote, its two agent rows, herdr, catch-all header,
-        // the orphan row.
+        // Row order: footnote, its two agent rows, notes squad, the "+ new
+        // workspace" footer, catch-all header, the orphan row.
         assert!(lines[1].contains("\u{25b8} footnote"), "{:?}", lines[1]);
         assert!(
             lines[2].contains("\u{25b2} peer: perm prompt"),
@@ -3443,24 +3568,25 @@ mod tests {
             lines[2]
         );
         assert!(lines[3].contains("\u{2717} dead"), "{:?}", lines[3]);
-        assert!(lines[4].contains("\u{25b8} herdr"), "{:?}", lines[4]);
-        assert!(lines[5].contains("~ agents"), "{:?}", lines[5]);
-        assert!(lines[6].contains("\u{25cf} bg-watch"), "{:?}", lines[6]);
+        assert!(lines[4].contains("\u{25b8} notes"), "{:?}", lines[4]);
+        assert!(lines[5].contains("+ new workspace"), "{:?}", lines[5]);
+        assert!(lines[6].contains("~ agents"), "{:?}", lines[6]);
+        assert!(lines[7].contains("\u{25cf} bg-watch"), "{:?}", lines[7]);
         // The exited row is DIM (fact beats badge, visually too).
         let cols = frame.cols as usize;
         let dead_cell = frame.cells[3 * cols + 2];
         assert_eq!(dead_cell.flags & cell_flags::DIM, cell_flags::DIM);
-        // Selector index 1 = the second SELECTABLE row (herdr), even though
+        // Selector index 1 = the second SELECTABLE row (notes), even though
         // agent rows render between them.
         let mut sel_view = view;
         sel_view.selector = Some(1);
         let sel_frame = sel_view.compose();
-        let herdr_row = 4usize;
-        let sel_cell = sel_frame.cells[herdr_row * cols + 2];
+        let notes_row = 4usize;
+        let sel_cell = sel_frame.cells[notes_row * cols + 2];
         assert_eq!(
             sel_cell.flags & cell_flags::INVERSE,
             cell_flags::INVERSE,
-            "selector highlight must land on the selectable herdr row"
+            "selector highlight must land on the selectable notes row"
         );
     }
 
@@ -3638,7 +3764,7 @@ mod tests {
         // AC6-FR: the catalog shrinks (squad 1 gone); the cursor re-anchors
         // to a live row instead of pointing off the end.
         view.set_layout(LayoutView {
-            squads: vec![meta(2, "herdr", 1, 0)],
+            squads: vec![meta(2, "notes", 1, 0)],
             active_squad: 2,
             panes: vec![(
                 20,

@@ -496,7 +496,10 @@ pub enum Command {
     /// and one shell tab rooted at `origin` (or the creating client's squad
     /// cwd), then switches the sender's view onto it. The `+` sideline button
     /// sends this after the name-input overlay.
-    NewSquad { name: String, origin: Option<String> },
+    NewSquad {
+        name: String,
+        origin: Option<String>,
+    },
 }
 
 /// Server -> client.
