@@ -82,6 +82,11 @@ def _ensure_onboarding_bypass() -> None:
     p = Path.home() / ".claude.json"
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # A cold environment may have no ~/.claude.json at all; create a minimal
+        # one carrying the flag (claude fills the rest on first run) so the fire
+        # still clears the onboarding wall.
+        data = {}
     except (OSError, ValueError):
         return
     if not isinstance(data, dict) or data.get("hasCompletedOnboarding") is True:
@@ -137,9 +142,18 @@ def fire_skill(
         _route_fn = resolve_route_fn
         if _route_fn is None:
             from fno.agents.model_routing import resolve_route
+            from fno.config import load_settings_for_repo
 
+            # Resolve the ROUTED repo's settings (per-repo config.model_routing),
+            # not the watcher's global settings; fall back to global on failure.
+            try:
+                _repo_settings = load_settings_for_repo(repo_dir)
+            except Exception:
+                _repo_settings = None
             _route_fn = lambda r: resolve_route(  # noqa: E731
-                r, notice=lambda m: log.info("pr-watch model-routing: %s", m)
+                r,
+                settings=_repo_settings,
+                notice=lambda m: log.info("pr-watch model-routing: %s", m),
             )
         try:
             route = _route_fn(role)
@@ -174,7 +188,11 @@ def fire_skill(
         # routed auth token wins) to the runner.
         _ensure_onboarding_bypass()
         spawn_env = dict(os.environ)
+        # Drop the parent's Anthropic creds so the routed AUTH_TOKEN wins: a
+        # lingering API key OR a subscription OAuth token would otherwise send
+        # the fire to Anthropic instead of the routed provider.
         spawn_env.pop("ANTHROPIC_API_KEY", None)
+        spawn_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         spawn_env.update(route)
         run_kwargs["env"] = spawn_env
 

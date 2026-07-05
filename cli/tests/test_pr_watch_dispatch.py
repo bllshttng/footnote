@@ -1362,6 +1362,7 @@ class TestPostMergeRouting:
         from fno.pr_watch._dispatch import fire_skill
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stale")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-sub-stale")
         captured = {}
         result = fire_skill(
             "merged",
@@ -1377,6 +1378,8 @@ class TestPostMergeRouting:
         assert env["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
         assert env["ANTHROPIC_MODEL"] == "glm-5.2"
         assert "ANTHROPIC_API_KEY" not in env  # stale key dropped on route
+        # Subscription OAuth token dropped too, else it would win over the route.
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
         # A routed fire must NOT pin --model (the GLM endpoint lacks the id).
         assert "--model" not in captured["cmd"]
 
@@ -1462,6 +1465,26 @@ class TestPostMergeRouting:
         data = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
         assert data["hasCompletedOnboarding"] is True
         assert data["other"] == 1  # other keys preserved
+
+    def test_routed_fire_creates_claude_json_when_absent(self, tmp_path, monkeypatch):
+        """A cold env with no ~/.claude.json: the routed fire creates one with
+        the onboarding flag rather than silently doing nothing."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        home = tmp_path / "home"
+        home.mkdir()  # no .claude.json inside
+        monkeypatch.setenv("HOME", str(home))
+
+        fire_skill(
+            "merged",
+            5,
+            tmp_path,
+            runner=self._capturing_runner({}),
+            resolve_route_fn=lambda role: dict(self._GLM_ROUTE),
+        )
+        cj = home / ".claude.json"
+        assert cj.exists()
+        assert json.loads(cj.read_text(encoding="utf-8"))["hasCompletedOnboarding"] is True
 
     def test_unrouted_fire_does_not_touch_onboarding(self, tmp_path, monkeypatch):
         """An unrouted (Anthropic) fire must not rewrite the user's claude.json."""
