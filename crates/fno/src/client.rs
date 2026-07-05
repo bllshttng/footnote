@@ -471,6 +471,18 @@ impl View {
             .collect()
     }
 
+    /// Open the new-workspace name overlay modally (x-9e5e): clear any
+    /// keyboard-opened overlay first. `create_keys` is routed AFTER
+    /// selector/answers in `handle_stdin`, so a lingering selector would
+    /// otherwise swallow the typed name (codex peer review).
+    fn open_create(&mut self) {
+        self.selector = None;
+        self.answers = None;
+        self.search = None;
+        self.create = Some(String::new());
+        self.create_esc.clear();
+    }
+
     fn panel_visible(&self) -> bool {
         self.panel_on && self.term.1 >= PANEL_W + MIN_CONTENT_COLS
     }
@@ -2020,8 +2032,7 @@ async fn handle_stdin(
                 // The `+` footer opens the name-input overlay (x-9e5e); the next
                 // keys route to create_keys (Enter sends NewSquad, Esc cancels).
                 Some(ChromeHit::OpenCreate) => {
-                    view.create = Some(String::new());
-                    view.create_esc.clear();
+                    view.open_create();
                     continue;
                 }
                 None => {}
@@ -3082,6 +3093,28 @@ mod tests {
         );
         view.on_hover(5, 40, Instant::now()); // onto pane content
         assert_eq!(view.hover_row, None, "off the panel clears the highlight");
+    }
+
+    #[test]
+    fn open_create_is_modal_over_keyboard_overlays() {
+        // codex peer review: create_keys routes AFTER selector/answers, so
+        // opening the create overlay while one is open must clear it - else the
+        // typed workspace name drives the selector instead.
+        let mut view = two_pane_view();
+        view.selector = Some(0);
+        view.answers = Some(0);
+        view.open_create();
+        assert!(view.selector.is_none(), "create clears an open selector");
+        assert!(
+            view.answers.is_none(),
+            "create clears an open answer overlay"
+        );
+        assert!(view.search.is_none());
+        assert_eq!(
+            view.create.as_deref(),
+            Some(""),
+            "the create overlay opens with an empty buffer"
+        );
     }
 
     #[test]
