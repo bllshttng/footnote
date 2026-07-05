@@ -135,12 +135,20 @@ as `providers/claude.py` does) or a lingering key sends the run back to Anthropi
 
 ```bash
 # $BRIEF = the review prompt (step 2); "zai,glm-5.2" = the peers entry's `model`.
-# PY must run on the interpreter that has `fno` importable: the fno tool venv
-# (`"$(dirname "$(command -v fno)")/../libexec/..."` varies) - the robust handle is
-# `uv run --project <fno-src> python3` in the footnote source tree, or the tool
-# venv python (`~/.local/share/uv/tools/fno/bin/python3`) in a deployed install.
-# A bare system python3 lacks fno's deps and will ModuleNotFoundError on pydantic.
-PYBIN="${FNO_PYTHON:-python3}"
+# PY must run on the interpreter that has `fno` importable. A bare system python3
+# lacks fno's deps (ModuleNotFoundError: pydantic), so do NOT default to it: probe
+# for a working interpreter and FAIL LOUD if none is found. Override with
+# FNO_PYTHON (e.g. the fno tool venv python, or `uv run --project <fno-src> python`
+# in the footnote source tree).
+PYBIN=""
+for c in "$FNO_PYTHON" "$HOME/.local/share/uv/tools/fno/bin/python3" python3; do
+  [ -n "$c" ] || continue
+  if "$c" -c "import fno.agents.model_routing" 2>/dev/null; then PYBIN="$c"; break; fi
+done
+if [ -z "$PYBIN" ]; then
+  echo "no interpreter with fno importable - set FNO_PYTHON to the fno tool venv python (or run under 'uv run --project <fno-src>')" >&2
+  # abstain like any failed peer; do NOT fall back to a same-model review.
+else
 GLM_REVIEW="$("$PYBIN" - "$BRIEF" "zai,glm-5.2" <<'PY'
 import sys, os, subprocess
 from fno.agents.model_routing import resolve_explicit_route
@@ -157,10 +165,12 @@ env.update(route)
 r = subprocess.run(["claude", "-p", brief], env=env,
                    capture_output=True, text=True, timeout=300)
 sys.stdout.write(r.stdout)
+sys.stderr.write(r.stderr)          # surface claude's failure reason, don't drop it
 sys.exit(r.returncode)
 PY
 )"
 GLM_RC=$?
+fi
 ```
 
 Then relay `$GLM_REVIEW` through step 4 exactly like a codex/gemini result: a
@@ -220,12 +230,20 @@ bash "${SKILL_DIR}/scripts/post-peer-review.sh" \
   --p1 "src/bar.py:88:Off-by-one drops the last row"
 ```
 
-**Advisory-first (x-ef41).** The routed GLM peer POSTS its review under the machine
-identity, but v1 keeps it **advisory**: it is not required by loop-check's gate
-unless the operator explicitly adds it to the gated peers list. Blocking judgment
-stays on the flagship (the `PROTECTED_ROLES` stance). To PROMOTE the GLM peer to a
-required gate once trusted, add its posting login to the required peers gate in
-`config.review` - a one-line config change, no code.
+**Advisory-first (x-ef41) - what "advisory" actually means here.** Be precise: any
+`config.review.peers` entry IS read by loop-check as a required reviewer (it
+resolves each entry to a posting login - the entry's own map `identity`, else the
+shared `peer_identity` - and requires that login to have reviewed). So a GLM peer
+is not gate-free simply by being routed. What keeps it advisory in v1 is that it
+posts under the *shared* `peer_identity` alongside codex/gemini: peers sharing one
+identity collapse to a SINGLE required login, cleared by ANY of them posting, so
+adding GLM does not add a new hurdle and blocking judgment still rides the flagship
+(`PROTECTED_ROLES` stance). (Caveat: a GLM peer that is the *only* peer, posting
+under the shared identity, is effectively the sole thing satisfying that login -
+there it does gate.) To PROMOTE GLM to an INDEPENDENT required gate once trusted,
+give its peers entry its OWN map `identity` (a distinct login loop-check must see
+separately) instead of letting it ride the shared `peer_identity` - a one-line
+config change, no code.
 
 On a **provider-failed** or **post-failed** outcome the helper exits non-zero
 and prints why; relay that verbatim. The gate then stays UNMET with a stated

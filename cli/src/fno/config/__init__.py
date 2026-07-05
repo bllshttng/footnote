@@ -612,16 +612,30 @@ class ReviewBlock(BaseModel):
                 prov, model = e.get("provider"), e.get("model")
             else:
                 continue
-            if (
-                isinstance(prov, str)
-                and prov.strip().lower() == "claude"
-                and not (isinstance(model, str) and model.strip())
-            ):
+            if not (isinstance(prov, str) and prov.strip().lower() == "claude"):
+                continue
+            # A claude peer is the author's own model UNLESS it names a route to
+            # a genuinely different model (the claude CLI is only transport). A
+            # non-empty `model` is not enough: it must parse as
+            # `route_provider,route_model` AND not route back to the author's own
+            # provider (anthropic/claude), or it defeats the distinct-model trust
+            # invariant just as a bare claude peer would. Reject fail-closed at
+            # load rather than let a same-model review masquerade as a peer.
+            route = model.strip() if isinstance(model, str) else ""
+            parts = [p.strip() for p in route.split(",")]
+            if len(parts) != 2 or not parts[0] or not parts[1]:
                 raise ValueError(
-                    "config.review.peers has a claude peer with no model route "
-                    "(it would otherwise be the same model as the author, "
-                    "breaking the distinct-model trust invariant); name a route, "
-                    f'e.g. {{provider: claude, model: "zai,glm-5.2"}}: {e!r}'
+                    "config.review.peers has a claude peer with no valid model "
+                    'route (need "route_provider,route_model", e.g. "zai,glm-5.2"); '
+                    "a bare claude peer is the same model as the author, breaking "
+                    f"the distinct-model trust invariant: {e!r}"
+                )
+            if parts[0].lower() in {"anthropic", "claude"}:
+                raise ValueError(
+                    "config.review.peers claude peer routes to the author's own "
+                    f"provider ({parts[0]!r}), which is not a distinct model - it "
+                    "breaks the distinct-model trust invariant; route to a "
+                    f"different provider (e.g. zai): {e!r}"
                 )
         return self
 
