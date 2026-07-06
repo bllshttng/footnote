@@ -210,6 +210,73 @@ impl Session {
         }
         RemoveOutcome::SquadRemoved
     }
+
+    /// Re-home a whole tab (and every pane in it) into another squad (x-96e8).
+    /// Pure data surgery - the caller does pane-free view fixup after. Panes
+    /// are NEVER reaped here (they ride with the tab); only [`RemoveOutcome`]'s
+    /// remove_tab path reaps. Can never produce a session-empty state: `dst`
+    /// gains a tab, so at least one squad always survives.
+    pub fn move_tab(&mut self, tab: TabId, dst: u64) -> MoveTabOutcome {
+        let Some((src_id, tab_idx)) = self.find_tab(tab) else {
+            return MoveTabOutcome::Refused("no such tab");
+        };
+        if self.squad(dst).is_none() {
+            return MoveTabOutcome::Refused("no such squad");
+        }
+        if src_id == dst {
+            return MoveTabOutcome::Refused("already there");
+        }
+        let src_pos = self
+            .squads
+            .iter()
+            .position(|s| s.id == src_id)
+            .expect("find_tab live squad");
+        // Detach the Tab (id kept - ids are session-unique, never reused).
+        let moved = self.squads[src_pos].tabs.remove(tab_idx);
+        // Source active_tab re-clamps exactly like remove_tab's TabRemoved arm.
+        {
+            let src = &mut self.squads[src_pos];
+            if !src.tabs.is_empty() {
+                if src.active_tab >= src.tabs.len() {
+                    src.active_tab = src.tabs.len() - 1;
+                } else if src.active_tab > tab_idx {
+                    src.active_tab -= 1;
+                }
+            }
+        }
+        // Push onto dst; dst.active_tab is untouched (the caller re-homes any
+        // viewer of the moved tab via set_view, which is the only thing that
+        // moves the MRU pointer).
+        self.squad_mut(dst)
+            .expect("dst checked live above")
+            .tabs
+            .push(moved);
+        // Source squad's last tab moved out: drop the now-empty squad (its
+        // panes already left with the tab) and re-anchor active_squad. Never
+        // SessionEmpty - dst just gained a tab.
+        if self.squads[src_pos].tabs.is_empty() {
+            self.squads.remove(src_pos);
+            if self.active_squad == Some(src_id) {
+                self.active_squad = Some(self.squads[0].id);
+            }
+            return MoveTabOutcome::MovedSquadRemoved;
+        }
+        MoveTabOutcome::Moved
+    }
+}
+
+/// What [`Session::move_tab`] did, so the handler can fix up client views: a
+/// plain move, a move that emptied (and removed) the source squad, or a
+/// fail-closed refusal carrying the notice text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveTabOutcome {
+    /// The tab moved; the source squad still has tabs.
+    Moved,
+    /// The tab moved AND its (now empty) source squad was removed. Panes were
+    /// NOT reaped - they rode with the tab.
+    MovedSquadRemoved,
+    /// No mutation happened; the `&str` is the notice text for the sender.
+    Refused(&'static str),
 }
 
 /// Display names for the sideline: each squad shows its canonical root's
@@ -459,6 +526,67 @@ mod tests {
         assert_eq!(s.active_squad, Some(2));
         assert_eq!(s.remove_tab(2, 0), RemoveOutcome::SquadRemoved);
         assert_eq!(s.active_squad, Some(1), "active falls back to a survivor");
+    }
+
+    // -- x-96e8 move_tab ------------------------------------------------
+
+    #[test]
+    fn move_tab_rehomes_a_tab_and_reclamps_source_active() {
+        // US4/AC-HP: a tab moves into the destination squad; the source squad's
+        // active_tab re-clamps like remove_tab, and dst keeps its own active_tab.
+        let mut s = Session::default();
+        s.add_squad(1, vec!["/a".into()], None, tab(&[10]));
+        s.squad_mut(1).unwrap().tabs.push(tab(&[11]));
+        s.squad_mut(1).unwrap().tabs.push(tab(&[12]));
+        s.squad_mut(1).unwrap().active_tab = 2;
+        s.add_squad(2, vec!["/b".into()], None, tab(&[20]));
+
+        assert_eq!(s.move_tab(10, 2), MoveTabOutcome::Moved);
+        // Source lost tab 10 (index 0), keeps 11/12; active_tab shifted down.
+        assert_eq!(s.squad(1).unwrap().tabs.len(), 2);
+        assert_eq!(s.squad(1).unwrap().active_tab, 1);
+        // Destination gained the tab (id preserved); its active_tab untouched.
+        assert_eq!(s.find_tab(10), Some((2, 1)));
+        assert_eq!(s.squad(2).unwrap().active_tab, 0);
+    }
+
+    #[test]
+    fn move_tab_of_last_tab_removes_empty_source_without_reaping() {
+        // Invariant: moving a squad's only tab removes the now-empty source and
+        // re-anchors active_squad; the panes ride with the tab (no reap here).
+        let mut s = Session::default();
+        s.add_squad(1, vec!["/a".into()], None, tab(&[10]));
+        s.add_squad(2, vec!["/b".into()], None, tab(&[20]));
+        assert_eq!(s.active_squad, Some(2));
+
+        assert_eq!(s.move_tab(20, 1), MoveTabOutcome::MovedSquadRemoved);
+        assert_eq!(s.squads.len(), 1, "empty source squad removed");
+        assert_eq!(s.squad(2), None);
+        assert_eq!(s.active_squad, Some(1), "active re-anchors to survivor");
+        // The moved pane is still present in the destination (never reaped).
+        assert_eq!(s.find_tab(20), Some((1, 1)));
+        assert_eq!(s.find_pane(20), Some((1, 1)));
+    }
+
+    #[test]
+    fn move_tab_refuses_unknown_tab_unknown_dst_and_same_squad() {
+        let mut s = Session::default();
+        s.add_squad(1, vec!["/a".into()], None, tab(&[10]));
+        s.add_squad(2, vec!["/b".into()], None, tab(&[20]));
+
+        assert_eq!(s.move_tab(999, 2), MoveTabOutcome::Refused("no such tab"));
+        assert_eq!(
+            s.move_tab(10, 999),
+            MoveTabOutcome::Refused("no such squad")
+        );
+        assert_eq!(
+            s.move_tab(10, 1),
+            MoveTabOutcome::Refused("already there"),
+            "dst == src is refused, not a corrupting no-op"
+        );
+        // No refusal mutated anything.
+        assert_eq!(s.find_tab(10), Some((1, 0)));
+        assert_eq!(s.squads.len(), 2);
     }
 
     #[test]
