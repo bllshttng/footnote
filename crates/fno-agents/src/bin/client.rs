@@ -751,6 +751,38 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         return Some(2);
     }
 
+    // Spawn gate (x-c5cc): cap + RAM floor for the CLIENT-SIDE substrates only.
+    // `pane` re-execs into the Python CLI whose mirrored gate is the sole gate
+    // on that path (exactly one gate evaluation per spawn, LD1). The guard is
+    // held across dispatch so the next waiter's count includes the newcomer
+    // (bg: the mutex until the roster/registry row exists; headless: the
+    // worker:<name> slot claim for the call duration), then dropped.
+    let mut gate_guard = if substrate == "pane" {
+        None
+    } else {
+        let flags = fno_agents::spawn_gate::GateFlags {
+            force: params
+                .get("force")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            no_wait: params
+                .get("no_wait")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        };
+        let config_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match fno_agents::spawn_gate::run_gate(
+            &config_cwd,
+            &home.registry_json(),
+            name,
+            substrate,
+            flags,
+        ) {
+            Ok(g) => Some(g),
+            Err(code) => return Some(code),
+        }
+    };
+
     // Each provider module defines its OWN AskOutcome struct (nominally
     // distinct types), so `emit!` prints+returns inline per arm rather than via
     // one shared closure that could not name all four types.
@@ -777,7 +809,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // agents`; attach/peek/reply; NOT a grid pane). claude-only by nature.
         ("claude", "bg") => {
             let claude_home = ClaudeHome::from_env();
-            emit!(dispatch_claude_spawn(
+            let outcome = dispatch_claude_spawn(
                 home,
                 &claude_home,
                 name,
@@ -788,7 +820,41 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 timeout,
                 &[],
                 model,
-            ))
+            );
+            if !outcome.stderr.is_empty() {
+                eprint!("{}", outcome.stderr);
+            }
+            if !outcome.stdout.is_empty() {
+                print!("{}", outcome.stdout);
+            }
+            // Flush the receipt BEFORE the bounded QoS roster poll so
+            // line-parsing consumers never wait on the demotion (x-c5cc).
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            // The roster row exists once dispatch returned: release the gate
+            // NOW so the ~10s demotion poll never serializes other spawns
+            // behind the spawn-gate mutex (codex P2).
+            if let Some(g) = gate_guard.as_mut() {
+                g.release();
+            }
+            if outcome.exit_code == 0 {
+                // The bg worker is claude's child (its exec can't be wrapped);
+                // demote post-hoc via the roster pid. short_id from the JSON
+                // receipt line (parsed, not string-split — gemini HIGH).
+                let parsed: Option<serde_json::Value> =
+                    serde_json::from_str(outcome.stdout.trim()).ok();
+                if let Some(sid) = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("short_id"))
+                    .and_then(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    let config_cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    fno_agents::spawn_gate::qos_demote_bg_worker(&config_cwd, sid);
+                }
+            }
+            Some(outcome.exit_code)
         }
         // claude headless: a truly headless `claude -p` one-shot (no thread, no
         // grid row; runs to completion and exits). The one place claude shells
@@ -1234,6 +1300,11 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--force" | "-F" => {
                 params.insert("force".into(), Value::Bool(true));
+            }
+            "--no-wait" => {
+                // Spawn-gate escape (x-c5cc): fail immediately at max_live
+                // instead of queueing for a free slot. Client-side only.
+                params.insert("no_wait".into(), Value::Bool(true));
             }
             "--model" | "-m" => {
                 // Exact model name forwarded to the provider CLI's own --model:
@@ -1916,7 +1987,7 @@ fn exit_code_for(code: ErrorCode) -> i32 {
 /// list against that set, so a new verb cannot land without a `--help` entry
 /// (ab-351427cb).
 const CLIENT_VERB_USAGE: &[&str] = &[
-    "spawn <name> --provider <p> [--substrate pane|bg|headless] [--cwd <dir>|--fresh|--here] --argv -- <cmd...>",
+    "spawn <name> --provider <p> [--substrate pane|bg|headless] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
     "ask <name> <message> [--cwd <dir>|--fresh|--here]",
     "list [--all]",
     "status",
@@ -2565,6 +2636,24 @@ mod tests {
         let (_m, force_params) =
             build_request("rm", &["myagent".to_string(), "-F".to_string()]).expect("-F must parse");
         assert_eq!(force_params["force"], true);
+    }
+
+    /// x-c5cc: the spawn-gate flags parse on the spawn verb (--force already
+    /// shared with stop/rm; --no-wait is gate-only).
+    #[test]
+    fn spawn_gate_flags_parse() {
+        let args = vec![
+            "w1".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "bg".to_string(),
+            "--force".to_string(),
+            "--no-wait".to_string(),
+        ];
+        let (_m, params) = build_request("spawn", &args).expect("gate flags must parse");
+        assert_eq!(params["force"], true);
+        assert_eq!(params["no_wait"], true);
     }
 
     /// AC4-HP: spawn with provider and no --argv succeeds (uses provider-derived argv).

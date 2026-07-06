@@ -669,6 +669,7 @@ fn client_ask_unknown_name_exits_16() {
 
     let out = std::process::Command::new(&bin)
         .args(["ask", "ghost-client", "hello"])
+        .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .output()
         .expect("failed to run fno-agents");
@@ -723,6 +724,7 @@ fn client_spawn_once_claude_is_headless_p_lane_not_bg() {
             "claude",
             "--once",
         ])
+        .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .env("PATH", path_with(&bin_dir))
         .current_dir(&cwd)
@@ -784,6 +786,7 @@ fn client_spawn_headless_claude_honors_timeout() {
             "--timeout",
             "1",
         ])
+        .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .env("PATH", path_with(&bin_dir))
         .current_dir(&cwd)
@@ -827,6 +830,7 @@ fn client_spawn_substrate_bg_codex_hard_errors() {
             "--substrate",
             "bg",
         ])
+        .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .output()
         .expect("failed to run fno-agents");
@@ -868,6 +872,7 @@ fn client_spawn_substrate_headless_opencode_hard_errors() {
             "--substrate",
             "headless",
         ])
+        .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .output()
         .expect("failed to run fno-agents");
@@ -909,6 +914,7 @@ fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_pane() {
             "--substrate",
             "bg",
         ])
+        .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .output()
         .expect("failed to run fno-agents");
@@ -945,6 +951,7 @@ fn client_spawn_no_provider_exits_2() {
 
     let out = std::process::Command::new(&bin)
         .args(["spawn", "myagent", "hello"])
+        .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .output()
         .expect("failed to run fno-agents");
@@ -997,6 +1004,7 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
             "--substrate",
             "bg",
         ])
+        .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .env("PATH", path_with(&bin_dir))
         .current_dir(&cwd)
@@ -1044,6 +1052,7 @@ fn client_host_retired_prints_mux_pointer() {
 
     let out = std::process::Command::new(&bin)
         .args(["host", "host-collide", "--provider", "codex"])
+        .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .env("FNO_AGENTS_DAEMON_BIN", "/usr/bin/false")
         .output()

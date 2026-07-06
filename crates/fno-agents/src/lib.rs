@@ -78,6 +78,7 @@ pub mod provider;
 pub mod readiness;
 pub mod scrape;
 pub mod screen;
+pub mod spawn_gate;
 pub mod state;
 pub mod stream_worker;
 pub mod subprocess_ask;

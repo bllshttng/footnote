@@ -1005,6 +1005,16 @@ class AgentsBlock(BaseModel):
     dead_row_grace: int = 3600
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
+    # Spawn-gate knobs (x-c5cc). All three coerce invalid values to their
+    # defaults (fail-open, matching _coerce_max_concurrent): the gate is
+    # protective infrastructure and a typo must never brick spawning.
+    #   max_live    — cap on concurrent live worker processes (union of the fno
+    #                 registry and claude's daemon roster). Spawn queues at cap.
+    #   min_free_gb — available-RAM floor for spawn preflight; <= 0 disables.
+    #   worker_qos  — utility (demote workers to background QoS) | off.
+    max_live: int = 3
+    min_free_gb: float = 4.0
+    worker_qos: str = "utility"
 
     @field_validator("dead_row_grace")
     @classmethod
@@ -1028,6 +1038,49 @@ class AgentsBlock(BaseModel):
                 f"got {v!r}"
             )
         return v
+
+    @field_validator("max_live", mode="before")
+    @classmethod
+    def _coerce_max_live(cls, v: object) -> object:
+        """Drop a non-positive / non-int max_live to the default (3); never raise."""
+        if isinstance(v, bool):
+            return 3
+        if isinstance(v, int) and v >= 1:
+            return v
+        if isinstance(v, str):
+            try:
+                n = int(v.strip())
+            except ValueError:
+                return 3
+            return n if n >= 1 else 3
+        return 3
+
+    @field_validator("min_free_gb", mode="before")
+    @classmethod
+    def _coerce_min_free_gb(cls, v: object) -> object:
+        """Coerce a non-numeric min_free_gb to the default (4.0); never raise.
+
+        <= 0 is a VALID value (guard disabled), so only unparseable input
+        falls back to the default.
+        """
+        if isinstance(v, bool):
+            return 4.0
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v.strip())
+            except ValueError:
+                return 4.0
+        return 4.0
+
+    @field_validator("worker_qos", mode="before")
+    @classmethod
+    def _coerce_worker_qos(cls, v: object) -> object:
+        """Any value outside utility|off coerces to the default (utility)."""
+        if isinstance(v, str) and v.strip().lower() in ("utility", "off"):
+            return v.strip().lower()
+        return "utility"
 
     @field_validator("codex", "gemini", mode="before")
     @classmethod

@@ -220,6 +220,116 @@ fn parse_bool(rest: &str) -> Option<bool> {
     }
 }
 
+// --- Spawn-gate knobs (x-c5cc). Same precedence + fail-open degrade as
+// `dead_row_grace_secs`; all three coerce invalid values to their defaults so
+// a config typo can never brick the spawn primitive.
+
+/// Default global cap on concurrent live worker processes (union of the fno
+/// registry and claude's daemon roster). Matches the Pydantic default.
+pub const DEFAULT_MAX_LIVE: u32 = 3;
+/// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
+pub const DEFAULT_MIN_FREE_GB: f64 = 4.0;
+
+/// Resolve `config.agents.max_live`. Values < 1 (or unparseable) coerce to
+/// [`DEFAULT_MAX_LIVE`] — never 0, which would block all spawns.
+pub fn max_live(cwd: &Path) -> u32 {
+    match resolve_agents_value(cwd, "max_live").and_then(|raw| raw.parse::<u32>().ok()) {
+        Some(v) if v >= 1 => v,
+        _ => DEFAULT_MAX_LIVE,
+    }
+}
+
+/// Resolve `config.agents.min_free_gb`. `<= 0` is a VALID value (guard
+/// disabled); only an unparseable value falls back to [`DEFAULT_MIN_FREE_GB`].
+pub fn min_free_gb(cwd: &Path) -> f64 {
+    resolve_agents_value(cwd, "min_free_gb")
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .unwrap_or(DEFAULT_MIN_FREE_GB)
+}
+
+/// Resolve `config.agents.worker_qos`: `true` = demote workers (the `utility`
+/// default), `false` = `off`. Any other value coerces to the default.
+pub fn worker_qos_enabled(cwd: &Path) -> bool {
+    match resolve_agents_value(cwd, "worker_qos").as_deref() {
+        Some("off") => false,
+        _ => true,
+    }
+}
+
+/// FNO_CONFIG-sole > project-local > global precedence for a direct child of
+/// `agents:` (the `dead_row_grace_secs` chain, generalized). Returns the raw
+/// trimmed scalar so each caller applies its own coercion.
+fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
+    if let Some(explicit) = non_empty_env("FNO_CONFIG") {
+        return read_agents_value_file(Path::new(&explicit), key);
+    }
+    if let Some(v) = read_agents_value_file(&cwd.join(".fno/settings.yaml"), key) {
+        return Some(v);
+    }
+    let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/settings.yaml")));
+    if let Some(g) = global {
+        if let Some(v) = read_agents_value_file(&g, key) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn read_agents_value_file(path: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    read_agents_value(&content, key)
+}
+
+/// Scan a settings.yaml body for `config: > agents: > <key>:` (a direct child
+/// of `agents:`, like `dead_row_grace`). Indent-unit-agnostic. Returns the raw
+/// scalar (comment-stripped, quote-trimmed, lowercased) or `None` when absent.
+pub(crate) fn read_agents_value(content: &str, key: &str) -> Option<String> {
+    let unit = content
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|l| l.len() - l.trim_start().len())
+        .find(|&i| i > 0)
+        .unwrap_or(2);
+    let level = |line: &str| -> usize { (line.len() - line.trim_start().len()) / unit };
+
+    let mut in_config = false;
+    let mut in_agents = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        match level(line) {
+            0 => {
+                in_config = trimmed.starts_with("config:");
+                in_agents = false;
+            }
+            1 if in_config => {
+                in_agents = trimmed.starts_with("agents:");
+            }
+            2 if in_agents => {
+                if let Some(rest) = trimmed.strip_prefix(key).and_then(|r| r.strip_prefix(':')) {
+                    let v = rest
+                        .split('#')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .to_ascii_lowercase();
+                    if v.is_empty() {
+                        return None;
+                    }
+                    return Some(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// `config.mux.notify_on_blocked` (default ON): the daemon fires an OS
 /// notification when a badge ENTERS `blocked` (x-dd84). Same file precedence
 /// and hang-safe degrade as [`dead_row_grace_secs`].
@@ -367,6 +477,66 @@ mod tests {
         // A headless_yolo: under some other block must not match.
         let yaml = "config:\n  target:\n    headless_yolo: false\n";
         assert_eq!(read_headless_yolo(yaml, "gemini"), None);
+    }
+
+    #[test]
+    fn agents_value_reads_spawn_gate_keys() {
+        let yaml = "config:\n  agents:\n    confirm: auto\n    max_live: 5\n    min_free_gb: 2.5\n    worker_qos: off\n";
+        assert_eq!(read_agents_value(yaml, "max_live").as_deref(), Some("5"));
+        assert_eq!(
+            read_agents_value(yaml, "min_free_gb").as_deref(),
+            Some("2.5")
+        );
+        assert_eq!(
+            read_agents_value(yaml, "worker_qos").as_deref(),
+            Some("off")
+        );
+    }
+
+    #[test]
+    fn agents_value_absent_nested_or_prefix_is_none() {
+        assert_eq!(read_agents_value("schema_version: 1\n", "max_live"), None);
+        // provider-depth key must not read as the agents child.
+        let nested = "config:\n  agents:\n    codex:\n      max_live: 9\n";
+        assert_eq!(read_agents_value(nested, "max_live"), None);
+        // prefix keys must not match without the ':' boundary.
+        let prefix = "config:\n  agents:\n    max_live_extra: 9\n";
+        assert_eq!(read_agents_value(prefix, "max_live"), None);
+    }
+
+    #[test]
+    fn spawn_gate_knobs_coerce_invalid_to_defaults() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        // max_live: 0 and banana both coerce to the default, never 0.
+        let f = write_file(
+            "gate-coerce",
+            "config:\n  agents:\n    max_live: 0\n    min_free_gb: banana\n    worker_qos: turbo\n",
+        );
+        std::env::set_var("FNO_CONFIG", &f);
+        let cwd = std::env::temp_dir();
+        let (ml, mf, qos) = (max_live(&cwd), min_free_gb(&cwd), worker_qos_enabled(&cwd));
+        clear_config_env();
+        assert_eq!(ml, DEFAULT_MAX_LIVE);
+        assert_eq!(mf, DEFAULT_MIN_FREE_GB);
+        assert!(qos, "unknown worker_qos coerces to utility (enabled)");
+    }
+
+    #[test]
+    fn spawn_gate_knobs_read_valid_values() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let f = write_file(
+            "gate-valid",
+            "config:\n  agents:\n    max_live: 7\n    min_free_gb: 0\n    worker_qos: off\n",
+        );
+        std::env::set_var("FNO_CONFIG", &f);
+        let cwd = std::env::temp_dir();
+        let (ml, mf, qos) = (max_live(&cwd), min_free_gb(&cwd), worker_qos_enabled(&cwd));
+        clear_config_env();
+        assert_eq!(ml, 7);
+        assert_eq!(mf, 0.0, "min_free_gb: 0 is valid (guard disabled)");
+        assert!(!qos);
     }
 
     #[test]

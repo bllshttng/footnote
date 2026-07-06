@@ -379,6 +379,21 @@ def cmd_spawn(
     plan: str | None = typer.Option(
         None, "--plan", help="Provenance FNO_PLAN override (skips the graph read)."
     ),
+    force: bool = typer.Option(
+        False, "--force", "-F",
+        help=(
+            "Spawn-gate bypass (x-c5cc): skip the max_live cap AND the "
+            "min_free_gb RAM floor. Workers are still QoS-demoted and still "
+            "counted by the next un-forced spawn."
+        ),
+    ),
+    no_wait: bool = typer.Option(
+        False, "--no-wait",
+        help=(
+            "Fail immediately when max_live is reached instead of queueing "
+            "for a free slot."
+        ),
+    ),
 ) -> None:
     """Spawn a new agent.
 
@@ -420,60 +435,81 @@ def cmd_spawn(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+
+    # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
+    # the substrate fan-out. This Python gate is the SOLE gate on every path
+    # that reaches cmd_spawn (the front door execs the binary for bg/headless,
+    # so those normally gate in Rust; the Rust pane arm re-execs back here) —
+    # exactly one gate evaluation per spawn (LD1). `--once` is the
+    # pre-substrate spelling of a headless one-shot, so it gates as headless.
+    from fno.agents.spawn_gate import run_gate
+
+    gate = run_gate(
+        name,
+        "headless" if (once or substrate == "headless") else substrate,
+        force=force,
+        no_wait=no_wait,
+    )
+
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
     # it to --substrate headless): it always means a one-shot, never a pane.
-    if substrate == "pane" and not once:
-        from fno.agents.mux_spawn import dispatch_spawn_pane, resolve_provenance
+    try:
+        if substrate == "pane" and not once:
+            from fno.agents.mux_spawn import dispatch_spawn_pane, resolve_provenance
+
+            try:
+                pane_result = dispatch_spawn_pane(
+                    name=name,
+                    message=message,
+                    provider=provider,
+                    cwd=workdir,
+                    yolo=yolo,
+                    role=role,
+                    model=model,
+                    provenance=resolve_provenance(node, slug, plan),
+                )
+            except DispatchAskError as exc:
+                print(str(exc), file=sys.stderr)
+                raise typer.Exit(code=exc.exit_code) from exc
+            # Compact one-line receipt, superset of the daemon-spawn receipt shape
+            # ({"name","short_id","provider","status"}) so line-parsing consumers
+            # keep working; short_id is empty (a mux row has no worker socket).
+            receipt = json.dumps(
+                {
+                    "name": pane_result.name,
+                    "short_id": "",
+                    "provider": pane_result.provider,
+                    "status": "live",
+                    "mux_session": pane_result.session,
+                    "pane_id": pane_result.pane_id,
+                }
+            )
+            sys.stdout.write(receipt + "\n")
+            sys.stdout.flush()
+            return
+        if substrate == "headless":
+            once = True
 
         try:
-            pane_result = dispatch_spawn_pane(
+            result: SpawnResult = dispatch_spawn(
                 name=name,
                 message=message,
                 provider=provider,
                 cwd=workdir,
+                once=once,
+                timeout=timeout,
+                from_name=from_name,
                 yolo=yolo,
                 role=role,
                 model=model,
-                provenance=resolve_provenance(node, slug, plan),
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
             raise typer.Exit(code=exc.exit_code) from exc
-        # Compact one-line receipt, superset of the daemon-spawn receipt shape
-        # ({"name","short_id","provider","status"}) so line-parsing consumers
-        # keep working; short_id is empty (a mux row has no worker socket).
-        receipt = json.dumps(
-            {
-                "name": pane_result.name,
-                "short_id": "",
-                "provider": pane_result.provider,
-                "status": "live",
-                "mux_session": pane_result.session,
-                "pane_id": pane_result.pane_id,
-            }
-        )
-        sys.stdout.write(receipt + "\n")
-        sys.stdout.flush()
-        return
-    if substrate == "headless":
-        once = True
-
-    try:
-        result: SpawnResult = dispatch_spawn(
-            name=name,
-            message=message,
-            provider=provider,
-            cwd=workdir,
-            once=once,
-            timeout=timeout,
-            from_name=from_name,
-            yolo=yolo,
-            role=role,
-            model=model,
-        )
-    except DispatchAskError as exc:
-        print(str(exc), file=sys.stderr)
-        raise typer.Exit(code=exc.exit_code) from exc
+    finally:
+        # Release the gate's claims once the dispatch result exists (or the
+        # spawn failed): registry/roster rows carry the count from here.
+        gate.release()
 
     if result.kind == "created":
         # claude plain spawn: compact hand-rolled JSON receipt on stdout.
@@ -488,6 +524,13 @@ def cmd_spawn(
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
+        # QoS (x-c5cc): a bg worker is claude's child, so its exec can't be
+        # wrapped — demote post-hoc via the roster, bounded and non-fatal.
+        # After the receipt flush so line-parsing consumers never wait on it.
+        if substrate == "bg" and result.provider == "claude" and result.short_id:
+            from fno.agents.spawn_gate import qos_demote_bg_worker
+
+            qos_demote_bg_worker(result.short_id)
     else:
         # once path: reply verbatim on stdout (no added newline per ask contract).
         sys.stdout.write(result.reply or "")
@@ -1125,6 +1168,24 @@ def cmd_whoami(
 
     if result.exit_code != 0:
         raise typer.Exit(code=result.exit_code)
+
+
+@agents_app.command("top")
+def cmd_top(
+    as_json: bool = typer.Option(
+        False, "--json", "-J", help="Emit the same rows as JSON (script parity)."
+    ),
+) -> None:
+    """Show every live worker process — fno-spawned and foreign claude bg
+    alike — with pid, RSS (MB), and status (x-c5cc US4).
+
+    The same union the spawn gate counts, so this is the audit surface every
+    gate message points at. Python-only (RSS via psutil; not routed to the
+    Rust client).
+    """
+    from fno.agents.top import render_top
+
+    print(render_top(as_json=as_json))
 
 
 @agents_app.command("ping")
