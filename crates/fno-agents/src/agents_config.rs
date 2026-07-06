@@ -487,7 +487,10 @@ mod tests {
             read_agents_value(yaml, "min_free_gb").as_deref(),
             Some("2.5")
         );
-        assert_eq!(read_agents_value(yaml, "worker_qos").as_deref(), Some("off"));
+        assert_eq!(
+            read_agents_value(yaml, "worker_qos").as_deref(),
+            Some("off")
+        );
     }
 
     #[test]

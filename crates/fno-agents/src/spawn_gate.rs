@@ -597,10 +597,7 @@ MemAvailable:    8000000 kB\n";
     #[test]
     fn urldecode_inverts_encode_key() {
         let key = "worker:my agent/x";
-        assert_eq!(
-            urldecode(&claims::encode_key(key)).as_deref(),
-            Some(key)
-        );
+        assert_eq!(urldecode(&claims::encode_key(key)).as_deref(), Some(key));
         assert_eq!(urldecode("bad%zz"), None);
     }
 
@@ -608,7 +605,9 @@ MemAvailable:    8000000 kB\n";
     fn qos_wrap_wraps_or_passes_through() {
         // test_env_lock: qos_wrap reads config via FNO_CONFIG-sensitive
         // resolve; serialize with the other env-touching tests.
-        let _g = claims::test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("abi-gate-qos-{}", std::process::id()));
         let abil = dir.join(".fno");
         std::fs::create_dir_all(&abil).unwrap();
@@ -643,7 +642,9 @@ MemAvailable:    8000000 kB\n";
         // A registry path that does not exist + (whatever roster the host has)
         // must not panic; the count is >= 0 and warnings explain any misses.
         // Serialize: live_count reads $HOME (roster) and the claims root.
-        let _g = claims::test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Missing registry: fresh-machine semantics, zero contribution, no
         // panic (load_registry treats absent as empty).
         let mut warnings = Vec::new();
