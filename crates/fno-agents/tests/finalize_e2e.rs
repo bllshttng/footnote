@@ -258,6 +258,23 @@ fn finalize_no_postmortem_on_ship_or_benign() {
     );
 }
 
+/// A stuck session that terminated Interrupted or Aborted (gave up mid-wedge or
+/// got cancelled) now writes a postmortem - the widened corpus (x-42f6 US2).
+#[test]
+fn finalize_postmortem_on_interrupted_or_aborted() {
+    for (sid, reason) in [("S-interrupted", "Interrupted"), ("S-aborted", "Aborted")] {
+        let env = setup(sid, false);
+        assert!(run_finalize(&env, reason).status.success());
+        let pms = postmortem_files(&env);
+        assert_eq!(pms.len(), 1, "{reason} terminal must write one postmortem");
+        let pm = fs::read_to_string(&pms[0]).unwrap();
+        assert!(
+            pm.contains(&format!("termination: **{reason}**")),
+            "postmortem names the reason: {pm}"
+        );
+    }
+}
+
 /// A ship reason runs ledger + stamp + graduate + handoff and emits
 /// session_finalized. (AC5-HP.)
 #[test]
