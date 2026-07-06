@@ -493,6 +493,11 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.search = None;
+        // A half-typed workspace name is dropped too (gemini review): the
+        // confirm owns the bottom row, and resuming a hidden create overlay
+        // after the confirm resolves reads as a stuck client.
+        self.create = None;
+        self.create_esc.clear();
         self.confirm = Some(action);
     }
 
@@ -1273,6 +1278,7 @@ impl View {
             if r >= rows {
                 break;
             }
+            let is_header = matches!(drow, DisplayRow::Header(_));
             let (text, mut flags) = match drow {
                 DisplayRow::Sel(row) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad);
@@ -1346,8 +1352,11 @@ impl View {
             };
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
-            // never drift from the painted row. Hover is highlight-only.
-            let highlit = self.selector == Some(i) || self.hover_row == Some(i);
+            // never drift from the painted row. Hover is highlight-only, and
+            // neither bar lands on an inert Header (the cursor skips them; the
+            // hover check here keeps a label from reading as actionable -
+            // gemini review).
+            let highlit = !is_header && (self.selector == Some(i) || self.hover_row == Some(i));
             if highlit {
                 flags |= cell_flags::INVERSE;
             }
@@ -4034,12 +4043,14 @@ mod tests {
         let mut view = unified_rows_view();
         view.selector = Some(8);
         view.answers = Some(0);
+        view.create = Some("half-typed".into());
         view.open_confirm(ConfirmAction {
             node: "x-rdy".into(),
             label: "x-rdy".into(),
         });
         assert!(view.selector.is_none(), "confirm clears an open selector");
         assert!(view.answers.is_none(), "confirm clears the answer overlay");
+        assert!(view.create.is_none(), "confirm drops a half-typed create");
         assert!(view.search.is_none());
         assert_eq!(
             view.confirm.as_ref().map(|c| c.node.as_str()),
