@@ -337,38 +337,35 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
 pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<RegistryAgent> {
     use std::collections::HashSet;
     let roster_ids: HashSet<&str> = roster.iter().map(|w| w.short_id.as_str()).collect();
-    let reg_ids: HashSet<String> = reg_rows
-        .iter()
-        .filter_map(|r| r.attach_id.clone())
-        .collect();
 
-    let mut out: Vec<RegistryAgent> = reg_rows
-        .into_iter()
-        .map(|mut r| {
-            if r.exited {
-                if let Some(id) = r.attach_id.as_deref() {
-                    if roster_ids.contains(id) {
-                        r.exited = false;
-                        r.external = true;
-                        // Drop any stale inside-leg/scrape verdict that a
-                        // terminal row happened to still carry: an upgraded row
-                        // renders as a plain live external row (plan merge step
-                        // 2), matching the synthesized-foreign shape below.
-                        r.badge = None;
-                        r.reason = None;
-                        r.answerable = None;
-                    }
+    // Upgrade in place, then dedup the roster against the (borrowed) registry
+    // ids - no per-tick String clones of the short ids (gemini review).
+    let mut out = reg_rows;
+    for r in &mut out {
+        if r.exited {
+            if let Some(id) = r.attach_id.as_deref() {
+                if roster_ids.contains(id) {
+                    r.exited = false;
+                    r.external = true;
+                    // Drop any stale inside-leg/scrape verdict that a terminal
+                    // row happened to still carry: an upgraded row renders as a
+                    // plain live external row (plan merge step 2), matching the
+                    // synthesized-foreign shape below.
+                    r.badge = None;
+                    r.reason = None;
+                    r.answerable = None;
                 }
             }
-            r
-        })
-        .collect();
+        }
+    }
 
+    let reg_ids: HashSet<&str> = out.iter().filter_map(|r| r.attach_id.as_deref()).collect();
+    let mut foreign = Vec::new();
     for w in roster {
-        if reg_ids.contains(&w.short_id) {
+        if reg_ids.contains(w.short_id.as_str()) {
             continue; // adopted / already owned by a registry row
         }
-        out.push(RegistryAgent {
+        foreign.push(RegistryAgent {
             name: w.name.clone(),
             cwd: w.cwd.clone(),
             exited: false,
@@ -380,6 +377,8 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             external: true,
         });
     }
+    drop(reg_ids); // release the borrow of `out` before extending it
+    out.extend(foreign);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
