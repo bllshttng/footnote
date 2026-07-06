@@ -41,6 +41,92 @@ pub struct RegistryAgent {
     /// watch-only (paneless) click path consumes it - a pane-hosted row focuses
     /// its pane instead.
     pub attach_id: Option<String>,
+    /// (x-0a2e) True when this row's provenance is claude's daemon roster: a
+    /// synthesized foreign session, or a registry row the roster liveness-
+    /// upgraded. Renders dim; strictly read-only toward `~/.claude/**`. NOT an
+    /// attachability signal - that is `attach_id.is_some() && !exited` (an
+    /// external row whose pane died still carries `external: true`).
+    pub external: bool,
+}
+
+/// One claude-roster worker as the sideline consumes it (three fields, not
+/// the supervisor's model): `short_id` is the `claude attach <id>` jobId (the
+/// first `-`-segment of the roster `sessionId`, == the roster map key), and
+/// `name` is already fallback-resolved (`dispatch.seed.name` else
+/// `cc-<short_id>`, the adopted-name convention).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterWorker {
+    pub short_id: String,
+    pub name: String,
+    pub cwd: String,
+}
+
+/// The claude daemon roster path, mirroring fno-agents'
+/// `claude_roster::daemon_dir` (`FNO_CLAUDE_DAEMON_DIR` > `$HOME/.claude/daemon`)
+/// - the same env override, so tests redirect both crates' readers with one
+/// variable. Mirrored, not imported: the crates share no types, the FILE is
+/// the contract (same rule as the registry above).
+pub fn roster_path() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_CLAUDE_DAEMON_DIR") {
+        return PathBuf::from(v).join("roster.json");
+    }
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(".claude").join("daemon").join("roster.json")
+}
+
+/// Parse the claude daemon roster into the sideline's three-field workers.
+/// Tolerant `Value` access ONLY - no typed struct: the `procStart`
+/// u64 -> date-string drift once zeroed every typed-parse consumer, and
+/// tolerant per-field access means unread fields cannot break the parse. A
+/// worker missing `sessionId` is skipped alone (tolerate-alien-row, like a
+/// registry row without `name`); a missing `workers` key is an empty roster;
+/// a malformed document is `None` (the caller keeps last-good foreign rows).
+pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
+    let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let workers = match doc.get("workers") {
+        Some(w) => w.as_object()?,
+        None => return Some(Vec::new()),
+    };
+    let mut out = Vec::with_capacity(workers.len());
+    for w in workers.values() {
+        let Some(session_id) = w
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        // short_id is the roster map key == the `claude attach` jobId. A
+        // sessionId that leads with `-` (defensive: upstream drift) would yield
+        // an empty first segment and thus a meaningless attach target; skip that
+        // worker, same as a missing sessionId.
+        let short_id = session_id.split('-').next().unwrap_or(session_id);
+        if short_id.is_empty() {
+            continue;
+        }
+        let short_id = short_id.to_string();
+        let cwd = w
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let name = w
+            .get("dispatch")
+            .and_then(|d| d.get("seed"))
+            .and_then(|s| s.get("name"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("cc-{short_id}"));
+        out.push(RosterWorker {
+            short_id,
+            name,
+            cwd,
+        });
+    }
+    Some(out)
 }
 
 /// The registry path, resolved exactly as fno-agents' `AgentsHome::from_env`
@@ -225,6 +311,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             mux,
             answerable,
             attach_id,
+            external: false,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -233,50 +320,165 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
     Some(out)
 }
 
+/// Union the fno registry rows with claude's roster (x-0a2e). Pure so the
+/// whole merge is unit-testable without files or a clock, exactly like
+/// `derive_rows`. The join key is the registry row's `attach_id` (== its
+/// `claude_short_id`) against the roster worker's `short_id`; a registry row
+/// always wins a collision (dedup registry-wins, Locked 4).
+///
+/// 1. Registry rows pass through.
+/// 2. Liveness upgrade: an `exited` registry row whose short_id the roster
+///    still lists is un-exited + `external` (attach revives a suspended
+///    session, so roster presence == attachable; Locked 5). The pane-dead
+///    fact stays senior in `agent_rows()`, which re-derives `exited`.
+/// 3. Foreign rows: every roster worker matching no registry short_id becomes
+///    a synthesized external row (paneless, attachable via `attach_id`).
+/// 4. Sort by name (the determinism rule the change gate and layouts need).
+pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<RegistryAgent> {
+    use std::collections::HashSet;
+    let roster_ids: HashSet<&str> = roster.iter().map(|w| w.short_id.as_str()).collect();
+
+    // Upgrade in place, then dedup the roster against the (borrowed) registry
+    // ids - no per-tick String clones of the short ids (gemini review).
+    let mut out = reg_rows;
+    for r in &mut out {
+        if r.exited {
+            if let Some(id) = r.attach_id.as_deref() {
+                if roster_ids.contains(id) {
+                    r.exited = false;
+                    r.external = true;
+                    // Drop any stale inside-leg/scrape verdict that a terminal
+                    // row happened to still carry: an upgraded row renders as a
+                    // plain live external row (plan merge step 2), matching the
+                    // synthesized-foreign shape below.
+                    r.badge = None;
+                    r.reason = None;
+                    r.answerable = None;
+                }
+            }
+        }
+    }
+
+    let reg_ids: HashSet<&str> = out.iter().filter_map(|r| r.attach_id.as_deref()).collect();
+    let mut foreign = Vec::new();
+    for w in roster {
+        if reg_ids.contains(w.short_id.as_str()) {
+            continue; // adopted / already owned by a registry row
+        }
+        foreign.push(RegistryAgent {
+            name: w.name.clone(),
+            cwd: w.cwd.clone(),
+            exited: false,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: Some(w.short_id.clone()),
+            external: true,
+        });
+    }
+    drop(reg_ids); // release the borrow of `out` before extending it
+    out.extend(foreign);
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// The reader's between-tick memory. The interval task itself lives in
 /// server.rs (it owns the `CoreMsg` sender); this holds the mtime-gated
-/// document cache and the last-sent row set so the derivation stays pure and
-/// unit-testable here.
+/// document caches (registry + roster) and the last-sent MERGED row set so
+/// the derivation stays pure and unit-testable here.
 #[derive(Default)]
 pub struct ReaderState {
-    cached_raw: Option<String>,
-    cached_stamp: Option<(std::time::SystemTime, u64)>,
+    reg_raw: Option<String>,
+    reg_stamp: Option<(std::time::SystemTime, u64)>,
+    roster_raw: Option<String>,
+    roster_stamp: Option<(std::time::SystemTime, u64)>,
+    /// Last successfully-derived rows per source, so a torn concurrent write
+    /// keeps that source's last-good instead of blanking it (the merged
+    /// `last_sent` alone can't distinguish which source went stale).
+    last_good_reg: Option<Vec<RegistryAgent>>,
+    last_good_roster: Option<Vec<RosterWorker>>,
     last_sent: Option<Vec<RegistryAgent>>,
 }
 
 impl ReaderState {
-    /// The stamp of the currently-cached document (the reader's mtime+len
-    /// gate: the caller skips the file read when this matches a fresh stat).
-    pub fn cached_stamp(&self) -> Option<(std::time::SystemTime, u64)> {
-        self.cached_stamp
+    /// The stamp of the currently-cached registry document (the reader's
+    /// mtime+len gate for the registry read).
+    pub fn reg_stamp(&self) -> Option<(std::time::SystemTime, u64)> {
+        self.reg_stamp
     }
 
-    /// One tick: fold in a fresh stat/read (both taken OFF the core loop by
-    /// the caller) and return the row set to publish, or `None` when nothing
-    /// changed. TTL aging re-derives from the cached document every tick, so
-    /// a badge can lapse without a file write (AC2-ERR). A malformed document
-    /// keeps the last-good rows (a torn concurrent write must not blank the
-    /// sideline); a vanished file empties them.
+    /// The stamp of the currently-cached roster document (the reader's
+    /// mtime+len gate for the roster read).
+    pub fn roster_stamp(&self) -> Option<(std::time::SystemTime, u64)> {
+        self.roster_stamp
+    }
+
+    /// One tick: fold fresh stats/reads of BOTH files (taken OFF the core loop
+    /// by the caller, each behind its own mtime+len gate) and return the
+    /// merged row set to publish, or `None` when the merged set is unchanged.
+    /// TTL aging re-derives from the cached registry every tick, so a badge
+    /// can lapse without a file write. For each source: a torn/garbage
+    /// document keeps that source's last-good rows; a vanished file empties
+    /// them (the two cases are distinct, AC2-FR).
+    #[allow(clippy::too_many_arguments)]
     pub fn tick(
         &mut self,
-        stamp: Option<(std::time::SystemTime, u64)>,
-        read_if_changed: impl FnOnce() -> Option<String>,
+        reg_stamp: Option<(std::time::SystemTime, u64)>,
+        reg_read: impl FnOnce() -> Option<String>,
+        roster_stamp: Option<(std::time::SystemTime, u64)>,
+        roster_read: impl FnOnce() -> Option<String>,
         now_secs: u64,
     ) -> Option<Vec<RegistryAgent>> {
-        if stamp != self.cached_stamp {
-            self.cached_stamp = stamp;
-            match (read_if_changed(), stamp) {
-                (Some(raw), _) => self.cached_raw = Some(raw),
-                (None, None) => self.cached_raw = None,
-                (None, Some(_)) => {} // read raced a writer: keep last-good
+        // Advance the cached stamp ONLY when the read resolves (fresh bytes, or
+        // a confirmed vanish). A changed stamp whose read came back empty is a
+        // raced/failed read: leave the stamp behind so the next tick's scan gate
+        // (stamp != cached) re-attempts the SAME stamp instead of freezing the
+        // last-good rows until an unrelated later write happens to move mtime.
+        if reg_stamp != self.reg_stamp {
+            match (reg_read(), reg_stamp) {
+                (Some(raw), _) => {
+                    self.reg_raw = Some(raw);
+                    self.reg_stamp = reg_stamp;
+                }
+                (None, None) => {
+                    self.reg_raw = None; // vanished
+                    self.reg_stamp = None;
+                }
+                (None, Some(_)) => {} // raced/failed read: keep last-good AND retry next tick
             }
         }
-        let rows = match &self.cached_raw {
+        if roster_stamp != self.roster_stamp {
+            match (roster_read(), roster_stamp) {
+                (Some(raw), _) => {
+                    self.roster_raw = Some(raw);
+                    self.roster_stamp = roster_stamp;
+                }
+                (None, None) => {
+                    self.roster_raw = None;
+                    self.roster_stamp = None;
+                }
+                (None, Some(_)) => {}
+            }
+        }
+
+        let reg_rows = match &self.reg_raw {
             Some(raw) => derive_rows(raw, now_secs)
-                .or_else(|| self.last_sent.clone())
+                .or_else(|| self.last_good_reg.clone())
                 .unwrap_or_default(),
             None => Vec::new(),
         };
+        self.last_good_reg = Some(reg_rows.clone());
+
+        let roster = match &self.roster_raw {
+            Some(raw) => parse_roster(raw)
+                .or_else(|| self.last_good_roster.clone())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        self.last_good_roster = Some(roster.clone());
+
+        let rows = merge_rows(reg_rows, &roster);
         if self.last_sent.as_ref() != Some(&rows) {
             self.last_sent = Some(rows.clone());
             Some(rows)
@@ -424,6 +626,258 @@ mod tests {
         let rows = derive_rows(&raw, NOW).unwrap();
         assert_eq!(rows[0].name, "alpha");
         assert_eq!(rows[1].name, "zeta");
+    }
+
+    // The roster parser (x-0a2e task 1.1): tolerant Value access over
+    // claude's roster.json. Cites the "torn roster" and "missing sessionId"
+    // Failure Modes bullets.
+    #[test]
+    fn parse_roster_live_shape_yields_three_field_workers() {
+        let raw = r#"{"workers":{
+            "ab12cd34":{"sessionId":"ab12cd34-9f00-4a2b-8888-000000000001",
+                        "cwd":"/w","procStart":1751000000,
+                        "dispatch":{"source":"shell","seed":{"name":"think-x-9999"}}},
+            "ef56ab78":{"sessionId":"ef56ab78-1111-4a2b-8888-000000000002",
+                        "cwd":"/x","dispatch":{"source":"fleet","seed":{}}}}}"#;
+        let mut workers = parse_roster(raw).unwrap();
+        workers.sort_by(|a, b| a.short_id.cmp(&b.short_id));
+        assert_eq!(workers.len(), 2);
+        assert_eq!(workers[0].short_id, "ab12cd34");
+        assert_eq!(workers[0].name, "think-x-9999");
+        assert_eq!(workers[0].cwd, "/w");
+        // Missing seed.name falls back to the adopted-name convention (AC4-EDGE).
+        assert_eq!(workers[1].name, "cc-ef56ab78");
+    }
+
+    #[test]
+    fn parse_roster_tolerates_field_drift_and_alien_workers() {
+        // procStart as a date STRING (the drift that once zeroed typed
+        // parsers) must not fail the parse; a worker without sessionId is
+        // skipped alone, never the document.
+        let raw = r#"{"workers":{
+            "ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w",
+                        "procStart":"2026-07-06T10:00:00Z"},
+            "orphan":{"cwd":"/x"},
+            "empty":{"sessionId":"","cwd":"/y"},
+            "dashlead":{"sessionId":"-nope","cwd":"/z"}}}"#;
+        let workers = parse_roster(raw).unwrap();
+        assert_eq!(
+            workers.len(),
+            1,
+            "orphan, empty, and dash-leading ids all skip"
+        );
+        assert_eq!(workers[0].short_id, "ab12cd34");
+    }
+
+    #[test]
+    fn parse_roster_garbage_is_none_and_missing_workers_is_empty() {
+        // Garbage doc -> None (caller keeps last-good, AC1-ERR); a document
+        // without a workers key (or with an empty map) is a VALID empty
+        // roster, not a parse failure.
+        assert_eq!(parse_roster("not json"), None);
+        assert_eq!(parse_roster(r#"{"workers": 3}"#), None);
+        assert_eq!(parse_roster("{}"), Some(Vec::new()));
+        assert_eq!(parse_roster(r#"{"workers":{}}"#), Some(Vec::new()));
+    }
+
+    // ---- Union merge + dual-doc ReaderState (x-0a2e task 1.2) ----
+
+    fn worker(short: &str, name: &str, cwd: &str) -> RosterWorker {
+        RosterWorker {
+            short_id: short.into(),
+            name: name.into(),
+            cwd: cwd.into(),
+        }
+    }
+
+    #[test]
+    fn merge_appends_foreign_rows_and_sorts(/* AC1-HP */) {
+        let reg = derive_rows(
+            &reg(r#"{"name":"mmm","cwd":"/w","status":"live","claude_short_id":"aa11bb22"}"#),
+            NOW,
+        )
+        .unwrap();
+        let roster = vec![
+            worker("cc33dd44", "think-x-9999", "/w"),
+            worker("aa11bb22", "already-owned", "/w"), // dedup: registry wins
+        ];
+        let rows = merge_rows(reg, &roster);
+        // Two rows: the registry row + one foreign; the roster twin of the
+        // owned session is suppressed (AC1-EDGE dedup).
+        assert_eq!(rows.len(), 2);
+        // Name-sorted: "mmm" < "think-x-9999".
+        assert_eq!(rows[0].name, "mmm");
+        assert!(!rows[0].external, "owned registry row is not external");
+        let foreign = &rows[1];
+        assert_eq!(foreign.name, "think-x-9999");
+        assert!(foreign.external);
+        assert_eq!(foreign.attach_id.as_deref(), Some("cc33dd44"));
+        assert!(!foreign.exited);
+        assert_eq!(foreign.mux, None);
+    }
+
+    #[test]
+    fn merge_upgrades_exited_registry_row_present_in_roster(/* AC3-HP */) {
+        let reg = derive_rows(
+            &reg(r#"{"name":"stale","cwd":"/w","status":"exited","claude_short_id":"ab12cd34"}"#),
+            NOW,
+        )
+        .unwrap();
+        assert!(reg[0].exited, "derive keeps it exited");
+        let rows = merge_rows(reg, &[worker("ab12cd34", "n", "/w")]);
+        assert_eq!(
+            rows.len(),
+            1,
+            "no duplicate foreign row for the upgraded id"
+        );
+        assert!(!rows[0].exited, "roster presence un-exits it");
+        assert!(rows[0].external);
+        assert_eq!(rows[0].name, "stale", "keeps its registry name");
+        assert_eq!(rows[0].attach_id.as_deref(), Some("ab12cd34"));
+    }
+
+    #[test]
+    fn merge_empty_roster_is_byte_equal_to_registry_only(/* AC3-EDGE */) {
+        let raw = reg(
+            r#"{"name":"z","cwd":"/w","status":"live","claude_short_id":"aa11bb22"},
+                        {"name":"a","cwd":"/x","status":"exited"}"#,
+        );
+        let reg = derive_rows(&raw, NOW).unwrap();
+        let merged = merge_rows(reg.clone(), &[]);
+        assert_eq!(
+            merged, reg,
+            "no roster => registry-only derivation, verbatim"
+        );
+        assert!(merged.iter().all(|r| !r.external));
+    }
+
+    // ReaderState: two mtime-gated docs, merged change gate, per-source
+    // last-good on a torn write vs empty on a vanished file (AC1-ERR, AC2-FR).
+    fn stamp(n: u64) -> Option<(std::time::SystemTime, u64)> {
+        Some((std::time::UNIX_EPOCH + std::time::Duration::from_secs(n), n))
+    }
+
+    #[test]
+    fn reader_publishes_union_on_first_tick_then_idles() {
+        let mut st = ReaderState::default();
+        let reg = reg(r#"{"name":"r","cwd":"/w","status":"live"}"#);
+        let roster = r#"{"workers":{"ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w",
+                        "dispatch":{"seed":{"name":"foreign"}}}}}"#
+            .to_string();
+        let rows = st
+            .tick(
+                stamp(1),
+                || Some(reg.clone()),
+                stamp(1),
+                || Some(roster.clone()),
+                NOW,
+            )
+            .expect("first tick publishes");
+        assert_eq!(rows.len(), 2);
+        // Idle tick: same stamps, nothing read, merged set unchanged.
+        assert!(st.tick(stamp(1), || None, stamp(1), || None, NOW).is_none());
+    }
+
+    #[test]
+    fn reader_torn_roster_keeps_last_good_vanished_empties(/* AC2-FR */) {
+        let mut st = ReaderState::default();
+        let reg = reg(r#"{"name":"r","cwd":"/w","status":"live"}"#);
+        let roster =
+            r#"{"workers":{"ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w"}}}"#.to_string();
+        let first = st
+            .tick(
+                stamp(1),
+                || Some(reg.clone()),
+                stamp(1),
+                || Some(roster),
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(first.len(), 2, "registry row + foreign");
+        // Torn roster (new stamp, garbage bytes): foreign row persists.
+        let torn = st.tick(stamp(1), || None, stamp(2), || Some("garbage".into()), NOW);
+        assert!(
+            torn.is_none(),
+            "last-good keeps merged set identical => no publish"
+        );
+        // Vanished roster (stamp -> None): foreign row disappears, registry stays.
+        let gone = st
+            .tick(stamp(1), || None, None, || None, NOW)
+            .expect("vanish changes the merged set");
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].name, "r");
+        assert!(!gone[0].external);
+    }
+
+    #[test]
+    fn reader_retries_same_stamp_after_a_raced_read() {
+        // A changed stamp whose read came back empty (raced/failed) must NOT
+        // advance the cached stamp: the next tick at the SAME stamp with a
+        // successful read has to publish the fresh content, not stay frozen.
+        let mut st = ReaderState::default();
+        st.tick(
+            stamp(1),
+            || Some(reg(r#"{"name":"a","cwd":"/w","status":"live"}"#)),
+            None,
+            || None,
+            NOW,
+        );
+        let raced = st.tick(stamp(2), || None, None, || None, NOW);
+        assert!(
+            raced.is_none(),
+            "a raced read keeps last-good => no publish"
+        );
+        let healed = st
+            .tick(
+                stamp(2),
+                || Some(reg(r#"{"name":"b","cwd":"/w","status":"live"}"#)),
+                None,
+                || None,
+                NOW,
+            )
+            .expect("the same stamp retries and publishes once the read succeeds");
+        assert_eq!(healed.len(), 1);
+        assert_eq!(
+            healed[0].name, "b",
+            "stamp did not freeze on the failed read"
+        );
+    }
+
+    #[test]
+    fn merge_upgrade_clears_a_stale_badge() {
+        // An exited registry row can still carry a live inside-leg badge; the
+        // liveness upgrade drops it so the row renders as a plain external row
+        // (plan merge step 2), never a badged one.
+        let reg = derive_rows(
+            &reg(
+                r#"{"name":"x","cwd":"/w","status":"exited","claude_short_id":"ab12cd34",
+                     "inside_leg":{"state":"working","received_at":"2020-01-01T00:00:00Z"}}"#,
+            ),
+            NOW,
+        )
+        .unwrap();
+        assert!(
+            reg[0].exited && reg[0].badge.is_some(),
+            "precondition: exited + badged"
+        );
+        let rows = merge_rows(reg, &[worker("ab12cd34", "n", "/w")]);
+        assert!(rows[0].external && !rows[0].exited);
+        assert_eq!(rows[0].badge, None, "upgrade drops the stale badge");
+        assert_eq!(rows[0].reason, None);
+    }
+
+    #[test]
+    fn reader_roster_only_change_republishes() {
+        let mut st = ReaderState::default();
+        let reg = reg(r#"{"name":"r","cwd":"/w","status":"live"}"#);
+        st.tick(stamp(1), || Some(reg), stamp(1), || Some("{}".into()), NOW);
+        // A worker appears in the roster only; registry untouched.
+        let roster =
+            r#"{"workers":{"ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w"}}}"#.to_string();
+        let rows = st
+            .tick(stamp(1), || None, stamp(2), || Some(roster), NOW)
+            .expect("roster-only change publishes");
+        assert_eq!(rows.len(), 2);
     }
 
     // x-c929: a live `blocked` scrape verdict with an `answerable` payload parses
