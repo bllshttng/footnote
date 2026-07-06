@@ -1462,6 +1462,25 @@ impl Core {
             .map(Command::AttachAgent)
     }
 
+    /// The situated notice for an in-flight card `inflight_route` could not
+    /// route (codex peer review): the same copy the v17 click path shows, so a
+    /// stale-client `DispatchNode` never regresses to a bare refusal on a card
+    /// the server knows is being worked. `None` when `node` names no in-flight
+    /// card (the caller falls through to the not-ready refusal).
+    fn inflight_hint(&self, node: &str) -> Option<String> {
+        let card = self
+            .backlog
+            .iter()
+            .find(|c| (c.id == node || c.slug == node) && c.state == CardState::InFlight)?;
+        Some(match self.node_registry_row(&card.id) {
+            Some((_, name)) => format!("in flight - session {name}"),
+            None => match self.backlog_holders.get(&card.id) {
+                Some(holder) => format!("in flight - worked by {holder}"),
+                None => "card in flight - no session visible here".to_string(),
+            },
+        })
+    }
+
     /// The lowest-id live pane in this session whose `FNO_NODE` provenance
     /// equals `node`. Provenance equality only - no cwd fallback here; a
     /// shell pane that merely sits in the node's worktree is not the worker.
@@ -2326,6 +2345,10 @@ impl Core {
                     // (catalog membership, jobId shape), so this adds no second
                     // spawn path.
                     return self.command(client_id, route);
+                } else if let Some(hint) = self.inflight_hint(&node) {
+                    // In flight but unroutable: say where the work is, the
+                    // same copy a routed v17 card click would show.
+                    self.notice(client_id, hint);
                 } else {
                     self.notice(client_id, "card not ready to dispatch");
                 }
@@ -4226,6 +4249,45 @@ mod tests {
             None,
             "unroutable in-flight falls through to the refusal notice"
         );
+    }
+
+    #[test]
+    fn inflight_hint_names_session_then_holder_then_default() {
+        // Codex peer review: a stale-client DispatchNode on an in-flight card
+        // with NO route must get the situated hint, not the bare not-ready
+        // refusal. Hint precedence: matched registry row's session name >
+        // claim holder > the client's default copy.
+        let mut core = empty_core();
+        core.backlog = vec![BacklogCard {
+            id: "x-aaa".into(),
+            slug: "aaa-slug".into(),
+            priority: "p2".into(),
+            state: CardState::InFlight,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
+        }];
+        // Nothing known at all: the default copy.
+        assert_eq!(
+            core.inflight_hint("x-aaa").as_deref(),
+            Some("card in flight - no session visible here")
+        );
+        // A claim holder is known: name it.
+        core.backlog_holders
+            .insert("x-aaa".into(), "target-session:abc".into());
+        assert_eq!(
+            core.inflight_hint("aaa-slug").as_deref(),
+            Some("in flight - worked by target-session:abc"),
+            "slug names the same card"
+        );
+        // A matched (unattachable) registry row outranks the holder.
+        core.agents = vec![bg_row("tgt-x-aaa", "/w", None)];
+        assert_eq!(
+            core.inflight_hint("x-aaa").as_deref(),
+            Some("in flight - session tgt-x-aaa")
+        );
+        // Not in flight / unknown: None (caller falls through to not-ready).
+        assert_eq!(core.inflight_hint("x-nope"), None);
     }
 
     #[test]

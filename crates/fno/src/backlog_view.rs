@@ -201,6 +201,11 @@ pub struct ReaderState {
     cached_raw: Option<String>,
     cached_stamp: Option<(std::time::SystemTime, u64)>,
     last_sent: Option<Vec<BacklogCard>>,
+    /// The live-claims map as of the last publish. Holders ride the publish
+    /// (they feed the server's `where_hint` join), so a holder-only change -
+    /// same card states, different/new holder - must republish too, not wait
+    /// for a card flip (codex peer review of the v17 routes).
+    last_live: Option<HashMap<String, String>>,
 }
 
 impl ReaderState {
@@ -252,7 +257,16 @@ impl ReaderState {
         if let Some(live) = live {
             overlay_claims(&mut cards, live);
         }
-        if self.last_sent.as_ref() != Some(&cards) {
+        // A holder-only change (same cards, new/different claim holder) also
+        // republishes: the holders map travels with the cards and feeds the
+        // publish-time `where_hint` join. `live: None` (no sweep yet, or a
+        // failing sweep with the caller retaining last-good) is never a
+        // change - retention must not churn publishes.
+        let live_changed = live.is_some_and(|l| self.last_live.as_ref() != Some(l));
+        if live_changed {
+            self.last_live = live.cloned();
+        }
+        if live_changed || self.last_sent.as_ref() != Some(&cards) {
             self.last_sent = Some(cards.clone());
             Some(cards)
         } else {
@@ -402,6 +416,36 @@ mod tests {
         let released = live(&[]);
         let reverted = st.tick(s, || None, Some(&released)).unwrap();
         assert_eq!(reverted[0].state, CardState::Ready);
+    }
+
+    #[test]
+    fn holder_only_change_republishes_and_retention_does_not_churn() {
+        // Codex peer review: holders feed the publish-time where_hint join, so
+        // a holder-only change (same card states - here a graph-native
+        // in-flight card) must republish; a `None` tick (no sweep yet /
+        // failing sweep retaining last-good) must NOT churn publishes.
+        let mut st = ReaderState::default();
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"claimed"}"#);
+        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let first = st.tick(s, || Some(raw.clone()), None).unwrap();
+        assert_eq!(
+            first[0].state,
+            CardState::InFlight,
+            "graph-native in-flight"
+        );
+        // First successful sweep: card state unchanged, holders newly known ->
+        // republish so the server's hint join sees them.
+        let a = live(&[("x-a", "target-session:abc")]);
+        assert!(st.tick(s, || None, Some(&a)).is_some());
+        // Same holders: no republish.
+        assert!(st.tick(s, || None, Some(&a)).is_none());
+        // Holder handoff, card still in flight: republish.
+        let b = live(&[("x-a", "target-session:def")]);
+        assert!(st.tick(s, || None, Some(&b)).is_some());
+        // Sweep failure (caller passes last-good again) then no-sweep tick:
+        // neither is a change.
+        assert!(st.tick(s, || None, Some(&b)).is_none());
+        assert!(st.tick(s, || None, None).is_none());
     }
 
     #[test]
