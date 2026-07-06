@@ -367,6 +367,9 @@ fn run_agy(
     let started = Instant::now();
     let tee_fh = open_tee(output_path)?;
 
+    // QoS (x-c5cc): exec-wrap at background priority (identity when
+    // worker_qos=off).
+    let argv = crate::spawn_gate::qos_wrap(popen_cwd, argv.to_vec());
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     // CRITICAL: detach stdin so agy -p never blocks on a non-TTY waiting for

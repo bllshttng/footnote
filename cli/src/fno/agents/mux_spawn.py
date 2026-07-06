@@ -400,7 +400,13 @@ def dispatch_spawn_pane(
             "claude",
             exit_code=2,
         )
-    wrapped = _mesh_env_wrapper(name, provider, role, argv, provenance)
+    # QoS (x-c5cc): demote the provider command INSIDE the env wrapper —
+    # wrapping outermost would break the mux server's FNO_NODE provenance
+    # parse, which is anchored on argv[0] == "env" (server.rs node_from_argv).
+    # env(1) applies its assignments and then execs taskpolicy/nice -> provider.
+    from fno.agents.spawn_gate import qos_wrap
+
+    wrapped = _mesh_env_wrapper(name, provider, role, qos_wrap(argv), provenance)
 
     registry_path = paths.agents_registry_path()
 

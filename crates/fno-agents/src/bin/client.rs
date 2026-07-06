@@ -809,7 +809,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // agents`; attach/peek/reply; NOT a grid pane). claude-only by nature.
         ("claude", "bg") => {
             let claude_home = ClaudeHome::from_env();
-            emit!(dispatch_claude_spawn(
+            let outcome = dispatch_claude_spawn(
                 home,
                 &claude_home,
                 name,
@@ -820,7 +820,33 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 timeout,
                 &[],
                 model,
-            ))
+            );
+            if !outcome.stderr.is_empty() {
+                eprint!("{}", outcome.stderr);
+            }
+            if !outcome.stdout.is_empty() {
+                print!("{}", outcome.stdout);
+            }
+            // Flush the receipt BEFORE the bounded QoS roster poll so
+            // line-parsing consumers never wait on the demotion (x-c5cc).
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            if outcome.exit_code == 0 {
+                // The bg worker is claude's child (its exec can't be wrapped);
+                // demote post-hoc via the roster pid. short_id from the
+                // receipt: {"name": ..., "short_id": "<8hex>", ...}.
+                if let Some(sid) = outcome
+                    .stdout
+                    .split("\"short_id\": \"")
+                    .nth(1)
+                    .and_then(|r| r.split('"').next())
+                {
+                    let config_cwd = std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    fno_agents::spawn_gate::qos_demote_bg_worker(&config_cwd, sid);
+                }
+            }
+            Some(outcome.exit_code)
         }
         // claude headless: a truly headless `claude -p` one-shot (no thread, no
         // grid row; runs to completion and exits). The one place claude shells

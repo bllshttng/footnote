@@ -278,20 +278,27 @@ class TestRunGate:
 class TestQos:
     def test_wrap_identity_when_off(self, monkeypatch):
         monkeypatch.setattr(spawn_gate, "_qos_enabled", lambda: False)
-        argv = ["claude", "--bg"]
+        argv = ["sh", "-c", "true"]
         assert spawn_gate.qos_wrap(argv) == argv
 
     def test_wrap_prefixes_platform_demotion(self, monkeypatch):
-        """AC3-HP: utility wraps the exec."""
+        """AC3-HP: utility wraps the exec (absolute wrapper path)."""
         monkeypatch.setattr(spawn_gate, "_qos_enabled", lambda: True)
-        wrapped = spawn_gate.qos_wrap(["claude", "--bg"])
+        wrapped = spawn_gate.qos_wrap(["sh", "-c", "true"])
+        import os as _os
         import sys as _sys
 
-        if _sys.platform == "darwin":
-            assert wrapped[:4] == ["taskpolicy", "-c", "utility", "--"]
-            assert wrapped[4:] == ["claude", "--bg"]
-        elif _sys.platform.startswith("linux"):
-            assert wrapped[:3] == ["nice", "-n", "10"]
+        if _sys.platform == "darwin" and _os.path.exists("/usr/sbin/taskpolicy"):
+            assert wrapped[:4] == ["/usr/sbin/taskpolicy", "-c", "utility", "--"]
+            assert wrapped[4:] == ["sh", "-c", "true"]
+        elif _sys.platform.startswith("linux") and _os.path.exists("/usr/bin/nice"):
+            assert wrapped[:3] == ["/usr/bin/nice", "-n", "10"]
+
+    def test_wrap_skips_unresolvable_command(self, monkeypatch):
+        """A missing provider CLI must surface its own NotFound, unwrapped."""
+        monkeypatch.setattr(spawn_gate, "_qos_enabled", lambda: True)
+        ghost = ["definitely-not-a-real-cli-xyz"]
+        assert spawn_gate.qos_wrap(ghost) == ghost
 
     def test_demote_failure_is_nonfatal_warning(self, monkeypatch, capsys):
         """AC3-ERR: taskpolicy failure warns once, never raises."""

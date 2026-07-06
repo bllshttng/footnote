@@ -1737,6 +1737,10 @@ pub fn dispatch_claude_headless(
     if !use_stdin {
         argv.push(effective.to_string());
     }
+    // QoS (x-c5cc): a headless one-shot is an fno-spawned child — exec-wrap it
+    // at background priority (worker_qos=utility) so it never starves the
+    // foreground. Identity when worker_qos=off.
+    let argv = crate::spawn_gate::qos_wrap(cwd, argv);
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);

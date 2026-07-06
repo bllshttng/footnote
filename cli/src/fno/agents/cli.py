@@ -524,6 +524,13 @@ def cmd_spawn(
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
+        # QoS (x-c5cc): a bg worker is claude's child, so its exec can't be
+        # wrapped — demote post-hoc via the roster, bounded and non-fatal.
+        # After the receipt flush so line-parsing consumers never wait on it.
+        if substrate == "bg" and result.provider == "claude" and result.short_id:
+            from fno.agents.spawn_gate import qos_demote_bg_worker
+
+            qos_demote_bg_worker(result.short_id)
     else:
         # once path: reply verbatim on stdout (no added newline per ask contract).
         sys.stdout.write(result.reply or "")

@@ -485,20 +485,45 @@ pub fn qos_wrap(config_cwd: &Path, argv: Vec<String>) -> Vec<String> {
     if !agents_config::worker_qos_enabled(config_cwd) || argv.is_empty() {
         return argv;
     }
+    // Don't wrap a command that won't resolve: callers report a missing
+    // provider CLI as NotFound/127, and a taskpolicy prefix would swallow
+    // that into the wrapper's own error.
+    if !resolves_on_path(&argv[0]) {
+        return argv;
+    }
+    // Absolute paths + existence check: a missing wrapper must degrade to an
+    // unwrapped exec (fail open), never surface as a "CLI not found" spawn
+    // failure for the actual worker command.
     let mut wrapped: Vec<String> = if cfg!(target_os = "macos") {
+        if !Path::new("/usr/sbin/taskpolicy").exists() {
+            return argv;
+        }
         vec![
-            "taskpolicy".into(),
+            "/usr/sbin/taskpolicy".into(),
             "-c".into(),
             "utility".into(),
             "--".into(),
         ]
     } else if cfg!(target_os = "linux") {
-        vec!["nice".into(), "-n".into(), "10".into()]
+        if !Path::new("/usr/bin/nice").exists() {
+            return argv;
+        }
+        vec!["/usr/bin/nice".into(), "-n".into(), "10".into()]
     } else {
         return argv;
     };
     wrapped.extend(argv);
     wrapped
+}
+
+/// Does `cmd` resolve to an executable (explicit path, or a PATH lookup)?
+fn resolves_on_path(cmd: &str) -> bool {
+    if cmd.contains('/') {
+        return Path::new(cmd).exists();
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|d| d.join(cmd).is_file()))
+        .unwrap_or(false)
 }
 
 /// Best-effort post-hoc demotion of a claude-daemon-owned bg worker pid
@@ -509,11 +534,11 @@ pub fn qos_demote_pid(config_cwd: &Path, pid: u32) {
         return;
     }
     let status = if cfg!(target_os = "macos") {
-        std::process::Command::new("taskpolicy")
+        std::process::Command::new("/usr/sbin/taskpolicy")
             .args(["-b", "-p", &pid.to_string()])
             .status()
     } else if cfg!(target_os = "linux") {
-        std::process::Command::new("renice")
+        std::process::Command::new("/usr/bin/renice")
             .args(["10", "-p", &pid.to_string()])
             .status()
     } else {
@@ -617,7 +642,9 @@ MemAvailable:    8000000 kB\n";
             "config:\n  agents:\n    worker_qos: off\n",
         )
         .unwrap();
-        let argv = vec!["claude".to_string(), "--bg".to_string()];
+        // `sh` resolves on every CI platform (a non-resolving argv[0] is
+        // deliberately left unwrapped so NotFound/127 semantics survive).
+        let argv = vec!["sh".to_string(), "-c".to_string(), "true".to_string()];
         assert_eq!(qos_wrap(&dir, argv.clone()), argv, "off = identity");
 
         std::fs::write(
@@ -626,15 +653,23 @@ MemAvailable:    8000000 kB\n";
         )
         .unwrap();
         let wrapped = qos_wrap(&dir, argv.clone());
-        if cfg!(target_os = "macos") {
-            assert_eq!(&wrapped[..4], &["taskpolicy", "-c", "utility", "--"]);
+        if cfg!(target_os = "macos") && Path::new("/usr/sbin/taskpolicy").exists() {
+            assert_eq!(
+                &wrapped[..4],
+                &["/usr/sbin/taskpolicy", "-c", "utility", "--"]
+            );
             assert_eq!(&wrapped[4..], &argv[..]);
-        } else if cfg!(target_os = "linux") {
-            assert_eq!(&wrapped[..3], &["nice", "-n", "10"]);
+        } else if cfg!(target_os = "linux") && Path::new("/usr/bin/nice").exists() {
+            assert_eq!(&wrapped[..3], &["/usr/bin/nice", "-n", "10"]);
             assert_eq!(&wrapped[3..], &argv[..]);
         } else {
-            assert_eq!(wrapped, argv);
+            assert_eq!(wrapped, argv, "no wrapper binary -> identity (fail open)");
         }
+
+        // A non-resolving command is never wrapped (NotFound must stay the
+        // caller's error, not taskpolicy's).
+        let ghost = vec!["definitely-not-a-real-cli-xyz".to_string()];
+        assert_eq!(qos_wrap(&dir, ghost.clone()), ghost);
     }
 
     #[test]

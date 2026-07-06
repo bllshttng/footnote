@@ -416,13 +416,26 @@ def _qos_enabled() -> bool:
 
 def qos_wrap(argv: list[str]) -> list[str]:
     """Exec-wrap a child command at background priority when
-    ``config.agents.worker_qos`` is ``utility``. Identity on ``off``."""
+    ``config.agents.worker_qos`` is ``utility``. Identity on ``off``.
+
+    Absolute wrapper paths + existence check: a missing wrapper degrades to
+    an unwrapped exec (fail open), never a spawn failure.
+    """
     if not argv or not _qos_enabled():
         return argv
-    if sys.platform == "darwin":
-        return ["taskpolicy", "-c", "utility", "--"] + argv
-    if sys.platform.startswith("linux"):
-        return ["nice", "-n", "10"] + argv
+    # Don't wrap a command that won't resolve: a missing provider CLI must
+    # surface as its own NotFound, not the wrapper's error.
+    import shutil
+
+    target = argv[0]
+    if ("/" in target and not os.path.exists(target)) or (
+        "/" not in target and shutil.which(target) is None
+    ):
+        return argv
+    if sys.platform == "darwin" and os.path.exists("/usr/sbin/taskpolicy"):
+        return ["/usr/sbin/taskpolicy", "-c", "utility", "--"] + argv
+    if sys.platform.startswith("linux") and os.path.exists("/usr/bin/nice"):
+        return ["/usr/bin/nice", "-n", "10"] + argv
     return argv
 
 
@@ -433,9 +446,9 @@ def qos_demote_pid(pid: int) -> None:
     import subprocess
 
     if sys.platform == "darwin":
-        cmd = ["taskpolicy", "-b", "-p", str(pid)]
+        cmd = ["/usr/sbin/taskpolicy", "-b", "-p", str(pid)]
     elif sys.platform.startswith("linux"):
-        cmd = ["renice", "10", "-p", str(pid)]
+        cmd = ["/usr/bin/renice", "10", "-p", str(pid)]
     else:
         return
     try:
