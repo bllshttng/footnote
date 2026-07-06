@@ -216,10 +216,12 @@ fn live_worker_slot_claims(warnings: &mut Vec<String>) -> usize {
     for entry in entries.flatten() {
         let fname = entry.file_name();
         let fname = fname.to_string_lossy();
-        if !fname.starts_with(prefix.as_str()) || !fname.ends_with(".lock") {
+        if !fname.starts_with(prefix.as_str()) {
             continue;
         }
-        let key = match urldecode(fname.trim_end_matches(".lock")) {
+        // strip_suffix, not trim_end_matches: a worker name ending in ".lock"
+        // must lose exactly one suffix (gemini MEDIUM).
+        let key = match fname.strip_suffix(".lock").and_then(urldecode) {
             Some(k) => k,
             None => continue,
         };

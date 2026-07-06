@@ -839,13 +839,15 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             }
             if outcome.exit_code == 0 {
                 // The bg worker is claude's child (its exec can't be wrapped);
-                // demote post-hoc via the roster pid. short_id from the
-                // receipt: {"name": ..., "short_id": "<8hex>", ...}.
-                if let Some(sid) = outcome
-                    .stdout
-                    .split("\"short_id\": \"")
-                    .nth(1)
-                    .and_then(|r| r.split('"').next())
+                // demote post-hoc via the roster pid. short_id from the JSON
+                // receipt line (parsed, not string-split — gemini HIGH).
+                let parsed: Option<serde_json::Value> =
+                    serde_json::from_str(outcome.stdout.trim()).ok();
+                if let Some(sid) = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("short_id"))
+                    .and_then(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
                 {
                     let config_cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

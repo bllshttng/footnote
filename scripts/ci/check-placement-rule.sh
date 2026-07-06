@@ -123,6 +123,7 @@ cli/src/fno/agents/providers/claude.py
 cli/src/fno/agents/read.py
 cli/src/fno/agents/registry.py
 cli/src/fno/agents/rust_runtime.py
+cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/whoami.py
 cli/src/fno/backlog/advance.py
 cli/src/fno/claims/session_pid.py
