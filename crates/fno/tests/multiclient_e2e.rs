@@ -317,6 +317,9 @@ fn multiclient_named_session_sets_fno_session_in_panes() {
     let pane = c
         .wait_layout(10, "first layout", |l| l.panes.len() == 1)
         .focus;
+    // Types straight after attach with no round-trips to settle the shell, so
+    // gate the first input on shell readiness (dash drops the startup CR).
+    c.wait_prompt(pane);
     c.input(b"echo S=$FNO_SESSION#\r");
     c.wait_pane_text(15, pane, |t| t.contains("S=work#"));
 }
