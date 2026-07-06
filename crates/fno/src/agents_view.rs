@@ -96,7 +96,11 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
         else {
             continue;
         };
-        let short_id = session_id.split('-').next().unwrap_or(session_id).to_string();
+        let short_id = session_id
+            .split('-')
+            .next()
+            .unwrap_or(session_id)
+            .to_string();
         let cwd = w
             .get("cwd")
             .and_then(|v| v.as_str())
@@ -689,7 +693,11 @@ mod tests {
         .unwrap();
         assert!(reg[0].exited, "derive keeps it exited");
         let rows = merge_rows(reg, &[worker("ab12cd34", "n", "/w")]);
-        assert_eq!(rows.len(), 1, "no duplicate foreign row for the upgraded id");
+        assert_eq!(
+            rows.len(),
+            1,
+            "no duplicate foreign row for the upgraded id"
+        );
         assert!(!rows[0].exited, "roster presence un-exits it");
         assert!(rows[0].external);
         assert_eq!(rows[0].name, "stale", "keeps its registry name");
@@ -698,11 +706,16 @@ mod tests {
 
     #[test]
     fn merge_empty_roster_is_byte_equal_to_registry_only(/* AC3-EDGE */) {
-        let raw = reg(r#"{"name":"z","cwd":"/w","status":"live","claude_short_id":"aa11bb22"},
-                        {"name":"a","cwd":"/x","status":"exited"}"#);
+        let raw = reg(
+            r#"{"name":"z","cwd":"/w","status":"live","claude_short_id":"aa11bb22"},
+                        {"name":"a","cwd":"/x","status":"exited"}"#,
+        );
         let reg = derive_rows(&raw, NOW).unwrap();
         let merged = merge_rows(reg.clone(), &[]);
-        assert_eq!(merged, reg, "no roster => registry-only derivation, verbatim");
+        assert_eq!(
+            merged, reg,
+            "no roster => registry-only derivation, verbatim"
+        );
         assert!(merged.iter().all(|r| !r.external));
     }
 
@@ -720,7 +733,13 @@ mod tests {
                         "dispatch":{"seed":{"name":"foreign"}}}}}"#
             .to_string();
         let rows = st
-            .tick(stamp(1), || Some(reg.clone()), stamp(1), || Some(roster.clone()), NOW)
+            .tick(
+                stamp(1),
+                || Some(reg.clone()),
+                stamp(1),
+                || Some(roster.clone()),
+                NOW,
+            )
             .expect("first tick publishes");
         assert_eq!(rows.len(), 2);
         // Idle tick: same stamps, nothing read, merged set unchanged.
@@ -731,14 +750,24 @@ mod tests {
     fn reader_torn_roster_keeps_last_good_vanished_empties(/* AC2-FR */) {
         let mut st = ReaderState::default();
         let reg = reg(r#"{"name":"r","cwd":"/w","status":"live"}"#);
-        let roster = r#"{"workers":{"ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w"}}}"#.to_string();
+        let roster =
+            r#"{"workers":{"ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w"}}}"#.to_string();
         let first = st
-            .tick(stamp(1), || Some(reg.clone()), stamp(1), || Some(roster), NOW)
+            .tick(
+                stamp(1),
+                || Some(reg.clone()),
+                stamp(1),
+                || Some(roster),
+                NOW,
+            )
             .unwrap();
         assert_eq!(first.len(), 2, "registry row + foreign");
         // Torn roster (new stamp, garbage bytes): foreign row persists.
         let torn = st.tick(stamp(1), || None, stamp(2), || Some("garbage".into()), NOW);
-        assert!(torn.is_none(), "last-good keeps merged set identical => no publish");
+        assert!(
+            torn.is_none(),
+            "last-good keeps merged set identical => no publish"
+        );
         // Vanished roster (stamp -> None): foreign row disappears, registry stays.
         let gone = st
             .tick(stamp(1), || None, None, || None, NOW)
@@ -754,7 +783,8 @@ mod tests {
         let reg = reg(r#"{"name":"r","cwd":"/w","status":"live"}"#);
         st.tick(stamp(1), || Some(reg), stamp(1), || Some("{}".into()), NOW);
         // A worker appears in the roster only; registry untouched.
-        let roster = r#"{"workers":{"ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w"}}}"#.to_string();
+        let roster =
+            r#"{"workers":{"ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w"}}}"#.to_string();
         let rows = st
             .tick(stamp(1), || None, stamp(2), || Some(roster), NOW)
             .expect("roster-only change publishes");

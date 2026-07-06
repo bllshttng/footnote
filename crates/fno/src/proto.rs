@@ -113,7 +113,11 @@ use crate::tree::{Dir, Rect, TabId};
 /// workspace, reorder the sideline, re-home a tab into another workspace.
 /// Parallel-branch hazard: two in-flight mux branches both take "next", so the
 /// one that merges second must re-bump (v17/v18 were re-numbered once already).
-pub const PROTO_VERSION: u32 = 19;
+/// v20: `AgentRow.external` - a sideline row surfaced or liveness-upgraded from
+/// claude's daemon roster rather than the fno registry (x-0a2e); renders dim.
+/// `#[serde(default)]` keeps a v19 reader wire-tolerant. (Re-bumped from 19:
+/// x-96e8 merged first and took 19 - the second-to-merge re-bump rule.)
+pub const PROTO_VERSION: u32 = 20;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
@@ -404,6 +408,12 @@ pub struct AgentRow {
     /// non-attachable row. `#[serde(default)]` keeps a v13 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_id: Option<String>,
+    /// (v19, x-0a2e) True when this row was surfaced or liveness-upgraded from
+    /// claude's daemon roster rather than owned live by the fno registry:
+    /// rendered dim + attachable, strictly read-only toward `~/.claude/**`.
+    /// `#[serde(default)]` keeps a v18 reader wire-tolerant (defaults false).
+    #[serde(default)]
+    pub external: bool,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -1369,6 +1379,18 @@ mod tests {
     }
 
     #[test]
+    fn agent_row_from_v18_json_defaults_external_false() {
+        // x-0a2e AC3-FR: a pre-v19 (v18) AgentRow omits `external` entirely.
+        // A v19 reader must decode it as `false`, never fail - the skew
+        // window that lets a v18 client talk to a v19 server during the
+        // handshake, and vice versa.
+        let v18 = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(v18).unwrap();
+        assert!(!row.external, "missing external key => false");
+    }
+
+    #[test]
     fn backlog_card_from_pre_v18_json_defaults_route_fields_none() {
         // A pre-v18 (v11..v17) BacklogCard omits the route fields entirely
         // (skip-when-None). A v18 reader must decode it as all-None, never
@@ -1459,6 +1481,7 @@ mod tests {
                             region_lines: 8,
                         }),
                         attach_id: None,
+                        external: false,
                     },
                     AgentRow {
                         squad: None,
@@ -1469,6 +1492,7 @@ mod tests {
                         exited: true,
                         answerable: None,
                         attach_id: None,
+                        external: false,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),

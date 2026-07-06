@@ -3898,6 +3898,7 @@ mod tests {
             exited: false,
             answerable: None,
             attach_id: None,
+            external: false,
         };
         // A watch-only bg row with a claude jobId: a click attaches it.
         let bg_attach = AgentRow {
@@ -3909,6 +3910,7 @@ mod tests {
             exited: false,
             answerable: None,
             attach_id: Some("c19cd2c3".into()),
+            external: false,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -3920,6 +3922,7 @@ mod tests {
             exited: false,
             answerable: None,
             attach_id: None,
+            external: false,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // display order: squad 1 (row1), its agent "worker" (row2), squad 2
@@ -3952,6 +3955,7 @@ mod tests {
                 exited: false,
                 answerable: None,
                 attach_id: None,
+                external: false,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -4179,6 +4183,7 @@ mod tests {
                     exited: false,
                     answerable: None,
                     attach_id: None,
+                    external: false,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -4189,6 +4194,7 @@ mod tests {
                     exited: true,
                     answerable: None,
                     attach_id: None,
+                    external: false,
                 },
                 AgentRow {
                     squad: None,
@@ -4199,6 +4205,7 @@ mod tests {
                     exited: false,
                     answerable: None,
                     attach_id: None,
+                    external: false,
                 },
             ],
             focus_node: None,
@@ -4460,6 +4467,7 @@ mod tests {
             exited: false,
             answerable: None,
             attach_id: attach_id.map(Into::into),
+            external: false,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -4699,6 +4707,7 @@ mod tests {
             exited: false,
             answerable: ans,
             attach_id: None,
+            external: false,
         }
     }
 
