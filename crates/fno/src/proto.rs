@@ -408,12 +408,12 @@ pub struct AgentRow {
     /// non-attachable row. `#[serde(default)]` keeps a v13 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_id: Option<String>,
-    /// (v19, x-0a2e) True when this row's provenance is claude's daemon roster
+    /// (v20, x-0a2e) True when this row's provenance is claude's daemon roster
     /// (a synthesized foreign session or a roster-liveness-upgraded registry
     /// row) rather than the fno registry: rendered dim, read-only toward
     /// `~/.claude/**`. NOT an attachability signal (that is
     /// `attach_id.is_some()`); an external row whose pane died is still
-    /// `external: true` but exited. `#[serde(default)]` keeps a v18 reader
+    /// `external: true` but exited. `#[serde(default)]` keeps a v19 reader
     /// wire-tolerant (defaults false).
     #[serde(default)]
     pub external: bool,
@@ -1382,14 +1382,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_row_from_v18_json_defaults_external_false() {
-        // x-0a2e AC3-FR: a pre-v19 (v18) AgentRow omits `external` entirely.
-        // A v19 reader must decode it as `false`, never fail - the skew
-        // window that lets a v18 client talk to a v19 server during the
-        // handshake, and vice versa.
-        let v18 = r#"{"squad":null,"name":"bg","pane_id":null,
+    fn agent_row_from_pre_external_json_defaults_external_false() {
+        // x-0a2e AC3-FR: a pre-external (<=v19) AgentRow omits `external`
+        // entirely. A v20 reader must decode it as `false`, never fail - the
+        // skew window that lets an older client talk to a v20 server during
+        // the handshake, and vice versa.
+        let older = r#"{"squad":null,"name":"bg","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;
-        let row: AgentRow = serde_json::from_str(v18).unwrap();
+        let row: AgentRow = serde_json::from_str(older).unwrap();
         assert!(!row.external, "missing external key => false");
     }
 
