@@ -108,6 +108,11 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
                 slug: slug.to_string(),
                 priority: priority.to_string(),
                 state,
+                // Routes are a publish-time server join (panes/registry),
+                // not graph state - the reader always derives them empty.
+                pane_id: None,
+                attach_id: None,
+                where_hint: None,
             },
         ));
     }

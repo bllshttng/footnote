@@ -3172,6 +3172,9 @@ mod tests {
                 slug: "hover-cards".into(),
                 priority: "p2".into(),
                 state: CardState::Ready,
+                pane_id: None,
+                attach_id: None,
+                where_hint: None,
             }],
         });
         // display_rows: [footnote squad, + new workspace, Header, Card] -> the
@@ -3196,6 +3199,9 @@ mod tests {
             slug: String::new(),
             priority: "p2".into(),
             state,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
         };
         view.set_layout(LayoutView {
             squads: vec![meta(1, "footnote", 2, 1)],

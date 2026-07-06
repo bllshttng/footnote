@@ -3945,6 +3945,9 @@ mod tests {
             slug: slug.into(),
             priority: "p2".into(),
             state,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
         };
         let backlog = [
             card("x-rdy", "ready-slug", CardState::Ready),
