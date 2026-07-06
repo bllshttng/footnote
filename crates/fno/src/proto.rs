@@ -516,7 +516,10 @@ pub enum Command {
     /// name CLEARS the explicit rename and reverts to the derived label -
     /// deliberately unlike `NewSquad`'s blank-refusal, because "reset to
     /// auto" is a meaningful rename target.
-    RenameTab { tab: TabId, name: String },
+    RenameTab {
+        tab: TabId,
+        name: String,
+    },
 }
 
 /// Server -> client.

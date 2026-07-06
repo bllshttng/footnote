@@ -2332,8 +2332,11 @@ impl Core {
                 match self.session.find_tab(tab) {
                     Some((sid, ti)) => {
                         let clean = sanitize_tab_name(&name);
-                        let t =
-                            &mut self.session.squad_mut(sid).expect("find_tab live squad").tabs[ti];
+                        let t = &mut self
+                            .session
+                            .squad_mut(sid)
+                            .expect("find_tab live squad")
+                            .tabs[ti];
                         // Blank-after-sanitize CLEARS the rename back to the
                         // derived label (Locked 2: "reset to auto" is a
                         // meaningful rename target).
@@ -3681,7 +3684,12 @@ mod tests {
         );
         // FNO_NODE provenance beats cwd + cmd (AC1-HP).
         assert_eq!(
-            tab_label(None, Some((Some("x-abcd"), "/w/x-2", Some("claude"))), "/w", 0),
+            tab_label(
+                None,
+                Some((Some("x-abcd"), "/w/x-2", Some("claude"))),
+                "/w",
+                0
+            ),
             "x-abcd"
         );
         // A spawn cwd whose basename differs from the squad's outranks the
@@ -3689,7 +3697,11 @@ mod tests {
         assert_eq!(
             tab_label(
                 None,
-                Some((None, "/conductor/workspaces/footnote/x-9f21", Some("claude"))),
+                Some((
+                    None,
+                    "/conductor/workspaces/footnote/x-9f21",
+                    Some("claude")
+                )),
                 "/code/footnote",
                 1
             ),
@@ -3697,13 +3709,23 @@ mod tests {
         );
         // Same basename would just echo the squad label -> cmd.
         assert_eq!(
-            tab_label(None, Some((None, "/code/footnote", Some("htop"))), "/code/footnote", 1),
+            tab_label(
+                None,
+                Some((None, "/code/footnote", Some("htop"))),
+                "/code/footnote",
+                1
+            ),
             "htop"
         );
         // Every source empty -> the bare 1-based index, exactly today's
         // label (AC1-EDGE, AC2-FR: nothing errors, logs, or bells).
         assert_eq!(
-            tab_label(None, Some((None, "/code/footnote", None)), "/code/footnote", 2),
+            tab_label(
+                None,
+                Some((None, "/code/footnote", None)),
+                "/code/footnote",
+                2
+            ),
             "3"
         );
     }
