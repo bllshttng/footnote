@@ -29,7 +29,7 @@ use crate::keys::{Event, Scanner};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, BacklogCard, BlockDir, CardState,
     Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent, MouseKind, ProtoError,
-    ServerMsg, SquadMeta, BUILD_VERSION, MAX_TAB_NAME, PROTO_VERSION,
+    ServerMsg, SquadMeta, BUILD_VERSION, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
 use crate::tree::{Rect, TabId};
 
@@ -405,22 +405,54 @@ struct View {
     /// Pending escape bytes in create-overlay mode (same split-arrow safety as
     /// [`View::search_esc`]).
     create_esc: Vec<u8>,
-    /// (x-c150) The pending rename-tab buffer: `(tab id captured at open,
-    /// typed name)`, `Some` while the `leader+,` overlay is open. Keys divert
-    /// to [`rename_keys`]. Enter on an EMPTY buffer still sends (blank =
-    /// clear back to the derived label), unlike `create`.
-    rename: Option<(TabId, String)>,
+    /// (x-c150; widened x-96e8) The pending rename buffer: `(target captured at
+    /// open, typed name)`, `Some` while the `leader+,` (tab) or selector `r`
+    /// (squad) overlay is open. Keys divert to [`rename_keys`]. Enter on an
+    /// EMPTY buffer still sends (blank = clear back to the derived label),
+    /// unlike `create`.
+    rename: Option<(RenameTarget, String)>,
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
+    /// (x-96e8) The move-a-tab-to-another-squad picker: `(tab captured at open,
+    /// candidate squad ids in the numbered order shown)`, `Some` while the
+    /// selector `m` overlay is open. A digit sends [`Command::MoveTab`]; the id
+    /// is re-validated against the current catalog before it goes on the wire.
+    move_pick: Option<(TabId, Vec<u64>)>,
+    /// (x-96e8) The squad the selector cursor is tracking across a `J`/`K`
+    /// reorder: the next `Layout` re-points the cursor at this squad's row so it
+    /// visually follows the moved workspace. Cleared by any non-reorder key or a
+    /// selector close.
+    sel_follow: Option<u64>,
 }
 
-/// A pending work-queue card dispatch awaiting the operator's one-keypress
-/// confirm (x-a496): `node` is the id `Command::DispatchNode` targets, `label`
-/// the slug/id shown in the prompt.
+/// A pending destructive/costly action awaiting the operator's one-keypress
+/// confirm. `label` is the entity name shown in the prompt; `action` is what
+/// Enter commits (x-a496 dispatch, extended by x-96e8 with squad removal).
 struct ConfirmAction {
-    node: String,
+    action: ConfirmKind,
     label: String,
+}
+
+/// What a confirmed [`ConfirmAction`] sends on Enter.
+enum ConfirmKind {
+    /// Start a targeted session on a work-queue card's node (x-a496).
+    Dispatch { node: String },
+    /// Close a whole workspace (x-96e8). `panes` is the blast radius named in
+    /// the prompt; `last` warns that removing the session's only squad ends it.
+    RemoveSquad {
+        squad: u64,
+        panes: usize,
+        last: bool,
+    },
+}
+
+/// The entity a rename overlay is editing (x-96e8 widened x-c150's tab-only
+/// overlay to also rename a squad): one buffer, one key handler, one esc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameTarget {
+    Tab(TabId),
+    Squad(u64),
 }
 
 /// Client-local in-scrollback search state (v12, x-e780).
@@ -465,6 +497,8 @@ impl View {
             create_esc: Vec::new(),
             rename: None,
             rename_esc: Vec::new(),
+            move_pick: None,
+            sel_follow: None,
         }
     }
 
@@ -491,6 +525,7 @@ impl View {
         self.answers = None;
         self.search = None;
         self.rename = None;
+        self.move_pick = None;
         self.create = Some(String::new());
         self.create_esc.clear();
     }
@@ -513,19 +548,44 @@ impl View {
         // live text-input overlay whose next Enter it would steal.
         self.rename = None;
         self.rename_esc.clear();
+        self.move_pick = None;
         self.confirm = Some(action);
     }
 
-    /// Open the rename-tab name overlay modally for `tab` (x-c150), clearing
-    /// any other keyboard-opened overlay first - the same discipline as
-    /// [`View::open_create`] (a lingering selector would swallow the name).
-    fn open_rename(&mut self, tab: TabId) {
+    /// Open the rename overlay modally for `target` (x-c150 tab, widened x-96e8
+    /// to a squad), clearing any other keyboard-opened overlay first - the same
+    /// discipline as [`View::open_create`] (a lingering selector would swallow
+    /// the name).
+    fn open_rename(&mut self, target: RenameTarget) {
+        self.selector = None;
+        self.answers = None;
+        self.search = None;
+        self.move_pick = None;
+        self.create = None;
+        self.rename = Some((target, String::new()));
+        self.rename_esc.clear();
+    }
+
+    /// Open the move-tab-to-squad picker modally for `tab` (x-96e8), listing the
+    /// candidate destination squads (source excluded, capped at 9) in the order
+    /// a digit selects them. Same overlay-clearing discipline as the others.
+    fn open_move_pick(&mut self, tab: TabId, squads: Vec<u64>) {
         self.selector = None;
         self.answers = None;
         self.search = None;
         self.create = None;
-        self.rename = Some((tab, String::new()));
-        self.rename_esc.clear();
+        self.rename = None;
+        self.confirm = None;
+        self.move_pick = Some((tab, squads));
+    }
+
+    /// The `display_rows()` index of squad `id`'s own row (a `Sel` with no tab),
+    /// or `None` if it is not currently a visible row. Used to re-point the
+    /// selector cursor onto a squad after a `J`/`K` reorder (x-96e8).
+    fn squad_row(&self, id: u64) -> Option<usize> {
+        self.display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Sel(s) if s.tab.is_none() && s.squad == id))
     }
 
     fn panel_visible(&self) -> bool {
@@ -668,7 +728,7 @@ impl View {
                     "terminal too short for the dispatch prompt".into(),
                 )),
                 CardState::Ready => Some(ChromeHit::Confirm(ConfirmAction {
-                    node: c.id.clone(),
+                    action: ConfirmKind::Dispatch { node: c.id.clone() },
                     label: if c.slug.is_empty() {
                         c.id.clone()
                     } else {
@@ -775,9 +835,16 @@ impl View {
         self.layout = layout;
         // Selector re-anchors to a live, actionable row on catalog change
         // (AC6-FR): clamp into the unified rows, then step off an inert Header
-        // so the cursor never rests on a label (x-260a).
-        if let Some(cur) = self.selector {
-            self.selector = self.selector_anchor(cur);
+        // so the cursor never rests on a label (x-260a). A pending J/K reorder
+        // (x-96e8) instead re-points the cursor at the moved squad's new row so
+        // it visually follows the workspace; the follow persists across repeated
+        // presses until a non-reorder key clears sel_follow.
+        if self.selector.is_some() {
+            let anchored = match self.sel_follow.and_then(|sq| self.squad_row(sq)) {
+                Some(row) => Some(row),
+                None => self.selector.and_then(|cur| self.selector_anchor(cur)),
+            };
+            self.selector = anchored;
         }
         // Answer overlay re-clamps when a scrape tick drops the selected blocked
         // pane (x-c929, AC2-EDGE): stay in place if a later entry now occupies
@@ -978,12 +1045,21 @@ impl View {
                 let lines = answer_overlay_lines(&blocked, sel.min(blocked.len() - 1));
                 draw_lines_overlay(&mut cells, rows, cols, &lines);
             }
+        } else if let Some((_, squads)) = &self.move_pick {
+            // x-96e8 move-tab picker: `move tab to:` + one numbered line per
+            // candidate squad, on the same inverse-video overlay chrome.
+            let lines = self.move_pick_lines(squads);
+            draw_lines_overlay(&mut cells, rows, cols, &lines);
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
         // one place the cursor may sit (AC1-UI/AC5-UI).
         let (mut cur_r, mut cur_c, mut cur_vis) = (0u16, 0u16, false);
-        if self.selector.is_none() && self.answers.is_none() && self.digest.is_none() {
+        if self.selector.is_none()
+            && self.answers.is_none()
+            && self.digest.is_none()
+            && self.move_pick.is_none()
+        {
             if let Some((_, rect)) = self
                 .layout
                 .panes
@@ -1049,7 +1125,7 @@ impl View {
         // A card-dispatch confirm is modal - it owns the row above everything
         // else while the operator decides (x-a496).
         if let Some(c) = &self.confirm {
-            self.draw_confirm_line(cells, rows, cols, &c.label);
+            self.draw_confirm_line(cells, rows, cols, c);
             return;
         }
         // The new-workspace name input overlays the row while open (x-9e5e),
@@ -1070,14 +1146,20 @@ impl View {
             }
             return;
         }
-        // The rename-tab name input (x-c150), same overlay discipline as the
-        // create input above; the hint spells out the blank-clears semantics.
-        if let Some((_, name)) = &self.rename {
+        // The rename name input (x-c150 tab; widened x-96e8 to squads), same
+        // overlay discipline as the create input above; the hint spells out the
+        // blank-clears semantics. The noun tracks the target so the operator
+        // sees what they are renaming.
+        if let Some((target, name)) = &self.rename {
             let r = rows - 1;
             for c in 0..cols {
                 cells[r * cols + c] = Cell::default();
             }
-            let text = format!(" rename tab: {name}_ (empty resets to auto)");
+            let noun = match target {
+                RenameTarget::Tab(_) => "tab",
+                RenameTarget::Squad(_) => "workspace",
+            };
+            let text = format!(" rename {noun}: {name}_ (empty resets to auto)");
             for (i, ch) in text.chars().take(cols).enumerate() {
                 cells[r * cols + i] = Cell {
                     c: ch,
@@ -1163,14 +1245,34 @@ impl View {
         }
     }
 
-    /// Paint the card-dispatch confirm prompt over the bottom row (x-a496).
-    /// Blank first (the x-5041 divider-bleed gotcha), then the BOLD prompt.
-    fn draw_confirm_line(&self, cells: &mut [Cell], rows: usize, cols: usize, label: &str) {
+    /// Paint the confirm prompt over the bottom row (x-a496 dispatch; x-96e8
+    /// squad removal). Blank first (the x-5041 divider-bleed gotcha), then the
+    /// BOLD prompt whose wording tracks the action being confirmed.
+    fn draw_confirm_line(
+        &self,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        action: &ConfirmAction,
+    ) {
         let r = rows - 1;
         for c in 0..cols {
             cells[r * cols + c] = Cell::default();
         }
-        let text = format!(" start session on {label}? ⏎/esc");
+        let label = &action.label;
+        let text = match &action.action {
+            ConfirmKind::Dispatch { .. } => format!(" start session on {label}? ⏎/esc"),
+            ConfirmKind::RemoveSquad {
+                panes, last: true, ..
+            } => format!(
+                " close workspace {label} ({panes} panes) - last workspace, ends the session? ⏎/esc"
+            ),
+            ConfirmKind::RemoveSquad {
+                panes, last: false, ..
+            } => {
+                format!(" close workspace {label} ({panes} panes)? ⏎/esc")
+            }
+        };
         for (i, ch) in text.chars().take(cols).enumerate() {
             cells[r * cols + i] = Cell {
                 c: ch,
@@ -1179,6 +1281,27 @@ impl View {
                 flags: cell_flags::BOLD,
             };
         }
+    }
+
+    /// Build the move-tab picker overlay lines (x-96e8): a header plus one
+    /// numbered line per candidate squad, the number being the digit that
+    /// selects it. A candidate that vanished from the catalog since open still
+    /// renders (labelled) - the digit is re-validated on press, and the server
+    /// refuses a stale id regardless.
+    fn move_pick_lines(&self, squads: &[u64]) -> Vec<String> {
+        const W: usize = 40;
+        let mut lines = vec![pad_to(" move tab to: · digit selects · esc cancel", W)];
+        for (i, &sid) in squads.iter().enumerate() {
+            let name = self
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == sid)
+                .map(|s| s.name.as_str())
+                .unwrap_or("(gone)");
+            lines.push(pad_to(&format!(" {} {name}", i + 1), W));
+        }
+        lines
     }
 
     /// Paint the in-scrollback search line over the bottom row (v12, x-e780).
@@ -1553,6 +1676,7 @@ const KEY_TABLE: &[&str] = &[
     "  &  close tab          w  panel selector ",
     "     selector ⏎ acts on the row: squad/tab ",
     "     · agent focus/attach · card dispatch · + create ",
+    "     · r rename · x remove · J/K reorder · m move tab ",
     "  a  answer queue       b  toggle sideline ",
     "  s  toggle status      ?  this key table  ",
     "  [ ]  jump block       v  select block   ",
@@ -2190,6 +2314,11 @@ async fn handle_stdin(
     if view.confirm.is_some() {
         return confirm_keys(view, &passthrough, sock_w).await;
     }
+    if view.move_pick.is_some() {
+        // Modal like confirm (x-96e8): a single digit/Esc resolves it. Ahead of
+        // the selector (which it replaced on open) so its keys can't leak there.
+        return move_pick_keys(view, &passthrough, sock_w).await;
+    }
     if view.selector.is_some() {
         return selector_keys(view, &passthrough, sock_w).await;
     }
@@ -2351,7 +2480,7 @@ async fn handle_stdin(
                     .map(|t| t.id);
                 match tab {
                     Some(id) => {
-                        view.open_rename(id);
+                        view.open_rename(RenameTarget::Tab(id));
                         // Swallow same-chunk bytes after the chord, like
                         // SearchOpen: nothing may leak into the pane.
                         break;
@@ -2411,12 +2540,13 @@ async fn confirm_keys(
         return Ok(StdinFlow::Continue);
     };
     if matches!(bytes.first(), Some(b'\r') | Some(b'\n')) {
-        write_msg(
-            sock_w,
-            &ClientMsg::Command(Command::DispatchNode(action.node)),
-        )
-        .await
-        .map_err(|e| format!("dispatch-node send failed: {e}"))?;
+        let cmd = match action.action {
+            ConfirmKind::Dispatch { node } => Command::DispatchNode(node),
+            ConfirmKind::RemoveSquad { squad, .. } => Command::RemoveSquad(squad),
+        };
+        write_msg(sock_w, &ClientMsg::Command(cmd))
+            .await
+            .map_err(|e| format!("confirm-action send failed: {e}"))?;
     }
     Ok(StdinFlow::Continue)
 }
@@ -2469,10 +2599,12 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
 /// Enter acts on the row through [`View::row_action`] + [`apply_hit`] - the
 /// same resolver a mouse click uses (x-260a), so squad/tab switch, agent
 /// focus/attach, card dispatch-confirm, and workspace-create are all keyboard
-/// reachable. A refusal (Notice) keeps the selector open; Esc/q closes. Rows
-/// and cursor are re-read per key so a close mid-chunk swallows the remainder
-/// instead of resurrecting the selector. Detach is leader+d from NORMAL mode
-/// only (Locked 11): close the selector first.
+/// reachable. The x-96e8 squad-management context keys ride here too: on a
+/// squad row `r` renames, `x` removes (behind a confirm), `J`/`K` reorder; on
+/// a tab row `m` opens the move-to-squad picker. A refusal (Notice/BEL) keeps
+/// the selector open; Esc/q closes. Rows and cursor are re-read per key so a
+/// close mid-chunk swallows the remainder instead of resurrecting the selector.
+/// Detach is leader+d from NORMAL mode only (Locked 11): close the selector.
 async fn selector_keys(
     view: &mut View,
     bytes: &[u8],
@@ -2488,6 +2620,11 @@ async fn selector_keys(
         let Some(cur) = view.selector else {
             break; // closed mid-chunk: swallow the rest, never forward
         };
+        // Any key other than a J/K reorder drops the cursor-follow intent, so a
+        // later Layout re-anchors normally instead of chasing a stale squad.
+        if k != b'J' && k != b'K' {
+            view.sel_follow = None;
+        }
         match k {
             b'j' => view.selector = Some(view.selector_down(cur)),
             b'k' => view.selector = Some(view.selector_up(cur)),
@@ -2525,9 +2662,159 @@ async fn selector_keys(
                     }
                 }
             }
+            b'r' => {
+                // Rename the squad at the cursor (x-96e8). Tab/other rows have
+                // no squad rename here (leader+, renames a tab), so they BEL.
+                let squad = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
+                    _ => None,
+                };
+                match squad {
+                    Some(sq) => view.open_rename(RenameTarget::Squad(sq)),
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
+            b'x' => {
+                // Remove the squad at the cursor (x-96e8), behind a confirm. A
+                // too-short terminal cannot render the bottom-row prompt, so it
+                // refuses with a notice rather than arm an INVISIBLE confirm
+                // (x-260a row_action rule); an unknown squad or a tab/other row
+                // BELs.
+                let squad = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
+                    _ => None,
+                };
+                match squad.and_then(|sq| {
+                    view.layout
+                        .squads
+                        .iter()
+                        .find(|s| s.id == sq)
+                        .map(|s| (sq, s.name.clone(), s.panes))
+                }) {
+                    Some(_) if view.term.0 < MIN_ROWS_FOR_STATUS => {
+                        view.set_notice("terminal too short for the confirm prompt".into())
+                    }
+                    Some((sq, name, panes)) => {
+                        let last = view.layout.squads.len() == 1;
+                        view.open_confirm(ConfirmAction {
+                            action: ConfirmKind::RemoveSquad {
+                                squad: sq,
+                                panes,
+                                last,
+                            },
+                            label: name,
+                        });
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
+            b'J' | b'K' => {
+                // Reorder the squad at the cursor down (`J`) / up (`K`) the
+                // sideline (x-96e8). The cursor follows the squad via sel_follow
+                // on the authoritative next Layout. Tab/other rows BEL.
+                let squad = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
+                    _ => None,
+                };
+                match squad {
+                    Some(sq) => {
+                        let delta = if k == b'J' { 1 } else { -1 };
+                        view.sel_follow = Some(sq);
+                        write_msg(
+                            sock_w,
+                            &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
+                        )
+                        .await
+                        .map_err(|e| format!("move-squad send failed: {e}"))?;
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
+            b'm' => {
+                // Move the tab at the cursor into another squad (x-96e8): open
+                // the numbered picker over the OTHER squads (a squad is moved
+                // with J/K, not m). A squad/other row, or nowhere to move to
+                // (only one squad), BELs.
+                let picked = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Sel(r)) => r.tab.map(|ti| (r.squad, ti)),
+                    _ => None,
+                }
+                .and_then(|(squad, ti)| {
+                    let tid = view
+                        .layout
+                        .squads
+                        .iter()
+                        .find(|s| s.id == squad)?
+                        .tabs
+                        .get(ti)?
+                        .id;
+                    let dsts: Vec<u64> = view
+                        .layout
+                        .squads
+                        .iter()
+                        .filter(|s| s.id != squad)
+                        .map(|s| s.id)
+                        .take(9)
+                        .collect();
+                    (!dsts.is_empty()).then_some((tid, dsts))
+                });
+                match picked {
+                    Some((tid, dsts)) => view.open_move_pick(tid, dsts),
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
+            }
             0x1b | b'q' => view.selector = None,
             _ => {}
         }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Move-tab picker keys (x-96e8): a digit `1..=9` selects the numbered
+/// destination squad and sends [`Command::MoveTab`]; the captured id is
+/// re-validated against the CURRENT catalog first (stale -> BEL + close, the
+/// server refuses a stale id regardless). Esc/q cancels; any other key closes
+/// without acting. `take()` clears the picker either way, so a stale overlay
+/// can never resurrect a second move.
+async fn move_pick_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let Some((tab, squads)) = view.move_pick.take() else {
+        return Ok(StdinFlow::Continue);
+    };
+    match bytes.first() {
+        Some(&b) if (b'1'..=b'9').contains(&b) => {
+            let idx = (b - b'1') as usize;
+            match squads.get(idx) {
+                // The captured id must still name a live squad; the server
+                // refuses a stale id regardless, but pre-validating saves a
+                // round-trip and keeps the BEL local.
+                Some(&sq) if view.layout.squads.iter().any(|s| s.id == sq) => {
+                    write_msg(
+                        sock_w,
+                        &ClientMsg::Command(Command::MoveTab { tab, squad: sq }),
+                    )
+                    .await
+                    .map_err(|e| format!("move-tab send failed: {e}"))?;
+                }
+                _ => {
+                    let _ = raw_out(b"\x07");
+                }
+            }
+        }
+        // Esc/q cancel silently; any other key just closes (the picker is
+        // single-shot, cleared by take() above).
+        _ => {}
     }
     Ok(StdinFlow::Continue)
 }
@@ -2785,14 +3072,15 @@ async fn rename_keys(
             }
             SearchKey::Byte(b) => match b {
                 b'\r' | b'\n' => {
-                    if let Some((tab, name)) = view.rename.take() {
+                    if let Some((target, name)) = view.rename.take() {
                         view.rename_esc.clear();
-                        write_msg(
-                            sock_w,
-                            &ClientMsg::Command(Command::RenameTab { tab, name }),
-                        )
-                        .await
-                        .map_err(|e| format!("rename-tab send failed: {e}"))?;
+                        let cmd = match target {
+                            RenameTarget::Tab(tab) => Command::RenameTab { tab, name },
+                            RenameTarget::Squad(squad) => Command::RenameSquad { squad, name },
+                        };
+                        write_msg(sock_w, &ClientMsg::Command(cmd))
+                            .await
+                            .map_err(|e| format!("rename send failed: {e}"))?;
                     }
                     break;
                 }
@@ -2802,8 +3090,15 @@ async fn rename_keys(
                     }
                 }
                 0x20..=0x7e => {
-                    if let Some((_, buf)) = view.rename.as_mut() {
-                        if buf.len() < MAX_TAB_NAME {
+                    if let Some((target, buf)) = view.rename.as_mut() {
+                        // Cap to the target's stored ceiling so the operator sees
+                        // exactly what the server will keep (server stays
+                        // authoritative for the wire).
+                        let cap = match target {
+                            RenameTarget::Tab(_) => MAX_TAB_NAME,
+                            RenameTarget::Squad(_) => MAX_SQUAD_NAME,
+                        };
+                        if buf.len() < cap {
                             buf.push(b as char);
                         }
                     }
@@ -3090,6 +3385,8 @@ mod tests {
                 })
                 .collect(),
             active_tab,
+            // One pane per tab is the test fixture's shape (each tab is a leaf).
+            panes: tabs,
         }
     }
 
@@ -3428,7 +3725,10 @@ mod tests {
         // card is index 3, painted at outer row TAB_BAR_ROWS + 3 = 4.
         match view.chrome_hit(4, 5) {
             Some(ChromeHit::Confirm(a)) => {
-                assert_eq!(a.node, "x-a496");
+                assert!(
+                    matches!(&a.action, ConfirmKind::Dispatch { node } if node == "x-a496"),
+                    "confirm dispatches the card's node"
+                );
                 assert_eq!(a.label, "hover-cards");
             }
             other => panic!("expected Confirm, got {}", chrome_hit_label(&other)),
@@ -4290,7 +4590,10 @@ mod tests {
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
         assert!(buf.is_empty(), "confirm first, dispatch on the next Enter");
         assert_eq!(v.selector, None);
-        assert_eq!(v.confirm.as_ref().map(|c| c.node.as_str()), Some("x-rdy"));
+        assert!(
+            matches!(&v.confirm.as_ref().unwrap().action, ConfirmKind::Dispatch { node } if node == "x-rdy"),
+            "the Ready card's node is armed for dispatch"
+        );
     }
 
     #[tokio::test]
@@ -4317,16 +4620,18 @@ mod tests {
         view.answers = Some(0);
         view.create = Some("half-typed".into());
         view.open_confirm(ConfirmAction {
-            node: "x-rdy".into(),
+            action: ConfirmKind::Dispatch {
+                node: "x-rdy".into(),
+            },
             label: "x-rdy".into(),
         });
         assert!(view.selector.is_none(), "confirm clears an open selector");
         assert!(view.answers.is_none(), "confirm clears the answer overlay");
         assert!(view.create.is_none(), "confirm drops a half-typed create");
         assert!(view.search.is_none());
-        assert_eq!(
-            view.confirm.as_ref().map(|c| c.node.as_str()),
-            Some("x-rdy")
+        assert!(
+            matches!(&view.confirm.as_ref().unwrap().action, ConfirmKind::Dispatch { node } if node == "x-rdy"),
+            "the armed confirm carries the node"
         );
     }
 
@@ -4558,7 +4863,7 @@ mod tests {
         // AC2-HP (client half): type + Enter -> one RenameTab for the tab id
         // captured at open time.
         let mut v = two_pane_view();
-        v.open_rename(7);
+        v.open_rename(RenameTarget::Tab(7));
         let mut buf: Vec<u8> = Vec::new();
         rename_keys(&mut v, b"debug\r", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -4578,7 +4883,7 @@ mod tests {
         // Locked 2 / AC3-HP: Enter on an EMPTY buffer sends (blank = reset to
         // auto) - the one deliberate divergence from create_keys.
         let mut v = two_pane_view();
-        v.open_rename(7);
+        v.open_rename(RenameTarget::Tab(7));
         let mut buf: Vec<u8> = Vec::new();
         rename_keys(&mut v, b"\r", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -4598,7 +4903,7 @@ mod tests {
         // AC1-UI: Esc closes, sends nothing; same-chunk bytes after the Esc
         // die with the overlay instead of leaking into the pane.
         let mut v = two_pane_view();
-        v.open_rename(7);
+        v.open_rename(RenameTarget::Tab(7));
         let mut buf: Vec<u8> = Vec::new();
         rename_keys(&mut v, b"deb\x1bx", &mut buf).await.unwrap();
         assert!(buf.is_empty(), "cancel sends no command");
@@ -4610,12 +4915,200 @@ mod tests {
         // The TUI affordance half of AC2-ERR: the operator sees exactly what
         // the server will store (the server cap stays authoritative).
         let mut v = two_pane_view();
-        v.open_rename(7);
+        v.open_rename(RenameTarget::Tab(7));
         let mut buf: Vec<u8> = Vec::new();
         let long = "a".repeat(MAX_TAB_NAME + 8);
         rename_keys(&mut v, long.as_bytes(), &mut buf)
             .await
             .unwrap();
         assert_eq!(v.rename.as_ref().unwrap().1.len(), MAX_TAB_NAME);
+    }
+
+    // ---- x-96e8: squad-management selector context keys ----
+
+    #[tokio::test]
+    async fn selector_r_opens_squad_rename_overlay() {
+        // AC1-HP (client half): `r` on a squad row opens the rename overlay for
+        // that squad, closing the selector, without sending anything.
+        let mut v = two_pane_view(); // rows: [squad1, squad2, +footer]
+        v.selector = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"r", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "opening the overlay sends nothing");
+        assert_eq!(v.selector, None, "the selector closes");
+        assert_eq!(v.rename.map(|(t, _)| t), Some(RenameTarget::Squad(1)));
+    }
+
+    #[tokio::test]
+    async fn rename_keys_squad_target_sends_rename_squad() {
+        // AC1-HP: Enter on a squad rename sends RenameSquad for the captured id.
+        let mut v = two_pane_view();
+        v.open_rename(RenameTarget::Squad(2));
+        let mut buf: Vec<u8> = Vec::new();
+        rename_keys(&mut v, b"oss\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let decoded: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            decoded,
+            ClientMsg::Command(Command::RenameSquad {
+                squad: 2,
+                name: "oss".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_j_sends_move_squad_and_tracks_the_squad() {
+        // AC3-HP (client half): `J` reorders the squad down and arms sel_follow
+        // so the next Layout re-points the cursor at the moved workspace; the
+        // selector stays open for repeated presses.
+        let mut v = two_pane_view();
+        v.selector = Some(0); // squad 1
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"J", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let decoded: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            decoded,
+            ClientMsg::Command(Command::MoveSquad { squad: 1, delta: 1 })
+        );
+        assert_eq!(v.sel_follow, Some(1), "the cursor tracks the moved squad");
+        assert_eq!(v.selector, Some(0), "the selector stays open");
+    }
+
+    #[test]
+    fn set_layout_follows_the_reordered_squad() {
+        // AC3-HP: after a J/K reorder, the next Layout re-points the cursor onto
+        // the moved squad's new row rather than clamping the old index.
+        let mut v = two_pane_view(); // rows: [squad1@0, squad2@1, footer]
+        v.selector = Some(0);
+        v.sel_follow = Some(1); // tracking squad 1
+                                // The reorder landed: squad 1 is now second, so its row moves to index 1.
+        v.set_layout(LayoutView {
+            squads: vec![meta(2, "notes", 1, 0), meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![],
+            focus: 11,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        assert_eq!(v.selector, Some(1), "cursor follows squad 1 to its new row");
+    }
+
+    #[tokio::test]
+    async fn selector_x_arms_remove_confirm_and_degrades_on_short_terminal() {
+        // AC2-UI: `x` on a squad row arms the remove confirm carrying the blast
+        // radius; a too-short terminal refuses instead of arming an invisible
+        // confirm (x-260a row_action rule).
+        let mut v = two_pane_view(); // squad1 (footnote) has 2 panes; 2 squads
+        v.selector = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert!(buf.is_empty());
+        assert_eq!(v.selector, None);
+        match v.confirm.as_ref().map(|c| (&c.action, c.label.as_str())) {
+            Some((ConfirmKind::RemoveSquad { squad, panes, last }, label)) => {
+                assert_eq!((*squad, *panes, *last), (1, 2, false));
+                assert_eq!(label, "footnote");
+            }
+            _ => panic!("expected a RemoveSquad confirm"),
+        }
+
+        // Too short: refuse with a notice, arm nothing.
+        let mut v = two_pane_view();
+        v.term.0 = MIN_ROWS_FOR_STATUS - 1;
+        v.selector = Some(0);
+        selector_keys(&mut v, b"x", &mut Vec::new()).await.unwrap();
+        assert!(
+            v.confirm.is_none(),
+            "no invisible confirm on a short terminal"
+        );
+        assert!(v.notice.is_some(), "the refusal is surfaced");
+    }
+
+    #[tokio::test]
+    async fn confirm_keys_enter_sends_remove_squad() {
+        // AC2-HP: Enter on an armed remove confirm sends RemoveSquad.
+        let mut v = two_pane_view();
+        v.confirm = Some(ConfirmAction {
+            action: ConfirmKind::RemoveSquad {
+                squad: 2,
+                panes: 1,
+                last: false,
+            },
+            label: "notes".into(),
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let decoded: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(decoded, ClientMsg::Command(Command::RemoveSquad(2)));
+    }
+
+    #[tokio::test]
+    async fn selector_m_opens_move_picker_on_a_tab_row() {
+        // AC (US4 client half): `m` on a tab row opens the picker over the OTHER
+        // squads; on a squad row it BELs (a squad moves with J/K, not m).
+        let mut v = two_pane_view();
+        v.expanded.insert(1); // rows: [squad1@0, t0@1, t1@2, squad2@3, footer]
+        v.selector = Some(1); // squad 1's first tab (id 0 in the fixture)
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"m", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "opening the picker sends nothing");
+        assert_eq!(
+            v.move_pick,
+            Some((0, vec![2])),
+            "picker captures the tab id and the non-source squads"
+        );
+
+        // On a squad row, `m` is a no-op (no picker armed).
+        let mut v = two_pane_view();
+        v.selector = Some(0);
+        selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
+        assert!(
+            v.move_pick.is_none(),
+            "a squad row does not open the picker"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_pick_keys_digit_sends_move_tab_and_stale_id_bels() {
+        // A digit sends MoveTab for the numbered squad; a captured id that
+        // vanished is refused locally (no wire message).
+        let mut v = two_pane_view();
+        v.move_pick = Some((7, vec![2])); // move tab 7 to squad 2 (digit 1)
+        let mut buf: Vec<u8> = Vec::new();
+        move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let decoded: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            decoded,
+            ClientMsg::Command(Command::MoveTab { tab: 7, squad: 2 })
+        );
+        assert_eq!(v.move_pick, None, "the picker is single-shot");
+
+        // A stale captured id (not in the current catalog) sends nothing.
+        let mut v = two_pane_view();
+        v.move_pick = Some((7, vec![999]));
+        let mut buf: Vec<u8> = Vec::new();
+        move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
+        assert!(
+            buf.is_empty(),
+            "a stale destination id never reaches the wire"
+        );
+        assert_eq!(v.move_pick, None);
+    }
+
+    #[tokio::test]
+    async fn selector_non_reorder_key_clears_sel_follow() {
+        // sel_follow only survives across J/K; any other key drops it so a later
+        // Layout re-anchors normally.
+        let mut v = two_pane_view();
+        v.selector = Some(0);
+        v.sel_follow = Some(1);
+        selector_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.sel_follow, None);
     }
 }
