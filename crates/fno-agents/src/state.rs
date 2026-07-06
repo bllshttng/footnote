@@ -211,6 +211,21 @@ impl InsideLegReport {
             None => false,
         }
     }
+
+    /// True when `received_at` is within `window_secs` of `now_secs` -- a plain
+    /// recency test (distinct from `is_live_at`, which never ages a report that
+    /// carries no `ttl_ms`). Used as the "provably live" signal that stops an
+    /// ask/mail routing miss from false-orphaning a live worker (x-c393). An
+    /// unparseable stamp fails CLOSED (not recent), so a corrupt row can never
+    /// shield a dead session from orphaning.
+    pub fn received_within(&self, now_secs: u64, window_secs: u64) -> bool {
+        match rfc3339_like_to_secs(&self.received_at) {
+            // A future stamp (recv > now) is corrupt/clock-skewed, not recent:
+            // require recv <= now so it cannot suppress orphaning (fail closed).
+            Some(recv) => recv <= now_secs && now_secs - recv <= window_secs,
+            None => false,
+        }
+    }
 }
 
 /// True when a badge report ENTERS `target` from a different prior state (x-dd84).

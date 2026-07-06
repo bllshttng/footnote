@@ -1254,3 +1254,49 @@ def test_dispatch_ask_followup_default_from_name_is_abilities(
         timeout=10,
     )
     assert captured["from_name"] == "fno"
+
+
+# --- _inside_leg_is_recent (x-c393): provably-live guard signal ----------
+
+
+def test_inside_leg_is_recent_true_for_fresh_report():
+    """A report stamped near `now` counts as provably-live (AC2-HP)."""
+    from fno.agents.dispatch import _inside_leg_is_recent
+
+    now = 1_000_000.0
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 30))
+    assert _inside_leg_is_recent({"received_at": stamp}, now) is True
+
+
+def test_inside_leg_is_recent_false_when_absent():
+    """No inside_leg report -> not provably live (a routing miss orphans)."""
+    from fno.agents.dispatch import _inside_leg_is_recent
+
+    assert _inside_leg_is_recent(None, 1_000_000.0) is False
+
+
+def test_inside_leg_is_recent_false_when_stale():
+    """A report older than the window is not a liveness signal (AC2-ERR side)."""
+    from fno.agents.dispatch import _inside_leg_is_recent, _PROVABLY_LIVE_WINDOW_SEC
+
+    now = 1_000_000.0
+    stamp = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - _PROVABLY_LIVE_WINDOW_SEC - 60)
+    )
+    assert _inside_leg_is_recent({"received_at": stamp}, now) is False
+
+
+def test_inside_leg_is_recent_false_on_unparseable_stamp():
+    """A corrupt stamp fails closed -> not recent (never shields a dead row)."""
+    from fno.agents.dispatch import _inside_leg_is_recent
+
+    assert _inside_leg_is_recent({"received_at": "not-a-date"}, 1_000_000.0) is False
+
+
+def test_inside_leg_is_recent_false_for_future_stamp():
+    """codex P3: a future/corrupt stamp must not count as recent."""
+    from fno.agents.dispatch import _inside_leg_is_recent
+
+    now = 1_000_000.0
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 300))
+    assert _inside_leg_is_recent({"received_at": stamp}, now) is False

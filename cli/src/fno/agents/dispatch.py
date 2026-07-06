@@ -200,6 +200,55 @@ _FROM_NAME_DEFAULT = "fno"
 _FROM_NAME_FORBIDDEN_CHARS = frozenset("\"<>&")
 _DEFAULT_FOLLOWUP_TIMEOUT_SEC = 600.0
 
+# x-c393: how recent an inside_leg report must be for a worker to count as
+# "provably live" when a follow-up fails to route. Mirrors the Rust
+# PROVABLY_LIVE_WINDOW_SECS; `fno agents reconcile` (the `claude logs` probe) is
+# the eventual authority that orphans a genuinely dead worker.
+_PROVABLY_LIVE_WINDOW_SEC = 3600.0
+
+
+def _inside_leg_is_recent(
+    inside_leg: Optional[dict],
+    now_epoch: float,
+    window_sec: float = _PROVABLY_LIVE_WINDOW_SEC,
+) -> bool:
+    """True when the row's ``inside_leg`` report is within ``window_sec`` of now.
+
+    A live bg worker whose registry identity merely wasn't routable (the
+    null-uuid gap, x-c393) still emits ``inside_leg`` reports, so a routing miss
+    on such a row is a gap, not a death. An absent report or unparseable stamp
+    is NOT recent (fail closed), so a genuinely dead / corrupt row still orphans.
+    """
+    if not isinstance(inside_leg, dict):
+        return False
+    stamp = inside_leg.get("received_at")
+    if not isinstance(stamp, str) or not stamp:
+        return False
+    try:
+        recv = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return False
+    # A future stamp (recv > now) is corrupt / clock-skewed, not recent: require
+    # recv <= now so it cannot suppress orphaning (fail closed).
+    return recv <= now_epoch and (now_epoch - recv) <= window_sec
+
+
+def _current_inside_leg(name: str) -> Optional[dict]:
+    """Read the row's CURRENT ``inside_leg``, not the pre-ask snapshot.
+
+    The ask can run for up to the follow-up timeout; deciding orphan-vs-live off
+    the row as it was BEFORE the send would miss a report that landed during it
+    (codex P2). A fresh read right before the guard closes that window. Read
+    failure -> ``None`` (fail closed: no liveness signal -> orphan as today).
+    """
+    try:
+        for entry in load_registry():
+            if entry.name == name:
+                return entry.inside_leg
+    except (OSError, RegistryVersionError):
+        return None
+    return None
+
 
 class DispatchAskError(RuntimeError):
     """Raised by :func:`dispatch_ask` for any callable failure.
@@ -379,6 +428,24 @@ def _followup_path(
                 demote_reason = f"send_failed_post_probe:{send_exc.reason}"
                 demote_event_kind = events.KIND_MCP_CHANNEL_DEMOTED_TO_SOCKET
             except claude_mod.ProviderOrphanError as orphan_exc:
+                # x-c393: same provably-live guard as the socket path below --
+                # a recent inside_leg report means a routing gap, not a death,
+                # so skip the orphan stamp and report it as a routing gap.
+                if _inside_leg_is_recent(_current_inside_leg(name), time.time()):
+                    events.emit(
+                        "agent_followup_failed",
+                        stage="routing-gap",
+                        name=name,
+                        short_id=short_id,
+                        backend="mcp",
+                        reason=orphan_exc.reason,
+                    )
+                    raise DispatchAskError(
+                        f"agent {name!r} is live but not currently routable "
+                        f"(reason: {orphan_exc.reason}); message not delivered. "
+                        f"Try 'claude attach {short_id}'",
+                        exit_code=13,
+                    ) from orphan_exc
                 # Same exit code (13) + status="orphaned" stamp as the
                 # socket-path orphan handler below. We do NOT fall back
                 # to socket here — orphan means the session itself is
@@ -459,6 +526,24 @@ def _followup_path(
             )
             backend = "socket_after_mcp_demote" if demote_reason else "socket"
         except claude_mod.ProviderOrphanError as exc:
+            # x-c393: a live worker whose row merely wasn't routable (a recent
+            # inside_leg report) is a routing gap, not a death -- do NOT stamp
+            # it orphaned (that misleads `fno agents list`). reconcile's
+            # `claude logs` probe stays the authority that orphans a dead one.
+            if _inside_leg_is_recent(_current_inside_leg(name), time.time()):
+                events.emit(
+                    "agent_followup_failed",
+                    stage="routing-gap",
+                    name=name,
+                    short_id=short_id,
+                    reason=exc.reason,
+                )
+                raise DispatchAskError(
+                    f"agent {name!r} is live but not currently routable "
+                    f"(reason: {exc.reason}); message not delivered. "
+                    f"Try 'claude attach {short_id}'",
+                    exit_code=13,
+                ) from exc
             # Stamp status=orphaned on the registry entry so US3 list shows
             # the dead session. Errors during this best-effort update should
             # NOT mask the original orphan: the user's primary signal is the
