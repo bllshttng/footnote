@@ -1677,9 +1677,12 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
 /// another live writer, 2 usage/validation/io error.
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
-        eprintln!("fno-agents: claim requires an operation: acquire|release|status");
+        eprintln!("fno-agents: claim requires an operation: acquire|release|status|sweep");
         return 2;
     };
+    if op == "sweep" {
+        return run_claim_sweep(&args[1..]);
+    }
     let Some(key) = args.get(1).filter(|k| !k.starts_with("--")).cloned() else {
         eprintln!("fno-agents: claim {op} requires a key argument");
         return 2;
@@ -1814,10 +1817,103 @@ pub fn run_claim(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("fno-agents: unknown claim operation: {other} (use acquire|release|status)");
+            eprintln!(
+                "fno-agents: unknown claim operation: {other} (use acquire|release|status|sweep)"
+            );
             2
         }
     }
+}
+
+/// `fno-agents claim sweep [--json] [--root <dir>]` — read every `node:` /
+/// `dispatch:` lockfile in the claims dir, classify each with the canonical
+/// [`crate::claims::classify`], and print ONE JSON object:
+/// `{"claims": [{"key", "state", "holder", "host", "pid"}, ...]}`.
+///
+/// The mux shells this (bounded, fail-open) to overlay in-flight state onto
+/// work-queue cards — the verdict shape above is a pinned contract (additive
+/// fields allowed, renames are not; `state` uses `ClaimState::as_str`
+/// vocabulary and consumers treat only `"live"` as in-flight).
+///
+/// A missing/unreadable claims dir is an EMPTY sweep (exit 0), not an error:
+/// no claims means no overlay. Unparseable/newer-schema lockfiles are
+/// excluded from the payload and logged to stderr (never fatal).
+fn run_claim_sweep(args: &[String]) -> i32 {
+    let mut root: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--root" => match it.next() {
+                Some(r) => root = Some(PathBuf::from(r)),
+                None => {
+                    eprintln!("fno-agents: claim sweep: --root requires a value");
+                    return 2;
+                }
+            },
+            "--json" | "-J" => {} // output is always JSON; accepted for symmetry
+            other => {
+                eprintln!("fno-agents: claim sweep: unknown flag {other}");
+                return 2;
+            }
+        }
+    }
+    let Some(dir) = crate::claims::claims_dir_for(root.as_deref()) else {
+        // No resolvable claims root: same as an empty dir (fail-open).
+        println!("{}", serde_json::json!({"claims": []}));
+        return 0;
+    };
+    println!("{}", claim_sweep_payload(&dir));
+    0
+}
+
+/// Pure(ish) core of `claim sweep`: scan `dir` for `node:` / `dispatch:`
+/// lockfiles and build the pinned verdict object. Separated from
+/// [`run_claim_sweep`] so tests can drive it against a temp dir.
+fn claim_sweep_payload(dir: &Path) -> Value {
+    // Filename prefilter: keys are percent-encoded (`:` -> `%3A`), so only
+    // read files that can be node/dispatch claims; `.expired/` is a subdir
+    // and non-`.lock` names are skipped by the same test.
+    let node_pfx = crate::claims::encode_key("node:");
+    let dispatch_pfx = crate::claims::encode_key("dispatch:");
+    let mut claims: Vec<Value> = Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return serde_json::json!({ "claims": [] }),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.ends_with(".lock")
+            || !(name.starts_with(&node_pfx) || name.starts_with(&dispatch_pfx))
+        {
+            continue;
+        }
+        match crate::claims::read_claim_file(&entry.path()) {
+            Ok(rec) => {
+                // Trust the record's own key over the filename decode; a
+                // record whose key does not carry a sweep prefix is excluded
+                // (filename lied — treat like corruption, minus the noise).
+                if !(rec.key.starts_with("node:") || rec.key.starts_with("dispatch:")) {
+                    continue;
+                }
+                let state = crate::claims::classify(&rec, None);
+                claims.push(serde_json::json!({
+                    "key": rec.key,
+                    "state": state.as_str(),
+                    "holder": rec.holder,
+                    "host": rec.host,
+                    "pid": rec.pid,
+                }));
+            }
+            Err(crate::claims::ReadError::GoneAway) => continue,
+            Err(crate::claims::ReadError::Corrupted(e)) => {
+                eprintln!("fno-agents: claim sweep: skipping {name}: {e}");
+                continue;
+            }
+        }
+    }
+    claims.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    serde_json::json!({ "claims": claims })
 }
 
 #[cfg(test)]
@@ -2333,5 +2429,74 @@ mod tests {
         let parsed: Value = serde_json::from_str(line).expect("valid JSON line");
         assert_eq!(parsed["kind"], "agent_resumed");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- claim sweep (x-54fa) --------------------------------------------
+
+    fn sweep_acquire(root: &std::path::Path, key: &str) {
+        let opts = crate::claims::AcquireOpts {
+            root: Some(root.to_path_buf()),
+            events_dir: Some(root.to_path_buf()),
+            ..Default::default()
+        };
+        match crate::claims::acquire(key, "test-holder", opts) {
+            crate::claims::AcquireOutcome::Acquired(_) => {}
+            other => panic!("acquire {key} failed: {other:?}"),
+        }
+    }
+
+    fn sweep_dir(root: &std::path::Path) -> PathBuf {
+        crate::claims::claims_dir_for(Some(root)).unwrap()
+    }
+
+    #[test]
+    fn claim_sweep_empty_or_missing_dir_is_empty_payload() {
+        let td = tempfile::TempDir::new().unwrap();
+        // Dir does not exist yet: empty payload, not an error (Boundaries:
+        // "must handle an empty claims directory").
+        let payload = claim_sweep_payload(&sweep_dir(td.path()));
+        assert_eq!(payload, serde_json::json!({"claims": []}));
+    }
+
+    #[test]
+    fn claim_sweep_reports_live_node_and_dispatch_claims() {
+        let td = tempfile::TempDir::new().unwrap();
+        sweep_acquire(td.path(), "node:x-ef41");
+        sweep_acquire(td.path(), "dispatch:x-ef41");
+        sweep_acquire(td.path(), "session:not-swept"); // out-of-scope prefix
+        let payload = claim_sweep_payload(&sweep_dir(td.path()));
+        let claims = payload["claims"].as_array().unwrap();
+        assert_eq!(claims.len(), 2, "session: claim must be excluded");
+        // Sorted by key: dispatch: before node:.
+        assert_eq!(claims[0]["key"], "dispatch:x-ef41");
+        assert_eq!(claims[1]["key"], "node:x-ef41");
+        for c in claims {
+            // Acquired by THIS live process => live.
+            assert_eq!(c["state"], "live");
+            assert_eq!(c["holder"], "test-holder");
+            assert_eq!(c["pid"], std::process::id());
+            assert!(c["host"].as_str().is_some_and(|h| !h.is_empty()));
+        }
+    }
+
+    #[test]
+    fn claim_sweep_excludes_corrupted_and_newer_schema_lockfiles() {
+        let td = tempfile::TempDir::new().unwrap();
+        sweep_acquire(td.path(), "node:x-good");
+        let dir = sweep_dir(td.path());
+        // Corrupted YAML under a sweep-prefixed name.
+        fs::write(dir.join("node%3Ax-bad.lock"), "{not yaml: [").unwrap();
+        // Newer schema writer: parse refuses, sweep excludes (does not crash).
+        fs::write(
+            dir.join("node%3Ax-newer.lock"),
+            "schema_version: 999\nkey: node:x-newer\nholder: h\nacquired_at: 1\npid: 1\nhost: x\n",
+        )
+        .unwrap();
+        // Non-lock and dot files are skipped.
+        fs::write(dir.join("node%3Ax-tmp.partial"), "x").unwrap();
+        let payload = claim_sweep_payload(&dir);
+        let claims = payload["claims"].as_array().unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0]["key"], "node:x-good");
     }
 }

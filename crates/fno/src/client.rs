@@ -650,7 +650,7 @@ impl View {
                 Some(pid) => Some(ChromeHit::Cmds(vec![Command::FocusPane(pid)])),
                 None => match &a.attach_id {
                     Some(id) => Some(ChromeHit::Cmds(vec![Command::AttachAgent(id.clone())])),
-                    None => Some(ChromeHit::Notice("agent has no pane here")),
+                    None => Some(ChromeHit::Notice("agent has no pane here".into())),
                 },
             },
             // Only a READY card starts a session (x-a496) - the same nodes
@@ -665,7 +665,7 @@ impl View {
                 // keys and could dispatch blind (sigma review x-260a). Same
                 // guard for the create overlay below.
                 CardState::Ready if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
-                    "terminal too short for the dispatch prompt",
+                    "terminal too short for the dispatch prompt".into(),
                 )),
                 CardState::Ready => Some(ChromeHit::Confirm(ConfirmAction {
                     node: c.id.clone(),
@@ -675,14 +675,29 @@ impl View {
                         c.slug.clone()
                     },
                 })),
-                CardState::Blocked => Some(ChromeHit::Notice("card blocked - unmet deps")),
-                CardState::InFlight => Some(ChromeHit::Notice("card already in flight")),
+                CardState::Blocked => Some(ChromeHit::Notice("card blocked - unmet deps".into())),
+                // An in-flight card routes to the session working it (x-54fa,
+                // route priority pane > attach > notice): focus the worker's
+                // pane in this session, else attach the paneless bg session
+                // (same command + server gates as the agents-row click), else
+                // say where the work is instead of a dead-end refusal.
+                CardState::InFlight => match (c.pane_id, &c.attach_id) {
+                    (Some(pid), _) => Some(ChromeHit::Cmds(vec![Command::FocusPane(pid)])),
+                    (None, Some(id)) => {
+                        Some(ChromeHit::Cmds(vec![Command::AttachAgent(id.clone())]))
+                    }
+                    (None, None) => {
+                        Some(ChromeHit::Notice(c.where_hint.clone().unwrap_or_else(
+                            || "card in flight - no session visible here".into(),
+                        )))
+                    }
+                },
             },
             DisplayRow::Header(_) => None,
             // The `+` footer opens the name-input overlay (x-9e5e).
-            DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => {
-                Some(ChromeHit::Notice("terminal too short for the name prompt"))
-            }
+            DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
+                "terminal too short for the name prompt".into(),
+            )),
             DisplayRow::NewSquad => Some(ChromeHit::OpenCreate),
         }
     }
@@ -1474,7 +1489,9 @@ enum TabHit {
 /// (a work-queue card, x-a496 - dispatch is too costly for a silent tap).
 enum ChromeHit {
     Cmds(Vec<Command>),
-    Notice(&'static str),
+    /// Owned, not `&'static`: an in-flight card's notice carries the
+    /// server-computed `where_hint` (v18), which is per-card data.
+    Notice(String),
     Confirm(ConfirmAction),
     /// Open the new-workspace name-input overlay (x-9e5e); the `+` footer.
     OpenCreate,
@@ -3402,6 +3419,9 @@ mod tests {
                 slug: "hover-cards".into(),
                 priority: "p2".into(),
                 state: CardState::Ready,
+                pane_id: None,
+                attach_id: None,
+                where_hint: None,
             }],
         });
         // display_rows: [footnote squad, + new workspace, Header, Card] -> the
@@ -3426,6 +3446,9 @@ mod tests {
             slug: String::new(),
             priority: "p2".into(),
             state,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
         };
         view.set_layout(LayoutView {
             squads: vec![meta(1, "footnote", 2, 1)],
@@ -3458,6 +3481,67 @@ mod tests {
             matches!(view.chrome_hit(5, 5), Some(ChromeHit::Notice(_))),
             "in-flight card -> notice, not confirm"
         );
+    }
+
+    #[test]
+    fn chrome_hit_inflight_card_routes_pane_then_attach_then_hint() {
+        // x-54fa: an in-flight card is no longer a dead-end. Route priority
+        // (plan Locked 5): a pane in this session focuses; a paneless bg
+        // worker attaches (same command the agents-row click sends, so the
+        // v14 server gates apply); nothing routable says WHERE the work is
+        // (the server's where_hint), never a bare "already dispatching".
+        let mut view = two_pane_view();
+        let card =
+            |id: &str, pane: Option<u64>, attach: Option<&str>, hint: Option<&str>| BacklogCard {
+                id: id.into(),
+                slug: String::new(),
+                priority: "p2".into(),
+                state: CardState::InFlight,
+                pane_id: pane,
+                attach_id: attach.map(str::to_owned),
+                where_hint: hint.map(str::to_owned),
+            };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(
+                11,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 72,
+                },
+            )],
+            focus: 11,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: vec![
+                // Pane beats attach when the server sent both (it never does,
+                // but the client must not attach when a local pane exists).
+                card("x-aaa", Some(11), Some("deadbee1"), None),
+                card("x-bbb", None, Some("deadbee2"), None),
+                card("x-ccc", None, None, Some("in flight - worked by t:abc")),
+                card("x-ddd", None, None, None),
+            ],
+        });
+        // display_rows: [squad, + new workspace, Header, 4 cards] -> rows 4-7.
+        assert_eq!(cmds(view.chrome_hit(4, 5)), vec![Command::FocusPane(11)]);
+        assert_eq!(
+            cmds(view.chrome_hit(5, 5)),
+            vec![Command::AttachAgent("deadbee2".into())]
+        );
+        match view.chrome_hit(6, 5) {
+            Some(ChromeHit::Notice(msg)) => assert_eq!(msg, "in flight - worked by t:abc"),
+            other => panic!("expected hint notice, got {}", chrome_hit_label(&other)),
+        }
+        match view.chrome_hit(7, 5) {
+            Some(ChromeHit::Notice(msg)) => {
+                assert_eq!(msg, "card in flight - no session visible here")
+            }
+            other => panic!("expected default notice, got {}", chrome_hit_label(&other)),
+        }
     }
 
     fn cmds(hit: Option<ChromeHit>) -> Vec<Command> {
@@ -4082,6 +4166,9 @@ mod tests {
             slug: String::new(),
             priority: "p2".into(),
             state,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
         };
         let mut v = view_with_agents(vec![
             agent(Some(1), "worker", Some(10), None),

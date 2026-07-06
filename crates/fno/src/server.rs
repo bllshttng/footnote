@@ -382,9 +382,14 @@ enum CoreMsg {
     /// re-pushes layouts (rects unchanged, so no frame re-emit).
     AgentRows(Vec<RegistryAgent>),
     /// (x-6f77) A fresh board-ordered work-queue card set from the off-loop graph
-    /// reader. Sent only when the set changed; the core stores it and re-pushes
-    /// layouts so the sideline backlog lane tracks claims/closes.
-    BacklogCards(Vec<BacklogCard>),
+    /// reader, claim-overlaid (x-54fa). Sent only when the set changed; the core
+    /// stores it and re-pushes layouts so the sideline backlog lane tracks
+    /// claims/closes. `holders` is the sweep's node-id -> claim-holder map,
+    /// consumed at publish time for the `where_hint` of unroutable cards.
+    BacklogCards {
+        cards: Vec<BacklogCard>,
+        holders: HashMap<String, String>,
+    },
 }
 
 /// The per-pane signal an off-loop `PaneWait` watcher observes. The core loop
@@ -656,6 +661,9 @@ struct Core {
     /// Latest board-ordered work-queue cards (x-6f77), from the off-loop graph
     /// reader; packed into every `Layout` for the sideline backlog lane.
     backlog: Vec<BacklogCard>,
+    /// Claim holder per in-flight node id (x-54fa), from the reader's sweep;
+    /// joined at publish time into card routes / `where_hint`.
+    backlog_holders: HashMap<String, String>,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
@@ -782,6 +790,28 @@ async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
     }
 }
 
+/// Shell `fno-agents claim sweep --json`, bounded + fail-open (the digest
+/// idiom, x-4e2d): returns the live-claim map (node id -> holder) for the
+/// work-queue overlay (x-54fa), or `None` on missing binary / non-zero exit /
+/// timeout / unparseable output — the caller keeps its last-good sweep, so a
+/// single flaky tick never downgrades an in-flight card.
+async fn run_claim_sweep() -> Option<HashMap<String, String>> {
+    const SWEEP_TIMEOUT: Duration = Duration::from_millis(800);
+    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+        .args(["claim", "sweep", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // On timeout the future is dropped; kill_on_drop reaps the child so a
+        // hung sweep can't accumulate an orphan per tick.
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(SWEEP_TIMEOUT, fut).await.ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    backlog_view::live_claims_from_sweep(&String::from_utf8_lossy(&output.stdout))
+}
+
 /// Whether `node` (an id or slug) names a READY card in the server's backlog
 /// snapshot (x-a496, codex peer review). A targeted card dispatch must refuse a
 /// blocked / in-flight / unknown node - the same nodes `leader+g` would never
@@ -792,6 +822,30 @@ fn card_ready_to_dispatch(backlog: &[BacklogCard], node: &str) -> bool {
     backlog
         .iter()
         .any(|c| (c.id == node || c.slug == node) && c.state == CardState::Ready)
+}
+
+/// Whether `name` carries `node` as an exact token (x-54fa, plan Locked 6):
+/// the id appears with no alphanumeric neighbor on either side, so
+/// `tgt-x-54fa` and `x-54fa` match but `x-54f` inside `x-54fa` (or `x-54fa`
+/// inside `x-54fab`) never does. `-` cannot be the boundary test (it is part
+/// of the id shape itself), so boundaries are non-alphanumeric.
+fn name_has_node_token(name: &str, node: &str) -> bool {
+    if node.is_empty() {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    let mut from = 0;
+    while let Some(i) = name[from..].find(node) {
+        let start = from + i;
+        let end = start + node.len();
+        let pre_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let post_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if pre_ok && post_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 /// Map a `fno dispatch one --json` verdict to the one-line client notice.
@@ -1453,9 +1507,106 @@ impl Core {
             // The focused pane's provenance for the status row (x-66e8). Re-sent
             // whenever `focus` changes, so the cell tracks focus for free.
             focus_node: self.panes.get(&focus).and_then(|e| e.node.clone()),
-            // The work-queue lane (x-6f77); already board-ordered by the reader.
-            backlog: self.backlog.clone(),
+            // The work-queue lane (x-6f77); already board-ordered by the
+            // reader, routes joined on at publish time (x-54fa).
+            backlog: self.routed_backlog(),
         }
+    }
+
+    /// The backlog cards with their v18 routes joined on at publish time
+    /// (x-54fa Phase B). An in-flight card gains, in priority order: the pane
+    /// in THIS session whose `FNO_NODE` provenance equals the node id; else
+    /// the attach jobId of a live paneless registry row working the node;
+    /// else a one-line `where_hint` naming the session or claim holder. Join
+    /// keys are exact only. Ready/Blocked cards pass through untouched.
+    fn routed_backlog(&self) -> Vec<BacklogCard> {
+        let mut cards = self.backlog.clone();
+        for c in &mut cards {
+            if c.state != CardState::InFlight {
+                continue;
+            }
+            if let Some(pid) = self.node_pane(&c.id) {
+                c.pane_id = Some(pid);
+            } else if let Some((attach, name)) = self.node_registry_row(&c.id) {
+                match attach {
+                    Some(id) => c.attach_id = Some(id),
+                    None => c.where_hint = Some(format!("in flight - session {name}")),
+                }
+            } else if let Some(holder) = self.backlog_holders.get(&c.id) {
+                c.where_hint = Some(format!("in flight - worked by {holder}"));
+            }
+        }
+        cards
+    }
+
+    /// The route command for an in-flight card named by id or slug (the same
+    /// matching `card_ready_to_dispatch` uses), or `None` when the card is
+    /// unknown, not in flight, or unroutable - the stale-client `DispatchNode`
+    /// re-check (x-54fa AC2-ERR).
+    fn inflight_route(&self, node: &str) -> Option<Command> {
+        let card = self
+            .backlog
+            .iter()
+            .find(|c| (c.id == node || c.slug == node) && c.state == CardState::InFlight)?;
+        if let Some(pid) = self.node_pane(&card.id) {
+            return Some(Command::FocusPane(pid));
+        }
+        self.node_registry_row(&card.id)
+            .and_then(|(attach, _)| attach)
+            .map(Command::AttachAgent)
+    }
+
+    /// The situated notice for an in-flight card `inflight_route` could not
+    /// route (codex peer review): the same copy the v18 click path shows, so a
+    /// stale-client `DispatchNode` never regresses to a bare refusal on a card
+    /// the server knows is being worked. `None` when `node` names no in-flight
+    /// card (the caller falls through to the not-ready refusal).
+    fn inflight_hint(&self, node: &str) -> Option<String> {
+        let card = self
+            .backlog
+            .iter()
+            .find(|c| (c.id == node || c.slug == node) && c.state == CardState::InFlight)?;
+        Some(match self.node_registry_row(&card.id) {
+            Some((_, name)) => format!("in flight - session {name}"),
+            None => match self.backlog_holders.get(&card.id) {
+                Some(holder) => format!("in flight - worked by {holder}"),
+                None => "card in flight - no session visible here".to_string(),
+            },
+        })
+    }
+
+    /// The lowest-id live pane in this session whose `FNO_NODE` provenance
+    /// equals `node`. Provenance equality only - no cwd fallback here; a
+    /// shell pane that merely sits in the node's worktree is not the worker.
+    fn node_pane(&self, node: &str) -> Option<u64> {
+        self.panes
+            .iter()
+            .filter(|(_, e)| e.node.as_deref() == Some(node))
+            .map(|(id, _)| *id)
+            .min()
+    }
+
+    /// The live, paneless registry row working `node`: matched by exact
+    /// node-id token in the worker name or registry-cwd basename equality
+    /// (the worktree-per-node convention). Returns `(attach_id, name)`; a row
+    /// with an attach target wins over a name-only match so the card routes
+    /// whenever any matching row can be attached.
+    fn node_registry_row(&self, node: &str) -> Option<(Option<String>, String)> {
+        let mut named: Option<(Option<String>, String)> = None;
+        for a in &self.agents {
+            if a.mux.is_some() || a.exited {
+                continue;
+            }
+            let cwd_match = Path::new(&a.cwd).file_name().and_then(|b| b.to_str()) == Some(node);
+            if !cwd_match && !name_has_node_token(&a.name, node) {
+                continue;
+            }
+            if a.attach_id.is_some() {
+                return Some((a.attach_id.clone(), a.name.clone()));
+            }
+            named.get_or_insert((None, a.name.clone()));
+        }
+        named
     }
 
     /// Join the registry-derived agent set to this server's live state (4a-G2,
@@ -2282,6 +2433,18 @@ impl Core {
                 // the other catalog-named commands (and covers an empty id).
                 if card_ready_to_dispatch(&self.backlog, &node) {
                     self.dispatch_next(client_id, Some(node));
+                } else if let Some(route) = self.inflight_route(&node) {
+                    // The client's Layout was stale: the card went in-flight
+                    // between publish and click, but the server can route it -
+                    // focus/attach instead of refusing (x-54fa AC2-ERR). The
+                    // recursion reuses the FocusPane/AttachAgent gates verbatim
+                    // (catalog membership, jobId shape), so this adds no second
+                    // spawn path.
+                    return self.command(client_id, route);
+                } else if let Some(hint) = self.inflight_hint(&node) {
+                    // In flight but unroutable: say where the work is, the
+                    // same copy a routed v18 card click would show.
+                    self.notice(client_id, hint);
                 } else {
                     self.notice(client_id, "card not ready to dispatch");
                 }
@@ -2755,10 +2918,11 @@ impl Core {
                 self.push_layout(false);
                 Flow::Continue
             }
-            CoreMsg::BacklogCards(cards) => {
+            CoreMsg::BacklogCards { cards, holders } => {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit (x-6f77).
                 self.backlog = cards;
+                self.backlog_holders = holders;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -2914,6 +3078,7 @@ async fn serve(
         self_tx: core_tx.clone(),
         agents: Vec::new(),
         backlog: Vec::new(),
+        backlog_holders: HashMap::new(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
@@ -2980,10 +3145,34 @@ async fn serve(
         let path = backlog_view::graph_path();
         tokio::spawn(async move {
             let mut state = backlog_view::ReaderState::default();
+            // The last-good claim sweep (x-54fa): `None` until the first
+            // success (render un-overlaid), then only ever replaced by a
+            // fresher success — a sweep failure keeps this tick's overlay.
+            let mut last_live: Option<HashMap<String, String>> = None;
+            let mut sweep_failing = false;
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
+                // Claims change without graph.json mtime changes (release, TTL
+                // expiry, new dispatch), so the sweep runs every tick, bounded
+                // + fail-open. Failure is logged once per state change, not
+                // per tick (a permanently-missing fno-agents is one line).
+                match run_claim_sweep().await {
+                    Some(live) => {
+                        if sweep_failing {
+                            eprintln!("fno mux: claim sweep recovered");
+                        }
+                        sweep_failing = false;
+                        last_live = Some(live);
+                    }
+                    None => {
+                        if !sweep_failing {
+                            eprintln!("fno mux: claim sweep failed; keeping last-good overlay");
+                            sweep_failing = true;
+                        }
+                    }
+                }
                 let stat_path = path.clone();
                 let stamp = tokio::task::spawn_blocking(move || {
                     std::fs::metadata(&stat_path)
@@ -3003,8 +3192,13 @@ async fn serve(
                 } else {
                     None
                 };
-                if let Some(cards) = state.tick(stamp, move || raw) {
-                    if core_tx.send(CoreMsg::BacklogCards(cards)).await.is_err() {
+                if let Some(cards) = state.tick(stamp, move || raw, last_live.as_ref()) {
+                    let holders = last_live.clone().unwrap_or_default();
+                    if core_tx
+                        .send(CoreMsg::BacklogCards { cards, holders })
+                        .await
+                        .is_err()
+                    {
                         return; // core loop gone; the server is shutting down
                     }
                 }
@@ -4208,6 +4402,9 @@ mod tests {
             slug: slug.into(),
             priority: "p2".into(),
             state,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
         };
         let backlog = [
             card("x-rdy", "ready-slug", CardState::Ready),
@@ -4236,6 +4433,185 @@ mod tests {
             !card_ready_to_dispatch(&[], "x-rdy"),
             "empty backlog refused"
         );
+    }
+
+    #[test]
+    fn node_token_matches_whole_ids_only() {
+        // Locked 6: exact node-id token, non-alphanumeric boundaries. `-` is
+        // part of the id shape, so it cannot be the boundary test.
+        assert!(name_has_node_token("x-54fa", "x-54fa"));
+        assert!(name_has_node_token("tgt-x-54fa", "x-54fa"));
+        assert!(name_has_node_token("run x-54fa now", "x-54fa"));
+        assert!(name_has_node_token("x-54fa.retry", "x-54fa"));
+        // Prefix/suffix of a longer token never matches.
+        assert!(!name_has_node_token("x-54fab", "x-54fa"));
+        assert!(!name_has_node_token("ax-54fa", "x-54fa"));
+        assert!(!name_has_node_token("x-54fa", "x-54f"));
+        // Second occurrence with clean boundaries still matches.
+        assert!(name_has_node_token("x-54fab x-54fa", "x-54fa"));
+        assert!(!name_has_node_token("anything", ""));
+    }
+
+    /// A paneless registry row for the routing tests: `name`/`cwd`/`attach_id`
+    /// are the join surfaces; everything else is the quiet default.
+    fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
+        RegistryAgent {
+            name: name.into(),
+            cwd: cwd.into(),
+            exited: false,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: attach.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn routed_backlog_joins_attach_then_hint_and_leaves_ready_alone() {
+        // x-54fa Phase B publish-time join, minus the pane arm (a live pane
+        // needs a real PTY; the pane join key - FNO_NODE provenance equality -
+        // is covered by the extract_fno_node tests + node_pane's trivial scan).
+        let card = |id: &str, state| BacklogCard {
+            id: id.into(),
+            slug: format!("{id}-slug"),
+            priority: "p2".into(),
+            state,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
+        };
+        let mut core = empty_core();
+        core.backlog = vec![
+            card("x-aaa", CardState::InFlight), // attach via name token
+            card("x-bbb", CardState::InFlight), // hint via matched row, no jobId
+            card("x-ccc", CardState::InFlight), // hint via claim holder
+            card("x-ddd", CardState::InFlight), // unroutable, nothing known
+            card("x-eee", CardState::Ready),    // never joined
+        ];
+        core.agents = vec![
+            bg_row("tgt-x-aaa", "/w/other", Some("deadbee1")),
+            // cwd-basename match (worktree-per-node convention), no jobId.
+            bg_row("worker", "/w/x-bbb", None),
+            // Rows that must NOT route: exited, pane-hosted, ready-card match.
+            RegistryAgent {
+                exited: true,
+                ..bg_row("tgt-x-ddd", "/w", Some("deadbee2"))
+            },
+            RegistryAgent {
+                mux: Some(("test".into(), 5)),
+                ..bg_row("tgt-x-ddd", "/w", Some("deadbee3"))
+            },
+            bg_row("tgt-x-eee", "/w", Some("deadbee4")),
+        ];
+        core.backlog_holders
+            .insert("x-ccc".into(), "target-session:abc".into());
+        let cards = core.routed_backlog();
+        assert_eq!(cards[0].attach_id.as_deref(), Some("deadbee1"));
+        assert_eq!(cards[0].where_hint, None, "attach route wins over hint");
+        assert_eq!(
+            cards[1].where_hint.as_deref(),
+            Some("in flight - session worker")
+        );
+        assert_eq!(
+            cards[2].where_hint.as_deref(),
+            Some("in flight - worked by target-session:abc")
+        );
+        let bare = &cards[3];
+        assert!(
+            bare.pane_id.is_none() && bare.attach_id.is_none() && bare.where_hint.is_none(),
+            "exited/pane-hosted rows never route"
+        );
+        let ready = &cards[4];
+        assert!(
+            ready.attach_id.is_none() && ready.where_hint.is_none(),
+            "a ready card is never joined"
+        );
+    }
+
+    #[test]
+    fn inflight_route_resolves_by_id_or_slug_and_fails_closed() {
+        // The stale-client DispatchNode re-check (AC2-ERR): an in-flight card
+        // with an attach target routes; ready/unknown/unroutable stay None so
+        // the handler falls through to dispatch or the refusal notice.
+        let mut core = empty_core();
+        core.backlog = vec![
+            BacklogCard {
+                id: "x-aaa".into(),
+                slug: "aaa-slug".into(),
+                priority: "p2".into(),
+                state: CardState::InFlight,
+                pane_id: None,
+                attach_id: None,
+                where_hint: None,
+            },
+            BacklogCard {
+                id: "x-rdy".into(),
+                slug: "rdy-slug".into(),
+                priority: "p2".into(),
+                state: CardState::Ready,
+                pane_id: None,
+                attach_id: None,
+                where_hint: None,
+            },
+        ];
+        core.agents = vec![bg_row("tgt-x-aaa", "/w", Some("deadbee1"))];
+        assert_eq!(
+            core.inflight_route("x-aaa"),
+            Some(Command::AttachAgent("deadbee1".into()))
+        );
+        assert_eq!(
+            core.inflight_route("aaa-slug"),
+            Some(Command::AttachAgent("deadbee1".into())),
+            "slug names the same card"
+        );
+        assert_eq!(core.inflight_route("x-rdy"), None, "ready is not routed");
+        assert_eq!(core.inflight_route("x-nope"), None, "unknown fails closed");
+        core.agents.clear();
+        assert_eq!(
+            core.inflight_route("x-aaa"),
+            None,
+            "unroutable in-flight falls through to the refusal notice"
+        );
+    }
+
+    #[test]
+    fn inflight_hint_names_session_then_holder_then_default() {
+        // Codex peer review: a stale-client DispatchNode on an in-flight card
+        // with NO route must get the situated hint, not the bare not-ready
+        // refusal. Hint precedence: matched registry row's session name >
+        // claim holder > the client's default copy.
+        let mut core = empty_core();
+        core.backlog = vec![BacklogCard {
+            id: "x-aaa".into(),
+            slug: "aaa-slug".into(),
+            priority: "p2".into(),
+            state: CardState::InFlight,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
+        }];
+        // Nothing known at all: the default copy.
+        assert_eq!(
+            core.inflight_hint("x-aaa").as_deref(),
+            Some("card in flight - no session visible here")
+        );
+        // A claim holder is known: name it.
+        core.backlog_holders
+            .insert("x-aaa".into(), "target-session:abc".into());
+        assert_eq!(
+            core.inflight_hint("aaa-slug").as_deref(),
+            Some("in flight - worked by target-session:abc"),
+            "slug names the same card"
+        );
+        // A matched (unattachable) registry row outranks the holder.
+        core.agents = vec![bg_row("tgt-x-aaa", "/w", None)];
+        assert_eq!(
+            core.inflight_hint("x-aaa").as_deref(),
+            Some("in flight - session tgt-x-aaa")
+        );
+        // Not in flight / unknown: None (caller falls through to not-ready).
+        assert_eq!(core.inflight_hint("x-nope"), None);
     }
 
     #[test]
@@ -4395,6 +4771,7 @@ mod tests {
             self_tx,
             agents: Vec::new(),
             backlog: Vec::new(),
+            backlog_holders: HashMap::new(),
             claim_eligible: HashSet::new(),
             claims: HashMap::new(),
             touch_last_emit: HashMap::new(),
