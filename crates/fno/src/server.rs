@@ -512,18 +512,32 @@ fn tab_label(
         return name.to_string();
     }
     if let Some((node, cwd, cmd)) = pane {
+        // Every derived candidate is sanitized like a rename (codex peer
+        // review): FNO_NODE values, dir names, and argv all admit control
+        // bytes, and these strings land in chrome cells. A candidate that
+        // sanitizes to empty (e.g. whitespace-only) falls through to the
+        // next source instead of rendering a blank label.
         if let Some(node) = node {
-            return node.to_string();
+            let clean = sanitize_tab_name(node);
+            if !clean.is_empty() {
+                return clean;
+            }
         }
         fn base(p: &str) -> &str {
             p.trim_end_matches('/').rsplit('/').next().unwrap_or("")
         }
         let cwd_base = base(cwd);
         if !cwd_base.is_empty() && cwd_base != base(squad_cwd) {
-            return cwd_base.to_string();
+            let clean = sanitize_tab_name(cwd_base);
+            if !clean.is_empty() {
+                return clean;
+            }
         }
         if let Some(cmd) = cmd {
-            return cmd.to_string();
+            let clean = sanitize_tab_name(cmd);
+            if !clean.is_empty() {
+                return clean;
+            }
         }
     }
     (i + 1).to_string()
@@ -3735,6 +3749,27 @@ mod tests {
         // AC3-FR: tab.focus names a reaped pane (mid-reap race) - the chain
         // skips provenance/cwd/cmd and terminates at the index, no panic.
         assert_eq!(tab_label(None, None, "/w", 0), "1");
+    }
+
+    #[test]
+    fn tab_label_sanitizes_derived_candidates_and_skips_empty_ones() {
+        // codex peer review: derived sources (FNO_NODE, dir names, argv) admit
+        // control bytes and land in chrome cells - sanitize like a rename.
+        assert_eq!(
+            tab_label(None, Some((Some("\x1b[31mx-1"), "/w", None)), "/w", 0),
+            "[31mx-1"
+        );
+        // A whitespace-only node sanitizes to empty and falls through to the
+        // next source instead of rendering a blank label.
+        assert_eq!(
+            tab_label(None, Some((Some("   "), "/w/x-2", None)), "/w", 0),
+            "x-2"
+        );
+        // A control-char-only dir basename falls through to cmd.
+        assert_eq!(
+            tab_label(None, Some((None, "/w/\x01\x02", Some("htop"))), "/w", 0),
+            "htop"
+        );
     }
 
     #[test]
