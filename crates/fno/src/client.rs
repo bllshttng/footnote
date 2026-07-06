@@ -1164,10 +1164,11 @@ impl View {
             hit: None,
         });
         for (i, t) in s.tabs.iter().enumerate() {
+            let label = tab_label_text(&t.name, i);
             let (text, flags) = if i == s.active_tab {
-                (format!("[{}]", i + 1), cell_flags::INVERSE)
+                (format!("[{label}]"), cell_flags::INVERSE)
             } else {
-                (format!(" {} ", i + 1), 0)
+                (format!(" {label} "), 0)
             };
             spans.push(TabSpan {
                 text,
@@ -1302,7 +1303,13 @@ impl View {
                             } else {
                                 ' '
                             };
-                            (format!("  {marker}{}", t + 1), 0)
+                            // The same digit-collapse as the tab bar: a
+                            // no-signal tab renders its bare ordinal (x-c150).
+                            let label = match squad.tabs.get(t) {
+                                Some(tm) => tab_label_text(&tm.name, t),
+                                None => (t + 1).to_string(),
+                            };
+                            (format!("  {marker}{label}"), 0)
                         }
                     };
                     (text, flags)
@@ -1425,6 +1432,25 @@ enum ChromeHit {
     Confirm(ConfirmAction),
     /// Open the new-workspace name-input overlay (x-9e5e); the `+` footer.
     OpenCreate,
+}
+
+/// A named tab's visible label width in the tab bar / sideline (x-c150);
+/// keeps ~4 labeled tabs visible at 100 cols.
+const TAB_LABEL_W: usize = 14;
+
+/// A tab span's label body (x-c150): the bare 1-based ordinal when the
+/// server-derived name carries no signal (the name IS the ordinal -
+/// byte-for-byte today's render for a plain shell tab, AC1-EDGE), else
+/// `{ordinal}:{name}` with the name truncated to [`TAB_LABEL_W`] chars. The
+/// ordinal stays visible in every span because the `1-9 select tab` keys
+/// key off it (Locked 5).
+fn tab_label_text(name: &str, i: usize) -> String {
+    let ordinal = (i + 1).to_string();
+    if name == ordinal {
+        return ordinal;
+    }
+    let short: String = name.chars().take(TAB_LABEL_W).collect();
+    format!("{ordinal}:{short}")
 }
 
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
@@ -2914,6 +2940,30 @@ mod tests {
                 .collect(),
             active_tab,
         }
+    }
+
+    #[test]
+    fn tab_bar_spans_label_named_tabs_and_collapse_bare_digits() {
+        // AC1-HP (render half) + AC1-EDGE: a no-signal name (== its ordinal)
+        // renders byte-for-byte today's `[N]` / ` N ` span; a real name
+        // renders `{ordinal}:{label}` (ordinal visible - Locked 5) truncated
+        // to TAB_LABEL_W.
+        let mut view = two_pane_view();
+        let spans = view.tab_bar_spans();
+        assert_eq!(spans[1].text, " 1 ", "digit collapse: zero regression");
+        assert_eq!(spans[2].text, "[2]");
+        view.layout.squads[0].tabs[0].name = "x-abcd".into();
+        view.layout.squads[0].tabs[1].name = "a-very-long-worktree-name".into();
+        let spans = view.tab_bar_spans();
+        assert_eq!(spans[1].text, " 1:x-abcd ");
+        assert_eq!(spans[2].text, "[2:a-very-long-wo]", "name truncates to 14");
+    }
+
+    #[test]
+    fn tab_label_text_collapses_only_the_exact_ordinal() {
+        assert_eq!(tab_label_text("1", 0), "1");
+        assert_eq!(tab_label_text("2", 0), "1:2", "a RENAME to a digit shows");
+        assert_eq!(tab_label_text("debug", 2), "3:debug");
     }
 
     fn text_frame(rows: u16, cols: u16, ch: char) -> Frame {
