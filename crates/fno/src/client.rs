@@ -471,6 +471,9 @@ struct SearchView {
 
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
+        // Seed with the active squad so the first frame already shows its tabs
+        // (and the focused tab's `*` marker) without any keypress (x-2f99).
+        let expanded = HashSet::from([layout.active_squad]);
         View {
             term,
             session,
@@ -480,7 +483,7 @@ impl View {
             status_on: true,
             hint: false,
             overlay: false,
-            expanded: HashSet::new(),
+            expanded,
             selector: None,
             sel_esc: Vec::new(),
             answers: None,
@@ -691,6 +694,14 @@ impl View {
     fn row_action(&self, i: usize) -> Option<ChromeHit> {
         match self.display_rows().get(i)? {
             DisplayRow::Sel(row) => match row.tab {
+                // Acting on the already-active squad row was a silent no-op
+                // (SelectSquad to the squad you're on); it now toggles the
+                // caret locally instead (x-2f99). Inactive rows keep
+                // SelectSquad - auto-expand in set_layout completes the
+                // gesture when the resulting layout push lands.
+                None if row.squad == self.layout.active_squad => {
+                    Some(ChromeHit::ToggleExpand(row.squad))
+                }
                 None => Some(ChromeHit::Cmds(vec![Command::SelectSquad(row.squad)])),
                 Some(t) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad)?;
@@ -832,6 +843,17 @@ impl View {
         // generation it belongs to).
         let live: HashSet<u64> = layout.panes.iter().map(|(id, _)| *id).collect();
         self.frames.retain(|id, _| live.contains(id));
+        // Auto-expand the newly active squad so focus is always visible - but
+        // only on an `active_squad` CHANGE: layout pushes arrive on every
+        // scrape tick, so an unconditional insert would fight manual collapse
+        // (x-2f99, AC1-EDGE). Insert-only: activation never collapses others.
+        if layout.active_squad != self.layout.active_squad {
+            self.expanded.insert(layout.active_squad);
+        }
+        // Prune ids whose squad vanished server-side, so the set only ever
+        // holds live squads (bounded leak otherwise).
+        self.expanded
+            .retain(|id| layout.squads.iter().any(|s| s.id == *id));
         self.layout = layout;
         // Selector re-anchors to a live, actionable row on catalog change
         // (AC6-FR): clamp into the unified rows, then step off an inert Header
@@ -879,6 +901,14 @@ impl View {
 
     fn set_notice(&mut self, text: String) {
         self.notice = Some((text, Instant::now() + NOTICE_TTL));
+    }
+
+    /// Flip a squad's caret expansion (x-2f99): pure client state, always
+    /// visible next frame (the caret glyph and tab rows change together).
+    fn toggle_expand(&mut self, id: u64) {
+        if !self.expanded.remove(&id) {
+            self.expanded.insert(id);
+        }
     }
 
     /// Clamp a selector cursor into the current [`View::display_rows`] and
@@ -1208,6 +1238,23 @@ impl View {
             put(cells, c, ch, cell_flags::BOLD);
             c += 1;
         }
+        // Active squad's name, only when there is more than one squad to be
+        // ambiguous about (x-2f99) - the always-visible answer to "which
+        // squad?" when the sideline is toggled off or auto-hidden. BOLD: it
+        // is identity, like the session cell, not context like the cwd.
+        if self.layout.squads.len() > 1 {
+            if let Some(s) = self
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == self.layout.active_squad)
+            {
+                for ch in format!("│ {} ", s.name).chars() {
+                    put(cells, c, ch, cell_flags::BOLD);
+                    c += 1;
+                }
+            }
+        }
         let cwd = self
             .layout
             .squads
@@ -1476,8 +1523,14 @@ impl View {
                             } else {
                                 '▸'
                             };
+                            // `*` after the caret marks the active squad so
+                            // activity survives weak-BOLD themes and manual
+                            // collapse (x-2f99); replaces the space, so row
+                            // width is unchanged. Same vocabulary as the
+                            // active-tab marker below.
+                            let mark = if is_active_squad { '*' } else { ' ' };
                             (
-                                format!("{caret} {}", squad.name),
+                                format!("{caret}{mark}{}", squad.name),
                                 if is_active_squad { cell_flags::BOLD } else { 0 },
                             )
                         }
@@ -1618,6 +1671,8 @@ enum ChromeHit {
     Confirm(ConfirmAction),
     /// Open the new-workspace name-input overlay (x-9e5e); the `+` footer.
     OpenCreate,
+    /// Flip the active squad row's caret locally (x-2f99); no socket write.
+    ToggleExpand(u64),
 }
 
 /// A named tab's visible label width in the tab bar / sideline (x-c150);
@@ -2522,6 +2577,9 @@ async fn apply_hit(
         // The `+` footer opens the name-input overlay (x-9e5e); the next keys
         // route to create_keys (Enter sends NewSquad, Esc cancels).
         ChromeHit::OpenCreate => view.open_create(),
+        // Pure state flip, no I/O - usable even when the socket write path
+        // is failing (x-2f99, AC1-FR).
+        ChromeHit::ToggleExpand(id) => view.toggle_expand(id),
     }
     Ok(())
 }
@@ -3485,9 +3543,12 @@ mod tests {
         // Tab bar: active squad name + tabs with the active one bracketed.
         assert!(lines[0].contains("footnote"), "{:?}", lines[0]);
         assert!(lines[0].contains("[2]"), "{:?}", lines[0]);
-        // Sideline: both squads listed with carets.
-        assert!(lines[1].contains("▸ footnote"), "{:?}", lines[1]);
-        assert!(lines[2].contains("▸ notes"), "{:?}", lines[2]);
+        // Sideline: the active squad auto-expanded with the `*` glyph and its
+        // labeled tab rows (x-2f99); the inactive squad collapsed, no glyph.
+        assert!(lines[1].contains("▾*footnote"), "{:?}", lines[1]);
+        assert!(lines[2].contains('1'), "{:?}", lines[2]);
+        assert!(lines[3].contains("*2"), "{:?}", lines[3]);
+        assert!(lines[4].contains("▸ notes"), "{:?}", lines[4]);
         // Content row: pane a, the 1-cell divider, pane b - at the offsets
         // implied by (tab bar 1 row, panel 28 cols).
         let row1: Vec<char> = lines[1].chars().collect();
@@ -3666,9 +3727,10 @@ mod tests {
         // change #3 AC3-FR: a layout push that drops the hovered row must not
         // leave the highlight on a now-out-of-range index.
         let mut view = two_pane_view();
-        // With one squad, display_rows is [squad, + new workspace] (len 2), so a
-        // hover on index 2 is now stale and must be cleared by the push.
-        view.hover_row = Some(2);
+        // With one squad (auto-expanded: 2 tab rows), display_rows is
+        // [squad, tab, tab, + new workspace] (len 4), so a hover on index 4
+        // is now stale and must be cleared by the push.
+        view.hover_row = Some(4);
         view.set_layout(LayoutView {
             squads: vec![meta(1, "footnote", 2, 1)], // second squad dropped
             active_squad: 1,
@@ -3721,9 +3783,9 @@ mod tests {
                 where_hint: None,
             }],
         });
-        // display_rows: [footnote squad, + new workspace, Header, Card] -> the
-        // card is index 3, painted at outer row TAB_BAR_ROWS + 3 = 4.
-        match view.chrome_hit(4, 5) {
+        // display_rows: [footnote squad, 2 tabs, + new workspace, Header, Card]
+        // -> the card is index 5, painted at outer row TAB_BAR_ROWS + 5 = 6.
+        match view.chrome_hit(6, 5) {
             Some(ChromeHit::Confirm(a)) => {
                 assert!(
                     matches!(&a.action, ConfirmKind::Dispatch { node } if node == "x-a496"),
@@ -3771,14 +3833,14 @@ mod tests {
                 card("x-fly", CardState::InFlight),
             ],
         });
-        // display_rows: [squad, + new workspace, Header, blocked, in-flight]
-        // -> the cards paint at outer rows 4, 5.
+        // display_rows: [squad, 2 tabs, + new workspace, Header, blocked,
+        // in-flight] -> the cards paint at outer rows 6, 7.
         assert!(
-            matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
+            matches!(view.chrome_hit(6, 5), Some(ChromeHit::Notice(_))),
             "blocked card -> notice, not confirm"
         );
         assert!(
-            matches!(view.chrome_hit(5, 5), Some(ChromeHit::Notice(_))),
+            matches!(view.chrome_hit(7, 5), Some(ChromeHit::Notice(_))),
             "in-flight card -> notice, not confirm"
         );
     }
@@ -3826,17 +3888,18 @@ mod tests {
                 card("x-ddd", None, None, None),
             ],
         });
-        // display_rows: [squad, + new workspace, Header, 4 cards] -> rows 4-7.
-        assert_eq!(cmds(view.chrome_hit(4, 5)), vec![Command::FocusPane(11)]);
+        // display_rows: [squad, 2 tabs, + new workspace, Header, 4 cards]
+        // -> rows 6-9.
+        assert_eq!(cmds(view.chrome_hit(6, 5)), vec![Command::FocusPane(11)]);
         assert_eq!(
-            cmds(view.chrome_hit(5, 5)),
+            cmds(view.chrome_hit(7, 5)),
             vec![Command::AttachAgent("deadbee2".into())]
         );
-        match view.chrome_hit(6, 5) {
+        match view.chrome_hit(8, 5) {
             Some(ChromeHit::Notice(msg)) => assert_eq!(msg, "in flight - worked by t:abc"),
             other => panic!("expected hint notice, got {}", chrome_hit_label(&other)),
         }
-        match view.chrome_hit(7, 5) {
+        match view.chrome_hit(9, 5) {
             Some(ChromeHit::Notice(msg)) => {
                 assert_eq!(msg, "card in flight - no session visible here")
             }
@@ -3858,6 +3921,7 @@ mod tests {
             Some(ChromeHit::Notice(_)) => "Notice",
             Some(ChromeHit::Confirm(_)) => "Confirm",
             Some(ChromeHit::OpenCreate) => "OpenCreate",
+            Some(ChromeHit::ToggleExpand(_)) => "ToggleExpand",
         }
     }
 
@@ -3874,15 +3938,170 @@ mod tests {
         assert!(view.chrome_hit(0, 5).is_none());
     }
 
-    // A left click on a sideline squad row switches to that squad.
+    // A left click on an inactive sideline squad row switches to it; the
+    // already-active squad row toggles its caret locally instead of the old
+    // silent SelectSquad no-op (x-2f99, AC3-HP/AC4-HP).
     #[test]
     fn chrome_hit_sideline_squad_rows() {
-        let view = two_pane_view(); // no agents/cards: rows are the two squads.
-        assert_eq!(cmds(view.chrome_hit(1, 4)), vec![Command::SelectSquad(1)]);
-        assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::SelectSquad(2)]);
+        // No agents/cards: rows are [squad 1 (active, expanded), its 2 tabs,
+        // squad 2, footer].
+        let view = two_pane_view();
+        assert!(matches!(
+            view.chrome_hit(1, 4),
+            Some(ChromeHit::ToggleExpand(1))
+        ));
+        assert_eq!(cmds(view.chrome_hit(4, 4)), vec![Command::SelectSquad(2)]);
         // The divider column and the pane content beyond it are not chrome hits.
         assert!(view.chrome_hit(1, 27).is_none());
         assert!(view.chrome_hit(1, 40).is_none());
+    }
+
+    // ---- x-2f99: active-squad visibility ----
+
+    /// two_pane_view's layout with a chosen active squad (LayoutView is not
+    /// Clone; squad 1 has 2 tabs, squad 2 has 1).
+    fn two_squad_layout(active_squad: u64) -> LayoutView {
+        LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1), meta(2, "notes", 1, 0)],
+            active_squad,
+            panes: vec![],
+            focus: 0,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+        }
+    }
+
+    // AC2-HP: a fresh attach seeds the active squad expanded, so the first
+    // frame shows its tabs (and the `*` marker) without any keypress.
+    #[test]
+    fn view_new_seeds_expanded_with_active_squad() {
+        let view = two_pane_view();
+        assert!(view.expanded.contains(&1));
+        assert!(!view.expanded.contains(&2));
+    }
+
+    // AC1-HP + Locked 3: activation auto-expands the newly active squad and
+    // never collapses the others.
+    #[test]
+    fn set_layout_auto_expands_on_activation_change() {
+        let mut view = two_pane_view();
+        view.set_layout(two_squad_layout(2));
+        assert!(view.expanded.contains(&2), "newly active squad expands");
+        assert!(
+            view.expanded.contains(&1),
+            "activation never collapses others"
+        );
+    }
+
+    // AC1-EDGE: manual collapse of the active squad survives the ~250ms
+    // scrape-tick layout pushes - auto-expand fires on CHANGE only.
+    #[test]
+    fn manual_collapse_survives_same_active_layout_push() {
+        let mut view = two_pane_view();
+        view.toggle_expand(1);
+        assert!(!view.expanded.contains(&1));
+        view.set_layout(two_squad_layout(1));
+        assert!(
+            !view.expanded.contains(&1),
+            "a push with an unchanged active_squad must not re-expand"
+        );
+        // A real activation change still re-expands on re-activation.
+        view.set_layout(two_squad_layout(2));
+        view.set_layout(two_squad_layout(1));
+        assert!(view.expanded.contains(&1));
+    }
+
+    // AC3-EDGE: an expanded squad removed server-side leaves `expanded`.
+    #[test]
+    fn set_layout_prunes_dead_squad_ids_from_expanded() {
+        let mut view = two_pane_view();
+        let mut layout = two_squad_layout(2);
+        layout.squads.remove(0); // squad 1 (expanded) vanishes
+        view.set_layout(layout);
+        assert!(!view.expanded.contains(&1), "dead id pruned");
+        assert!(view.expanded.contains(&2));
+    }
+
+    // AC3-HP: acting on the active squad row toggles locally - twice
+    // round-trips - and apply_hit's ToggleExpand arm does no I/O (AC1-FR is
+    // structural: toggle_expand never touches the socket).
+    #[test]
+    fn toggle_expand_round_trips() {
+        let mut view = two_pane_view();
+        assert!(matches!(
+            view.row_action(0),
+            Some(ChromeHit::ToggleExpand(1))
+        ));
+        view.toggle_expand(1);
+        assert!(!view.expanded.contains(&1), "first toggle collapses");
+        // Collapsed, the active row still resolves to the toggle (rows are
+        // now [sq1, sq2, footer]).
+        assert!(matches!(
+            view.row_action(0),
+            Some(ChromeHit::ToggleExpand(1))
+        ));
+        view.toggle_expand(1);
+        assert!(view.expanded.contains(&1), "second toggle re-expands");
+    }
+
+    // AC1-UI: exactly one squad row carries the `*` glyph - the active one -
+    // in both its expanded and collapsed states.
+    #[test]
+    fn client_compose_active_squad_glyph_in_both_caret_states() {
+        let mut view = two_pane_view();
+        let text = frame_text(&view.compose());
+        assert!(text.contains("▾*footnote"), "expanded active carries *");
+        assert!(text.contains("▸ notes"), "inactive carries no *");
+        view.toggle_expand(1);
+        let text = frame_text(&view.compose());
+        assert!(text.contains("▸*footnote"), "collapsed active keeps *");
+    }
+
+    // AC2-EDGE: a zero-tab active squad expands to a bare `▾` caret - no tab
+    // rows, no panic.
+    #[test]
+    fn client_compose_zero_tab_active_squad() {
+        let view = View::new(
+            (30, 100),
+            "main".into(),
+            LayoutView {
+                squads: vec![meta(1, "empty", 0, 0), meta(2, "notes", 1, 0)],
+                active_squad: 1,
+                panes: vec![],
+                focus: 0,
+                area: (28, 72),
+                agents: vec![],
+                focus_node: None,
+                backlog: Vec::new(),
+            },
+        );
+        let text = frame_text(&view.compose());
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[1].contains("▾*empty"), "{:?}", lines[1]);
+        assert!(lines[2].contains("▸ notes"), "no tab rows in between");
+    }
+
+    // AC2-UI: the status row names the active squad iff more than one squad
+    // exists (the sideline-hidden answer to "which squad?").
+    #[test]
+    fn client_compose_status_row_squad_cell_multi_squad_only() {
+        let view = two_pane_view();
+        let text = frame_text(&view.compose());
+        let bottom = text.lines().last().unwrap();
+        assert!(
+            bottom.starts_with(" main │ footnote │ /code/footnote"),
+            "{bottom:?}"
+        );
+        // A single squad has nothing to disambiguate: the cell is absent.
+        let mut view = two_pane_view();
+        let mut layout = two_squad_layout(1);
+        layout.squads.remove(1);
+        view.set_layout(layout);
+        let text = frame_text(&view.compose());
+        let bottom = text.lines().last().unwrap();
+        assert!(bottom.starts_with(" main │ /code/footnote"), "{bottom:?}");
     }
 
     // A pane-hosted agent row focuses its pane; a watch-only row (no pane in this
@@ -3922,19 +4141,20 @@ mod tests {
             attach_id: None,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
-        // display order: squad 1 (row1), its agent "worker" (row2), squad 2
-        // (row3), "+ new workspace" footer (row4), "~ agents" header (row5),
-        // orphan "bg-claude" (row6), orphan "bg-other" (row7).
-        assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::FocusPane(10)]);
+        // display order: squad 1 (row1), its 2 tabs (rows2-3), its agent
+        // "worker" (row4), squad 2 (row5), "+ new workspace" footer (row6),
+        // "~ agents" header (row7), orphan "bg-claude" (row8), orphan
+        // "bg-other" (row9).
+        assert_eq!(cmds(view.chrome_hit(4, 4)), vec![Command::FocusPane(10)]);
         assert_eq!(
-            cmds(view.chrome_hit(6, 4)),
+            cmds(view.chrome_hit(8, 4)),
             vec![Command::AttachAgent("c19cd2c3".into())]
         );
-        assert!(matches!(view.chrome_hit(7, 4), Some(ChromeHit::Notice(_))));
+        assert!(matches!(view.chrome_hit(9, 4), Some(ChromeHit::Notice(_))));
         // The "~ agents" header row is inert.
-        assert!(view.chrome_hit(5, 4).is_none());
+        assert!(view.chrome_hit(7, 4).is_none());
         // The "+ new workspace" footer opens the create overlay.
-        assert!(matches!(view.chrome_hit(4, 4), Some(ChromeHit::OpenCreate)));
+        assert!(matches!(view.chrome_hit(6, 4), Some(ChromeHit::OpenCreate)));
     }
 
     // A click on the bottom row belongs to the status/which-key/search chrome
@@ -4207,29 +4427,31 @@ mod tests {
         let frame = view.compose();
         let text = frame_text(&frame);
         let lines: Vec<&str> = text.lines().collect();
-        // Row order: footnote, its two agent rows, notes squad, the "+ new
-        // workspace" footer, catch-all header, the orphan row.
-        assert!(lines[1].contains("\u{25b8} footnote"), "{:?}", lines[1]);
+        // Row order: footnote (auto-expanded, x-2f99), its two tab rows, its
+        // two agent rows, notes squad, the "+ new workspace" footer,
+        // catch-all header, the orphan row.
+        assert!(lines[1].contains("\u{25be}*footnote"), "{:?}", lines[1]);
         assert!(
-            lines[2].contains("\u{25b2} peer: perm prompt"),
+            lines[4].contains("\u{25b2} peer: perm prompt"),
             "{:?}",
-            lines[2]
+            lines[4]
         );
-        assert!(lines[3].contains("\u{2717} dead"), "{:?}", lines[3]);
-        assert!(lines[4].contains("\u{25b8} notes"), "{:?}", lines[4]);
-        assert!(lines[5].contains("+ new workspace"), "{:?}", lines[5]);
-        assert!(lines[6].contains("~ agents"), "{:?}", lines[6]);
-        assert!(lines[7].contains("\u{25cf} bg-watch"), "{:?}", lines[7]);
+        assert!(lines[5].contains("\u{2717} dead"), "{:?}", lines[5]);
+        assert!(lines[6].contains("\u{25b8} notes"), "{:?}", lines[6]);
+        assert!(lines[7].contains("+ new workspace"), "{:?}", lines[7]);
+        assert!(lines[8].contains("~ agents"), "{:?}", lines[8]);
+        assert!(lines[9].contains("\u{25cf} bg-watch"), "{:?}", lines[9]);
         // The exited row is DIM (fact beats badge, visually too).
         let cols = frame.cols as usize;
-        let dead_cell = frame.cells[3 * cols + 2];
+        let dead_cell = frame.cells[5 * cols + 2];
         assert_eq!(dead_cell.flags & cell_flags::DIM, cell_flags::DIM);
-        // The selector indexes display rows directly (x-260a): index 3 = the
-        // notes squad row, after footnote and its two agent rows.
+        // The selector indexes display rows directly (x-260a): index 5 = the
+        // notes squad row, after footnote, its two tab rows, and its two
+        // agent rows.
         let mut sel_view = view;
-        sel_view.selector = Some(3);
+        sel_view.selector = Some(5);
         let sel_frame = sel_view.compose();
-        let notes_row = 4usize;
+        let notes_row = 6usize;
         let sel_cell = sel_frame.cells[notes_row * cols + 2];
         assert_eq!(
             sel_cell.flags & cell_flags::INVERSE,
@@ -4257,8 +4479,8 @@ mod tests {
 
     #[test]
     fn client_compose_expanded_squad_lists_tabs_and_selector_highlights() {
+        // The active squad arrives expanded (View::new seeds it, x-2f99).
         let mut view = two_pane_view();
-        view.expanded.insert(1);
         view.selector = Some(1); // first tab row of squad 1 (display index)
         let sel: Vec<SelRow> = view
             .display_rows()
@@ -4292,7 +4514,7 @@ mod tests {
         let frame = view.compose();
         let text = frame_text(&frame);
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[1].contains("▾ footnote"), "{:?}", lines[1]);
+        assert!(lines[1].contains("▾*footnote"), "{:?}", lines[1]);
         assert!(lines[2].contains('1'), "{:?}", lines[2]);
         assert!(lines[3].contains("*2"), "active tab marked: {:?}", lines[3]);
         // The selector row's cells carry INVERSE.
@@ -4414,7 +4636,6 @@ mod tests {
     #[test]
     fn client_selector_rows_reanchor_on_catalog_shrink() {
         let mut view = two_pane_view();
-        view.expanded.insert(1);
         view.selector = Some(3);
         // AC6-FR: the catalog shrinks (squad 1 gone); the cursor re-anchors
         // to a live row instead of pointing off the end.
@@ -4436,9 +4657,10 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
         });
-        // Display rows are now [notes squad, + new workspace]: the cursor
-        // clamps to the last live row (the footer, an actionable stop).
-        assert_eq!(view.selector, Some(1), "cursor clamped to the live rows");
+        // Display rows are now [notes squad (auto-expanded on activation),
+        // its tab, + new workspace]: the cursor clamps to the last live row
+        // (the footer, an actionable stop).
+        assert_eq!(view.selector, Some(2), "cursor clamped to the live rows");
     }
 
     // ---- x-260a: unified selector rows (keyboard reaches every actionable row) ----
@@ -4447,9 +4669,10 @@ mod tests {
     /// the footer, an orphan-agents section (attachable bg + watch-only), and
     /// a work-queue lane (ready + blocked cards).
     ///
-    /// Display rows: 0 sq1 · 1 hosted agent · 2 sq2 · 3 "+ new workspace" ·
-    /// 4 "~ agents" · 5 bg-attach · 6 bg-plain · 7 "~ work queue" ·
-    /// 8 ready card · 9 blocked card · 10 in-flight card.
+    /// Display rows (sq1 is active, so auto-expanded with its 2 tabs, x-2f99):
+    /// 0 sq1 · 1-2 its tabs · 3 hosted agent · 4 sq2 · 5 "+ new workspace" ·
+    /// 6 "~ agents" · 7 bg-attach · 8 bg-plain · 9 "~ work queue" ·
+    /// 10 ready card · 11 blocked card · 12 in-flight card.
     fn unified_rows_view() -> View {
         let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
             squad,
@@ -4488,11 +4711,11 @@ mod tests {
         // AC2-UI + Boundaries: j/k stop on every actionable row, skip the two
         // section headers, and clamp (no wrap) at both ends.
         let v = unified_rows_view();
-        assert_eq!(v.selector_down(3), 5, "j from the footer skips '~ agents'");
-        assert_eq!(v.selector_down(6), 8, "j skips '~ work queue'");
-        assert_eq!(v.selector_down(10), 10, "clamp at the last row");
-        assert_eq!(v.selector_up(5), 3, "k skips '~ agents' upward");
-        assert_eq!(v.selector_up(8), 6, "k skips '~ work queue' upward");
+        assert_eq!(v.selector_down(5), 7, "j from the footer skips '~ agents'");
+        assert_eq!(v.selector_down(8), 10, "j skips '~ work queue'");
+        assert_eq!(v.selector_down(12), 12, "clamp at the last row");
+        assert_eq!(v.selector_up(7), 5, "k skips '~ agents' upward");
+        assert_eq!(v.selector_up(10), 8, "k skips '~ work queue' upward");
         assert_eq!(v.selector_up(0), 0, "clamp at the top");
     }
 
@@ -4501,9 +4724,9 @@ mod tests {
         // AC1-FR / AC2-EDGE: a re-anchored cursor never rests on a Header -
         // forward first, and an out-of-range index clamps to the last row.
         let v = unified_rows_view();
-        assert_eq!(v.selector_anchor(4), Some(5), "header steps forward");
-        assert_eq!(v.selector_anchor(7), Some(8), "header steps forward");
-        assert_eq!(v.selector_anchor(50), Some(10), "stale index clamps");
+        assert_eq!(v.selector_anchor(6), Some(7), "header steps forward");
+        assert_eq!(v.selector_anchor(9), Some(10), "header steps forward");
+        assert_eq!(v.selector_anchor(50), Some(12), "stale index clamps");
         assert_eq!(v.selector_anchor(0), Some(0), "actionable row stays put");
     }
 
@@ -4534,7 +4757,7 @@ mod tests {
     async fn selector_enter_focuses_hosted_agent_pane() {
         // AC1-HP: Enter on a pane-hosted agent row sends FocusPane and closes.
         let mut v = unified_rows_view();
-        v.selector = Some(1);
+        v.selector = Some(3);
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -4550,7 +4773,7 @@ mod tests {
         // AC1-EDGE: Enter on a claude bg row with an attach id sends
         // AttachAgent.
         let mut v = unified_rows_view();
-        v.selector = Some(5);
+        v.selector = Some(7);
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -4567,7 +4790,7 @@ mod tests {
         // card, in-flight card) shows a notice, sends nothing, and the
         // selector stays open.
         let mut v = unified_rows_view();
-        for row in [6usize, 9, 10] {
+        for row in [8usize, 11, 12] {
             v.selector = Some(row);
             v.notice = None;
             let mut buf: Vec<u8> = Vec::new();
@@ -4585,7 +4808,7 @@ mod tests {
         // Enter (confirm_keys) sends the DispatchNode (AC2-FR: the confirm
         // takes the action, so one dispatch at most).
         let mut v = unified_rows_view();
-        v.selector = Some(8);
+        v.selector = Some(10);
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
         assert!(buf.is_empty(), "confirm first, dispatch on the next Enter");
@@ -4600,7 +4823,7 @@ mod tests {
     async fn selector_enter_footer_opens_create_overlay() {
         // AC3-HP: Enter on "+ new workspace" opens the name-input overlay.
         let mut v = unified_rows_view();
-        v.selector = Some(3);
+        v.selector = Some(5);
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
         assert!(buf.is_empty());
@@ -4644,17 +4867,17 @@ mod tests {
         let mut v = unified_rows_view();
         v.term.0 = MIN_ROWS_FOR_STATUS - 1;
         assert!(
-            matches!(v.row_action(8), Some(ChromeHit::Notice(_))),
+            matches!(v.row_action(10), Some(ChromeHit::Notice(_))),
             "ready card refuses on a too-short terminal"
         );
         assert!(
-            matches!(v.row_action(3), Some(ChromeHit::Notice(_))),
+            matches!(v.row_action(5), Some(ChromeHit::Notice(_))),
             "footer refuses on a too-short terminal"
         );
         // At the minimum height both act normally again.
         v.term.0 = MIN_ROWS_FOR_STATUS;
-        assert!(matches!(v.row_action(8), Some(ChromeHit::Confirm(_))));
-        assert!(matches!(v.row_action(3), Some(ChromeHit::OpenCreate)));
+        assert!(matches!(v.row_action(10), Some(ChromeHit::Confirm(_))));
+        assert!(matches!(v.row_action(5), Some(ChromeHit::OpenCreate)));
     }
 
     #[tokio::test]
@@ -4662,12 +4885,12 @@ mod tests {
         // AC1-UI / AC2-UI: j/k through selector_keys land on agent and card
         // rows, skipping headers, without sending anything.
         let mut v = unified_rows_view();
-        v.selector = Some(3);
+        v.selector = Some(5);
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"j", &mut buf).await.unwrap();
-        assert_eq!(v.selector, Some(5), "j skips the '~ agents' header");
+        assert_eq!(v.selector, Some(7), "j skips the '~ agents' header");
         selector_keys(&mut v, b"k", &mut buf).await.unwrap();
-        assert_eq!(v.selector, Some(3), "k skips it back");
+        assert_eq!(v.selector, Some(5), "k skips it back");
         assert!(buf.is_empty(), "navigation sends nothing");
     }
 
