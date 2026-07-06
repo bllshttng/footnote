@@ -2393,7 +2393,8 @@ mod tests {
     fn orphans_a_row_whose_inside_leg_is_stale() {
         // A report older than the window is not a liveness signal.
         let stamp = "2026-07-06T20:00:00Z";
-        let now = crate::state::rfc3339_like_to_secs(stamp).unwrap() + PROVABLY_LIVE_WINDOW_SECS + 60;
+        let now =
+            crate::state::rfc3339_like_to_secs(stamp).unwrap() + PROVABLY_LIVE_WINDOW_SECS + 60;
         let row = row_with_inside_leg(Some(report_at(stamp)));
         assert!(should_orphan_on_ask_failure(&row, now));
     }
