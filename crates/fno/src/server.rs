@@ -39,7 +39,7 @@ use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
     Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, ServerMsg, SquadMeta, TabMeta,
-    WaitOutcome,
+    WaitOutcome, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, RemoveOutcome, Resolver, Session};
@@ -527,6 +527,15 @@ fn tab_label(
         }
     }
     (i + 1).to_string()
+}
+
+/// Sanitize a wire-supplied tab name (x-c150): strip control characters (they
+/// would corrupt chrome cells), trim, cap at [`MAX_TAB_NAME`] chars. The cap
+/// lives HERE and not only in the overlay: `Command` is a wire surface, and
+/// the TUI is not the only client. Empty-after-sanitize means "clear".
+fn sanitize_tab_name(raw: &str) -> String {
+    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+    cleaned.trim().chars().take(MAX_TAB_NAME).collect()
 }
 
 /// Whether an event ended the session.
@@ -2316,6 +2325,25 @@ impl Core {
                 self.push_layout(true);
                 Flow::Continue
             }
+            Command::RenameTab { tab, name } => {
+                // Explicit tab rename (x-c150). A stale/unknown id (the tab
+                // closed racing the overlay) is refused fail-closed with a
+                // notice, like SelectTab - no mutation.
+                match self.session.find_tab(tab) {
+                    Some((sid, ti)) => {
+                        let clean = sanitize_tab_name(&name);
+                        let t =
+                            &mut self.session.squad_mut(sid).expect("find_tab live squad").tabs[ti];
+                        // Blank-after-sanitize CLEARS the rename back to the
+                        // derived label (Locked 2: "reset to auto" is a
+                        // meaningful rename target).
+                        t.name = (!clean.is_empty()).then_some(clean);
+                        self.push_layout(true);
+                    }
+                    None => self.notice(client_id, "no such tab"),
+                }
+                Flow::Continue
+            }
             Command::CopySelection => {
                 // Keyboard copy (leader+y): the focused pane's selection, else the
                 // newest completed block (precedence + refusals in copy_source).
@@ -3985,6 +4013,107 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(core.session.squads.len(), 1, "blank name creates no squad");
         assert!(core.panes.is_empty(), "blank name spawns no pane");
+    }
+
+    #[test]
+    fn rename_tab_round_trips_and_blank_clears() {
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        // The rename stores the trimmed name (AC2-HP's server half)...
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 5,
+                name: "  debug ".into(),
+            },
+        );
+        assert_eq!(
+            core.session.squads[0].tabs[0].name.as_deref(),
+            Some("debug")
+        );
+        // ...and a blank rename CLEARS it back to the derived label (AC3-HP,
+        // Locked 2) - a clear, never an error. (Re-register the sender: the
+        // test client's dropped receiver made the rename's own layout push
+        // reap it, exactly like a real disconnect.)
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 5,
+                name: "   ".into(),
+            },
+        );
+        assert_eq!(core.session.squads[0].tabs[0].name, None);
+    }
+
+    #[test]
+    fn rename_tab_stale_id_is_refused_without_mutation() {
+        // AC1-ERR: a RenameTab naming a closed tab mutates nothing.
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                name: Some("keep".into()),
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        let flow = core.command(
+            1,
+            Command::RenameTab {
+                tab: 999,
+                name: "x".into(),
+            },
+        );
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(
+            core.session.squads[0].tabs[0].name.as_deref(),
+            Some("keep"),
+            "a stale id must not touch any live tab"
+        );
+    }
+
+    #[test]
+    fn rename_tab_sanitizes_hostile_wire_names() {
+        // AC2-ERR: control chars are stripped and the stored name is capped -
+        // the wire is not the overlay, so the server owns the guarantee.
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 5,
+                name: format!("\x1b[31m{}", "a".repeat(200)),
+            },
+        );
+        let stored = core.session.squads[0].tabs[0].name.clone().unwrap();
+        assert_eq!(stored, format!("[31m{}", "a".repeat(MAX_TAB_NAME - 4)));
     }
 
     #[test]
