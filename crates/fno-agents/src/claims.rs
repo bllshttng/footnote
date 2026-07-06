@@ -241,6 +241,16 @@ pub fn claim_path(key: &str, root: Option<&Path>) -> Result<PathBuf, String> {
     Ok(claims_dir(key, root)?.join(format!("{}.lock", encode_key(key))))
 }
 
+/// The claims DIRECTORY (`<root>/.fno/claims`) for an explicit root, else the
+/// global root. `None` when no root resolves (no `$FNO_CLAIMS_ROOT`, no
+/// `$HOME`) — callers sweep-read fail-open on that.
+pub(crate) fn claims_dir_for(root: Option<&Path>) -> Option<PathBuf> {
+    match root {
+        Some(r) => Some(r.join(CLAIMS_DIRNAME)),
+        None => global_claims_root().map(|r| r.join(CLAIMS_DIRNAME)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Time, host, and process liveness
 // ---------------------------------------------------------------------------
@@ -405,7 +415,7 @@ pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-enum ReadError {
+pub(crate) enum ReadError {
     /// File disappeared between decision and read.
     GoneAway,
     /// Unparseable YAML, non-mapping root, schema violation, or io error.
@@ -433,7 +443,7 @@ fn parse_claim_str(text: &str) -> Result<ClaimRecord, ReadError> {
     Ok(rec)
 }
 
-fn read_claim_file(path: &Path) -> Result<ClaimRecord, ReadError> {
+pub(crate) fn read_claim_file(path: &Path) -> Result<ClaimRecord, ReadError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ReadError::GoneAway),
