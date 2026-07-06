@@ -53,6 +53,11 @@ os.environ["USERPROFILE"] = _SESSION_HOME
 # input; hard-set it off (a shell-exported =1 must not leak either). Tests
 # that exercise the spawn path re-arm per-test via monkeypatch.setenv.
 os.environ["FNO_THINK_SPAWN"] = "0"
+# Same class of hazard (x-c5cc): the spawn gate counts the HOST machine's
+# real live workers (registry + claude roster), so a CLI-level spawn test on
+# a busy dev box would queue for minutes behind processes the test doesn't
+# own. Gate off suite-wide; the gate's own tests re-arm via monkeypatch.delenv.
+os.environ["FNO_SPAWN_GATE"] = "0"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:

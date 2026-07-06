@@ -757,7 +757,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // held across dispatch so the next waiter's count includes the newcomer
     // (bg: the mutex until the roster/registry row exists; headless: the
     // worker:<name> slot claim for the call duration), then dropped.
-    let _gate_guard = if substrate == "pane" {
+    let mut gate_guard = if substrate == "pane" {
         None
     } else {
         let flags = fno_agents::spawn_gate::GateFlags {
@@ -831,6 +831,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             // line-parsing consumers never wait on the demotion (x-c5cc).
             use std::io::Write;
             let _ = std::io::stdout().flush();
+            // The roster row exists once dispatch returned: release the gate
+            // NOW so the ~10s demotion poll never serializes other spawns
+            // behind the spawn-gate mutex (codex P2).
+            if let Some(g) = gate_guard.as_mut() {
+                g.release();
+            }
             if outcome.exit_code == 0 {
                 // The bg worker is claude's child (its exec can't be wrapped);
                 // demote post-hoc via the roster pid. short_id from the

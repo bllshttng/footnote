@@ -324,6 +324,12 @@ pub fn run_gate(
     substrate: &str,
     flags: GateFlags,
 ) -> Result<GateGuard, i32> {
+    // FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
+    // precedent): test suites exercising spawn plumbing must not queue behind
+    // the REAL machine's live workers, and it doubles as an operator escape.
+    if std::env::var_os("FNO_SPAWN_GATE").is_some_and(|v| v == "0") {
+        return Ok(GateGuard::default());
+    }
     let cap = agents_config::max_live(config_cwd) as usize;
     let floor_gb = agents_config::min_free_gb(config_cwd);
     let holder = format!("spawn-gate:{}:{}", std::process::id(), name);

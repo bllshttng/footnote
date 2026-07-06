@@ -23,6 +23,9 @@ def _isolated_world(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
     monkeypatch.setenv("FNO_THINK_SPAWN", "0")
+    # conftest disables the gate suite-wide; re-arm it here — these tests
+    # exercise the gate itself.
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
     yield
 
 

@@ -380,7 +380,7 @@ def cmd_spawn(
         None, "--plan", help="Provenance FNO_PLAN override (skips the graph read)."
     ),
     force: bool = typer.Option(
-        False, "--force",
+        False, "--force", "-F",
         help=(
             "Spawn-gate bypass (x-c5cc): skip the max_live cap AND the "
             "min_free_gb RAM floor. Workers are still QoS-demoted and still "

@@ -327,6 +327,11 @@ def run_gate(
     """Run the full gate. Returns a :class:`GateGuard` to hold across dispatch
     on pass; raises :class:`GateRefused` (a SystemExit) on refusal/timeout.
     All output goes to stderr (the stdout receipt shape is reserved)."""
+    # FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
+    # precedent): test suites exercising spawn plumbing must not queue behind
+    # the REAL machine's live workers, and it doubles as an operator escape.
+    if os.environ.get("FNO_SPAWN_GATE") == "0":
+        return GateGuard()
     try:
         from fno.config import load_settings
 
