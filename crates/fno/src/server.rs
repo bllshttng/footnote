@@ -687,6 +687,13 @@ struct Core {
     /// steering path. An inflated autonomy rate is the dangerous silent
     /// failure, so the count exists even before the scoreboard reads it.
     touch_emit_failures: Arc<AtomicU64>,
+    /// Attached-client count for the periodic readers (x-4e30). Published
+    /// from choke points (tail of `handle` + the main-loop tail), never
+    /// per mutation site: `clients` mutates in six places and per-site
+    /// stores drift on the next refactor. A `watch`, not an atomic,
+    /// because the readers park in `tick().await` and need the
+    /// `changed()` edge as the 0->1 wakeup.
+    client_count: watch::Sender<usize>,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -2676,7 +2683,27 @@ impl Core {
         }
     }
 
+    /// Re-publish `clients.len()` to the periodic readers. `send_if_modified`
+    /// so a no-change pass wakes nobody.
+    fn publish_client_count(&self) {
+        let n = self.clients.len();
+        self.client_count.send_if_modified(|c| {
+            let changed = *c != n;
+            *c = n;
+            changed
+        });
+    }
+
     fn handle(&mut self, msg: CoreMsg) -> Flow {
+        let flow = self.handle_msg(msg);
+        // Choke point: every message-driven `clients` mutation (attach,
+        // detach, Gone, dead-client sweeps under push_layout) has returned
+        // by here. The main-loop tail covers the non-message sweeps.
+        self.publish_client_count();
+        flow
+    }
+
+    fn handle_msg(&mut self, msg: CoreMsg) -> Flow {
         // Read-only enforcement at the server (x-6a14): drop any PTY/tree-mutating
         // message from an observer (passive) client, whatever sends it. The web
         // bridge holds no write half so it never sends these; this makes the
@@ -3193,6 +3220,9 @@ async fn serve(
     let (out_tx, mut out_rx) = mpsc::channel::<(u64, Vec<u8>)>(256);
     let (exit_tx, mut exit_rx) = mpsc::channel::<u64>(64);
     let (core_tx, mut core_rx) = mpsc::channel::<CoreMsg>(256);
+    // Attached-client count for the periodic readers (x-4e30): Core owns the
+    // sender; each reader holds a receiver as its work gate + 0->1 wakeup.
+    let (client_count_tx, client_count_rx) = watch::channel(0usize);
 
     let mut core = Core {
         session: Session::default(),
@@ -3214,6 +3244,7 @@ async fn serve(
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
+        client_count: client_count_tx,
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -3228,6 +3259,7 @@ async fn serve(
         let core_tx = core_tx.clone();
         let reg_path = agents_view::registry_path();
         let roster_path = agents_view::roster_path();
+        let mut count_rx = client_count_rx.clone();
         tokio::spawn(async move {
             let mut state = agents_view::ReaderState::default();
             let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -3258,7 +3290,20 @@ async fn serve(
                 (stamp, raw)
             }
             loop {
-                tick.tick().await;
+                // Gate the registry+roster read on an attached client (x-4e30).
+                // The `changed()` arm IS the 0->1 kick: an attach wakes the
+                // parked reader at once so the first overlay is fresh (AC3-FR).
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    res = count_rx.changed() => {
+                        if res.is_err() {
+                            return; // Core dropped; server shutting down
+                        }
+                    }
+                }
+                if *count_rx.borrow() == 0 {
+                    continue; // no viewer -> skip both file reads entirely
+                }
                 let (reg_stamp, reg_raw) = scan(reg_path.clone(), state.reg_stamp()).await;
                 let (roster_stamp, roster_raw) =
                     scan(roster_path.clone(), state.roster_stamp()).await;
@@ -3289,6 +3334,7 @@ async fn serve(
     {
         let core_tx = core_tx.clone();
         let path = backlog_view::graph_path();
+        let mut count_rx = client_count_rx.clone();
         tokio::spawn(async move {
             let mut state = backlog_view::ReaderState::default();
             // The last-good claim sweep (x-54fa): `None` until the first
@@ -3299,7 +3345,23 @@ async fn serve(
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tick.tick().await;
+                // Gate the per-tick claim-sweep SUBPROCESS + graph.json read on
+                // an attached client (x-4e30). This is the idle-CPU root fix:
+                // an orphaned server with no viewer stops fork/exec'ing a whole
+                // `fno-agents claim sweep` process every second. The
+                // `changed()` arm is the 0->1 kick so the first attach's
+                // overlay is not up to 1s stale (AC3-FR).
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    res = count_rx.changed() => {
+                        if res.is_err() {
+                            return; // Core dropped; server shutting down
+                        }
+                    }
+                }
+                if *count_rx.borrow() == 0 {
+                    continue; // no viewer -> no sweep subprocess, no read
+                }
                 // Claims change without graph.json mtime changes (release, TTL
                 // expiry, new dispatch), so the sweep runs every tick, bounded
                 // + fail-open. Failure is logged once per state change, not
@@ -3387,9 +3449,38 @@ async fn serve(
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
 
     eprintln!("fno mux: serving {}", socket.display());
+
+    // FNO_E2E idle-exit reaper (x-4e30, Fix 2): the ONLY reaper that survives
+    // all four leak paths — panic=abort, SIGKILL of the test binary, a
+    // cargo-test timeout, and the untracked client-autospawned setsid server —
+    // because it consults neither the parent (ppid==1 by design in prod) nor a
+    // Drop guard (never runs on SIGKILL/abort). Armed always, runtime no-op
+    // without the marker: a production mux MUST persist across client detach
+    // (Locked Decision 2, AC2-EDGE). The deadline re-arms on activity — a
+    // client-count change (covers the 0->1 attach edge) OR any pane output —
+    // so a working client-less script session (`pane run`, script_api_e2e with
+    // `sleep 30` panes) survives; only a truly silent, viewer-less orphan
+    // reaches the grace and reaps.
+    let idle_exit_e2e = std::env::var_os("FNO_E2E").is_some();
+    let idle_grace = Duration::from_millis(
+        std::env::var("FNO_IDLE_EXIT_GRACE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60_000),
+    );
+    let mut idle_count_rx = client_count_rx.clone();
+    let mut idle_deadline = tokio::time::Instant::now() + idle_grace;
+
     let flow = loop {
         tokio::select! {
             chunk = out_rx.recv() => {
+                // Pane output is a liveness signal (x-4e30): re-arm the idle
+                // reaper so a working client-less script session never reaps.
+                // Gated on the marker so a high-throughput prod pane pays no
+                // Instant::now() per chunk (gemini review).
+                if idle_exit_e2e {
+                    idle_deadline = tokio::time::Instant::now() + idle_grace;
+                }
                 // out_tx lives in Core, so recv never yields None.
                 let Some((pid, bytes)) = chunk else { break Flow::Shutdown };
                 let mut touched = HashSet::new();
@@ -3455,9 +3546,40 @@ async fn serve(
                     break Flow::Shutdown;
                 }
             }
+            // A client-count change is activity (covers the 0->1 attach edge):
+            // re-arm the grace window. Disabled in prod (the reaper arm below
+            // is off without the marker), so no watch-channel wakeups there
+            // (gemini review).
+            res = idle_count_rx.changed(), if idle_exit_e2e => {
+                if res.is_ok() {
+                    idle_deadline = tokio::time::Instant::now() + idle_grace;
+                }
+            }
+            // The reaper (x-4e30): enabled only under FNO_E2E. On grace with no
+            // activity, reap iff no client is attached — a still-attached
+            // session is in use, so re-arm and keep serving. Replicate the
+            // CoreMsg::Kill teardown (kill every pane PTY + Flow::Shutdown so
+            // SocketGuard unlinks); NEVER std::process::exit, which would
+            // orphan the pane shells and leak the socket file.
+            _ = tokio::time::sleep_until(idle_deadline), if idle_exit_e2e => {
+                if *idle_count_rx.borrow() == 0 {
+                    eprintln!("fno mux: idle-exit (FNO_E2E): no client for grace window");
+                    for entry in core.panes.values() {
+                        entry.pty.kill();
+                    }
+                    break Flow::Shutdown;
+                }
+                idle_deadline = tokio::time::Instant::now() + idle_grace;
+            }
             _ = async { sigterm.as_mut().unwrap().recv().await }, if sigterm.is_some() => break Flow::Shutdown,
             _ = async { sigint.as_mut().unwrap().recv().await }, if sigint.is_some() => break Flow::Shutdown,
         }
+        // Loop-tail choke point (x-4e30): the out_rx/exit_rx arms mutate
+        // `clients` via the dead-client sweeps (broadcast_pane /
+        // sync_focused_modes / close_pane) without a `handle()` call, so the
+        // handle-tail publish alone would leave the count stale on exactly
+        // the orphan path the readers gate on.
+        core.publish_client_count();
     };
     if flow == Flow::Shutdown {
         core.bye_all("session ended");
@@ -5196,6 +5318,7 @@ mod tests {
             claims: HashMap::new(),
             touch_last_emit: HashMap::new(),
             touch_emit_failures: Arc::new(AtomicU64::new(0)),
+            client_count: watch::channel(0).0,
         }
     }
 
@@ -5269,6 +5392,26 @@ mod tests {
         );
         assert_eq!(core.clients.len(), 1);
         assert!(core.clients[0].passive, "the (0,0) client is passive");
+    }
+
+    #[test]
+    fn gone_decrements_the_published_client_count() {
+        // AC4-EDGE (x-4e30): detach via CoreMsg::Gone must drop the published
+        // count - the regression the original 4-site enumeration would have
+        // shipped (a count stuck high means the idle gate and the FNO_E2E
+        // reaper never fire).
+        let (tx, rx) = watch::channel(0usize);
+        let mut core = empty_core();
+        core.client_count = tx;
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.publish_client_count();
+        assert_eq!(*rx.borrow(), 1);
+        core.handle(CoreMsg::Gone(1));
+        assert_eq!(
+            *rx.borrow(),
+            0,
+            "Gone must publish the decremented count via the handle-tail choke point"
+        );
     }
 
     #[test]

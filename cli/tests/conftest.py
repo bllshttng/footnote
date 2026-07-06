@@ -58,6 +58,14 @@ os.environ["FNO_THINK_SPAWN"] = "0"
 # a busy dev box would queue for minutes behind processes the test doesn't
 # own. Gate off suite-wide; the gate's own tests re-arm via monkeypatch.delenv.
 os.environ["FNO_SPAWN_GATE"] = "0"
+# Reap any mux server a test autospawns (x-4e30): the 2026-07-05 incident's
+# leaked servers included Python-spawned `fno-test-home-*` ones, so Rust-only
+# wiring would miss the population that crushed the machine. FNO_E2E arms the
+# server's inactivity idle-exit (60s default grace), so a server orphaned by a
+# SIGKILL'd / panic=abort'd / timed-out test self-exits instead of burning CPU
+# for hours. spawn_server inherits the env (no env_clear), so the marker reaches
+# even a client-autospawned setsid server.
+os.environ["FNO_E2E"] = "1"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:

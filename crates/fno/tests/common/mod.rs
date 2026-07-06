@@ -104,6 +104,10 @@ impl ClientHarness {
         cmd.env("TERM", "xterm-256color");
         // A bare, predictable prompt so screen assertions are stable.
         cmd.env("PS1", "$ ");
+        // Reap any server this client autospawns (x-4e30): spawn_server
+        // inherits the env (no env_clear), so the marker reaches the
+        // setsid'd, harness-untracked server and it self-exits within grace.
+        cmd.env("FNO_E2E", "1");
         for (k, v) in envs {
             cmd.env(k, v);
         }
@@ -234,6 +238,10 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // Reap the server if this test process dies without running Drop (SIGKILL,
+    // panic=abort, cargo-test timeout) — x-4e30. A test that needs a specific
+    // grace (or none) overrides via `envs`, which is applied after.
+    cmd.env("FNO_E2E", "1");
     for (k, v) in envs {
         cmd.env(k, v);
     }
