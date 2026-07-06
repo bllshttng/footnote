@@ -419,6 +419,52 @@ fn ac1_hp_promise_green_pr_done() {
     );
 }
 
+/// x-81d9 (c) / AC3-UI: an unparseable `.fno/settings.yaml` must emit a
+/// `loop_check_settings_unparseable` event (and fail the login gate closed),
+/// never silently zero the required bots and ship unreviewed.
+#[test]
+fn ac3_ui_unparseable_settings_emits_event() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    // Deliberately malformed YAML (unclosed flow sequence). No isolate_settings.
+    fs::write(
+        cwd.join(".fno/settings.yaml"),
+        "config:\n  review:\n    required_bots: [codex, gemini\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-unparse", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+    let (_code, _d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("loop_check_settings_unparseable"),
+        "unparseable settings must emit loop_check_settings_unparseable; events: {events}"
+    );
+}
+
 /// batch-lane Wave 2/3 (x-6cdf): a batched unit terminates as DoneBatched on
 /// its promise even with NO PR (its commits ship via the batch PR, not its
 /// own). The no_pr mock proves the batched arm short-circuits BEFORE run_done,
