@@ -39,10 +39,10 @@ use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
     Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, ServerMsg, SquadMeta, TabMeta,
-    WaitOutcome, MAX_TAB_NAME,
+    WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
-use crate::squad::{self, RemoveOutcome, Resolver, Session};
+use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session};
 use crate::tree::{self, Axis, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
@@ -548,13 +548,18 @@ fn tab_label(
     (i + 1).to_string()
 }
 
-/// Sanitize a wire-supplied tab name (x-c150): strip control characters (they
-/// would corrupt chrome cells), trim, cap at [`MAX_TAB_NAME`] chars. The cap
-/// lives HERE and not only in the overlay: `Command` is a wire surface, and
-/// the TUI is not the only client. Empty-after-sanitize means "clear".
-fn sanitize_tab_name(raw: &str) -> String {
+/// Sanitize a wire-supplied name: strip control characters (they would corrupt
+/// chrome cells), trim, cap at `cap` chars. The cap lives HERE and not only in
+/// the overlay: `Command` is a wire surface, and the TUI is not the only
+/// client. Empty-after-sanitize means "clear".
+fn sanitize_name(raw: &str, cap: usize) -> String {
     let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
-    cleaned.trim().chars().take(MAX_TAB_NAME).collect()
+    cleaned.trim().chars().take(cap).collect()
+}
+
+/// Tab-name sanitize (x-c150), capped at [`MAX_TAB_NAME`].
+fn sanitize_tab_name(raw: &str) -> String {
+    sanitize_name(raw, MAX_TAB_NAME)
 }
 
 /// Whether an event ended the session.
@@ -1125,6 +1130,16 @@ impl Core {
     /// A one-line refusal/notice to ONE client (BEL + transient message on
     /// its side). Errors write to the session log, never a client terminal
     /// (the compositor owns it).
+    /// The sideline-attach catalog gate: is `id` a live watch-only row
+    /// (paneless, not exited) whose jobId matches? Both a registry bg row and
+    /// a roster-synthesized foreign row (x-0a2e) share this shape, so foreign
+    /// rows attach through the existing path with no new spawn logic (AC2-HP).
+    fn attachable_agent(&self, id: &str) -> bool {
+        self.agents
+            .iter()
+            .any(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id))
+    }
+
     fn notice(&self, client_id: u64, text: impl Into<String>) {
         if let Some(c) = self.clients.iter().find(|c| c.id == client_id) {
             let _ = c
@@ -1507,6 +1522,9 @@ impl Core {
                 } else {
                     s.active_tab
                 },
+                // Blast radius for the RemoveSquad confirm (x-96e8): live leaves
+                // summed over every tab of the squad.
+                panes: s.tabs.iter().map(|t| tree::leaves(&t.root).len()).sum(),
             })
             .collect();
         ServerMsg::Layout {
@@ -1678,6 +1696,10 @@ impl Core {
                 } else {
                     a.attach_id.clone()
                 },
+                // Roster provenance (x-0a2e) rides through as-is; the pane fact
+                // above already forced `exited` for a dead pane, so the client's
+                // exited glyph stays senior over the external marker (AC2-EDGE).
+                external: a.external,
             });
         }
         out
@@ -2384,11 +2406,11 @@ impl Core {
                 // Attach ONLY a session actually surfaced in this sideline: a
                 // live watch-only row (paneless, not exited) whose jobId matches
                 // - the same catalog-membership refusal FocusPane/SelectTab use,
-                // so a stale or never-surfaced id can never drive a spawn.
-                let known = self.agents.iter().any(|a| {
-                    a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id.as_str())
-                });
-                if !known {
+                // so a stale or never-surfaced id can never drive a spawn. A
+                // roster-synthesized foreign row (x-0a2e: mux None, !exited,
+                // attach_id set) satisfies this unchanged - it is exactly the
+                // watch-only shape the gate was built for.
+                if !self.attachable_agent(&id) {
                     self.notice(client_id, "no such agent");
                     return Flow::Continue;
                 }
@@ -2533,6 +2555,110 @@ impl Core {
                         self.push_layout(true);
                     }
                     None => self.notice(client_id, "no such tab"),
+                }
+                Flow::Continue
+            }
+            Command::RenameSquad { squad, name } => {
+                // Explicit squad rename (x-96e8). A stale/unknown id (the squad
+                // died racing the overlay) is refused fail-closed with a notice,
+                // like SelectSquad - no mutation.
+                match self.session.squad(squad) {
+                    Some(sq) => {
+                        let clean = sanitize_name(&name, MAX_SQUAD_NAME);
+                        // Blank-after-sanitize CLEARS back to the derived label
+                        // (the RenameTab precedent) - EXCEPT an origin-less
+                        // squad, whose derived label would be empty: there a
+                        // blank is refused (nothing to fall back to).
+                        if clean.is_empty() && sq.origins.is_empty() {
+                            self.notice(client_id, "name required");
+                            return Flow::Continue;
+                        }
+                        self.session
+                            .squad_mut(squad)
+                            .expect("squad() live above")
+                            .name = (!clean.is_empty()).then_some(clean);
+                        self.push_layout(true);
+                    }
+                    None => self.notice(client_id, "no such squad"),
+                }
+                Flow::Continue
+            }
+            Command::RemoveSquad(id) => {
+                // Close a whole workspace (x-96e8): reap every pane across all
+                // its tabs, drop the squad, re-anchor views. Destructiveness is
+                // gated client-side by a confirm; the server just executes.
+                let Some(pos) = self.session.squads.iter().position(|s| s.id == id) else {
+                    self.notice(client_id, "no such squad");
+                    return Flow::Continue;
+                };
+                let pids: Vec<u64> = self.session.squads[pos]
+                    .tabs
+                    .iter()
+                    .flat_map(|t| tree::leaves(&t.root))
+                    .collect();
+                let tids: Vec<TabId> = self.session.squads[pos].tabs.iter().map(|t| t.id).collect();
+                for pid in pids {
+                    self.reap_pane(pid);
+                }
+                self.session.squads.remove(pos);
+                for tid in tids {
+                    self.tab_areas.remove(&tid);
+                }
+                // The last squad ends the session (Locked Decision 8), exactly
+                // like closing its tabs one at a time.
+                if self.session.squads.is_empty() {
+                    self.session.active_squad = None;
+                    return Flow::Shutdown;
+                }
+                if self.session.active_squad == Some(id) {
+                    self.session.active_squad = Some(self.session.squads[0].id);
+                }
+                self.reanchor_views();
+                self.push_layout(true);
+                Flow::Continue
+            }
+            Command::MoveSquad { squad, delta } => {
+                // Reorder the sideline (x-96e8). Pure presentation move: clamp
+                // to the list bounds; an already-at-edge move is a silent no-op
+                // (holding a reorder key at the top must not bell).
+                let Some(idx) = self.session.squads.iter().position(|s| s.id == squad) else {
+                    self.notice(client_id, "no such squad");
+                    return Flow::Continue;
+                };
+                let len = self.session.squads.len() as i64;
+                let new = (idx as i64 + delta as i64).clamp(0, len - 1) as usize;
+                if new != idx {
+                    let sq = self.session.squads.remove(idx);
+                    self.session.squads.insert(new, sq);
+                    self.push_layout(true);
+                }
+                Flow::Continue
+            }
+            Command::MoveTab { tab, squad } => {
+                // Re-home a whole tab into another squad (x-96e8). move_tab does
+                // the pure data surgery; the view fixup lives here.
+                match self.session.move_tab(tab, squad) {
+                    MoveTabOutcome::Refused(msg) => self.notice(client_id, msg),
+                    outcome => {
+                        // A viewer watching the moved tab FOLLOWS it into dst
+                        // (content continuity beats spatial position); set_view
+                        // validates the (dst, tab) pair.
+                        let movers: Vec<u64> = self
+                            .clients
+                            .iter()
+                            .filter(|c| c.view.1 == tab)
+                            .map(|c| c.id)
+                            .collect();
+                        for cid in movers {
+                            self.set_view(cid, squad, tab);
+                        }
+                        // Source squad died (its last tab moved out): its other
+                        // viewers, if any, re-anchor to a survivor.
+                        if matches!(outcome, MoveTabOutcome::MovedSquadRemoved) {
+                            self.reanchor_views();
+                        }
+                        self.push_layout(true);
+                    }
                 }
                 Flow::Continue
             }
@@ -3122,33 +3248,28 @@ async fn serve(
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
-    // the fno-agents registry on the blocking pool, re-derives the agent row
-    // set (TTL aging included), and sends it to the core only when it
-    // changed. The render path never touches the file (AC2-UI; the origin
-    // freeze class), and its staleness is bounded by this one interval.
+    // BOTH the fno-agents registry AND claude's daemon roster (x-0a2e) on the
+    // blocking pool, unions them into the agent row set (TTL aging + roster
+    // liveness upgrade + foreign rows included), and sends it to the core only
+    // when the MERGED set changed. Each file is behind its own mtime+len gate,
+    // so a roster-only change publishes and an idle tick reads nothing. The
+    // render path never touches either file (AC2-UI; the origin freeze class),
+    // and staleness stays bounded by this one interval.
     {
         let core_tx = core_tx.clone();
-        let path = agents_view::registry_path();
+        let reg_path = agents_view::registry_path();
+        let roster_path = agents_view::roster_path();
         let mut count_rx = client_count_rx.clone();
         tokio::spawn(async move {
             let mut state = agents_view::ReaderState::default();
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                // Gate the registry read on an attached client (x-4e30). The
-                // `changed()` arm IS the 0->1 kick: an attach wakes the parked
-                // reader at once so the first overlay is fresh (AC3-FR).
-                tokio::select! {
-                    _ = tick.tick() => {}
-                    res = count_rx.changed() => {
-                        if res.is_err() {
-                            return; // Core dropped; server shutting down
-                        }
-                    }
-                }
-                if *count_rx.borrow() == 0 {
-                    continue; // no viewer -> skip the file read entirely
-                }
+            // Stat + conditional read of one file behind an mtime+len gate,
+            // both off the core loop. Returns (fresh stamp, raw-if-changed).
+            async fn scan(
+                path: std::path::PathBuf,
+                cached: Option<(std::time::SystemTime, u64)>,
+            ) -> (Option<(std::time::SystemTime, u64)>, Option<String>) {
                 let stat_path = path.clone();
                 let stamp = tokio::task::spawn_blocking(move || {
                     std::fs::metadata(&stat_path)
@@ -3158,25 +3279,45 @@ async fn serve(
                 .await
                 .ok()
                 .flatten();
-                let read_path = path.clone();
-                let changed = stamp != {
-                    // Peek: ReaderState owns the cached stamp; read the
-                    // file only when it moved (mtime+len gate).
-                    state.cached_stamp()
-                };
-                let raw = if changed {
-                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&read_path).ok())
+                let raw = if stamp != cached {
+                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&path).ok())
                         .await
                         .ok()
                         .flatten()
                 } else {
                     None
                 };
+                (stamp, raw)
+            }
+            loop {
+                // Gate the registry+roster read on an attached client (x-4e30).
+                // The `changed()` arm IS the 0->1 kick: an attach wakes the
+                // parked reader at once so the first overlay is fresh (AC3-FR).
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    res = count_rx.changed() => {
+                        if res.is_err() {
+                            return; // Core dropped; server shutting down
+                        }
+                    }
+                }
+                if *count_rx.borrow() == 0 {
+                    continue; // no viewer -> skip both file reads entirely
+                }
+                let (reg_stamp, reg_raw) = scan(reg_path.clone(), state.reg_stamp()).await;
+                let (roster_stamp, roster_raw) =
+                    scan(roster_path.clone(), state.roster_stamp()).await;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                if let Some(rows) = state.tick(stamp, move || raw, now) {
+                if let Some(rows) = state.tick(
+                    reg_stamp,
+                    move || reg_raw,
+                    roster_stamp,
+                    move || roster_raw,
+                    now,
+                ) {
                     if core_tx.send(CoreMsg::AgentRows(rows)).await.is_err() {
                         return; // core loop gone; the server is shutting down
                     }
@@ -4237,6 +4378,7 @@ mod tests {
             mux: Some((sess.into(), pane)),
             answerable: None,
             attach_id: None,
+            external: false,
         }
     }
 
@@ -4266,6 +4408,7 @@ mod tests {
                 mux: Some(("other".into(), 5)),
                 answerable: None,
                 attach_id: None,
+                external: false,
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
@@ -4278,6 +4421,7 @@ mod tests {
                 mux: None,
                 answerable: None,
                 attach_id: Some("c19cd2c3".into()),
+                external: false,
             },
         ];
         let rows = core.agent_rows();
@@ -4347,6 +4491,7 @@ mod tests {
                 mux: None,
                 answerable: None,
                 attach_id: None,
+                external: false,
             },
         ];
         let rows = core.agent_rows();
@@ -4362,6 +4507,90 @@ mod tests {
             Some(2),
             "a watch-only row matches a squad via a child of origins[1]"
         );
+    }
+
+    #[test]
+    fn external_synthesized_row_passes_the_attach_catalog_gate() {
+        // AC2-HP: a roster-synthesized foreign row (mux None, !exited, attach_id
+        // set, external true) is attachable through the EXISTING catalog gate,
+        // with no new spawn path. An exited or pane-hosted row is refused, like
+        // any non-attachable registry row.
+        let mut core = empty_core();
+        core.agents = vec![
+            RegistryAgent {
+                name: "think-x-9999".into(),
+                cwd: "/w".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+                attach_id: Some("ab12cd34".into()),
+                external: true,
+            },
+            // An exited external row (dead pane beat the upgrade): not attachable.
+            RegistryAgent {
+                name: "dead-ext".into(),
+                cwd: "/w".into(),
+                exited: true,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+                attach_id: Some("ffffffff".into()),
+                external: true,
+            },
+        ];
+        assert!(
+            core.attachable_agent("ab12cd34"),
+            "a live foreign row is attachable"
+        );
+        assert!(
+            !core.attachable_agent("ffffffff"),
+            "an exited foreign row is refused"
+        );
+        assert!(
+            !core.attachable_agent("deadbeef"),
+            "an id naming no surfaced row is refused"
+        );
+    }
+
+    #[test]
+    fn dead_pane_beats_roster_liveness_upgrade() {
+        // AC2-EDGE: an upgraded (roster-present, external) registry row whose
+        // mux ref points to a dead pane in THIS session renders exited - the
+        // pane fact stays senior over the merge's un-exit.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        core.session.add_squad(
+            1,
+            vec!["/w".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        // merge_rows would have set exited=false + external=true on this row,
+        // but its mux pane (77) is absent from core.panes -> pane_dead.
+        core.agents = vec![RegistryAgent {
+            name: "upgraded".into(),
+            cwd: "/w".into(),
+            exited: false,
+            badge: None,
+            reason: None,
+            mux: Some(("main".into(), 77)),
+            answerable: None,
+            attach_id: Some("ab12cd34".into()),
+            external: true,
+        }];
+        let rows = core.agent_rows();
+        let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
+        assert!(row.exited, "a dead pane forces exited despite the upgrade");
+        assert!(row.external, "provenance still rides through");
+        assert_eq!(row.attach_id, None, "an exited row drops its attach target");
     }
 
     #[test]
@@ -4494,6 +4723,182 @@ mod tests {
         assert_eq!(stored, format!("[31m{}", "a".repeat(MAX_TAB_NAME - 4)));
     }
 
+    // -- x-96e8 squad management verbs ----------------------------------
+
+    fn leaf_tab(id: TabId, pane: u64) -> Tab {
+        Tab {
+            name: None,
+            id,
+            root: Node::Leaf(pane),
+            focus: pane,
+        }
+    }
+
+    #[test]
+    fn rename_squad_blank_clears_origin_squad_and_refuses_origin_less() {
+        // AC1-EDGE + AC1-ERR (server half): a blank rename clears an origin-
+        // backed squad to its derived label, but an origin-less (NewSquad)
+        // squad has no derivable label, so the blank is refused (name kept).
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/x".into()], Some("work".into()), leaf_tab(5, 1));
+        core.session
+            .add_squad(2, vec![], Some("scratch".into()), leaf_tab(6, 2));
+
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameSquad {
+                squad: 1,
+                name: "  oss ".into(),
+            },
+        );
+        assert_eq!(core.session.squads[0].name.as_deref(), Some("oss"));
+
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameSquad {
+                squad: 1,
+                name: "   ".into(),
+            },
+        );
+        assert_eq!(
+            core.session.squads[0].name, None,
+            "blank clears an origin-backed squad to its derived label"
+        );
+
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameSquad {
+                squad: 2,
+                name: "".into(),
+            },
+        );
+        assert_eq!(
+            core.session.squads[1].name.as_deref(),
+            Some("scratch"),
+            "an origin-less squad refuses a blank (nothing to derive)"
+        );
+    }
+
+    #[test]
+    fn remove_squad_reanchors_then_last_ends_the_session() {
+        // AC2-HP / AC2-EDGE (server half): removing a squad drops it and re-
+        // anchors active_squad; removing the last squad ends the session.
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.session
+            .add_squad(2, vec!["/b".into()], None, leaf_tab(6, 2));
+        core.session.active_squad = Some(1);
+
+        core.clients.push(client(1, 5, (24, 80), false));
+        let flow = core.command(1, Command::RemoveSquad(1));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(core.session.squads.len(), 1);
+        assert_eq!(core.session.squad(1), None);
+        assert_eq!(
+            core.session.active_squad,
+            Some(2),
+            "active re-anchors to a survivor"
+        );
+
+        core.clients.push(client(1, 6, (24, 80), false));
+        let flow = core.command(1, Command::RemoveSquad(2));
+        assert!(
+            matches!(flow, Flow::Shutdown),
+            "removing the last squad ends the session (Locked Decision 8)"
+        );
+        assert!(core.session.squads.is_empty());
+    }
+
+    #[test]
+    fn remove_squad_unknown_id_is_refused_without_mutation() {
+        // AC2-ERR: a RemoveSquad naming a dead id touches nothing.
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.clients.push(client(1, 5, (24, 80), false));
+        let flow = core.command(1, Command::RemoveSquad(999));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(core.session.squads.len(), 1, "no squad removed");
+    }
+
+    #[test]
+    fn move_squad_reorders_and_edge_bump_is_silent_noop() {
+        // AC3-HP + Boundaries: reorder clamps to the list, and an at-edge move
+        // is a silent no-op (holding a reorder key at the top must not churn).
+        let mut core = empty_core();
+        for (sid, tid, pid) in [(1u64, 5u64, 1u64), (2, 6, 2), (3, 7, 3)] {
+            core.session
+                .add_squad(sid, vec![format!("/{sid}")], None, leaf_tab(tid, pid));
+        }
+        let order = |c: &Core| c.session.squads.iter().map(|s| s.id).collect::<Vec<_>>();
+
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::MoveSquad {
+                squad: 3,
+                delta: -1,
+            },
+        );
+        assert_eq!(order(&core), vec![1, 3, 2], "squad 3 moved up one");
+
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::MoveSquad {
+                squad: 1,
+                delta: -1,
+            },
+        );
+        assert_eq!(
+            order(&core),
+            vec![1, 3, 2],
+            "an at-edge bump changes nothing"
+        );
+    }
+
+    #[test]
+    fn move_tab_follows_the_viewing_client_into_dst() {
+        // Invariant (view validity): a viewer of the moved tab follows it into
+        // the destination squad - content continuity beats spatial position.
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.session
+            .add_squad(2, vec!["/b".into()], None, leaf_tab(6, 2));
+        // A live receiver so push_layout does not reap the client before we
+        // read its post-move view.
+        let (tx, _rx) = mpsc::channel(8);
+        core.clients.push(Client {
+            id: 1,
+            reliable_tx: tx,
+            dirty: Arc::default(),
+            notify: Arc::new(Notify::new()),
+            synced_modes: Modes::default(),
+            view: (1, 5),
+            visible: HashSet::new(),
+            dims: (24, 80),
+            passive: false,
+        });
+
+        core.command(1, Command::MoveTab { tab: 5, squad: 2 });
+        assert_eq!(
+            core.session.find_tab(5),
+            Some((2, 1)),
+            "tab 5 re-homed into squad 2"
+        );
+        assert_eq!(
+            core.clients[0].view,
+            (2, 5),
+            "the viewer follows the moved tab into its new squad"
+        );
+    }
+
     #[test]
     fn attach_agent_refuses_unknown_or_malformed_jobid() {
         // The jobId lands in `claude attach <id>`'s argv, so an out-of-shape id
@@ -4600,6 +5005,7 @@ mod tests {
             mux: None,
             answerable: None,
             attach_id: attach.map(str::to_owned),
+            external: false,
         }
     }
 

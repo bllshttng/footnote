@@ -2507,6 +2507,7 @@ mod tests {
             mux: mux.map(|(s, p)| (s.to_string(), p)),
             answerable: None,
             attach_id: None,
+            external: false,
         }
     }
 

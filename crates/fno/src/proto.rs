@@ -108,12 +108,27 @@ use crate::tree::{Dir, Rect, TabId};
 /// v18: `BacklogCard.{pane_id, attach_id, where_hint}` - publish-time routes
 /// so an in-flight work-queue card focuses/attaches/locates its live session
 /// (x-54fa) instead of dead-ending.
-pub const PROTO_VERSION: u32 = 18;
+/// v19: `Command::{RenameSquad, RemoveSquad, MoveSquad, MoveTab}` - squad
+/// management verbs (x-96e8): rename/clear a workspace label, close a whole
+/// workspace, reorder the sideline, re-home a tab into another workspace.
+/// Parallel-branch hazard: two in-flight mux branches both take "next", so the
+/// one that merges second must re-bump (v17/v18 were re-numbered once already).
+/// v20: `AgentRow.external` - a sideline row surfaced or liveness-upgraded from
+/// claude's daemon roster rather than the fno registry (x-0a2e); renders dim.
+/// `#[serde(default)]` keeps a v19 reader wire-tolerant. (Re-bumped from 19:
+/// x-96e8 merged first and took 19 - the second-to-merge re-bump rule.)
+pub const PROTO_VERSION: u32 = 20;
 
 /// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
 /// (the authoritative cap for any wire client) and the rename overlay's input
 /// cap (the TUI affordance, so the operator sees exactly what will be stored).
 pub const MAX_TAB_NAME: usize = 32;
+
+/// The stored squad-name ceiling (x-96e8), the same 32-char cap as
+/// [`MAX_TAB_NAME`] applied to `RenameSquad` on both the server sanitize and
+/// the client input. A sibling const (not a shared rename) so the two rename
+/// paths stay independently readable.
+pub const MAX_SQUAD_NAME: usize = 32;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -393,6 +408,15 @@ pub struct AgentRow {
     /// non-attachable row. `#[serde(default)]` keeps a v13 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_id: Option<String>,
+    /// (v20, x-0a2e) True when this row's provenance is claude's daemon roster
+    /// (a synthesized foreign session or a roster-liveness-upgraded registry
+    /// row) rather than the fno registry: rendered dim, read-only toward
+    /// `~/.claude/**`. NOT an attachability signal (that is
+    /// `attach_id.is_some()`); an external row whose pane died is still
+    /// `external: true` but exited. `#[serde(default)]` keeps a v19 reader
+    /// wire-tolerant (defaults false).
+    #[serde(default)]
+    pub external: bool,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -538,6 +562,44 @@ pub enum Command {
     RenameTab {
         tab: TabId,
         name: String,
+    },
+    /// (v19, x-96e8) Rename a squad/workspace. `squad` names a stable squad id
+    /// from the last `Layout` catalog (a stale id is refused fail-closed with a
+    /// notice, like `SelectSquad`). The server sanitizes `name` (strip control
+    /// chars, trim, cap [`MAX_SQUAD_NAME`]); a blank name CLEARS the explicit
+    /// name back to the derived `origins` label (the `RenameTab` precedent) -
+    /// EXCEPT for an origin-less squad (a `NewSquad` workspace), whose derived
+    /// label would be empty: there a blank is refused with `name required`.
+    RenameSquad {
+        squad: u64,
+        name: String,
+    },
+    /// (v19, x-96e8) Close a whole workspace: reap every pane across all its
+    /// tabs, remove the squad, re-anchor views. Removing the LAST squad ends
+    /// the session (`Bye`), identical to closing its tabs one at a time
+    /// (Locked Decision 8). Destructiveness is gated CLIENT-side by a confirm,
+    /// not refused server-side (every live squad always has an occupied tab, so
+    /// "refuse while occupied" would be a dead verb). A stale/unknown id is
+    /// refused with a notice.
+    RemoveSquad(u64),
+    /// (v19, x-96e8) Reorder the sideline: move the squad `delta` positions in
+    /// `Session::squads` (the sideline order). The target index is clamped to
+    /// the list bounds; an already-at-edge move is a silent no-op (holding a
+    /// reorder key at the top must not bell). An unknown id is refused with a
+    /// notice. Pure presentation reorder: no ids, views, or active_tab change.
+    MoveSquad {
+        squad: u64,
+        delta: i32,
+    },
+    /// (v19, x-96e8) Re-home a whole tab (and every pane in it) into another
+    /// squad. `tab` names a `TabMeta::id`, `squad` a destination squad id, both
+    /// from the last `Layout` catalog. An unknown tab, unknown dst, or dst ==
+    /// src is refused fail-closed with a notice. Panes are NOT reaped (they
+    /// move with the tab); if the source squad's last tab moves out, the now
+    /// empty squad is removed (its panes already gone) and views re-anchor.
+    MoveTab {
+        tab: TabId,
+        squad: u64,
     },
 }
 
@@ -741,6 +803,11 @@ pub struct SquadMeta {
     pub canonical_cwd: String,
     pub tabs: Vec<TabMeta>,
     pub active_tab: usize,
+    /// (v19, x-96e8) Total live pane count across ALL the squad's tabs - the
+    /// blast radius the `RemoveSquad` confirm names before it reaps them.
+    /// Display-only; a slightly stale count only skews the prompt, and the
+    /// server reaps whatever is actually live at commit.
+    pub panes: usize,
 }
 
 /// A complete rendered screen: `rows * cols` cells in row-major order plus the
@@ -1315,6 +1382,18 @@ mod tests {
     }
 
     #[test]
+    fn agent_row_from_pre_external_json_defaults_external_false() {
+        // x-0a2e AC3-FR: a pre-external (<=v19) AgentRow omits `external`
+        // entirely. A v20 reader must decode it as `false`, never fail - the
+        // skew window that lets an older client talk to a v20 server during
+        // the handshake, and vice versa.
+        let older = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(older).unwrap();
+        assert!(!row.external, "missing external key => false");
+    }
+
+    #[test]
     fn backlog_card_from_pre_v18_json_defaults_route_fields_none() {
         // A pre-v18 (v11..v17) BacklogCard omits the route fields entirely
         // (skip-when-None). A v18 reader must decode it as all-None, never
@@ -1354,6 +1433,7 @@ mod tests {
                         },
                     ],
                     active_tab: 1,
+                    panes: 2,
                 }],
                 active_squad: 1,
                 panes: vec![
@@ -1404,6 +1484,7 @@ mod tests {
                             region_lines: 8,
                         }),
                         attach_id: None,
+                        external: false,
                     },
                     AgentRow {
                         squad: None,
@@ -1414,6 +1495,7 @@ mod tests {
                         exited: true,
                         answerable: None,
                         attach_id: None,
+                        external: false,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
