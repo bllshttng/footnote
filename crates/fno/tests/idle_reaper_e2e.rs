@@ -168,7 +168,16 @@ fn autospawn_reaped() {
 
     let run = Command::new(env!("CARGO_BIN_EXE_fno"))
         .args([
-            "mux", "pane", "run", "--session", "work", "--cwd", dir, "--", "/bin/sh", "-c",
+            "mux",
+            "pane",
+            "run",
+            "--session",
+            "work",
+            "--cwd",
+            dir,
+            "--",
+            "/bin/sh",
+            "-c",
             "sleep 300",
         ])
         .env("FNO_MUX_DIR", &scratch.0)
