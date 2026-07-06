@@ -3203,19 +3203,30 @@ async fn serve(
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
-    // the fno-agents registry on the blocking pool, re-derives the agent row
-    // set (TTL aging included), and sends it to the core only when it
-    // changed. The render path never touches the file (AC2-UI; the origin
-    // freeze class), and its staleness is bounded by this one interval.
+    // BOTH the fno-agents registry AND claude's daemon roster (x-0a2e) on the
+    // blocking pool, unions them into the agent row set (TTL aging + roster
+    // liveness upgrade + foreign rows included), and sends it to the core only
+    // when the MERGED set changed. Each file is behind its own mtime+len gate,
+    // so a roster-only change publishes and an idle tick reads nothing. The
+    // render path never touches either file (AC2-UI; the origin freeze class),
+    // and staleness stays bounded by this one interval.
     {
         let core_tx = core_tx.clone();
-        let path = agents_view::registry_path();
+        let reg_path = agents_view::registry_path();
+        let roster_path = agents_view::roster_path();
         tokio::spawn(async move {
             let mut state = agents_view::ReaderState::default();
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
+            // Stat + conditional read of one file behind an mtime+len gate,
+            // both off the core loop. Returns (fresh stamp, raw-if-changed).
+            async fn scan(
+                path: std::path::PathBuf,
+                cached: Option<(std::time::SystemTime, u64)>,
+            ) -> (
+                Option<(std::time::SystemTime, u64)>,
+                Option<String>,
+            ) {
                 let stat_path = path.clone();
                 let stamp = tokio::task::spawn_blocking(move || {
                     std::fs::metadata(&stat_path)
@@ -3225,25 +3236,32 @@ async fn serve(
                 .await
                 .ok()
                 .flatten();
-                let read_path = path.clone();
-                let changed = stamp != {
-                    // Peek: ReaderState owns the cached stamp; read the
-                    // file only when it moved (mtime+len gate).
-                    state.cached_stamp()
-                };
-                let raw = if changed {
-                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&read_path).ok())
+                let raw = if stamp != cached {
+                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&path).ok())
                         .await
                         .ok()
                         .flatten()
                 } else {
                     None
                 };
+                (stamp, raw)
+            }
+            loop {
+                tick.tick().await;
+                let (reg_stamp, reg_raw) = scan(reg_path.clone(), state.reg_stamp()).await;
+                let (roster_stamp, roster_raw) =
+                    scan(roster_path.clone(), state.roster_stamp()).await;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                if let Some(rows) = state.tick(stamp, move || raw, now) {
+                if let Some(rows) = state.tick(
+                    reg_stamp,
+                    move || reg_raw,
+                    roster_stamp,
+                    move || roster_raw,
+                    now,
+                ) {
                     if core_tx.send(CoreMsg::AgentRows(rows)).await.is_err() {
                         return; // core loop gone; the server is shutting down
                     }
@@ -4227,6 +4245,7 @@ mod tests {
             mux: Some((sess.into(), pane)),
             answerable: None,
             attach_id: None,
+            external: false,
         }
     }
 
@@ -4256,6 +4275,7 @@ mod tests {
                 mux: Some(("other".into(), 5)),
                 answerable: None,
                 attach_id: None,
+                external: false,
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
@@ -4268,6 +4288,7 @@ mod tests {
                 mux: None,
                 answerable: None,
                 attach_id: Some("c19cd2c3".into()),
+                external: false,
             },
         ];
         let rows = core.agent_rows();
@@ -4337,6 +4358,7 @@ mod tests {
                 mux: None,
                 answerable: None,
                 attach_id: None,
+                external: false,
             },
         ];
         let rows = core.agent_rows();
@@ -4766,6 +4788,7 @@ mod tests {
             mux: None,
             answerable: None,
             attach_id: attach.map(str::to_owned),
+            external: false,
         }
     }
 
