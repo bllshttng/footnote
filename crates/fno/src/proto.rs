@@ -101,7 +101,16 @@ use crate::tree::{Dir, Rect, TabId};
 /// v15: `MouseKind::Move` (1003 any-motion hover reports) drives focus-follows-
 /// mouse; `Command::DispatchNode(id)` starts a targeted interactive session from
 /// a clicked work-queue card (the confirm path).
-pub const PROTO_VERSION: u32 = 16;
+/// v16: `Command::NewSquad { name, origin }` - explicit named-workspace
+/// creation (the `+` sideline footer, x-9e5e).
+/// v17: `Command::RenameTab { tab, name }` - explicit tab rename (leader+,,
+/// x-c150); a blank name clears the rename back to the derived label.
+pub const PROTO_VERSION: u32 = 17;
+
+/// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
+/// (the authoritative cap for any wire client) and the rename overlay's input
+/// cap (the TUI affordance, so the operator sees exactly what will be stored).
+pub const MAX_TAB_NAME: usize = 32;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -499,6 +508,17 @@ pub enum Command {
     NewSquad {
         name: String,
         origin: Option<String>,
+    },
+    /// (v17) Rename a tab (x-c150). `tab` names a stable [`TabMeta::id`] from
+    /// the last `Layout`'s catalog (a stale id is refused fail-closed with a
+    /// notice, like `SelectTab`). The server sanitizes `name` (strip control
+    /// chars, trim, cap [`MAX_TAB_NAME`]) before storing; a blank/whitespace
+    /// name CLEARS the explicit rename and reverts to the derived label -
+    /// deliberately unlike `NewSquad`'s blank-refusal, because "reset to
+    /// auto" is a meaningful rename target.
+    RenameTab {
+        tab: TabId,
+        name: String,
     },
 }
 

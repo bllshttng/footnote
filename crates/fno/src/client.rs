@@ -29,7 +29,7 @@ use crate::keys::{Event, Scanner};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentRow, BacklogCard, BlockDir, CardState,
     Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent, MouseKind, ProtoError,
-    ServerMsg, SquadMeta, BUILD_VERSION, PROTO_VERSION,
+    ServerMsg, SquadMeta, BUILD_VERSION, MAX_TAB_NAME, PROTO_VERSION,
 };
 use crate::tree::{Rect, TabId};
 
@@ -405,6 +405,14 @@ struct View {
     /// Pending escape bytes in create-overlay mode (same split-arrow safety as
     /// [`View::search_esc`]).
     create_esc: Vec<u8>,
+    /// (x-c150) The pending rename-tab buffer: `(tab id captured at open,
+    /// typed name)`, `Some` while the `leader+,` overlay is open. Keys divert
+    /// to [`rename_keys`]. Enter on an EMPTY buffer still sends (blank =
+    /// clear back to the derived label), unlike `create`.
+    rename: Option<(TabId, String)>,
+    /// Pending escape bytes in rename-overlay mode (same split-arrow safety
+    /// as [`View::create_esc`]).
+    rename_esc: Vec<u8>,
 }
 
 /// A pending work-queue card dispatch awaiting the operator's one-keypress
@@ -455,6 +463,8 @@ impl View {
             confirm: None,
             create: None,
             create_esc: Vec::new(),
+            rename: None,
+            rename_esc: Vec::new(),
         }
     }
 
@@ -480,6 +490,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.search = None;
+        self.rename = None;
         self.create = Some(String::new());
         self.create_esc.clear();
     }
@@ -498,7 +509,23 @@ impl View {
         // after the confirm resolves reads as a stuck client.
         self.create = None;
         self.create_esc.clear();
+        // Same for a half-typed rename (x-c150): the confirm must not hide a
+        // live text-input overlay whose next Enter it would steal.
+        self.rename = None;
+        self.rename_esc.clear();
         self.confirm = Some(action);
+    }
+
+    /// Open the rename-tab name overlay modally for `tab` (x-c150), clearing
+    /// any other keyboard-opened overlay first - the same discipline as
+    /// [`View::open_create`] (a lingering selector would swallow the name).
+    fn open_rename(&mut self, tab: TabId) {
+        self.selector = None;
+        self.answers = None;
+        self.search = None;
+        self.create = None;
+        self.rename = Some((tab, String::new()));
+        self.rename_esc.clear();
     }
 
     fn panel_visible(&self) -> bool {
@@ -994,6 +1021,7 @@ impl View {
         self.term.0 >= MIN_ROWS_FOR_STATUS
             && (self.confirm.is_some()
                 || self.create.is_some()
+                || self.rename.is_some()
                 || self.search.is_some()
                 || self.hint
                 || self.status_on)
@@ -1017,6 +1045,24 @@ impl View {
                 cells[r * cols + c] = Cell::default();
             }
             let text = format!(" new workspace: {name}_");
+            for (i, ch) in text.chars().take(cols).enumerate() {
+                cells[r * cols + i] = Cell {
+                    c: ch,
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: cell_flags::BOLD,
+                };
+            }
+            return;
+        }
+        // The rename-tab name input (x-c150), same overlay discipline as the
+        // create input above; the hint spells out the blank-clears semantics.
+        if let Some((_, name)) = &self.rename {
+            let r = rows - 1;
+            for c in 0..cols {
+                cells[r * cols + c] = Cell::default();
+            }
+            let text = format!(" rename tab: {name}_ (empty resets to auto)");
             for (i, ch) in text.chars().take(cols).enumerate() {
                 cells[r * cols + i] = Cell {
                     c: ch,
@@ -1164,10 +1210,11 @@ impl View {
             hit: None,
         });
         for (i, t) in s.tabs.iter().enumerate() {
+            let label = tab_label_text(&t.name, i);
             let (text, flags) = if i == s.active_tab {
-                (format!("[{}]", i + 1), cell_flags::INVERSE)
+                (format!("[{label}]"), cell_flags::INVERSE)
             } else {
-                (format!(" {} ", i + 1), 0)
+                (format!(" {label} "), 0)
             };
             spans.push(TabSpan {
                 text,
@@ -1302,7 +1349,13 @@ impl View {
                             } else {
                                 ' '
                             };
-                            (format!("  {marker}{}", t + 1), 0)
+                            // The same digit-collapse as the tab bar: a
+                            // no-signal tab renders its bare ordinal (x-c150).
+                            let label = match squad.tabs.get(t) {
+                                Some(tm) => tab_label_text(&tm.name, t),
+                                None => (t + 1).to_string(),
+                            };
+                            (format!("  {marker}{label}"), 0)
                         }
                     };
                     (text, flags)
@@ -1427,6 +1480,25 @@ enum ChromeHit {
     OpenCreate,
 }
 
+/// A named tab's visible label width in the tab bar / sideline (x-c150);
+/// keeps ~4 labeled tabs visible at 100 cols.
+const TAB_LABEL_W: usize = 14;
+
+/// A tab span's label body (x-c150): the bare 1-based ordinal when the
+/// server-derived name carries no signal (the name IS the ordinal -
+/// byte-for-byte today's render for a plain shell tab, AC1-EDGE), else
+/// `{ordinal}:{name}` with the name truncated to [`TAB_LABEL_W`] chars. The
+/// ordinal stays visible in every span because the `1-9 select tab` keys
+/// key off it (Locked 5).
+fn tab_label_text(name: &str, i: usize) -> String {
+    let ordinal = (i + 1).to_string();
+    if name == ordinal {
+        return ordinal;
+    }
+    let short: String = name.chars().take(TAB_LABEL_W).collect();
+    format!("{ordinal}:{short}")
+}
+
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
 /// boundary so `/home/user2/...` never reads as `~2/...`.
 fn abbrev_home(p: &str) -> String {
@@ -1469,6 +1541,7 @@ const KEY_TABLE: &[&str] = &[
     "  [ ]  jump block       v  select block   ",
     "  y  copy selection     r  rerun block    ",
     "  g  grab work (dispatch next ready)     ",
+    "  ,  rename tab (empty resets to auto)   ",
     "  /  search scrollback  n/N older/newer  ",
     "  d  detach             C-b C-b  literal  ",
     " any key dismisses                        ",
@@ -2109,6 +2182,11 @@ async fn handle_stdin(
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
+    if view.rename.is_some() {
+        // Same precedence slot as create_keys: AFTER selector/answers, so a
+        // lingering overlay never swallows the typed name (x-9e5e finding).
+        return rename_keys(view, &passthrough, sock_w).await;
+    }
     if view.search.is_some() {
         return search_keys(view, &passthrough, sock_w).await;
     }
@@ -2242,6 +2320,29 @@ async fn handle_stdin(
                 });
                 view.search_esc.clear();
                 break;
+            }
+            Event::OpenRename => {
+                // Rename targets the ACTIVE tab, resolved to its stable id at
+                // open time so a tab switch mid-edit cannot retarget the send
+                // (the server refuses a stale id fail-closed - AC1-FR).
+                let tab = view
+                    .layout
+                    .squads
+                    .iter()
+                    .find(|s| s.id == view.layout.active_squad)
+                    .and_then(|s| s.tabs.get(s.active_tab))
+                    .map(|t| t.id);
+                match tab {
+                    Some(id) => {
+                        view.open_rename(id);
+                        // Swallow same-chunk bytes after the chord, like
+                        // SearchOpen: nothing may leak into the pane.
+                        break;
+                    }
+                    None => {
+                        let _ = raw_out(b"\x07");
+                    }
+                }
             }
             Event::Bell => {
                 let _ = raw_out(b"\x07");
@@ -2638,6 +2739,65 @@ async fn create_keys(
     Ok(StdinFlow::Continue)
 }
 
+/// Rename-tab name-input keys (x-c150). The create overlay's shape (split-arrow
+/// folding, printable append, Backspace pops, Esc cancels locally) with one
+/// deliberate divergence: Enter ALWAYS sends [`Command::RenameTab`] - an empty
+/// buffer is the "reset to auto" verb (blank clears server-side), not a kept-open
+/// input. The buffer caps at [`MAX_TAB_NAME`] so the operator sees exactly what
+/// the server will store (the server-side cap stays authoritative for the wire).
+async fn rename_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.rename_esc);
+    let keys = fold_search_input(&mut esc, bytes);
+    view.rename_esc = esc;
+    for key in keys {
+        // Re-read the mode each key: an Esc mid-chunk closes it, and the rest
+        // of the chunk must be swallowed, never forwarded.
+        if view.rename.is_none() {
+            break;
+        }
+        match key {
+            SearchKey::Esc => {
+                // AC1-UI: no command sent, chrome restored, no state retained.
+                view.rename = None;
+                view.rename_esc.clear();
+                break;
+            }
+            SearchKey::Byte(b) => match b {
+                b'\r' | b'\n' => {
+                    if let Some((tab, name)) = view.rename.take() {
+                        view.rename_esc.clear();
+                        write_msg(
+                            sock_w,
+                            &ClientMsg::Command(Command::RenameTab { tab, name }),
+                        )
+                        .await
+                        .map_err(|e| format!("rename-tab send failed: {e}"))?;
+                    }
+                    break;
+                }
+                0x7f | 0x08 => {
+                    if let Some((_, buf)) = view.rename.as_mut() {
+                        buf.pop();
+                    }
+                }
+                0x20..=0x7e => {
+                    if let Some((_, buf)) = view.rename.as_mut() {
+                        if buf.len() < MAX_TAB_NAME {
+                            buf.push(b as char);
+                        }
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
 /// Answer-overlay keys (x-c929): a digit answers the selected blocked pane
 /// (sending [`ClientMsg::PaneAnswer`] with the daemon-pinned option keystroke -
 /// focus unchanged), `n`/`N` (and j/k/arrows) cycle the blocked queue, Enter
@@ -2914,6 +3074,30 @@ mod tests {
                 .collect(),
             active_tab,
         }
+    }
+
+    #[test]
+    fn tab_bar_spans_label_named_tabs_and_collapse_bare_digits() {
+        // AC1-HP (render half) + AC1-EDGE: a no-signal name (== its ordinal)
+        // renders byte-for-byte today's `[N]` / ` N ` span; a real name
+        // renders `{ordinal}:{label}` (ordinal visible - Locked 5) truncated
+        // to TAB_LABEL_W.
+        let mut view = two_pane_view();
+        let spans = view.tab_bar_spans();
+        assert_eq!(spans[1].text, " 1 ", "digit collapse: zero regression");
+        assert_eq!(spans[2].text, "[2]");
+        view.layout.squads[0].tabs[0].name = "x-abcd".into();
+        view.layout.squads[0].tabs[1].name = "a-very-long-worktree-name".into();
+        let spans = view.tab_bar_spans();
+        assert_eq!(spans[1].text, " 1:x-abcd ");
+        assert_eq!(spans[2].text, "[2:a-very-long-wo]", "name truncates to 14");
+    }
+
+    #[test]
+    fn tab_label_text_collapses_only_the_exact_ordinal() {
+        assert_eq!(tab_label_text("1", 0), "1");
+        assert_eq!(tab_label_text("2", 0), "1:2", "a RENAME to a digit shows");
+        assert_eq!(tab_label_text("debug", 2), "3:debug");
     }
 
     fn text_frame(rows: u16, cols: u16, ch: char) -> Frame {
@@ -4280,5 +4464,71 @@ mod tests {
             buf.is_empty(),
             "cycling and closing send nothing to the pane"
         );
+    }
+
+    #[tokio::test]
+    async fn rename_keys_enter_sends_the_typed_name_for_the_captured_tab() {
+        // AC2-HP (client half): type + Enter -> one RenameTab for the tab id
+        // captured at open time.
+        let mut v = two_pane_view();
+        v.open_rename(7);
+        let mut buf: Vec<u8> = Vec::new();
+        rename_keys(&mut v, b"debug\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            msg,
+            ClientMsg::Command(Command::RenameTab {
+                tab: 7,
+                name: "debug".into()
+            })
+        );
+        assert_eq!(v.rename, None, "submit closes the overlay");
+    }
+
+    #[tokio::test]
+    async fn rename_keys_empty_enter_still_sends_the_clear() {
+        // Locked 2 / AC3-HP: Enter on an EMPTY buffer sends (blank = reset to
+        // auto) - the one deliberate divergence from create_keys.
+        let mut v = two_pane_view();
+        v.open_rename(7);
+        let mut buf: Vec<u8> = Vec::new();
+        rename_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            msg,
+            ClientMsg::Command(Command::RenameTab {
+                tab: 7,
+                name: String::new()
+            })
+        );
+        assert_eq!(v.rename, None);
+    }
+
+    #[tokio::test]
+    async fn rename_keys_esc_cancels_without_sending_and_swallows_the_tail() {
+        // AC1-UI: Esc closes, sends nothing; same-chunk bytes after the Esc
+        // die with the overlay instead of leaking into the pane.
+        let mut v = two_pane_view();
+        v.open_rename(7);
+        let mut buf: Vec<u8> = Vec::new();
+        rename_keys(&mut v, b"deb\x1bx", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "cancel sends no command");
+        assert_eq!(v.rename, None);
+    }
+
+    #[tokio::test]
+    async fn rename_keys_caps_the_buffer_at_max_tab_name() {
+        // The TUI affordance half of AC2-ERR: the operator sees exactly what
+        // the server will store (the server cap stays authoritative).
+        let mut v = two_pane_view();
+        v.open_rename(7);
+        let mut buf: Vec<u8> = Vec::new();
+        let long = "a".repeat(MAX_TAB_NAME + 8);
+        rename_keys(&mut v, long.as_bytes(), &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.rename.as_ref().unwrap().1.len(), MAX_TAB_NAME);
     }
 }

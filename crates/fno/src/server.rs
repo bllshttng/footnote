@@ -39,7 +39,7 @@ use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
     Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, ServerMsg, SquadMeta, TabMeta,
-    WaitOutcome,
+    WaitOutcome, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, RemoveOutcome, Resolver, Session};
@@ -450,6 +450,13 @@ struct PaneEntry {
     /// an ad-hoc `pane run` with no `FNO_NODE=` token. Surfaced to the client
     /// status row via `Layout::focus_node`.
     node: Option<String>,
+    /// The spawn cwd, captured once so the tab-label derivation (x-c150) never
+    /// touches the filesystem on the render path. Empty when the spawn fell
+    /// back to the server cwd.
+    cwd: String,
+    /// Basename of the spawned command ("claude", "htop"), parsed from the
+    /// pane-run argv like [`node_from_argv`]. `None` for a shell pane.
+    cmd: Option<String>,
 }
 
 /// Extract the `FNO_NODE` value from a pane-run `argv`. The `_mesh_env_wrapper`
@@ -471,6 +478,78 @@ fn node_from_argv(argv: &[String]) -> Option<String> {
         .find_map(|a| a.strip_prefix("FNO_NODE="))
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
+}
+
+/// The spawned command's basename for the tab-label chain (x-c150): the first
+/// argv token past an optional leading `env` + its `NAME=VALUE` run (the same
+/// scan shape as [`node_from_argv`]). `None` when the scan finds no command -
+/// spawn never fails on labeling.
+fn cmd_from_argv(argv: &[String]) -> Option<String> {
+    let cmd = if argv.first().map(String::as_str) == Some("env") {
+        argv.iter().skip(1).find(|a| !a.contains('='))?
+    } else {
+        argv.first()?
+    };
+    let base = cmd.rsplit('/').next().unwrap_or(cmd);
+    (!base.is_empty()).then(|| base.to_string())
+}
+
+/// A tab's display label (x-c150), from spawn-time facts only - no I/O, no
+/// subprocess on the layout path (squad.rs's origin-freeze discipline).
+/// Chain (Locked 1): explicit rename > `FNO_NODE` provenance > spawn-cwd
+/// basename when it differs from the squad's > command basename > the bare
+/// 1-based index (exactly the pre-x-c150 label, so a plain shell tab renders
+/// unchanged). `pane` is the focused pane's `(node, cwd, cmd)`; `None` (a
+/// reaped pane racing tree cleanup) falls through to the index - the
+/// derivation never panics on a missing pane.
+fn tab_label(
+    rename: Option<&str>,
+    pane: Option<(Option<&str>, &str, Option<&str>)>,
+    squad_cwd: &str,
+    i: usize,
+) -> String {
+    if let Some(name) = rename {
+        return name.to_string();
+    }
+    if let Some((node, cwd, cmd)) = pane {
+        // Every derived candidate is sanitized like a rename (codex peer
+        // review): FNO_NODE values, dir names, and argv all admit control
+        // bytes, and these strings land in chrome cells. A candidate that
+        // sanitizes to empty (e.g. whitespace-only) falls through to the
+        // next source instead of rendering a blank label.
+        if let Some(node) = node {
+            let clean = sanitize_tab_name(node);
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+        fn base(p: &str) -> &str {
+            p.trim_end_matches('/').rsplit('/').next().unwrap_or("")
+        }
+        let cwd_base = base(cwd);
+        if !cwd_base.is_empty() && cwd_base != base(squad_cwd) {
+            let clean = sanitize_tab_name(cwd_base);
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+        if let Some(cmd) = cmd {
+            let clean = sanitize_tab_name(cmd);
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+    }
+    (i + 1).to_string()
+}
+
+/// Sanitize a wire-supplied tab name (x-c150): strip control characters (they
+/// would corrupt chrome cells), trim, cap at [`MAX_TAB_NAME`] chars. The cap
+/// lives HERE and not only in the overlay: `Command` is a wire surface, and
+/// the TUI is not the only client. Empty-after-sanitize means "clear".
+fn sanitize_tab_name(raw: &str) -> String {
+    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+    cleaned.trim().chars().take(MAX_TAB_NAME).collect()
 }
 
 /// Whether an event ended the session.
@@ -792,7 +871,7 @@ impl Core {
         )
         .map_err(|e| e.to_string())?;
         // A shell pane carries no node provenance (no wrapper argv).
-        self.register_pane(id, pty, rows, cols, None);
+        self.register_pane(id, pty, rows, cols, None, cwd.to_string(), None);
         Ok(id)
     }
 
@@ -811,6 +890,7 @@ impl Core {
             return Err("pane run needs a command (empty argv)".into());
         }
         let node = node_from_argv(argv);
+        let cmd = cmd_from_argv(argv);
         let id = self.next_pane_id;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn_cmd(
@@ -824,13 +904,14 @@ impl Core {
             self.exit_tx.clone(),
         )
         .map_err(|e| e.to_string())?;
-        self.register_pane(id, pty, rows, cols, node);
+        self.register_pane(id, pty, rows, cols, node, cwd.to_string(), cmd);
         Ok(id)
     }
 
     /// Record a freshly-spawned pane: bump the id, insert its VT grid, and
     /// arm its output watch (dropped receiver, so the watch costs nothing
     /// until a `PaneWait` subscribes).
+    #[allow(clippy::too_many_arguments)]
     fn register_pane(
         &mut self,
         id: u64,
@@ -838,6 +919,8 @@ impl Core {
         rows: u16,
         cols: u16,
         node: Option<String>,
+        cwd: String,
+        cmd: Option<String>,
     ) {
         self.next_pane_id += 1;
         self.panes.insert(
@@ -846,6 +929,8 @@ impl Core {
                 pty,
                 vt: vt::Pane::new(rows, cols),
                 node,
+                cwd,
+                cmd,
             },
         );
         let (tx, _rx) = watch::channel(WaitTick::default());
@@ -947,6 +1032,7 @@ impl Core {
         }
         let tid = self.session.mint_tab_id();
         let tab = Tab {
+            name: None,
             id: tid,
             root: Node::Leaf(pid),
             focus: pid,
@@ -1059,6 +1145,7 @@ impl Core {
                             vec![key],
                             None,
                             Tab {
+                                name: None,
                                 id: tid,
                                 root: Node::Leaf(pid),
                                 focus: pid,
@@ -1334,7 +1421,14 @@ impl Core {
                     .enumerate()
                     .map(|(i, t)| TabMeta {
                         id: t.id,
-                        name: (i + 1).to_string(),
+                        name: tab_label(
+                            t.name.as_deref(),
+                            self.panes
+                                .get(&t.focus)
+                                .map(|e| (e.node.as_deref(), e.cwd.as_str(), e.cmd.as_deref())),
+                            s.canonical_cwd(),
+                            i,
+                        ),
                     })
                     .collect(),
                 // The viewed squad highlights the VIEWER's tab; other squads
@@ -2004,6 +2098,7 @@ impl Core {
                     return Flow::Continue;
                 };
                 squad.tabs.push(Tab {
+                    name: None,
                     id: tid,
                     root: Node::Leaf(pid),
                     focus: pid,
@@ -2162,6 +2257,7 @@ impl Core {
                     return Flow::Continue;
                 };
                 squad.tabs.push(Tab {
+                    name: None,
                     id: tid,
                     root: Node::Leaf(pid),
                     focus: pid,
@@ -2233,6 +2329,7 @@ impl Core {
                     origins,
                     Some(name.to_string()),
                     Tab {
+                        name: None,
                         id: tid,
                         root: Node::Leaf(pid),
                         focus: pid,
@@ -2240,6 +2337,28 @@ impl Core {
                 );
                 self.set_view(client_id, sid, tid);
                 self.push_layout(true);
+                Flow::Continue
+            }
+            Command::RenameTab { tab, name } => {
+                // Explicit tab rename (x-c150). A stale/unknown id (the tab
+                // closed racing the overlay) is refused fail-closed with a
+                // notice, like SelectTab - no mutation.
+                match self.session.find_tab(tab) {
+                    Some((sid, ti)) => {
+                        let clean = sanitize_tab_name(&name);
+                        let t = &mut self
+                            .session
+                            .squad_mut(sid)
+                            .expect("find_tab live squad")
+                            .tabs[ti];
+                        // Blank-after-sanitize CLEARS the rename back to the
+                        // derived label (Locked 2: "reset to auto" is a
+                        // meaningful rename target).
+                        t.name = (!clean.is_empty()).then_some(clean);
+                        self.push_layout(true);
+                    }
+                    None => self.notice(client_id, "no such tab"),
+                }
                 Flow::Continue
             }
             Command::CopySelection => {
@@ -3553,6 +3672,107 @@ mod tests {
     }
 
     #[test]
+    fn cmd_from_argv_takes_the_command_basename_past_the_env_wrapper() {
+        let cmd = |a: &[&str]| cmd_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            cmd(&["env", "FNO_NODE=x-1", "claude", "--bg"]),
+            Some("claude".into())
+        );
+        assert_eq!(cmd(&["/usr/bin/htop"]), Some("htop".into()));
+        // An env run with no command yields None; spawn never fails on labeling.
+        assert_eq!(cmd(&["env", "A=1"]), None);
+        assert_eq!(cmd(&[]), None);
+    }
+
+    #[test]
+    fn tab_label_resolves_the_locked_derivation_chain() {
+        // Explicit rename wins outright.
+        assert_eq!(
+            tab_label(
+                Some("debug"),
+                Some((Some("x-1"), "/w/x-2", Some("claude"))),
+                "/w",
+                0
+            ),
+            "debug"
+        );
+        // FNO_NODE provenance beats cwd + cmd (AC1-HP).
+        assert_eq!(
+            tab_label(
+                None,
+                Some((Some("x-abcd"), "/w/x-2", Some("claude"))),
+                "/w",
+                0
+            ),
+            "x-abcd"
+        );
+        // A spawn cwd whose basename differs from the squad's outranks the
+        // cmd label (AC2-EDGE: the worktree-per-node case).
+        assert_eq!(
+            tab_label(
+                None,
+                Some((
+                    None,
+                    "/conductor/workspaces/footnote/x-9f21",
+                    Some("claude")
+                )),
+                "/code/footnote",
+                1
+            ),
+            "x-9f21"
+        );
+        // Same basename would just echo the squad label -> cmd.
+        assert_eq!(
+            tab_label(
+                None,
+                Some((None, "/code/footnote", Some("htop"))),
+                "/code/footnote",
+                1
+            ),
+            "htop"
+        );
+        // Every source empty -> the bare 1-based index, exactly today's
+        // label (AC1-EDGE, AC2-FR: nothing errors, logs, or bells).
+        assert_eq!(
+            tab_label(
+                None,
+                Some((None, "/code/footnote", None)),
+                "/code/footnote",
+                2
+            ),
+            "3"
+        );
+    }
+
+    #[test]
+    fn tab_label_stale_focused_pane_falls_back_to_index() {
+        // AC3-FR: tab.focus names a reaped pane (mid-reap race) - the chain
+        // skips provenance/cwd/cmd and terminates at the index, no panic.
+        assert_eq!(tab_label(None, None, "/w", 0), "1");
+    }
+
+    #[test]
+    fn tab_label_sanitizes_derived_candidates_and_skips_empty_ones() {
+        // codex peer review: derived sources (FNO_NODE, dir names, argv) admit
+        // control bytes and land in chrome cells - sanitize like a rename.
+        assert_eq!(
+            tab_label(None, Some((Some("\x1b[31mx-1"), "/w", None)), "/w", 0),
+            "[31mx-1"
+        );
+        // A whitespace-only node sanitizes to empty and falls through to the
+        // next source instead of rendering a blank label.
+        assert_eq!(
+            tab_label(None, Some((Some("   "), "/w/x-2", None)), "/w", 0),
+            "x-2"
+        );
+        // A control-char-only dir basename falls through to cmd.
+        assert_eq!(
+            tab_label(None, Some((None, "/w/\x01\x02", Some("htop"))), "/w", 0),
+            "htop"
+        );
+    }
+
+    #[test]
     fn server_control_dead_pane_err_carries_the_code_and_id() {
         match dead_pane(99) {
             ServerMsg::Err { code, msg } => {
@@ -3775,6 +3995,7 @@ mod tests {
             vec!["/origins/one".into()],
             None,
             Tab {
+                name: None,
                 id: 1,
                 root: Node::Leaf(42),
                 focus: 42,
@@ -3786,6 +4007,7 @@ mod tests {
             vec!["/grp/frontend".into(), "/grp/backend".into()],
             Some("stack".into()),
             Tab {
+                name: None,
                 id: 2,
                 root: Node::Leaf(50),
                 focus: 50,
@@ -3831,6 +4053,7 @@ mod tests {
             vec!["/x".into()],
             None,
             Tab {
+                name: None,
                 id: 5,
                 root: Node::Leaf(1),
                 focus: 1,
@@ -3847,6 +4070,107 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(core.session.squads.len(), 1, "blank name creates no squad");
         assert!(core.panes.is_empty(), "blank name spawns no pane");
+    }
+
+    #[test]
+    fn rename_tab_round_trips_and_blank_clears() {
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        // The rename stores the trimmed name (AC2-HP's server half)...
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 5,
+                name: "  debug ".into(),
+            },
+        );
+        assert_eq!(
+            core.session.squads[0].tabs[0].name.as_deref(),
+            Some("debug")
+        );
+        // ...and a blank rename CLEARS it back to the derived label (AC3-HP,
+        // Locked 2) - a clear, never an error. (Re-register the sender: the
+        // test client's dropped receiver made the rename's own layout push
+        // reap it, exactly like a real disconnect.)
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 5,
+                name: "   ".into(),
+            },
+        );
+        assert_eq!(core.session.squads[0].tabs[0].name, None);
+    }
+
+    #[test]
+    fn rename_tab_stale_id_is_refused_without_mutation() {
+        // AC1-ERR: a RenameTab naming a closed tab mutates nothing.
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                name: Some("keep".into()),
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        let flow = core.command(
+            1,
+            Command::RenameTab {
+                tab: 999,
+                name: "x".into(),
+            },
+        );
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(
+            core.session.squads[0].tabs[0].name.as_deref(),
+            Some("keep"),
+            "a stale id must not touch any live tab"
+        );
+    }
+
+    #[test]
+    fn rename_tab_sanitizes_hostile_wire_names() {
+        // AC2-ERR: control chars are stripped and the stored name is capped -
+        // the wire is not the overlay, so the server owns the guarantee.
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 5,
+                name: format!("\x1b[31m{}", "a".repeat(200)),
+            },
+        );
+        let stored = core.session.squads[0].tabs[0].name.clone().unwrap();
+        assert_eq!(stored, format!("[31m{}", "a".repeat(MAX_TAB_NAME - 4)));
     }
 
     #[test]
@@ -4006,6 +4330,7 @@ mod tests {
             vec!["/tmp/worktrees/x-aff6".into()],
             None,
             Tab {
+                name: None,
                 id: 1,
                 root: Node::Leaf(7),
                 focus: 7,
@@ -4016,6 +4341,7 @@ mod tests {
             vec!["/tmp/worktrees/footnote".into()],
             None,
             Tab {
+                name: None,
                 id: 2,
                 root: Node::Leaf(8),
                 focus: 8,

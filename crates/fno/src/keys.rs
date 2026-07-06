@@ -12,7 +12,8 @@
 //! select tab · `&` close tab · `w` panel selector · `b` toggle sideline ·
 //! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
 //! prev/next command block · `v` select block · `y` copy selection · `r` rerun
-//! block (x-38c4) · leader-leader = one literal leader byte. Leader + anything
+//! block (x-38c4) · `,` rename tab (x-c150) · leader-leader = one literal
+//! leader byte. Leader + anything
 //! unmapped is swallowed with BEL - a chord typo must never leak half a chord
 //! into the pane (AC2-UI's never-leak guarantee).
 //!
@@ -81,6 +82,10 @@ pub enum Event {
     /// client enters a local typing mode; the query and n/N/Esc are interpreted
     /// by the client's view layer, not here (like OpenSelector / OpenAnswers).
     SearchOpen,
+    /// Open the rename-tab name overlay for the active tab (leader+,, tmux
+    /// `rename-window` convention, x-c150). The client owns the typing mode
+    /// and resolves the active tab's stable id; the chord only opens it.
+    OpenRename,
     /// Swallowed unmapped chord: the client sounds BEL.
     Bell,
 }
@@ -252,6 +257,9 @@ fn chord(b: u8) -> Event {
         // In-scrollback search (leader+/, x-e780): tmux copy-mode `/` muscle
         // memory. The client owns the typing mode; the chord only opens it.
         b'/' => Event::SearchOpen,
+        // Rename the active tab (leader+,, tmux rename-window convention,
+        // x-c150). Same client-owned typing mode shape as search.
+        b',' => Event::OpenRename,
         _ => Event::Bell,
     }
 }
