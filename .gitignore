@@ -95,3 +95,6 @@ cli/.venv/
 
 # understand-anything skill output (generated knowledge graph; keep local, never commit)
 .understand-anything/
+
+# Local secrets (z.ai / model-routing keys, etc.) - never commit
+.env
