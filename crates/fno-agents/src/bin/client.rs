@@ -841,8 +841,8 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                     .nth(1)
                     .and_then(|r| r.split('"').next())
                 {
-                    let config_cwd = std::env::current_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let config_cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                     fno_agents::spawn_gate::qos_demote_bg_worker(&config_cwd, sid);
                 }
             }

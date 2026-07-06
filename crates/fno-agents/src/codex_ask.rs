@@ -406,10 +406,8 @@ fn run_codex(
 
     // QoS (x-c5cc): every codex child is an fno-spawned worker process —
     // exec-wrap at background priority (identity when worker_qos=off).
-    let argv = crate::spawn_gate::qos_wrap(
-        popen_cwd.unwrap_or_else(|| Path::new(".")),
-        argv.to_vec(),
-    );
+    let argv =
+        crate::spawn_gate::qos_wrap(popen_cwd.unwrap_or_else(|| Path::new(".")), argv.to_vec());
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     cmd.stdin(Stdio::null()); // LD11
