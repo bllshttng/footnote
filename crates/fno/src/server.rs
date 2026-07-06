@@ -494,6 +494,41 @@ fn cmd_from_argv(argv: &[String]) -> Option<String> {
     (!base.is_empty()).then(|| base.to_string())
 }
 
+/// A tab's display label (x-c150), from spawn-time facts only - no I/O, no
+/// subprocess on the layout path (squad.rs's origin-freeze discipline).
+/// Chain (Locked 1): explicit rename > `FNO_NODE` provenance > spawn-cwd
+/// basename when it differs from the squad's > command basename > the bare
+/// 1-based index (exactly the pre-x-c150 label, so a plain shell tab renders
+/// unchanged). `pane` is the focused pane's `(node, cwd, cmd)`; `None` (a
+/// reaped pane racing tree cleanup) falls through to the index - the
+/// derivation never panics on a missing pane.
+fn tab_label(
+    rename: Option<&str>,
+    pane: Option<(Option<&str>, &str, Option<&str>)>,
+    squad_cwd: &str,
+    i: usize,
+) -> String {
+    if let Some(name) = rename {
+        return name.to_string();
+    }
+    if let Some((node, cwd, cmd)) = pane {
+        if let Some(node) = node {
+            return node.to_string();
+        }
+        fn base(p: &str) -> &str {
+            p.trim_end_matches('/').rsplit('/').next().unwrap_or("")
+        }
+        let cwd_base = base(cwd);
+        if !cwd_base.is_empty() && cwd_base != base(squad_cwd) {
+            return cwd_base.to_string();
+        }
+        if let Some(cmd) = cmd {
+            return cmd.to_string();
+        }
+    }
+    (i + 1).to_string()
+}
+
 /// Whether an event ended the session.
 #[derive(PartialEq)]
 enum Flow {
@@ -1363,7 +1398,14 @@ impl Core {
                     .enumerate()
                     .map(|(i, t)| TabMeta {
                         id: t.id,
-                        name: (i + 1).to_string(),
+                        name: tab_label(
+                            t.name.as_deref(),
+                            self.panes
+                                .get(&t.focus)
+                                .map(|e| (e.node.as_deref(), e.cwd.as_str(), e.cmd.as_deref())),
+                            s.canonical_cwd(),
+                            i,
+                        ),
                     })
                     .collect(),
                 // The viewed squad highlights the VIEWER's tab; other squads
@@ -3582,6 +3624,67 @@ mod tests {
         );
         // No `env` wrapper at all -> never scanned, even with a bare token.
         assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
+    }
+
+    #[test]
+    fn cmd_from_argv_takes_the_command_basename_past_the_env_wrapper() {
+        let cmd = |a: &[&str]| cmd_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            cmd(&["env", "FNO_NODE=x-1", "claude", "--bg"]),
+            Some("claude".into())
+        );
+        assert_eq!(cmd(&["/usr/bin/htop"]), Some("htop".into()));
+        // An env run with no command yields None; spawn never fails on labeling.
+        assert_eq!(cmd(&["env", "A=1"]), None);
+        assert_eq!(cmd(&[]), None);
+    }
+
+    #[test]
+    fn tab_label_resolves_the_locked_derivation_chain() {
+        // Explicit rename wins outright.
+        assert_eq!(
+            tab_label(
+                Some("debug"),
+                Some((Some("x-1"), "/w/x-2", Some("claude"))),
+                "/w",
+                0
+            ),
+            "debug"
+        );
+        // FNO_NODE provenance beats cwd + cmd (AC1-HP).
+        assert_eq!(
+            tab_label(None, Some((Some("x-abcd"), "/w/x-2", Some("claude"))), "/w", 0),
+            "x-abcd"
+        );
+        // A spawn cwd whose basename differs from the squad's outranks the
+        // cmd label (AC2-EDGE: the worktree-per-node case).
+        assert_eq!(
+            tab_label(
+                None,
+                Some((None, "/conductor/workspaces/footnote/x-9f21", Some("claude"))),
+                "/code/footnote",
+                1
+            ),
+            "x-9f21"
+        );
+        // Same basename would just echo the squad label -> cmd.
+        assert_eq!(
+            tab_label(None, Some((None, "/code/footnote", Some("htop"))), "/code/footnote", 1),
+            "htop"
+        );
+        // Every source empty -> the bare 1-based index, exactly today's
+        // label (AC1-EDGE, AC2-FR: nothing errors, logs, or bells).
+        assert_eq!(
+            tab_label(None, Some((None, "/code/footnote", None)), "/code/footnote", 2),
+            "3"
+        );
+    }
+
+    #[test]
+    fn tab_label_stale_focused_pane_falls_back_to_index() {
+        // AC3-FR: tab.focus names a reaped pane (mid-reap race) - the chain
+        // skips provenance/cwd/cmd and terminates at the index, no panic.
+        assert_eq!(tab_label(None, None, "/w", 0), "1");
     }
 
     #[test]
