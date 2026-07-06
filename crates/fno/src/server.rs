@@ -1123,6 +1123,16 @@ impl Core {
     /// A one-line refusal/notice to ONE client (BEL + transient message on
     /// its side). Errors write to the session log, never a client terminal
     /// (the compositor owns it).
+    /// The sideline-attach catalog gate: is `id` a live watch-only row
+    /// (paneless, not exited) whose jobId matches? Both a registry bg row and
+    /// a roster-synthesized foreign row (x-0a2e) share this shape, so foreign
+    /// rows attach through the existing path with no new spawn logic (AC2-HP).
+    fn attachable_agent(&self, id: &str) -> bool {
+        self.agents
+            .iter()
+            .any(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id))
+    }
+
     fn notice(&self, client_id: u64, text: impl Into<String>) {
         if let Some(c) = self.clients.iter().find(|c| c.id == client_id) {
             let _ = c
@@ -1679,6 +1689,10 @@ impl Core {
                 } else {
                     a.attach_id.clone()
                 },
+                // Roster provenance (x-0a2e) rides through as-is; the pane fact
+                // above already forced `exited` for a dead pane, so the client's
+                // exited glyph stays senior over the external marker (AC2-EDGE).
+                external: a.external,
             });
         }
         out
@@ -2385,11 +2399,11 @@ impl Core {
                 // Attach ONLY a session actually surfaced in this sideline: a
                 // live watch-only row (paneless, not exited) whose jobId matches
                 // - the same catalog-membership refusal FocusPane/SelectTab use,
-                // so a stale or never-surfaced id can never drive a spawn.
-                let known = self.agents.iter().any(|a| {
-                    a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id.as_str())
-                });
-                if !known {
+                // so a stale or never-surfaced id can never drive a spawn. A
+                // roster-synthesized foreign row (x-0a2e: mux None, !exited,
+                // attach_id set) satisfies this unchanged - it is exactly the
+                // watch-only shape the gate was built for.
+                if !self.attachable_agent(&id) {
                     self.notice(client_id, "no such agent");
                     return Flow::Continue;
                 }
@@ -3203,19 +3217,27 @@ async fn serve(
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
-    // the fno-agents registry on the blocking pool, re-derives the agent row
-    // set (TTL aging included), and sends it to the core only when it
-    // changed. The render path never touches the file (AC2-UI; the origin
-    // freeze class), and its staleness is bounded by this one interval.
+    // BOTH the fno-agents registry AND claude's daemon roster (x-0a2e) on the
+    // blocking pool, unions them into the agent row set (TTL aging + roster
+    // liveness upgrade + foreign rows included), and sends it to the core only
+    // when the MERGED set changed. Each file is behind its own mtime+len gate,
+    // so a roster-only change publishes and an idle tick reads nothing. The
+    // render path never touches either file (AC2-UI; the origin freeze class),
+    // and staleness stays bounded by this one interval.
     {
         let core_tx = core_tx.clone();
-        let path = agents_view::registry_path();
+        let reg_path = agents_view::registry_path();
+        let roster_path = agents_view::roster_path();
         tokio::spawn(async move {
             let mut state = agents_view::ReaderState::default();
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
+            // Stat + conditional read of one file behind an mtime+len gate,
+            // both off the core loop. Returns (fresh stamp, raw-if-changed).
+            async fn scan(
+                path: std::path::PathBuf,
+                cached: Option<(std::time::SystemTime, u64)>,
+            ) -> (Option<(std::time::SystemTime, u64)>, Option<String>) {
                 let stat_path = path.clone();
                 let stamp = tokio::task::spawn_blocking(move || {
                     std::fs::metadata(&stat_path)
@@ -3225,25 +3247,32 @@ async fn serve(
                 .await
                 .ok()
                 .flatten();
-                let read_path = path.clone();
-                let changed = stamp != {
-                    // Peek: ReaderState owns the cached stamp; read the
-                    // file only when it moved (mtime+len gate).
-                    state.cached_stamp()
-                };
-                let raw = if changed {
-                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&read_path).ok())
+                let raw = if stamp != cached {
+                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&path).ok())
                         .await
                         .ok()
                         .flatten()
                 } else {
                     None
                 };
+                (stamp, raw)
+            }
+            loop {
+                tick.tick().await;
+                let (reg_stamp, reg_raw) = scan(reg_path.clone(), state.reg_stamp()).await;
+                let (roster_stamp, roster_raw) =
+                    scan(roster_path.clone(), state.roster_stamp()).await;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                if let Some(rows) = state.tick(stamp, move || raw, now) {
+                if let Some(rows) = state.tick(
+                    reg_stamp,
+                    move || reg_raw,
+                    roster_stamp,
+                    move || roster_raw,
+                    now,
+                ) {
                     if core_tx.send(CoreMsg::AgentRows(rows)).await.is_err() {
                         return; // core loop gone; the server is shutting down
                     }
@@ -4227,6 +4256,7 @@ mod tests {
             mux: Some((sess.into(), pane)),
             answerable: None,
             attach_id: None,
+            external: false,
         }
     }
 
@@ -4256,6 +4286,7 @@ mod tests {
                 mux: Some(("other".into(), 5)),
                 answerable: None,
                 attach_id: None,
+                external: false,
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
@@ -4268,6 +4299,7 @@ mod tests {
                 mux: None,
                 answerable: None,
                 attach_id: Some("c19cd2c3".into()),
+                external: false,
             },
         ];
         let rows = core.agent_rows();
@@ -4337,6 +4369,7 @@ mod tests {
                 mux: None,
                 answerable: None,
                 attach_id: None,
+                external: false,
             },
         ];
         let rows = core.agent_rows();
@@ -4352,6 +4385,90 @@ mod tests {
             Some(2),
             "a watch-only row matches a squad via a child of origins[1]"
         );
+    }
+
+    #[test]
+    fn external_synthesized_row_passes_the_attach_catalog_gate() {
+        // AC2-HP: a roster-synthesized foreign row (mux None, !exited, attach_id
+        // set, external true) is attachable through the EXISTING catalog gate,
+        // with no new spawn path. An exited or pane-hosted row is refused, like
+        // any non-attachable registry row.
+        let mut core = empty_core();
+        core.agents = vec![
+            RegistryAgent {
+                name: "think-x-9999".into(),
+                cwd: "/w".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+                attach_id: Some("ab12cd34".into()),
+                external: true,
+            },
+            // An exited external row (dead pane beat the upgrade): not attachable.
+            RegistryAgent {
+                name: "dead-ext".into(),
+                cwd: "/w".into(),
+                exited: true,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+                attach_id: Some("ffffffff".into()),
+                external: true,
+            },
+        ];
+        assert!(
+            core.attachable_agent("ab12cd34"),
+            "a live foreign row is attachable"
+        );
+        assert!(
+            !core.attachable_agent("ffffffff"),
+            "an exited foreign row is refused"
+        );
+        assert!(
+            !core.attachable_agent("deadbeef"),
+            "an id naming no surfaced row is refused"
+        );
+    }
+
+    #[test]
+    fn dead_pane_beats_roster_liveness_upgrade() {
+        // AC2-EDGE: an upgraded (roster-present, external) registry row whose
+        // mux ref points to a dead pane in THIS session renders exited - the
+        // pane fact stays senior over the merge's un-exit.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        core.session.add_squad(
+            1,
+            vec!["/w".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        // merge_rows would have set exited=false + external=true on this row,
+        // but its mux pane (77) is absent from core.panes -> pane_dead.
+        core.agents = vec![RegistryAgent {
+            name: "upgraded".into(),
+            cwd: "/w".into(),
+            exited: false,
+            badge: None,
+            reason: None,
+            mux: Some(("main".into(), 77)),
+            answerable: None,
+            attach_id: Some("ab12cd34".into()),
+            external: true,
+        }];
+        let rows = core.agent_rows();
+        let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
+        assert!(row.exited, "a dead pane forces exited despite the upgrade");
+        assert!(row.external, "provenance still rides through");
+        assert_eq!(row.attach_id, None, "an exited row drops its attach target");
     }
 
     #[test]
@@ -4766,6 +4883,7 @@ mod tests {
             mux: None,
             answerable: None,
             attach_id: attach.map(str::to_owned),
+            external: false,
         }
     }
 
