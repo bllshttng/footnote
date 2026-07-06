@@ -105,11 +105,20 @@ function probeModel(transcriptPath) {
   }
 }
 
-// Throttled, one-shot spend + drift check. Returns a warning string to emit, or
-// null. Persists the latch + throttle timestamp in a per-session sidecar.
+// Throttled, one-shot spend + drift check. Returns { message, commit } where
+// message is the warning to emit (or null) and commit() persists the one-shot
+// latch. The caller MUST call commit() only AFTER a successful stdout.write, so
+// a failed emit (e.g. EPIPE) re-warns next tick instead of latching the genuine
+// first trip into silence. The throttle timestamp is persisted here regardless.
 function checkSpendAndDrift(sessionId, transcriptPath, tmpDir) {
+  const NOOP = { message: null, commit: () => {} }
   try {
     const spendPath = path.join(tmpDir, `claude-ctx-${sessionId}-spend.json`)
+    const persist = (s) => {
+      try {
+        fs.writeFileSync(spendPath, JSON.stringify(s))
+      } catch (e) {}
+    }
     let state = { lastTs: 0, budgetWarned: false, budgetEscalated: false, driftWarned: false }
     if (fs.existsSync(spendPath)) {
       try {
@@ -121,7 +130,7 @@ function checkSpendAndDrift(sessionId, transcriptPath, tmpDir) {
 
     // Throttle: no shell-outs while a prior check ran <60s ago (AC7).
     const now = Date.now()
-    if (now - (state.lastTs || 0) < SPEND_THROTTLE_MS) return null
+    if (now - (state.lastTs || 0) < SPEND_THROTTLE_MS) return NOOP
 
     const capUsd = readInteractiveCap()
 
@@ -143,15 +152,19 @@ function checkSpendAndDrift(sessionId, transcriptPath, tmpDir) {
     // Nothing to check -> record the tick and bail. AC6: with the cap unset AND
     // no drift target, no `fno cost` call is made.
     if (capUsd === null && !intendedModel) {
-      try {
-        fs.writeFileSync(spendPath, JSON.stringify(state))
-      } catch (e) {}
-      return null
+      persist(state)
+      return NOOP
     }
 
     const actualModel = intendedModel ? probeModel(transcriptPath) : null
     const cost = capUsd !== null ? probeCost(sessionId) : null
 
+    // Snapshot the prior latch flags before deciding.
+    const prevFlags = {
+      budgetWarned: state.budgetWarned,
+      budgetEscalated: state.budgetEscalated,
+      driftWarned: state.driftWarned,
+    }
     const { message, state: latch } = decideSpendDrift({
       capUsd,
       cost,
@@ -159,13 +172,21 @@ function checkSpendAndDrift(sessionId, transcriptPath, tmpDir) {
       actualModel,
       state,
     })
-    Object.assign(state, latch)
-    try {
-      fs.writeFileSync(spendPath, JSON.stringify(state))
-    } catch (e) {}
-    return message
+
+    if (!message) {
+      Object.assign(state, latch)
+      persist(state)
+      return NOOP
+    }
+
+    // A warning will be emitted by the caller. Persist the advanced throttle NOW
+    // but keep the prior (pre-trip) latch flags, so a failed emit re-warns. The
+    // caller's commit() writes the new latch only after stdout.write succeeds.
+    persist({ ...state, ...prevFlags })
+    const latched = { ...state, ...latch }
+    return { message, commit: () => persist(latched) }
   } catch (e) {
-    return null
+    return NOOP
   }
 }
 
@@ -217,13 +238,15 @@ process.stdin.on('end', () => {
     // Guards (a) Layer 2 (model drift) + (b) interactive spend cap. Throttled,
     // one-shot; when one fires it preempts this tick's context-pressure warning
     // (both latch, so nothing is lost — the context warning re-fires next tick).
-    const spendMsg = checkSpendAndDrift(sessionId, data.transcript_path, os.tmpdir())
-    if (spendMsg) {
+    const spend = checkSpendAndDrift(sessionId, data.transcript_path, os.tmpdir())
+    if (spend.message) {
       process.stdout.write(
         JSON.stringify({
-          hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: spendMsg },
+          hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: spend.message },
         })
       )
+      // Latch the one-shot only after the warning actually reached stdout.
+      spend.commit()
       process.exit(0)
     }
 
