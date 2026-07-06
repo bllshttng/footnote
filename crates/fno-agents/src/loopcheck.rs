@@ -908,6 +908,10 @@ struct PrInfo {
     /// Required bots with no completed review pass (names the gap in the
     /// block message, AC1-UI).
     missing_bots: Vec<String>,
+    /// Required bots dropped from the gate because they are rate-limited (a
+    /// usage-limit comment, no review). Named in the terminal-allow message so
+    /// an operator sees why the gate proceeded without them (AC1-UI).
+    usage_limited: Vec<String>,
     /// Blocking inline findings (codex P1 / gemini critical|high) whose
     /// thread has no qualifying ack (AC2).
     unaddressed_findings: Vec<Finding>,
@@ -1042,6 +1046,7 @@ fn read_pr_info(
                 latest_review_ts: "none".to_string(),
                 reviewed: false,
                 missing_bots: Vec::new(),
+                usage_limited: Vec::new(),
                 unaddressed_findings: Vec::new(),
                 review_skipped: false,
             });
@@ -1084,6 +1089,7 @@ fn read_pr_info(
             latest_review_ts: "none".to_string(),
             reviewed: true,
             missing_bots: Vec::new(),
+            usage_limited: Vec::new(),
             unaddressed_findings: Vec::new(),
             review_skipped: true,
         });
@@ -1130,13 +1136,14 @@ fn read_pr_info(
     let login_gate_active = !required_bots.is_empty() || !optional_bots.is_empty();
     let login_skipped = no_external || !login_gate_active;
     let reviewers_ok = reviewers_all_attested(events_path, reviewers, head_sha);
-    let (latest_review_ts, reviewed, missing_bots, unaddressed_findings) = if login_skipped {
+    let (latest_review_ts, reviewed, missing_bots, usage_limited, unaddressed_findings) =
+        if login_skipped {
         // No GitHub logins to poll (nothing configured, or no_external): skip
         // the gh review reads entirely (fewer calls + no spurious gh-error
         // block). The local attestation gate still applies - reviewers_ok is
         // true when unconfigured, so a login-only or no-gate config is
         // unaffected.
-        ("none".to_string(), reviewers_ok, Vec::new(), Vec::new())
+        ("none".to_string(), reviewers_ok, Vec::new(), Vec::new(), Vec::new())
     } else {
         // Read 3: top-level reviews + issue comments
         let reviews_out = Command::new(gh_bin)
@@ -1244,7 +1251,24 @@ fn read_pr_info(
         // both clear. reviewers is usually empty (vacuously true) so this is a
         // no-op for login-only configs.
         let reviewed = info.all_required_passed() && unaddressed.is_empty() && reviewers_ok;
-        (activity_ts, reviewed, info.missing_bots, unaddressed)
+        // (a) Record the rate-limit drop so a post-hoc audit sees why the gate
+        // proceeded without a required bot (AC1-UI). append_loop_event, not
+        // Branch-B emit: these are target-stream events (see the doc comment on
+        // append_loop_event), deliberately unregistered in KNOWN_EVENT_KINDS.
+        if !info.usage_limited.is_empty() {
+            append_loop_event(
+                events_path,
+                "review_gate_bot_usage_limited",
+                serde_json::json!({"pr": number, "bots": info.usage_limited.clone()}),
+            );
+        }
+        (
+            activity_ts,
+            reviewed,
+            info.missing_bots,
+            info.usage_limited,
+            unaddressed,
+        )
     };
 
     Ok(PrInfo {
@@ -1255,6 +1279,7 @@ fn read_pr_info(
         latest_review_ts,
         reviewed,
         missing_bots,
+        usage_limited,
         unaddressed_findings,
         // Telemetry only (no decision reads this): "no review gate of any kind
         // applied" = the login reads were skipped AND no local reviewers gate.
@@ -1402,6 +1427,13 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
     login.ends_with("[bot]") || KNOWN_BOTS.iter().any(|&b| login.contains(b))
 }
 
+/// Pinned usage-limit markers a rate-limited review bot posts as an ISSUE
+/// comment when it never posts a review object (PR #214). Matched
+/// case-insensitively via `contains` against a lowercased body, mirroring the
+/// pinned-string approach in `blocking_severity`. Kept tight: an under-match
+/// degrades to the safe old block behavior; an over-match risks a false drop.
+const USAGE_LIMIT_MARKERS: &[&str] = &["usage limits for code reviews", "codex usage limits"];
+
 /// Per-required-bot review verdict (grilled decision 5 / step 2).
 #[derive(Debug)]
 struct ReviewInfo {
@@ -1412,6 +1444,13 @@ struct ReviewInfo {
     /// (verified on PR #447; codex reviews once per PR and never re-reviews,
     /// so requiring a pass on HEAD would make the gate unsatisfiable).
     missing_bots: Vec<String>,
+    /// Required bots dropped from `missing_bots` because they are env-blocked
+    /// (rate-limited): they posted only a usage-limit comment, never a review.
+    /// Keeping them in `missing_bots` wedged the gate until budget death
+    /// (PR #214); dropping them lets the gate proceed on remaining evidence
+    /// while the caller records the drop (AC1-UI). A bot is never in both
+    /// lists - it is scanned only while still in `missing_bots`.
+    usage_limited: Vec<String>,
 }
 
 impl ReviewInfo {
@@ -1470,16 +1509,52 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
         latest_ts
     };
 
-    let missing_bots: Vec<String> = required_bots
+    let mut missing_bots: Vec<String> = required_bots
         .iter()
         .zip(passed.iter())
         .filter(|(_, ok)| !**ok)
         .map(|(bot, _)| bot.clone())
         .collect();
 
+    // (a) Usage-limit detection. A still-missing required bot that authored a
+    // comment carrying a pinned usage-limit marker is env-blocked, not
+    // hasn't-reviewed-yet: it will never post a review, so leaving it in
+    // missing_bots blocks every fire until the budget cap kills the session
+    // (PR #214). Move it OUT of missing_bots into usage_limited so the gate
+    // proceeds on remaining evidence (the caller logs the drop + names the bot,
+    // and the merge stays human-gated). Scoped to the bot's OWN author.login so
+    // a stranger's comment never drops a required bot (AC1-ERR). Only
+    // still-missing bots are scanned, so a bot that actually reviewed is never
+    // usage-limited-dropped (AC1-EDGE).
+    let mut usage_limited: Vec<String> = Vec::new();
+    missing_bots.retain(|bot| {
+        let rate_limited = comments.iter().any(|c| {
+            let login = c
+                .pointer("/author/login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !login_matches_bot(login, bot) {
+                return false;
+            }
+            let body = c
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            USAGE_LIMIT_MARKERS.iter().any(|m| body.contains(m))
+        });
+        if rate_limited {
+            usage_limited.push(bot.clone());
+            false
+        } else {
+            true
+        }
+    });
+
     ReviewInfo {
         latest_ts: final_ts,
         missing_bots,
+        usage_limited,
     }
 }
 
@@ -2765,12 +2840,24 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 let head_shipped = !pr_info.head_oid.is_empty() && pr_info.head_oid == head_sha;
 
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
+                    // AC1-UI: name any rate-limited bot the gate proceeded
+                    // without, so the terminal message and the emitted event
+                    // agree on why a required bot is absent from the evidence.
+                    let done_msg = if pr_info.usage_limited.is_empty() {
+                        format!("PR #{} is green and reviewed", pr_info.number)
+                    } else {
+                        format!(
+                            "PR #{} is green and reviewed (rate-limited, dropped from gate: {})",
+                            pr_info.number,
+                            pr_info.usage_limited.join(", ")
+                        )
+                    };
                     emit(
                         "termination",
                         serde_json::json!({
                             "session_id": session_id,
                             "reason": "DonePRGreen",
-                            "message": format!("PR #{} green and reviewed", pr_info.number)
+                            "message": done_msg.clone()
                         }),
                     );
                     emit(
@@ -2796,7 +2883,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         allow_output(
                             "allow",
                             Some(TerminationReason::DonePRGreen),
-                            &format!("PR #{} is green and reviewed", pr_info.number),
+                            &done_msg,
                             this_fire,
                             Some(fingerprint),
                         ),
@@ -3463,6 +3550,7 @@ mod tests {
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
+            usage_limited: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
         };
@@ -4534,6 +4622,73 @@ mod tests {
         });
         let info = compute_review_info(&json, &required);
         assert!(!info.all_required_passed());
+    }
+
+    #[test]
+    fn compute_review_info_usage_limited_bot_dropped() {
+        // AC1-HP: a required bot that posted only a usage-limit comment (no
+        // review) leaves missing_bots for usage_limited, so the gate proceeds.
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [
+                {"author": {"login": "chatgpt-codex-connector"},
+                 "body": "You have reached your Codex usage limits for code reviews.",
+                 "createdAt": "2026-07-06T01:00:00Z"}
+            ]
+        });
+        let info = compute_review_info(&json, &required);
+        assert!(info.missing_bots.is_empty());
+        assert_eq!(
+            info.usage_limited,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+        assert!(info.all_required_passed());
+    }
+
+    #[test]
+    fn compute_review_info_usage_limit_only_own_comment_counts() {
+        // AC1-ERR: a usage-limit marker in a HUMAN's comment must not drop the
+        // bot - detection is scoped to the bot's own author.login.
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [
+                {"author": {"login": "some-human"},
+                 "body": "The bot hit its usage limits for code reviews, ugh.",
+                 "createdAt": "2026-07-06T01:00:00Z"}
+            ]
+        });
+        let info = compute_review_info(&json, &required);
+        assert_eq!(
+            info.missing_bots,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+        assert!(info.usage_limited.is_empty());
+        assert!(!info.all_required_passed());
+    }
+
+    #[test]
+    fn compute_review_info_real_review_beats_ratelimit_comment() {
+        // AC1-EDGE: a bot that posted a usage-limit comment earlier AND a real
+        // COMMENTED review is counted as passed, never usage-limited (it is
+        // never in missing_bots to be scanned).
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [
+                {"author": {"login": "chatgpt-codex-connector"}, "state": "COMMENTED",
+                 "submittedAt": "2026-07-06T02:00:00Z"}
+            ],
+            "comments": [
+                {"author": {"login": "chatgpt-codex-connector"},
+                 "body": "codex usage limits reached",
+                 "createdAt": "2026-07-06T01:00:00Z"}
+            ]
+        });
+        let info = compute_review_info(&json, &required);
+        assert!(info.missing_bots.is_empty());
+        assert!(info.usage_limited.is_empty());
+        assert!(info.all_required_passed());
     }
 
     // ── step 2: inline findings + severity + addressed (US2) ────────────────
