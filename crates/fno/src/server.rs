@@ -835,6 +835,11 @@ fn name_has_node_token(name: &str, node: &str) -> bool {
     }
     let bytes = name.as_bytes();
     let mut from = 0;
+    // Advance past a rejected match by the WIDTH of node's first char, not a
+    // hardcoded 1: ids are ASCII in practice, but `id_prefix` is user config,
+    // and a multi-byte first char would put `start + 1` inside a char and
+    // panic the slice (gemini review of PR #211).
+    let first_char_len = node.chars().next().map_or(1, char::len_utf8);
     while let Some(i) = name[from..].find(node) {
         let start = from + i;
         let end = start + node.len();
@@ -843,7 +848,7 @@ fn name_has_node_token(name: &str, node: &str) -> bool {
         if pre_ok && post_ok {
             return true;
         }
-        from = start + 1;
+        from = start + first_char_len;
     }
     false
 }
@@ -4450,6 +4455,15 @@ mod tests {
         // Second occurrence with clean boundaries still matches.
         assert!(name_has_node_token("x-54fab x-54fa", "x-54fa"));
         assert!(!name_has_node_token("anything", ""));
+        // A node whose FIRST char is multi-byte (a non-ASCII `id_prefix` is
+        // legal config) must not panic when a rejected match forces the scan
+        // to advance - `start + 1` would land inside the char (gemini review
+        // of PR #211). Both the advance-then-match and the pure-reject walk.
+        assert!(name_has_node_token(
+            "a\u{3093}-54fa \u{3093}-54fa",
+            "\u{3093}-54fa"
+        ));
+        assert!(!name_has_node_token("a\u{3093}-54fa", "\u{3093}-54fa"));
     }
 
     /// A paneless registry row for the routing tests: `name`/`cwd`/`attach_id`
