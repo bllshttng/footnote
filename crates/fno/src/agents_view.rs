@@ -43,6 +43,78 @@ pub struct RegistryAgent {
     pub attach_id: Option<String>,
 }
 
+/// One claude-roster worker as the sideline consumes it (three fields, not
+/// the supervisor's model): `short_id` is the `claude attach <id>` jobId (the
+/// first `-`-segment of the roster `sessionId`, == the roster map key), and
+/// `name` is already fallback-resolved (`dispatch.seed.name` else
+/// `cc-<short_id>`, the adopted-name convention).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterWorker {
+    pub short_id: String,
+    pub name: String,
+    pub cwd: String,
+}
+
+/// The claude daemon roster path, mirroring fno-agents'
+/// `claude_roster::daemon_dir` (`FNO_CLAUDE_DAEMON_DIR` > `$HOME/.claude/daemon`)
+/// - the same env override, so tests redirect both crates' readers with one
+/// variable. Mirrored, not imported: the crates share no types, the FILE is
+/// the contract (same rule as the registry above).
+pub fn roster_path() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_CLAUDE_DAEMON_DIR") {
+        return PathBuf::from(v).join("roster.json");
+    }
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(".claude").join("daemon").join("roster.json")
+}
+
+/// Parse the claude daemon roster into the sideline's three-field workers.
+/// Tolerant `Value` access ONLY - no typed struct: the `procStart`
+/// u64 -> date-string drift once zeroed every typed-parse consumer, and
+/// tolerant per-field access means unread fields cannot break the parse. A
+/// worker missing `sessionId` is skipped alone (tolerate-alien-row, like a
+/// registry row without `name`); a missing `workers` key is an empty roster;
+/// a malformed document is `None` (the caller keeps last-good foreign rows).
+pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
+    let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let workers = match doc.get("workers") {
+        Some(w) => w.as_object()?,
+        None => return Some(Vec::new()),
+    };
+    let mut out = Vec::with_capacity(workers.len());
+    for w in workers.values() {
+        let Some(session_id) = w
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let short_id = session_id.split('-').next().unwrap_or(session_id).to_string();
+        let cwd = w
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let name = w
+            .get("dispatch")
+            .and_then(|d| d.get("seed"))
+            .and_then(|s| s.get("name"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("cc-{short_id}"));
+        out.push(RosterWorker {
+            short_id,
+            name,
+            cwd,
+        });
+    }
+    Some(out)
+}
+
 /// The registry path, resolved exactly as fno-agents' `AgentsHome::from_env`
 /// does (`FNO_AGENTS_HOME` > `$HOME/.fno/agents` > `./.fno/agents`).
 pub fn registry_path() -> PathBuf {
@@ -424,6 +496,53 @@ mod tests {
         let rows = derive_rows(&raw, NOW).unwrap();
         assert_eq!(rows[0].name, "alpha");
         assert_eq!(rows[1].name, "zeta");
+    }
+
+    // The roster parser (x-0a2e task 1.1): tolerant Value access over
+    // claude's roster.json. Cites the "torn roster" and "missing sessionId"
+    // Failure Modes bullets.
+    #[test]
+    fn parse_roster_live_shape_yields_three_field_workers() {
+        let raw = r#"{"workers":{
+            "ab12cd34":{"sessionId":"ab12cd34-9f00-4a2b-8888-000000000001",
+                        "cwd":"/w","procStart":1751000000,
+                        "dispatch":{"source":"shell","seed":{"name":"think-x-9999"}}},
+            "ef56ab78":{"sessionId":"ef56ab78-1111-4a2b-8888-000000000002",
+                        "cwd":"/x","dispatch":{"source":"fleet","seed":{}}}}}"#;
+        let mut workers = parse_roster(raw).unwrap();
+        workers.sort_by(|a, b| a.short_id.cmp(&b.short_id));
+        assert_eq!(workers.len(), 2);
+        assert_eq!(workers[0].short_id, "ab12cd34");
+        assert_eq!(workers[0].name, "think-x-9999");
+        assert_eq!(workers[0].cwd, "/w");
+        // Missing seed.name falls back to the adopted-name convention (AC4-EDGE).
+        assert_eq!(workers[1].name, "cc-ef56ab78");
+    }
+
+    #[test]
+    fn parse_roster_tolerates_field_drift_and_alien_workers() {
+        // procStart as a date STRING (the drift that once zeroed typed
+        // parsers) must not fail the parse; a worker without sessionId is
+        // skipped alone, never the document.
+        let raw = r#"{"workers":{
+            "ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w",
+                        "procStart":"2026-07-06T10:00:00Z"},
+            "orphan":{"cwd":"/x"},
+            "empty":{"sessionId":"","cwd":"/y"}}}"#;
+        let workers = parse_roster(raw).unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].short_id, "ab12cd34");
+    }
+
+    #[test]
+    fn parse_roster_garbage_is_none_and_missing_workers_is_empty() {
+        // Garbage doc -> None (caller keeps last-good, AC1-ERR); a document
+        // without a workers key (or with an empty map) is a VALID empty
+        // roster, not a parse failure.
+        assert_eq!(parse_roster("not json"), None);
+        assert_eq!(parse_roster(r#"{"workers": 3}"#), None);
+        assert_eq!(parse_roster("{}"), Some(Vec::new()));
+        assert_eq!(parse_roster(r#"{"workers":{}}"#), Some(Vec::new()));
     }
 
     // x-c929: a live `blocked` scrape verdict with an `answerable` payload parses
