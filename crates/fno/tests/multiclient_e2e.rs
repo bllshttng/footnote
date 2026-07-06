@@ -380,6 +380,10 @@ fn multiclient_kill_server_live_stale_and_missing() {
             .skip(1)
             .find_map(|s| s.split('#').next().and_then(|v| v.trim().parse().ok()))
     }
+    // Gate the first input on shell readiness: this test types straight after
+    // attach (no clamp round-trips like the sizing tests to let the shell
+    // settle), so on dash the startup CR is lost and the echo never runs.
+    c.wait_prompt(pane);
     c.input(b"echo pid=$$#\r");
     let child_pid: i32 = c.wait(15, "pane pid", |c| extract_pid(&c.pane_text(pane)));
 

@@ -9,7 +9,6 @@
 mod common;
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use common::{spawn_server, FakeClient};
 use fno::proto::{MouseButton, MouseEvent, MouseKind};
@@ -51,35 +50,10 @@ fn wheel_up() -> MouseEvent {
     }
 }
 
-/// Wait until the pane's shell has printed its first prompt. Writing to the
-/// PTY before `sh` is ready to read gets the bytes echoed by the tty line
-/// discipline but never executed (the submitting `\r` is lost during startup),
-/// so every test gates its FIRST input on this. The pinned prompt ends with
-/// `$` (`sh-3.2$ ` on macOS bash-as-sh).
-fn wait_prompt(c: &mut FakeClient, pane: u64) {
-    // A fresh pane's shell prints its prompt exactly once at startup then
-    // idles. That single passive frame can be missed under parallel-test load
-    // (every server now arms the FNO_E2E idle-exit, whose extra core-loop
-    // scheduling can starve the frame writer past the 15s deadline on an
-    // oversubscribed box) - dash exposes this, bash-as-sh's slower startup
-    // hides it. Nudge with a bare CR until the prompt renders: a ready shell
-    // re-emits `$ ` on each Enter (a fresh frame the writer redelivers), and a
-    // not-yet-ready shell drops the CR harmlessly so the next nudge retries.
-    // Bounded so a genuinely dead pane still panics with the live state.
-    for _ in 0..28 {
-        if c.pane_text(pane).trim_end().ends_with('$') {
-            return;
-        }
-        c.input(b"\r");
-        c.pump(Duration::from_millis(500));
-    }
-    c.wait_pane_text(15, pane, |t| t.trim_end().ends_with('$'));
-}
-
 /// Fill the pane with enough output that the wheel has history to scroll
 /// into, and wait until the shell is provably done producing it.
 fn fill_history(c: &mut FakeClient, pane: u64) {
-    wait_prompt(c, pane);
+    c.wait_prompt(pane);
     // 60 lines: comfortably past the 24-row viewport so a wheel-up has real
     // history to scroll into, without the load of a 200-iteration sh loop
     // (which under a saturated box crawls and blows the timeout).
@@ -160,7 +134,7 @@ fn mouse_drag_release_copies_selection_to_initiator_only() {
     let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
     b.wait_layout(10, "b attached", |l| !l.panes.is_empty());
 
-    wait_prompt(&mut a, pane);
+    a.wait_prompt(pane);
     a.input(b"echo copy-me-payload#\r");
     let text = a.wait_pane_text(15, pane, |t| {
         t.lines().any(|l| l.starts_with("copy-me-payload#"))
