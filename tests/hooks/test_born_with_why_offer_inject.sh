@@ -57,22 +57,43 @@ offered_line()    { printf '{"ts":"%s","type":"think_offered","source":"backlog"
 offered_no_line() { printf '{"ts":"%s","type":"think_offered","source":"backlog","data":{"node_id":"%s"}}\n' "$1" "$2"; }
 other_line()      { printf '{"ts":"%s","type":"think_spawned","source":"backlog","data":{"node_id":"%s"}}\n' "$1" "$2"; }
 
-# Stub `fno` so the resolve-guard's `fno backlog get <id>` is deterministic: it
-# exits nonzero (unresolvable) for any id in $FNO_STUB_PHANTOM, else 0 (resolves).
+# Stub `fno` so the resolve/in-progress guard's `fno backlog get <id>` is
+# deterministic:
+#   - id in $FNO_STUB_PHANTOM     -> exit 1 (unresolvable / phantom)
+#   - id in $FNO_STUB_INPROGRESS  -> exit 0 + JSON with a PR + claimed status
+#                                    (work already underway)
+#   - otherwise                   -> exit 0 + empty stdout (resolves; the hook
+#                                    treats an unparseable/empty body as
+#                                    not-underway and surfaces -> fail safe,
+#                                    which keeps the pre-existing scenarios below
+#                                    unchanged)
 # Prepended to PATH in run_hook so it shadows any real installed fno.
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/fno" <<'STUB'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "backlog" && "${2:-}" == "get" ]]; then
   for p in ${FNO_STUB_PHANTOM:-}; do [[ "${3:-}" == "$p" ]] && exit 1; done
+  for w in ${FNO_STUB_INPROGRESS:-}; do
+    [[ "${3:-}" == "$w" ]] && { printf '{"pr_number":207,"_status":"claimed"}\n'; exit 0; }
+  done
+  # Resolves (exit 0) but emits NON-DICT JSON (null): the underway predicate must
+  # not crash on d.get -> it exits 1 and the offer surfaces (fail safe).
+  for n in ${FNO_STUB_NONDICT:-}; do
+    [[ "${3:-}" == "$n" ]] && { printf 'null\n'; exit 0; }
+  done
 fi
 exit 0
 STUB
 chmod +x "$WORK/bin/fno"
 
-# FNO_STUB_PHANTOM is read from the outer env per-test (default empty -> every id
-# resolves, so the pre-existing scenarios below are unaffected).
-run_hook() { ( cd "$WORK" && PATH="$WORK/bin:$PATH" FNO_STUB_PHANTOM="${FNO_STUB_PHANTOM:-}" bash "$HOOK" </dev/null ); }
+# FNO_STUB_PHANTOM / FNO_STUB_INPROGRESS / FNO_STUB_NONDICT are read from the
+# outer env per-test (all default empty -> every id resolves as a fresh,
+# offerable node, so the pre-existing scenarios below are unaffected).
+run_hook() { ( cd "$WORK" && PATH="$WORK/bin:$PATH" \
+    FNO_STUB_PHANTOM="${FNO_STUB_PHANTOM:-}" \
+    FNO_STUB_INPROGRESS="${FNO_STUB_INPROGRESS:-}" \
+    FNO_STUB_NONDICT="${FNO_STUB_NONDICT:-}" \
+    bash "$HOOK" </dev/null ); }
 
 # ── Silent: no events file ───────────────────────────────────────────
 out="$(run_hook)" || fail "hook nonzero with no events file"
@@ -133,6 +154,32 @@ out="$(run_hook)" || fail "hook nonzero on real offer after phantom"
 ctx="$(printf '%s' "$out" | extract_ctx)"
 [[ "$ctx" == *"x-eeee5555"* ]] || fail "resolve-guard: real offer after a phantom did not surface"
 pass "resolve-guard: real offer still surfaces after a suppressed phantom"
+
+# ── In-progress guard: an offer for a node already underway is suppressed ──
+# (x-a83a) A claimed / PR-open node re-offering a born-with-why /think is the
+# duplicate-session bug: the node resolves fine, but the work already started.
+offered_line "2026-06-30T08:00:00Z" "x-ffff6666" >> "$EVENTS"
+out="$(FNO_STUB_INPROGRESS="x-ffff6666" run_hook)" || fail "hook nonzero on in-progress offer"
+[[ -z "$out" ]] || fail "in-progress guard: offer for a claimed/PR node surfaced (should be suppressed): $out"
+pass "in-progress guard: offer for an already-underway node suppressed"
+
+# ── In-progress guard: a just-born (fresh) node still surfaces ────────
+# The guard must NOT over-suppress: a not-yet-started node is exactly the case
+# born-with-why exists for. (Default stub = resolvable, not underway.)
+offered_line "2026-06-30T08:30:00Z" "x-7777aaaa" >> "$EVENTS"
+out="$(run_hook)" || fail "hook nonzero on fresh offer after in-progress"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-7777aaaa"* ]] || fail "in-progress guard: a fresh node's offer was wrongly suppressed"
+pass "in-progress guard: a just-born node still surfaces (no over-suppression)"
+
+# ── In-progress guard: non-dict resolver output fails safe (surfaces, no crash) ──
+# (gemini review on PR #208) If `fno backlog get` ever emits null / a list, the
+# underway predicate must not crash on d.get; it surfaces the offer instead.
+offered_line "2026-06-30T09:00:00Z" "x-8888bbbb" >> "$EVENTS"
+out="$(FNO_STUB_NONDICT="x-8888bbbb" run_hook)" || fail "in-progress guard: hook nonzero on non-dict resolver output"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-8888bbbb"* ]] || fail "in-progress guard: non-dict output did not fail safe to surfacing"
+pass "in-progress guard: non-dict resolver output fails safe (surfaces, no crash)"
 
 # ── Wiring: hooks.json registers the hook under UserPromptSubmit ──────
 python3 -c "import json; json.load(open('$HOOKS_JSON'))" || fail "hooks.json failed JSON parse"
