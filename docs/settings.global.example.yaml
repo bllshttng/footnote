@@ -41,6 +41,11 @@ config:
     # peers: [codex, gemini]
     # peer_identity: fno-peer-bot     # the distinct login peers post under (NOT your account)
     # peer_token_env: GH_PEER_TOKEN   # env var holding that account's PAT
+    # reviewers: local reviewers that produce NO GitHub review - loop-check
+    # reads a head-pinned attestation event instead. Lets a solo/claude-only
+    # harness (no App bot) express a real gate. One of sigma | /code-review |
+    # declare; each emits the attestation on a pass. Uncomment to require one:
+    # reviewers: [sigma]
 
   # Worktree placement for every repo on this machine: <base>/<repo>/<name>.
   # Leave unset for the harness-native <repo>/.claude/worktrees/<name>.

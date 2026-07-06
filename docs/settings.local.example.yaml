@@ -35,6 +35,9 @@ config:
   #   peers: [codex, gemini]     # or gate on a locally-run CLI review under a distinct
   #   peer_identity: fno-peer-bot  #   machine account (needs a PAT in peer_token_env)
   #   peer_token_env: GH_PEER_TOKEN
+  #   reviewers: [sigma]         # or gate on a LOCAL reviewer (sigma | /code-review |
+  #                              #   declare) via a head-pinned attestation - no App bot,
+  #                              #   no GitHub review object. Fits a solo/claude-only harness.
 
   # --- recommended per-project workflow toggles (code default: false) ---
   target:

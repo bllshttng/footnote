@@ -203,6 +203,19 @@ def validate(event: dict[str, Any]) -> None:
                     f"(allowed: {allowed})"
                 )
 
+    # Same chokepoint rationale: review_attestation is a trust-core gate event
+    # (x-e703). loop-check fail-closes on anything but an exact `pass`, but a
+    # producer typo (`verdict: passs`) should fail LOUD at emit rather than land
+    # a silently-never-satisfying record. The generic emit CLI is a writer, so
+    # the enum must be enforced here, not only in the typed helper.
+    if type_name == "review_attestation":
+        allowed = type_spec["data"]["properties"]["verdict"]["enum"]
+        if data.get("verdict") not in allowed:
+            raise ValidationError(
+                f"unknown review_attestation data.verdict: {data.get('verdict')!r} "
+                f"(allowed: {allowed})"
+            )
+
     serialized = _json.dumps(data, separators=(",", ":")).encode("utf-8")
     if len(serialized) > MAX_DATA_BYTES:
         raise ValidationError(

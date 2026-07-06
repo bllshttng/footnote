@@ -198,6 +198,19 @@ If `.fno/target-state.md` exists and has `input_type: plan`:
 These are WARNINGs — agents may have valid reasons to modify additional files.
 Exclude common non-plan files: lock files, `.fno/*`, test fixtures, `node_modules`.
 
+### Step 6c: Emit the reviewers-gate attestation (only on a clean PASS)
+
+If — and only if — the verdict is `ready-to-merge` (no unaddressed blocking finding after Step 3b/Step 4), emit the head-pinned `review_attestation` so a `config.review.reviewers: [sigma]` gate can clear:
+
+```bash
+bash "${SKILL_DIR}/scripts/emit-attestation.sh" sigma
+```
+
+This is what lets a solo / claude-only harness (no GitHub App bot) express a real, auditable review gate. Rules:
+- **Never emit on a blocking finding.** A failing or blocked panel emits nothing; absence holds the gate (fail closed).
+- **Head-pinned.** The helper stamps the current HEAD. If new commits land after this pass, re-run sigma — the old attestation no longer counts (loop-check discards a `head_sha` that is not the current HEAD).
+- **Advisory when not gating.** If no `reviewers` entry names `sigma`, the event is harmless telemetry; loop-check only reads it when the gate is configured.
+
 ## What We DON'T Check
 
 - Unit test coverage (we don't care)

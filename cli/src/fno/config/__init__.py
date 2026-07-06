@@ -418,6 +418,13 @@ class CrossModelBlock(BaseModel):
         return False
 
 
+# Reviewer names that have a `review_attestation` emit path (x-e703 Change 4).
+# config.review.reviewers entries must resolve to one of these; a leading '/' is
+# stripped first (so `/code-review` == `code-review`). Kept in sync with the
+# emit surfaces in skills/review and the loop-check attestation read.
+_RESOLVABLE_REVIEWERS = frozenset({"sigma", "code-review", "declare"})
+
+
 class ReviewBlock(BaseModel):
     """External-review gate settings (nested under 'config.review').
 
@@ -469,6 +476,14 @@ class ReviewBlock(BaseModel):
     # never waits for them (their absence never blocks - kills the App-bot
     # usage-limit wedge), but a blocking finding from one still holds the gate.
     optional_apps: list[str] = Field(default_factory=list)
+    # Local-attestation reviewers (x-e703, Phase 2): skill/agent/command names
+    # (sigma | /code-review | declare) that produce NO GitHub review object, so
+    # loop-check accepts a head-pinned `review_attestation` event as gate
+    # evidence instead of a login match. A leading '/' is stripped so
+    # `/code-review` and `code-review` name the same reviewer. An unresolvable
+    # name fails LOUD here (a typo must never silently become no-gate) and is
+    # unsatisfiable at loop-check (Rust, fail closed).
+    reviewers: list[str] = Field(default_factory=list)
     # The INVOCATION list (Locked Decision 2): which AI reviewers /pr requests a
     # review from (gemini | codex | coderabbit | claude | none). Distinct from
     # required_bots (the GATE: which GitHub bot logins must have reviewed before
@@ -533,6 +548,43 @@ class ReviewBlock(BaseModel):
             v,
         )
         return []
+
+    @field_validator("reviewers", mode="before")
+    @classmethod
+    def coerce_and_resolve_reviewers(cls, v: object) -> object:
+        """Coerce scalar->list, strip a leading '/', and reject an unresolvable
+        name loudly (AC2-ERR / AC3-ERR).
+
+        The resolvable set is exactly the reviewers that have a
+        `review_attestation` emit path in this repo (sigma / code-review /
+        declare). A name outside it names no producer, so its gate entry could
+        never be satisfied - raising at load beats a silent never-green gate.
+        Unlike optional_apps, this fails CLOSED-and-LOUD rather than fail-safe:
+        a reviewers typo is a mis-declared GATE, not a dropped optional.
+        """
+        if v is None:
+            return []
+        if isinstance(v, bool) or not isinstance(v, (str, list)):
+            raise ValueError(
+                f"config.review.reviewers must be a scalar or list of reviewer "
+                f"names (got {v!r})"
+            )
+        raw = [v] if isinstance(v, str) else v
+        cleaned: list[str] = []
+        for entry in raw:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"config.review.reviewers entry must be a string (got {entry!r})"
+                )
+            name = entry.strip().lstrip("/")
+            if name not in _RESOLVABLE_REVIEWERS:
+                raise ValueError(
+                    f"config.review.reviewers names an unresolvable reviewer "
+                    f"{entry!r} (expected one of {sorted(_RESOLVABLE_REVIEWERS)}); "
+                    f"a typo would leave the gate permanently unsatisfiable"
+                )
+            cleaned.append(name)
+        return cleaned
 
     @field_validator("peers", mode="before")
     @classmethod
