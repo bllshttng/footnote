@@ -550,8 +550,8 @@ fn is_bg_guard_refusal(exit_code: i32, output_tail: Option<&str>) -> bool {
 ///     emit loop_unit_dispatched
 ///     run session, wait
 ///     if journal has termination event: close unit, journal node_closed, break
-///     if exit is claude's bg-guard refusal: journal walk_paused(bg_guard_refusal),
-///       close unit (NoProgress), break -- do NOT re-dispatch (x-4504, AC1-ERR)
+///     if exit is claude's bg-guard refusal: close unit (NoProgress) + node_closed,
+///       break -- do NOT re-dispatch (x-4504, AC1-ERR)
 ///     else: emit node_failed, continue inner loop (re-dispatch)
 /// ```
 ///
@@ -772,17 +772,12 @@ pub fn run_loop(
             // next dispatch re-runs `claude --resume` and re-hits the guard, so
             // re-dispatching is an infinite respawn loop. Park the unit instead
             // (a later native attach / detach frees the slot for a fresh walk).
+            // Mirror the per-unit-cap park: close with NoProgress evidence + a
+            // node_closed event whose detail identifies the bg-guard cause. Do
+            // NOT emit walk_paused -- that event is reserved for QUEUE-level
+            // policy pauses (schema.yaml enum: consecutive_failures|p0_failed),
+            // not per-unit parks (codex peer review).
             if is_bg_guard_refusal(exit_code, session.output_tail().as_deref()) {
-                journal.append(
-                    "walk_paused",
-                    json!({
-                        "policy": "bg_guard_refusal",
-                        "detail": "claude refused --resume: session is a live background agent (bg); re-dispatch halted to avoid respawn loop",
-                        "unit_id": unit.id,
-                        "session_id": unit.session_key,
-                        "iteration": iterations_used,
-                    }),
-                )?;
                 let evidence = Evidence {
                     reason: TerminationReason::NoProgress,
                     message: "claude bg-guard refusal (session running as a background agent); re-dispatch halted".to_string(),

@@ -226,13 +226,20 @@ impl Session for ShelloutSession {
     }
 
     fn output_tail(&self) -> Option<String> {
+        use std::io::{Read, Seek, SeekFrom};
+        // The guard message is short and near the end; read only the last 8 KiB
+        // (seek, don't slurp) so a large transcript can never balloon memory.
+        const MAX_TAIL: u64 = 8 * 1024;
         let path = self.output_file.as_ref()?;
-        let bytes = std::fs::read(path).ok()?;
-        // The guard message is short and near the end; keep only the last 8 KiB
-        // so a large transcript does not balloon the classification read.
-        const MAX_TAIL: usize = 8 * 1024;
-        let start = bytes.len().saturating_sub(MAX_TAIL);
-        Some(String::from_utf8_lossy(&bytes[start..]).into_owned())
+        let mut file = std::fs::File::open(path).ok()?;
+        // A metadata failure is not proof the file is gone (could be transient);
+        // fall through and read from the start rather than bailing.
+        if let Ok(len) = file.metadata().map(|m| m.len()) {
+            let _ = file.seek(SeekFrom::Start(len.saturating_sub(MAX_TAIL)));
+        }
+        let mut buf = Vec::new();
+        file.take(MAX_TAIL).read_to_end(&mut buf).ok()?;
+        Some(String::from_utf8_lossy(&buf).into_owned())
     }
 }
 

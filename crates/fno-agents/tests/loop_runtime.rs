@@ -794,13 +794,24 @@ fn bg_guard_refusal_parks_without_redispatch() {
     );
     assert_eq!(count_events(&project_events, "loop_unit_dispatched"), 1);
 
-    // A walk_paused event tagged bg_guard_refusal is present for observability.
-    let paused: Vec<_> = read_jsonl(&project_events)
-        .into_iter()
-        .filter(|v| v["type"] == "walk_paused")
-        .collect();
-    assert_eq!(paused.len(), 1, "expected one walk_paused event");
-    assert_eq!(paused[0]["data"]["policy"], "bg_guard_refusal");
+    // The bg-guard park is journaled as node_closed (like the per-unit-cap
+    // park); the bg-guard identity lives in the in-memory evidence message.
+    // It must NOT emit walk_paused (reserved for queue-level policy pauses,
+    // schema.yaml enum consecutive_failures|p0_failed).
+    assert_eq!(
+        count_events(&project_events, "walk_paused"),
+        0,
+        "per-unit bg-guard park must not emit the queue-level walk_paused event"
+    );
+    assert_eq!(count_events(&project_events, "node_closed"), 1);
+    assert!(
+        outcome.units[0]
+            .evidence
+            .message
+            .to_lowercase()
+            .contains("bg-guard refusal"),
+        "evidence must identify the bg-guard park"
+    );
 }
 
 /// A bare non-zero exit WITHOUT the bg-guard marker must still re-dispatch like
@@ -842,10 +853,13 @@ fn bare_crash_exit_still_redispatches() {
         2,
         "each ordinary crash emits node_failed"
     );
-    // No bg-guard walk_paused for a markerless crash.
-    let bg_paused = read_jsonl(&project_events)
-        .into_iter()
-        .filter(|v| v["type"] == "walk_paused" && v["data"]["policy"] == "bg_guard_refusal")
-        .count();
-    assert_eq!(bg_paused, 0, "markerless crash must not be a bg-guard park");
+    // The cap park is an ordinary NoProgress park, NOT a bg-guard one.
+    assert!(
+        !outcome.units[0]
+            .evidence
+            .message
+            .to_lowercase()
+            .contains("bg-guard"),
+        "markerless crash must not be classified as a bg-guard park"
+    );
 }
