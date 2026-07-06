@@ -701,3 +701,165 @@ fn parse_termination_reason_serde_roundtrip() {
         "unknown reason string must not match (returns None)"
     );
 }
+
+// ── bg-guard refusal (x-4504, AC1-ERR) ────────────────────────────────────────
+
+/// A Session that returns a fixed exit code and a fixed `output_tail`, never
+/// writing a termination event. Models a `claude --resume` that exited with the
+/// bg-guard refusal message (or an ordinary crash, when the tail lacks it).
+struct OutputSession {
+    exit_code: i32,
+    output_tail: Option<String>,
+}
+
+impl Session for OutputSession {
+    fn wait(&mut self) -> Result<i32, LoopError> {
+        Ok(self.exit_code)
+    }
+    fn output_tail(&self) -> Option<String> {
+        self.output_tail.clone()
+    }
+}
+
+/// A Dispatcher whose every session returns the same exit code + output tail.
+struct OutputDispatcher {
+    exit_code: i32,
+    output_tail: Option<String>,
+    dispatch_count: AtomicU64,
+}
+
+impl OutputDispatcher {
+    fn new(exit_code: i32, output_tail: Option<&str>) -> Self {
+        Self {
+            exit_code,
+            output_tail: output_tail.map(str::to_string),
+            dispatch_count: AtomicU64::new(0),
+        }
+    }
+    fn count(&self) -> u64 {
+        self.dispatch_count.load(Ordering::SeqCst)
+    }
+}
+
+impl Dispatcher for OutputDispatcher {
+    fn run(&self, _unit: &Unit, _ctx: &DispatchCtx) -> Result<Box<dyn Session>, LoopError> {
+        self.dispatch_count.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(OutputSession {
+            exit_code: self.exit_code,
+            output_tail: self.output_tail.clone(),
+        }))
+    }
+}
+
+/// AC1-ERR: a claude bg-guard refusal exit parks the unit after ONE dispatch —
+/// it must not re-dispatch into a sustained respawn loop.
+#[test]
+fn bg_guard_refusal_parks_without_redispatch() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+
+    let unit = make_unit("ab-bg1", "sess-bg1");
+    let mut queue = FixedQueue::new(vec![unit]);
+    // exit 1 + the claude bg-guard message, never a termination event.
+    let dispatcher = OutputDispatcher::new(
+        1,
+        Some("sess-bg1 is currently running as a background agent (bg). Use 'claude agents'."),
+    );
+    // Generous budget + NO per-unit cap: only the bg-guard branch can stop it,
+    // so an unbounded budget would spin forever if the branch were absent.
+    let budget = LoopBudget::new(100).unwrap();
+    let journal = Journal::new_raw(project_events.clone(), global_events);
+
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+
+    // The unit is parked (NoProgress) after exactly one dispatch; the walk then
+    // drains the queue and finishes NoWork.
+    assert_eq!(outcome.reason, TerminationReason::NoWork);
+    assert_eq!(
+        dispatcher.count(),
+        1,
+        "bg-guard refusal must NOT re-dispatch"
+    );
+    assert_eq!(
+        outcome.units[0].evidence.reason,
+        TerminationReason::NoProgress
+    );
+
+    // No node_failed (we did not treat it as a crash); exactly one dispatch.
+    assert_eq!(
+        count_events(&project_events, "node_failed"),
+        0,
+        "bg-guard refusal is terminal, not a crash-respawn"
+    );
+    assert_eq!(count_events(&project_events, "loop_unit_dispatched"), 1);
+
+    // The bg-guard park is journaled as node_closed (like the per-unit-cap
+    // park); the bg-guard identity lives in the in-memory evidence message.
+    // It must NOT emit walk_paused (reserved for queue-level policy pauses,
+    // schema.yaml enum consecutive_failures|p0_failed).
+    assert_eq!(
+        count_events(&project_events, "walk_paused"),
+        0,
+        "per-unit bg-guard park must not emit the queue-level walk_paused event"
+    );
+    assert_eq!(count_events(&project_events, "node_closed"), 1);
+    assert!(
+        outcome.units[0]
+            .evidence
+            .message
+            .to_lowercase()
+            .contains("bg-guard refusal"),
+        "evidence must identify the bg-guard park"
+    );
+}
+
+/// A bare non-zero exit WITHOUT the bg-guard marker must still re-dispatch like
+/// an ordinary crash (the bg-guard branch must not suppress real crashes).
+#[test]
+fn bare_crash_exit_still_redispatches() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+
+    let unit = make_unit("ab-bg2", "sess-bg2");
+    let mut queue = FixedQueue::new(vec![unit]);
+    // exit 1 with an ordinary crash message (no bg-guard marker).
+    let dispatcher = OutputDispatcher::new(1, Some("panic: index out of bounds"));
+    let budget = LoopBudget::new(100).unwrap();
+    let journal = Journal::new_raw(project_events.clone(), global_events);
+
+    // per_unit cap = 2 so the ordinary crash-respawn is bounded for the test.
+    let outcome = run_loop(
+        &mut queue,
+        &dispatcher,
+        &budget,
+        &journal,
+        &|| false,
+        Some(2),
+    )
+    .unwrap();
+
+    assert_eq!(outcome.reason, TerminationReason::NoWork);
+    // Re-dispatched up to the cap (2), proving it was NOT suppressed as a
+    // bg-guard refusal; then parked NoProgress by the cap.
+    assert_eq!(
+        dispatcher.count(),
+        2,
+        "ordinary crash must re-dispatch to cap"
+    );
+    assert_eq!(
+        count_events(&project_events, "node_failed"),
+        2,
+        "each ordinary crash emits node_failed"
+    );
+    // The cap park is an ordinary NoProgress park, NOT a bg-guard one.
+    assert!(
+        !outcome.units[0]
+            .evidence
+            .message
+            .to_lowercase()
+            .contains("bg-guard"),
+        "markerless crash must not be classified as a bg-guard park"
+    );
+}

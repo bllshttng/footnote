@@ -205,6 +205,12 @@ pub fn which_binary(name: &str) -> Option<PathBuf> {
 /// A live session wrapping a bash `driver_invoke` child process.
 pub struct ShelloutSession {
     child: Child,
+    /// Path the driver redirects claude stdout+stderr into (env `OUTPUT_FILE`),
+    /// read after exit to classify a claude bg-guard refusal (x-4504). `None`
+    /// when the dispatcher env carried no `OUTPUT_FILE`. The driver truncates
+    /// this file at the start of every `driver_invoke`, so after `wait()` it
+    /// holds exactly this iteration's output.
+    output_file: Option<PathBuf>,
 }
 
 impl Session for ShelloutSession {
@@ -217,6 +223,23 @@ impl Session for ShelloutSession {
         Ok(status
             .code()
             .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+    }
+
+    fn output_tail(&self) -> Option<String> {
+        use std::io::{Read, Seek, SeekFrom};
+        // The guard message is short and near the end; read only the last 8 KiB
+        // (seek, don't slurp) so a large transcript can never balloon memory.
+        const MAX_TAIL: u64 = 8 * 1024;
+        let path = self.output_file.as_ref()?;
+        let mut file = std::fs::File::open(path).ok()?;
+        // A metadata failure is not proof the file is gone (could be transient);
+        // fall through and read from the start rather than bailing.
+        if let Ok(len) = file.metadata().map(|m| m.len()) {
+            let _ = file.seek(SeekFrom::Start(len.saturating_sub(MAX_TAIL)));
+        }
+        let mut buf = Vec::new();
+        file.take(MAX_TAIL).read_to_end(&mut buf).ok()?;
+        Some(String::from_utf8_lossy(&buf).into_owned())
     }
 }
 
@@ -281,7 +304,15 @@ impl Dispatcher for ShelloutDispatcher {
             .spawn()
             .map_err(|e| LoopError::Dispatch(format!("spawn bash driver_invoke: {e}")))?;
 
-        Ok(Box::new(ShelloutSession { child }))
+        // Capture OUTPUT_FILE (the driver's stdout+stderr sink) so the walk can
+        // classify a claude bg-guard refusal after exit (x-4504).
+        let output_file = self
+            .env
+            .iter()
+            .find(|(k, _)| k == "OUTPUT_FILE")
+            .map(|(_, v)| PathBuf::from(v));
+
+        Ok(Box::new(ShelloutSession { child, output_file }))
     }
 }
 
