@@ -521,7 +521,13 @@ impl FakeClient {
     /// shell drops the CR harmlessly so the next nudge retries. Bounded so a
     /// genuinely dead pane still panics with the live state. The pinned prompt
     /// ends with `$` (`sh-3.2$ ` on macOS bash-as-sh, `$ ` on dash).
+    ///
+    /// Drives the *focused* pane: the CR nudge is routed server-side to the
+    /// focused pane, so `pane` must be the focused one (it always is at the
+    /// call sites - the first pane right after attach). Asserted to fail loud
+    /// rather than silently nudge the wrong pane if that ever changes.
     pub fn wait_prompt(&mut self, pane: u64) {
+        assert_eq!(self.focus(), pane, "wait_prompt drives the focused pane");
         for _ in 0..28 {
             if self.pane_text(pane).trim_end().ends_with('$') {
                 return;

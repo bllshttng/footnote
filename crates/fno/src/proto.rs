@@ -410,8 +410,8 @@ pub struct AgentRow {
     pub attach_id: Option<String>,
     /// (v20, x-0a2e) True when this row's provenance is claude's daemon roster
     /// (a synthesized foreign session or a roster-liveness-upgraded registry
-    /// row) rather than the fno registry: rendered dim, read-only toward
-    /// `~/.claude/**`. NOT an attachability signal (that is
+    /// row) rather than the fno registry: rendered dim, read-only toward the
+    /// claude daemon roster. NOT an attachability signal (that is
     /// `attach_id.is_some()`); an external row whose pane died is still
     /// `external: true` but exited. `#[serde(default)]` keeps a v19 reader
     /// wire-tolerant (defaults false).

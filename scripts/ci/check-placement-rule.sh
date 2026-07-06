@@ -176,7 +176,6 @@ crates/fno-agents/src/bin/client.rs
 crates/fno-agents/tests/claude_ask_dispatch.rs
 crates/fno-agents/tests/claude_ask_parity.rs
 crates/fno/src/agents_view.rs
-crates/fno/src/proto.rs
 hooks/cache-keepalive-inject.sh
 hooks/corrections-git-postcommit.sh
 hooks/session-start.sh
