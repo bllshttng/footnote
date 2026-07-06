@@ -9,6 +9,7 @@
 mod common;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use common::{spawn_server, FakeClient};
 use fno::proto::{MouseButton, MouseEvent, MouseKind};
@@ -56,6 +57,22 @@ fn wheel_up() -> MouseEvent {
 /// so every test gates its FIRST input on this. The pinned prompt ends with
 /// `$` (`sh-3.2$ ` on macOS bash-as-sh).
 fn wait_prompt(c: &mut FakeClient, pane: u64) {
+    // A fresh pane's shell prints its prompt exactly once at startup then
+    // idles. That single passive frame can be missed under parallel-test load
+    // (every server now arms the FNO_E2E idle-exit, whose extra core-loop
+    // scheduling can starve the frame writer past the 15s deadline on an
+    // oversubscribed box) - dash exposes this, bash-as-sh's slower startup
+    // hides it. Nudge with a bare CR until the prompt renders: a ready shell
+    // re-emits `$ ` on each Enter (a fresh frame the writer redelivers), and a
+    // not-yet-ready shell drops the CR harmlessly so the next nudge retries.
+    // Bounded so a genuinely dead pane still panics with the live state.
+    for _ in 0..28 {
+        if c.pane_text(pane).trim_end().ends_with('$') {
+            return;
+        }
+        c.input(b"\r");
+        c.pump(Duration::from_millis(500));
+    }
     c.wait_pane_text(15, pane, |t| t.trim_end().ends_with('$'));
 }
 
