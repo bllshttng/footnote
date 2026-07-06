@@ -1430,6 +1430,8 @@ const KEY_TABLE: &[&str] = &[
     "  x  close pane         c  new tab        ",
     "  n/p  cycle tabs       1-9  select tab   ",
     "  &  close tab          w  panel selector ",
+    "     selector ⏎ acts on the row: squad/tab ",
+    "     · agent focus/attach · card dispatch · + create ",
     "  a  answer queue       b  toggle sideline ",
     "  s  toggle status      ?  this key table  ",
     "  [ ]  jump block       v  select block   ",
