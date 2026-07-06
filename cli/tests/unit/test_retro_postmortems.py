@@ -292,6 +292,40 @@ def test_plain_run_drains_postmortems(tmp_path: Path, monkeypatch) -> None:
     assert "consumed_at" in (pm_dir / "cancel.md").read_text()
 
 
+# -- CLI wiring (`fno retro drain-postmortems`, x-42f6 US3) ---------------------
+
+def test_drain_postmortems_drains_and_reports(tmp_path: Path, monkeypatch) -> None:
+    """AC4-HP: the narrow verb drains each postmortem, stamps consumed_at, and
+    exits 0. AC4-FR: a second drain is an idempotent no-op."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    pm_dir = _wire_cli(tmp_path, monkeypatch)
+    _write(pm_dir, "cancel.md", LEGACY)
+    res = CliRunner().invoke(app, ["retro", "drain-postmortems"])
+    assert res.exit_code == 0, res.output
+    assert "1 archived" in res.output
+    assert "consumed_at" in (pm_dir / "cancel.md").read_text()
+
+    # AC4-FR: re-drain proposes nothing (consumed_at guard) -> zero-count line.
+    rerun = CliRunner().invoke(app, ["retro", "drain-postmortems"])
+    assert rerun.exit_code == 0, rerun.output
+    assert "0 unconsumed" in rerun.output
+
+
+def test_drain_postmortems_empty_is_zero_count(tmp_path: Path, monkeypatch) -> None:
+    """AC4-EDGE: no postmortems -> a zero-count line and exit 0."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    _wire_cli(tmp_path, monkeypatch)  # empty postmortems dir
+    res = CliRunner().invoke(app, ["retro", "drain-postmortems"])
+    assert res.exit_code == 0, res.output
+    assert "0 unconsumed" in res.output
+
+
 def test_targeted_run_skips_postmortems(tmp_path: Path, monkeypatch) -> None:
     """--node/--pr-number is a targeted harvest; the global postmortem drain
     only rides the plain run."""
