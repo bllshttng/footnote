@@ -382,9 +382,14 @@ enum CoreMsg {
     /// re-pushes layouts (rects unchanged, so no frame re-emit).
     AgentRows(Vec<RegistryAgent>),
     /// (x-6f77) A fresh board-ordered work-queue card set from the off-loop graph
-    /// reader. Sent only when the set changed; the core stores it and re-pushes
-    /// layouts so the sideline backlog lane tracks claims/closes.
-    BacklogCards(Vec<BacklogCard>),
+    /// reader, claim-overlaid (x-54fa). Sent only when the set changed; the core
+    /// stores it and re-pushes layouts so the sideline backlog lane tracks
+    /// claims/closes. `holders` is the sweep's node-id -> claim-holder map,
+    /// consumed at publish time for the `where_hint` of unroutable cards.
+    BacklogCards {
+        cards: Vec<BacklogCard>,
+        holders: HashMap<String, String>,
+    },
 }
 
 /// The per-pane signal an off-loop `PaneWait` watcher observes. The core loop
@@ -577,6 +582,9 @@ struct Core {
     /// Latest board-ordered work-queue cards (x-6f77), from the off-loop graph
     /// reader; packed into every `Layout` for the sideline backlog lane.
     backlog: Vec<BacklogCard>,
+    /// Claim holder per in-flight node id (x-54fa), from the reader's sweep;
+    /// joined at publish time into card routes / `where_hint`.
+    backlog_holders: HashMap<String, String>,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
@@ -701,6 +709,28 @@ async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
             }
         }
     }
+}
+
+/// Shell `fno-agents claim sweep --json`, bounded + fail-open (the digest
+/// idiom, x-4e2d): returns the live-claim map (node id -> holder) for the
+/// work-queue overlay (x-54fa), or `None` on missing binary / non-zero exit /
+/// timeout / unparseable output — the caller keeps its last-good sweep, so a
+/// single flaky tick never downgrades an in-flight card.
+async fn run_claim_sweep() -> Option<HashMap<String, String>> {
+    const SWEEP_TIMEOUT: Duration = Duration::from_millis(800);
+    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+        .args(["claim", "sweep", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // On timeout the future is dropped; kill_on_drop reaps the child so a
+        // hung sweep can't accumulate an orphan per tick.
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(SWEEP_TIMEOUT, fut).await.ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    backlog_view::live_claims_from_sweep(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Whether `node` (an id or slug) names a READY card in the server's backlog
@@ -2636,10 +2666,11 @@ impl Core {
                 self.push_layout(false);
                 Flow::Continue
             }
-            CoreMsg::BacklogCards(cards) => {
+            CoreMsg::BacklogCards { cards, holders } => {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit (x-6f77).
                 self.backlog = cards;
+                self.backlog_holders = holders;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -2795,6 +2826,7 @@ async fn serve(
         self_tx: core_tx.clone(),
         agents: Vec::new(),
         backlog: Vec::new(),
+        backlog_holders: HashMap::new(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
@@ -2861,10 +2893,34 @@ async fn serve(
         let path = backlog_view::graph_path();
         tokio::spawn(async move {
             let mut state = backlog_view::ReaderState::default();
+            // The last-good claim sweep (x-54fa): `None` until the first
+            // success (render un-overlaid), then only ever replaced by a
+            // fresher success — a sweep failure keeps this tick's overlay.
+            let mut last_live: Option<HashMap<String, String>> = None;
+            let mut sweep_failing = false;
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
+                // Claims change without graph.json mtime changes (release, TTL
+                // expiry, new dispatch), so the sweep runs every tick, bounded
+                // + fail-open. Failure is logged once per state change, not
+                // per tick (a permanently-missing fno-agents is one line).
+                match run_claim_sweep().await {
+                    Some(live) => {
+                        if sweep_failing {
+                            eprintln!("fno mux: claim sweep recovered");
+                        }
+                        sweep_failing = false;
+                        last_live = Some(live);
+                    }
+                    None => {
+                        if !sweep_failing {
+                            eprintln!("fno mux: claim sweep failed; keeping last-good overlay");
+                            sweep_failing = true;
+                        }
+                    }
+                }
                 let stat_path = path.clone();
                 let stamp = tokio::task::spawn_blocking(move || {
                     std::fs::metadata(&stat_path)
@@ -2884,8 +2940,13 @@ async fn serve(
                 } else {
                     None
                 };
-                if let Some(cards) = state.tick(stamp, move || raw) {
-                    if core_tx.send(CoreMsg::BacklogCards(cards)).await.is_err() {
+                if let Some(cards) = state.tick(stamp, move || raw, last_live.as_ref()) {
+                    let holders = last_live.clone().unwrap_or_default();
+                    if core_tx
+                        .send(CoreMsg::BacklogCards { cards, holders })
+                        .await
+                        .is_err()
+                    {
                         return; // core loop gone; the server is shutting down
                     }
                 }
@@ -4069,6 +4130,7 @@ mod tests {
             self_tx,
             agents: Vec::new(),
             backlog: Vec::new(),
+            backlog_holders: HashMap::new(),
             claim_eligible: HashSet::new(),
             claims: HashMap::new(),
             touch_last_emit: HashMap::new(),

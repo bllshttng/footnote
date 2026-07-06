@@ -13,6 +13,7 @@
 //! fields per node, not the whole model. A malformed document keeps the
 //! last-good cards (a torn concurrent write must not blank the lane).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::proto::{BacklogCard, CardState};
@@ -136,6 +137,56 @@ fn rank_band(rank: Option<f64>) -> u8 {
     }
 }
 
+/// Parse `fno-agents claim sweep --json` stdout into the live-claim map the
+/// overlay consumes: node id -> claim holder, for claims whose `state` is
+/// `"live"` under a `node:` / `dispatch:` key (x-54fa). Only `"live"` counts
+/// as in-flight (Locked 2); the sweep's other states (`stale`/`suspect`/...)
+/// never flip a card. `None` on unparseable output so the caller keeps its
+/// last-good sweep — a flaky tick must not downgrade in-flight cards.
+///
+/// The mux deliberately parses only this pinned JSON verdict: claim YAML,
+/// classification, and liveness live in `fno-agents` alone.
+pub fn live_claims_from_sweep(stdout: &str) -> Option<HashMap<String, String>> {
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let arr = v.get("claims")?.as_array()?;
+    let mut live: HashMap<String, String> = HashMap::new();
+    for c in arr {
+        if c.get("state").and_then(|s| s.as_str()) != Some("live") {
+            continue;
+        }
+        let Some(key) = c.get("key").and_then(|k| k.as_str()) else {
+            continue;
+        };
+        let holder = c
+            .get("holder")
+            .and_then(|h| h.as_str())
+            .unwrap_or_default()
+            .to_string();
+        // A node held by both a `dispatch:` and a `node:` claim keeps the
+        // `node:` holder (the worker session) for display; either alone
+        // marks the id in-flight.
+        if let Some(id) = key.strip_prefix("node:") {
+            live.insert(id.to_string(), holder);
+        } else if let Some(id) = key.strip_prefix("dispatch:") {
+            live.entry(id.to_string()).or_insert(holder);
+        }
+    }
+    Some(live)
+}
+
+/// Overlay live lockfile claims onto graph-derived cards (x-54fa): a card
+/// whose id holds a live `node:`/`dispatch:` claim renders InFlight,
+/// overriding Ready AND Blocked (a claimed node with a stale `blocked_by` is
+/// in-flight — this module's documented stance). Pure; ids not in the card
+/// set are ignored (no phantom cards), ids join by node id only.
+pub fn overlay_claims(cards: &mut [BacklogCard], live: &HashMap<String, String>) {
+    for c in cards.iter_mut() {
+        if live.contains_key(&c.id) {
+            c.state = CardState::InFlight;
+        }
+    }
+}
+
 /// The reader's between-tick memory (mtime-gated document cache + last-sent
 /// cards), mirroring [`crate::agents_view::ReaderState`]. The interval task
 /// lives in server.rs (it owns the `CoreMsg` sender); this keeps the derivation
@@ -154,14 +205,20 @@ impl ReaderState {
         self.cached_stamp
     }
 
-    /// One tick: fold in a fresh stat/read (both taken OFF the core loop) and
-    /// return the card set to publish, or `None` when nothing changed. A
-    /// malformed document keeps the last-good cards (a torn concurrent write
-    /// must not blank the lane); a vanished file empties them.
+    /// One tick: fold in a fresh stat/read (both taken OFF the core loop),
+    /// overlay live claims, and return the card set to publish, or `None` when
+    /// nothing changed. A malformed document keeps the last-good cards (a torn
+    /// concurrent write must not blank the lane); a vanished file empties them.
+    ///
+    /// `live` is the last-good claim sweep (`None` = no sweep has ever
+    /// succeeded: render un-overlaid, today's behavior). The overlay applies
+    /// INSIDE the change gate so a claim appearing/releasing republishes even
+    /// when the graph file itself is untouched (x-54fa AC1-HP / AC1-EDGE).
     pub fn tick(
         &mut self,
         stamp: Option<(std::time::SystemTime, u64)>,
         read_if_changed: impl FnOnce() -> Option<String>,
+        live: Option<&HashMap<String, String>>,
     ) -> Option<Vec<BacklogCard>> {
         if stamp != self.cached_stamp {
             match (read_if_changed(), stamp) {
@@ -181,12 +238,15 @@ impl ReaderState {
                 (None, Some(_)) => {} // torn read: keep last-good AND retry next tick
             }
         }
-        let cards = match &self.cached_raw {
+        let mut cards = match &self.cached_raw {
             Some(raw) => derive_cards(raw)
                 .or_else(|| self.last_sent.clone())
                 .unwrap_or_default(),
             None => Vec::new(),
         };
+        if let Some(live) = live {
+            overlay_claims(&mut cards, live);
+        }
         if self.last_sent.as_ref() != Some(&cards) {
             self.last_sent = Some(cards.clone());
             Some(cards)
@@ -270,17 +330,91 @@ mod tests {
         let mut st = ReaderState::default();
         let good = graph(r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"}"#);
         let s1 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
-        assert_eq!(st.tick(s1, || Some(good.clone())).unwrap().len(), 1);
+        assert_eq!(st.tick(s1, || Some(good.clone()), None).unwrap().len(), 1);
         // A changed stamp but a torn (None) read keeps the last-good card AND
         // does not commit the new stamp, so the read is retried next tick.
         let s2 = Some((std::time::SystemTime::UNIX_EPOCH, 999));
-        assert!(st.tick(s2, || None).is_none()); // last-good unchanged -> no republish
-                                                 // Retry at the same stamp now succeeds with two cards -> republished
-                                                 // (proves the torn read did not pin the stale set).
+        assert!(st.tick(s2, || None, None).is_none()); // last-good unchanged -> no republish
+                                                       // Retry at the same stamp now succeeds with two cards -> republished
+                                                       // (proves the torn read did not pin the stale set).
         let two = graph(
             r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"},
                {"id":"b","slug":"t","priority":"p2","_status":"blocked"}"#,
         );
-        assert_eq!(st.tick(s2, || Some(two.clone())).unwrap().len(), 2);
+        assert_eq!(st.tick(s2, || Some(two.clone()), None).unwrap().len(), 2);
+    }
+
+    // ---- claims overlay (x-54fa) -----------------------------------------
+
+    fn live(ids: &[(&str, &str)]) -> HashMap<String, String> {
+        ids.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn overlay_flips_ready_and_blocked_to_in_flight() {
+        // AC1-HP: ready + live claim renders InFlight. AC2-EDGE: overlay
+        // beats Blocked. Ids not in the live map are untouched; live ids not
+        // in the card set are ignored (no phantom cards).
+        let raw = graph(
+            r#"{"id":"x-rdy","slug":"r","priority":"p1","_status":"ready"},
+               {"id":"x-blk","slug":"b","priority":"p2","_status":"blocked","blocked_by":["x-rdy"]},
+               {"id":"x-free","slug":"f","priority":"p2","_status":"ready"}"#,
+        );
+        let mut cards = derive_cards(&raw).unwrap();
+        overlay_claims(
+            &mut cards,
+            &live(&[
+                ("x-rdy", "target-session:abc"),
+                ("x-blk", "dispatch-node:1"),
+                ("x-ghost", "nobody"),
+            ]),
+        );
+        let by_id = |id: &str| cards.iter().find(|c| c.id == id).unwrap().state;
+        assert_eq!(by_id("x-rdy"), CardState::InFlight);
+        assert_eq!(by_id("x-blk"), CardState::InFlight);
+        assert_eq!(by_id("x-free"), CardState::Ready);
+        assert_eq!(cards.len(), 3, "no phantom card for x-ghost");
+    }
+
+    #[test]
+    fn overlay_change_republishes_without_graph_change() {
+        // AC1-HP/AC1-EDGE: a claim appearing (and later releasing) flips the
+        // card within a tick even though the graph stamp never moves.
+        let mut st = ReaderState::default();
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
+        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let first = st.tick(s, || Some(raw.clone()), None).unwrap();
+        assert_eq!(first[0].state, CardState::Ready);
+        // Claim appears: same stamp, no re-read, card republishes InFlight.
+        let claimed = live(&[("x-a", "target-session:abc")]);
+        let flipped = st.tick(s, || None, Some(&claimed)).unwrap();
+        assert_eq!(flipped[0].state, CardState::InFlight);
+        // Unchanged claim set: no republish.
+        assert!(st.tick(s, || None, Some(&claimed)).is_none());
+        // Claim released: card reverts to Ready and republishes.
+        let released = live(&[]);
+        let reverted = st.tick(s, || None, Some(&released)).unwrap();
+        assert_eq!(reverted[0].state, CardState::Ready);
+    }
+
+    #[test]
+    fn sweep_parse_takes_only_live_node_and_dispatch_claims() {
+        let stdout = r#"{"claims":[
+            {"key":"node:x-a","state":"live","holder":"target-session:abc","host":"h","pid":1},
+            {"key":"dispatch:x-a","state":"live","holder":"dispatch-node:9","host":"h","pid":9},
+            {"key":"dispatch:x-b","state":"live","holder":"advance:2","host":"h","pid":2},
+            {"key":"node:x-c","state":"stale","holder":"gone","host":"h","pid":3},
+            {"key":"node:x-d","state":"suspect","holder":"maybe","host":"h","pid":4}
+        ]}"#;
+        let live = live_claims_from_sweep(stdout).unwrap();
+        // Only live claims count; node: holder preferred over dispatch:.
+        assert_eq!(live.len(), 2);
+        assert_eq!(live["x-a"], "target-session:abc");
+        assert_eq!(live["x-b"], "advance:2");
+        // Unparseable output is None (keep last-good), not an empty map.
+        assert!(live_claims_from_sweep("not json").is_none());
+        assert!(live_claims_from_sweep(r#"{"no_claims":1}"#).is_none());
     }
 }

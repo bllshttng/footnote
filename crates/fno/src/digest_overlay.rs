@@ -179,8 +179,9 @@ fn parse_bool(v: &str) -> Option<bool> {
 
 /// Resolve the `fno-agents` binary: `$FNO_AGENTS_BIN`, else a sibling of the
 /// running `fno` binary (the installed layout, mirroring `resolve_daemon_bin`),
-/// else bare `fno-agents` on PATH.
-fn fno_agents_bin() -> PathBuf {
+/// else bare `fno-agents` on PATH. Crate-visible: the server's claim-sweep
+/// shell-out (x-54fa) resolves the same binary the same way.
+pub(crate) fn fno_agents_bin() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_AGENTS_BIN") {
         return PathBuf::from(v);
     }
