@@ -212,6 +212,17 @@ pub trait Queue {
 pub trait Session {
     /// Block until the session exits and return its exit code.
     fn wait(&mut self) -> Result<i32, LoopError>;
+
+    /// Tail of the session's captured driver output (the `OUTPUT_FILE` the bash
+    /// driver redirects claude stdout+stderr into), if available. The walk reads
+    /// it to classify a non-termination exit: claude's bg-guard refusal
+    /// ("running as a background agent (bg)") must terminate the unit rather than
+    /// be re-dispatched into an infinite respawn loop (x-4504, AC1-ERR). Default
+    /// `None` -> a Session that captures no output is treated as an ordinary
+    /// crash and re-dispatched exactly as before.
+    fn output_tail(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Launches sessions for units. Stateless with respect to the walk loop;
@@ -494,6 +505,28 @@ pub struct LoopOutcome {
     pub units: Vec<UnitResult>,
 }
 
+// ── bg-guard refusal classifier ─────────────────────────────────────────────
+
+/// Claude's bg-guard refusal marker. When a `/target --resume` lands on a
+/// session claude still has registered as a live background agent, claude exits
+/// via `exit_with_message` (exit 1) after printing a message containing this
+/// phrase (e.g. "<sid> is currently running as a background agent (bg)"). The
+/// walk resumes by shelling `claude --resume`, so re-dispatching just re-hits
+/// the guard forever -- the x-4504 respawn loop. Match is case-insensitive.
+const BG_GUARD_MARKER: &str = "running as a background agent";
+
+/// True iff a non-termination session exit is claude's bg-guard refusal and
+/// therefore must be treated as terminal (parked) rather than re-dispatched.
+/// Gated on a non-zero exit AND the marker in the captured output: a bare
+/// non-zero exit WITHOUT the marker stays an ordinary crash-respawn, and a clean
+/// (exit 0) run that merely mentions the phrase is never suppressed.
+fn is_bg_guard_refusal(exit_code: i32, output_tail: Option<&str>) -> bool {
+    exit_code != 0
+        && output_tail
+            .map(|t| t.to_ascii_lowercase().contains(BG_GUARD_MARKER))
+            .unwrap_or(false)
+}
+
 // ── main loop ─────────────────────────────────────────────────────────────────
 
 /// Run a walk over the queue until the queue is empty, the budget is exhausted,
@@ -517,6 +550,8 @@ pub struct LoopOutcome {
 ///     emit loop_unit_dispatched
 ///     run session, wait
 ///     if journal has termination event: close unit, journal node_closed, break
+///     if exit is claude's bg-guard refusal: journal walk_paused(bg_guard_refusal),
+///       close unit (NoProgress), break -- do NOT re-dispatch (x-4504, AC1-ERR)
 ///     else: emit node_failed, continue inner loop (re-dispatch)
 /// ```
 ///
@@ -730,6 +765,38 @@ pub fn run_loop(
                 break; // Break inner loop -> continue outer loop (next unit).
             }
 
+            // x-4504 / AC1-ERR: claude's bg-guard refusal is terminal, not a
+            // crash to re-dispatch. When `/target --resume` lands on a session
+            // claude still holds as a live background agent, claude refuses with
+            // `exit_with_message` ("running as a background agent (bg)"). The
+            // next dispatch re-runs `claude --resume` and re-hits the guard, so
+            // re-dispatching is an infinite respawn loop. Park the unit instead
+            // (a later native attach / detach frees the slot for a fresh walk).
+            if is_bg_guard_refusal(exit_code, session.output_tail().as_deref()) {
+                journal.append(
+                    "walk_paused",
+                    json!({
+                        "policy": "bg_guard_refusal",
+                        "detail": "claude refused --resume: session is a live background agent (bg); re-dispatch halted to avoid respawn loop",
+                        "unit_id": unit.id,
+                        "session_id": unit.session_key,
+                        "iteration": iterations_used,
+                    }),
+                )?;
+                let evidence = Evidence {
+                    reason: TerminationReason::NoProgress,
+                    message: "claude bg-guard refusal (session running as a background agent); re-dispatch halted".to_string(),
+                };
+                let close = queue.close(&unit, &evidence)?;
+                journal_node_closed(journal, &unit, &evidence, &close, iterations_used)?;
+                units.push(UnitResult {
+                    unit_id: unit.id.clone(),
+                    evidence,
+                    close,
+                });
+                break; // Break inner loop -> continue outer loop (next unit).
+            }
+
             // No termination event: emit node_failed (watchdog synthesis) and
             // re-dispatch in the next inner iteration.
             journal.append(
@@ -778,4 +845,38 @@ fn journal_node_closed(
             "iterations_used": iterations_used,
         }),
     )
+}
+
+#[cfg(test)]
+mod bg_guard_tests {
+    use super::is_bg_guard_refusal;
+
+    #[test]
+    fn refusal_marker_with_nonzero_exit_is_terminal() {
+        let out = "abc123 is currently running as a background agent (bg). \
+                   Use 'claude agents' to view it, or add --fork-session.";
+        assert!(is_bg_guard_refusal(1, Some(out)));
+        // Case-insensitive.
+        assert!(is_bg_guard_refusal(
+            1,
+            Some("RUNNING AS A BACKGROUND AGENT")
+        ));
+    }
+
+    #[test]
+    fn bare_nonzero_exit_without_marker_is_not_terminal() {
+        // An ordinary crash must still re-dispatch (not be suppressed).
+        assert!(!is_bg_guard_refusal(1, Some("panic: index out of bounds")));
+        assert!(!is_bg_guard_refusal(1, None));
+        assert!(!is_bg_guard_refusal(137, Some("killed"))); // SIGKILL
+    }
+
+    #[test]
+    fn clean_exit_is_never_a_refusal_even_with_marker() {
+        // A successful run that merely mentions the phrase must not be parked.
+        assert!(!is_bg_guard_refusal(
+            0,
+            Some("running as a background agent")
+        ));
+    }
 }
