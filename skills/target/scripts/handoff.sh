@@ -721,8 +721,9 @@ except Exception as e:
 PYEOF
 true  # python3 best-effort; rc ignored
 
-# 8e. Touch per-session sentinel
+# 8e. Touch per-session sentinel; clear any PreCompact arming marker (guard c).
 touch "$SENTINEL"
+rm -f "$FNO_DIR/.handoff-armed-$SESSION_ID"
 
 # ---------------------------------------------------------------------------
 # Step 8 complete: print delegated line (step 9 is the calling LLM's job)
