@@ -164,6 +164,13 @@ consolidate-artifacts.sh
 # point). Pure sourcing library: exposes reconcile_maybe_fire; no standalone CLI.
 reconcile-throttle.sh
 
+# Shared daily-throttled eval-loop ignition helper (x-42f6). Sourced by
+# hooks/eval-sweep-session-start.sh to fire a backgrounded, throttled
+# `fno observer sweep` + `fno skill-diff tick` (which ARE the wrapped entry
+# points); itself sources reconcile-throttle.sh for helper reuse. Pure sourcing
+# library: exposes eval_sweep_maybe_fire; no standalone CLI.
+eval-sweep-throttle.sh
+
 # W8 operator-authority enforcement (cv-b36e32b1). Sourced by
 # hooks/target-stop-hook.sh; drive_authority_active() is a thin bash consumer
 # of the EXISTING `fno agents drive-authority` verb (which IS the wrapped entry
