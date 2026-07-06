@@ -303,6 +303,101 @@ def test_peers_without_identity_fails_loud(
         )
 
 
+# --- claude->routed-model peer lane (x-ef41) ---
+
+
+def test_peers_claude_with_model_route_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-HP: a claude peer that names a model route loads (GLM via claude CLI)."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    peers:\n"
+        '      - provider: claude\n        model: "zai,glm-5.2"\n'
+        "    peer_identity: fno-peer-bot\n",
+    )
+    assert settings.config.review.peers == [
+        {"provider": "claude", "model": "zai,glm-5.2"}
+    ]
+
+
+def test_peers_bare_claude_no_model_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-ERR: a claude peer with no model route is the author's own model ->
+    reject at load, citing the distinct-model trust invariant."""
+    with pytest.raises(Exception, match="distinct-model"):
+        _load(
+            tmp_path,
+            monkeypatch,
+            "schema_version: 1\nconfig:\n  review:\n    peers:\n"
+            "      - provider: claude\n    peer_identity: fno-peer-bot\n",
+        )
+
+
+def test_peers_scalar_claude_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scalar `peers: claude` is also a routeless claude peer -> rejected."""
+    with pytest.raises(Exception, match="distinct-model"):
+        _load(
+            tmp_path,
+            monkeypatch,
+            "schema_version: 1\nconfig:\n  review:\n    peers: [claude]\n"
+            "    peer_identity: fno-peer-bot\n",
+        )
+
+
+def test_peers_claude_malformed_route_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claude peer whose model is not `route_provider,route_model` is rejected
+    (a bare `zai` with no model half is not a valid distinct route)."""
+    with pytest.raises(Exception, match="distinct-model"):
+        _load(
+            tmp_path,
+            monkeypatch,
+            "schema_version: 1\nconfig:\n  review:\n    peers:\n"
+            '      - provider: claude\n        model: "zai"\n'
+            "    peer_identity: fno-peer-bot\n",
+        )
+
+
+@pytest.mark.parametrize("route", ["anthropic,claude-opus", "claude,sonnet"])
+def test_peers_claude_same_model_route_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """A claude peer routing back to the author's own provider (anthropic/claude)
+    is not a distinct model -> rejected at load (defense-in-depth: the runtime
+    also fail-safes an unknown provider to None)."""
+    with pytest.raises(Exception, match="distinct-model"):
+        _load(
+            tmp_path,
+            monkeypatch,
+            "schema_version: 1\nconfig:\n  review:\n    peers:\n"
+            f'      - provider: claude\n        model: "{route}"\n'
+            "    peer_identity: fno-peer-bot\n",
+        )
+
+
+def test_peers_codex_with_model_key_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-EDGE: a `model` key on a codex/gemini entry is accepted (ignored by
+    those lanes); the guard is claude-only, so back-compat holds."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    peers:\n"
+        '      - provider: codex\n        model: "zai,glm-5.2"\n'
+        "    peer_identity: fno-peer-bot\n",
+    )
+    assert settings.config.review.peers == [
+        {"provider": "codex", "model": "zai,glm-5.2"}
+    ]
+
+
 # --- optional_apps: honored-if-present, never required (x-4baa) ---
 
 

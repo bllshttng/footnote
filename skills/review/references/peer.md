@@ -27,8 +27,12 @@ review from the bot account and never satisfies a `required_bots` gate.
   - PR number -> review `gh pr diff <N>`.
   - branch name -> review that branch's diff vs base.
   - nothing -> review the current branch vs base (`origin/main` unless overridden).
-- **provider** (optional, trailing word): `codex` (default) or `gemini`. `claude`
-  is rejected - it has no `--once` one-shot lane (see Hard rules).
+- **provider** (optional, trailing word): `codex` (default) or `gemini`. A bare
+  `claude` is rejected (it is the same model as the author - see Hard rules), but
+  a **routed** `claude` peer IS allowed: a `config.review.peers` entry of the form
+  `{provider: claude, model: "zai,glm-5.2"}` runs the claude CLI as transport over
+  a genuinely different model (GLM via z.ai), which satisfies the distinct-model
+  trust invariant (see step 3b).
 - **base** (optional): override the diff base (default `origin/main`).
 - **`--post`** (optional flag): after getting the review, POST it to the PR
   under `config.review.peer_identity` so it satisfies the login-based loop-check
@@ -98,7 +102,7 @@ cp "$DIFF" .git/peer-review.diff   # workspace-relative; readable by a sandboxed
 Unlike a `gh`/`git` call, a local file read works even when the sandbox blocks
 network.
 
-### 3. SPAWN - the agent runs it (this is the whole point)
+### 3a. SPAWN (codex / gemini) - the agent runs it (this is the whole point)
 
 Run the genuine one-shot via your **Bash tool** (never instruct the user to type
 it). Name is positional, message is the trailing positional, reply is on stdout:
@@ -118,6 +122,61 @@ fno agents spawn --provider "$PROVIDER" -H -t 300 "peer-$TARGET" "$(cat "$BRIEF"
   (e.g. 360000 ms) so the tool does not cut the review off early.
 - `peer-$TARGET` is a throwaway name (`-H` tears the agent down); derive it
   from the target, e.g. `peer-pr657` or `peer-fix-ratios`.
+
+### 3b. GENERATE (routed claude -> GLM) - claude CLI as transport (x-ef41)
+
+For a `config.review.peers` entry `{provider: claude, model: "<rprov>,<rmodel>"}`
+(e.g. `zai,glm-5.2`), do NOT `fno agents spawn` - the claude CLI is only the
+transport; the review model is the routed one (GLM via z.ai). Run `claude -p` with
+the routed `ANTHROPIC_*` env built by the SAME model-routing layer the spawn path
+uses (`resolve_explicit_route`), so the z.ai env-var contract lives in one place
+and is never hand-rolled here. Clear the parent Anthropic credential first (exactly
+as `providers/claude.py` does) or a lingering key sends the run back to Anthropic:
+
+```bash
+# $BRIEF = the review prompt (step 2); "zai,glm-5.2" = the peers entry's `model`.
+# PY must run on the interpreter that has `fno` importable. A bare system python3
+# lacks fno's deps (ModuleNotFoundError: pydantic), so do NOT default to it: probe
+# for a working interpreter and FAIL LOUD if none is found. Override with
+# FNO_PYTHON (e.g. the fno tool venv python, or `uv run --project <fno-src> python`
+# in the footnote source tree).
+PYBIN=""
+for c in "$FNO_PYTHON" "$HOME/.local/share/uv/tools/fno/bin/python3" python3; do
+  [ -n "$c" ] || continue
+  if "$c" -c "import fno.agents.model_routing" 2>/dev/null; then PYBIN="$c"; break; fi
+done
+if [ -z "$PYBIN" ]; then
+  echo "no interpreter with fno importable - set FNO_PYTHON to the fno tool venv python (or run under 'uv run --project <fno-src>')" >&2
+  # abstain like any failed peer; do NOT fall back to a same-model review.
+else
+GLM_REVIEW="$("$PYBIN" - "$BRIEF" "zai,glm-5.2" <<'PY'
+import sys, os, subprocess
+from fno.agents.model_routing import resolve_explicit_route
+brief = open(sys.argv[1]).read()
+rprov, _, rmodel = sys.argv[2].partition(",")
+route = resolve_explicit_route(rprov, rmodel, notice=lambda m: print(m, file=sys.stderr))
+if not route:                      # z.ai key unset / provider misconfigured
+    print("z.ai key unset - GLM peer skipped", file=sys.stderr)
+    sys.exit(3)                    # fail-safe: NO silent Anthropic-billed fallback
+env = dict(os.environ)
+env.pop("ANTHROPIC_API_KEY", None)
+env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+env.update(route)
+r = subprocess.run(["claude", "-p", brief], env=env,
+                   capture_output=True, text=True, timeout=300)
+sys.stdout.write(r.stdout)
+sys.stderr.write(r.stderr)          # surface claude's failure reason, don't drop it
+sys.exit(r.returncode)
+PY
+)"
+GLM_RC=$?
+fi
+```
+
+Then relay `$GLM_REVIEW` through step 4 exactly like a codex/gemini result: a
+non-zero `$GLM_RC` (including exit 3, key unset) is a FAILED/abstained peer - say
+so plainly ("z.ai key unset - GLM peer skipped") and leave the gate as-is. NEVER
+invent findings to stand in for the GLM review you did not actually get.
 
 ### 4. RELAY honestly (the cardinal guard)
 
@@ -160,6 +219,9 @@ PR-head, failing loud on any `gh` error:
 # $REVIEW_FILE holds the verbatim provider output from step 3.
 # Extract each blocking finding you identified as `path:line:message` and pass
 # it with --p1 (repeatable). The helper embeds the P1 badge markup itself.
+# For the routed-claude peer (step 3b) pass a distinct label - `claude-glm` - so
+# its head marker (<!-- fno-peer:claude-glm:<sha> -->) and body do not collide
+# with a codex/gemini peer on the same PR.
 bash "${SKILL_DIR}/scripts/post-peer-review.sh" \
   --pr "$N" --provider "$PROVIDER" \
   --token-env "$(fno config get config.review.peer_token_env)" \
@@ -167,6 +229,21 @@ bash "${SKILL_DIR}/scripts/post-peer-review.sh" \
   --p1 "src/foo.rs:42:Null deref when the cache is cold" \
   --p1 "src/bar.py:88:Off-by-one drops the last row"
 ```
+
+**Advisory-first (x-ef41) - what "advisory" actually means here.** Be precise: any
+`config.review.peers` entry IS read by loop-check as a required reviewer (it
+resolves each entry to a posting login - the entry's own map `identity`, else the
+shared `peer_identity` - and requires that login to have reviewed). So a GLM peer
+is not gate-free simply by being routed. What keeps it advisory in v1 is that it
+posts under the *shared* `peer_identity` alongside codex/gemini: peers sharing one
+identity collapse to a SINGLE required login, cleared by ANY of them posting, so
+adding GLM does not add a new hurdle and blocking judgment still rides the flagship
+(`PROTECTED_ROLES` stance). (Caveat: a GLM peer that is the *only* peer, posting
+under the shared identity, is effectively the sole thing satisfying that login -
+there it does gate.) To PROMOTE GLM to an INDEPENDENT required gate once trusted,
+give its peers entry its OWN map `identity` (a distinct login loop-check must see
+separately) instead of letting it ride the shared `peer_identity` - a one-line
+config change, no code.
 
 On a **provider-failed** or **post-failed** outcome the helper exits non-zero
 and prints why; relay that verbatim. The gate then stays UNMET with a stated
@@ -180,10 +257,14 @@ review, or whose post to GitHub failed, must be reported, not papered over.
    `! fno agents spawn ...` recreates the exact bug this skill fixes.
 2. **Never fabricate a review.** Empty/non-zero is FAILED-or-abstained, reported
    as such. A peer review you did not actually get is worse than none.
-3. **codex or gemini only.** `claude --once` errors (claude peers are persistent
-   bg threads, not one-shots). If the user asks for a claude review, point them at
-   `/review sigma` (internal Claude panel) or a normal Claude subagent - do not try
-   to force `--once`.
+3. **codex, gemini, or a ROUTED claude only.** A bare `claude` peer is rejected -
+   it is the author's own model (`claude --once` also has no one-shot lane), so
+   point a bare-claude request at `/review sigma` or a normal Claude subagent. The
+   ONE exception is a routed claude peer (`{provider: claude, model: "zai,glm-5.2"}`,
+   step 3b): the claude CLI is transport for a genuinely different model (GLM), so
+   it satisfies the distinct-model invariant and is generated via `claude -p` with
+   the routed env, never `fno agents spawn`. The config loader enforces this - a
+   `claude` peers entry with no `model` route is rejected at load.
 4. **Advisory by default; a gate only with `--post`.** Bare `/review peer` is a
    coding-account read that never satisfies a review gate. With `--post` it is
    posted under the distinct `peer_identity` (NOT the author account) and DOES
