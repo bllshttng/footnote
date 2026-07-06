@@ -68,6 +68,9 @@
 | `config.agents.dead_row_grace` | int | `3600` | advanced | Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600). |
 | `config.agents.codex.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless codex workers. |
 | `config.agents.gemini.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless gemini workers. |
+| `config.agents.max_live` | int | `3` | advanced | Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3). |
+| `config.agents.min_free_gb` | float | `4.0` | advanced | Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4). |
+| `config.agents.worker_qos` | str | `utility` | advanced | Worker CPU/IO priority: utility (background QoS, default) or off. |
 | `config.auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |
 | `config.think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node. |
 | `config.think_spawn.max_per_run` | int | `5` | advanced | Blast-radius cap on /think spawns per node-generation run. |

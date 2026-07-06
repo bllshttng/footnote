@@ -161,6 +161,12 @@ config:
     gemini:
       # Use full-yolo (drop sandbox) for headless gemini workers.
       headless_yolo: false
+    # Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).
+    max_live: 3
+    # Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).
+    min_free_gb: 4.0
+    # Worker CPU/IO priority: utility (background QoS, default) or off.
+    worker_qos: utility
   auto_continue:
     # Auto-dispatch the next ready node after a PR merges.
     enabled: false
