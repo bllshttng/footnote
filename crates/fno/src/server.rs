@@ -450,6 +450,13 @@ struct PaneEntry {
     /// an ad-hoc `pane run` with no `FNO_NODE=` token. Surfaced to the client
     /// status row via `Layout::focus_node`.
     node: Option<String>,
+    /// The spawn cwd, captured once so the tab-label derivation (x-c150) never
+    /// touches the filesystem on the render path. Empty when the spawn fell
+    /// back to the server cwd.
+    cwd: String,
+    /// Basename of the spawned command ("claude", "htop"), parsed from the
+    /// pane-run argv like [`node_from_argv`]. `None` for a shell pane.
+    cmd: Option<String>,
 }
 
 /// Extract the `FNO_NODE` value from a pane-run `argv`. The `_mesh_env_wrapper`
@@ -471,6 +478,20 @@ fn node_from_argv(argv: &[String]) -> Option<String> {
         .find_map(|a| a.strip_prefix("FNO_NODE="))
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
+}
+
+/// The spawned command's basename for the tab-label chain (x-c150): the first
+/// argv token past an optional leading `env` + its `NAME=VALUE` run (the same
+/// scan shape as [`node_from_argv`]). `None` when the scan finds no command -
+/// spawn never fails on labeling.
+fn cmd_from_argv(argv: &[String]) -> Option<String> {
+    let cmd = if argv.first().map(String::as_str) == Some("env") {
+        argv.iter().skip(1).find(|a| !a.contains('='))?
+    } else {
+        argv.first()?
+    };
+    let base = cmd.rsplit('/').next().unwrap_or(cmd);
+    (!base.is_empty()).then(|| base.to_string())
 }
 
 /// Whether an event ended the session.
@@ -792,7 +813,7 @@ impl Core {
         )
         .map_err(|e| e.to_string())?;
         // A shell pane carries no node provenance (no wrapper argv).
-        self.register_pane(id, pty, rows, cols, None);
+        self.register_pane(id, pty, rows, cols, None, cwd.to_string(), None);
         Ok(id)
     }
 
@@ -811,6 +832,7 @@ impl Core {
             return Err("pane run needs a command (empty argv)".into());
         }
         let node = node_from_argv(argv);
+        let cmd = cmd_from_argv(argv);
         let id = self.next_pane_id;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn_cmd(
@@ -824,13 +846,14 @@ impl Core {
             self.exit_tx.clone(),
         )
         .map_err(|e| e.to_string())?;
-        self.register_pane(id, pty, rows, cols, node);
+        self.register_pane(id, pty, rows, cols, node, cwd.to_string(), cmd);
         Ok(id)
     }
 
     /// Record a freshly-spawned pane: bump the id, insert its VT grid, and
     /// arm its output watch (dropped receiver, so the watch costs nothing
     /// until a `PaneWait` subscribes).
+    #[allow(clippy::too_many_arguments)]
     fn register_pane(
         &mut self,
         id: u64,
@@ -838,6 +861,8 @@ impl Core {
         rows: u16,
         cols: u16,
         node: Option<String>,
+        cwd: String,
+        cmd: Option<String>,
     ) {
         self.next_pane_id += 1;
         self.panes.insert(
@@ -846,6 +871,8 @@ impl Core {
                 pty,
                 vt: vt::Pane::new(rows, cols),
                 node,
+                cwd,
+                cmd,
             },
         );
         let (tx, _rx) = watch::channel(WaitTick::default());
@@ -947,6 +974,7 @@ impl Core {
         }
         let tid = self.session.mint_tab_id();
         let tab = Tab {
+            name: None,
             id: tid,
             root: Node::Leaf(pid),
             focus: pid,
@@ -1059,6 +1087,7 @@ impl Core {
                             vec![key],
                             None,
                             Tab {
+                                name: None,
                                 id: tid,
                                 root: Node::Leaf(pid),
                                 focus: pid,
@@ -2004,6 +2033,7 @@ impl Core {
                     return Flow::Continue;
                 };
                 squad.tabs.push(Tab {
+                    name: None,
                     id: tid,
                     root: Node::Leaf(pid),
                     focus: pid,
@@ -2162,6 +2192,7 @@ impl Core {
                     return Flow::Continue;
                 };
                 squad.tabs.push(Tab {
+                    name: None,
                     id: tid,
                     root: Node::Leaf(pid),
                     focus: pid,
@@ -2233,6 +2264,7 @@ impl Core {
                     origins,
                     Some(name.to_string()),
                     Tab {
+                        name: None,
                         id: tid,
                         root: Node::Leaf(pid),
                         focus: pid,
@@ -3775,6 +3807,7 @@ mod tests {
             vec!["/origins/one".into()],
             None,
             Tab {
+                name: None,
                 id: 1,
                 root: Node::Leaf(42),
                 focus: 42,
@@ -3786,6 +3819,7 @@ mod tests {
             vec!["/grp/frontend".into(), "/grp/backend".into()],
             Some("stack".into()),
             Tab {
+                name: None,
                 id: 2,
                 root: Node::Leaf(50),
                 focus: 50,
@@ -3831,6 +3865,7 @@ mod tests {
             vec!["/x".into()],
             None,
             Tab {
+                name: None,
                 id: 5,
                 root: Node::Leaf(1),
                 focus: 1,
@@ -4006,6 +4041,7 @@ mod tests {
             vec!["/tmp/worktrees/x-aff6".into()],
             None,
             Tab {
+                name: None,
                 id: 1,
                 root: Node::Leaf(7),
                 focus: 7,
@@ -4016,6 +4052,7 @@ mod tests {
             vec!["/tmp/worktrees/footnote".into()],
             None,
             Tab {
+                name: None,
                 id: 2,
                 root: Node::Leaf(8),
                 focus: 8,
