@@ -465,6 +465,63 @@ fn ac3_ui_unparseable_settings_emits_event() {
     );
 }
 
+/// x-81d9 (c) regression (peer review): an unparseable LOCAL settings.yaml must
+/// fail the gate closed even when a parseable GLOBAL file declares an empty
+/// github_apps gate. resolved_required_bots prefers github_apps over
+/// required_bots, so the fail-closed sentinel must be pinned into github_apps
+/// too - otherwise the merge keeps the global (empty) gate and ships unreviewed.
+#[test]
+fn unparseable_local_settings_not_outranked_by_global_github_apps() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    // GLOBAL: a parseable, empty github_apps gate (the worst case - no bots).
+    let global = cwd.join("global.yaml");
+    fs::write(&global, "config:\n  review:\n    github_apps: []\n").unwrap();
+    // LOCAL: unparseable (the exact bug this PR targets).
+    fs::write(
+        cwd.join(".fno/settings.yaml"),
+        "config:\n  review:\n    github_apps: [codex\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-merge", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+    // Call the verb directly (NOT via `fire`, which forces --global-settings
+    // /nonexistent); pass our own global so the merge overlay runs.
+    let args: Vec<String> = vec![
+        "loop-check".into(),
+        "--state".into(),
+        manifest_path.to_str().unwrap().into(),
+        "--transcript".into(),
+        transcript_path.to_str().unwrap().into(),
+        "--cwd".into(),
+        cwd.to_str().unwrap().into(),
+        "--now".into(),
+        "2026-06-05T00:30:00Z".into(),
+        format!("--gh-bin={}", mock.gh.display()),
+        format!("--git-bin={}", mock.git.display()),
+        "--global-settings".into(),
+        global.to_str().unwrap().into(),
+    ];
+    let (_code, json_str) = fno_agents::loopcheck::run_loop_check_capture(&args);
+    let d: Decision = serde_json::from_str(&json_str).unwrap();
+    assert_ne!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "an unparseable local settings.yaml must not ship green via a global empty gate; got: {json_str}"
+    );
+}
+
 /// batch-lane Wave 2/3 (x-6cdf): a batched unit terminates as DoneBatched on
 /// its promise even with NO PR (its commits ship via the batch PR, not its
 /// own). The no_pr mock proves the batched arm short-circuits BEFORE run_done,

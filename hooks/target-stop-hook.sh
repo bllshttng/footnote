@@ -69,7 +69,7 @@ unavailable_block_or_allow() {
     local count=0
     [[ -f "$counter" ]] && count=$(tr -dc '0-9' < "$counter" 2>/dev/null)
     [[ -z "$count" ]] && count=0          # absent or corrupt -> start at 0
-    count=$((count + 1))
+    count=$((10#$count + 1))              # 10# so a stray leading zero isn't read as octal
     echo "$count" > "$counter" 2>/dev/null || true
     if (( count <= MAX_UNAVAIL_RETRIES )); then
         echo "target stop-hook: checker unavailable (${count}/${MAX_UNAVAIL_RETRIES}), keeping session running" >&2

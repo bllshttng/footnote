@@ -430,10 +430,17 @@ fn read_u64_cap(v: &serde_yaml_ng::Value, ctx: &str) -> Option<Result<u64, Strin
 }
 
 /// Settings with the login gate pinned unsatisfiable - the fail-closed result
-/// when settings.yaml cannot be parsed as YAML at all (x-81d9 (c)).
+/// when settings.yaml cannot be parsed as YAML at all (x-81d9 (c)). The
+/// sentinel goes into BOTH github_apps and required_bots: resolved_required_bots
+/// prefers github_apps.or(required_bots), so pinning required_bots alone would
+/// be silently outranked by a parseable global file's github_apps during the
+/// global+local merge (an unparseable LOCAL file would then resolve to the
+/// global gate, re-opening the fail-open this fix removes).
 fn fail_closed_settings() -> Settings {
+    let sentinel = Some(vec![UNPARSEABLE_SETTINGS_SENTINEL.to_string()]);
     Settings {
-        required_bots: Some(vec![UNPARSEABLE_SETTINGS_SENTINEL.to_string()]),
+        github_apps: sentinel.clone(),
+        required_bots: sentinel,
         ..Default::default()
     }
 }
