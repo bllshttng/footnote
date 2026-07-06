@@ -1219,10 +1219,10 @@ impl View {
     }
 
     /// The sideline's display order (4a-G2): each squad's squad/tab rows, that
-    /// squad's agent rows, then a catch-all section for agents matched to no
-    /// squad, the work-queue lane, and the `+ new workspace` footer. The ONE
-    /// row enumeration (x-260a): painting, hover, mouse hit-testing, and the
-    /// leader+w selector all index into it.
+    /// squad's agent rows, then the `+ new workspace` footer, a catch-all
+    /// section for agents matched to no squad, and the work-queue lane. The
+    /// ONE row enumeration (x-260a): painting, hover, mouse hit-testing, and
+    /// the leader+w selector all index into it.
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
         let mut out = Vec::new();
         for s in &self.layout.squads {
@@ -1393,7 +1393,8 @@ impl View {
 enum DisplayRow<'a> {
     Sel(SelRow),
     Agent(&'a AgentRow),
-    /// A work-queue backlog card (x-6f77), display-only in v1.
+    /// A work-queue backlog card (x-6f77); a Ready card dispatches via the
+    /// confirm (x-a496), by click or selector Enter (x-260a).
     Card(&'a BacklogCard),
     Header(&'static str),
     /// The `+` create-workspace affordance (x-9e5e), a footer under the squad
