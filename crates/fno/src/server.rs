@@ -3308,9 +3308,34 @@ async fn serve(
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
 
     eprintln!("fno mux: serving {}", socket.display());
+
+    // FNO_E2E idle-exit reaper (x-4e30, Fix 2): the ONLY reaper that survives
+    // all four leak paths — panic=abort, SIGKILL of the test binary, a
+    // cargo-test timeout, and the untracked client-autospawned setsid server —
+    // because it consults neither the parent (ppid==1 by design in prod) nor a
+    // Drop guard (never runs on SIGKILL/abort). Armed always, runtime no-op
+    // without the marker: a production mux MUST persist across client detach
+    // (Locked Decision 2, AC2-EDGE). The deadline re-arms on activity — a
+    // client-count change (covers the 0->1 attach edge) OR any pane output —
+    // so a working client-less script session (`pane run`, script_api_e2e with
+    // `sleep 30` panes) survives; only a truly silent, viewer-less orphan
+    // reaches the grace and reaps.
+    let idle_exit_e2e = std::env::var_os("FNO_E2E").is_some();
+    let idle_grace = Duration::from_millis(
+        std::env::var("FNO_IDLE_EXIT_GRACE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60_000),
+    );
+    let mut idle_count_rx = client_count_rx.clone();
+    let mut idle_deadline = tokio::time::Instant::now() + idle_grace;
+
     let flow = loop {
         tokio::select! {
             chunk = out_rx.recv() => {
+                // Pane output is a liveness signal (x-4e30): re-arm the idle
+                // reaper so a working client-less script session never reaps.
+                idle_deadline = tokio::time::Instant::now() + idle_grace;
                 // out_tx lives in Core, so recv never yields None.
                 let Some((pid, bytes)) = chunk else { break Flow::Shutdown };
                 let mut touched = HashSet::new();
@@ -3375,6 +3400,30 @@ async fn serve(
                 } else if core.handle(msg) == Flow::Shutdown {
                     break Flow::Shutdown;
                 }
+            }
+            // A client-count change is activity (covers the 0->1 attach edge):
+            // re-arm the grace window. Harmless in prod (the reaper arm below
+            // is disabled without the marker).
+            res = idle_count_rx.changed() => {
+                if res.is_ok() {
+                    idle_deadline = tokio::time::Instant::now() + idle_grace;
+                }
+            }
+            // The reaper (x-4e30): enabled only under FNO_E2E. On grace with no
+            // activity, reap iff no client is attached — a still-attached
+            // session is in use, so re-arm and keep serving. Replicate the
+            // CoreMsg::Kill teardown (kill every pane PTY + Flow::Shutdown so
+            // SocketGuard unlinks); NEVER std::process::exit, which would
+            // orphan the pane shells and leak the socket file.
+            _ = tokio::time::sleep_until(idle_deadline), if idle_exit_e2e => {
+                if *idle_count_rx.borrow() == 0 {
+                    eprintln!("fno mux: idle-exit (FNO_E2E): no client for grace window");
+                    for entry in core.panes.values() {
+                        entry.pty.kill();
+                    }
+                    break Flow::Shutdown;
+                }
+                idle_deadline = tokio::time::Instant::now() + idle_grace;
             }
             _ = async { sigterm.as_mut().unwrap().recv().await }, if sigterm.is_some() => break Flow::Shutdown,
             _ = async { sigint.as_mut().unwrap().recv().await }, if sigint.is_some() => break Flow::Shutdown,
