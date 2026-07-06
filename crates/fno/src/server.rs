@@ -3129,12 +3129,26 @@ async fn serve(
     {
         let core_tx = core_tx.clone();
         let path = agents_view::registry_path();
+        let mut count_rx = client_count_rx.clone();
         tokio::spawn(async move {
             let mut state = agents_view::ReaderState::default();
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tick.tick().await;
+                // Gate the registry read on an attached client (x-4e30). The
+                // `changed()` arm IS the 0->1 kick: an attach wakes the parked
+                // reader at once so the first overlay is fresh (AC3-FR).
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    res = count_rx.changed() => {
+                        if res.is_err() {
+                            return; // Core dropped; server shutting down
+                        }
+                    }
+                }
+                if *count_rx.borrow() == 0 {
+                    continue; // no viewer -> skip the file read entirely
+                }
                 let stat_path = path.clone();
                 let stamp = tokio::task::spawn_blocking(move || {
                     std::fs::metadata(&stat_path)
@@ -3179,6 +3193,7 @@ async fn serve(
     {
         let core_tx = core_tx.clone();
         let path = backlog_view::graph_path();
+        let mut count_rx = client_count_rx.clone();
         tokio::spawn(async move {
             let mut state = backlog_view::ReaderState::default();
             // The last-good claim sweep (x-54fa): `None` until the first
@@ -3189,7 +3204,23 @@ async fn serve(
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tick.tick().await;
+                // Gate the per-tick claim-sweep SUBPROCESS + graph.json read on
+                // an attached client (x-4e30). This is the idle-CPU root fix:
+                // an orphaned server with no viewer stops fork/exec'ing a whole
+                // `fno-agents claim sweep` process every second. The
+                // `changed()` arm is the 0->1 kick so the first attach's
+                // overlay is not up to 1s stale (AC3-FR).
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    res = count_rx.changed() => {
+                        if res.is_err() {
+                            return; // Core dropped; server shutting down
+                        }
+                    }
+                }
+                if *count_rx.borrow() == 0 {
+                    continue; // no viewer -> no sweep subprocess, no read
+                }
                 // Claims change without graph.json mtime changes (release, TTL
                 // expiry, new dispatch), so the sweep runs every tick, bounded
                 // + fail-open. Failure is logged once per state change, not
