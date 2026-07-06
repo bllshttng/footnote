@@ -356,7 +356,8 @@ struct View {
     overlay: bool,
     /// Caret expansion per squad id - client-local, instant (AC6-UI).
     expanded: HashSet<u64>,
-    /// Selector cursor into [`View::sel_rows`], when open.
+    /// Selector cursor into [`View::display_rows`], when open (x-260a: one
+    /// index space shared with painting, hover, and mouse hit-testing).
     selector: Option<usize>,
     /// Pending escape bytes in selector mode, carried ACROSS reads so a
     /// split arrow sequence can never half-close the selector and leak its
@@ -460,8 +461,8 @@ impl View {
     /// The blocked-pane queue for the answer overlay (x-c929): live rows badged
     /// `blocked`, in `Layout.agents` order (the documented, deterministic cycle
     /// order - AC2-UI). Owned clones so a per-key mutation of `answers` does not
-    /// alias the borrow (the same reason the selector reads owned `sel_rows`);
-    /// blocked panes are few, so the clone is cheap.
+    /// alias the borrow (the same reason the selector materializes owned data
+    /// per key); blocked panes are few, so the clone is cheap.
     fn blocked_queue(&self) -> Vec<AgentRow> {
         self.layout
             .agents
@@ -481,6 +482,23 @@ impl View {
         self.search = None;
         self.create = Some(String::new());
         self.create_esc.clear();
+    }
+
+    /// Arm the card-dispatch confirm modally (x-a496) with the same
+    /// overlay-clearing discipline as [`View::open_create`]: the confirm wins
+    /// the stdin routing, so a selector left open behind it would swallow the
+    /// keystrokes that follow the confirm's resolution (sigma review x-260a -
+    /// reachable by mouse-clicking a card while leader+w is open).
+    fn open_confirm(&mut self, action: ConfirmAction) {
+        self.selector = None;
+        self.answers = None;
+        self.search = None;
+        // A half-typed workspace name is dropped too (gemini review): the
+        // confirm owns the bottom row, and resuming a hidden create overlay
+        // after the confirm resolves reads as a stuck client.
+        self.create = None;
+        self.create_esc.clear();
+        self.confirm = Some(action);
     }
 
     fn panel_visible(&self) -> bool {
@@ -576,9 +594,16 @@ impl View {
             return None;
         }
         // Row i of display_rows() is painted at TAB_BAR_ROWS + i (draw_sideline).
-        let i = (row - TAB_BAR_ROWS) as usize;
+        self.row_action((row - TAB_BAR_ROWS) as usize)
+    }
+
+    /// What acting on sideline display row `i` does - the single resolver both
+    /// a mouse click ([`View::chrome_hit`]) and the leader+w selector's Enter
+    /// route through (x-260a), so the two inputs can never diverge. `None` only
+    /// for an out-of-range index or an inert [`DisplayRow::Header`].
+    fn row_action(&self, i: usize) -> Option<ChromeHit> {
         match self.display_rows().get(i)? {
-            DisplayRow::Sel { row, .. } => match row.tab {
+            DisplayRow::Sel(row) => match row.tab {
                 None => Some(ChromeHit::Cmds(vec![Command::SelectSquad(row.squad)])),
                 Some(t) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad)?;
@@ -608,6 +633,13 @@ impl View {
             // Still too costly for a stray tap, so a ready card opens a
             // one-keypress confirm rather than dispatching now.
             DisplayRow::Card(c) => match c.state {
+                // A terminal too short to render the bottom-row prompt refuses
+                // instead of arming an INVISIBLE confirm that would capture
+                // keys and could dispatch blind (sigma review x-260a). Same
+                // guard for the create overlay below.
+                CardState::Ready if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
+                    "terminal too short for the dispatch prompt",
+                )),
                 CardState::Ready => Some(ChromeHit::Confirm(ConfirmAction {
                     node: c.id.clone(),
                     label: if c.slug.is_empty() {
@@ -621,6 +653,9 @@ impl View {
             },
             DisplayRow::Header(_) => None,
             // The `+` footer opens the name-input overlay (x-9e5e).
+            DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => {
+                Some(ChromeHit::Notice("terminal too short for the name prompt"))
+            }
             DisplayRow::NewSquad => Some(ChromeHit::OpenCreate),
         }
     }
@@ -696,10 +731,11 @@ impl View {
         let live: HashSet<u64> = layout.panes.iter().map(|(id, _)| *id).collect();
         self.frames.retain(|id, _| live.contains(id));
         self.layout = layout;
-        // Selector re-anchors to a live row on catalog change (AC6-FR).
+        // Selector re-anchors to a live, actionable row on catalog change
+        // (AC6-FR): clamp into the unified rows, then step off an inert Header
+        // so the cursor never rests on a label (x-260a).
         if let Some(cur) = self.selector {
-            let n = self.sel_rows().len();
-            self.selector = if n == 0 { None } else { Some(cur.min(n - 1)) };
+            self.selector = self.selector_anchor(cur);
         }
         // Answer overlay re-clamps when a scrape tick drops the selected blocked
         // pane (x-c929, AC2-EDGE): stay in place if a later entry now occupies
@@ -736,26 +772,42 @@ impl View {
         self.notice = Some((text, Instant::now() + NOTICE_TTL));
     }
 
-    /// The sideline rows in display order: each squad, then its tabs when
-    /// expanded. The ids are (namespace, key)-style typed pairs from day one
-    /// (x-fef5 lesson): a squad row and a tab row can never collide.
-    fn sel_rows(&self) -> Vec<SelRow> {
-        let mut rows = Vec::new();
-        for s in &self.layout.squads {
-            rows.push(SelRow {
-                squad: s.id,
-                tab: None,
-            });
-            if self.expanded.contains(&s.id) {
-                for t in 0..s.tabs.len() {
-                    rows.push(SelRow {
-                        squad: s.id,
-                        tab: Some(t),
-                    });
-                }
-            }
+    /// Clamp a selector cursor into the current [`View::display_rows`] and
+    /// step it off an inert Header row (forward first, else backward), so the
+    /// cursor never rests on a label (x-260a invariant). `None` only for an
+    /// empty list, unreachable in practice: the `+ new workspace` footer keeps
+    /// the rows non-empty.
+    fn selector_anchor(&self, cur: usize) -> Option<usize> {
+        let rows = self.display_rows();
+        if rows.is_empty() {
+            return None;
         }
-        rows
+        let cur = cur.min(rows.len() - 1);
+        if !matches!(rows[cur], DisplayRow::Header(_)) {
+            return Some(cur);
+        }
+        (cur + 1..rows.len())
+            .chain((0..cur).rev())
+            .find(|&i| !matches!(rows[i], DisplayRow::Header(_)))
+    }
+
+    /// The next selector stop below `cur`: the nearest following display row
+    /// that is not a Header. Clamps at the end (no wrap) - `cur` itself when
+    /// nothing actionable follows.
+    fn selector_down(&self, cur: usize) -> usize {
+        let rows = self.display_rows();
+        (cur + 1..rows.len())
+            .find(|&i| !matches!(rows[i], DisplayRow::Header(_)))
+            .unwrap_or(cur)
+    }
+
+    /// The next selector stop above `cur` (nearest first); `cur` at the top.
+    fn selector_up(&self, cur: usize) -> usize {
+        let rows = self.display_rows();
+        (0..cur.min(rows.len()))
+            .rev()
+            .find(|&i| !matches!(rows[i], DisplayRow::Header(_)))
+            .unwrap_or(cur)
     }
 
     /// Compose the full-terminal frame: tab bar, sideline, dividers, panes.
@@ -1166,32 +1218,24 @@ impl View {
         }
     }
 
-    /// The sideline's display order (4a-G2): each squad's selectable rows
-    /// (index-aligned with [`View::sel_rows`] so the selector highlight stays
-    /// correct), that squad's agent rows, then a catch-all section for agents
-    /// matched to no squad. Agent rows are display-only.
+    /// The sideline's display order (4a-G2): each squad's squad/tab rows, that
+    /// squad's agent rows, then the `+ new workspace` footer, a catch-all
+    /// section for agents matched to no squad, and the work-queue lane. The
+    /// ONE row enumeration (x-260a): painting, hover, mouse hit-testing, and
+    /// the leader+w selector all index into it.
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
         let mut out = Vec::new();
-        let mut sel_idx = 0usize;
         for s in &self.layout.squads {
-            out.push(DisplayRow::Sel {
-                idx: sel_idx,
-                row: SelRow {
-                    squad: s.id,
-                    tab: None,
-                },
-            });
-            sel_idx += 1;
+            out.push(DisplayRow::Sel(SelRow {
+                squad: s.id,
+                tab: None,
+            }));
             if self.expanded.contains(&s.id) {
                 for t in 0..s.tabs.len() {
-                    out.push(DisplayRow::Sel {
-                        idx: sel_idx,
-                        row: SelRow {
-                            squad: s.id,
-                            tab: Some(t),
-                        },
-                    });
-                    sel_idx += 1;
+                    out.push(DisplayRow::Sel(SelRow {
+                        squad: s.id,
+                        tab: Some(t),
+                    }));
                 }
             }
             out.extend(
@@ -1234,8 +1278,9 @@ impl View {
             if r >= rows {
                 break;
             }
-            let (text, mut flags, selected) = match drow {
-                DisplayRow::Sel { idx, row } => {
+            let is_header = matches!(drow, DisplayRow::Header(_));
+            let (text, mut flags) = match drow {
+                DisplayRow::Sel(row) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad);
                     let Some(squad) = squad else { continue };
                     let is_active_squad = squad.id == self.layout.active_squad;
@@ -1260,7 +1305,7 @@ impl View {
                             (format!("  {marker}{}", t + 1), 0)
                         }
                     };
-                    (text, flags, self.selector == Some(idx))
+                    (text, flags)
                 }
                 DisplayRow::Agent(a) => {
                     // Fact-badge lattice glyphs (brief US2 state machine):
@@ -1282,7 +1327,7 @@ impl View {
                         text.push_str(reason);
                     }
                     let flags = if a.exited { cell_flags::DIM } else { 0 };
-                    (text, flags, false)
+                    (text, flags)
                 }
                 DisplayRow::Card(c) => {
                     // Ready hollow, in-flight filled, blocked triangle - a glyph
@@ -1300,14 +1345,18 @@ impl View {
                     } else {
                         0
                     };
-                    (format!("  {glyph} {label} {}", c.priority), flags, false)
+                    (format!("  {glyph} {label} {}", c.priority), flags)
                 }
-                DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM, false),
-                DisplayRow::NewSquad => ("+ new workspace".to_string(), cell_flags::DIM, false),
+                DisplayRow::Header(h) => (h.to_string(), cell_flags::DIM),
+                DisplayRow::NewSquad => ("+ new workspace".to_string(), cell_flags::DIM),
             };
             // The selector cursor OR the mouse hover paints the INVERSE bar
-            // (x-a496); hover is highlight-only and shares the selector's look.
-            let highlit = selected || self.hover_row == Some(i);
+            // (x-a496); both are display indices now (x-260a), so the bar can
+            // never drift from the painted row. Hover is highlight-only, and
+            // neither bar lands on an inert Header (the cursor skips them; the
+            // hover check here keeps a label from reading as actionable -
+            // gemini review).
+            let highlit = !is_header && (self.selector == Some(i) || self.hover_row == Some(i));
             if highlit {
                 flags |= cell_flags::INVERSE;
             }
@@ -1338,16 +1387,14 @@ impl View {
     }
 }
 
-/// One rendered sideline line: a selectable squad/tab row (carrying its
-/// [`View::sel_rows`] index so the selector highlight follows selection), a
-/// display-only agent row, or the catch-all section header.
+/// One rendered sideline line. Every variant except `Header` is actionable:
+/// the selector's Enter and a mouse click resolve it through
+/// [`View::row_action`] (x-260a).
 enum DisplayRow<'a> {
-    Sel {
-        idx: usize,
-        row: SelRow,
-    },
+    Sel(SelRow),
     Agent(&'a AgentRow),
-    /// A work-queue backlog card (x-6f77), display-only in v1.
+    /// A work-queue backlog card (x-6f77); a Ready card dispatches via the
+    /// confirm (x-a496), by click or selector Enter (x-260a).
     Card(&'a BacklogCard),
     Header(&'static str),
     /// The `+` create-workspace affordance (x-9e5e), a footer under the squad
@@ -1415,6 +1462,8 @@ const KEY_TABLE: &[&str] = &[
     "  x  close pane         c  new tab        ",
     "  n/p  cycle tabs       1-9  select tab   ",
     "  &  close tab          w  panel selector ",
+    "     selector ⏎ acts on the row: squad/tab ",
+    "     · agent focus/attach · card dispatch · + create ",
     "  a  answer queue       b  toggle sideline ",
     "  s  toggle status      ?  this key table  ",
     "  [ ]  jump block       v  select block   ",
@@ -2010,32 +2059,9 @@ async fn handle_stdin(
         // an agent's pane, opens a tab, or opens a card-dispatch confirm - it
         // never reaches the pane underneath.
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
-            match view.chrome_hit(rep.row, rep.col) {
-                Some(ChromeHit::Cmds(cmds)) => {
-                    for cmd in cmds {
-                        write_msg(sock_w, &ClientMsg::Command(cmd))
-                            .await
-                            .map_err(|e| format!("command send failed: {e}"))?;
-                    }
-                    continue;
-                }
-                Some(ChromeHit::Notice(msg)) => {
-                    view.set_notice(msg.to_string());
-                    continue;
-                }
-                // A card click opens the confirm (x-a496); the next keypress
-                // (Enter dispatches, else cancels) resolves it via confirm_keys.
-                Some(ChromeHit::Confirm(action)) => {
-                    view.confirm = Some(action);
-                    continue;
-                }
-                // The `+` footer opens the name-input overlay (x-9e5e); the next
-                // keys route to create_keys (Enter sends NewSquad, Esc cancels).
-                Some(ChromeHit::OpenCreate) => {
-                    view.open_create();
-                    continue;
-                }
-                None => {}
+            if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
+                apply_hit(view, hit, sock_w).await?;
+                continue;
             }
         }
         if let Some((pane, prow, pcol)) = view.hit_test(rep.row, rep.col) {
@@ -2123,10 +2149,14 @@ async fn handle_stdin(
             }
             Event::Detach => return Ok(StdinFlow::Detach),
             Event::OpenSelector => {
-                if view.sel_rows().is_empty() || view.term.1 < PANEL_W + MIN_CONTENT_COLS {
+                // The unified rows are never empty - the `+ new workspace`
+                // footer is always present - so an empty session opens on it
+                // (x-260a AC3-EDGE) instead of a BEL. Only the width gate stays.
+                if view.term.1 < PANEL_W + MIN_CONTENT_COLS {
                     let _ = raw_out(b"\x07");
                 } else {
                     view.panel_on = true;
+                    // Row 0 is a squad row (or the footer, never a Header).
                     view.selector = Some(0);
                     view.sel_esc.clear();
                 }
@@ -2221,6 +2251,34 @@ async fn handle_stdin(
     Ok(StdinFlow::Continue)
 }
 
+/// Apply one resolved [`ChromeHit`] - the single consumer both input paths
+/// share (x-260a): the mouse press path and the selector's Enter. Cmds go to
+/// the wire; Notice is a local one-liner; Confirm arms the one-keypress
+/// dispatch prompt (x-a496); OpenCreate opens the name-input overlay (x-9e5e).
+async fn apply_hit(
+    view: &mut View,
+    hit: ChromeHit,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    match hit {
+        ChromeHit::Cmds(cmds) => {
+            for cmd in cmds {
+                write_msg(sock_w, &ClientMsg::Command(cmd))
+                    .await
+                    .map_err(|e| format!("command send failed: {e}"))?;
+            }
+        }
+        ChromeHit::Notice(msg) => view.set_notice(msg.to_string()),
+        // A card hit opens the confirm (x-a496); the next keypress (Enter
+        // dispatches, else cancels) resolves it via confirm_keys.
+        ChromeHit::Confirm(action) => view.open_confirm(action),
+        // The `+` footer opens the name-input overlay (x-9e5e); the next keys
+        // route to create_keys (Enter sends NewSquad, Esc cancels).
+        ChromeHit::OpenCreate => view.open_create(),
+    }
+    Ok(())
+}
+
 /// Card-dispatch confirm keys (x-a496): Enter (CR/LF) as the first byte sends
 /// the targeted `DispatchNode`; any other key cancels. The whole chunk is
 /// swallowed (like the overlay dismiss) so an arrow's escape tail can't leak
@@ -2288,11 +2346,15 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
     keys
 }
 
-/// Selector-mode keys: j/k (and arrows) move, h/l (and left/right) collapse/
-/// expand, Enter selects (squad or tab), Esc/q closes. Rows and cursor are
-/// re-read per key so a close mid-chunk swallows the remainder instead of
-/// resurrecting the selector. Detach is leader+d from NORMAL mode only
-/// (Locked 11): close the selector first.
+/// Selector-mode keys: j/k (and arrows) move over the unified display rows,
+/// skipping inert Headers; h/l (and left/right) collapse/expand squad rows;
+/// Enter acts on the row through [`View::row_action`] + [`apply_hit`] - the
+/// same resolver a mouse click uses (x-260a), so squad/tab switch, agent
+/// focus/attach, card dispatch-confirm, and workspace-create are all keyboard
+/// reachable. A refusal (Notice) keeps the selector open; Esc/q closes. Rows
+/// and cursor are re-read per key so a close mid-chunk swallows the remainder
+/// instead of resurrecting the selector. Detach is leader+d from NORMAL mode
+/// only (Locked 11): close the selector first.
 async fn selector_keys(
     view: &mut View,
     bytes: &[u8],
@@ -2302,64 +2364,48 @@ async fn selector_keys(
     let keys = fold_selector_keys(&mut esc, bytes);
     view.sel_esc = esc;
     for &k in &keys {
-        let rows = view.sel_rows();
+        // Rows are re-read per key (via the View helpers below) so a layout
+        // push or a close mid-chunk acts on the CURRENT catalog, never a stale
+        // snapshot.
         let Some(cur) = view.selector else {
             break; // closed mid-chunk: swallow the rest, never forward
         };
         match k {
-            b'j' => {
-                if !rows.is_empty() {
-                    view.selector = Some((cur + 1).min(rows.len() - 1));
-                }
-            }
-            b'k' => view.selector = Some(cur.saturating_sub(1)),
-            b'l' => {
-                if let Some(row) = rows.get(cur) {
-                    if row.tab.is_none() {
-                        view.expanded.insert(row.squad);
-                    }
-                }
-            }
-            b'h' => {
-                if let Some(row) = rows.get(cur) {
-                    if row.tab.is_none() {
-                        view.expanded.remove(&row.squad);
+            b'j' => view.selector = Some(view.selector_down(cur)),
+            b'k' => view.selector = Some(view.selector_up(cur)),
+            b'l' | b'h' => {
+                // Expand/collapse applies to squad rows; every other variant
+                // no-ops (matching today's tab rows). Materialize the owned id
+                // before mutating - display_rows() borrows the layout.
+                let squad = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
+                    _ => None,
+                };
+                if let Some(sq) = squad {
+                    if k == b'l' {
+                        view.expanded.insert(sq);
+                    } else {
+                        view.expanded.remove(&sq);
                     }
                 }
             }
             b'\r' | b'\n' => {
-                if let Some(row) = rows.get(cur) {
-                    // Validate against the CURRENT catalog before sending
-                    // (AC6-FR); the server refuses stale ids regardless.
-                    let squad = view.layout.squads.iter().find(|s| s.id == row.squad);
-                    match (squad, row.tab) {
-                        (Some(_), None) => {
-                            write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(row.squad)))
-                                .await
-                                .map_err(|e| format!("command send failed: {e}"))?;
-                        }
-                        (Some(s), Some(t)) if t < s.tabs.len() => {
-                            if s.id != view.layout.active_squad {
-                                write_msg(
-                                    sock_w,
-                                    &ClientMsg::Command(Command::SelectSquad(row.squad)),
-                                )
-                                .await
-                                .map_err(|e| format!("command send failed: {e}"))?;
-                            }
-                            write_msg(
-                                sock_w,
-                                &ClientMsg::Command(Command::SelectTab(s.tabs[t].id)),
-                            )
-                            .await
-                            .map_err(|e| format!("command send failed: {e}"))?;
-                        }
-                        _ => {
-                            let _ = raw_out(b"\x07");
-                        }
+                // row_action resolves against the CURRENT catalog (AC6-FR) and
+                // returns an OWNED hit, so applying it can mutate the view.
+                match view.row_action(cur) {
+                    // A refusal keeps the selector open (x-260a locked 3): the
+                    // operator stays in the list to pick another row.
+                    Some(ChromeHit::Notice(msg)) => view.set_notice(msg.to_string()),
+                    Some(hit) => {
+                        view.selector = None;
+                        apply_hit(view, hit, sock_w).await?;
+                    }
+                    // Out of range / Header: unreachable via j/k, but a stale
+                    // cursor gets a BEL, never a silent close.
+                    None => {
+                        let _ = raw_out(b"\x07");
                     }
                 }
-                view.selector = None;
             }
             0x1b | b'q' => view.selector = None,
             _ => {}
@@ -3610,10 +3656,10 @@ mod tests {
         let cols = frame.cols as usize;
         let dead_cell = frame.cells[3 * cols + 2];
         assert_eq!(dead_cell.flags & cell_flags::DIM, cell_flags::DIM);
-        // Selector index 1 = the second SELECTABLE row (notes), even though
-        // agent rows render between them.
+        // The selector indexes display rows directly (x-260a): index 3 = the
+        // notes squad row, after footnote and its two agent rows.
         let mut sel_view = view;
-        sel_view.selector = Some(1);
+        sel_view.selector = Some(3);
         let sel_frame = sel_view.compose();
         let notes_row = 4usize;
         let sel_cell = sel_frame.cells[notes_row * cols + 2];
@@ -3645,10 +3691,17 @@ mod tests {
     fn client_compose_expanded_squad_lists_tabs_and_selector_highlights() {
         let mut view = two_pane_view();
         view.expanded.insert(1);
-        view.selector = Some(1); // first tab row of squad 1
-        let rows = view.sel_rows();
+        view.selector = Some(1); // first tab row of squad 1 (display index)
+        let sel: Vec<SelRow> = view
+            .display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Sel(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            rows,
+            sel,
             vec![
                 SelRow {
                     squad: 1,
@@ -3815,7 +3868,231 @@ mod tests {
             focus_node: None,
             backlog: Vec::new(),
         });
-        assert_eq!(view.selector, Some(0), "cursor clamped to the live rows");
+        // Display rows are now [notes squad, + new workspace]: the cursor
+        // clamps to the last live row (the footer, an actionable stop).
+        assert_eq!(view.selector, Some(1), "cursor clamped to the live rows");
+    }
+
+    // ---- x-260a: unified selector rows (keyboard reaches every actionable row) ----
+
+    /// A sideline with every row kind: squad 1 + its hosted agent, squad 2,
+    /// the footer, an orphan-agents section (attachable bg + watch-only), and
+    /// a work-queue lane (ready + blocked cards).
+    ///
+    /// Display rows: 0 sq1 · 1 hosted agent · 2 sq2 · 3 "+ new workspace" ·
+    /// 4 "~ agents" · 5 bg-attach · 6 bg-plain · 7 "~ work queue" ·
+    /// 8 ready card · 9 blocked card · 10 in-flight card.
+    fn unified_rows_view() -> View {
+        let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
+            squad,
+            name: name.into(),
+            pane_id,
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: attach_id.map(Into::into),
+        };
+        let card = |id: &str, state| BacklogCard {
+            id: id.into(),
+            slug: String::new(),
+            priority: "p2".into(),
+            state,
+        };
+        let mut v = view_with_agents(vec![
+            agent(Some(1), "worker", Some(10), None),
+            agent(None, "bg-claude", None, Some("c19cd2c3")),
+            agent(None, "bg-other", None, None),
+        ]);
+        v.layout.backlog = vec![
+            card("x-rdy", CardState::Ready),
+            card("x-blk", CardState::Blocked),
+            card("x-fly", CardState::InFlight),
+        ];
+        v
+    }
+
+    #[test]
+    fn selector_nav_skips_headers_and_clamps() {
+        // AC2-UI + Boundaries: j/k stop on every actionable row, skip the two
+        // section headers, and clamp (no wrap) at both ends.
+        let v = unified_rows_view();
+        assert_eq!(v.selector_down(3), 5, "j from the footer skips '~ agents'");
+        assert_eq!(v.selector_down(6), 8, "j skips '~ work queue'");
+        assert_eq!(v.selector_down(10), 10, "clamp at the last row");
+        assert_eq!(v.selector_up(5), 3, "k skips '~ agents' upward");
+        assert_eq!(v.selector_up(8), 6, "k skips '~ work queue' upward");
+        assert_eq!(v.selector_up(0), 0, "clamp at the top");
+    }
+
+    #[test]
+    fn selector_anchor_steps_off_headers() {
+        // AC1-FR / AC2-EDGE: a re-anchored cursor never rests on a Header -
+        // forward first, and an out-of-range index clamps to the last row.
+        let v = unified_rows_view();
+        assert_eq!(v.selector_anchor(4), Some(5), "header steps forward");
+        assert_eq!(v.selector_anchor(7), Some(8), "header steps forward");
+        assert_eq!(v.selector_anchor(50), Some(10), "stale index clamps");
+        assert_eq!(v.selector_anchor(0), Some(0), "actionable row stays put");
+    }
+
+    #[test]
+    fn display_rows_footer_keeps_empty_session_actionable() {
+        // AC3-EDGE: zero squads/agents/cards still yields the footer, so
+        // leader+w always has a row to open on and Enter opens the create
+        // overlay.
+        let v = View::new(
+            (30, 100),
+            "main".into(),
+            LayoutView {
+                squads: vec![],
+                active_squad: 0,
+                panes: vec![],
+                focus: 0,
+                area: (28, 72),
+                agents: vec![],
+                focus_node: None,
+                backlog: Vec::new(),
+            },
+        );
+        assert_eq!(v.display_rows().len(), 1, "footer only");
+        assert!(matches!(v.row_action(0), Some(ChromeHit::OpenCreate)));
+    }
+
+    #[tokio::test]
+    async fn selector_enter_focuses_hosted_agent_pane() {
+        // AC1-HP: Enter on a pane-hosted agent row sends FocusPane and closes.
+        let mut v = unified_rows_view();
+        v.selector = Some(1);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync(&mut cur).unwrap() {
+            ClientMsg::Command(Command::FocusPane(10)) => {}
+            other => panic!("expected FocusPane(10), got {other:?}"),
+        }
+        assert_eq!(v.selector, None, "acting closes the selector");
+    }
+
+    #[tokio::test]
+    async fn selector_enter_attaches_bg_agent() {
+        // AC1-EDGE: Enter on a claude bg row with an attach id sends
+        // AttachAgent.
+        let mut v = unified_rows_view();
+        v.selector = Some(5);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent(id)) => assert_eq!(id, "c19cd2c3"),
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+        assert_eq!(v.selector, None);
+    }
+
+    #[tokio::test]
+    async fn selector_enter_refusal_keeps_selector_open() {
+        // AC1-ERR + AC2-ERR (locked 3): a refusal row (paneless agent, blocked
+        // card, in-flight card) shows a notice, sends nothing, and the
+        // selector stays open.
+        let mut v = unified_rows_view();
+        for row in [6usize, 9, 10] {
+            v.selector = Some(row);
+            v.notice = None;
+            let mut buf: Vec<u8> = Vec::new();
+            selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
+            assert!(buf.is_empty(), "refusal sends nothing (row {row})");
+            assert!(v.notice.is_some(), "refusal explains itself (row {row})");
+            assert_eq!(v.selector, Some(row), "selector stays open (row {row})");
+        }
+    }
+
+    #[tokio::test]
+    async fn selector_enter_ready_card_opens_confirm() {
+        // AC2-HP: Enter on a Ready card closes the selector and arms the
+        // one-keypress dispatch confirm - nothing on the wire yet; the second
+        // Enter (confirm_keys) sends the DispatchNode (AC2-FR: the confirm
+        // takes the action, so one dispatch at most).
+        let mut v = unified_rows_view();
+        v.selector = Some(8);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "confirm first, dispatch on the next Enter");
+        assert_eq!(v.selector, None);
+        assert_eq!(v.confirm.as_ref().map(|c| c.node.as_str()), Some("x-rdy"));
+    }
+
+    #[tokio::test]
+    async fn selector_enter_footer_opens_create_overlay() {
+        // AC3-HP: Enter on "+ new workspace" opens the name-input overlay.
+        let mut v = unified_rows_view();
+        v.selector = Some(3);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert!(buf.is_empty());
+        assert_eq!(v.selector, None, "open_create clears the selector");
+        assert_eq!(v.create.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn open_confirm_is_modal_over_keyboard_overlays() {
+        // sigma review x-260a: a mouse click arming the confirm while the
+        // keyboard selector (or answer overlay) is open must clear it - the
+        // confirm wins stdin routing, so a lingering selector would swallow
+        // the keystrokes after the confirm resolves. Same discipline as
+        // open_create.
+        let mut view = unified_rows_view();
+        view.selector = Some(8);
+        view.answers = Some(0);
+        view.create = Some("half-typed".into());
+        view.open_confirm(ConfirmAction {
+            node: "x-rdy".into(),
+            label: "x-rdy".into(),
+        });
+        assert!(view.selector.is_none(), "confirm clears an open selector");
+        assert!(view.answers.is_none(), "confirm clears the answer overlay");
+        assert!(view.create.is_none(), "confirm drops a half-typed create");
+        assert!(view.search.is_none());
+        assert_eq!(
+            view.confirm.as_ref().map(|c| c.node.as_str()),
+            Some("x-rdy")
+        );
+    }
+
+    #[test]
+    fn short_terminal_degrades_prompts_to_notices() {
+        // sigma review x-260a: below MIN_ROWS_FOR_STATUS the bottom-row
+        // prompt cannot render, so a Ready card and the footer refuse with a
+        // notice instead of arming an invisible modal (which could dispatch
+        // blind on the next Enter).
+        let mut v = unified_rows_view();
+        v.term.0 = MIN_ROWS_FOR_STATUS - 1;
+        assert!(
+            matches!(v.row_action(8), Some(ChromeHit::Notice(_))),
+            "ready card refuses on a too-short terminal"
+        );
+        assert!(
+            matches!(v.row_action(3), Some(ChromeHit::Notice(_))),
+            "footer refuses on a too-short terminal"
+        );
+        // At the minimum height both act normally again.
+        v.term.0 = MIN_ROWS_FOR_STATUS;
+        assert!(matches!(v.row_action(8), Some(ChromeHit::Confirm(_))));
+        assert!(matches!(v.row_action(3), Some(ChromeHit::OpenCreate)));
+    }
+
+    #[tokio::test]
+    async fn selector_keys_navigate_unified_rows() {
+        // AC1-UI / AC2-UI: j/k through selector_keys land on agent and card
+        // rows, skipping headers, without sending anything.
+        let mut v = unified_rows_view();
+        v.selector = Some(3);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"j", &mut buf).await.unwrap();
+        assert_eq!(v.selector, Some(5), "j skips the '~ agents' header");
+        selector_keys(&mut v, b"k", &mut buf).await.unwrap();
+        assert_eq!(v.selector, Some(3), "k skips it back");
+        assert!(buf.is_empty(), "navigation sends nothing");
     }
 
     // ---- x-c929: answer overlay + next-blocked cycle ----
