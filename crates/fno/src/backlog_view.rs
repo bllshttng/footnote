@@ -204,7 +204,7 @@ pub struct ReaderState {
     /// The live-claims map as of the last publish. Holders ride the publish
     /// (they feed the server's `where_hint` join), so a holder-only change -
     /// same card states, different/new holder - must republish too, not wait
-    /// for a card flip (codex peer review of the v17 routes).
+    /// for a card flip (codex peer review of the v18 routes).
     last_live: Option<HashMap<String, String>>,
 }
 

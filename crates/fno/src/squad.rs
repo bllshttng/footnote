@@ -368,6 +368,7 @@ mod tests {
             }
         };
         Tab {
+            name: None,
             id: ids[0], // unique-enough stable id for container tests
             root,
             focus: ids[0],

@@ -101,7 +101,19 @@ use crate::tree::{Dir, Rect, TabId};
 /// v15: `MouseKind::Move` (1003 any-motion hover reports) drives focus-follows-
 /// mouse; `Command::DispatchNode(id)` starts a targeted interactive session from
 /// a clicked work-queue card (the confirm path).
-pub const PROTO_VERSION: u32 = 17;
+/// v16: `Command::NewSquad { name, origin }` - explicit named-workspace
+/// creation (the `+` sideline footer, x-9e5e).
+/// v17: `Command::RenameTab { tab, name }` - explicit tab rename (leader+,,
+/// x-c150); a blank name clears the rename back to the derived label.
+/// v18: `BacklogCard.{pane_id, attach_id, where_hint}` - publish-time routes
+/// so an in-flight work-queue card focuses/attaches/locates its live session
+/// (x-54fa) instead of dead-ending.
+pub const PROTO_VERSION: u32 = 18;
+
+/// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
+/// (the authoritative cap for any wire client) and the rename overlay's input
+/// cap (the TUI affordance, so the operator sees exactly what will be stored).
+pub const MAX_TAB_NAME: usize = 32;
 
 /// The crate version, carried in the handshake purely for the error message.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -393,17 +405,17 @@ pub struct BacklogCard {
     /// `p0`..`p3` (the raw string; the sideline shows it verbatim).
     pub priority: String,
     pub state: CardState,
-    /// (v17) The pane in THIS session working the node (`FNO_NODE` provenance
+    /// (v18) The pane in THIS session working the node (`FNO_NODE` provenance
     /// equality), when in flight. A click focuses it instead of dead-ending.
     /// Route priority is pane > attach > `where_hint`; at most one is acted on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<u64>,
-    /// (v17) The `claude attach <id>` jobId of the paneless bg session working
+    /// (v18) The `claude attach <id>` jobId of the paneless bg session working
     /// the node - the same target the agents-row click would use (v14 gate
     /// unchanged). Present only when no pane in this session has the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_id: Option<String>,
-    /// (v17) One-line locator for an in-flight card with no route here (e.g.
+    /// (v18) One-line locator for an in-flight card with no route here (e.g.
     /// `in flight - worked by <holder>`), shown as the click notice instead of
     /// a bare "already dispatching". `None` when a route exists or nothing is
     /// known.
@@ -515,6 +527,17 @@ pub enum Command {
     NewSquad {
         name: String,
         origin: Option<String>,
+    },
+    /// (v17) Rename a tab (x-c150). `tab` names a stable [`TabMeta::id`] from
+    /// the last `Layout`'s catalog (a stale id is refused fail-closed with a
+    /// notice, like `SelectTab`). The server sanitizes `name` (strip control
+    /// chars, trim, cap [`MAX_TAB_NAME`]) before storing; a blank/whitespace
+    /// name CLEARS the explicit rename and reverts to the derived label -
+    /// deliberately unlike `NewSquad`'s blank-refusal, because "reset to
+    /// auto" is a meaningful rename target.
+    RenameTab {
+        tab: TabId,
+        name: String,
     },
 }
 
@@ -1292,19 +1315,19 @@ mod tests {
     }
 
     #[test]
-    fn backlog_card_from_v16_json_defaults_route_fields_none() {
-        // A pre-v17 (v16) BacklogCard omits the route fields entirely
-        // (skip-when-None). A v17 reader must decode it as all-None, never
+    fn backlog_card_from_pre_v18_json_defaults_route_fields_none() {
+        // A pre-v18 (v11..v17) BacklogCard omits the route fields entirely
+        // (skip-when-None). A v18 reader must decode it as all-None, never
         // fail - same skew contract as the v14 `AgentRow.attach_id` bump.
-        let v16 = r#"{"id":"x-54fa","slug":"card-attach","priority":"p2",
+        let pre_v18 = r#"{"id":"x-54fa","slug":"card-attach","priority":"p2",
                       "state":"InFlight"}"#;
-        let card: BacklogCard = serde_json::from_str(v16).unwrap();
+        let card: BacklogCard = serde_json::from_str(pre_v18).unwrap();
         assert_eq!(card.pane_id, None);
         assert_eq!(card.attach_id, None);
         assert_eq!(card.where_hint, None);
-        // And the reverse: a v17 writer with all-None routes emits no route
-        // keys, so a v16 reader (strict about nothing, but keep the wire
-        // minimal) sees exactly the v16 shape.
+        // And the reverse: a v18 writer with all-None routes emits no route
+        // keys, so a pre-v18 reader (strict about nothing, but keep the
+        // wire minimal) sees exactly the pre-v18 shape.
         let out = serde_json::to_string(&card).unwrap();
         assert!(!out.contains("pane_id") && !out.contains("where_hint"));
     }
