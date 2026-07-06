@@ -484,6 +484,18 @@ impl View {
         self.create_esc.clear();
     }
 
+    /// Arm the card-dispatch confirm modally (x-a496) with the same
+    /// overlay-clearing discipline as [`View::open_create`]: the confirm wins
+    /// the stdin routing, so a selector left open behind it would swallow the
+    /// keystrokes that follow the confirm's resolution (sigma review x-260a -
+    /// reachable by mouse-clicking a card while leader+w is open).
+    fn open_confirm(&mut self, action: ConfirmAction) {
+        self.selector = None;
+        self.answers = None;
+        self.search = None;
+        self.confirm = Some(action);
+    }
+
     fn panel_visible(&self) -> bool {
         self.panel_on && self.term.1 >= PANEL_W + MIN_CONTENT_COLS
     }
@@ -616,6 +628,13 @@ impl View {
             // Still too costly for a stray tap, so a ready card opens a
             // one-keypress confirm rather than dispatching now.
             DisplayRow::Card(c) => match c.state {
+                // A terminal too short to render the bottom-row prompt refuses
+                // instead of arming an INVISIBLE confirm that would capture
+                // keys and could dispatch blind (sigma review x-260a). Same
+                // guard for the create overlay below.
+                CardState::Ready if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
+                    "terminal too short for the dispatch prompt",
+                )),
                 CardState::Ready => Some(ChromeHit::Confirm(ConfirmAction {
                     node: c.id.clone(),
                     label: if c.slug.is_empty() {
@@ -629,6 +648,9 @@ impl View {
             },
             DisplayRow::Header(_) => None,
             // The `+` footer opens the name-input overlay (x-9e5e).
+            DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => {
+                Some(ChromeHit::Notice("terminal too short for the name prompt"))
+            }
             DisplayRow::NewSquad => Some(ChromeHit::OpenCreate),
         }
     }
@@ -2239,7 +2261,7 @@ async fn apply_hit(
         ChromeHit::Notice(msg) => view.set_notice(msg.to_string()),
         // A card hit opens the confirm (x-a496); the next keypress (Enter
         // dispatches, else cancels) resolves it via confirm_keys.
-        ChromeHit::Confirm(action) => view.confirm = Some(action),
+        ChromeHit::Confirm(action) => view.open_confirm(action),
         // The `+` footer opens the name-input overlay (x-9e5e); the next keys
         // route to create_keys (Enter sends NewSquad, Esc cancels).
         ChromeHit::OpenCreate => view.open_create(),
@@ -3849,7 +3871,7 @@ mod tests {
     ///
     /// Display rows: 0 sq1 · 1 hosted agent · 2 sq2 · 3 "+ new workspace" ·
     /// 4 "~ agents" · 5 bg-attach · 6 bg-plain · 7 "~ work queue" ·
-    /// 8 ready card · 9 blocked card.
+    /// 8 ready card · 9 blocked card · 10 in-flight card.
     fn unified_rows_view() -> View {
         let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
             squad,
@@ -3875,6 +3897,7 @@ mod tests {
         v.layout.backlog = vec![
             card("x-rdy", CardState::Ready),
             card("x-blk", CardState::Blocked),
+            card("x-fly", CardState::InFlight),
         ];
         v
     }
@@ -3886,7 +3909,7 @@ mod tests {
         let v = unified_rows_view();
         assert_eq!(v.selector_down(3), 5, "j from the footer skips '~ agents'");
         assert_eq!(v.selector_down(6), 8, "j skips '~ work queue'");
-        assert_eq!(v.selector_down(9), 9, "clamp at the last row");
+        assert_eq!(v.selector_down(10), 10, "clamp at the last row");
         assert_eq!(v.selector_up(5), 3, "k skips '~ agents' upward");
         assert_eq!(v.selector_up(8), 6, "k skips '~ work queue' upward");
         assert_eq!(v.selector_up(0), 0, "clamp at the top");
@@ -3899,7 +3922,7 @@ mod tests {
         let v = unified_rows_view();
         assert_eq!(v.selector_anchor(4), Some(5), "header steps forward");
         assert_eq!(v.selector_anchor(7), Some(8), "header steps forward");
-        assert_eq!(v.selector_anchor(50), Some(9), "stale index clamps");
+        assert_eq!(v.selector_anchor(50), Some(10), "stale index clamps");
         assert_eq!(v.selector_anchor(0), Some(0), "actionable row stays put");
     }
 
@@ -3959,10 +3982,11 @@ mod tests {
 
     #[tokio::test]
     async fn selector_enter_refusal_keeps_selector_open() {
-        // AC1-ERR + AC2-ERR (locked 3): a refusal row shows a notice, sends
-        // nothing, and the selector stays open.
+        // AC1-ERR + AC2-ERR (locked 3): a refusal row (paneless agent, blocked
+        // card, in-flight card) shows a notice, sends nothing, and the
+        // selector stays open.
         let mut v = unified_rows_view();
-        for row in [6usize, 9] {
+        for row in [6usize, 9, 10] {
             v.selector = Some(row);
             v.notice = None;
             let mut buf: Vec<u8> = Vec::new();
@@ -3998,6 +4022,51 @@ mod tests {
         assert!(buf.is_empty());
         assert_eq!(v.selector, None, "open_create clears the selector");
         assert_eq!(v.create.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn open_confirm_is_modal_over_keyboard_overlays() {
+        // sigma review x-260a: a mouse click arming the confirm while the
+        // keyboard selector (or answer overlay) is open must clear it - the
+        // confirm wins stdin routing, so a lingering selector would swallow
+        // the keystrokes after the confirm resolves. Same discipline as
+        // open_create.
+        let mut view = unified_rows_view();
+        view.selector = Some(8);
+        view.answers = Some(0);
+        view.open_confirm(ConfirmAction {
+            node: "x-rdy".into(),
+            label: "x-rdy".into(),
+        });
+        assert!(view.selector.is_none(), "confirm clears an open selector");
+        assert!(view.answers.is_none(), "confirm clears the answer overlay");
+        assert!(view.search.is_none());
+        assert_eq!(
+            view.confirm.as_ref().map(|c| c.node.as_str()),
+            Some("x-rdy")
+        );
+    }
+
+    #[test]
+    fn short_terminal_degrades_prompts_to_notices() {
+        // sigma review x-260a: below MIN_ROWS_FOR_STATUS the bottom-row
+        // prompt cannot render, so a Ready card and the footer refuse with a
+        // notice instead of arming an invisible modal (which could dispatch
+        // blind on the next Enter).
+        let mut v = unified_rows_view();
+        v.term.0 = MIN_ROWS_FOR_STATUS - 1;
+        assert!(
+            matches!(v.row_action(8), Some(ChromeHit::Notice(_))),
+            "ready card refuses on a too-short terminal"
+        );
+        assert!(
+            matches!(v.row_action(3), Some(ChromeHit::Notice(_))),
+            "footer refuses on a too-short terminal"
+        );
+        // At the minimum height both act normally again.
+        v.term.0 = MIN_ROWS_FOR_STATUS;
+        assert!(matches!(v.row_action(8), Some(ChromeHit::Confirm(_))));
+        assert!(matches!(v.row_action(3), Some(ChromeHit::OpenCreate)));
     }
 
     #[tokio::test]
