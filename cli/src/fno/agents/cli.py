@@ -1170,6 +1170,24 @@ def cmd_whoami(
         raise typer.Exit(code=result.exit_code)
 
 
+@agents_app.command("top")
+def cmd_top(
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit the same rows as JSON (script parity)."
+    ),
+) -> None:
+    """Show every live worker process — fno-spawned and foreign claude bg
+    alike — with pid, RSS (MB), and status (x-c5cc US4).
+
+    The same union the spawn gate counts, so this is the audit surface every
+    gate message points at. Python-only (RSS via psutil; not routed to the
+    Rust client).
+    """
+    from fno.agents.top import render_top
+
+    print(render_top(as_json=as_json))
+
+
 @agents_app.command("ping")
 def cmd_ping() -> None:
     """Health check (placeholder).
