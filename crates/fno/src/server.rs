@@ -682,6 +682,13 @@ struct Core {
     /// steering path. An inflated autonomy rate is the dangerous silent
     /// failure, so the count exists even before the scoreboard reads it.
     touch_emit_failures: Arc<AtomicU64>,
+    /// Attached-client count for the periodic readers (x-4e30). Published
+    /// from choke points (tail of `handle` + the main-loop tail), never
+    /// per mutation site: `clients` mutates in six places and per-site
+    /// stores drift on the next refactor. A `watch`, not an atomic,
+    /// because the readers park in `tick().await` and need the
+    /// `changed()` edge as the 0->1 wakeup.
+    client_count: watch::Sender<usize>,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -2550,7 +2557,27 @@ impl Core {
         }
     }
 
+    /// Re-publish `clients.len()` to the periodic readers. `send_if_modified`
+    /// so a no-change pass wakes nobody.
+    fn publish_client_count(&self) {
+        let n = self.clients.len();
+        self.client_count.send_if_modified(|c| {
+            let changed = *c != n;
+            *c = n;
+            changed
+        });
+    }
+
     fn handle(&mut self, msg: CoreMsg) -> Flow {
+        let flow = self.handle_msg(msg);
+        // Choke point: every message-driven `clients` mutation (attach,
+        // detach, Gone, dead-client sweeps under push_layout) has returned
+        // by here. The main-loop tail covers the non-message sweeps.
+        self.publish_client_count();
+        flow
+    }
+
+    fn handle_msg(&mut self, msg: CoreMsg) -> Flow {
         // Read-only enforcement at the server (x-6a14): drop any PTY/tree-mutating
         // message from an observer (passive) client, whatever sends it. The web
         // bridge holds no write half so it never sends these; this makes the
@@ -3067,6 +3094,9 @@ async fn serve(
     let (out_tx, mut out_rx) = mpsc::channel::<(u64, Vec<u8>)>(256);
     let (exit_tx, mut exit_rx) = mpsc::channel::<u64>(64);
     let (core_tx, mut core_rx) = mpsc::channel::<CoreMsg>(256);
+    // Attached-client count for the periodic readers (x-4e30): Core owns the
+    // sender; each reader holds a receiver as its work gate + 0->1 wakeup.
+    let (client_count_tx, client_count_rx) = watch::channel(0usize);
 
     let mut core = Core {
         session: Session::default(),
@@ -3088,6 +3118,7 @@ async fn serve(
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
+        client_count: client_count_tx,
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -3317,6 +3348,12 @@ async fn serve(
             _ = async { sigterm.as_mut().unwrap().recv().await }, if sigterm.is_some() => break Flow::Shutdown,
             _ = async { sigint.as_mut().unwrap().recv().await }, if sigint.is_some() => break Flow::Shutdown,
         }
+        // Loop-tail choke point (x-4e30): the out_rx/exit_rx arms mutate
+        // `clients` via the dead-client sweeps (broadcast_pane /
+        // sync_focused_modes / close_pane) without a `handle()` call, so the
+        // handle-tail publish alone would leave the count stale on exactly
+        // the orphan path the readers gate on.
+        core.publish_client_count();
     };
     if flow == Flow::Shutdown {
         core.bye_all("session ended");
@@ -4790,6 +4827,7 @@ mod tests {
             claims: HashMap::new(),
             touch_last_emit: HashMap::new(),
             touch_emit_failures: Arc::new(AtomicU64::new(0)),
+            client_count: watch::channel(0).0,
         }
     }
 
@@ -4863,6 +4901,26 @@ mod tests {
         );
         assert_eq!(core.clients.len(), 1);
         assert!(core.clients[0].passive, "the (0,0) client is passive");
+    }
+
+    #[test]
+    fn gone_decrements_the_published_client_count() {
+        // AC4-EDGE (x-4e30): detach via CoreMsg::Gone must drop the published
+        // count - the regression the original 4-site enumeration would have
+        // shipped (a count stuck high means the idle gate and the FNO_E2E
+        // reaper never fire).
+        let (tx, rx) = watch::channel(0usize);
+        let mut core = empty_core();
+        core.client_count = tx;
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.publish_client_count();
+        assert_eq!(*rx.borrow(), 1);
+        core.handle(CoreMsg::Gone(1));
+        assert_eq!(
+            *rx.borrow(),
+            0,
+            "Gone must publish the decremented count via the handle-tail choke point"
+        );
     }
 
     #[test]
