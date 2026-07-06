@@ -1517,7 +1517,15 @@ impl View {
                         text.push_str(": ");
                         text.push_str(reason);
                     }
-                    let flags = if a.exited { cell_flags::DIM } else { 0 };
+                    // Fact-badge lattice + roster provenance (x-0a2e, AC1-UI):
+                    // `✗`+DIM = exited, `·`+DIM = external (roster-surfaced live),
+                    // `·` bright = fno-owned live. Exit keeps its glyph; external
+                    // only dims a live `·` row, staying pairwise-distinct.
+                    let flags = if a.exited || a.external {
+                        cell_flags::DIM
+                    } else {
+                        0
+                    };
                     (text, flags)
                 }
                 DisplayRow::Card(c) => {
@@ -4242,6 +4250,77 @@ mod tests {
             sel_cell.flags & cell_flags::INVERSE,
             cell_flags::INVERSE,
             "selector highlight must land on the selectable notes row"
+        );
+    }
+
+    #[test]
+    fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
+        // x-0a2e AC1-UI: the three sideline row kinds are pairwise distinct -
+        // `✗`+DIM (exited), `·`+DIM (external, roster-surfaced live), `·` bright
+        // (fno-owned live). External dims a live `·` row without stealing the
+        // exit glyph or the bright-live glyph.
+        let mut view = two_pane_view();
+        let panes = view.layout.panes.clone();
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 1, 1)],
+            active_squad: 1,
+            panes,
+            focus: 11,
+            area: (29, 72),
+            agents: vec![
+                AgentRow {
+                    squad: None,
+                    name: "z-exited".into(),
+                    pane_id: None,
+                    badge: None,
+                    reason: None,
+                    exited: true,
+                    answerable: None,
+                    attach_id: None,
+                    external: false,
+                },
+                AgentRow {
+                    squad: None,
+                    name: "z-external".into(),
+                    pane_id: None,
+                    badge: None,
+                    reason: None,
+                    exited: false,
+                    answerable: None,
+                    attach_id: Some("ab12cd34".into()),
+                    external: true,
+                },
+                AgentRow {
+                    squad: None,
+                    name: "z-fnolive".into(),
+                    pane_id: None,
+                    badge: None,
+                    reason: None,
+                    exited: false,
+                    answerable: None,
+                    attach_id: None,
+                    external: false,
+                },
+            ],
+            focus_node: None,
+            backlog: Vec::new(),
+        });
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        let text = frame_text(&frame);
+        let lines: Vec<&str> = text.lines().collect();
+        // Locate each row by name and read its glyph cell (col 2) + DIM flag.
+        let probe = |needle: &str| -> (char, bool) {
+            let r = lines.iter().position(|l| l.contains(needle)).unwrap();
+            let cell = frame.cells[r * cols + 2];
+            (cell.c, cell.flags & cell_flags::DIM == cell_flags::DIM)
+        };
+        assert_eq!(probe("z-exited"), ('\u{2717}', true), "exited: ✗ + DIM");
+        assert_eq!(probe("z-external"), ('\u{00b7}', true), "external: · + DIM");
+        assert_eq!(
+            probe("z-fnolive"),
+            ('\u{00b7}', false),
+            "fno-live: · + bright"
         );
     }
 
