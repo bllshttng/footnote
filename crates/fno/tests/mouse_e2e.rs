@@ -50,19 +50,10 @@ fn wheel_up() -> MouseEvent {
     }
 }
 
-/// Wait until the pane's shell has printed its first prompt. Writing to the
-/// PTY before `sh` is ready to read gets the bytes echoed by the tty line
-/// discipline but never executed (the submitting `\r` is lost during startup),
-/// so every test gates its FIRST input on this. The pinned prompt ends with
-/// `$` (`sh-3.2$ ` on macOS bash-as-sh).
-fn wait_prompt(c: &mut FakeClient, pane: u64) {
-    c.wait_pane_text(15, pane, |t| t.trim_end().ends_with('$'));
-}
-
 /// Fill the pane with enough output that the wheel has history to scroll
 /// into, and wait until the shell is provably done producing it.
 fn fill_history(c: &mut FakeClient, pane: u64) {
-    wait_prompt(c, pane);
+    c.wait_prompt(pane);
     // 60 lines: comfortably past the 24-row viewport so a wheel-up has real
     // history to scroll into, without the load of a 200-iteration sh loop
     // (which under a saturated box crawls and blows the timeout).
@@ -143,7 +134,7 @@ fn mouse_drag_release_copies_selection_to_initiator_only() {
     let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
     b.wait_layout(10, "b attached", |l| !l.panes.is_empty());
 
-    wait_prompt(&mut a, pane);
+    a.wait_prompt(pane);
     a.input(b"echo copy-me-payload#\r");
     let text = a.wait_pane_text(15, pane, |t| {
         t.lines().any(|l| l.starts_with("copy-me-payload#"))

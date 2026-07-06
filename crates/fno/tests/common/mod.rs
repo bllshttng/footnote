@@ -510,6 +510,34 @@ impl FakeClient {
         })
     }
 
+    /// Gate the FIRST input to a pane on the shell being ready. Typing before
+    /// the shell reads gets the bytes echoed by the tty line discipline but
+    /// never executed (the submitting CR is lost during startup), so a test
+    /// that types straight after attach silently loses its command - dash (the
+    /// Linux `/bin/sh`) exposes this deterministically, bash-as-sh's slower
+    /// startup happens to be racier. Nudge with a bare CR until the prompt
+    /// renders: a ready shell re-emits `$ ` on each Enter (also recovering a
+    /// startup frame missed under parallel-test load), and a not-yet-ready
+    /// shell drops the CR harmlessly so the next nudge retries. Bounded so a
+    /// genuinely dead pane still panics with the live state. The pinned prompt
+    /// ends with `$` (`sh-3.2$ ` on macOS bash-as-sh, `$ ` on dash).
+    ///
+    /// Drives the *focused* pane: the CR nudge is routed server-side to the
+    /// focused pane, so `pane` must be the focused one (it always is at the
+    /// call sites - the first pane right after attach). Asserted to fail loud
+    /// rather than silently nudge the wrong pane if that ever changes.
+    pub fn wait_prompt(&mut self, pane: u64) {
+        assert_eq!(self.focus(), pane, "wait_prompt drives the focused pane");
+        for _ in 0..28 {
+            if self.pane_text(pane).trim_end().ends_with('$') {
+                return;
+            }
+            self.input(b"\r");
+            self.pump(Duration::from_millis(500));
+        }
+        self.wait_pane_text(15, pane, |t| t.trim_end().ends_with('$'));
+    }
+
     /// The current focused pane per the last Layout.
     pub fn focus(&self) -> u64 {
         self.layout.as_ref().expect("no Layout yet").focus
