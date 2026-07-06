@@ -408,10 +408,13 @@ pub struct AgentRow {
     /// non-attachable row. `#[serde(default)]` keeps a v13 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_id: Option<String>,
-    /// (v19, x-0a2e) True when this row was surfaced or liveness-upgraded from
-    /// claude's daemon roster rather than owned live by the fno registry:
-    /// rendered dim + attachable, strictly read-only toward `~/.claude/**`.
-    /// `#[serde(default)]` keeps a v18 reader wire-tolerant (defaults false).
+    /// (v19, x-0a2e) True when this row's provenance is claude's daemon roster
+    /// (a synthesized foreign session or a roster-liveness-upgraded registry
+    /// row) rather than the fno registry: rendered dim, read-only toward
+    /// `~/.claude/**`. NOT an attachability signal (that is
+    /// `attach_id.is_some()`); an external row whose pane died is still
+    /// `external: true` but exited. `#[serde(default)]` keeps a v18 reader
+    /// wire-tolerant (defaults false).
     #[serde(default)]
     pub external: bool,
 }

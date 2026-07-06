@@ -41,9 +41,11 @@ pub struct RegistryAgent {
     /// watch-only (paneless) click path consumes it - a pane-hosted row focuses
     /// its pane instead.
     pub attach_id: Option<String>,
-    /// (x-0a2e) True for a row surfaced or liveness-upgraded from claude's
-    /// daemon roster rather than owned live by the fno registry: rendered
-    /// dim, attachable, strictly read-only toward `~/.claude/**`.
+    /// (x-0a2e) True when this row's provenance is claude's daemon roster: a
+    /// synthesized foreign session, or a registry row the roster liveness-
+    /// upgraded. Renders dim; strictly read-only toward `~/.claude/**`. NOT an
+    /// attachability signal - that is `attach_id.is_some() && !exited` (an
+    /// external row whose pane died still carries `external: true`).
     pub external: bool,
 }
 
@@ -96,11 +98,15 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
         else {
             continue;
         };
-        let short_id = session_id
-            .split('-')
-            .next()
-            .unwrap_or(session_id)
-            .to_string();
+        // short_id is the roster map key == the `claude attach` jobId. A
+        // sessionId that leads with `-` (defensive: upstream drift) would yield
+        // an empty first segment and thus a meaningless attach target; skip that
+        // worker, same as a missing sessionId.
+        let short_id = session_id.split('-').next().unwrap_or(session_id);
+        if short_id.is_empty() {
+            continue;
+        }
+        let short_id = short_id.to_string();
         let cwd = w
             .get("cwd")
             .and_then(|v| v.as_str())
@@ -344,6 +350,13 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
                     if roster_ids.contains(id) {
                         r.exited = false;
                         r.external = true;
+                        // Drop any stale inside-leg/scrape verdict that a
+                        // terminal row happened to still carry: an upgraded row
+                        // renders as a plain live external row (plan merge step
+                        // 2), matching the synthesized-foreign shape below.
+                        r.badge = None;
+                        r.reason = None;
+                        r.answerable = None;
                     }
                 }
             }
@@ -418,19 +431,34 @@ impl ReaderState {
         roster_read: impl FnOnce() -> Option<String>,
         now_secs: u64,
     ) -> Option<Vec<RegistryAgent>> {
+        // Advance the cached stamp ONLY when the read resolves (fresh bytes, or
+        // a confirmed vanish). A changed stamp whose read came back empty is a
+        // raced/failed read: leave the stamp behind so the next tick's scan gate
+        // (stamp != cached) re-attempts the SAME stamp instead of freezing the
+        // last-good rows until an unrelated later write happens to move mtime.
         if reg_stamp != self.reg_stamp {
-            self.reg_stamp = reg_stamp;
             match (reg_read(), reg_stamp) {
-                (Some(raw), _) => self.reg_raw = Some(raw),
-                (None, None) => self.reg_raw = None, // vanished
-                (None, Some(_)) => {}                // read raced a writer: keep last-good
+                (Some(raw), _) => {
+                    self.reg_raw = Some(raw);
+                    self.reg_stamp = reg_stamp;
+                }
+                (None, None) => {
+                    self.reg_raw = None; // vanished
+                    self.reg_stamp = None;
+                }
+                (None, Some(_)) => {} // raced/failed read: keep last-good AND retry next tick
             }
         }
         if roster_stamp != self.roster_stamp {
-            self.roster_stamp = roster_stamp;
             match (roster_read(), roster_stamp) {
-                (Some(raw), _) => self.roster_raw = Some(raw),
-                (None, None) => self.roster_raw = None,
+                (Some(raw), _) => {
+                    self.roster_raw = Some(raw);
+                    self.roster_stamp = roster_stamp;
+                }
+                (None, None) => {
+                    self.roster_raw = None;
+                    self.roster_stamp = None;
+                }
                 (None, Some(_)) => {}
             }
         }
@@ -631,9 +659,14 @@ mod tests {
             "ab12cd34":{"sessionId":"ab12cd34-1","cwd":"/w",
                         "procStart":"2026-07-06T10:00:00Z"},
             "orphan":{"cwd":"/x"},
-            "empty":{"sessionId":"","cwd":"/y"}}}"#;
+            "empty":{"sessionId":"","cwd":"/y"},
+            "dashlead":{"sessionId":"-nope","cwd":"/z"}}}"#;
         let workers = parse_roster(raw).unwrap();
-        assert_eq!(workers.len(), 1);
+        assert_eq!(
+            workers.len(),
+            1,
+            "orphan, empty, and dash-leading ids all skip"
+        );
         assert_eq!(workers[0].short_id, "ab12cd34");
     }
 
@@ -775,6 +808,63 @@ mod tests {
         assert_eq!(gone.len(), 1);
         assert_eq!(gone[0].name, "r");
         assert!(!gone[0].external);
+    }
+
+    #[test]
+    fn reader_retries_same_stamp_after_a_raced_read() {
+        // A changed stamp whose read came back empty (raced/failed) must NOT
+        // advance the cached stamp: the next tick at the SAME stamp with a
+        // successful read has to publish the fresh content, not stay frozen.
+        let mut st = ReaderState::default();
+        st.tick(
+            stamp(1),
+            || Some(reg(r#"{"name":"a","cwd":"/w","status":"live"}"#)),
+            None,
+            || None,
+            NOW,
+        );
+        let raced = st.tick(stamp(2), || None, None, || None, NOW);
+        assert!(
+            raced.is_none(),
+            "a raced read keeps last-good => no publish"
+        );
+        let healed = st
+            .tick(
+                stamp(2),
+                || Some(reg(r#"{"name":"b","cwd":"/w","status":"live"}"#)),
+                None,
+                || None,
+                NOW,
+            )
+            .expect("the same stamp retries and publishes once the read succeeds");
+        assert_eq!(healed.len(), 1);
+        assert_eq!(
+            healed[0].name, "b",
+            "stamp did not freeze on the failed read"
+        );
+    }
+
+    #[test]
+    fn merge_upgrade_clears_a_stale_badge() {
+        // An exited registry row can still carry a live inside-leg badge; the
+        // liveness upgrade drops it so the row renders as a plain external row
+        // (plan merge step 2), never a badged one.
+        let reg = derive_rows(
+            &reg(
+                r#"{"name":"x","cwd":"/w","status":"exited","claude_short_id":"ab12cd34",
+                     "inside_leg":{"state":"working","received_at":"2020-01-01T00:00:00Z"}}"#,
+            ),
+            NOW,
+        )
+        .unwrap();
+        assert!(
+            reg[0].exited && reg[0].badge.is_some(),
+            "precondition: exited + badged"
+        );
+        let rows = merge_rows(reg, &[worker("ab12cd34", "n", "/w")]);
+        assert!(rows[0].external && !rows[0].exited);
+        assert_eq!(rows[0].badge, None, "upgrade drops the stale badge");
+        assert_eq!(rows[0].reason, None);
     }
 
     #[test]
