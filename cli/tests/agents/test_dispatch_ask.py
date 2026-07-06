@@ -1291,3 +1291,12 @@ def test_inside_leg_is_recent_false_on_unparseable_stamp():
     from fno.agents.dispatch import _inside_leg_is_recent
 
     assert _inside_leg_is_recent({"received_at": "not-a-date"}, 1_000_000.0) is False
+
+
+def test_inside_leg_is_recent_false_for_future_stamp():
+    """codex P3: a future/corrupt stamp must not count as recent."""
+    from fno.agents.dispatch import _inside_leg_is_recent
+
+    now = 1_000_000.0
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 300))
+    assert _inside_leg_is_recent({"received_at": stamp}, now) is False

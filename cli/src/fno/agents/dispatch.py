@@ -228,7 +228,26 @@ def _inside_leg_is_recent(
         recv = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
     except (ValueError, TypeError):
         return False
-    return (now_epoch - recv) <= window_sec
+    # A future stamp (recv > now) is corrupt / clock-skewed, not recent: require
+    # recv <= now so it cannot suppress orphaning (fail closed).
+    return recv <= now_epoch and (now_epoch - recv) <= window_sec
+
+
+def _current_inside_leg(name: str) -> Optional[dict]:
+    """Read the row's CURRENT ``inside_leg``, not the pre-ask snapshot.
+
+    The ask can run for up to the follow-up timeout; deciding orphan-vs-live off
+    the row as it was BEFORE the send would miss a report that landed during it
+    (codex P2). A fresh read right before the guard closes that window. Read
+    failure -> ``None`` (fail closed: no liveness signal -> orphan as today).
+    """
+    try:
+        for entry in load_registry():
+            if entry.name == name:
+                return entry.inside_leg
+    except (OSError, RegistryVersionError):
+        return None
+    return None
 
 
 class DispatchAskError(RuntimeError):
@@ -412,7 +431,7 @@ def _followup_path(
                 # x-c393: same provably-live guard as the socket path below --
                 # a recent inside_leg report means a routing gap, not a death,
                 # so skip the orphan stamp and report it as a routing gap.
-                if _inside_leg_is_recent(existing.inside_leg, time.time()):
+                if _inside_leg_is_recent(_current_inside_leg(name), time.time()):
                     events.emit(
                         "agent_followup_failed",
                         stage="routing-gap",
@@ -511,7 +530,7 @@ def _followup_path(
             # inside_leg report) is a routing gap, not a death -- do NOT stamp
             # it orphaned (that misleads `fno agents list`). reconcile's
             # `claude logs` probe stays the authority that orphans a dead one.
-            if _inside_leg_is_recent(existing.inside_leg, time.time()):
+            if _inside_leg_is_recent(_current_inside_leg(name), time.time()):
                 events.emit(
                     "agent_followup_failed",
                     stage="routing-gap",

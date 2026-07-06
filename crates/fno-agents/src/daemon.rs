@@ -3563,7 +3563,9 @@ enum UuidBackfill {
 fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBackfill {
     let mut found = None;
     for (i, e) in entries.iter().enumerate() {
-        if e.claude_session_uuid.is_some() {
+        // Only a claude bg row owns a claude_short_id + uuid identity; skip any
+        // other provider so a malformed foreign row can't adopt a claude uuid.
+        if e.provider != "claude" || e.claude_session_uuid.is_some() {
             continue;
         }
         let Some(short) = e.claude_short_id.as_deref() else {
@@ -4544,6 +4546,18 @@ mod tests {
         // path, never backfilled here.
         let mut row = bg_claude_row("w", "3228ccad");
         row.claude_session_uuid = Some("3228ccad-c078-4b53-a8c9-7199b831eae4".into());
+        assert!(matches!(
+            find_uuid_backfill_row(&[row], "3228ccad-c078-4b53-a8c9-7199b831eae4"),
+            UuidBackfill::None
+        ));
+    }
+
+    #[test]
+    fn find_uuid_backfill_row_skips_non_claude_rows() {
+        // codex P2: a foreign-provider row carrying a claude_short_id must not
+        // adopt a claude uuid.
+        let mut row = bg_claude_row("w", "3228ccad");
+        row.provider = "codex".into();
         assert!(matches!(
             find_uuid_backfill_row(&[row], "3228ccad-c078-4b53-a8c9-7199b831eae4"),
             UuidBackfill::None

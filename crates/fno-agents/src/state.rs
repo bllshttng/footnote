@@ -220,7 +220,9 @@ impl InsideLegReport {
     /// shield a dead session from orphaning.
     pub fn received_within(&self, now_secs: u64, window_secs: u64) -> bool {
         match rfc3339_like_to_secs(&self.received_at) {
-            Some(recv) => now_secs.saturating_sub(recv) <= window_secs,
+            // A future stamp (recv > now) is corrupt/clock-skewed, not recent:
+            // require recv <= now so it cannot suppress orphaning (fail closed).
+            Some(recv) => recv <= now_secs && now_secs - recv <= window_secs,
             None => false,
         }
     }

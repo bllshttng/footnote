@@ -1244,16 +1244,17 @@ const DEFAULT_SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
 /// ceiling, not config -- reconcile is the backstop.
 const PROVABLY_LIVE_WINDOW_SECS: u64 = 3600;
 
-/// Whether an ask follow-up that failed to route should stamp the row
-/// `orphaned`. A row with a recent inside-leg report is a LIVE worker whose
-/// registry identity merely wasn't routable (e.g. the null-uuid gap before the
-/// backfill lands, x-c393); orphaning it would mislead `fno agents list`. Only
-/// orphan when there is no recent liveness signal.
-fn should_orphan_on_ask_failure(entry: &RegistryEntry, now_secs: u64) -> bool {
-    !entry
-        .inside_leg
-        .as_ref()
-        .is_some_and(|r| r.received_within(now_secs, PROVABLY_LIVE_WINDOW_SECS))
+/// Whether a row is "provably live": it carries an inside-leg report recent
+/// enough that a follow-up routing miss is a gap, not a death (x-c393). Checked
+/// against the CURRENT row under the registry lock at stamp time -- not a
+/// pre-ask snapshot -- so a report that landed during a long ask is not missed
+/// (codex P2). A live row must NOT be stamped orphaned; that would mislead
+/// `fno agents list`. reconcile's `claude logs` probe orphans a truly dead one.
+fn is_provably_live_report(
+    inside_leg: Option<&crate::state::InsideLegReport>,
+    now_secs: u64,
+) -> bool {
+    inside_leg.is_some_and(|r| r.received_within(now_secs, PROVABLY_LIVE_WINDOW_SECS))
 }
 
 fn now_epoch_secs() -> u64 {
@@ -1981,12 +1982,42 @@ fn followup(
             AskOutcome::ok_stdout(reply)
         }
         Err(AskError::Orphan { reason, .. }) => {
-            // Provably-live guard (x-c393): a live bg worker whose registry
-            // identity merely wasn't routable (a recent inside-leg report) is a
-            // routing miss, not a death. Do NOT stamp it orphaned -- that would
-            // mislead `fno agents list` about a working session; reconcile's
-            // `claude logs` probe stays the authority that orphans a dead one.
-            if !should_orphan_on_ask_failure(entry, now_epoch_secs()) {
+            // Decide orphan-vs-routing-gap against the CURRENT row under the same
+            // registry lock that stamps it, so an inside-leg report that landed
+            // during a long ask is not missed (x-c393; codex P2). A recent report
+            // => routing gap (status untouched, `fno agents list` still shows the
+            // live worker); else stamp orphaned. Best-effort stamp: a write
+            // failure stays OBSERVABLE (stderr warning + agent_status_stamp_failed
+            // event) like Python's, not a silent swallow.
+            let now = now_epoch_secs();
+            let mut provably_live = false;
+            let mut stamp_warning = String::new();
+            if let Err(e) = update_registry(registry_path, |reg| {
+                if let Some(en) = reg.find_mut(name) {
+                    if is_provably_live_report(en.inside_leg.as_ref(), now) {
+                        provably_live = true;
+                    } else {
+                        en.status = AgentStatus::Orphaned;
+                    }
+                }
+            }) {
+                stamp_warning = format!(
+                    "fno agents: warning: failed to mark {} as orphaned: {}\n",
+                    py_repr(name),
+                    e
+                );
+                emit_event(
+                    events,
+                    "agent_status_stamp_failed",
+                    &[
+                        ("name", name.into()),
+                        ("short_id", short_id.clone().into()),
+                        ("target_status", "orphaned".into()),
+                        ("error", e.to_string().into()),
+                    ],
+                );
+            }
+            if provably_live {
                 emit_event(
                     events,
                     "agent_followup_failed",
@@ -2007,32 +2038,6 @@ fn followup(
                     ),
                     exit_code: 13,
                 };
-            }
-            // Best-effort orphan stamp. On failure Python keeps the swallow
-            // OBSERVABLE (dispatch.py:455-473): a stderr warning + an
-            // agent_status_stamp_failed event, so list/ask status drift is
-            // debuggable. Replicate both rather than swallow silently.
-            let mut stamp_warning = String::new();
-            if let Err(e) = update_registry(registry_path, |reg| {
-                if let Some(en) = reg.find_mut(name) {
-                    en.status = AgentStatus::Orphaned;
-                }
-            }) {
-                stamp_warning = format!(
-                    "fno agents: warning: failed to mark {} as orphaned: {}\n",
-                    py_repr(name),
-                    e
-                );
-                emit_event(
-                    events,
-                    "agent_status_stamp_failed",
-                    &[
-                        ("name", name.into()),
-                        ("short_id", short_id.clone().into()),
-                        ("target_status", "orphaned".into()),
-                        ("error", e.to_string().into()),
-                    ],
-                );
             }
             emit_event(
                 events,
@@ -2330,37 +2335,7 @@ mod tests {
         assert_eq!(spawn_create_timeout(Some(explicit)), explicit);
     }
 
-    // --- should_orphan_on_ask_failure (x-c393) -----------------------------
-
-    fn row_with_inside_leg(inside_leg: Option<crate::state::InsideLegReport>) -> RegistryEntry {
-        RegistryEntry {
-            name: "w".into(),
-            short_id: String::new(),
-            provider: "claude".into(),
-            cwd: "/tmp".into(),
-            project_root: "/tmp".into(),
-            session_id: None,
-            claude_short_id: Some("3228ccad".into()),
-            claude_session_uuid: None,
-            messaging_socket_path: None,
-            codex_session_id: None,
-            gemini_session_id: None,
-            mcp_channel_id: None,
-            host_mode: None,
-            cc_session_id: None,
-            status: AgentStatus::Live,
-            last_message_at: None,
-            created_at: "t".into(),
-            pid: None,
-            pid_start_time: None,
-            log_path: None,
-            last_reconciled_at: None,
-            inside_leg,
-            exited_at: None,
-            mux: None,
-            screen_state: None,
-        }
-    }
+    // --- is_provably_live_report (x-c393) ----------------------------------
 
     fn report_at(stamp: &str) -> crate::state::InsideLegReport {
         crate::state::InsideLegReport {
@@ -2373,30 +2348,34 @@ mod tests {
     }
 
     #[test]
-    fn does_not_orphan_a_row_with_a_recent_inside_leg_report() {
-        // AC2-HP: a live worker (recent report) whose follow-up fails to route
-        // must NOT be orphaned.
+    fn provably_live_true_for_recent_inside_leg_report() {
+        // AC2-HP: a live worker (recent report) is not orphaned on a routing miss.
         let stamp = "2026-07-06T20:00:00Z";
         let now = crate::state::rfc3339_like_to_secs(stamp).unwrap() + 30;
-        let row = row_with_inside_leg(Some(report_at(stamp)));
-        assert!(!should_orphan_on_ask_failure(&row, now));
+        assert!(is_provably_live_report(Some(&report_at(stamp)), now));
     }
 
     #[test]
-    fn orphans_a_row_with_no_inside_leg_report() {
+    fn not_provably_live_without_inside_leg_report() {
         // No liveness signal -> a routing failure is a real orphan (AC2-ERR side).
-        let row = row_with_inside_leg(None);
-        assert!(should_orphan_on_ask_failure(&row, 9_999_999_999));
+        assert!(!is_provably_live_report(None, 9_999_999_999));
     }
 
     #[test]
-    fn orphans_a_row_whose_inside_leg_is_stale() {
+    fn not_provably_live_when_inside_leg_is_stale() {
         // A report older than the window is not a liveness signal.
         let stamp = "2026-07-06T20:00:00Z";
         let now =
             crate::state::rfc3339_like_to_secs(stamp).unwrap() + PROVABLY_LIVE_WINDOW_SECS + 60;
-        let row = row_with_inside_leg(Some(report_at(stamp)));
-        assert!(should_orphan_on_ask_failure(&row, now));
+        assert!(!is_provably_live_report(Some(&report_at(stamp)), now));
+    }
+
+    #[test]
+    fn not_provably_live_for_future_stamp() {
+        // codex P3: a future/corrupt stamp must not count as recent.
+        let stamp = "2026-07-06T20:00:00Z";
+        let now = crate::state::rfc3339_like_to_secs(stamp).unwrap() - 60;
+        assert!(!is_provably_live_report(Some(&report_at(stamp)), now));
     }
 
     // PR #544 deeper fix (codex P1): the create wait returns on the launch
