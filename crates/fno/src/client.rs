@@ -576,7 +576,14 @@ impl View {
             return None;
         }
         // Row i of display_rows() is painted at TAB_BAR_ROWS + i (draw_sideline).
-        let i = (row - TAB_BAR_ROWS) as usize;
+        self.row_action((row - TAB_BAR_ROWS) as usize)
+    }
+
+    /// What acting on sideline display row `i` does - the single resolver both
+    /// a mouse click ([`View::chrome_hit`]) and the leader+w selector's Enter
+    /// route through (x-260a), so the two inputs can never diverge. `None` only
+    /// for an out-of-range index or an inert [`DisplayRow::Header`].
+    fn row_action(&self, i: usize) -> Option<ChromeHit> {
         match self.display_rows().get(i)? {
             DisplayRow::Sel { row, .. } => match row.tab {
                 None => Some(ChromeHit::Cmds(vec![Command::SelectSquad(row.squad)])),
@@ -2010,32 +2017,9 @@ async fn handle_stdin(
         // an agent's pane, opens a tab, or opens a card-dispatch confirm - it
         // never reaches the pane underneath.
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
-            match view.chrome_hit(rep.row, rep.col) {
-                Some(ChromeHit::Cmds(cmds)) => {
-                    for cmd in cmds {
-                        write_msg(sock_w, &ClientMsg::Command(cmd))
-                            .await
-                            .map_err(|e| format!("command send failed: {e}"))?;
-                    }
-                    continue;
-                }
-                Some(ChromeHit::Notice(msg)) => {
-                    view.set_notice(msg.to_string());
-                    continue;
-                }
-                // A card click opens the confirm (x-a496); the next keypress
-                // (Enter dispatches, else cancels) resolves it via confirm_keys.
-                Some(ChromeHit::Confirm(action)) => {
-                    view.confirm = Some(action);
-                    continue;
-                }
-                // The `+` footer opens the name-input overlay (x-9e5e); the next
-                // keys route to create_keys (Enter sends NewSquad, Esc cancels).
-                Some(ChromeHit::OpenCreate) => {
-                    view.open_create();
-                    continue;
-                }
-                None => {}
+            if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
+                apply_hit(view, hit, sock_w).await?;
+                continue;
             }
         }
         if let Some((pane, prow, pcol)) = view.hit_test(rep.row, rep.col) {
@@ -2219,6 +2203,34 @@ async fn handle_stdin(
         }
     }
     Ok(StdinFlow::Continue)
+}
+
+/// Apply one resolved [`ChromeHit`] - the single consumer both input paths
+/// share (x-260a): the mouse press path and the selector's Enter. Cmds go to
+/// the wire; Notice is a local one-liner; Confirm arms the one-keypress
+/// dispatch prompt (x-a496); OpenCreate opens the name-input overlay (x-9e5e).
+async fn apply_hit(
+    view: &mut View,
+    hit: ChromeHit,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    match hit {
+        ChromeHit::Cmds(cmds) => {
+            for cmd in cmds {
+                write_msg(sock_w, &ClientMsg::Command(cmd))
+                    .await
+                    .map_err(|e| format!("command send failed: {e}"))?;
+            }
+        }
+        ChromeHit::Notice(msg) => view.set_notice(msg.to_string()),
+        // A card hit opens the confirm (x-a496); the next keypress (Enter
+        // dispatches, else cancels) resolves it via confirm_keys.
+        ChromeHit::Confirm(action) => view.confirm = Some(action),
+        // The `+` footer opens the name-input overlay (x-9e5e); the next keys
+        // route to create_keys (Enter sends NewSquad, Esc cancels).
+        ChromeHit::OpenCreate => view.open_create(),
+    }
+    Ok(())
 }
 
 /// Card-dispatch confirm keys (x-a496): Enter (CR/LF) as the first byte sends
