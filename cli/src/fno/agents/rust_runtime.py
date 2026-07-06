@@ -194,6 +194,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Listing it here is defensive/documentary: whoami is not in
     # RUST_CLIENT_VERBS, so AUTO_ROUTE_VERBS already excludes it.
     "whoami",
+    # x-c5cc: the spawn-gate audit surface — every live worker process with
+    # RSS via psutil, over the same union the gate counts. Python-only by
+    # design (LD8): no daemon involvement, no Rust port, never auto-routes.
+    "top",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs

@@ -1173,7 +1173,7 @@ def cmd_whoami(
 @agents_app.command("top")
 def cmd_top(
     as_json: bool = typer.Option(
-        False, "--json", help="Emit the same rows as JSON (script parity)."
+        False, "--json", "-J", help="Emit the same rows as JSON (script parity)."
     ),
 ) -> None:
     """Show every live worker process — fno-spawned and foreign claude bg
