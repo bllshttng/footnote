@@ -76,17 +76,23 @@ if [[ "${1:-}" == "backlog" && "${2:-}" == "get" ]]; then
   for w in ${FNO_STUB_INPROGRESS:-}; do
     [[ "${3:-}" == "$w" ]] && { printf '{"pr_number":207,"_status":"claimed"}\n'; exit 0; }
   done
+  # Resolves (exit 0) but emits NON-DICT JSON (null): the underway predicate must
+  # not crash on d.get -> it exits 1 and the offer surfaces (fail safe).
+  for n in ${FNO_STUB_NONDICT:-}; do
+    [[ "${3:-}" == "$n" ]] && { printf 'null\n'; exit 0; }
+  done
 fi
 exit 0
 STUB
 chmod +x "$WORK/bin/fno"
 
-# FNO_STUB_PHANTOM / FNO_STUB_INPROGRESS are read from the outer env per-test
-# (both default empty -> every id resolves as a fresh, offerable node, so the
-# pre-existing scenarios below are unaffected).
+# FNO_STUB_PHANTOM / FNO_STUB_INPROGRESS / FNO_STUB_NONDICT are read from the
+# outer env per-test (all default empty -> every id resolves as a fresh,
+# offerable node, so the pre-existing scenarios below are unaffected).
 run_hook() { ( cd "$WORK" && PATH="$WORK/bin:$PATH" \
     FNO_STUB_PHANTOM="${FNO_STUB_PHANTOM:-}" \
     FNO_STUB_INPROGRESS="${FNO_STUB_INPROGRESS:-}" \
+    FNO_STUB_NONDICT="${FNO_STUB_NONDICT:-}" \
     bash "$HOOK" </dev/null ); }
 
 # ── Silent: no events file ───────────────────────────────────────────
@@ -165,6 +171,15 @@ out="$(run_hook)" || fail "hook nonzero on fresh offer after in-progress"
 ctx="$(printf '%s' "$out" | extract_ctx)"
 [[ "$ctx" == *"x-7777aaaa"* ]] || fail "in-progress guard: a fresh node's offer was wrongly suppressed"
 pass "in-progress guard: a just-born node still surfaces (no over-suppression)"
+
+# ── In-progress guard: non-dict resolver output fails safe (surfaces, no crash) ──
+# (gemini review on PR #208) If `fno backlog get` ever emits null / a list, the
+# underway predicate must not crash on d.get; it surfaces the offer instead.
+offered_line "2026-06-30T09:00:00Z" "x-8888bbbb" >> "$EVENTS"
+out="$(FNO_STUB_NONDICT="x-8888bbbb" run_hook)" || fail "in-progress guard: hook nonzero on non-dict resolver output"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-8888bbbb"* ]] || fail "in-progress guard: non-dict output did not fail safe to surfacing"
+pass "in-progress guard: non-dict resolver output fails safe (surfaces, no crash)"
 
 # ── Wiring: hooks.json registers the hook under UserPromptSubmit ──────
 python3 -c "import json; json.load(open('$HOOKS_JSON'))" || fail "hooks.json failed JSON parse"

@@ -97,10 +97,15 @@ if command -v fno >/dev/null 2>&1; then
 import sys, json
 try:
     d = json.load(sys.stdin)
+    # isinstance guard: fno backlog get emits an object, but a null / list body
+    # would make d.get raise AttributeError outside the try. Keep the whole
+    # access inside the try so any unexpected shape exits 1 -> surface (gemini).
+    underway = isinstance(d, dict) and (
+        bool(d.get("pr_number")) or d.get("_status") in {"claimed", "next", "done", "superseded"}
+    )
+    sys.exit(0 if underway else 1)
 except Exception:
-    sys.exit(1)  # unparseable -> do NOT suppress
-underway = bool(d.get("pr_number")) or d.get("_status") in {"claimed", "next", "done", "superseded"}
-sys.exit(0 if underway else 1)
+    sys.exit(1)  # unparseable or unexpected shape -> do NOT suppress (surface)
 ' 2>/dev/null; then
             exit 0
         fi
