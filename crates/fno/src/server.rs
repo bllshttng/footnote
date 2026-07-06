@@ -3335,7 +3335,11 @@ async fn serve(
             chunk = out_rx.recv() => {
                 // Pane output is a liveness signal (x-4e30): re-arm the idle
                 // reaper so a working client-less script session never reaps.
-                idle_deadline = tokio::time::Instant::now() + idle_grace;
+                // Gated on the marker so a high-throughput prod pane pays no
+                // Instant::now() per chunk (gemini review).
+                if idle_exit_e2e {
+                    idle_deadline = tokio::time::Instant::now() + idle_grace;
+                }
                 // out_tx lives in Core, so recv never yields None.
                 let Some((pid, bytes)) = chunk else { break Flow::Shutdown };
                 let mut touched = HashSet::new();
@@ -3402,9 +3406,10 @@ async fn serve(
                 }
             }
             // A client-count change is activity (covers the 0->1 attach edge):
-            // re-arm the grace window. Harmless in prod (the reaper arm below
-            // is disabled without the marker).
-            res = idle_count_rx.changed() => {
+            // re-arm the grace window. Disabled in prod (the reaper arm below
+            // is off without the marker), so no watch-channel wakeups there
+            // (gemini review).
+            res = idle_count_rx.changed(), if idle_exit_e2e => {
                 if res.is_ok() {
                     idle_deadline = tokio::time::Instant::now() + idle_grace;
                 }
