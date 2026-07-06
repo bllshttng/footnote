@@ -21,11 +21,153 @@
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
+const { execFileSync } = require('child_process')
+const { decideSpendDrift } = require('./lib/spend-drift')
 
 const WARNING_THRESHOLD = 35 // remaining_percentage <= 35%
 const CRITICAL_THRESHOLD = 25 // remaining_percentage <= 25%
 const DEBOUNCE_CALLS = 5 // min tool uses between warnings
 const SESSION_CONTEXT_PATH = path.join(os.homedir(), '.claude', '.session-context.json')
+
+// Guards (a) Layer 2 (model drift) + (b) interactive spend cap.
+const SPEND_THROTTLE_MS = 60_000 // at most one cost/drift check per minute
+
+// Read config.budget.interactive.cap_usd from settings.yaml (local > global).
+// This value is intentionally UNMODELED (rides extra="ignore" like budget.attended),
+// so `fno config get` rejects it — read the raw YAML the same way loopcheck.rs does.
+// Returns a positive number, or null when unset / unreadable (feature off).
+const PY_READ_CAP = `
+import yaml, os
+def rd(p):
+    try:
+        d = yaml.safe_load(open(p)) or {}
+    except Exception:
+        return None
+    c = d.get('config') or {}
+    b = c.get('budget') or {}
+    i = b.get('interactive') or {}
+    return i.get('cap_usd')
+for p in ['.fno/settings.yaml', os.path.expanduser('~/.fno/settings.yaml')]:
+    v = rd(p)
+    if v is not None:
+        print(v)
+        break
+`
+
+function readInteractiveCap() {
+  try {
+    const out = execFileSync('python3', ['-c', PY_READ_CAP], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    const n = parseFloat(out)
+    return Number.isFinite(n) && n > 0 ? n : null
+  } catch (e) {
+    return null
+  }
+}
+
+// Live spend-so-far ($) from the transcript. null on any failure (fails open).
+function probeCost(sessionId) {
+  try {
+    const out = execFileSync('fno', ['cost', sessionId, '--json'], {
+      encoding: 'utf8',
+      timeout: 10000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const j = JSON.parse(out)
+    const c = typeof j.cost_usd === 'number' ? j.cost_usd : parseFloat(j.cost_usd)
+    return Number.isFinite(c) ? c : null
+  } catch (e) {
+    return null
+  }
+}
+
+// Actual running model from the transcript via the sanctioned probe. Reused
+// instead of an fno cost call so the drift check honors AC6 (no cost call when
+// the cap is unset). null on any failure.
+function probeModel(transcriptPath) {
+  if (!transcriptPath) return null
+  const root = process.env.CLAUDE_PLUGIN_ROOT || path.join(__dirname, '..')
+  const probe = path.join(root, 'skills', 'target', 'scripts', 'context-probe.sh')
+  if (!fs.existsSync(probe)) return null
+  try {
+    const out = execFileSync('bash', [probe, transcriptPath], {
+      encoding: 'utf8',
+      timeout: 8000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const j = JSON.parse(out)
+    return j && typeof j.model === 'string' && j.model ? j.model : null
+  } catch (e) {
+    return null
+  }
+}
+
+// Throttled, one-shot spend + drift check. Returns a warning string to emit, or
+// null. Persists the latch + throttle timestamp in a per-session sidecar.
+function checkSpendAndDrift(sessionId, transcriptPath, tmpDir) {
+  try {
+    const spendPath = path.join(tmpDir, `claude-ctx-${sessionId}-spend.json`)
+    let state = { lastTs: 0, budgetWarned: false, budgetEscalated: false, driftWarned: false }
+    if (fs.existsSync(spendPath)) {
+      try {
+        state = { ...state, ...JSON.parse(fs.readFileSync(spendPath, 'utf8')) }
+      } catch (e) {
+        /* corrupt sidecar — re-check rather than go silent */
+      }
+    }
+
+    // Throttle: no shell-outs while a prior check ran <60s ago (AC7).
+    const now = Date.now()
+    if (now - (state.lastTs || 0) < SPEND_THROTTLE_MS) return null
+
+    const capUsd = readInteractiveCap()
+
+    // Drift is checkable only if L1 recorded an intended model and we haven't warned.
+    let intendedModel = null
+    if (!state.driftWarned) {
+      const attestPath = path.join(os.homedir(), '.claude', `.fno-attest-${sessionId}.json`)
+      if (fs.existsSync(attestPath)) {
+        try {
+          const a = JSON.parse(fs.readFileSync(attestPath, 'utf8'))
+          if (a && typeof a.model === 'string' && a.model) intendedModel = a.model
+        } catch (e) {
+          /* ignore */
+        }
+      }
+    }
+
+    state.lastTs = now
+    // Nothing to check -> record the tick and bail. AC6: with the cap unset AND
+    // no drift target, no `fno cost` call is made.
+    if (capUsd === null && !intendedModel) {
+      try {
+        fs.writeFileSync(spendPath, JSON.stringify(state))
+      } catch (e) {}
+      return null
+    }
+
+    const actualModel = intendedModel ? probeModel(transcriptPath) : null
+    const cost = capUsd !== null ? probeCost(sessionId) : null
+
+    const { message, state: latch } = decideSpendDrift({
+      capUsd,
+      cost,
+      intendedModel,
+      actualModel,
+      state,
+    })
+    Object.assign(state, latch)
+    try {
+      fs.writeFileSync(spendPath, JSON.stringify(state))
+    } catch (e) {}
+    return message
+  } catch (e) {
+    return null
+  }
+}
 
 /**
  * Parse the mode field from target-state.md.
@@ -69,6 +211,19 @@ process.stdin.on('end', () => {
     const sessionId = data.session_id
 
     if (!sessionId) {
+      process.exit(0)
+    }
+
+    // Guards (a) Layer 2 (model drift) + (b) interactive spend cap. Throttled,
+    // one-shot; when one fires it preempts this tick's context-pressure warning
+    // (both latch, so nothing is lost — the context warning re-fires next tick).
+    const spendMsg = checkSpendAndDrift(sessionId, data.transcript_path, os.tmpdir())
+    if (spendMsg) {
+      process.stdout.write(
+        JSON.stringify({
+          hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: spendMsg },
+        })
+      )
       process.exit(0)
     }
 
