@@ -271,3 +271,37 @@ entries:
     branch: feature/x-4504
     delta: 127
     reason: 'claude bg-guard refusal is terminal, not a crash to re-dispatch (x-4504). +101 in loop_runtime.rs + 24 in loop_dispatch.rs. The walk re-dispatched on ANY non-termination exit ignoring the exit code, so a /target --resume that claude refuses (exit_with_message, the (bg) running-as-a-background-agent guard) re-ran claude --resume forever - the operator-facing respawn loop. The delta adds: Session::output_tail() (a bounded 8 KiB read of the driver OUTPUT_FILE, wired through ShelloutSession), the is_bg_guard_refusal classifier (non-zero-exit AND marker, so a bare crash still respawns and a clean run is never suppressed), and the terminal branch (journal walk_paused bg_guard_refusal + park NoProgress + break). Roughly a third of the in-glob delta is the inline cfg(test) classifier module (the loop-glob counts inline test mods, #205/#448 precedent); the two run_loop behavior tests are in tests/loop_runtime.rs (off-glob). It cannot be smaller and stay correct: the fail-safe arms (no marker means unchanged crash-respawn, no OUTPUT_FILE means None means unchanged) and the non-zero-plus-marker gate each need their own branch plus regression test. Structurally incapable of regressing the loop: it only NARROWS re-dispatch (adds a terminal case, no new fire path), the walk stays read-only over the journal, and every classification failure falls back to the prior crash-respawn behavior. Post peer review (+2): dropped the schema-violating walk_paused emission (codex P2 - walk_paused is queue-level only) and switched output_tail to a seek-based 8 KiB tail read (gemini - fs::read was an OOM risk). Option B (resident stream_worker release-on-idle) is a separate deferred node.'
+  - date: 2026-07-06
+    pr: 222
+    branch: feature/x-5413
+    delta: 176
+    reason: >-
+      Three new advisory session-lifecycle hook guards (x-5413), all fail-open
+      and read-only over session state - never mutate the loop, graph, or
+      manifest. +74 hooks/attest-model.sh (SessionStart model/provider
+      env-coherence: warns when ANTHROPIC_MODEL names a non-Anthropic model but
+      ANTHROPIC_BASE_URL is empty or an anthropic.com host so the request
+      silently falls back to the primary Anthropic model - the x-db50
+      wrong-model class - plus the OAuth-scrub catch on a real routed lane;
+      records an intended-identity sidecar for the transcript-drift check). +74
+      hooks/arm-handoff-precompact.sh (PreCompact intent recorder: when a live
+      target session is past the context-pressure threshold with outstanding
+      work it writes a handoff-armed marker keyed on the manifest session_id; it
+      NEVER spawns, archives the manifest, or releases the node claim - a
+      compaction can land mid-wave which handoff.sh forbids, so the real handoff
+      stays owned by handoff.sh at a wave boundary). +28 net
+      hooks/target-postcompact-reinject.sh (re-surfaces the armed marker before
+      its own reinject gate and folds the nudge into the active-path output).
+      The interactive spend cap and the Layer-2 model-drift check ride the
+      existing context-monitor.js PostToolUse tick (.js, off-glob) with the pure
+      decider extracted to hooks/lib/spend-drift.js (off-glob, unit-tested);
+      hooks.json and the three test files are off-glob too. It cannot be smaller
+      and stay correct: each guard is a distinct lifecycle event (SessionStart /
+      PreCompact / PostCompact) with its own fail-open decline arms (unset env,
+      missing fno/jq/python3, unreadable transcript, dead owner pid,
+      promise-present) that each need their own branch. Structurally incapable
+      of regressing the loop: every hook is advisory (additionalContext or
+      marker file only), exits 0 on any error, and the PreCompact guard is
+      explicitly forbidden from the manifest/claim mutations that could race the
+      one-holder invariant. Control-plane initiative remains far ahead of
+      baseline (cumulative -7598).
