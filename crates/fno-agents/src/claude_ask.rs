@@ -1236,6 +1236,33 @@ const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 /// SIGKILLed and the caller sees exit 124 instead of a wedged process.
 const DEFAULT_SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How recent an inside-leg report must be for a worker to count as "provably
+/// live" when a follow-up fails to route (x-c393). A bg `/target` worker reports
+/// at least per turn, but a long turn can leave a multi-minute gap, so the
+/// window is generous; `fno agents reconcile` (the `claude logs` probe) is the
+/// eventual authority that orphans a genuinely dead worker. ponytail: a fixed
+/// ceiling, not config -- reconcile is the backstop.
+const PROVABLY_LIVE_WINDOW_SECS: u64 = 3600;
+
+/// Whether an ask follow-up that failed to route should stamp the row
+/// `orphaned`. A row with a recent inside-leg report is a LIVE worker whose
+/// registry identity merely wasn't routable (e.g. the null-uuid gap before the
+/// backfill lands, x-c393); orphaning it would mislead `fno agents list`. Only
+/// orphan when there is no recent liveness signal.
+fn should_orphan_on_ask_failure(entry: &RegistryEntry, now_secs: u64) -> bool {
+    !entry
+        .inside_leg
+        .as_ref()
+        .is_some_and(|r| r.received_within(now_secs, PROVABLY_LIVE_WINDOW_SECS))
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// The create-wait timeout for a spawn: an explicit `--timeout` wins, else the
 /// bounded default. Never returns `None`, so a spawn launch can never fall into
 /// `bg_create`'s unbounded wait arm. Pulled out as a pure fn so the defaulting
@@ -1954,6 +1981,33 @@ fn followup(
             AskOutcome::ok_stdout(reply)
         }
         Err(AskError::Orphan { reason, .. }) => {
+            // Provably-live guard (x-c393): a live bg worker whose registry
+            // identity merely wasn't routable (a recent inside-leg report) is a
+            // routing miss, not a death. Do NOT stamp it orphaned -- that would
+            // mislead `fno agents list` about a working session; reconcile's
+            // `claude logs` probe stays the authority that orphans a dead one.
+            if !should_orphan_on_ask_failure(entry, now_epoch_secs()) {
+                emit_event(
+                    events,
+                    "agent_followup_failed",
+                    &[
+                        ("stage", "routing-gap".into()),
+                        ("name", name.into()),
+                        ("short_id", short_id.clone().into()),
+                        ("reason", reason.as_str().into()),
+                    ],
+                );
+                return AskOutcome {
+                    stdout: String::new(),
+                    stderr: format!(
+                        "agent {} is live but not currently routable (reason: {}); message not delivered. Try 'claude attach {}'\n",
+                        py_repr(name),
+                        reason.as_str(),
+                        short_id
+                    ),
+                    exit_code: 13,
+                };
+            }
             // Best-effort orphan stamp. On failure Python keeps the swallow
             // OBSERVABLE (dispatch.py:455-473): a stderr warning + an
             // agent_status_stamp_failed event, so list/ask status drift is
@@ -2274,6 +2328,74 @@ mod tests {
     fn spawn_create_timeout_honors_explicit() {
         let explicit = Duration::from_secs(5);
         assert_eq!(spawn_create_timeout(Some(explicit)), explicit);
+    }
+
+    // --- should_orphan_on_ask_failure (x-c393) -----------------------------
+
+    fn row_with_inside_leg(inside_leg: Option<crate::state::InsideLegReport>) -> RegistryEntry {
+        RegistryEntry {
+            name: "w".into(),
+            short_id: String::new(),
+            provider: "claude".into(),
+            cwd: "/tmp".into(),
+            project_root: "/tmp".into(),
+            session_id: None,
+            claude_short_id: Some("3228ccad".into()),
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            host_mode: None,
+            cc_session_id: None,
+            status: AgentStatus::Live,
+            last_message_at: None,
+            created_at: "t".into(),
+            pid: None,
+            pid_start_time: None,
+            log_path: None,
+            last_reconciled_at: None,
+            inside_leg,
+            exited_at: None,
+            mux: None,
+            screen_state: None,
+        }
+    }
+
+    fn report_at(stamp: &str) -> crate::state::InsideLegReport {
+        crate::state::InsideLegReport {
+            state: crate::state::InsideLegState::Working,
+            seq: 1,
+            reason: None,
+            received_at: stamp.into(),
+            ttl_ms: None,
+        }
+    }
+
+    #[test]
+    fn does_not_orphan_a_row_with_a_recent_inside_leg_report() {
+        // AC2-HP: a live worker (recent report) whose follow-up fails to route
+        // must NOT be orphaned.
+        let stamp = "2026-07-06T20:00:00Z";
+        let now = crate::state::rfc3339_like_to_secs(stamp).unwrap() + 30;
+        let row = row_with_inside_leg(Some(report_at(stamp)));
+        assert!(!should_orphan_on_ask_failure(&row, now));
+    }
+
+    #[test]
+    fn orphans_a_row_with_no_inside_leg_report() {
+        // No liveness signal -> a routing failure is a real orphan (AC2-ERR side).
+        let row = row_with_inside_leg(None);
+        assert!(should_orphan_on_ask_failure(&row, 9_999_999_999));
+    }
+
+    #[test]
+    fn orphans_a_row_whose_inside_leg_is_stale() {
+        // A report older than the window is not a liveness signal.
+        let stamp = "2026-07-06T20:00:00Z";
+        let now = crate::state::rfc3339_like_to_secs(stamp).unwrap() + PROVABLY_LIVE_WINDOW_SECS + 60;
+        let row = row_with_inside_leg(Some(report_at(stamp)));
+        assert!(should_orphan_on_ask_failure(&row, now));
     }
 
     // PR #544 deeper fix (codex P1): the create wait returns on the launch
