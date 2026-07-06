@@ -745,6 +745,30 @@ fn card_ready_to_dispatch(backlog: &[BacklogCard], node: &str) -> bool {
         .any(|c| (c.id == node || c.slug == node) && c.state == CardState::Ready)
 }
 
+/// Whether `name` carries `node` as an exact token (x-54fa, plan Locked 6):
+/// the id appears with no alphanumeric neighbor on either side, so
+/// `tgt-x-54fa` and `x-54fa` match but `x-54f` inside `x-54fa` (or `x-54fa`
+/// inside `x-54fab`) never does. `-` cannot be the boundary test (it is part
+/// of the id shape itself), so boundaries are non-alphanumeric.
+fn name_has_node_token(name: &str, node: &str) -> bool {
+    if node.is_empty() {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    let mut from = 0;
+    while let Some(i) = name[from..].find(node) {
+        let start = from + i;
+        let end = start + node.len();
+        let pre_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let post_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if pre_ok && post_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
 /// Map a `fno dispatch one --json` verdict to the one-line client notice.
 /// Unparseable / unknown output fails open to a generic failure notice (never
 /// silent on an error).
@@ -1389,9 +1413,87 @@ impl Core {
             // The focused pane's provenance for the status row (x-66e8). Re-sent
             // whenever `focus` changes, so the cell tracks focus for free.
             focus_node: self.panes.get(&focus).and_then(|e| e.node.clone()),
-            // The work-queue lane (x-6f77); already board-ordered by the reader.
-            backlog: self.backlog.clone(),
+            // The work-queue lane (x-6f77); already board-ordered by the
+            // reader, routes joined on at publish time (x-54fa).
+            backlog: self.routed_backlog(),
         }
+    }
+
+    /// The backlog cards with their v17 routes joined on at publish time
+    /// (x-54fa Phase B). An in-flight card gains, in priority order: the pane
+    /// in THIS session whose `FNO_NODE` provenance equals the node id; else
+    /// the attach jobId of a live paneless registry row working the node;
+    /// else a one-line `where_hint` naming the session or claim holder. Join
+    /// keys are exact only. Ready/Blocked cards pass through untouched.
+    fn routed_backlog(&self) -> Vec<BacklogCard> {
+        let mut cards = self.backlog.clone();
+        for c in &mut cards {
+            if c.state != CardState::InFlight {
+                continue;
+            }
+            if let Some(pid) = self.node_pane(&c.id) {
+                c.pane_id = Some(pid);
+            } else if let Some((attach, name)) = self.node_registry_row(&c.id) {
+                match attach {
+                    Some(id) => c.attach_id = Some(id),
+                    None => c.where_hint = Some(format!("in flight - session {name}")),
+                }
+            } else if let Some(holder) = self.backlog_holders.get(&c.id) {
+                c.where_hint = Some(format!("in flight - worked by {holder}"));
+            }
+        }
+        cards
+    }
+
+    /// The route command for an in-flight card named by id or slug (the same
+    /// matching `card_ready_to_dispatch` uses), or `None` when the card is
+    /// unknown, not in flight, or unroutable - the stale-client `DispatchNode`
+    /// re-check (x-54fa AC2-ERR).
+    fn inflight_route(&self, node: &str) -> Option<Command> {
+        let card = self
+            .backlog
+            .iter()
+            .find(|c| (c.id == node || c.slug == node) && c.state == CardState::InFlight)?;
+        if let Some(pid) = self.node_pane(&card.id) {
+            return Some(Command::FocusPane(pid));
+        }
+        self.node_registry_row(&card.id)
+            .and_then(|(attach, _)| attach)
+            .map(Command::AttachAgent)
+    }
+
+    /// The lowest-id live pane in this session whose `FNO_NODE` provenance
+    /// equals `node`. Provenance equality only - no cwd fallback here; a
+    /// shell pane that merely sits in the node's worktree is not the worker.
+    fn node_pane(&self, node: &str) -> Option<u64> {
+        self.panes
+            .iter()
+            .filter(|(_, e)| e.node.as_deref() == Some(node))
+            .map(|(id, _)| *id)
+            .min()
+    }
+
+    /// The live, paneless registry row working `node`: matched by exact
+    /// node-id token in the worker name or registry-cwd basename equality
+    /// (the worktree-per-node convention). Returns `(attach_id, name)`; a row
+    /// with an attach target wins over a name-only match so the card routes
+    /// whenever any matching row can be attached.
+    fn node_registry_row(&self, node: &str) -> Option<(Option<String>, String)> {
+        let mut named: Option<(Option<String>, String)> = None;
+        for a in &self.agents {
+            if a.mux.is_some() || a.exited {
+                continue;
+            }
+            let cwd_match = Path::new(&a.cwd).file_name().and_then(|b| b.to_str()) == Some(node);
+            if !cwd_match && !name_has_node_token(&a.name, node) {
+                continue;
+            }
+            if a.attach_id.is_some() {
+                return Some((a.attach_id.clone(), a.name.clone()));
+            }
+            named.get_or_insert((None, a.name.clone()));
+        }
+        named
     }
 
     /// Join the registry-derived agent set to this server's live state (4a-G2,
@@ -2216,6 +2318,14 @@ impl Core {
                 // the other catalog-named commands (and covers an empty id).
                 if card_ready_to_dispatch(&self.backlog, &node) {
                     self.dispatch_next(client_id, Some(node));
+                } else if let Some(route) = self.inflight_route(&node) {
+                    // The client's Layout was stale: the card went in-flight
+                    // between publish and click, but the server can route it -
+                    // focus/attach instead of refusing (x-54fa AC2-ERR). The
+                    // recursion reuses the FocusPane/AttachAgent gates verbatim
+                    // (catalog membership, jobId shape), so this adds no second
+                    // spawn path.
+                    return self.command(client_id, route);
                 } else {
                     self.notice(client_id, "card not ready to dispatch");
                 }
@@ -3975,6 +4085,146 @@ mod tests {
         assert!(
             !card_ready_to_dispatch(&[], "x-rdy"),
             "empty backlog refused"
+        );
+    }
+
+    #[test]
+    fn node_token_matches_whole_ids_only() {
+        // Locked 6: exact node-id token, non-alphanumeric boundaries. `-` is
+        // part of the id shape, so it cannot be the boundary test.
+        assert!(name_has_node_token("x-54fa", "x-54fa"));
+        assert!(name_has_node_token("tgt-x-54fa", "x-54fa"));
+        assert!(name_has_node_token("run x-54fa now", "x-54fa"));
+        assert!(name_has_node_token("x-54fa.retry", "x-54fa"));
+        // Prefix/suffix of a longer token never matches.
+        assert!(!name_has_node_token("x-54fab", "x-54fa"));
+        assert!(!name_has_node_token("ax-54fa", "x-54fa"));
+        assert!(!name_has_node_token("x-54fa", "x-54f"));
+        // Second occurrence with clean boundaries still matches.
+        assert!(name_has_node_token("x-54fab x-54fa", "x-54fa"));
+        assert!(!name_has_node_token("anything", ""));
+    }
+
+    /// A paneless registry row for the routing tests: `name`/`cwd`/`attach_id`
+    /// are the join surfaces; everything else is the quiet default.
+    fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
+        RegistryAgent {
+            name: name.into(),
+            cwd: cwd.into(),
+            exited: false,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: attach.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn routed_backlog_joins_attach_then_hint_and_leaves_ready_alone() {
+        // x-54fa Phase B publish-time join, minus the pane arm (a live pane
+        // needs a real PTY; the pane join key - FNO_NODE provenance equality -
+        // is covered by the extract_fno_node tests + node_pane's trivial scan).
+        let card = |id: &str, state| BacklogCard {
+            id: id.into(),
+            slug: format!("{id}-slug"),
+            priority: "p2".into(),
+            state,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
+        };
+        let mut core = empty_core();
+        core.backlog = vec![
+            card("x-aaa", CardState::InFlight), // attach via name token
+            card("x-bbb", CardState::InFlight), // hint via matched row, no jobId
+            card("x-ccc", CardState::InFlight), // hint via claim holder
+            card("x-ddd", CardState::InFlight), // unroutable, nothing known
+            card("x-eee", CardState::Ready),    // never joined
+        ];
+        core.agents = vec![
+            bg_row("tgt-x-aaa", "/w/other", Some("deadbee1")),
+            // cwd-basename match (worktree-per-node convention), no jobId.
+            bg_row("worker", "/w/x-bbb", None),
+            // Rows that must NOT route: exited, pane-hosted, ready-card match.
+            RegistryAgent {
+                exited: true,
+                ..bg_row("tgt-x-ddd", "/w", Some("deadbee2"))
+            },
+            RegistryAgent {
+                mux: Some(("test".into(), 5)),
+                ..bg_row("tgt-x-ddd", "/w", Some("deadbee3"))
+            },
+            bg_row("tgt-x-eee", "/w", Some("deadbee4")),
+        ];
+        core.backlog_holders
+            .insert("x-ccc".into(), "target-session:abc".into());
+        let cards = core.routed_backlog();
+        assert_eq!(cards[0].attach_id.as_deref(), Some("deadbee1"));
+        assert_eq!(cards[0].where_hint, None, "attach route wins over hint");
+        assert_eq!(
+            cards[1].where_hint.as_deref(),
+            Some("in flight - session worker")
+        );
+        assert_eq!(
+            cards[2].where_hint.as_deref(),
+            Some("in flight - worked by target-session:abc")
+        );
+        let bare = &cards[3];
+        assert!(
+            bare.pane_id.is_none() && bare.attach_id.is_none() && bare.where_hint.is_none(),
+            "exited/pane-hosted rows never route"
+        );
+        let ready = &cards[4];
+        assert!(
+            ready.attach_id.is_none() && ready.where_hint.is_none(),
+            "a ready card is never joined"
+        );
+    }
+
+    #[test]
+    fn inflight_route_resolves_by_id_or_slug_and_fails_closed() {
+        // The stale-client DispatchNode re-check (AC2-ERR): an in-flight card
+        // with an attach target routes; ready/unknown/unroutable stay None so
+        // the handler falls through to dispatch or the refusal notice.
+        let mut core = empty_core();
+        core.backlog = vec![
+            BacklogCard {
+                id: "x-aaa".into(),
+                slug: "aaa-slug".into(),
+                priority: "p2".into(),
+                state: CardState::InFlight,
+                pane_id: None,
+                attach_id: None,
+                where_hint: None,
+            },
+            BacklogCard {
+                id: "x-rdy".into(),
+                slug: "rdy-slug".into(),
+                priority: "p2".into(),
+                state: CardState::Ready,
+                pane_id: None,
+                attach_id: None,
+                where_hint: None,
+            },
+        ];
+        core.agents = vec![bg_row("tgt-x-aaa", "/w", Some("deadbee1"))];
+        assert_eq!(
+            core.inflight_route("x-aaa"),
+            Some(Command::AttachAgent("deadbee1".into()))
+        );
+        assert_eq!(
+            core.inflight_route("aaa-slug"),
+            Some(Command::AttachAgent("deadbee1".into())),
+            "slug names the same card"
+        );
+        assert_eq!(core.inflight_route("x-rdy"), None, "ready is not routed");
+        assert_eq!(core.inflight_route("x-nope"), None, "unknown fails closed");
+        core.agents.clear();
+        assert_eq!(
+            core.inflight_route("x-aaa"),
+            None,
+            "unroutable in-flight falls through to the refusal notice"
         );
     }
 
