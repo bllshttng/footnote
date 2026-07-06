@@ -256,6 +256,21 @@ def test_explicit_route_no_key_fails_safe() -> None:
     )
     assert route is None
     assert notes
+    # The notice must describe the ACTUAL outcome for a peer (skipped), not claim
+    # a fall-back to the primary/Anthropic model that never happens (gemini P-med).
+    assert any("skipping the peer" in n for n in notes)
+    assert not any("primary" in n for n in notes)
+
+
+def test_role_context_notice_still_says_primary_model() -> None:
+    # A ROLE that can't route DOES fall back to the primary model - keep that
+    # wording (the peer-only rewording must not leak into the role path).
+    notes, sink = _collector()
+    route = mr.resolve_route(
+        "consolidate", settings=_settings(), env={}, notice=sink
+    )
+    assert route is None
+    assert any("primary Anthropic model" in n for n in notes)
 
 
 @pytest.mark.parametrize("provider,model", [("", "glm-5.2"), ("zai", ""), ("zai", "  ")])

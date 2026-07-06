@@ -222,12 +222,23 @@ def _route_for_target(
     (peer lane names the target directly). Returns None (fail-safe, never raises)
     when the provider is unknown/non-anthropic/keyless. ``ctx`` names the caller
     ("role 'consolidate'" / "peer 'zai'") for the fail-safe notices."""
+    # A role that can't route falls back to the primary Anthropic model; a PEER
+    # that can't route is SKIPPED entirely (there is no author-model fallback for
+    # a peer - that would be the same model as the author). Word the fail-safe
+    # notice for the actual outcome so the operator is not told a skipped GLM peer
+    # "fell back to the primary model" when nothing ran.
+    fallback = "skipping the peer" if ctx.startswith("peer") else "using the primary model"
+    fallback_key = (
+        "skipping the peer"
+        if ctx.startswith("peer")
+        else "falling back to the primary Anthropic model"
+    )
     provider = _resolve_provider(pname, block)
     if provider is None:
         _emit(
             notice,
             f"model-routing: provider {pname!r} for {ctx} is not "
-            f"configured; using the primary model",
+            f"configured; {fallback}",
         )
         return None
 
@@ -236,7 +247,7 @@ def _route_for_target(
         _emit(
             notice,
             f"model-routing: provider {pname!r} uses the {protocol!r} protocol, "
-            f"which a claude worker cannot use; using the primary model",
+            f"which a claude worker cannot use; {fallback}",
         )
         return None
 
@@ -244,8 +255,7 @@ def _route_for_target(
     if not base_url:
         _emit(
             notice,
-            f"model-routing: provider {pname!r} has no base_url; "
-            f"using the primary model",
+            f"model-routing: provider {pname!r} has no base_url; {fallback}",
         )
         return None
 
@@ -254,7 +264,7 @@ def _route_for_target(
         _emit(
             notice,
             f"model-routing: no API key for provider {pname!r} ({ctx}); "
-            f"falling back to the primary Anthropic model",
+            f"{fallback_key}",
         )
         return None
 
