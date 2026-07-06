@@ -3544,6 +3544,48 @@ pub(crate) fn notify_transition(title: String, body: String) {
     });
 }
 
+/// Which null-uuid row (if any) should adopt a full session uuid seen on an
+/// inside-leg report (x-c393).
+enum UuidBackfill {
+    None,
+    One(usize),
+    Ambiguous,
+}
+
+/// Find the `claude --bg` row awaiting its full session uuid. A bg spawn writes
+/// the row with `claude_short_id` (the 8-hex jobId) but `claude_session_uuid:
+/// null` -- the full uuid only arrives on the first inside-leg report, so until
+/// it is backfilled `entry_holds_session` never matches and every report is
+/// buffered-then-lost (x-c393). Match a null-uuid claude row whose short-id is
+/// the leading hex group of `full_uuid` (`3228ccad` -> `3228ccad-c078-...`).
+/// Two rows sharing that short-id is ambiguous -> refuse rather than backfill
+/// the wrong row (AC1-ERR).
+fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBackfill {
+    let mut found = None;
+    for (i, e) in entries.iter().enumerate() {
+        if e.claude_session_uuid.is_some() {
+            continue;
+        }
+        let Some(short) = e.claude_short_id.as_deref() else {
+            continue;
+        };
+        // Require the group boundary (`<short>-`) so a short cannot match a
+        // longer hex run it merely prefixes.
+        if short.is_empty()
+            || !full_uuid
+                .strip_prefix(short)
+                .is_some_and(|rest| rest.starts_with('-'))
+        {
+            continue;
+        }
+        if found.is_some() {
+            return UuidBackfill::Ambiguous;
+        }
+        found = Some(i);
+    }
+    found.map_or(UuidBackfill::None, UuidBackfill::One)
+}
+
 fn handle_report(ctx: &Ctx, req: &Request) -> Response {
     let session_id = match req.params.get("session_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s.to_string(),
@@ -3607,14 +3649,29 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
     // notifier can never stall ingestion.
     let mut notify: Option<(String, String, bool)> = None;
     if let Err(e) = state::update_registry(&ctx.home.registry_json(), |r| {
-        let Some(entry) = r
+        // Match by the pinned session id (fast path). If nothing holds it, a
+        // `claude --bg` row may still be waiting for its uuid: backfill it by
+        // short-id prefix so the report can store on it AND ask/mail/push route
+        // to it (x-c393). Ambiguous prefix -> no backfill (AC1-ERR).
+        let idx = match r
             .entries
-            .iter_mut()
-            .find(|e| entry_holds_session(e, &session_id))
-        else {
+            .iter()
+            .position(|e| entry_holds_session(e, &session_id))
+        {
+            Some(i) => Some(i),
+            None => match find_uuid_backfill_row(&r.entries, &session_id) {
+                UuidBackfill::One(i) => {
+                    r.entries[i].claude_session_uuid = Some(session_id.clone());
+                    Some(i)
+                }
+                UuidBackfill::None | UuidBackfill::Ambiguous => None,
+            },
+        };
+        let Some(idx) = idx else {
             outcome = Outcome::Unknown;
             return;
         };
+        let entry = &mut r.entries[idx];
         if let Some(prev) = &entry.inside_leg {
             if seq <= prev.seq {
                 outcome = Outcome::StaleSeq { last: prev.seq };
@@ -4445,6 +4502,63 @@ mod tests {
 
     fn probe_err() -> crate::provider::ReachabilityProbeError {
         crate::provider::ReachabilityProbeError::new("codex", "store unavailable")
+    }
+
+    // --- find_uuid_backfill_row (x-c393): backfill a null-uuid bg row ---------
+
+    /// A `claude --bg` row: `claude_short_id` set, `claude_session_uuid` null.
+    fn bg_claude_row(name: &str, short_id: &str) -> RegistryEntry {
+        let mut e = rentry(name, AgentStatus::Live, None);
+        e.provider = "claude".into();
+        e.claude_short_id = Some(short_id.into());
+        e.claude_session_uuid = None;
+        e
+    }
+
+    #[test]
+    fn find_uuid_backfill_row_matches_null_uuid_by_short_prefix() {
+        // AC1-HP: the full uuid's leading hex group is the row's short-id.
+        let rows = vec![bg_claude_row("w", "3228ccad")];
+        assert!(matches!(
+            find_uuid_backfill_row(&rows, "3228ccad-c078-4b53-a8c9-7199b831eae4"),
+            UuidBackfill::One(0)
+        ));
+    }
+
+    #[test]
+    fn find_uuid_backfill_row_refuses_ambiguous_short_collision() {
+        // AC1-ERR: two null-uuid rows share the short-id -> refuse, don't guess.
+        let rows = vec![
+            bg_claude_row("w1", "3228ccad"),
+            bg_claude_row("w2", "3228ccad"),
+        ];
+        assert!(matches!(
+            find_uuid_backfill_row(&rows, "3228ccad-c078-4b53-a8c9-7199b831eae4"),
+            UuidBackfill::Ambiguous
+        ));
+    }
+
+    #[test]
+    fn find_uuid_backfill_row_skips_rows_that_already_have_a_uuid() {
+        // Idempotent: a row already carrying its uuid is matched by the fast
+        // path, never backfilled here.
+        let mut row = bg_claude_row("w", "3228ccad");
+        row.claude_session_uuid = Some("3228ccad-c078-4b53-a8c9-7199b831eae4".into());
+        assert!(matches!(
+            find_uuid_backfill_row(&[row], "3228ccad-c078-4b53-a8c9-7199b831eae4"),
+            UuidBackfill::None
+        ));
+    }
+
+    #[test]
+    fn find_uuid_backfill_row_requires_group_boundary() {
+        // A short must not match a longer hex run it merely prefixes: `3228ccad`
+        // is not the leading group of `3228ccadd-...` (no `-` at the boundary).
+        let rows = vec![bg_claude_row("w", "3228ccad")];
+        assert!(matches!(
+            find_uuid_backfill_row(&rows, "3228ccadd-c078-4b53-a8c9-7199b831eae4"),
+            UuidBackfill::None
+        ));
     }
 
     #[test]
