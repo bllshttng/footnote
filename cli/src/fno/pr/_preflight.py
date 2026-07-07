@@ -118,6 +118,11 @@ def check_stale_base(
         return OK, None
 
     remote, ref = _split_base(base)
+    # Compare against the remote-tracking ref we actually fetch. `git fetch` only
+    # advances refs/remotes/<remote>/<ref>, never a local branch, so a bare
+    # `--base main` must still read origin/main - comparing local `main` would
+    # read a ref the fetch never touched and pass exactly when it should refuse.
+    compare = f"{remote}/{ref}"
     try:
         fetch = _git(["fetch", remote, ref, "--quiet"], repo)
     except ToolMissing:
@@ -125,25 +130,25 @@ def check_stale_base(
     if fetch.returncode != 0:
         # Fail-open: a network flake must not block a ship, and gh pr create is
         # about to make the real network test anyway.
-        return OK, f"could not refresh {base}; stale-base check skipped"
+        return OK, f"could not refresh {compare}; stale-base check skipped"
 
-    mb = _git(["merge-base", "HEAD", base], repo)
+    mb = _git(["merge-base", "HEAD", compare], repo)
     mb_sha = mb.stdout.strip()
     if mb.returncode != 0 or not mb_sha:
-        return UNRELATED, _unrelated_message(base)
+        return UNRELATED, _unrelated_message(compare)
 
-    behind = _git(["rev-list", "--count", f"{mb_sha}..{base}"], repo)
+    behind = _git(["rev-list", "--count", f"{mb_sha}..{compare}"], repo)
     if behind.stdout.strip() == "0":
         return OK, None  # up to date; merge-base age is irrelevant
 
-    tip_ts = _committer_epoch(base, repo)
+    tip_ts = _committer_epoch(compare, repo)
     mb_ts = _committer_epoch(mb_sha, repo)
     if tip_ts is None or mb_ts is None:
         return OK, "could not read commit dates; stale-base check skipped"
 
     span_hours = (tip_ts - mb_ts) / 3600.0
     if span_hours > max_hours:
-        return REFUSED_STALE, _stale_message(span_hours, base)
+        return REFUSED_STALE, _stale_message(span_hours, compare)
     return OK, None
 
 

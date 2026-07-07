@@ -163,6 +163,12 @@ def ship(
         from fno.pr._preflight import check_stale_base
 
         base_code, base_msg = check_stale_base(base=f"origin/{base_branch}")
+        if base_msg and base_code == 0:
+            # Fail-open path: the guard was SKIPPED (fetch flake / git missing).
+            # Say so - a silently-skipped guard must not read as a clean pass.
+            import sys
+
+            print(f"worker.ship: {base_msg}", file=sys.stderr)
         if base_code != 0:
             return {
                 "action": "error",

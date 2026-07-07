@@ -139,6 +139,20 @@ def test_bypass_passes_and_emits_gate_escape(tmp_path):  # AC1-FR
     assert escapes[-1]["data"]["reason"] == "stale-base"
 
 
+def test_bare_ref_compares_remote_not_local(tmp_path):
+    """A bare `--base main` must compare origin/main (the fetched ref), not the
+    local main branch which git fetch never advances."""
+    work = _repo(tmp_path, timedelta(days=3))  # HEAD=feature/x; origin/main fresh
+    mb = subprocess.run(
+        ["git", "merge-base", "HEAD", "origin/main"],
+        cwd=work, text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    # Rewind LOCAL main to the old merge-base -> local main is stale, origin fresh.
+    _git(work, "branch", "-f", "main", mb)
+    code, _ = _preflight.check_stale_base(base="main", cwd=str(work))
+    assert code == 3  # would be 0 (pass) if it compared the stale local main
+
+
 def test_wrong_bypass_value_still_refuses(tmp_path):  # AC1-FR
     work = _repo(tmp_path, timedelta(days=3))
     code, _ = _preflight.check_stale_base(cwd=str(work), env={"FNO_PR_BASE_OK": "1"})
