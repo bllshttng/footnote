@@ -4308,11 +4308,17 @@ mod tests {
         // the entry and gate on the survivors.
         let bad =
             parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n      - {a: b}\n");
-        assert_eq!(bad.reviewers, vec![MALFORMED_REVIEWERS_SENTINEL.to_string()]);
+        assert_eq!(
+            bad.reviewers,
+            vec![MALFORMED_REVIEWERS_SENTINEL.to_string()]
+        );
         // A clean all-scalar list still parses normally.
         let ok =
             parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n      - declare\n");
-        assert_eq!(ok.reviewers, vec!["sigma".to_string(), "declare".to_string()]);
+        assert_eq!(
+            ok.reviewers,
+            vec!["sigma".to_string(), "declare".to_string()]
+        );
     }
 
     #[test]
