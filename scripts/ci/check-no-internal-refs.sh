@@ -74,9 +74,12 @@ is_allowlisted() {
     return 1
 }
 
-# node-id + session-url leak patterns (applied to ALL in-scope files).
+# node-id + session-url leak patterns (applied to ALL in-scope files). The
+# session-url pattern requires the trailing slash (a real URL is always
+# claude.ai/code/<session-path>), so a doc that merely NAMES the concept -
+# including the docs for this very gate - is not a false positive.
 NODE_ID_RE='\b(x-[0-9a-f]{4}|ab-[0-9a-f]{8})\b'
-SESSION_URL_RE='claude\.ai/code'
+SESSION_URL_RE='claude\.ai/code/'
 
 # Synthetic example tokens that legitimately appear in format / command
 # examples. Literal tokens only, all obviously non-real; exempt by TOKEN so a

@@ -29,9 +29,12 @@
 
 set -uo pipefail
 
-# Single pattern: the bare URL and the `Claude-Session: https://claude.ai/code/…`
-# trailer both embed this substring, so one pattern covers both.
-PATTERN='claude\.ai/code'
+# Single pattern: a real session URL is always `claude.ai/code/<session-path>`,
+# and the `Claude-Session:` trailer embeds that same form - so requiring the
+# trailing slash covers every real leak while letting prose that merely NAMES
+# the concept ("scans for claude.ai/code") pass, including this gate's own PR
+# body and docs.
+PATTERN='claude\.ai/code/'
 
 BASE="${PR_BASE_SHA:-}"
 HEAD="${PR_HEAD_SHA:-HEAD}"
