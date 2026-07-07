@@ -126,8 +126,18 @@ jobs:
       - name: cargo test --all-targets (fno mux)
         # The mux e2e tests spawn real PTYs and Unix sockets; both work on
         # the ubuntu-latest runner (the harness needs no TTY of its own).
+        # RUST_TEST_THREADS=1 (x-0296): the PTY-heavy e2e suites (persistence,
+        # layout_e2e, multiclient) each drive real servers + PTYs against
+        # wall-clock `wait_screen` deadlines. libtest's default per-binary
+        # parallelism (= num_cpus) oversubscribes the 2-core runner, so those
+        # deadlines miss and a rotating subset times out ~every run - red on
+        # PRs touching zero crates/fno files, and red on main itself. Serial
+        # execution removes the contention (all 10 persistence tests pass in
+        # 10.85s single-threaded); it masks no bug - the snapshot correctness
+        # this crate's `cold_attach_delivers_every_pane_frame` guard covers is
+        # thread-count-independent.
         working-directory: crates/fno
-        run: cargo test --all-targets
+        run: RUST_TEST_THREADS=1 cargo test --all-targets
 
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
