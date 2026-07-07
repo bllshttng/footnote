@@ -148,9 +148,10 @@ step-2 size decision).
   constraints, then a stop condition; use imperative single-purpose lines. e.g.:
 
   ```
-  Output contract (follow exactly): emit sections in order P1, P2, P3, verdict. One finding per line as `file:line - problem - fix`. End with a one-line verdict.
-  Do not: write a preamble, restate the diff, or add praise. After the verdict line, stop.
-  Review the diff below for <PR #$N | branch $BRANCH> for defects (P1 blocking, P2 should-fix, P3 nit). If the diff is clean, say so plainly - do not invent findings.
+  Output contract (follow exactly): emit sections in order P1, P2, P3, verdict. One finding per line as `file:line - problem - fix`. If the diff is clean, omit the finding sections and output only `verdict: clean`. End with the one-line verdict, then stop.
+  Do not: write a preamble, restate the diff, add praise, or invent findings.
+  Context: <one line - the user's stated goal, or the repo's purpose from AGENTS.md>.
+  Review the diff below for <PR #$N | branch $BRANCH> for defects (P1 blocking, P2 should-fix, P3 nit).
   ```
 
 - **gemini.** A short numbered constraint list; name the output format but
