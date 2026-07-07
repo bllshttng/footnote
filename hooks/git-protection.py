@@ -533,13 +533,21 @@ _ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 def _command_segments(command):
     """Split a shell command into command-position segments (lists of tokens).
 
-    Splits on physical lines first (shlex eats newlines), then each line into
-    segments at shell separators. Each segment is a token run that begins a
-    command. Uses stdlib shlex in POSIX mode so quoted arguments stay single
-    tokens and separators inside quotes are not treated as separators. Raises
-    ValueError on unbalanced quotes (in any line); the caller then falls back to
-    legacy whole-command matching.
+    Collapses backslash line-continuations, then splits on physical lines
+    (shlex eats newlines), then each line into segments at shell separators.
+    Each segment is a token run that begins a command. Uses stdlib shlex in
+    POSIX mode so quoted arguments stay single tokens and separators inside
+    quotes are not treated as separators. Raises ValueError on unbalanced quotes
+    (in any line); the caller then falls back to legacy whole-command matching.
     """
+    # A backslash immediately before a newline is a shell line-continuation:
+    # the shell joins the two physical lines into one logical command. Collapse
+    # them FIRST, else `git push \<newline>origin main` or
+    # `git commit \<newline>--no-verify` would split across physical lines and be
+    # judged with the branch target / flag in isolation - a gate bypass (gemini
+    # review, PR #227). Removed (not spaced) to match shell semantics, so a
+    # mid-token continuation like `git pu\<newline>sh` rejoins to `git push`.
+    command = re.sub(r'\\\r?\n', '', command)
     segments = []
     for line in command.split("\n"):
         if line.strip():

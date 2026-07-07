@@ -329,6 +329,23 @@ def test_find_git_segments_pipe_does_not_false_split_git():
     assert git_protection._find_git_segments(segs) == ["git log"]
 
 
+def test_backslash_line_continuation_does_not_bypass():
+    """Regression (gemini, PR #227): a backslash line-continuation joins two
+    physical lines into one command; the gate must see it joined, not split
+    with the branch target / flag judged in isolation."""
+    seg = git_protection._command_segments
+    fg = git_protection._find_git_segments
+    fm = git_protection._find_merge_segment
+    # --no-verify on the continuation line is still caught
+    assert fg(seg("git commit \\\n  --no-verify -m x")) == ["git commit --no-verify -m x"]
+    # branch target on the continuation line is still caught
+    assert fg(seg("git push \\\n  origin main")) == ["git push origin main"]
+    # merge verb split by a continuation is still caught
+    assert fm(seg(f"{_MERGE} \\\n  5")) == f"{_MERGE} 5"
+    # a mid-token continuation rejoins (shell semantics: removed, not spaced)
+    assert fg(seg("git pu\\\nsh origin main")) == ["git push origin main"]
+
+
 def test_command_segments_unbalanced_quote_raises():
     try:
         git_protection._command_segments(f'{_MERGE} 5 --body "unclosed')
