@@ -7,13 +7,20 @@
 # session guard, decision translation, and the read-only invariant.
 #
 # Tests:
-#   T1  no state file -> exit 0
-#   T2  binary missing -> exit 0 + loop_check_binary_missing event emitted
+#   T1  no state file -> exit 0, no unavailable counter written
+#   T2  binary missing (active session) -> exit 2 bounded-block + event + counter=1
 #   T3  block decision -> exit 2, message on stderr
 #   T4  allow decision with TerminationReason -> exit 0
 #   T5  read-only invariant: state file unchanged across a block fire
 #   T6  foreign transcript -> exit 0 without invoking the binary
-#   T7  verb returns garbage output -> exit 0 with warning
+#   T7  verb returns garbage output (active session) -> exit 2 bounded-block + warning
+#   T8  claude_transcript_id: null still invokes the binary
+#
+# x-81d9 active-session-aware error handling (AC2):
+#   T9   verb non-zero (active session) -> exit 2 bounded-block + warning
+#   T10  counter at MAX -> loud give-up: exit 0 + loop_check_unavailable_giveup (both logs)
+#   T11  counter is per-session_id (a sibling session's budget is untouched)
+#   T12  clean decision self-heals the counter (removed before honoring)
 #
 # Each test feeds the shim stdin JSON: {"transcript_path":"<tmp>/<uuid>.jsonl"}
 # and runs the shim from a tmp cwd containing .fno/target-state.md.
@@ -119,19 +126,24 @@ log "T1: no state file -> exit 0"
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
     run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}"
 
-    rm -rf "$TMP_DIR" 2>/dev/null || true
-
-    if [[ "$HOOK_RC" -eq 0 ]]; then
-        pass "T1: no state file -> exit 0"
-    else
+    t1_ok=true
+    if [[ "$HOOK_RC" -ne 0 ]]; then
         fail "T1: expected exit 0, got $HOOK_RC"
+        t1_ok=false
     fi
+    # AC2-HP: no state file -> instant allow, no counter written.
+    if ls "${TMP_DIR}/.fno/.loop-check-unavail-"* >/dev/null 2>&1; then
+        fail "T1: an unavailable counter was written despite no state file"
+        t1_ok=false
+    fi
+    rm -rf "$TMP_DIR" 2>/dev/null || true
+    [[ "$t1_ok" == "true" ]] && pass "T1: no state file -> exit 0, no counter"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # T2: binary missing -> exit 0 + loop_check_binary_missing event emitted
 # ─────────────────────────────────────────────────────────────────────────────
-log "T2: binary missing -> exit 0 + event emitted"
+log "T2: binary missing (active session) -> exit 2 bounded-block + event + counter=1"
 {
     setup_env "bbbb-0002"
 
@@ -144,19 +156,27 @@ log "T2: binary missing -> exit 0 + event emitted"
         "FNO_AGENTS_BIN=/nonexistent"
 
     proj_events="${TMP_DIR}/.fno/events.jsonl"
-    global_events="${HOME_DIR}/.fno/events.jsonl"
+    counter="${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
 
     t2_ok=true
 
-    if [[ "$HOOK_RC" -ne 0 ]]; then
-        fail "T2: expected exit 0, got $HOOK_RC"
+    # AC2-ERR: a missing binary for an ACTIVE session bounded-blocks (was the
+    # old silent exit 0 that disabled the ship gate).
+    if [[ "$HOOK_RC" -ne 2 ]]; then
+        fail "T2: expected exit 2 (bounded block), got $HOOK_RC"
         t2_ok=false
     fi
 
+    # The diagnostic event still fires (before the block).
     if [[ -f "$proj_events" ]] && grep -q 'loop_check_binary_missing' "$proj_events" 2>/dev/null; then
         : # good
     else
         fail "T2: loop_check_binary_missing not found in project events.jsonl (file: $proj_events)"
+        t2_ok=false
+    fi
+
+    if [[ "$(tr -dc '0-9' < "$counter" 2>/dev/null)" != "1" ]]; then
+        fail "T2: expected counter=1 at $counter; got: $(cat "$counter" 2>/dev/null)"
         t2_ok=false
     fi
 
@@ -165,7 +185,7 @@ log "T2: binary missing -> exit 0 + event emitted"
         t2_ok=false
     fi
 
-    [[ "$t2_ok" == "true" ]] && pass "T2: binary missing -> exit 0 + event + stderr"
+    [[ "$t2_ok" == "true" ]] && pass "T2: binary missing -> exit 2 + event + counter=1"
     cleanup
 }
 
@@ -299,7 +319,7 @@ STUB_EOF
 # ─────────────────────────────────────────────────────────────────────────────
 # T7: verb returns garbage output -> exit 0 with warning
 # ─────────────────────────────────────────────────────────────────────────────
-log "T7: garbage output from verb -> exit 0 + warning"
+log "T7: garbage output from verb (active session) -> exit 2 bounded-block + warning"
 {
     setup_env "ffff-0007"
 
@@ -316,15 +336,142 @@ STUB
         "FNO_AGENTS_BIN=${STUB}"
 
     t7_ok=true
-    if [[ "$HOOK_RC" -ne 0 ]]; then
-        fail "T7: expected exit 0, got $HOOK_RC"
+    # Non-JSON output for an active session is checker-unavailable -> block.
+    if [[ "$HOOK_RC" -ne 2 ]]; then
+        fail "T7: expected exit 2 (bounded block), got $HOOK_RC"
         t7_ok=false
     fi
-    if ! echo "$HOOK_STDERR" | grep -qi 'warning\|invalid\|json\|parse\|unexpected'; then
+    if ! echo "$HOOK_STDERR" | grep -qi 'warning\|invalid\|json\|parse\|unexpected\|unavailable'; then
         fail "T7: expected a warning on stderr; got: $HOOK_STDERR"
         t7_ok=false
     fi
-    [[ "$t7_ok" == "true" ]] && pass "T7: garbage output -> exit 0 + warning"
+    [[ "$t7_ok" == "true" ]] && pass "T7: garbage output -> exit 2 + warning"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T9: verb non-zero (active session) -> exit 2 bounded-block + warning (AC2-ERR)
+# ─────────────────────────────────────────────────────────────────────────────
+log "T9: verb non-zero -> exit 2 bounded-block + warning"
+{
+    setup_env "9999-0009"
+
+    STUB="${TMP_DIR}/fno-agents-stub"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+echo "boom" >&2
+exit 3
+STUB
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+
+    counter="${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
+    t9_ok=true
+    if [[ "$HOOK_RC" -ne 2 ]]; then
+        fail "T9: expected exit 2, got $HOOK_RC"; t9_ok=false
+    fi
+    if [[ "$(tr -dc '0-9' < "$counter" 2>/dev/null)" != "1" ]]; then
+        fail "T9: expected counter=1; got: $(cat "$counter" 2>/dev/null)"; t9_ok=false
+    fi
+    if ! echo "$HOOK_STDERR" | grep -qi 'unavailable\|exited\|warning'; then
+        fail "T9: expected a warning on stderr; got: $HOOK_STDERR"; t9_ok=false
+    fi
+    [[ "$t9_ok" == "true" ]] && pass "T9: verb non-zero -> exit 2 + counter=1 + warning"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T10: counter at MAX -> loud give-up (exit 0 + event to both logs) (AC2-UI)
+# ─────────────────────────────────────────────────────────────────────────────
+log "T10: counter at MAX -> give-up exit 0 + loop_check_unavailable_giveup"
+{
+    setup_env "aaaa-0010"
+
+    # Pre-seed the counter at the ceiling (3): the next unavailable fire gives up.
+    printf '3' > "${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" \
+        "HOME=${HOME_DIR}" "PATH=$(safe_path)" "FNO_AGENTS_BIN=/nonexistent"
+
+    proj_events="${TMP_DIR}/.fno/events.jsonl"
+    global_events="${HOME_DIR}/.fno/events.jsonl"
+    t10_ok=true
+    if [[ "$HOOK_RC" -ne 0 ]]; then
+        fail "T10: expected exit 0 (give-up), got $HOOK_RC"; t10_ok=false
+    fi
+    if ! grep -q 'loop_check_unavailable_giveup' "$proj_events" 2>/dev/null; then
+        fail "T10: give-up event missing from project events"; t10_ok=false
+    fi
+    if ! grep -q 'loop_check_unavailable_giveup' "$global_events" 2>/dev/null; then
+        fail "T10: give-up event missing from global events"; t10_ok=false
+    fi
+    [[ "$t10_ok" == "true" ]] && pass "T10: give-up -> exit 0 + event in both logs"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T11: counter is per-session_id -> a sibling's budget is untouched (AC2-EDGE)
+# ─────────────────────────────────────────────────────────────────────────────
+log "T11: per-session counter isolation"
+{
+    setup_env "bbbb-0011"
+
+    # A sibling session B already has a counter at 2 in the shared .fno.
+    sibling="${TMP_DIR}/.fno/.loop-check-unavail-sibling-session-B"
+    printf '2' > "$sibling"
+
+    STUB="${TMP_DIR}/fno-agents-stub"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+exit 3
+STUB
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+
+    mine="${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
+    t11_ok=true
+    if [[ "$(tr -dc '0-9' < "$mine" 2>/dev/null)" != "1" ]]; then
+        fail "T11: my counter should be 1; got: $(cat "$mine" 2>/dev/null)"; t11_ok=false
+    fi
+    if [[ "$(tr -dc '0-9' < "$sibling" 2>/dev/null)" != "2" ]]; then
+        fail "T11: sibling counter was mutated; got: $(cat "$sibling" 2>/dev/null)"; t11_ok=false
+    fi
+    [[ "$t11_ok" == "true" ]] && pass "T11: counters isolated per session_id"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T12: a clean decision self-heals (removes) the counter (AC2-FR)
+# ─────────────────────────────────────────────────────────────────────────────
+log "T12: clean decision self-heals the counter"
+{
+    setup_env "cccc-0012"
+
+    # Counter is at 2 from prior broken fires.
+    counter="${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
+    printf '2' > "$counter"
+
+    STUB="${TMP_DIR}/fno-agents-stub"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
+exit 0
+STUB
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+
+    t12_ok=true
+    if [[ "$HOOK_RC" -ne 2 ]]; then
+        fail "T12: expected exit 2 (block decision honored), got $HOOK_RC"; t12_ok=false
+    fi
+    if [[ -f "$counter" ]]; then
+        fail "T12: counter should have been removed on a clean decision"; t12_ok=false
+    fi
+    [[ "$t12_ok" == "true" ]] && pass "T12: clean decision removed the counter"
     cleanup
 }
 

@@ -258,38 +258,15 @@ fn strip_inline_comment(raw: &str) -> &str {
     }
 }
 
-/// The shape of a YAML list value's inline RHS (after `key:`), used by the
-/// github_apps / required_bots / peers parsers so they classify identically.
-enum ListForm {
-    /// `key: []` - explicit empty list.
-    Empty,
-    /// `key: ["a", "b"]` - inline list, items parsed.
-    Inline(Vec<String>),
-    /// bare `key:` - block-list items follow at deeper indent.
-    Block,
-    /// a scalar / anything else - malformed, caller fails closed.
-    Malformed,
-}
-
-/// Classify the inline RHS of a list key (comment already strippable).
-fn classify_list_rhs(rest: &str) -> ListForm {
-    let raw = strip_inline_comment(rest.trim());
-    if raw == "[]" {
-        ListForm::Empty
-    } else if raw.is_empty() {
-        ListForm::Block
-    } else if raw.starts_with('[') && raw.ends_with(']') {
-        let inner = &raw[1..raw.len() - 1];
-        let items: Vec<String> = inner
-            .split(',')
-            .map(|p| p.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
-            .filter(|p| !p.is_empty())
-            .collect();
-        ListForm::Inline(items)
-    } else {
-        ListForm::Malformed
-    }
-}
+/// Fail-closed sentinel for an unparseable settings.yaml (x-81d9 (c)). A YAML
+/// scanner error (e.g. tab-indentation, which YAML forbids) previously caused
+/// the hand-parser to silently drop the whole config.review subtree, yielding
+/// zero required_bots and shipping the PR unreviewed. Now such a file fails
+/// CLOSED: this sentinel is placed in the login gate so it can never be
+/// satisfied (no real bot login contains a NUL), the gate blocks visibly, and a
+/// `loop_check_settings_unparseable` event records it. Distinct from
+/// MALFORMED_REVIEWERS_SENTINEL so an audit sees which gate the config tripped.
+const UNPARSEABLE_SETTINGS_SENTINEL: &str = "\u{0}unparseable-settings\u{0}";
 
 /// A bare scalar RHS (`key: value`) as a single-item login list. Used when a
 /// list key was written scalar-form: it must GATE on that one login, never
@@ -308,357 +285,271 @@ fn scalar_as_singleton(rest: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Minimal indentation-aware settings.yaml parser.
-/// Handles nested `config.budget.attended/unattended` blocks plus flat keys.
-fn parse_settings(content: &str) -> Settings {
-    let mut s = Settings::default();
-    let mut in_config = false;
-    let mut in_budget = false;
-    let mut in_attended = false;
-    let mut in_unattended = false;
-    let mut in_ci = false;
-    let mut in_review = false;
-    let mut collecting_reviewers = false;
-    let mut collecting_required_bots = false;
-    let mut collecting_github_apps = false;
-    let mut collecting_optional_apps = false;
-    // config.review.reviewers block items (x-e703). Distinct from
-    // `collecting_reviewers`, which is the top-level config.external_reviewers.
-    let mut collecting_review_reviewers = false;
-    let mut collecting_peers = false;
+/// A YAML scalar (string / number / bool) as a String; None for structured
+/// values (sequence / mapping / null). Numbers and bools stringify so a
+/// `required_bots: 123` or a stray bool still coerces to a login string,
+/// matching the old scalar-tolerant behavior.
+fn yaml_scalar_string(v: &serde_yaml_ng::Value) -> Option<String> {
+    use serde_yaml_ng::Value;
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
 
-    // Derive the file's indent unit from the first indented line instead of
-    // assuming 2 spaces, so a 4-space-indented settings.yaml parses
-    // identically instead of being silently skipped (gemini HIGH on #447).
-    let unit = content
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-        .map(|l| l.len() - l.trim_start().len())
-        .find(|&i| i > 0)
-        .unwrap_or(2);
-
-    for line in content.lines() {
-        if line.trim_start().starts_with('#') || line.trim().is_empty() {
-            continue;
+/// Classify a config.review LOGIN list value (`required_bots` / `github_apps` /
+/// `optional_apps`) off a typed YAML Value, matching the Python loader:
+///   absent / null -> None            (key absent; code default = no gate)
+///   sequence      -> Some(items)     (empty stays Some(empty) = declared no-gate)
+///   scalar        -> singleton gate  (a bare `key: codex` still GATES on codex)
+///   mapping/other -> None            (a `{...}` is not a login; Python drops it)
+fn value_as_login_list(v: &serde_yaml_ng::Value) -> Option<Vec<String>> {
+    use serde_yaml_ng::Value;
+    match v {
+        Value::Null => None,
+        Value::Sequence(items) => Some(items.iter().filter_map(yaml_scalar_string).collect()),
+        // A bare scalar routes through scalar_as_singleton so its brace/empty
+        // semantics (and the direct unit test) stay live and Python-aligned.
+        Value::String(_) | Value::Bool(_) | Value::Number(_) => {
+            yaml_scalar_string(v).and_then(|s| scalar_as_singleton(&s))
         }
-        let raw_indent = line.len() - line.trim_start().len();
-        // Normalize to the canonical 2-space levels the state machine below
-        // matches on (0 / 2 / 4 / 6).
-        let indent = (raw_indent / unit) * 2;
-        let trimmed = line.trim();
+        // Mapping / tagged: not a login gate -> None (Python parity).
+        _ => None,
+    }
+}
 
-        // Top-level: indent == 0
-        if indent == 0 {
-            in_config = trimmed.starts_with("config:");
-            collecting_reviewers = false;
-            collecting_required_bots = false;
-            collecting_github_apps = false;
-            collecting_optional_apps = false;
-            collecting_review_reviewers = false;
-            collecting_peers = false;
-            if !in_config {
-                in_budget = false;
-                in_attended = false;
-                in_unattended = false;
-                in_ci = false;
-                in_review = false;
-            }
-            // Flat key: budget_cap: N
-            if let Some(rest) = trimmed.strip_prefix("budget_cap:") {
-                let raw = rest.trim();
-                s.flat_budget_cap = Some(raw.parse::<f64>().map_err(|_| {
-                    eprintln!(
-                        "loop-check: malformed budget cap 'budget_cap: {raw}' - failing closed; fix the config"
-                    );
-                    raw.to_string()
-                }));
-            }
-            continue;
-        }
-
-        // indent == 2: inside config
-        if in_config && indent == 2 {
-            in_budget = trimmed.starts_with("budget:");
-            in_ci = trimmed.starts_with("ci:");
-            in_review = trimmed.starts_with("review:");
-            collecting_reviewers = trimmed.starts_with("external_reviewers:");
-            collecting_required_bots = false;
-            collecting_github_apps = false;
-            collecting_optional_apps = false;
-            collecting_review_reviewers = false;
-            collecting_peers = false;
-            if !in_budget {
-                in_attended = false;
-                in_unattended = false;
-            }
-            continue;
-        }
-
-        // indent == 4: inside config.budget or config.ci
-        if in_config && in_budget && indent == 4 {
-            in_attended = trimmed.starts_with("attended:");
-            in_unattended = trimmed.starts_with("unattended:");
-            continue;
-        }
-
-        if in_config && in_ci && indent == 4 {
-            if let Some(rest) = trimmed.strip_prefix("declared_none:") {
-                s.ci_declared_none = rest.trim() == "true";
-            }
-            continue;
-        }
-
-        // indent == 4: inside config.review. Guard on `!starts_with('-')` so a
-        // KEY-ALIGNED block-sequence item (`- login` at the SAME indent as its
-        // key, which is exactly what PyYAML / `fno config set` writes) is NOT
-        // treated as a new key here - it falls through to the item collectors
-        // below. Without this guard those items are dropped and the gate fails
-        // OPEN for any github_apps/peers written by the CLI (x-4baa review).
-        if in_config && in_review && indent == 4 && !trimmed.starts_with('-') {
-            // A new indent-4 key ends any in-flight list collection. Set the
-            // specific collecting flag in each branch below.
-            collecting_required_bots = false;
-            collecting_github_apps = false;
-            collecting_optional_apps = false;
-            collecting_review_reviewers = false;
-            collecting_peers = false;
-            if let Some(rest) = trimmed.strip_prefix("required_bots:") {
-                // Strip a trailing YAML inline comment first (codex P2 on
-                // #448): `required_bots: []  # no review gate` must parse as
-                // the declared-empty form, not fall through to malformed.
-                match classify_list_rhs(rest) {
-                    ListForm::Empty => s.required_bots = Some(Vec::new()),
-                    ListForm::Block => collecting_required_bots = true,
-                    ListForm::Inline(items) => s.required_bots = Some(items),
-                    // A bare scalar `required_bots: codex` is a single-login
-                    // gate (parity with the peers scalar + Python), NOT a silent
-                    // no-gate: a bracket-less typo must still GATE on that login,
-                    // never fail open (codex P1 on #205).
-                    ListForm::Malformed => s.required_bots = scalar_as_singleton(rest),
-                }
-            } else if let Some(rest) = trimmed.strip_prefix("github_apps:") {
-                match classify_list_rhs(rest) {
-                    ListForm::Empty => s.github_apps = Some(Vec::new()),
-                    ListForm::Block => collecting_github_apps = true,
-                    ListForm::Inline(items) => s.github_apps = Some(items),
-                    ListForm::Malformed => s.github_apps = scalar_as_singleton(rest),
-                }
-            } else if let Some(rest) = trimmed.strip_prefix("optional_apps:") {
-                match classify_list_rhs(rest) {
-                    ListForm::Empty => s.optional_apps = Some(Vec::new()),
-                    ListForm::Block => collecting_optional_apps = true,
-                    ListForm::Inline(items) => s.optional_apps = Some(items),
-                    ListForm::Malformed => s.optional_apps = scalar_as_singleton(rest),
-                }
-            } else if let Some(rest) = trimmed.strip_prefix("reviewers:") {
-                // config.review.reviewers (x-e703): local-attestation gate. No
-                // "declared empty" semantic (additive to the login gate), so an
-                // explicit `[]` just leaves the list empty. A leading '/' is
-                // stripped so `/code-review` == `code-review`.
-                match classify_list_rhs(rest) {
-                    ListForm::Empty => {}
-                    ListForm::Block => collecting_review_reviewers = true,
-                    ListForm::Inline(items) => {
-                        s.reviewers = items
-                            .iter()
-                            .map(|r| normalize_reviewer(r))
-                            .filter(|r| !r.is_empty())
-                            .collect();
-                    }
-                    ListForm::Malformed => match scalar_as_singleton(rest) {
-                        // A clean bare scalar (`reviewers: sigma`) is one entry.
-                        Some(one) => {
-                            s.reviewers = one
-                                .iter()
-                                .map(|r| normalize_reviewer(r))
-                                .filter(|r| !r.is_empty())
-                                .collect();
-                        }
-                        // A structurally-malformed value (`reviewers: {a: b}`)
-                        // fails CLOSED, not open: keep the gate active but
-                        // unsatisfiable (Python raises here; Rust must not drop
-                        // to no-gate). codex peer review P1.
-                        None => {
-                            s.reviewers = vec![MALFORMED_REVIEWERS_SENTINEL.to_string()];
-                        }
-                    },
-                }
-            } else if let Some(rest) = trimmed.strip_prefix("peers:") {
-                match classify_list_rhs(rest) {
-                    ListForm::Empty => {}
-                    ListForm::Block => collecting_peers = true,
-                    ListForm::Inline(items) => {
-                        s.peers = items
-                            .into_iter()
-                            .map(|provider| PeerEntry {
-                                provider,
-                                identity: None,
-                            })
-                            .collect();
-                    }
-                    ListForm::Malformed => {
-                        // A bare scalar `peers: codex` is a single-item peers
-                        // list, matching Python's coerce_peers. Treat it as one
-                        // provider (NOT a silent drop - that would fail OPEN and
-                        // diverge from Python, which blesses the scalar form).
-                        // Identity still resolves via peer_identity, else the
-                        // sentinel fails the gate closed downstream.
-                        let provider = strip_inline_comment(rest.trim())
-                            .trim_matches(|c| c == '"' || c == '\'')
-                            .to_string();
-                        if !provider.is_empty() {
-                            s.peers = vec![PeerEntry {
-                                provider,
-                                identity: None,
-                            }];
+/// Classify a config.review.reviewers value (x-e703 local-attestation gate).
+/// Unlike the login lists, a structurally-wrong mapping fails CLOSED (Python
+/// raises) via the unsatisfiable sentinel, never a silent empty gate. A leading
+/// '/' is normalized off each entry.
+fn value_as_reviewers(v: &serde_yaml_ng::Value) -> Vec<String> {
+    use serde_yaml_ng::Value;
+    match v {
+        Value::Null => Vec::new(),
+        Value::Sequence(items) => {
+            let mut out = Vec::new();
+            for it in items {
+                match yaml_scalar_string(it) {
+                    Some(s) => {
+                        let n = normalize_reviewer(&s);
+                        if !n.is_empty() {
+                            out.push(n);
                         }
                     }
-                }
-            } else if let Some(rest) = trimmed.strip_prefix("peer_identity:") {
-                let id = strip_inline_comment(rest.trim())
-                    .trim_matches(|c| c == '"' || c == '\'')
-                    .to_string();
-                if !id.is_empty() {
-                    s.peer_identity = Some(id);
+                    // A non-scalar item (nested map/seq) is structurally wrong;
+                    // Python raises on it, so fail CLOSED with the sentinel
+                    // rather than silently dropping it (gemini medium) - matches
+                    // the top-level-mapping arm below.
+                    None => return vec![MALFORMED_REVIEWERS_SENTINEL.to_string()],
                 }
             }
-            continue;
+            out
         }
-
-        // required_bots / github_apps / optional_apps list items: "- login"
-        // under their key (item indent 4 key-aligned OR 6 nested).
-        if in_config
-            && (collecting_required_bots || collecting_github_apps || collecting_optional_apps)
-            && trimmed.starts_with('-')
-        {
-            let bot = strip_inline_comment(trimmed.trim_start_matches('-').trim())
-                .trim()
-                .trim_matches(|c| c == '"' || c == '\'')
-                .to_string();
-            if !bot.is_empty() {
-                let target = if collecting_github_apps {
-                    &mut s.github_apps
-                } else if collecting_optional_apps {
-                    &mut s.optional_apps
-                } else {
-                    &mut s.required_bots
-                };
-                target.get_or_insert_with(Vec::new).push(bot);
+        Value::String(s) => {
+            let n = normalize_reviewer(s);
+            if n.is_empty() {
+                Vec::new()
+            } else {
+                vec![n]
             }
-            continue;
         }
+        // A mapping (or other structural shape) fails closed, not empty.
+        _ => vec![MALFORMED_REVIEWERS_SENTINEL.to_string()],
+    }
+}
 
-        // reviewers block items: "- sigma" under config.review.reviewers (item
-        // indent 4 key-aligned OR 6 nested, same as the login collectors). A
-        // leading '/' is normalized off so `/code-review` == `code-review`.
-        if in_config && collecting_review_reviewers && trimmed.starts_with('-') {
-            let name = normalize_reviewer(
-                strip_inline_comment(trimmed.trim_start_matches('-').trim())
-                    .trim()
-                    .trim_matches(|c| c == '"' || c == '\''),
+/// Classify a config.review.peers value into PeerEntry list. A sequence item is
+/// either a scalar (provider only) or a mapping whose `provider`/`identity` keys
+/// are read order-independently (a real map, so no hand key-order handling). A
+/// bare scalar `peers: codex` is one provider (Python's coerce_peers).
+fn value_as_peers(v: &serde_yaml_ng::Value) -> Vec<PeerEntry> {
+    use serde_yaml_ng::Value;
+    let scalar_entry = |s: String| PeerEntry {
+        provider: s,
+        identity: None,
+    };
+    // One map entry -> a PeerEntry (provider/identity read order-independently).
+    let map_entry = |it: &Value| -> Option<PeerEntry> {
+        let provider = it
+            .get("provider")
+            .and_then(yaml_scalar_string)
+            .unwrap_or_default();
+        let identity = it
+            .get("identity")
+            .and_then(yaml_scalar_string)
+            .filter(|s| !s.is_empty());
+        if provider.is_empty() && identity.is_none() {
+            None
+        } else {
+            Some(PeerEntry { provider, identity })
+        }
+    };
+    match v {
+        Value::Sequence(items) => items
+            .iter()
+            .filter_map(|it| match it {
+                Value::Mapping(_) => map_entry(it),
+                _ => yaml_scalar_string(it)
+                    .filter(|s| !s.is_empty())
+                    .map(scalar_entry),
+            })
+            .collect(),
+        Value::String(s) if !s.is_empty() => vec![scalar_entry(s.clone())],
+        // A single top-level mapping is ONE peer - parity with Python's
+        // coerce_peers, which wraps a dict as [dict]. Dropping it to empty (as
+        // this arm did before the codex peer review) silently discards a
+        // configured peer gate -> fail-open, the class this PR removes.
+        Value::Mapping(_) => map_entry(v).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Read an f64 budget cap off a typed Value: a number is Ok, a non-numeric
+/// scalar fails CLOSED as Some(Err(raw)) (so check_budget trips), an
+/// absent/null key is None (unlimited). Mirrors the manifest cap semantics.
+fn read_f64_cap(v: &serde_yaml_ng::Value, ctx: &str) -> Option<Result<f64, String>> {
+    use serde_yaml_ng::Value;
+    match v {
+        Value::Null => None,
+        Value::Number(n) => Some(Ok(n.as_f64().unwrap_or(f64::NAN))),
+        other => {
+            let raw = yaml_scalar_string(other).unwrap_or_default();
+            Some(raw.parse::<f64>().map_err(|_| {
+                eprintln!(
+                    "loop-check: malformed budget cap '{ctx}: {raw}' - failing closed; fix the config"
+                );
+                raw
+            }))
+        }
+    }
+}
+
+/// Read a u64 budget cap off a typed Value (same fail-closed rule as f64).
+fn read_u64_cap(v: &serde_yaml_ng::Value, ctx: &str) -> Option<Result<u64, String>> {
+    use serde_yaml_ng::Value;
+    match v {
+        Value::Null => None,
+        Value::Number(n) => Some(n.as_u64().ok_or_else(|| {
+            eprintln!(
+                "loop-check: malformed budget cap '{ctx}: {n}' - failing closed; fix the config"
             );
-            if !name.is_empty() {
-                s.reviewers.push(name);
-            }
-            continue;
+            n.to_string()
+        })),
+        other => {
+            let raw = yaml_scalar_string(other).unwrap_or_default();
+            Some(raw.parse::<u64>().map_err(|_| {
+                eprintln!(
+                    "loop-check: malformed budget cap '{ctx}: {raw}' - failing closed; fix the config"
+                );
+                raw
+            }))
         }
+    }
+}
 
-        // peers block items: a scalar `- codex` or a map entry whose keys can
-        // appear in EITHER order (`- provider: codex` then `identity: x`, OR
-        // `- identity: x` then `provider: codex`). Key order is arbitrary in
-        // YAML and PyYAML / `fno config set` emits keys alphabetically, so
-        // `identity` lands BEFORE `provider` - the map parser must not assume
-        // an order (gemini HIGH on #205).
-        if in_config && collecting_peers {
-            let unquote = |v: &str| -> String {
-                strip_inline_comment(v.trim())
-                    .trim_matches(|c| c == '"' || c == '\'')
-                    .to_string()
-            };
-            if trimmed.starts_with('-') {
-                // A `-` starts a new entry. Its inline `key: value` (if any)
-                // seeds either field; a scalar seeds the provider.
-                let item = strip_inline_comment(trimmed.trim_start_matches('-').trim()).trim();
-                let mut entry = PeerEntry::default();
-                if let Some(v) = item.strip_prefix("provider:") {
-                    entry.provider = unquote(v);
-                } else if let Some(v) = item.strip_prefix("identity:") {
-                    entry.identity = Some(unquote(v)).filter(|s| !s.is_empty());
-                } else if !item.is_empty() {
-                    entry.provider = unquote(item);
-                }
-                if !entry.provider.is_empty() || entry.identity.is_some() {
-                    s.peers.push(entry);
-                }
-                continue;
+/// Settings with the login gate pinned unsatisfiable - the fail-closed result
+/// when settings.yaml cannot be parsed as YAML at all (x-81d9 (c)). The
+/// sentinel goes into BOTH github_apps and required_bots: resolved_required_bots
+/// prefers github_apps.or(required_bots), so pinning required_bots alone would
+/// be silently outranked by a parseable global file's github_apps during the
+/// global+local merge (an unparseable LOCAL file would then resolve to the
+/// global gate, re-opening the fail-open this fix removes).
+fn fail_closed_settings() -> Settings {
+    let sentinel = Some(vec![UNPARSEABLE_SETTINGS_SENTINEL.to_string()]);
+    Settings {
+        github_apps: sentinel.clone(),
+        required_bots: sentinel,
+        ..Default::default()
+    }
+}
+
+/// Parse settings.yaml with a real YAML parser (serde_yaml_ng), replacing the
+/// former hand-rolled indent state machine that derived one global indent unit
+/// and silently dropped the config.review subtree on tabs or mixed widths
+/// (x-81d9 (c)). A genuine YAML scanner error (e.g. tab indentation) returns
+/// Err so the caller can fail closed + emit an event, rather than silently
+/// zeroing the gate. The typed-Value classification preserves every semantic
+/// the old ListForm branches encoded (see the value_as_* helpers).
+fn parse_settings_result(content: &str) -> Result<Settings, String> {
+    use serde_yaml_ng::Value;
+    let root: Value = serde_yaml_ng::from_str(content).map_err(|e| e.to_string())?;
+    let mut s = Settings::default();
+
+    // Top-level flat budget cap.
+    if let Some(v) = root.get("budget_cap") {
+        s.flat_budget_cap = read_f64_cap(v, "budget_cap");
+    }
+
+    let Some(config) = root.get("config") else {
+        return Ok(s);
+    };
+
+    if let Some(budget) = config.get("budget") {
+        if let Some(att) = budget.get("attended") {
+            if let Some(v) = att.get("wall_clock_cap_minutes") {
+                s.attended_wall_cap_minutes = read_u64_cap(v, "attended.wall_clock_cap_minutes");
             }
-            // A map sub-key line fills whichever field the `-` line did not.
-            // token_env is not needed by the login-based gate; other lines are
-            // ignored.
-            if let Some(v) = trimmed.strip_prefix("provider:") {
-                if let Some(last) = s.peers.last_mut() {
-                    let p = unquote(v);
-                    if last.provider.is_empty() && !p.is_empty() {
-                        last.provider = p;
-                    }
-                }
-                continue;
-            }
-            if let Some(v) = trimmed.strip_prefix("identity:") {
-                if let Some(last) = s.peers.last_mut() {
-                    let id = unquote(v);
-                    if !id.is_empty() {
-                        last.identity = Some(id);
-                    }
-                }
-                continue;
+            if let Some(v) = att.get("cost_cap_usd") {
+                s.attended_cost_cap_usd = read_f64_cap(v, "attended.cost_cap_usd");
             }
         }
-
-        // indent == 6: inside attended/unattended blocks
-        if in_config && in_budget && (in_attended || in_unattended) && indent == 6 {
-            if let Some(rest) = trimmed.strip_prefix("wall_clock_cap_minutes:") {
-                let raw = rest.trim();
-                let parsed = raw.parse::<u64>().map_err(|_| {
-                    let which = if in_attended { "attended" } else { "unattended" };
-                    eprintln!(
-                        "loop-check: malformed budget cap '{which}.wall_clock_cap_minutes: {raw}' - failing closed; fix the config"
-                    );
-                    raw.to_string()
-                });
-                if in_attended {
-                    s.attended_wall_cap_minutes = Some(parsed);
-                } else {
-                    s.unattended_wall_cap_minutes = Some(parsed);
-                }
+        if let Some(un) = budget.get("unattended") {
+            if let Some(v) = un.get("wall_clock_cap_minutes") {
+                s.unattended_wall_cap_minutes =
+                    read_u64_cap(v, "unattended.wall_clock_cap_minutes");
             }
-            if let Some(rest) = trimmed.strip_prefix("cost_cap_usd:") {
-                let raw = rest.trim();
-                let parsed = raw.parse::<f64>().map_err(|_| {
-                    let which = if in_attended { "attended" } else { "unattended" };
-                    eprintln!(
-                        "loop-check: malformed budget cap '{which}.cost_cap_usd: {raw}' - failing closed; fix the config"
-                    );
-                    raw.to_string()
-                });
-                if in_attended {
-                    s.attended_cost_cap_usd = Some(parsed);
-                } else {
-                    s.unattended_cost_cap_usd = Some(parsed);
-                }
-            }
-            continue;
-        }
-
-        // External reviewers list items: "  - login" under config.external_reviewers
-        if in_config && collecting_reviewers && trimmed.starts_with('-') {
-            let reviewer = trimmed.trim_start_matches('-').trim().to_string();
-            if !reviewer.is_empty() {
-                s.external_reviewers.push(reviewer);
+            if let Some(v) = un.get("cost_cap_usd") {
+                s.unattended_cost_cap_usd = read_f64_cap(v, "unattended.cost_cap_usd");
             }
         }
     }
-    s
+
+    if let Some(ci) = config.get("ci") {
+        s.ci_declared_none = ci
+            .get("declared_none")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    }
+
+    if let Some(er) = config.get("external_reviewers") {
+        if let Value::Sequence(items) = er {
+            s.external_reviewers = items.iter().filter_map(yaml_scalar_string).collect();
+        }
+    }
+
+    if let Some(review) = config.get("review") {
+        if let Some(v) = review.get("required_bots") {
+            s.required_bots = value_as_login_list(v);
+        }
+        if let Some(v) = review.get("github_apps") {
+            s.github_apps = value_as_login_list(v);
+        }
+        if let Some(v) = review.get("optional_apps") {
+            s.optional_apps = value_as_login_list(v);
+        }
+        if let Some(v) = review.get("reviewers") {
+            s.reviewers = value_as_reviewers(v);
+        }
+        if let Some(v) = review.get("peers") {
+            s.peers = value_as_peers(v);
+        }
+        if let Some(v) = review.get("peer_identity") {
+            s.peer_identity = yaml_scalar_string(v).filter(|s| !s.is_empty());
+        }
+    }
+
+    Ok(s)
+}
+
+/// Infallible wrapper: an unparseable file fails CLOSED (unsatisfiable login
+/// gate) rather than silently defaulting to no gate. Test-only - production
+/// calls parse_settings_result directly so it can also emit the
+/// `loop_check_settings_unparseable` event on the Err path.
+#[cfg(test)]
+fn parse_settings(content: &str) -> Settings {
+    parse_settings_result(content).unwrap_or_else(|_| fail_closed_settings())
 }
 
 // ── ledger parsing ────────────────────────────────────────────────────────────
@@ -908,6 +799,10 @@ struct PrInfo {
     /// Required bots with no completed review pass (names the gap in the
     /// block message, AC1-UI).
     missing_bots: Vec<String>,
+    /// Required bots dropped from the gate because they are rate-limited (a
+    /// usage-limit comment, no review). Named in the terminal-allow message so
+    /// an operator sees why the gate proceeded without them (AC1-UI).
+    usage_limited: Vec<String>,
     /// Blocking inline findings (codex P1 / gemini critical|high) whose
     /// thread has no qualifying ack (AC2).
     unaddressed_findings: Vec<Finding>,
@@ -1042,6 +937,7 @@ fn read_pr_info(
                 latest_review_ts: "none".to_string(),
                 reviewed: false,
                 missing_bots: Vec::new(),
+                usage_limited: Vec::new(),
                 unaddressed_findings: Vec::new(),
                 review_skipped: false,
             });
@@ -1084,6 +980,7 @@ fn read_pr_info(
             latest_review_ts: "none".to_string(),
             reviewed: true,
             missing_bots: Vec::new(),
+            usage_limited: Vec::new(),
             unaddressed_findings: Vec::new(),
             review_skipped: true,
         });
@@ -1130,122 +1027,148 @@ fn read_pr_info(
     let login_gate_active = !required_bots.is_empty() || !optional_bots.is_empty();
     let login_skipped = no_external || !login_gate_active;
     let reviewers_ok = reviewers_all_attested(events_path, reviewers, head_sha);
-    let (latest_review_ts, reviewed, missing_bots, unaddressed_findings) = if login_skipped {
-        // No GitHub logins to poll (nothing configured, or no_external): skip
-        // the gh review reads entirely (fewer calls + no spurious gh-error
-        // block). The local attestation gate still applies - reviewers_ok is
-        // true when unconfigured, so a login-only or no-gate config is
-        // unaffected.
-        ("none".to_string(), reviewers_ok, Vec::new(), Vec::new())
-    } else {
-        // Read 3: top-level reviews + issue comments
-        let reviews_out = Command::new(gh_bin)
-            .args(["pr", "view", "--json", "reviews,comments"])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| ("pr_reviews".to_string(), e.to_string()))?;
-
-        if !reviews_out.status.success() {
-            return Err(("pr_reviews".to_string(), stderr_tail(&reviews_out.stderr)));
-        }
-
-        let reviews_json: Value = serde_json::from_slice(&reviews_out.stdout)
-            .map_err(|_| ("pr_reviews_parse".to_string(), String::new()))?;
-
-        // PRESENCE is required-only: an optional login's absence must never
-        // create a missing_bot (never wait for it). FINDINGS honor the union:
-        // an optional login's blocking P1 still holds the gate ("honor if
-        // present"). A dedup keeps a login that is in both lists counted once.
-        let info = compute_review_info(&reviews_json, required_bots);
-        let mut findings_bots: Vec<String> = required_bots.to_vec();
-        for b in optional_bots {
-            if !findings_bots.iter().any(|x| x == b) {
-                findings_bots.push(b.clone());
-            }
-        }
-
-        // Read 4: inline review comments (NEW in step 2). Codex's P1s land on
-        // the /pulls/N/comments REST endpoint, which `gh pr view --json
-        // comments` does NOT return (verified on PR #447). --paginate may
-        // emit CONCATENATED JSON arrays (one per page), so parse as a stream.
-        let comments_out = Command::new(gh_bin)
-            .args([
-                "api",
-                &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
-                "--paginate",
-            ])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| ("pulls_comments".to_string(), e.to_string()))?;
-
-        if !comments_out.status.success() {
-            return Err((
-                "pulls_comments".to_string(),
-                stderr_tail(&comments_out.stderr),
-            ));
-        }
-
-        let mut inline_comments: Vec<Value> = Vec::new();
-        for page in serde_json::Deserializer::from_slice(&comments_out.stdout).into_iter::<Value>()
-        {
-            let page = page.map_err(|_| ("pulls_comments_parse".to_string(), String::new()))?;
-            match page.as_array() {
-                Some(arr) => inline_comments.extend(arr.iter().cloned()),
-                None => return Err(("pulls_comments_parse".to_string(), String::new())),
-            }
-        }
-
-        // Commit timestamps feed the commit-after arm of "addressed". Only
-        // fetched when a blocking candidate could exist (cheap pre-scan).
-        let has_blocking_candidate = inline_comments.iter().any(|c| {
-            c.get("in_reply_to_id").and_then(|v| v.as_i64()).is_none()
-                && blocking_severity(c.get("body").and_then(|v| v.as_str()).unwrap_or("")).is_some()
-        });
-        let commit_dates: Vec<String> = if has_blocking_candidate {
-            let commits_out = Command::new(gh_bin)
-                .args(["pr", "view", "--json", "commits"])
+    let (latest_review_ts, reviewed, missing_bots, usage_limited, unaddressed_findings) =
+        if login_skipped {
+            // No GitHub logins to poll (nothing configured, or no_external): skip
+            // the gh review reads entirely (fewer calls + no spurious gh-error
+            // block). The local attestation gate still applies - reviewers_ok is
+            // true when unconfigured, so a login-only or no-gate config is
+            // unaffected.
+            (
+                "none".to_string(),
+                reviewers_ok,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else {
+            // Read 3: top-level reviews + issue comments
+            let reviews_out = Command::new(gh_bin)
+                .args(["pr", "view", "--json", "reviews,comments"])
                 .current_dir(cwd)
                 .output()
-                .map_err(|e| ("pr_commits".to_string(), e.to_string()))?;
-            if !commits_out.status.success() {
-                return Err(("pr_commits".to_string(), stderr_tail(&commits_out.stderr)));
+                .map_err(|e| ("pr_reviews".to_string(), e.to_string()))?;
+
+            if !reviews_out.status.success() {
+                return Err(("pr_reviews".to_string(), stderr_tail(&reviews_out.stderr)));
             }
-            let commits_json: Value = serde_json::from_slice(&commits_out.stdout)
-                .map_err(|_| ("pr_commits_parse".to_string(), String::new()))?;
-            commits_json
-                .get("commits")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|c| {
-                            c.get("committedDate")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+
+            let reviews_json: Value = serde_json::from_slice(&reviews_out.stdout)
+                .map_err(|_| ("pr_reviews_parse".to_string(), String::new()))?;
+
+            // PRESENCE is required-only: an optional login's absence must never
+            // create a missing_bot (never wait for it). FINDINGS honor the union:
+            // an optional login's blocking P1 still holds the gate ("honor if
+            // present"). A dedup keeps a login that is in both lists counted once.
+            let info = compute_review_info(&reviews_json, required_bots);
+            let mut findings_bots: Vec<String> = required_bots.to_vec();
+            for b in optional_bots {
+                if !findings_bots.iter().any(|x| x == b) {
+                    findings_bots.push(b.clone());
+                }
+            }
+
+            // Read 4: inline review comments (NEW in step 2). Codex's P1s land on
+            // the /pulls/N/comments REST endpoint, which `gh pr view --json
+            // comments` does NOT return (verified on PR #447). --paginate may
+            // emit CONCATENATED JSON arrays (one per page), so parse as a stream.
+            let comments_out = Command::new(gh_bin)
+                .args([
+                    "api",
+                    &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
+                    "--paginate",
+                ])
+                .current_dir(cwd)
+                .output()
+                .map_err(|e| ("pulls_comments".to_string(), e.to_string()))?;
+
+            if !comments_out.status.success() {
+                return Err((
+                    "pulls_comments".to_string(),
+                    stderr_tail(&comments_out.stderr),
+                ));
+            }
+
+            let mut inline_comments: Vec<Value> = Vec::new();
+            for page in
+                serde_json::Deserializer::from_slice(&comments_out.stdout).into_iter::<Value>()
+            {
+                let page = page.map_err(|_| ("pulls_comments_parse".to_string(), String::new()))?;
+                match page.as_array() {
+                    Some(arr) => inline_comments.extend(arr.iter().cloned()),
+                    None => return Err(("pulls_comments_parse".to_string(), String::new())),
+                }
+            }
+
+            // Commit timestamps feed the commit-after arm of "addressed". Only
+            // fetched when a blocking candidate could exist (cheap pre-scan).
+            let has_blocking_candidate = inline_comments.iter().any(|c| {
+                c.get("in_reply_to_id").and_then(|v| v.as_i64()).is_none()
+                    && blocking_severity(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
+                        .is_some()
+            });
+            let commit_dates: Vec<String> = if has_blocking_candidate {
+                let commits_out = Command::new(gh_bin)
+                    .args(["pr", "view", "--json", "commits"])
+                    .current_dir(cwd)
+                    .output()
+                    .map_err(|e| ("pr_commits".to_string(), e.to_string()))?;
+                if !commits_out.status.success() {
+                    return Err(("pr_commits".to_string(), stderr_tail(&commits_out.stderr)));
+                }
+                let commits_json: Value = serde_json::from_slice(&commits_out.stdout)
+                    .map_err(|_| ("pr_commits_parse".to_string(), String::new()))?;
+                commits_json
+                    .get("commits")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|c| {
+                                c.get("committedDate")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            let (inline_ts, unaddressed) = compute_unaddressed_findings(
+                &inline_comments,
+                &commit_dates,
+                &findings_bots,
+                external_reviewers,
+            );
+
+            // Read 4's newest comment timestamp joins the activity timestamp so
+            // inline-only review traffic advances the fingerprint (closes the
+            // false-NoProgress hole).
+            let activity_ts = max_ts(&info.latest_ts, &inline_ts);
+            // x-e703: the login gate AND the local-attestation reviewers gate must
+            // both clear. reviewers is usually empty (vacuously true) so this is a
+            // no-op for login-only configs.
+            let reviewed = info.all_required_passed() && unaddressed.is_empty() && reviewers_ok;
+            // (a) Record the rate-limit drop so a post-hoc audit sees why the gate
+            // proceeded without a required bot (AC1-UI). append_loop_event, not
+            // Branch-B emit: these are target-stream events (see the doc comment on
+            // append_loop_event), deliberately unregistered in KNOWN_EVENT_KINDS.
+            if !info.usage_limited.is_empty() {
+                append_loop_event(
+                    events_path,
+                    "review_gate_bot_usage_limited",
+                    serde_json::json!({"pr": number, "bots": info.usage_limited.clone()}),
+                );
+            }
+            (
+                activity_ts,
+                reviewed,
+                info.missing_bots,
+                info.usage_limited,
+                unaddressed,
+            )
         };
-
-        let (inline_ts, unaddressed) = compute_unaddressed_findings(
-            &inline_comments,
-            &commit_dates,
-            &findings_bots,
-            external_reviewers,
-        );
-
-        // Read 4's newest comment timestamp joins the activity timestamp so
-        // inline-only review traffic advances the fingerprint (closes the
-        // false-NoProgress hole).
-        let activity_ts = max_ts(&info.latest_ts, &inline_ts);
-        // x-e703: the login gate AND the local-attestation reviewers gate must
-        // both clear. reviewers is usually empty (vacuously true) so this is a
-        // no-op for login-only configs.
-        let reviewed = info.all_required_passed() && unaddressed.is_empty() && reviewers_ok;
-        (activity_ts, reviewed, info.missing_bots, unaddressed)
-    };
 
     Ok(PrInfo {
         state,
@@ -1255,6 +1178,7 @@ fn read_pr_info(
         latest_review_ts,
         reviewed,
         missing_bots,
+        usage_limited,
         unaddressed_findings,
         // Telemetry only (no decision reads this): "no review gate of any kind
         // applied" = the login reads were skipped AND no local reviewers gate.
@@ -1402,6 +1326,13 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
     login.ends_with("[bot]") || KNOWN_BOTS.iter().any(|&b| login.contains(b))
 }
 
+/// Pinned usage-limit markers a rate-limited review bot posts as an ISSUE
+/// comment when it never posts a review object (PR #214). Matched
+/// case-insensitively via `contains` against a lowercased body, mirroring the
+/// pinned-string approach in `blocking_severity`. Kept tight: an under-match
+/// degrades to the safe old block behavior; an over-match risks a false drop.
+const USAGE_LIMIT_MARKERS: &[&str] = &["usage limits for code reviews", "codex usage limits"];
+
 /// Per-required-bot review verdict (grilled decision 5 / step 2).
 #[derive(Debug)]
 struct ReviewInfo {
@@ -1412,6 +1343,13 @@ struct ReviewInfo {
     /// (verified on PR #447; codex reviews once per PR and never re-reviews,
     /// so requiring a pass on HEAD would make the gate unsatisfiable).
     missing_bots: Vec<String>,
+    /// Required bots dropped from `missing_bots` because they are env-blocked
+    /// (rate-limited): they posted only a usage-limit comment, never a review.
+    /// Keeping them in `missing_bots` wedged the gate until budget death
+    /// (PR #214); dropping them lets the gate proceed on remaining evidence
+    /// while the caller records the drop (AC1-UI). A bot is never in both
+    /// lists - it is scanned only while still in `missing_bots`.
+    usage_limited: Vec<String>,
 }
 
 impl ReviewInfo {
@@ -1470,16 +1408,52 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
         latest_ts
     };
 
-    let missing_bots: Vec<String> = required_bots
+    let mut missing_bots: Vec<String> = required_bots
         .iter()
         .zip(passed.iter())
         .filter(|(_, ok)| !**ok)
         .map(|(bot, _)| bot.clone())
         .collect();
 
+    // (a) Usage-limit detection. A still-missing required bot that authored a
+    // comment carrying a pinned usage-limit marker is env-blocked, not
+    // hasn't-reviewed-yet: it will never post a review, so leaving it in
+    // missing_bots blocks every fire until the budget cap kills the session
+    // (PR #214). Move it OUT of missing_bots into usage_limited so the gate
+    // proceeds on remaining evidence (the caller logs the drop + names the bot,
+    // and the merge stays human-gated). Scoped to the bot's OWN author.login so
+    // a stranger's comment never drops a required bot (AC1-ERR). Only
+    // still-missing bots are scanned, so a bot that actually reviewed is never
+    // usage-limited-dropped (AC1-EDGE).
+    let mut usage_limited: Vec<String> = Vec::new();
+    missing_bots.retain(|bot| {
+        let rate_limited = comments.iter().any(|c| {
+            let login = c
+                .pointer("/author/login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !login_matches_bot(login, bot) {
+                return false;
+            }
+            let body = c
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            USAGE_LIMIT_MARKERS.iter().any(|m| body.contains(m))
+        });
+        if rate_limited {
+            usage_limited.push(bot.clone());
+            false
+        } else {
+            true
+        }
+    });
+
     ReviewInfo {
         latest_ts: final_ts,
         missing_bots,
+        usage_limited,
     }
 }
 
@@ -2210,9 +2184,31 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // global file; a project-local settings.yaml with unrelated content
     // must not silently uncap the session). An explicit --settings path
     // replaces the merge entirely (tests rely on full isolation).
+    //
+    // x-81d9 (c): a genuinely unparseable settings.yaml fails CLOSED (the login
+    // gate is pinned unsatisfiable) and emits loop_check_settings_unparseable,
+    // rather than silently zeroing the required bots and shipping unreviewed.
+    let parse_or_emit = |content: &str, path: &Path| -> Settings {
+        match parse_settings_result(content) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "loop-check: settings.yaml unparseable ({}): {e} - failing the login gate closed",
+                    path.display()
+                );
+                emit_to_both(
+                    &project_events,
+                    &global_events,
+                    "loop_check_settings_unparseable",
+                    serde_json::json!({"path": path.display().to_string(), "error": e}),
+                );
+                fail_closed_settings()
+            }
+        }
+    };
     let settings = if let Some(ref explicit) = parsed.settings_path {
         if let Ok(sc) = std::fs::read_to_string(explicit) {
-            parse_settings(&sc)
+            parse_or_emit(&sc, explicit)
         } else {
             Settings::default()
         }
@@ -2222,10 +2218,11 @@ pub fn decide(args: &[String]) -> (i32, String) {
             .clone()
             .unwrap_or_else(|| PathBuf::from(&home).join(".fno/settings.yaml"));
         let mut merged = std::fs::read_to_string(&global_path)
-            .map(|sc| parse_settings(&sc))
+            .map(|sc| parse_or_emit(&sc, &global_path))
             .unwrap_or_default();
-        if let Ok(sc) = std::fs::read_to_string(cwd.join(".fno/settings.yaml")) {
-            let local = parse_settings(&sc);
+        let local_path = cwd.join(".fno/settings.yaml");
+        if let Ok(sc) = std::fs::read_to_string(&local_path) {
+            let local = parse_or_emit(&sc, &local_path);
             if local.attended_wall_cap_minutes.is_some() {
                 merged.attended_wall_cap_minutes = local.attended_wall_cap_minutes;
             }
@@ -2765,12 +2762,24 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 let head_shipped = !pr_info.head_oid.is_empty() && pr_info.head_oid == head_sha;
 
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
+                    // AC1-UI: name any rate-limited bot the gate proceeded
+                    // without, so the terminal message and the emitted event
+                    // agree on why a required bot is absent from the evidence.
+                    let done_msg = if pr_info.usage_limited.is_empty() {
+                        format!("PR #{} is green and reviewed", pr_info.number)
+                    } else {
+                        format!(
+                            "PR #{} is green and reviewed (rate-limited, dropped from gate: {})",
+                            pr_info.number,
+                            pr_info.usage_limited.join(", ")
+                        )
+                    };
                     emit(
                         "termination",
                         serde_json::json!({
                             "session_id": session_id,
                             "reason": "DonePRGreen",
-                            "message": format!("PR #{} green and reviewed", pr_info.number)
+                            "message": done_msg.clone()
                         }),
                     );
                     emit(
@@ -2796,7 +2805,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         allow_output(
                             "allow",
                             Some(TerminationReason::DonePRGreen),
-                            &format!("PR #{} is green and reviewed", pr_info.number),
+                            &done_msg,
                             this_fire,
                             Some(fingerprint),
                         ),
@@ -3463,6 +3472,7 @@ mod tests {
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
+            usage_limited: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
         };
@@ -4039,6 +4049,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_settings_mixed_width_indent_reads_correctly() {
+        // AC3-EDGE: the old hand-parser derived ONE global indent unit and
+        // silently dropped the config.review subtree on a mixed width. A real
+        // YAML parser handles 2-then-6-space nesting fine, so required_bots is
+        // read, not zeroed - this was the actual reported (c) bug.
+        let yaml = "config:\n  review:\n      required_bots:\n        - chatgpt-codex-connector\n";
+        let s = parse_settings(yaml);
+        assert_eq!(
+            s.required_bots,
+            Some(vec!["chatgpt-codex-connector".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_settings_tab_indent_fails_closed_not_zeroed() {
+        // AC3-EDGE (reality): YAML forbids tabs for indentation, so
+        // serde_yaml_ng REJECTS a tab-indented file. The fix's point is that
+        // this must NOT silently zero the gate (the old fail-open); it fails
+        // CLOSED with an unsatisfiable sentinel so the ship gate blocks visibly.
+        let yaml = "config:\n\treview:\n\t\trequired_bots:\n\t\t  - codex\n";
+        assert!(
+            parse_settings_result(yaml).is_err(),
+            "tab indentation must be a YAML parse error"
+        );
+        let s = parse_settings(yaml);
+        assert_eq!(
+            s.required_bots,
+            Some(vec![UNPARSEABLE_SETTINGS_SENTINEL.to_string()]),
+            "a tab-indented file must fail closed, not zero the gate"
+        );
+        // The sentinel can never be satisfied by a real bot login.
+        assert!(!login_matches_bot(
+            "chatgpt-codex-connector",
+            UNPARSEABLE_SETTINGS_SENTINEL
+        ));
+    }
+
+    #[test]
+    fn parse_settings_unparseable_fails_closed() {
+        // AC3-UI: a genuinely malformed YAML file leaves the login gate
+        // unsatisfiable (fail closed), never a silent no-gate. The production
+        // caller additionally emits loop_check_settings_unparseable.
+        let yaml = "config:\n  review:\n    required_bots: [1, 2, 3\n"; // unclosed flow seq
+        assert!(parse_settings_result(yaml).is_err());
+        let s = parse_settings(yaml);
+        assert_eq!(
+            resolved_required_bots(&s),
+            vec![UNPARSEABLE_SETTINGS_SENTINEL.to_string()]
+        );
+    }
+
+    #[test]
     fn resolved_required_bots_default_is_empty() {
         // Fresh-install default: no required review bot, so a clone with no
         // review configuration is not blocked waiting for a bot it never set up.
@@ -4240,6 +4302,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_settings_reviewers_seq_with_nonscalar_fails_closed() {
+        // gemini medium: a non-scalar item INSIDE the reviewers list (Python
+        // raises on it) must fail CLOSED with the sentinel, not silently drop
+        // the entry and gate on the survivors.
+        let bad =
+            parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n      - {a: b}\n");
+        assert_eq!(
+            bad.reviewers,
+            vec![MALFORMED_REVIEWERS_SENTINEL.to_string()]
+        );
+        // A clean all-scalar list still parses normally.
+        let ok =
+            parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n      - declare\n");
+        assert_eq!(
+            ok.reviewers,
+            vec!["sigma".to_string(), "declare".to_string()]
+        );
+    }
+
+    #[test]
     fn reviewers_all_attested_latest_verdict_wins() {
         // events.jsonl is append-ordered: a later attestation supersedes an
         // earlier one for the same reviewer at the same head (codex peer P1).
@@ -4422,6 +4504,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_settings_peers_single_mapping_is_one_peer() {
+        // codex peer review P1: a single top-level mapping for peers (what
+        // Python's coerce_peers wraps as [dict]) must parse as ONE peer, not be
+        // silently dropped - dropping it is a fail-open on a configured peer gate.
+        let block = parse_settings(
+            "config:\n  review:\n    peers:\n      provider: codex\n      identity: fno-codex-bot\n",
+        );
+        assert_eq!(block.peers.len(), 1, "block-map peers must be one peer");
+        assert_eq!(block.peers[0].provider, "codex");
+        assert_eq!(block.peers[0].identity.as_deref(), Some("fno-codex-bot"));
+        // Flow-map form parses identically.
+        let flow = parse_settings(
+            "config:\n  review:\n    peers: {provider: gemini, identity: fno-gemini-bot}\n",
+        );
+        assert_eq!(flow.peers.len(), 1);
+        assert_eq!(flow.peers[0].provider, "gemini");
+        assert_eq!(flow.peers[0].identity.as_deref(), Some("fno-gemini-bot"));
+    }
+
+    #[test]
     fn parse_settings_peers_bare_scalar_is_one_provider() {
         // `peers: codex` (scalar) matches Python's coerce_peers -> one peer,
         // NOT a silent drop (which would fail open + diverge from Python).
@@ -4534,6 +4636,73 @@ mod tests {
         });
         let info = compute_review_info(&json, &required);
         assert!(!info.all_required_passed());
+    }
+
+    #[test]
+    fn compute_review_info_usage_limited_bot_dropped() {
+        // AC1-HP: a required bot that posted only a usage-limit comment (no
+        // review) leaves missing_bots for usage_limited, so the gate proceeds.
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [
+                {"author": {"login": "chatgpt-codex-connector"},
+                 "body": "You have reached your Codex usage limits for code reviews.",
+                 "createdAt": "2026-07-06T01:00:00Z"}
+            ]
+        });
+        let info = compute_review_info(&json, &required);
+        assert!(info.missing_bots.is_empty());
+        assert_eq!(
+            info.usage_limited,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+        assert!(info.all_required_passed());
+    }
+
+    #[test]
+    fn compute_review_info_usage_limit_only_own_comment_counts() {
+        // AC1-ERR: a usage-limit marker in a HUMAN's comment must not drop the
+        // bot - detection is scoped to the bot's own author.login.
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [
+                {"author": {"login": "some-human"},
+                 "body": "The bot hit its usage limits for code reviews, ugh.",
+                 "createdAt": "2026-07-06T01:00:00Z"}
+            ]
+        });
+        let info = compute_review_info(&json, &required);
+        assert_eq!(
+            info.missing_bots,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+        assert!(info.usage_limited.is_empty());
+        assert!(!info.all_required_passed());
+    }
+
+    #[test]
+    fn compute_review_info_real_review_beats_ratelimit_comment() {
+        // AC1-EDGE: a bot that posted a usage-limit comment earlier AND a real
+        // COMMENTED review is counted as passed, never usage-limited (it is
+        // never in missing_bots to be scanned).
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [
+                {"author": {"login": "chatgpt-codex-connector"}, "state": "COMMENTED",
+                 "submittedAt": "2026-07-06T02:00:00Z"}
+            ],
+            "comments": [
+                {"author": {"login": "chatgpt-codex-connector"},
+                 "body": "codex usage limits reached",
+                 "createdAt": "2026-07-06T01:00:00Z"}
+            ]
+        });
+        let info = compute_review_info(&json, &required);
+        assert!(info.missing_bots.is_empty());
+        assert!(info.usage_limited.is_empty());
+        assert!(info.all_required_passed());
     }
 
     // ── step 2: inline findings + severity + addressed (US2) ────────────────

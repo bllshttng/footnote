@@ -11,9 +11,16 @@
 #   3. <repo>/crates/fno-agents/target/debug/fno-agents    (debug build)
 #   4. $(command -v fno-agents)   (PATH fallback)
 #
-# On binary missing: emits loop_check_binary_missing to both events.jsonl paths
-# and exits 0 (allow). An unstoppable block-loop with no checker is worse than
-# letting the session continue; CI catches regressions independently.
+# ACTIVE-SESSION-AWARE error handling (x-81d9): the state file
+# `.fno/target-state.md` is the active-session discriminator. With NO state file
+# there is nothing to gate, so every failure path exits 0 (allow) as before.
+# With a state file present, a broken checker (missing jq, missing/stale binary,
+# verb non-zero, non-JSON output) is NOT a safe allow - silently allowing there
+# disables the ship gate. Instead each such path bounded-blocks (exit 2) up to
+# MAX_UNAVAIL_RETRIES so a transient breakage (mid-rebuild binary, flaky gh) can
+# recover, then gives up LOUDLY (an event + exit 0) so a persistently-broken
+# checker never wedges the session forever. The counter self-heals: it is
+# removed on the first clean decision, so the bound is on CONSECUTIVE failures.
 #
 # Exit codes forwarded from the JSON decision:
 #   0  allow  (includes all TerminationReason variants: DonePRGreen, NoWork, etc.)
@@ -21,27 +28,75 @@
 
 set -uo pipefail
 
+# Consecutive checker-unavailable fires tolerated for an active session before a
+# loud give-up allow. 3 gives a transient cause room to recover; 2-5 defensible
+# (Claude's discretion). Named so the ceiling is obvious and tunable.
+readonly MAX_UNAVAIL_RETRIES=3
+
 # ── 1. Read stdin ─────────────────────────────────────────────────────────────
 HOOK_INPUT=$(cat)
 
-if ! command -v jq >/dev/null 2>&1; then
-    echo "target stop-hook: WARNING: jq not found; allowing session to continue" >&2
-    exit 0
-fi
-
-TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
-
-if [[ -z "$TRANSCRIPT_PATH" ]] || [[ ! -f "$TRANSCRIPT_PATH" ]]; then
-    exit 0
-fi
-
-# ── 2. State file ─────────────────────────────────────────────────────────────
+# ── 2. State file: the active-session discriminator ───────────────────────────
+# No state file -> no target session here -> nothing to gate. This is the ONLY
+# safe silent allow, and it gates every error path below: with a state file
+# present, a checker that cannot do its job must block-and-signal, never allow.
 STATE_FILE=".fno/target-state.md"
 if [[ ! -f "$STATE_FILE" ]]; then
     exit 0
 fi
 
-# ── 3. Foreign-session guard (PR #388 fix class) ──────────────────────────────
+# Active target session confirmed from here down.
+REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+SESSION_ID=$(grep '^session_id:' "$STATE_FILE" 2>/dev/null \
+    | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
+
+# Append an event to both project + global logs WITHOUT jq (this runs on the
+# jq-missing give-up path too). Fields are hook-internal and safe to interpolate.
+emit_event_both() {
+    local etype="$1" data="$2" ts line
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+    line="{\"ts\":\"${ts}\",\"type\":\"${etype}\",\"source\":\"hook\",\"data\":${data}}"
+    mkdir -p "${REPO_ROOT}/.fno" "${HOME}/.fno" 2>/dev/null || true
+    echo "$line" >> "${REPO_ROOT}/.fno/events.jsonl" 2>/dev/null || true
+    echo "$line" >> "${HOME}/.fno/events.jsonl" 2>/dev/null || true
+}
+
+# Checker unavailable for an ACTIVE session: bounded-block, then loud give-up.
+# Counter keyed by session_id so two sessions sharing a symlinked .fno never
+# consume each other's retry budget (AC2-EDGE). Calls exit directly.
+unavailable_block_or_allow() {
+    local counter=".fno/.loop-check-unavail-${SESSION_ID}"
+    local count=0
+    [[ -f "$counter" ]] && count=$(tr -dc '0-9' < "$counter" 2>/dev/null)
+    [[ -z "$count" ]] && count=0          # absent or corrupt -> start at 0
+    count=$((10#$count + 1))              # 10# so a stray leading zero isn't read as octal
+    echo "$count" > "$counter" 2>/dev/null || true
+    if (( count <= MAX_UNAVAIL_RETRIES )); then
+        echo "target stop-hook: checker unavailable (${count}/${MAX_UNAVAIL_RETRIES}), keeping session running" >&2
+        exit 2
+    fi
+    emit_event_both "loop_check_unavailable_giveup" "{\"session_id\":\"${SESSION_ID}\",\"count\":${count}}"
+    echo "target stop-hook: checker unavailable ${count} times; allowing stop (ship gate off for this stop)" >&2
+    exit 0
+}
+
+# ── 3. jq required to parse the payload + decision ────────────────────────────
+# Missing jq for an active session is checker-unavailable, not a safe allow.
+if ! command -v jq >/dev/null 2>&1; then
+    echo "target stop-hook: WARNING: jq not found for an active session" >&2
+    unavailable_block_or_allow
+fi
+
+TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+
+# An active target always has a transcript; its absence is an anomaly, not a
+# reason to disable the gate.
+if [[ -z "$TRANSCRIPT_PATH" ]] || [[ ! -f "$TRANSCRIPT_PATH" ]]; then
+    echo "target stop-hook: WARNING: no transcript for an active session" >&2
+    unavailable_block_or_allow
+fi
+
+# ── 4. Foreign-session guard (PR #388 fix class) ──────────────────────────────
 # Extract the claude session id from state frontmatter. Read the current key
 # (claude_session_id) first, falling back to the pre-x-2de3 key
 # (the pre-rename claude_transcript_id) so an in-flight manifest written by an older binary
@@ -55,14 +110,12 @@ MANIFEST_CTID=$(grep -E '^(claude_session_id|claude_transcript_id):' "$STATE_FIL
 if [[ -n "$MANIFEST_CTID" && "$MANIFEST_CTID" != "null" ]]; then
     TRANSCRIPT_BASENAME=$(basename "$TRANSCRIPT_PATH" .jsonl)
     if [[ "$TRANSCRIPT_BASENAME" != "$MANIFEST_CTID" ]]; then
-        # Another session's manifest; not ours to judge.
+        # Another session's manifest; genuinely not ours to judge.
         exit 0
     fi
 fi
 
-# ── 4. Resolve the binary ─────────────────────────────────────────────────────
-REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-
+# ── 5. Resolve the binary ─────────────────────────────────────────────────────
 BIN=""
 if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
     BIN="$FNO_AGENTS_BIN"
@@ -74,23 +127,17 @@ elif command -v fno-agents >/dev/null 2>&1; then
     BIN=$(command -v fno-agents)
 fi
 
-# ── 5. Binary missing: emit event + allow ─────────────────────────────────────
+# ── 6. Binary missing for an active session: emit event + bounded-block ───────
+# A stale/absent binary must not silently disable the ship gate; emit the
+# diagnostic (as before) then route through the bounded-block helper.
 if [[ -z "$BIN" ]]; then
-    SESSION_ID=$(grep '^session_id:' "$STATE_FILE" 2>/dev/null \
-        | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
-    EVENT=$(jq -nc \
-        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        --arg sid "$SESSION_ID" \
-        '{ts:$ts,type:"loop_check_binary_missing",source:"hook",data:{session_id:$sid}}')
-    mkdir -p "${REPO_ROOT}/.fno" "${HOME}/.fno" 2>/dev/null || true
-    echo "$EVENT" >> "${REPO_ROOT}/.fno/events.jsonl" 2>/dev/null || true
-    echo "$EVENT" >> "${HOME}/.fno/events.jsonl" 2>/dev/null || true
-    echo "target stop-hook: WARNING: fno-agents binary not found; allowing session to continue" >&2
-    echo "target stop-hook: install with: cargo install --path crates/fno-agents --bins" >&2
-    exit 0
+    emit_event_both "loop_check_binary_missing" "{\"session_id\":\"${SESSION_ID}\"}"
+    echo "target stop-hook: WARNING: fno-agents binary not found for an active session" >&2
+    echo "target stop-hook: install with: cargo install --path crates/fno-agents --bins (needs a Rust toolchain/rustup)" >&2
+    unavailable_block_or_allow
 fi
 
-# ── 6. Invoke the verb ────────────────────────────────────────────────────────
+# ── 7. Invoke the verb ────────────────────────────────────────────────────────
 # The full hook payload rides the verb's stdin (--hook-input-stdin) so
 # loop-check can read last_assistant_message - the stopping turn's final text,
 # recomputed per fire - instead of racing the transcript flush (ab-223d2dae).
@@ -115,19 +162,24 @@ DECISION_JSON=$("$BIN" loop-check \
     2>>"$LOOP_CHECK_LOG" <<<"$HOOK_INPUT") || verb_rc=$?
 
 if [[ $verb_rc -ne 0 ]]; then
-    echo "target stop-hook: WARNING: fno-agents loop-check exited $verb_rc; allowing session to continue" >&2
+    echo "target stop-hook: WARNING: fno-agents loop-check exited $verb_rc for an active session" >&2
     # Surface the verb's own stderr (the 2>> redirect above hides it from the
     # operator otherwise) - last lines name the actual cause.
     tail -n 5 "$LOOP_CHECK_LOG" >&2 2>/dev/null || true
-    exit 0
+    unavailable_block_or_allow
 fi
 
 if ! echo "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
-    echo "target stop-hook: WARNING: fno-agents loop-check returned unexpected output (not JSON); allowing session to continue" >&2
-    exit 0
+    echo "target stop-hook: WARNING: fno-agents loop-check returned unexpected output (not JSON) for an active session" >&2
+    unavailable_block_or_allow
 fi
 
-# ── 7. Translate decision to hook protocol ────────────────────────────────────
+# ── 8. Clean decision reached: self-heal the unavailable counter ──────────────
+# The checker worked. Reset the consecutive-failure counter FIRST so the bound
+# is on consecutive failures only and a recovered checker starts fresh (AC2-FR).
+rm -f ".fno/.loop-check-unavail-${SESSION_ID}" 2>/dev/null || true
+
+# ── 9. Translate decision to hook protocol ────────────────────────────────────
 DECISION=$(echo "$DECISION_JSON" | jq -r '.decision // "allow"')
 MESSAGE=$(echo "$DECISION_JSON" | jq -r '.message // ""')
 
@@ -136,7 +188,7 @@ if [[ "$DECISION" == "block" ]]; then
     exit 2
 fi
 
-# ── 8. Terminal-allow: invoke the finalize WRITER (step 6, ab-f8e5f214) ────────
+# ── 10. Terminal-allow: invoke the finalize WRITER (step 6, ab-f8e5f214) ───────
 # loop-check is the read-only DECISION; on a TERMINAL allow (a non-null
 # termination_reason) the shim runs the separate `finalize` WRITER to re-home
 # the ledger record + (ship-only) plan stamp/graduate + handoff artifact. This
