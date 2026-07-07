@@ -34,38 +34,27 @@ const SPEND_THROTTLE_MS = 60_000 // at most one cost/drift check per minute
 
 // Read config.budget.interactive.cap_usd from settings.yaml (local > global).
 // This value is intentionally UNMODELED (rides extra="ignore" like budget.attended),
-// so `fno config get` rejects it — read the raw YAML the same way loopcheck.rs does.
-// Returns a positive number, or null when unset / unreadable (feature off).
-const PY_READ_CAP = `
-import yaml, os
-def rd(p):
-    try:
-        d = yaml.safe_load(open(p)) or {}
-    except Exception:
-        return None
-    c = d.get('config') or {}
-    b = c.get('budget') or {}
-    i = b.get('interactive') or {}
-    return i.get('cap_usd')
-for p in ['.fno/settings.yaml', os.path.expanduser('~/.fno/settings.yaml')]:
-    v = rd(p)
-    if v is not None:
-        print(v)
-        break
-`
-
+// so `fno config get` rejects it — read the raw YAML directly. Parsed natively in
+// JS (no python3 / PyYAML dependency, no per-tick process spawn — gemini review).
+// The regex is LINE-ANCHORED so `cost_cap_usd:` (config.budget.attended /
+// unattended, which contains "cap_usd" as a substring) cannot false-match the
+// interactive `cap_usd:`. Returns a positive number, or null (feature off).
 function readInteractiveCap() {
-  try {
-    const out = execFileSync('python3', ['-c', PY_READ_CAP], {
-      encoding: 'utf8',
-      timeout: 5000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-    const n = parseFloat(out)
-    return Number.isFinite(n) && n > 0 ? n : null
-  } catch (e) {
-    return null
+  const files = ['.fno/settings.yaml', path.join(os.homedir(), '.fno', 'settings.yaml')]
+  for (const p of files) {
+    try {
+      if (!fs.existsSync(p)) continue
+      const content = fs.readFileSync(p, 'utf8')
+      const m = content.match(/^[ \t]*cap_usd:[ \t]*([0-9.]+)/m)
+      if (m) {
+        const n = parseFloat(m[1])
+        if (Number.isFinite(n) && n > 0) return n
+      }
+    } catch (e) {
+      /* unreadable — try the next path, else feature off */
+    }
   }
+  return null
 }
 
 // Live spend-so-far ($) from the transcript. null on any failure (fails open).
