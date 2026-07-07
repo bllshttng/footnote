@@ -764,6 +764,10 @@ owner_cwd: "$local_owner_cwd"
 claude_session_id: $claude_transcript_id
 scratchpad_path: $REPO_ROOT/.fno/scratchpad
 target_size: ${TARGET_SIZE:-}
+# Dispatch pins - a model/provider chosen at `fno target start`/`init`, carried
+# to this session's dispatched workers. Empty = unpinned (spawn-time defaults).
+dispatch_model: ${TARGET_DISPATCH_MODEL:-}
+dispatch_provider: ${TARGET_DISPATCH_PROVIDER:-}
 # Skip flags - sourced from the size profile (TARGET_SIZE) plus per-flag
 # TARGET_NO_* env overrides. The LLM must NEVER flip these on its own judgment.
 no_external: $no_external

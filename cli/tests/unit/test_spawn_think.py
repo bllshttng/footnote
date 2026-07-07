@@ -70,8 +70,11 @@ def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     spawn_calls: list[tuple] = []
     stamp_calls: list[tuple] = []
 
-    def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth", invocation_suffix=None, model=None):
-        spawn_calls.append((node_id, prompt, node_cwd, node_slug, reason, invocation_suffix, model))
+    def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth",
+                   invocation_suffix=None, model=None, provider=None):
+        spawn_calls.append(
+            (node_id, prompt, node_cwd, node_slug, reason, invocation_suffix, model, provider)
+        )
         return "deadbeef"
 
     monkeypatch.setattr(st, "_spawn_think_worker", fake_spawn)
@@ -511,6 +514,60 @@ def test_parse_short_id_among_noise():
 
 def test_parse_short_id_absent():
     assert st._parse_short_id("no json here at all") == ""
+
+
+# ---------------------------------------------------------------------------
+# _spawn_think_worker - dispatch pin passthrough (model/provider on the cmd)
+# ---------------------------------------------------------------------------
+
+
+def _capture_spawn_cmd(monkeypatch) -> list:
+    """Patch subprocess.run inside _spawn_think_worker; return the captured cmd."""
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"short_id":"abc123"}'
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(st.subprocess, "run", fake_run)
+    return captured
+
+
+def test_spawn_worker_default_provider_claude_no_model(monkeypatch):
+    """Byte-for-byte default: no pins -> --provider claude, no --model token."""
+    cap = _capture_spawn_cmd(monkeypatch)
+    st._spawn_think_worker("x-1", "prompt", None, "slug")
+    cmd = cap["cmd"]
+    assert "--provider" in cmd and cmd[cmd.index("--provider") + 1] == "claude"
+    assert "--model" not in cmd
+
+
+def test_spawn_worker_threads_model_and_provider(monkeypatch):
+    """A dispatch pin reaches the spawn cmd as exact --model / --provider tokens."""
+    cap = _capture_spawn_cmd(monkeypatch)
+    st._spawn_think_worker("x-1", "prompt", None, "slug",
+                           model="glm-4.7", provider="codex")
+    cmd = cap["cmd"]
+    assert cmd[cmd.index("--provider") + 1] == "codex"
+    assert cmd[cmd.index("--model") + 1] == "glm-4.7"
+
+
+def test_maybe_spawn_threads_node_pins(iso, monkeypatch, patch_spawn):
+    """maybe_spawn_think carries node['model']/['provider'] to the spawn seam."""
+    spawn_calls, _ = patch_spawn
+    _resolved(monkeypatch, ok=True)
+    monkeypatch.setenv("FNO_BG", "1")  # away -> real spawn
+    node = _node(model="glm-4.7", provider="codex")
+    res = st.maybe_spawn_think(node, events_path=iso)
+    assert res.decision == "spawned"
+    # tuple: (node_id, prompt, node_cwd, node_slug, reason, suffix, model, provider)
+    assert spawn_calls[0][6] == "glm-4.7"
+    assert spawn_calls[0][7] == "codex"
 
 
 # ---------------------------------------------------------------------------

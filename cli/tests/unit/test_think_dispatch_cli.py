@@ -73,6 +73,42 @@ def test_happy_path_passes_live_pointer(graph, monkeypatch):
     assert graph["node"]["id"] == "x-0a9c"
 
 
+def test_model_flag_overlays_node(graph, monkeypatch):
+    """AC1-HP/AC1-UI: --model rides onto the node so it reaches the spawn seam."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "live-sid")
+    r = runner.invoke(think_cli.think_app,
+                      ["dispatch", "x-0a9c", "--model", "glm-4.7"])
+    assert r.exit_code == 0
+    assert graph["node"]["model"] == "glm-4.7"
+
+
+def test_provider_flag_overlays_node(graph, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "live-sid")
+    r = runner.invoke(think_cli.think_app,
+                      ["dispatch", "x-0a9c", "--provider", "codex"])
+    assert r.exit_code == 0
+    assert graph["node"]["provider"] == "codex"
+
+
+def test_empty_model_rejected_exits_2(graph, monkeypatch):
+    """AC2-ERR at this verb: an empty --model is a usage error, nothing dispatches."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "live-sid")
+    r = runner.invoke(think_cli.think_app,
+                      ["dispatch", "x-0a9c", "--model", "   "])
+    assert r.exit_code == 2
+    assert "--model must not be empty" in r.output
+    assert "node" not in graph  # never reached the dispatch
+
+
+def test_no_pins_leaves_node_unpinned(graph, monkeypatch):
+    """Byte-for-byte: without flags the node carries no model/provider key."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "live-sid")
+    r = runner.invoke(think_cli.think_app, ["dispatch", "x-0a9c"])
+    assert r.exit_code == 0
+    assert "model" not in graph["node"]
+    assert "provider" not in graph["node"]
+
+
 def test_skipped_exits_1(graph, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "live-sid")
     monkeypatch.setattr(

@@ -124,6 +124,36 @@ def test_happy_path_claims_and_prints_receipt(monkeypatch, tmp_path):
     assert init_calls == [str(wt)]
 
 
+def test_start_forwards_model_provider_to_init(monkeypatch, tmp_path):
+    """--model/--provider ride through to the composed `fno target init` call."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *a: "/canonical/repo")
+    monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda r, w: (0, ""))
+
+    init_args = {}
+
+    def fake_run(args, **kwargs):
+        if "ensure" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=str(wt), stderr="")
+        if "init" in args:
+            init_args["args"] = list(args)
+            return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    result = runner.invoke(
+        target_app, ["start", "x-d91b", "--model", "glm-4.7", "--provider", "codex"]
+    )
+    assert result.exit_code == 0, result.stdout
+    a = init_args["args"]
+    assert a[a.index("--model") + 1] == "glm-4.7"
+    assert a[a.index("--provider") + 1] == "codex"
+
+
 def test_existing_manifest_is_idempotent(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()
