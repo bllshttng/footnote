@@ -31,15 +31,26 @@ not a megawalk-only concern - it's always allowed.
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# State file for tracking approvals
-STATE_DIR = Path.home() / ".claude" / "state"
-STATE_FILE = STATE_DIR / "git-protection.json"
+# Footnote state lives under ${FNO_HOME:-~/.fno}, never under the harness
+# state dir (placement rule, ab-f063 Wave 2). This hook is stdlib-only and runs under bare
+# python3 on a fresh plugin install, so it resolves FNO_HOME directly rather
+# than importing fno.paths (the same accepted limitation every
+# ${FNO_HOME:-$HOME/.fno} shell hook has). A custom config.state_dir in
+# settings.yaml is therefore not honored here.
+FNO_HOME = Path(os.environ.get("FNO_HOME") or (Path.home() / ".fno"))
+STATE_FILE = FNO_HOME / "git-protection.json"
+APPROVAL_FLAG = FNO_HOME / "approve_no_verify.flag"
+# Opt-out marker: when present, every gate exits 0 immediately. Same
+# auditable-violation trust model as the approve flag - an agent can create it,
+# but doing so unprompted is a visible violation, not a silent bypass.
+DISABLE_MARKER = FNO_HOME / "git-protection.disabled"
 
 # Protected branches - NO COWBOY CODING
 PROTECTED_BRANCHES = ["main", "master", "develop", "dev"]
@@ -87,22 +98,32 @@ ALLOWED_GIT_PATTERNS = [
     r'git\s+tag',
 ]
 
+def _default_state():
+    return {
+        "bypass_phrase": "Push to Main",
+        "last_approval": None,
+        "approval_expires": None,
+        "last_blocked_command": None,
+    }
+
 def load_state():
-    """Load approval state."""
+    """Load approval state from the FNO_HOME path. Missing or corrupt -> defaults.
+
+    No legacy read-fallback from the old harness state dir: the only durable
+    field is bypass_phrase, which no code path ever customizes, and the approval
+    timestamps are 2-minute TTL. Migration would preserve nothing real while
+    forcing a harness-dir reference that defeats the re-home (US2). A user blocked
+    pre-upgrade is re-blocked once with the new path printed; self-healing.
+    """
     try:
         with open(STATE_FILE, 'r') as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {
-            "bypass_phrase": "Push to Main",
-            "last_approval": None,
-            "approval_expires": None,
-            "last_blocked_command": None,
-        }
+        return _default_state()
 
 def save_state(state):
     """Save approval state."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    FNO_HOME.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=2)
 
@@ -478,129 +499,96 @@ def _check_pr_merge_allowed(command=""):
     return f"active {state_file.name} + external review artifact ({int(age)}s old)"
 
 
-def main():
-    """Main hook enforcement logic."""
-    try:
-        input_data = json.load(sys.stdin)
-    except Exception:
-        sys.exit(0)  # Allow if we can't parse input
+# ==========================================
+# COMMAND-POSITION TOKENIZATION
+# ==========================================
+# Gate keywords (`git`, `gh pr merge`) must only fire when they sit at COMMAND
+# position - the start of the string or right after a shell separator. A keyword
+# buried inside a quoted argument (e.g. a `--details "... gh pr merge ..."`
+# string) must NOT trip the gate (observed live 2026-07-06). The same tokenizer
+# also closes the opposite hole: `cd /tmp && git push origin main` used to
+# bypass the protected-branch gate because the string did not start with 'git'.
 
-    tool_name = input_data.get("tool_name", "")
-    tool_input = input_data.get("tool_input", {})
+# Shell separators that end a command-position segment, and keywords after which
+# a new command begins.
+_SEGMENT_SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
+_SEGMENT_KEYWORDS = {"then", "do"}
 
-    # Only check Bash commands
-    if tool_name != "Bash":
-        sys.exit(0)
 
-    command = tool_input.get("command", "").strip()
+def _command_segments(command):
+    """Split a shell command into command-position segments (lists of tokens).
 
-    # ==========================================
-    # gh pr create - always allowed (ad-hoc dev is legit; the merge gate
-    # is where pipeline discipline is enforced)
-    # ==========================================
+    Each segment is a token run that begins a command: the start of the string
+    and everything after a shell separator or a then/do keyword. Uses stdlib
+    shlex in POSIX mode so quoted arguments stay single tokens and separators
+    inside quotes are not treated as separators. Raises ValueError on unbalanced
+    quotes; the caller then falls back to legacy whole-command matching.
+    """
+    lexer = shlex.shlex(command, punctuation_chars=True, posix=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)  # ValueError on unbalanced quotes
+    segments, current = [], []
+    at_command_start = True
+    for tok in tokens:
+        if tok in _SEGMENT_SEPARATORS:
+            if current:
+                segments.append(current)
+                current = []
+            at_command_start = True
+            continue
+        if at_command_start and tok in _SEGMENT_KEYWORDS:
+            # keyword occupies command position; the real command is next token
+            continue
+        current.append(tok)
+        at_command_start = False
+    if current:
+        segments.append(current)
+    return segments
 
-    # ==========================================
-    # gh pr merge - allow only with two-factor (state + artifact) verification
-    # ==========================================
-    if re.search(r'gh\s+pr\s+merge', command, re.IGNORECASE):
-        allow_reason = _check_pr_merge_allowed(command)
-        if allow_reason:
-            output = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": f"[fno auto-merge] {allow_reason}",
-                }
-            }
-            print(json.dumps(output))
-            sys.exit(0)
 
-        reason = """╔════════════════════════════════════════════════════════════════╗
-║  🚫 BLOCKED: gh pr merge (two-factor check failed)
-╚════════════════════════════════════════════════════════════════╝
+def _find_merge_segment(segments):
+    """Return the joined string of the first `gh pr merge` segment at command
+    position, else None."""
+    for seg in segments:
+        if (len(seg) >= 3 and seg[0].lower() == "gh"
+                and seg[1].lower() == "pr" and seg[2].lower() == "merge"):
+            return " ".join(seg)
+    return None
 
-Command: """ + command + """
 
-Auto-merge from Claude Code requires ALL of:
-  1. Top-level `config.auto_merge.enabled: true` in settings.yaml
-  2. Active target state file with `auto_merge_approved: true`
-     (megawalk-state.md does NOT authorize merge - target owns shipping)
-  3. Either:
-     a. `external_review_passed: skipped` in state (explicit --no-external), OR
-     b. External review artifact at
-        <repo>/.fno/artifacts/external-<session_id>.md
-        with matching frontmatter (phase: external, session_id: <sid>)
+def _find_git_segments(segments):
+    """Return joined strings of every command-position segment whose first token
+    is `git`. Catches compound commands a bare startswith('git') would miss."""
+    return [" ".join(seg) for seg in segments if seg and seg[0] == "git"]
 
-The artifact proves /pr check actually ran for this session. A stale
-or missing artifact blocks the merge even if the state flag is true.
 
-There is NO single-use override flag. If /pr check was skipped or failed,
-the correct recovery is to run it again or explicitly configure
---no-external. Do not forge the artifact.
-
-If you expected this to work:
-  - Run /target L <plan> (runs /pr check by default and writes the artifact)
-  - Or set `--no-external` / config.external_reviewer: none to skip
-    intentionally; the state file will show external_review_passed: skipped
-  - Check that .fno/artifacts/external-*.md exists and matches
-    the session_id in state file frontmatter
-
-═══════════════════════════════════════════════════════════════════
-"""
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
+def _emit(decision, reason):
+    """Print a PreToolUse permission decision as JSON."""
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
         }
-        print(json.dumps(output))
-        sys.exit(0)
+    }))
 
-    # ==========================================
-    # ALLOW: Non-git commands
-    # ==========================================
-    if not command.startswith('git'):
-        sys.exit(0)
 
-    # ==========================================
-    # CHECK: User approval for --no-verify
-    # ==========================================
-    approval_flag = STATE_DIR / "approve_no_verify.flag"
-    has_approval = False
+def _check_approval_flag():
+    """True if a fresh (<5 min) --no-verify approval flag exists. An expired
+    flag is removed. Guarded so a filesystem hiccup never crashes the gate."""
+    try:
+        if APPROVAL_FLAG.exists():
+            age_seconds = time.time() - APPROVAL_FLAG.stat().st_mtime
+            if age_seconds < 300:
+                return True
+            APPROVAL_FLAG.unlink(missing_ok=True)  # expired
+    except OSError:
+        pass
+    return False
 
-    if approval_flag.exists():
-        mtime = approval_flag.stat().st_mtime
-        age_seconds = time.time() - mtime
 
-        if age_seconds < 300:  # 5 minutes
-            has_approval = True
-            # Don't remove flag yet - remove after successful use
-        else:
-            # Expired approval
-            approval_flag.unlink()
-
-    # ==========================================
-    # BLOCK: --no-verify usage (unless approved)
-    # ==========================================
-    for pattern in NO_VERIFY_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            # Check if approved by user
-            if has_approval:
-                # Remove approval flag (one-time use)
-                if approval_flag.exists():
-                    approval_flag.unlink()
-                # Allow the command
-                output = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "allow",
-                        "permissionDecisionReason": "[Approved] User approved --no-verify commit",
-                    }
-                }
-                print(json.dumps(output))
-                sys.exit(0)
-            reason = f"""╔════════════════════════════════════════════════════════════════╗
+def _no_verify_deny_message(command):
+    return f"""╔════════════════════════════════════════════════════════════════╗
 ║  🚫 BLOCKED: --no-verify flag detected
 ╚════════════════════════════════════════════════════════════════╝
 
@@ -625,54 +613,27 @@ The proper workflow:
 ⚠️  To approve this --no-verify commit:
 
 Run this command:
-  touch ~/.claude/state/approve_no_verify.flag
+  touch {APPROVAL_FLAG}
 
 Then I'll retry the commit automatically.
 Approval expires after 5 minutes and is single-use.
 
+To disable git protection entirely on this machine:
+  touch {DISABLE_MARKER}
+
 ═══════════════════════════════════════════════════════════════════
 """
-            output = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
-                }
-            }
-            print(json.dumps(output))
-            sys.exit(0)
 
-    # ==========================================
-    # ALLOW: Safe git commands
-    # ==========================================
-    if is_allowed_git_command(command):
-        sys.exit(0)
 
-    # ==========================================
-    # CHECK: Push to protected branch
-    # ==========================================
-    is_protected, branch = is_push_to_protected_branch(command)
-
-    if is_protected:
-        state = load_state()
-        using_no_verify = is_using_no_verify(command)
-
-        # Extra angry message for --no-verify
-        no_verify_warning = ""
-        if using_no_verify:
-            no_verify_warning = """
+def _push_deny_message(command, branch, using_no_verify):
+    no_verify_warning = ""
+    if using_no_verify:
+        no_verify_warning = """
 ⚠️  DETECTED: --no-verify flag
 ⚠️  This is EXACTLY the behavior we're trying to prevent!
 ⚠️  Bypassing git hooks is NOT acceptable for protected branches.
 """
-
-        # Check for recent approval or bypass phrase
-        if has_recent_approval(state) or check_for_bypass_phrase(state):
-            print(f"[Git Protection: Approved] Emergency push to {branch}: {command}", file=sys.stderr)
-            sys.exit(0)
-
-        # BLOCK
-        reason = f"""╔════════════════════════════════════════════════════════════════╗
+    return f"""╔════════════════════════════════════════════════════════════════╗
 ║  🚫 BLOCKED: Direct push to protected branch '{branch}'
 ╚════════════════════════════════════════════════════════════════╝
 
@@ -704,34 +665,155 @@ The proper workflow:
 
 ═══════════════════════════════════════════════════════════════════
 
-⚠️  EMERGENCY OVERRIDE (use with extreme caution):
-
-If you have a legitimate emergency (production down, critical hotfix):
-
-1. User must explicitly say: "Push to Main" (or similar)
-2. Approval expires after 2 minutes
-3. Document the emergency push in PR after the fact
-
-Bypass phrases: Push to Main, push to main, Emergency Push
+To disable git protection entirely on this machine:
+  touch {DISABLE_MARKER}
 
 ═══════════════════════════════════════════════════════════════════
 """
 
-        # Store blocked command for debugging
+
+def _merge_deny_message(command):
+    return """╔════════════════════════════════════════════════════════════════╗
+║  🚫 BLOCKED: gh pr merge (two-factor check failed)
+╚════════════════════════════════════════════════════════════════╝
+
+Command: """ + command + f"""
+
+Raw `gh pr merge` is gated at the shipping boundary. The sanctioned merge
+primitive is `fno pr merge`, which runs its own footnote-canonical guards
+and is not blocked by this hook.
+
+Auto-merge directly from Claude Code requires ALL of:
+  1. Top-level `config.auto_merge.enabled: true` in settings.yaml
+  2. Active target state file with `auto_merge_approved: true`
+     (megawalk-state.md does NOT authorize merge - target owns shipping)
+  3. Either:
+     a. `external_review_passed: skipped` in state (explicit --no-external), OR
+     b. External review artifact at
+        <repo>/.fno/artifacts/external-<session_id>.md
+        with matching frontmatter (phase: external, session_id: <sid>)
+
+The artifact proves /pr check actually ran for this session. A stale
+or missing artifact blocks the merge even if the state flag is true.
+
+There is NO single-use override flag. If /pr check was skipped or failed,
+the correct recovery is to run it again or explicitly configure
+--no-external. Do not forge the artifact.
+
+To disable git protection entirely on this machine:
+  touch {DISABLE_MARKER}
+
+═══════════════════════════════════════════════════════════════════
+"""
+
+
+def _evaluate_git_segment(command, has_approval):
+    """Evaluate one command-position git segment.
+
+    Returns ('deny', reason) | ('allow', reason) | None (safe / no opinion).
+    None means the segment is fine (explicitly-allowed git command, a
+    feature-branch push, or a bypass-approved protected push).
+    """
+    # --no-verify (checked first: an allowed verb like `git commit` must still
+    # be denied when it carries --no-verify)
+    for pattern in NO_VERIFY_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            if has_approval:
+                return ("allow", "[Approved] User approved --no-verify commit")
+            return ("deny", _no_verify_deny_message(command))
+
+    if is_allowed_git_command(command):
+        return None
+
+    is_protected, branch = is_push_to_protected_branch(command)
+    if is_protected:
+        state = load_state()
+        if has_recent_approval(state) or check_for_bypass_phrase(state):
+            print(f"[Git Protection: Approved] Emergency push to {branch}: "
+                  f"{command}", file=sys.stderr)
+            return None
         state["last_blocked_command"] = command
         save_state(state)
+        return ("deny", _push_deny_message(command, branch,
+                                           is_using_no_verify(command)))
+    return None
 
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        }
-        print(json.dumps(output))
+
+def main():
+    """Main hook enforcement logic."""
+    try:
+        input_data = json.load(sys.stdin)
+    except Exception:
+        sys.exit(0)  # Allow if we can't parse input
+
+    tool_name = input_data.get("tool_name", "")
+    tool_input = input_data.get("tool_input", {})
+
+    # Only check Bash commands
+    if tool_name != "Bash":
         sys.exit(0)
 
-    # Command is safe, allow it
+    command = tool_input.get("command", "").strip()
+    if not command:
+        sys.exit(0)
+
+    # Opt-out marker: a disabled gate exits immediately (AC1-EDGE).
+    if DISABLE_MARKER.exists():
+        sys.exit(0)
+
+    # Tokenize into command-position segments. On unbalanced quotes shlex
+    # raises ValueError; fall back to legacy whole-command matching per gate so
+    # a crash never silently drops the gate.
+    try:
+        segments = _command_segments(command)
+    except ValueError:
+        segments = None
+
+    # ==========================================
+    # gh pr create - always allowed (ad-hoc dev is legit; the merge gate is
+    # where pipeline discipline is enforced). gh pr merge - allow only with
+    # two-factor (state + artifact) verification.
+    # ==========================================
+    if segments is not None:
+        merge_seg = _find_merge_segment(segments)
+    else:
+        # legacy fallback (deny-leaning): loose match on the whole command
+        merge_seg = command if re.search(r'gh\s+pr\s+merge', command,
+                                          re.IGNORECASE) else None
+    if merge_seg is not None:
+        allow_reason = _check_pr_merge_allowed(merge_seg)
+        if allow_reason:
+            _emit("allow", f"[fno auto-merge] {allow_reason}")
+            sys.exit(0)
+        _emit("deny", _merge_deny_message(merge_seg))
+        sys.exit(0)
+
+    # ==========================================
+    # Git gates, evaluated per command-position segment so a compound command
+    # (`cd /tmp && git push origin main`) can't smuggle a git verb past a
+    # startswith('git') check. Non-git commands fall through to allow.
+    # ==========================================
+    if segments is not None:
+        git_segs = _find_git_segments(segments)
+    else:
+        git_segs = [command] if command.startswith('git') else []
+    if not git_segs:
+        sys.exit(0)
+
+    has_approval = _check_approval_flag()
+    for seg in git_segs:
+        decision = _evaluate_git_segment(seg, has_approval)
+        if decision is None:
+            continue
+        kind, reason = decision
+        if kind == "allow":
+            APPROVAL_FLAG.unlink(missing_ok=True)  # one-time consume, race-safe
+            _emit("allow", reason)
+            sys.exit(0)
+        _emit("deny", reason)
+        sys.exit(0)
+
+    # All git segments safe, allow it
     sys.exit(0)
 
 
