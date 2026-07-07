@@ -126,8 +126,14 @@ jobs:
       - name: cargo test --all-targets (fno mux)
         # The mux e2e tests spawn real PTYs and Unix sockets; both work on
         # the ubuntu-latest runner (the harness needs no TTY of its own).
+        # --test-threads=1: each PTY e2e test (persistence_*/layout_e2e_*) spawns
+        # a mux server + shells and waits up to 15s for the shell to render. Run
+        # in parallel on a 2-core runner they oversubscribe it, so shells miss
+        # the 15s budget and flake non-deterministically (the failing SET varies
+        # run-to-run - x-9e26). Serializing removes the contention; the unit
+        # tests it also serializes are fast, so the wall-clock cost is small.
         working-directory: crates/fno
-        run: cargo test --all-targets
+        run: cargo test --all-targets -- --test-threads=1
 
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
