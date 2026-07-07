@@ -1036,7 +1036,8 @@ def load_plan_strategy(
     if resolved.kind == "folder":
         # Deprecation warning per AC4-EDGE
         print(
-            "Warning: folder plan format deprecated; run `fno plan migrate-folder` to convert",
+            f"Warning: folder plan format deprecated; run "
+            f"`fno plan migrate-folder {resolved.root_path}` to convert it to a single-doc plan",
             file=sys.stderr,
         )
         assert resolved.index_path is not None

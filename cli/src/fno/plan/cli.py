@@ -4,6 +4,7 @@ Verbs:
     stamp             - mark a plan's frontmatter with ship metadata (status:shipped)
     graduate          - flip a stamped plan from status:shipped to status:done
     brief             - generate a scoped task brief from a single-doc plan
+    migrate-folder    - relocate a folder plan into a single-doc plan (archive folder)
     reconcile-status  - normalize drifted plan frontmatter status in place
 
 stamp and graduate forward all unknown args + propagate exit codes from the
@@ -200,6 +201,37 @@ def brief(
         typer.echo(json.dumps(result.to_json_dict(), indent=2))
     else:
         typer.echo(result.to_markdown())
+
+
+@plan_app.command(
+    "migrate-folder",
+    help=(
+        "Relocate a folder plan (dir + 00-INDEX.md + NN-*.md phases) into a "
+        "single-doc plan beside it; archive the folder with an -archived "
+        "suffix. Idempotent. --update-node repoints a node's plan_path and "
+        "refuses dispatch-armed (ready/idea/claimed) nodes.\n\n"
+        "Exit codes: 0 success/no-op, 1 folder or node not found, "
+        "2 dispatch-armed refusal, 3 mid-write failure."
+    ),
+)
+def migrate_folder(
+    folder: str = typer.Argument(..., help="Folder-plan directory to migrate"),
+    update_node: Optional[str] = typer.Option(
+        None,
+        "--update-node",
+        help="Repoint this node's plan_path to the new doc (refuses ready/idea/claimed).",
+    ),
+) -> None:
+    from fno.plan._migrate import MigrateError, migrate_folder as _migrate
+
+    _EXIT = {"not-found": 1, "node-missing": 1, "dispatch-armed": 2}
+    try:
+        res = _migrate(folder, update_node=update_node)
+    except MigrateError as exc:
+        typer.echo(f"fno plan migrate-folder: {exc}", err=True)
+        raise typer.Exit(code=_EXIT.get(exc.kind, 3))
+
+    typer.echo(res.message)
 
 
 @plan_app.command(
