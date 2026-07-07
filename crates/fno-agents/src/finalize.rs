@@ -59,8 +59,12 @@ const SHIP_REASONS: &[&str] = &["DonePRGreen", "DoneAdvisory"];
 /// review consumes via `~/.fno/corrections.log` (ab-1a92b677: re-homed here
 /// after the control-plane wedge dropped the old stop-hook generator; moved
 /// again from ~/.claude/ to ~/.fno/ per the placement rule, ab-f063 Wave 2).
-/// A ship or a benign NoWork/Interrupted/Aborted terminal is not "stuck".
-const POSTMORTEM_REASONS: &[&str] = &["NoProgress", "Budget"];
+/// Interrupted/Aborted join the set: a session that gave up mid-wedge or got
+/// cancelled is stuck-but-differently-terminated and belongs in the corpus.
+/// A ship or a benign NoWork terminal is not "stuck": NoWork is megawalk finding
+/// nothing to do, and ship reasons succeeded. There is no `Blocked` terminal -
+/// a blocked session ends Interrupted/Aborted/NoProgress, all covered here.
+const POSTMORTEM_REASONS: &[&str] = &["NoProgress", "Budget", "Interrupted", "Aborted"];
 
 // ── arg parsing ─────────────────────────────────────────────────────────────
 
@@ -402,7 +406,8 @@ pub fn run_finalize(args: &[String]) -> i32 {
     }
 
     // ── STUCK ONLY: postmortem artifact (ab-1a92b677) ──────────────────────
-    // A NoProgress/Budget terminal means the session gave up without shipping.
+    // A stuck terminal (NoProgress/Budget/Interrupted/Aborted) means the session
+    // gave up, ran out of budget, or was cancelled mid-wedge without shipping.
     // Re-home the BLOCKED-postmortem generator the wedge dropped when the stop
     // hook became a thin shim: write a structured artifact + a corrections.log
     // pointer so the autocorrect monthly review can mechanically consume what
@@ -1838,16 +1843,10 @@ mod tests {
     #[test]
     fn postmortem_reasons_gate() {
         // Stuck terminals get a postmortem; ships and benign terminals do not.
-        for stuck in ["NoProgress", "Budget"] {
+        for stuck in ["NoProgress", "Budget", "Interrupted", "Aborted"] {
             assert!(POSTMORTEM_REASONS.contains(&stuck));
         }
-        for not_stuck in [
-            "DonePRGreen",
-            "DoneAdvisory",
-            "NoWork",
-            "Interrupted",
-            "Aborted",
-        ] {
+        for not_stuck in ["DonePRGreen", "DoneAdvisory", "NoWork"] {
             assert!(!POSTMORTEM_REASONS.contains(&not_stuck));
         }
     }

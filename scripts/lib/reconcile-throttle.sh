@@ -87,12 +87,19 @@ reconcile_maybe_fire() {
     # repo). Both retro run and tidy are best-effort (|| true): a failure never
     # affects the reconcile result publish and, per retro's own contract, a
     # failed harvest RETAINS the sentinel for the next window's retry.
+    #
+    # `fno retro drain-postmortems` also co-fires here (x-42f6 US3): a stuck
+    # session's postmortem is decoupled from the post-merge `retro run` trigger,
+    # so it drains within one throttle window of the next session start instead
+    # of waiting for an unrelated PR to merge. Best-effort, sequenced last; dedup
+    # by existing-node + consumed_at makes a race with a post-merge run safe.
     nohup bash -c '
         cd "$1" 2>/dev/null || exit 0
         "$2" backlog reconcile --json > "$3.tmp" 2>/dev/null \
             && mv -f "$3.tmp" "$3" 2>/dev/null
         "$2" retro run >/dev/null 2>&1 || true
         "$2" backlog capture tidy >/dev/null 2>&1 || true
+        "$2" retro drain-postmortems >/dev/null 2>&1 || true
     ' _ "$repo_root" "$abi_cmd" "$result" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 

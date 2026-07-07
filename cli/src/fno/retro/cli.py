@@ -503,10 +503,12 @@ def process_sentinel_file(
     return report, removed
 
 
-def _run_postmortem_pass(repo_root: Path, node_root: Path) -> bool:
-    """Drain unconsumed postmortems (W6 6.2). Returns True when any entry
-    failed to land (caller retains the retry exit code). Fully self-contained:
-    an exception here never sinks the sentinel loop."""
+def _run_postmortem_pass(repo_root: Path, node_root: Path) -> tuple[bool, int]:
+    """Drain unconsumed postmortems (W6 6.2). Returns (failed, harvested):
+    failed is True when any entry failed to land (caller retains the retry exit
+    code); harvested is the count of postmortems drained (0 on the empty/error
+    path). Fully self-contained: an exception here never sinks the sentinel
+    loop."""
     from fno.graph.store import read_graph
     from fno.paths import graph_json, postmortems_dir
     from fno.retro.routine import triage_postmortems
@@ -531,7 +533,7 @@ def _run_postmortem_pass(repo_root: Path, node_root: Path) -> bool:
         )
     except Exception as exc:  # one bad source never sinks the run
         typer.echo(f"WARN postmortem harvest: {exc}", err=True)
-        return True
+        return True, 0
     if pm.harvested:
         counts = {
             k: sum(1 for d in pm.dispositions.values() if d == k)
@@ -545,7 +547,28 @@ def _run_postmortem_pass(repo_root: Path, node_root: Path) -> bool:
         )
     for w in pm.warnings:
         typer.echo(f"WARN postmortem: {w}", err=True)
-    return pm.failed
+    return pm.failed, pm.harvested
+
+
+@retro_app.command("drain-postmortems")
+def drain_postmortems() -> None:
+    """Drain unconsumed postmortems ONLY - no sentinel triage, no carve-out
+    harvest. The narrow verb (x-42f6 US3) co-fired in the SessionStart reconcile
+    throttle so a stuck session's postmortem is harvested within one throttle
+    window, not "whenever some other PR happens to merge." Idempotent: date+
+    session-keyed filenames and consumed_at stamps mean a re-drain is a no-op."""
+    from fno.paths import resolve_canonical_repo_root, resolve_repo_root
+
+    repo_root = resolve_repo_root()
+    # Filed nodes are scoped to the CANONICAL root (a node outlives the worktree
+    # it was captured in), matching `retro run`'s split.
+    node_root = resolve_canonical_repo_root()
+    failed, harvested = _run_postmortem_pass(repo_root, node_root)
+    if not harvested and not failed:
+        # Genuinely empty drain. On the error path _run_postmortem_pass already
+        # WARNed and returns (True, 0); don't also print a clean "0 unconsumed".
+        typer.echo("postmortems: 0 unconsumed")
+    raise typer.Exit(1 if failed else 0)
 
 
 @retro_app.command("run")
@@ -660,7 +683,7 @@ def run(
     # sinks the sentinel loop, and vice versa.
     pm_failed = False
     if node is None and pr is None:
-        pm_failed = _run_postmortem_pass(repo_root, node_root)
+        pm_failed, _ = _run_postmortem_pass(repo_root, node_root)
 
     if not candidates and pr is None:
         typer.echo("(no retro-pending sentinels to triage)")

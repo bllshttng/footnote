@@ -143,6 +143,12 @@ DISPOSITION_ARCHIVE = "archive"
 
 # One-off: a specific cancel / interrupt / transient - archived, no work filed.
 _PM_ONEOFF_RE = re.compile(r"cancel|interrupt|abort", re.IGNORECASE)
+# Finalize-format STUCK TerminationReasons (finalize.rs POSTMORTEM_REASONS). NOT
+# benign one-offs even though "Interrupted"/"Aborted" contain the interrupt/abort
+# tokens _PM_ONEOFF_RE matches - they classify by body (wedge -> node, else
+# inbox) so the widened stuck-session corpus (x-42f6) is surfaced, not silently
+# archived. Exact-match on the whole subkind, so a legacy cancel kind still archives.
+_PM_STUCK_REASONS = frozenset({"noprogress", "budget", "interrupted", "aborted"})
 # Wedge-class: a named, repeatable failure mode worth a backlog node.
 _PM_WEDGE_RE = re.compile(
     r"split.?brain|wedge|respawn\s+loop|orphan|deadlock|"
@@ -165,7 +171,7 @@ def classify_postmortem(item: RawItem, *, body_cap: int = BODY_CAP) -> "tuple[st
     # .target-cancelled sentinel) is ambiguous, and ambiguous never archives -
     # it falls through to the wedge check / inbox (sigma P3).
     reason = item.subkind or ""
-    if _PM_ONEOFF_RE.search(reason):
+    if reason.lower() not in _PM_STUCK_REASONS and _PM_ONEOFF_RE.search(reason):
         return DISPOSITION_ARCHIVE, None
 
     wedge = bool(_PM_WEDGE_RE.search(item.text or ""))

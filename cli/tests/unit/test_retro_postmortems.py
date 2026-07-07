@@ -178,6 +178,29 @@ def test_classify_ambiguous_is_inbox_not_guessed() -> None:
     assert disposition == DISPOSITION_INBOX and cand is not None and cand.tier == "inbox"
 
 
+def test_classify_interrupted_wedge_is_node_not_archived() -> None:
+    """x-42f6 regression: a finalize-format Interrupted/Aborted postmortem must
+    classify by body, NOT auto-archive on the interrupt/abort substring - else
+    the widened stuck-session corpus is silently dropped (codex P2)."""
+    for reason in ("Interrupted", "Aborted"):
+        disposition, cand = classify_postmortem(
+            _item("worker hit a split-brain after respawn", subkind=reason)
+        )
+        assert disposition == DISPOSITION_NODE, f"{reason} wedge must be a node"
+        assert cand is not None and cand.tier == "node"
+
+
+def test_classify_interrupted_benign_is_inbox_not_archived() -> None:
+    """A stuck-reason postmortem with no wedge text surfaces to inbox (not
+    archived, not guessed into a node)."""
+    for reason in ("Interrupted", "Aborted"):
+        disposition, cand = classify_postmortem(
+            _item("session was cancelled while doing normal work", subkind=reason)
+        )
+        assert disposition == DISPOSITION_INBOX, f"{reason} no-wedge must be inbox"
+        assert cand is not None and cand.tier == "inbox"
+
+
 def test_classify_reasonless_cancel_wording_is_not_archived() -> None:
     """Archive requires an EXPLICIT one-off reason kind: a reason-less gist
     merely quoting cancel-ish words (.target-cancelled sentinel) is ambiguous
@@ -290,6 +313,40 @@ def test_plain_run_drains_postmortems(tmp_path: Path, monkeypatch) -> None:
     assert res.exit_code == 0, res.output
     assert "1 archived" in res.output
     assert "consumed_at" in (pm_dir / "cancel.md").read_text()
+
+
+# -- CLI wiring (`fno retro drain-postmortems`, x-42f6 US3) ---------------------
+
+def test_drain_postmortems_drains_and_reports(tmp_path: Path, monkeypatch) -> None:
+    """AC4-HP: the narrow verb drains each postmortem, stamps consumed_at, and
+    exits 0. AC4-FR: a second drain is an idempotent no-op."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    pm_dir = _wire_cli(tmp_path, monkeypatch)
+    _write(pm_dir, "cancel.md", LEGACY)
+    res = CliRunner().invoke(app, ["retro", "drain-postmortems"])
+    assert res.exit_code == 0, res.output
+    assert "1 archived" in res.output
+    assert "consumed_at" in (pm_dir / "cancel.md").read_text()
+
+    # AC4-FR: re-drain proposes nothing (consumed_at guard) -> zero-count line.
+    rerun = CliRunner().invoke(app, ["retro", "drain-postmortems"])
+    assert rerun.exit_code == 0, rerun.output
+    assert "0 unconsumed" in rerun.output
+
+
+def test_drain_postmortems_empty_is_zero_count(tmp_path: Path, monkeypatch) -> None:
+    """AC4-EDGE: no postmortems -> a zero-count line and exit 0."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    _wire_cli(tmp_path, monkeypatch)  # empty postmortems dir
+    res = CliRunner().invoke(app, ["retro", "drain-postmortems"])
+    assert res.exit_code == 0, res.output
+    assert "0 unconsumed" in res.output
 
 
 def test_targeted_run_skips_postmortems(tmp_path: Path, monkeypatch) -> None:
