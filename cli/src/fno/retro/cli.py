@@ -684,6 +684,22 @@ def run(
     pm_failed = False
     if node is None and pr is None:
         pm_failed, _ = _run_postmortem_pass(repo_root, node_root)
+        # Autonomy-debt summary (x-f894): rank gate_escape events by reason so
+        # the roadmap sees which reliability fix pays first. Rides the plain run
+        # (like the postmortem pass); prints even with no sentinels, before the
+        # early exit, so a clean repo still reports "0 by reason". Best-effort:
+        # a read failure here never sinks the retro run.
+        try:
+            from fno.retro.gate_escape import (
+                render_gate_escapes,
+                summarize_gate_escapes,
+            )
+
+            _ge = summarize_gate_escapes(node_root / ".fno" / "events.jsonl")
+            for _line in render_gate_escapes(_ge):
+                typer.echo(_line, err=True)
+        except Exception as _exc:
+            typer.echo(f"WARN gate_escape summary failed: {_exc}", err=True)
 
     if not candidates and pr is None:
         typer.echo("(no retro-pending sentinels to triage)")

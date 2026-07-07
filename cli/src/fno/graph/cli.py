@@ -4314,6 +4314,7 @@ def cmd_reconcile(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
+        emit_gate_escape_for_record,
         emit_human_touch_for_record,
         emit_session_satisfied_for_record,
         scan_merge_drift,
@@ -4433,6 +4434,32 @@ def cmd_reconcile(
             # action no loop performed. Once per node - reconcile only ever
             # closes a node once (AC4-EDGE).
             emit_human_touch_for_record(record)
+
+            # Tier-1 gate_escape (x-f894): a STRICTER subset of the touch above -
+            # only when a required review bot never reviewed the oob-merged PR
+            # (the #222 boundary). Resolve the repo's required bots (empty on
+            # most repos -> no-op) and let the helper apply the boundary + emit.
+            # Fully fail-open: never abort the close.
+            _required_bots: list = []
+            if record.cwd:
+                try:
+                    from fno.config import load_settings_for_repo
+                    _settings = load_settings_for_repo(Path(record.cwd))
+                    # The review block lives under `config:` (SettingsModel ->
+                    # config.review), NOT at the top level - reading
+                    # `_settings.review` always missed and returned [], so the
+                    # emit short-circuited and this telemetry never fired in the
+                    # real CLI path (codex P2 on PR #232). github_apps is the bot
+                    # half of the required gate; a local peer reviewer that never
+                    # reviewed is NOT counted here. That under-reports (fail-safe
+                    # direction) and is acceptable for a Tier-1 metric - dead-bot
+                    # is the recurring escape this catches.
+                    _required_bots = list(
+                        _settings.config.review.github_apps or []
+                    )
+                except Exception:
+                    _required_bots = []  # fail open: unresolvable config -> no emit
+            emit_gate_escape_for_record(record, required_bots=_required_bots)
 
             closed.append({
                 "node_id": record.node_id,

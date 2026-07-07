@@ -578,3 +578,235 @@ def emit_human_touch_for_record(record: MergeDriftRecord) -> Optional[Path]:
             file=sys.stderr,
         )
         return None
+
+
+# Tier-1 gate_escape (x-f894). A required review bot that never reviewed a PR
+# which merged out-of-band is autonomy debt: the loop should have waited for /
+# resolved that review, and the human merge past it is the escape. Kept as a
+# module constant so the emit site and its tests name the same string.
+_GATE_ESCAPE_REASON_DEADBOT = "dead-bot"
+
+
+def _fetch_pr_review_logins(
+    pr_number: int,
+    *,
+    repo: Optional[str] = None,
+    cwd: Optional[str] = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    timeout_s: float = GH_QUERY_TIMEOUT_S,
+) -> set[str]:
+    """Return the lowercased set of logins that reviewed a PR.
+
+    Any review state (APPROVED / COMMENTED / CHANGES_REQUESTED) counts as "the
+    bot reviewed" for the required-bot gate. Raises :class:`ReconcileError` on
+    any gh failure so the caller fails OPEN (does not emit on uncertainty).
+    """
+    if _gh_executable() is None:
+        raise ReconcileError("gh CLI not found on PATH")
+    cmd = ["gh", "pr", "view", str(pr_number)]
+    if repo:
+        cmd += ["--repo", repo]
+    cmd += ["--json", "reviews"]
+    try:
+        result = runner(
+            cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ReconcileError(
+            f"gh pr view #{pr_number} reviews timed out after {timeout_s}s"
+        ) from exc
+    except OSError as exc:
+        raise ReconcileError(f"gh subprocess failed to launch: {exc}") from exc
+    if result.returncode != 0:
+        raise ReconcileError(
+            f"gh pr view #{pr_number} reviews failed (rc={result.returncode}): "
+            f"{(result.stderr or '').strip()}"
+        )
+    try:
+        row = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
+    if not isinstance(row, dict):
+        raise ReconcileError("gh stdout was not a JSON object")
+    logins: set[str] = set()
+    for rev in row.get("reviews") or []:
+        if not isinstance(rev, dict):
+            continue
+        author = rev.get("author")
+        login = author.get("login") if isinstance(author, dict) else None
+        if isinstance(login, str) and login:
+            logins.add(login.lower())
+    return logins
+
+
+def _gate_escape_already_emitted(
+    events_path: Path, pr_number: Optional[int], reason: str
+) -> bool:
+    """Dedup on (pr, reason): True if events.jsonl already holds a matching
+    gate_escape (AC4-INV). Reconcile closes a node once, but two reconcile runs
+    racing the same events.jsonl (e.g. SessionStart in two worktrees) would
+    otherwise double-count. A missing/unreadable log reads as 'not emitted'."""
+    if pr_number is None or pr_number <= 0:
+        return False
+    try:
+        text = events_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if '"gate_escape"' not in line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") != "gate_escape":
+            continue
+        data = ev.get("data") or {}
+        if data.get("reason") == reason and data.get("pr") == pr_number:
+            return True
+    return False
+
+
+def _canonical_events_path(cwd: Optional[str] = None) -> Path:
+    """The single events log gate_escape telemetry lands in. A closed node
+    outlives its worktree and per-worktree events.jsonl are NOT shared, so the
+    metric must aggregate from the canonical root (the same rationale retro uses
+    for filed nodes). Retro reads this exact path.
+
+    Resolve the canonical root from the CLOSED record's ``cwd`` when given: a
+    full-graph reconcile can run from repo A and close a node whose worktree is
+    in repo B, so the escape must land under B (where ``retro run`` reads it),
+    not the process repo A (codex P2 on PR #232). Falls back to the process-cwd
+    canonical root when ``cwd`` is absent or not a working tree."""
+    from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree
+
+    if cwd:
+        canon = resolve_canonical_worktree(Path(cwd))
+        if canon is not None:
+            return canon.resolve() / ".fno" / "events.jsonl"
+    return resolve_canonical_repo_root() / ".fno" / "events.jsonl"
+
+
+def gate_escape_failure_log_path(events_path: Path) -> Path:
+    """The durable emit-failure counter, sitting beside its events log so both
+    resolve together (retro reads this for AC7)."""
+    return events_path.parent / "gate_escape_emit_failures.jsonl"
+
+
+def _record_gate_escape_emit_failure(
+    log_path: Optional[Path], node_id: str, reason: str, exc: Exception
+) -> None:
+    """Append one line to a durable emit-failure log so retro can surface a
+    broken counter (AC7-FR): a fail-open emit that silently drops would make the
+    metric under-report and OVERSTATE autonomy. Best-effort - a failure to log
+    the failure is swallowed; we never raise from the telemetry path."""
+    print(
+        f"reconcile: gate_escape emit failed for {node_id} (reason={reason}): "
+        f"{type(exc).__name__}: {exc}; merge close unaffected, telemetry fails open",
+        file=sys.stderr,
+    )
+    if log_path is None:
+        return
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(
+            {
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "node": node_id,
+                "reason": reason,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+            separators=(",", ":"),
+        )
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass  # ponytail: the failure-log write is itself best-effort; never raise
+
+
+def emit_gate_escape_for_record(
+    record: MergeDriftRecord,
+    *,
+    required_bots: list[str],
+    reviews_fetcher: Callable[..., set[str]] = _fetch_pr_review_logins,
+    events_path: Optional[Path] = None,
+) -> Optional[Path]:
+    """Tier-1 auto-emit (x-f894): a ``gate_escape{reason:dead-bot}`` when
+    reconcile closes an out-of-band-merged node whose required review bot never
+    reviewed.
+
+    Boundary (the #222 rule - the load-bearing correctness surface):
+      - required_bots empty          -> NOT an escape: a no-required-bots repo
+                                        self-merging a green PR is normal (AC2).
+      - every required bot reviewed  -> NOT an escape: the gate was met; only
+                                        the merge happened out of band (AC2b).
+      - some required bot never reviewed -> escape: the loop should have waited
+                                        for / resolved that review (AC1).
+
+    Lands in the CANONICAL events log (``events_path`` overrides for tests) so a
+    closed node's telemetry outlives its worktree and retro aggregates one
+    coherent log. Dedup on (pr, reason) (AC4). Telemetry fails OPEN: any failure
+    logs a durable emit-failure line beside the events log (AC7) and returns
+    None, never raising - the emit must never abort the reconcile close (AC5).
+    Returns the events.jsonl path on a successful emit.
+    """
+    reason = _GATE_ESCAPE_REASON_DEADBOT
+    resolved_events: Optional[Path] = events_path
+    try:
+        if record.pr_number <= 0:
+            return None  # placeholder/unassigned PR number: nothing to escape
+        wanted = [b for b in (required_bots or []) if isinstance(b, str) and b.strip()]
+        if not wanted:
+            return None  # AC2: nothing required, so nothing to escape
+
+        # Resolve the events log NOW - before the review fetch - so a fetch
+        # failure still knows where to write the durable emit-failure counter
+        # (AC7). If this were resolved only after the fetch, a gh-auth blind spot
+        # would log nothing and retro would read a silent zero (the exact
+        # silent-low-reading the metric exists to prevent). Resolved AFTER the
+        # no-required-bots return above, so a clean repo never touches the log.
+        if resolved_events is None:
+            resolved_events = _canonical_events_path(record.cwd)
+
+        # On a review-fetch failure we CANNOT tell whether a required bot
+        # reviewed, so we fail open (do not emit): a missed escape (under-report)
+        # is the safe direction, and the failure is logged so retro surfaces the
+        # blind spot rather than the metric silently reading low (AC7).
+        repo = repo_slug_from_url(record.pr_url)
+        reviewed = reviews_fetcher(record.pr_number, repo=repo, cwd=record.cwd)
+        # Match a configured bot to its review login with the SAME semantics as
+        # the ship gate (loopcheck.rs): strip a trailing ``[bot]`` suffix and do
+        # a case-insensitive substring check, so ``github_apps: [gemini]`` counts
+        # ``gemini-code-assist[bot]``'s review. Exact equality here would falsely
+        # flag a bot that DID review under its gh ``[bot]`` login as dead-bot
+        # (codex P2 on PR #232).
+        from fno.pr_watch._discover import _reviewer_matches
+
+        unmet = [b for b in wanted if not any(_reviewer_matches(lg, [b]) for lg in reviewed)]
+        if not unmet:
+            return None  # AC2b: every required bot reviewed; gate was met
+
+        if _gate_escape_already_emitted(resolved_events, record.pr_number, reason):
+            return None  # AC4: already counted this (pr, reason)
+
+        from fno.events import _build, append_event
+
+        data: dict[str, Any] = {"reason": reason, "pr": record.pr_number}
+        if record.node_id:
+            data["graph_node_id"] = record.node_id
+        # Name the wedged bot(s) so retro's ranked output can point at the fix.
+        data["detail"] = "required bot(s) never reviewed: " + ", ".join(sorted(unmet))
+        event = _build("gate_escape", "backlog", data)
+
+        append_event(event, events_path=resolved_events)
+        return resolved_events
+    except Exception as exc:  # telemetry fails OPEN (AC5) + visible (AC7)
+        fail_log = (
+            gate_escape_failure_log_path(resolved_events)
+            if resolved_events is not None
+            else None
+        )
+        _record_gate_escape_emit_failure(fail_log, record.node_id, reason, exc)
+        return None
