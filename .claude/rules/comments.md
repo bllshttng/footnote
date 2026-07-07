@@ -19,7 +19,7 @@ Rename the variable, extract the function, split the branch. If the code can car
 - Narrate the happy path step by step.
 - Re-explain a name (`/// the user id` on `user_id`).
 - Add a docstring to every function by reflex. Document a function only when its signature and name don't already tell the whole story. Most don't need one.
-- Ticket / PR / node IDs (see the no-internal-refs rule).
+- Ticket / PR / node IDs (enforced by the `scripts/ci/check-no-internal-refs.sh` CI gate).
 
 ## Shape
 
