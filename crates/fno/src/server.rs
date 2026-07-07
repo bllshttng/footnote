@@ -802,6 +802,21 @@ async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
     }
 }
 
+/// x-0296 CI diagnostics: timestamped breadcrumbs for the e2e server log
+/// (`<session>.log`, dumped by the test harness on a wait_screen timeout).
+/// FNO_E2E-gated so a production server writes none of it; the gate is
+/// latched once so the hot call sites (push_layout) never re-read the env.
+fn e2e_log(msg: std::fmt::Arguments<'_>) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("FNO_E2E").is_some()) {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        eprintln!("fno mux e2e[{ms}]: {msg}");
+    }
+}
+
 /// Shell `fno-agents claim sweep --json`, bounded + fail-open (the digest
 /// idiom, x-4e2d): returns the live-claim map (node id -> holder) for the
 /// work-queue overlay (x-54fa), or `None` on missing binary / non-zero exit /
@@ -1268,8 +1283,10 @@ impl Core {
         // is unchanged; the wire message set is unchanged (same `Frame`
         // variant, so no proto bump).
         if let Some(c) = self.clients.iter().find(|c| c.id == id) {
+            let mut sent_n = 0usize;
             let mut pids: Vec<u64> = c.visible.iter().copied().collect();
             pids.sort_unstable();
+            let visible_n = pids.len();
             let mut d = c.dirty.lock().unwrap();
             for pid in pids {
                 if let Some(entry) = self.panes.get(&pid) {
@@ -1288,10 +1305,15 @@ impl Core {
                     // notified droppable path stays the fallback rather than
                     // leaving the pane with no delivery at all.
                     if sent {
+                        sent_n += 1;
                         d.remove(&pid);
                     }
                 }
             }
+            drop(d);
+            e2e_log(format_args!(
+                "attach client {id}: {visible_n} visible panes, {sent_n} reliable frames"
+            ));
         }
     }
 
@@ -1475,6 +1497,11 @@ impl Core {
                 dead.push(c.id);
                 continue;
             }
+            e2e_log(format_args!(
+                "layout -> client {}: {} rects, reemit={reemit}",
+                c.id,
+                rects.len()
+            ));
             // An observer subscribes to all panes; a driving client to just
             // its viewed tab's rects.
             let frame_ids: Vec<u64> = if c.passive {
@@ -2852,6 +2879,7 @@ impl Core {
                         c.dims = (rows, cols);
                     }
                 }
+                e2e_log(format_args!("resize client {id} -> {rows}x{cols}"));
                 self.push_layout(true);
                 Flow::Continue
             }
@@ -2913,6 +2941,7 @@ impl Core {
                 // constraining client releases its clamp, so the tab regrows
                 // for the survivors in this same pass - Detach and an abrupt
                 // socket death take the identical path.
+                e2e_log(format_args!("client {id} gone"));
                 self.clients.retain(|c| c.id != id);
                 self.push_layout(true);
                 Flow::Continue
@@ -3464,6 +3493,7 @@ async fn serve(
                 Ok((stream, _)) => {
                     let id = next_id;
                     next_id += 1;
+                    e2e_log(format_args!("conn {id} accepted"));
                     tokio::spawn(handle_client(
                         stream,
                         accept_core_tx.clone(),
@@ -3825,6 +3855,7 @@ async fn handle_client(
                 let _ = write_msg(&mut stream, &ServerMsg::Bye { reason }).await;
                 return;
             }
+            e2e_log(format_args!("conn {id} attach read ({rows}x{cols})"));
             (rows, cols, cwd)
         }
         // Pre-Attach management pair (wire shapes FROZEN, no version
@@ -3856,6 +3887,7 @@ async fn handle_client(
     };
 
     let squad_key = resolve_squad_key(&resolver, &cwd).await;
+    e2e_log(format_args!("conn {id} squad key resolved"));
 
     let (reliable_tx, reliable_rx) = mpsc::channel::<ServerMsg>(RELIABLE_CAP);
     let dirty: DirtyMap = Arc::default();

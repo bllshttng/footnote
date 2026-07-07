@@ -199,15 +199,34 @@ impl ClientHarness {
             }
             &s[start..]
         }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
         let raw = self.raw_output().replace('\x1b', "\\e");
         let mut out = format!(
-            "--- client raw output ({} bytes, tail) ---\n{}\n",
+            "--- diagnostics at unix_ms {now_ms} ---\n--- client raw output ({} bytes, tail) ---\n{}\n",
             raw.len(),
             tail(&raw, 3000)
         );
         if let Ok(rd) = std::fs::read_dir(&self.scratch_dir) {
             for e in rd.flatten() {
                 let p = e.path();
+                if p.extension().is_some_and(|x| x == "sock") {
+                    // Is anything still listening? Refused/absent = the server
+                    // process is gone; connected = at least the OS-level
+                    // listener survives (a wedged runtime still accepts via
+                    // the backlog, so this cannot prove liveness - only death).
+                    let probe = std::os::unix::net::UnixStream::connect(&p);
+                    out.push_str(&format!(
+                        "--- socket {}: {} ---\n",
+                        p.display(),
+                        match &probe {
+                            Ok(_) => "accepting connections".to_string(),
+                            Err(e) => format!("connect failed: {e}"),
+                        }
+                    ));
+                }
                 if p.extension().is_some_and(|x| x == "log") {
                     let body = std::fs::read_to_string(&p).unwrap_or_default();
                     out.push_str(&format!(
