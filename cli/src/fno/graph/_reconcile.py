@@ -669,13 +669,23 @@ def _gate_escape_already_emitted(
     return False
 
 
-def _canonical_events_path() -> Path:
+def _canonical_events_path(cwd: Optional[str] = None) -> Path:
     """The single events log gate_escape telemetry lands in. A closed node
     outlives its worktree and per-worktree events.jsonl are NOT shared, so the
     metric must aggregate from the canonical root (the same rationale retro uses
-    for filed nodes). Retro reads this exact path."""
-    from fno.paths import resolve_canonical_repo_root
+    for filed nodes). Retro reads this exact path.
 
+    Resolve the canonical root from the CLOSED record's ``cwd`` when given: a
+    full-graph reconcile can run from repo A and close a node whose worktree is
+    in repo B, so the escape must land under B (where ``retro run`` reads it),
+    not the process repo A (codex P2 on PR #232). Falls back to the process-cwd
+    canonical root when ``cwd`` is absent or not a working tree."""
+    from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree
+
+    if cwd:
+        canon = resolve_canonical_worktree(Path(cwd))
+        if canon is not None:
+            return canon.resolve() / ".fno" / "events.jsonl"
     return resolve_canonical_repo_root() / ".fno" / "events.jsonl"
 
 
@@ -758,7 +768,7 @@ def emit_gate_escape_for_record(
         # silent-low-reading the metric exists to prevent). Resolved AFTER the
         # no-required-bots return above, so a clean repo never touches the log.
         if resolved_events is None:
-            resolved_events = _canonical_events_path()
+            resolved_events = _canonical_events_path(record.cwd)
 
         # On a review-fetch failure we CANNOT tell whether a required bot
         # reviewed, so we fail open (do not emit): a missed escape (under-report)
@@ -766,7 +776,15 @@ def emit_gate_escape_for_record(
         # blind spot rather than the metric silently reading low (AC7).
         repo = repo_slug_from_url(record.pr_url)
         reviewed = reviews_fetcher(record.pr_number, repo=repo, cwd=record.cwd)
-        unmet = [b for b in wanted if b.lower() not in reviewed]
+        # Match a configured bot to its review login with the SAME semantics as
+        # the ship gate (loopcheck.rs): strip a trailing ``[bot]`` suffix and do
+        # a case-insensitive substring check, so ``github_apps: [gemini]`` counts
+        # ``gemini-code-assist[bot]``'s review. Exact equality here would falsely
+        # flag a bot that DID review under its gh ``[bot]`` login as dead-bot
+        # (codex P2 on PR #232).
+        from fno.pr_watch._discover import _reviewer_matches
+
+        unmet = [b for b in wanted if not any(_reviewer_matches(lg, [b]) for lg in reviewed)]
         if not unmet:
             return None  # AC2b: every required bot reviewed; gate was met
 

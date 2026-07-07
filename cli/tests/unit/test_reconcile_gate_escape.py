@@ -75,6 +75,20 @@ def test_ac2b_edge_no_emit_when_required_bot_reviewed(tmp_path):
     assert _gate_escapes(tmp_path) == []
 
 
+def test_short_name_bot_matches_gh_bot_suffix_login(tmp_path):
+    """A configured short name (`gemini`) must count a review posted under gh's
+    `[bot]`-suffixed login (`gemini-code-assist[bot]`), same as the ship gate.
+    Exact equality would falsely flag a bot that DID review as dead-bot."""
+    rec = _record(tmp_path)
+    emit_gate_escape_for_record(
+        rec,
+        required_bots=["gemini"],
+        reviews_fetcher=lambda *a, **k: {"gemini-code-assist[bot]"},
+        events_path=_epath(tmp_path),
+    )
+    assert _gate_escapes(tmp_path) == []
+
+
 def test_ac4_inv_no_double_count_same_pr_reason(tmp_path):
     """AC4-INV: two closes racing the same events.jsonl count the escape once."""
     rec = _record(tmp_path)
@@ -133,7 +147,7 @@ def test_ac7_production_default_logs_fetch_failure_at_canonical(tmp_path, monkey
     reviewer caught: fetch fails before resolved_events is set)."""
     import fno.graph._reconcile as recon
 
-    monkeypatch.setattr(recon, "_canonical_events_path", lambda: _epath(tmp_path))
+    monkeypatch.setattr(recon, "_canonical_events_path", lambda *a, **k: _epath(tmp_path))
 
     def _raise(*a, **k):
         raise RuntimeError("gh auth expired")

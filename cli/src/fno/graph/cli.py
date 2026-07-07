@@ -4445,13 +4445,17 @@ def cmd_reconcile(
                 try:
                     from fno.config import load_settings_for_repo
                     _settings = load_settings_for_repo(Path(record.cwd))
-                    # github_apps is the bot half of the required gate; a local
-                    # peer reviewer that never reviewed is NOT counted here. That
-                    # under-reports (fail-safe direction) and is acceptable for a
-                    # Tier-1 metric - dead-bot is the recurring escape this catches.
+                    # The review block lives under `config:` (SettingsModel ->
+                    # config.review), NOT at the top level - reading
+                    # `_settings.review` always missed and returned [], so the
+                    # emit short-circuited and this telemetry never fired in the
+                    # real CLI path (codex P2 on PR #232). github_apps is the bot
+                    # half of the required gate; a local peer reviewer that never
+                    # reviewed is NOT counted here. That under-reports (fail-safe
+                    # direction) and is acceptable for a Tier-1 metric - dead-bot
+                    # is the recurring escape this catches.
                     _required_bots = list(
-                        getattr(getattr(_settings, "review", None), "github_apps", None)
-                        or []
+                        _settings.config.review.github_apps or []
                     )
                 except Exception:
                     _required_bots = []  # fail open: unresolvable config -> no emit
