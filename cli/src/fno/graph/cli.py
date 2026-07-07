@@ -573,27 +573,28 @@ def cmd_decompose(
         help="Allow a re-decomposition that orphans an already-shipped group child node.",
     ),
     plans: str = typer.Option(
-        "fragment",
+        "separate",
         "--plans",
         help=(
-            "Per-child plan packaging. 'fragment' (default): each child's "
-            "plan_path is a <epic-doc>#group-<slug> fragment of the shared doc "
-            "(lean, one source of truth). 'separate': scaffold a self-contained "
-            "quick-plan stub per child and repoint its plan_path to that file "
-            "(best for fresh-context bg /target builders)."
+            "Per-child plan packaging. Only 'separate' is supported: scaffold a "
+            "self-contained quick-plan stub per child and repoint its plan_path "
+            "to that file (one plan == one PR == one node). The former 'fragment' "
+            "packaging (a <epic-doc>#group-<slug> section of a shared doc) was "
+            "removed - it is still recognized on existing children for idempotent "
+            "re-decompose, but never authored."
         ),
     ),
 ) -> None:
     """Upsert group child nodes under an epic (atomic + idempotent).
 
     Each group becomes one child node (parent=epic) bundling 1+ execution waves
-    into a single shippable PR. The child's plan_path is either a
-    <epic-doc>#group-<slug> fragment (--plans fragment, default) or a
-    self-contained <stem>.group-<slug>.md quick-plan (--plans separate). Re-running
-    with the same slugs updates the existing children in place rather than
-    duplicating, keyed on the slug across both packaging modes. The whole
-    decomposition lands in one locked graph mutation, so a bad spec leaves the
-    graph exactly as it was (AC1-FR).
+    into a single shippable PR, with its own self-contained
+    <stem>.group-<slug>.md quick-plan (the only packaging). Re-running with the
+    same slugs updates the existing children in place rather than duplicating,
+    keyed on the slug - and a child still on the legacy <epic-doc>#group-<slug>
+    fragment form is repointed to its separate file. The whole decomposition
+    lands in one locked graph mutation, so a bad spec leaves the graph exactly
+    as it was (AC1-FR).
     """
     import sys as _sys
     from fno.graph._constants import mint_node_id
@@ -613,10 +614,17 @@ def cmd_decompose(
     )
     from fno.handoff.output import emit_error, json_mode
 
-    if plans not in ("fragment", "separate"):
-        emit_error(ctx, f"--plans must be 'fragment' or 'separate' (got {plans!r})")
+    if plans == "fragment":
+        emit_error(
+            ctx,
+            "--plans fragment was removed; 'separate' is now the only packaging "
+            "(one plan == one PR == one node). Drop the flag or pass --plans separate.",
+        )
         raise typer.Exit(code=1)
-    separate = plans == "separate"
+    if plans != "separate":
+        emit_error(ctx, f"--plans must be 'separate' (got {plans!r})")
+        raise typer.Exit(code=1)
+    separate = True
 
     # 1. Read the --groups source ('@file', '-' stdin, or a JSON literal),
     #    keeping read vs parse failures distinct so the message names the cause.
@@ -742,11 +750,11 @@ def cmd_decompose(
         for grp in norm:
             frag_path = child_plan_path(base, grp["slug"])
             sep_path = separate_plan_path(base, grp["slug"])
-            cpath = sep_path if separate else frag_path
+            cpath = sep_path
             # Tolerant lookup: a child is the same group whether its plan_path is
-            # currently the fragment or the separate-file form, so re-running -
-            # including a switch between --plans modes - upserts in place instead
-            # of duplicating (Concurrency invariant: idempotent on the slug).
+            # currently the legacy fragment or the separate-file form, so
+            # re-decomposing a pre-removal epic upserts in place (and repoints the
+            # child to its separate file) instead of duplicating (idempotent on slug).
             existing = next(
                 (
                     e
@@ -904,7 +912,7 @@ def cmd_decompose(
             waves = f" waves {r['waves']}" if r["waves"] else ""
             blk = f" blocked_by={r['blocked_by']}" if r["blocked_by"] else ""
             tier = " dep=contract" if r.get("dep") == "contract" else ""
-            marker = r["slug"] if separate else f"#group-{r['slug']}"
+            marker = r["slug"]
             typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}")
         for f in scaffolded:
             typer.echo(f"  scaffolded plan: {f}")
