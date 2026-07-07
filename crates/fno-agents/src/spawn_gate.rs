@@ -5,11 +5,16 @@
 //! in `fno/agents/spawn_gate.py` is the sole gate on that path — exactly one
 //! gate evaluation per spawn, LD1).
 //!
-//! The gate is READ-ONLY over the fno registry and claude's daemon roster;
-//! its only writes are its own claims (`spawn-gate` check→dispatch mutex,
-//! `worker:<name>` headless slot claims). Every guard fails OPEN on read
-//! errors (LD5): the gate is protective infrastructure and must never become
-//! the thing that bricks spawning.
+//! The gate is READ-ONLY: the `max_live` slot cap counts the fno registry
+//! (worker provenance) and the RAM floor reads system `vm_stat`/meminfo. The
+//! claude daemon roster is consulted only as a LIVENESS ORACLE for fno bg rows
+//! that carry no local pid, and by the post-spawn QoS demotion helper — never
+//! as a population to count (x-bdf9: the roster's non-work sessions must not
+//! consume worker slots; only rows that are ALSO in the fno registry count).
+//! The gate's only writes are its own claims (`spawn-gate` check→dispatch mutex,
+//! `worker:<name>` headless slot claims). Every guard fails OPEN on read errors
+//! (LD5): the gate is protective infrastructure and must never become the thing
+//! that bricks spawning.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -132,65 +137,80 @@ fn available_bytes() -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 1: the union live-count
+// Layer 1: the worker-slot count
 // ---------------------------------------------------------------------------
 
-/// Count live worker processes: | fno_registry_live ∪ claude_roster_live | +
-/// live `worker:<name>` headless slot claims, deduped by claude session
-/// short_id (an adopted/bg claude session has both a roster row and a minted
-/// registry row; count it once). Read-only; every source failure degrades to
-/// a 0 contribution with one warning line pushed to `warnings`.
-pub fn live_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
-    let mut count = 0usize;
-    let mut counted_short_ids: std::collections::HashSet<String> = Default::default();
-
-    // claude roster first: it is the RAM ground truth for foreign bg sessions.
-    match ClaudeRoster::load_default() {
-        Ok(roster) => {
-            for w in roster.workers_deduped() {
-                let alive = w.pid.map(|p| pid_is_ours(p, w.proc_start)).unwrap_or(false);
-                if alive {
-                    counted_short_ids.insert(w.short_id().to_string());
-                    count += 1;
-                }
+/// Count fno WORKER SLOTS in use for the `max_live` cap: liveness-filtered fno
+/// registry rows + live `worker:<name>` headless slot claims.
+///
+/// This is deliberately NOT the full claude daemon roster (x-bdf9). The roster
+/// carries every live claude session — dozens of claude-mem observers and
+/// resident-idle sessions among them — none of which is fno work; counting them
+/// let the slot cap read "20/15" with zero real build workers running and wedge
+/// `/target bg`. Registry membership IS the "fno spawned this for work"
+/// provenance (spawn writes the row), so the registry alone is the slot
+/// denominator. The roster's RAM cost is still honored elsewhere:
+/// [`check_ram_floor`] reads real available RAM from `vm_stat`/meminfo, which
+/// already reflects every process the roster holds.
+///
+/// The roster IS still read here, but only as a LIVENESS ORACLE, not as a
+/// population to count: a fno `claude --bg` row is minted with a `claude_short_id`
+/// but NO local `pid` (its process lives in the claude daemon, so liveness is in
+/// the roster — see `claude_ask.rs`). Such a row's liveness is resolved by
+/// looking its `claude_short_id` up in the roster. This counts real fno bg
+/// workers (which a pid-only filter would drop, letting the cap admit unbounded
+/// bg workers — Codex P1 on PR #235) WITHOUT counting non-fno sessions: a
+/// claude-mem observer has no registry row, so it is never reached.
+///
+/// Read-only; a registry read failure degrades to a 0 contribution with one
+/// warning line pushed to `warnings` (LD5, fail open).
+pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
+    // Live roster short_ids: the liveness oracle for pid-less fno bg rows only.
+    // A roster read failure degrades this to empty (bg rows then fall back to
+    // their local pid, i.e. uncounted) — fail open, never wedge.
+    let live_roster_short_ids: std::collections::HashSet<String> =
+        match ClaudeRoster::load_default() {
+            Ok(roster) => roster
+                .workers_deduped()
+                .iter()
+                .filter(|w| w.pid.map(|p| pid_is_ours(p, w.proc_start)).unwrap_or(false))
+                .map(|w| w.short_id().to_string())
+                .collect(),
+            Err(e) => {
+                warnings.push(format!(
+                    "spawn-gate: claude roster unreadable ({e}); pid-less bg rows uncounted"
+                ));
+                Default::default()
             }
-        }
-        Err(e) => warnings.push(format!(
-            "spawn-gate: claude roster unreadable ({e}); counting fno registry only"
-        )),
-    }
-
-    // fno registry rows, skipping ones already counted via the roster.
+        };
+    let mut count = 0usize;
     match load_registry(registry_path) {
         Ok(Registry { entries, .. }) => {
             for e in &entries {
                 if !status_is_liveish(&e.status) {
                     continue;
                 }
-                let dedup_key = e
-                    .claude_short_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| (!e.short_id.is_empty()).then_some(e.short_id.as_str()));
-                if let Some(k) = dedup_key {
-                    if counted_short_ids.contains(k) {
-                        continue;
-                    }
-                }
-                let alive = e
-                    .pid
-                    .map(|p| pid_is_ours(p, e.pid_start_time))
-                    .unwrap_or(false);
+                let alive = match e.pid {
+                    // Local pid: liveness by PID/start-time, same as claims.
+                    Some(p) => pid_is_ours(p, e.pid_start_time),
+                    // No local pid: a fno bg/adopted row whose process is the
+                    // claude daemon's — resolve liveness via the roster by its
+                    // claude_short_id. (A row without either signal is a
+                    // disk-only ghost and stays uncounted.)
+                    None => e
+                        .claude_short_id
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(|sid| live_roster_short_ids.contains(sid))
+                        .unwrap_or(false),
+                };
                 if alive {
-                    if let Some(k) = dedup_key {
-                        counted_short_ids.insert(k.to_string());
-                    }
                     count += 1;
                 }
             }
         }
         Err(e) => warnings.push(format!(
-            "spawn-gate: fno registry unreadable ({e}); counting claude roster only"
+            "spawn-gate: fno registry unreadable ({e}); slot count degraded to 0"
         )),
     }
 
@@ -379,11 +399,11 @@ pub fn run_gate(
         if acquired_mutex {
             guard.gate_key = Some(("spawn-gate".to_string(), holder.clone()));
             let mut warnings = Vec::new();
-            let live = live_count(registry_path, &mut warnings);
+            let slots = slot_count(registry_path, &mut warnings);
             for w in &warnings {
                 eprintln!("{w}");
             }
-            if live < cap {
+            if slots < cap {
                 // Slot free. RAM recheck happens NOW (at dequeue too — a spawn
                 // that queued 5 minutes must not dispatch into a tight machine).
                 if let Err(code) = check_ram_floor(floor_gb) {
@@ -405,21 +425,21 @@ pub fn run_gate(
 
             if flags.no_wait {
                 eprintln!(
-                    "spawn-gate: {live} live workers >= max_live {cap}; refusing (--no-wait). \
+                    "spawn-gate: {slots} live worker slots >= max_live {cap}; refusing (--no-wait). \
                      See `fno agents top`."
                 );
                 return Err(EXIT_NO_WAIT);
             }
             if !announced {
                 eprintln!(
-                    "spawn queued: {live} live workers >= max_live {cap}; waiting for a free \
+                    "spawn queued: {slots} live worker slots >= max_live {cap}; waiting for a free \
                      slot (--no-wait to fail fast, --force to bypass)"
                 );
                 announced = true;
                 last_progress = Instant::now();
             } else if last_progress.elapsed() >= QUEUE_PROGRESS_EVERY {
                 eprintln!(
-                    "still queued: {live}/{cap} live, waited {}s",
+                    "still queued: {slots}/{cap} live worker slots, waited {}s",
                     started.elapsed().as_secs()
                 );
                 last_progress = Instant::now();
@@ -681,29 +701,126 @@ MemAvailable:    8000000 kB\n";
     }
 
     #[test]
-    fn live_count_absent_sources_is_zero_with_rows_needing_pids() {
-        // A registry path that does not exist + (whatever roster the host has)
-        // must not panic; the count is >= 0 and warnings explain any misses.
-        // Serialize: live_count reads $HOME (roster) and the claims root.
+    fn slot_count_absent_sources_is_zero_with_rows_needing_pids() {
+        // A registry path that does not exist must not panic; the count is >= 0
+        // and a malformed file warns rather than errors (LD5, fail open).
+        // Serialize: slot_count reads the claims root.
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Missing registry: fresh-machine semantics, zero contribution, no
         // panic (load_registry treats absent as empty).
         let mut warnings = Vec::new();
-        let missing = std::env::temp_dir().join("abi-gate-noreg/registry.json");
-        let _ = live_count(&missing, &mut warnings);
+        let missing = std::env::temp_dir().join("fno-gate-noreg/registry.json");
+        let _ = slot_count(&missing, &mut warnings);
 
         // Malformed registry: fail OPEN with one warning (LD5), never an error.
-        let dir = std::env::temp_dir().join(format!("abi-gate-badreg-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fno-gate-badreg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bad = dir.join("registry.json");
         std::fs::write(&bad, "{ not json").unwrap();
         let mut warnings = Vec::new();
-        let _ = live_count(&bad, &mut warnings);
+        let _ = slot_count(&bad, &mut warnings);
         assert!(
             warnings.iter().any(|w| w.contains("registry unreadable")),
             "malformed registry must warn, got {warnings:?}"
         );
+    }
+
+    /// AC1-FR (x-bdf9): the Rust gate and the Python mirror must return the same
+    /// slot count for the same synthetic registry+roster. Both suites read this
+    /// ONE fixture; a divergence in either gate's counting rule (e.g. re-adding
+    /// the roster to the slot count) fails its own assertion. A populated roster
+    /// is materialized deliberately: `slot_count` must ignore it, so a future
+    /// re-introduction of roster counting inflates the count and trips here.
+    #[test]
+    fn slot_count_agrees_with_python_gate_fixture() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/tests/agents/fixtures/spawn_gate_slot_agreement.json");
+        let raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("read fixture {}: {e}", fixture_path.display()));
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let self_pid = std::process::id();
+        // 2^22+17: realistically never a live pid (mirrors the Python fixture).
+        let dead_pid: u32 = 4_194_321;
+        let resolve = |v: &serde_json::Value| -> Option<u32> {
+            match v.as_str() {
+                Some("self") => Some(self_pid),
+                Some("dead") => Some(dead_pid),
+                _ => None, // absent pid = disk-only row
+            }
+        };
+        let base = std::env::temp_dir().join(format!("fno-gate-agree-{self_pid}"));
+        for (i, sc) in fixture["scenarios"].as_array().unwrap().iter().enumerate() {
+            let dir = base.join(format!("s{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            // Isolate the claims root: no real worker:<name> slot claim leaks in.
+            std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+            // Populate a roster the slot count must ignore.
+            let daemon = dir.join("daemon");
+            std::fs::create_dir_all(&daemon).unwrap();
+            std::env::set_var("FNO_CLAUDE_DAEMON_DIR", &daemon);
+            let mut rworkers = Vec::new();
+            for (j, r) in sc["roster"].as_array().unwrap().iter().enumerate() {
+                let short = r["short"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{:08x}", 0xaaaa_0000u32 + j as u32));
+                let pidf = resolve(&r["pid"])
+                    .map(|p| format!(r#","pid":{p}"#))
+                    .unwrap_or_default();
+                rworkers.push(format!(
+                    r#""{short}":{{"sessionId":"{short}-1-2-3-4"{pidf}}}"#
+                ));
+            }
+            std::fs::write(
+                daemon.join("roster.json"),
+                format!(
+                    r#"{{"proto":1,"supervisorPid":1,"workers":{{{}}}}}"#,
+                    rworkers.join(",")
+                ),
+            )
+            .unwrap();
+            // Materialize the registry.
+            let mut entries = Vec::new();
+            for row in sc["registry"].as_array().unwrap() {
+                let name = row["name"].as_str().unwrap();
+                let status = row["status"].as_str().unwrap();
+                let pidf = resolve(&row["pid"])
+                    .map(|p| format!(r#","pid":{p}"#))
+                    .unwrap_or_default();
+                let csidf = row["claude_short_id"]
+                    .as_str()
+                    .map(|s| format!(r#","claude_short_id":"{s}""#))
+                    .unwrap_or_default();
+                entries.push(format!(
+                    r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z"{pidf}{csidf}}}"#
+                ));
+            }
+            let reg = dir.join("registry.json");
+            std::fs::write(
+                &reg,
+                format!(
+                    r#"{{"schema_version":1,"entries":[{}]}}"#,
+                    entries.join(",")
+                ),
+            )
+            .unwrap();
+
+            let mut warnings = Vec::new();
+            let got = slot_count(&reg, &mut warnings);
+            let want = sc["expect_slot_count"].as_u64().unwrap() as usize;
+            assert_eq!(
+                got,
+                want,
+                "scenario {:?}: got {got}, want {want}",
+                sc["name"].as_str().unwrap_or("?")
+            );
+        }
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
     }
 }

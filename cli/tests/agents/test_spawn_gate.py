@@ -196,7 +196,7 @@ class TestRunGate:
         _settings(monkeypatch, max_live=1)
         w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[w])
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
         )
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
@@ -214,14 +214,14 @@ class TestRunGate:
         def fake_census():
             calls["n"] += 1
             if calls["n"] == 1:
-                return spawn_gate.LiveCensus(workers=[w])
+                return spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
             return spawn_gate.LiveCensus(workers=[])
 
         monkeypatch.setattr(spawn_gate, "census", fake_census)
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
         guard = spawn_gate.run_gate("w2", "bg")
         err = capsys.readouterr().err
-        assert "spawn queued: 1 live workers >= max_live 1" in err
+        assert "spawn queued: 1 live worker slots >= max_live 1" in err
         assert "--no-wait" in err and "--force" in err
         guard.release()
 
@@ -230,7 +230,7 @@ class TestRunGate:
         _settings(monkeypatch, max_live=1)
         w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[w])
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
         )
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
         monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
@@ -245,7 +245,7 @@ class TestRunGate:
         _settings(monkeypatch, max_live=1)
         w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[w])
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
         )
         guard = spawn_gate.run_gate("w2", "bg", force=True)
         assert "forced past cap" in capsys.readouterr().err

@@ -5,8 +5,13 @@ Called at the top of ``cmd_spawn`` before the substrate fan-out. Mirrors
 exclusive execution paths (the front door execs the binary for bg/headless;
 the Rust ``pane`` arm re-execs this CLI), so every spawn passes exactly one.
 
-The gate is READ-ONLY over the fno registry and claude's daemon roster; its
-only writes are its own claims (``spawn-gate`` check→dispatch mutex,
+The gate is READ-ONLY: the ``max_live`` slot cap counts fno registry rows
+(worker provenance) and the RAM floor reads real system RAM. The claude daemon
+roster feeds the ``fno agents top`` display and serves as a LIVENESS ORACLE for
+fno bg rows that carry no local pid, but is never a population to count toward
+the slot cap (x-bdf9 — only a row that is ALSO in the fno registry counts, so
+non-work sessions never consume slots). Its only writes are its own claims
+(``spawn-gate`` check→dispatch mutex,
 ``worker:<name>`` headless slot claims, both under the GLOBAL claims root —
 the RAM budget is machine-wide). Every guard fails OPEN on read errors: the
 gate must never become the thing that bricks spawning.
@@ -19,7 +24,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import unquote
 
 # Exit codes, distinct from existing dispatch codes (2, 13, 14, 15, 18, 127)
@@ -94,7 +99,7 @@ def _roster_path() -> Path:
 class LiveWorker:
     """One live process row, shared by the gate count and ``fno agents top``."""
 
-    source: str  # "fno" | "claude"
+    source: Literal["fno", "claude"]
     name: str
     provider: str
     substrate: str
@@ -108,20 +113,44 @@ class LiveCensus:
     warnings: list[str] = field(default_factory=list)
     #: live worker:<name> slot claims (headless one-shots, no process row yet)
     slot_claims: int = 0
+    #: live fno registry work rows, counted straight from the registry
+    #: (dedup-independent) so the slot cap mirrors the Rust gate exactly — see
+    #: :attr:`slot_count`.
+    fno_slot_workers: int = 0
 
     @property
     def count(self) -> int:
+        """The full union size (fno rows + roster sessions + slot claims). The
+        RAM-ground-truth / ``fno agents top`` display number — NOT the slot cap
+        denominator."""
         return len(self.workers) + self.slot_claims
+
+    @property
+    def slot_count(self) -> int:
+        """Worker SLOTS in use for the ``max_live`` cap (x-bdf9): live fno
+        registry rows + headless slot claims. Counted straight from the
+        registry, NOT by filtering the display union — a bg/adopted fno worker
+        is display-deduped into its roster row (``source == "claude"``) but is
+        still fno work and must hold a slot, exactly as the Rust gate counts it.
+        The claude roster's non-work sessions (claude-mem observers, resident
+        idle) never enter this count; their RAM cost stays honored by the
+        separate ``min_free_gb`` floor."""
+        return self.fno_slot_workers + self.slot_claims
 
 
 def census() -> LiveCensus:
-    """The union live-count: fno registry ∪ claude roster (deduped by claude
-    session short_id) + live ``worker:<name>`` slot claims. Read-only; every
-    source failure degrades to zero contribution with one warning."""
+    """The full union: fno registry ∪ claude roster (deduped by claude session
+    short_id) + live ``worker:<name>`` slot claims. This is the display /
+    RAM-ground-truth view (``fno agents top`` renders every row). The spawn
+    gate's ``max_live`` decision uses :attr:`LiveCensus.slot_count`, which
+    counts fno-sourced rows only — the roster is kept here for visibility but
+    does NOT consume worker slots (x-bdf9). Read-only; every source failure
+    degrades to zero contribution with one warning."""
     out = LiveCensus()
     counted_short_ids: set[str] = set()
 
-    # claude roster first: RAM ground truth for foreign `claude --bg` sessions.
+    # claude roster first: display + dedup key for adopted sessions. Kept in the
+    # union for `fno agents top`, but excluded from the slot cap (see slot_count).
     roster_workers: dict[str, dict] = {}
     try:
         raw = json.loads(_roster_path().read_text(encoding="utf-8"))
@@ -157,38 +186,63 @@ def census() -> LiveCensus:
                 )
             )
 
-    # fno registry rows, skipping ones already counted via the roster.
+    # Snapshot the LIVE roster short_ids before the registry loop mutates
+    # counted_short_ids. This is the liveness oracle for fno bg rows that carry
+    # no local pid (their process is the claude daemon's), NOT a population to
+    # count — only a row that is ALSO in the fno registry is ever counted.
+    roster_live_short_ids = set(counted_short_ids)
+
+    # fno registry rows: every live one holds a worker slot; the roster only
+    # decides whether to add a DUPLICATE display row for a bg/adopted worker.
     try:
         from fno.agents.registry import load_registry
 
         rows = load_registry()
     except Exception as exc:
         out.warnings.append(
-            f"spawn-gate: fno registry unreadable ({exc}); counting claude roster only"
+            f"spawn-gate: fno registry unreadable ({exc}); registry rows omitted from the census"
         )
         rows = []
     for row in rows:
         if row.status not in LIVE_STATUSES:
             continue
+        pid_alive = _pid_alive(row.pid, row.pid_start_time)
+        # A fno `claude --bg` row is minted with a claude_short_id but no local
+        # pid (liveness lives in the claude daemon roster). Resolve it via the
+        # roster so real fno bg workers hold slots — a pid-only filter would drop
+        # them and let the cap admit unbounded bg workers (Codex P1, PR #235).
+        # Still no non-fno session counted: a claude-mem observer has no
+        # registry row and never reaches here.
+        bg_alive = (
+            not pid_alive
+            and row.pid is None
+            and bool(row.claude_short_id)
+            and row.claude_short_id in roster_live_short_ids
+        )
+        if not (pid_alive or bg_alive):
+            continue
+        # A live fno row is fno work: it holds a slot regardless of the display
+        # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
+        # but its registry row is the slot, matching the registry-only Rust gate).
+        out.fno_slot_workers += 1
         dedup_key = row.claude_short_id or row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
-            continue
-        if _pid_alive(row.pid, row.pid_start_time):
-            if dedup_key:
-                counted_short_ids.add(dedup_key)
-            substrate = "pane" if getattr(row, "mux", None) else (
-                "bg" if row.claude_short_id else "worker"
+            continue  # already shown as its roster row in the display union
+        if dedup_key:
+            counted_short_ids.add(dedup_key)
+        substrate = "pane" if getattr(row, "mux", None) else (
+            "bg" if row.claude_short_id else "worker"
+        )
+        out.workers.append(
+            LiveWorker(
+                source="fno",
+                name=row.name,
+                provider=row.provider,
+                substrate=substrate,
+                pid=row.pid,
+                status=str(row.status),
             )
-            out.workers.append(
-                LiveWorker(
-                    source="fno",
-                    name=row.name,
-                    provider=row.provider,
-                    substrate=substrate,
-                    pid=row.pid,
-                    status=str(row.status),
-                )
-            )
+        )
 
     out.slot_claims = _live_worker_slot_claims(out.warnings)
     return out
@@ -360,7 +414,8 @@ def run_gate(
             c = census()
             for w in c.warnings:
                 _warn(w)
-            if c.count < cap:
+            slots = c.slot_count
+            if slots < cap:
                 try:
                     _check_ram_floor(floor_gb)
                 except GateRefused:
@@ -376,14 +431,14 @@ def run_gate(
 
             if no_wait:
                 _warn(
-                    f"spawn-gate: {c.count} live workers >= max_live {cap}; "
+                    f"spawn-gate: {slots} live worker slots >= max_live {cap}; "
                     f"refusing (--no-wait). See `fno agents top`."
                 )
                 raise GateRefused(EXIT_NO_WAIT)
             now = time.monotonic()
             if not announced:
                 _warn(
-                    f"spawn queued: {c.count} live workers >= max_live {cap}; "
+                    f"spawn queued: {slots} live worker slots >= max_live {cap}; "
                     f"waiting for a free slot (--no-wait to fail fast, "
                     f"--force to bypass)"
                 )
@@ -391,7 +446,7 @@ def run_gate(
                 last_progress = now
             elif now - last_progress >= QUEUE_PROGRESS_EVERY_S:
                 _warn(
-                    f"still queued: {c.count}/{cap} live, "
+                    f"still queued: {slots}/{cap} live worker slots, "
                     f"waited {int(now - started)}s"
                 )
                 last_progress = now
