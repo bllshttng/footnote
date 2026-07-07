@@ -274,16 +274,16 @@ entries:
   - date: 2026-07-06
     pr: 222
     branch: feature/x-5413
-    delta: 176
+    delta: 182
     reason: >-
       Three new advisory session-lifecycle hook guards (x-5413), all fail-open
       and read-only over session state - never mutate the loop, graph, or
-      manifest. +74 hooks/attest-model.sh (SessionStart model/provider
+      manifest. +76 hooks/attest-model.sh (SessionStart model/provider
       env-coherence: warns when ANTHROPIC_MODEL names a non-Anthropic model but
       ANTHROPIC_BASE_URL is empty or an anthropic.com host so the request
       silently falls back to the primary Anthropic model - the x-db50
       wrong-model class - plus the OAuth-scrub catch on a real routed lane;
-      records an intended-identity sidecar for the transcript-drift check). +74
+      records an intended-identity sidecar for the transcript-drift check). +78
       hooks/arm-handoff-precompact.sh (PreCompact intent recorder: when a live
       target session is past the context-pressure threshold with outstanding
       work it writes a handoff-armed marker keyed on the manifest session_id; it
