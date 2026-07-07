@@ -65,6 +65,28 @@ def _good_plan(tmp_path, name):
 # help + A2 rejection
 # --------------------------------------------------------------------------- #
 
+def test_digest_dir_keyed_to_skill_owner(monkeypatch, tmp_path):
+    """The digest lands under the skill's owning project (its skill-id
+    namespace), not the ambient checkout - so a sweep fired from a worktree
+    or a sibling repo never spawns an internal/<basename>/ folder."""
+    import fno.paths as paths
+
+    seen = {}
+
+    def _capture(project_root=None, project_id=None):
+        seen["project_id"] = project_id
+        return tmp_path
+
+    monkeypatch.setattr(paths, "observer_reports_dir", _capture)
+    summary = {
+        "skill_id": "fno:blueprint", "run_id": "obs-x", "coverage_pct": 100,
+        "corpus_size": 1, "pass_count": 1, "degraded_count": 0, "fail_count": 0,
+        "failure_ranking": [],
+    }
+    cli._write_digest(summary, "blueprint", mode="sweep")
+    assert seen["project_id"] == "fno"
+
+
 def test_help_lists_sweep_and_replay():
     r = runner.invoke(cli.observer_app, ["--help"])
     assert r.exit_code == 0

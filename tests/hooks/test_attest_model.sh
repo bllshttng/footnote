@@ -31,7 +31,7 @@ STDIN_JSON="$(printf '{"session_id":"%s"}' "$SID")"
 # Run the hook with a scrubbed routing env, capturing stdout + exit code.
 run_hook() {
   # args: MODEL BASE TOKEN
-  env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN \
+  env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u FNO_HOME \
     ANTHROPIC_MODEL="$1" ANTHROPIC_BASE_URL="$2" ANTHROPIC_AUTH_TOKEN="$3" \
     HOME="$HOME" \
     bash "$HOOK" <<<"$STDIN_JSON"
@@ -74,7 +74,7 @@ echo "$OUT" | grep -q "OAuth" && pass "oat token on routed lane -> OAuth warning
   || fail "expected OAuth warning, got: $OUT"
 
 # 6. Sidecar recorded the intended identity.
-[[ -f "$HOME/.claude/.fno-attest-${SID}.json" ]] && pass "sidecar written" || fail "sidecar missing"
+[[ -f "$HOME/.fno/attest/${SID}.json" ]] && pass "sidecar written" || fail "sidecar missing"
 
 # 7. Fail-open: garbage env still exits 0 and never blocks.
 OUT="$(run_hook "!!!bad model!!!" "not-a-url" "" 2>/dev/null)"; RC=$?

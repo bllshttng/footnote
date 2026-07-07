@@ -126,7 +126,8 @@ function checkSpendAndDrift(sessionId, transcriptPath, tmpDir) {
     // Drift is checkable only if L1 recorded an intended model and we haven't warned.
     let intendedModel = null
     if (!state.driftWarned) {
-      const attestPath = path.join(os.homedir(), '.claude', `.fno-attest-${sessionId}.json`)
+      const fnoHome = process.env.FNO_HOME || path.join(os.homedir(), '.fno')
+      const attestPath = path.join(fnoHome, 'attest', `${sessionId}.json`)
       if (fs.existsSync(attestPath)) {
         try {
           const a = JSON.parse(fs.readFileSync(attestPath, 'utf8'))
