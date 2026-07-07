@@ -83,6 +83,34 @@ def test_upstream_flag_feature_push_still_allowed():
         "git push -u origin feature/x") == (False, None)
 
 
+# --force-with-lease carries an =<ref> value that must be stripped whole, else
+# the leftover token shifts the positional parse and a force-with-lease to a
+# protected branch slips through the destination check.
+
+def test_force_with_lease_to_feature_allowed():
+    _on_main("feature/x")
+    assert git_protection.is_push_to_protected_branch(
+        "git push --force-with-lease origin feature/x") == (False, None)
+
+
+def test_force_with_lease_to_main_still_blocked():
+    _on_main("feature/x")
+    assert git_protection.is_push_to_protected_branch(
+        "git push --force-with-lease origin main") == (True, "main")
+
+
+def test_force_with_lease_ref_value_to_main_still_blocked():
+    _on_main("feature/x")
+    assert git_protection.is_push_to_protected_branch(
+        "git push --force-with-lease=origin/feature origin main") == (True, "main")
+
+
+def test_force_with_lease_ref_value_to_feature_allowed():
+    _on_main("feature/x")
+    assert git_protection.is_push_to_protected_branch(
+        "git push --force-with-lease=origin/main origin feature/x") == (False, None)
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):

@@ -165,8 +165,11 @@ def extract_branch_from_push(command):
     #   git push -u origin main
     #   git push --set-upstream origin main
 
-    # Remove flags
-    cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)', ' ', command)
+    # Remove flags, including an attached =value (so `--force-with-lease=origin/x`
+    # is dropped whole; without this the leftover `=origin/x` shifts the
+    # positional parse and a `... =origin/x origin main` reads the destination as
+    # the remote, letting a force-with-lease to a protected branch slip through).
+    cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)(=\S+)?', ' ', command)
 
     # Match: git push [optional remote] [branch-or-refspec]
     match = re.search(r'git\s+push\s+(?:\S+\s+)?(\S+)', cleaned)
@@ -189,8 +192,9 @@ def push_names_explicit_dest(command):
     caller falls through to the current-branch check."""
     # Collapse shell line-continuations so multiline pushes count correctly.
     cleaned = re.sub(r'\\\s*\n', ' ', command)
-    # Drop flags (and stop at '=' so `--repo=x` leaves no positional token).
-    cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)', ' ', cleaned)
+    # Drop flags including an attached =value, so `--force-with-lease=origin/x`
+    # leaves no positional token to miscount.
+    cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)(=\S+)?', ' ', cleaned)
     m = re.search(r'git\s+push\b(.*)$', cleaned)
     if not m:
         return False
