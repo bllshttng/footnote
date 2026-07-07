@@ -74,7 +74,7 @@ target claims opt in by recording a durable session pid (see below); the
 megawalk walker records a transient pid, so the arm never fires for it and
 its TTL park-exclusion is unchanged.
 
-**Suspect state + skip-not-steal (x-ba4b).** A TTL claim still *inside* its
+**Suspect state + skip-not-steal.** A TTL claim still *inside* its
 window whose recorded pid is not live classifies as `suspect`, not `live`.
 This is the respawned-worker case: a bg `/target` supervisor pid dies and the
 claude session keeps working under a new pid, so the pid arm can no longer

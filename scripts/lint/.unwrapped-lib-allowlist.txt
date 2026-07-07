@@ -67,12 +67,12 @@ aborted-tag.sh
 help-tag.sh
 hook-input.sh
 
-# Phase 4 of stop-hook refactor: thrash detector + external cancel signal
-# detector lifted from hooks/target-stop-hook.sh. Both are sourced by the
-# hook (and by tests that exercise the helpers in isolation). cancel-signal
-# owns the BLOCKED-write path; thrash-detector bundles the no-progress,
-# gate-only, budget, and help-escalation helpers.
-thrash-detector.sh
+# Phase 4 of stop-hook refactor: external cancel signal detector lifted
+# from hooks/target-stop-hook.sh. Sourced by the hook (and by tests that
+# exercise the helper in isolation); cancel-signal owns the BLOCKED-write
+# path. (The bash thrash-detector was retired; loop enforcement -
+# no-progress, budget, help-escalation - now lives in
+# crates/fno-agents/src/loopcheck.rs.)
 cancel-signal.sh
 
 # Orphan target-family detector: blocks exit when /fno:target,
@@ -89,8 +89,9 @@ stale-owner.sh
 
 # Phase 8 of stop-hook refactor: legacy RESULT-line and output-hash
 # circuit breakers lifted from sections 33+34 of the pre-refactor
-# hooks/target-stop-hook.sh. Distinct from thrash-detector.sh (Phase 4
-# structural-fingerprint detector): these are simpler 3-identical-X
+# hooks/target-stop-hook.sh. Distinct from the retired Phase-4 bash
+# thrash-detector (structural-fingerprint detection now lives in
+# crates/fno-agents/src/loopcheck.rs): these are simpler 3-identical-X
 # circuit breakers that coach toward <help>. Sourced by the hook; no
 # user-facing CLI.
 legacy-circuit-breaker.sh
@@ -103,14 +104,14 @@ legacy-circuit-breaker.sh
 # Sourced by the hook; not a user-facing entry point.
 gate-audit.sh
 
-# Phase 9 of stop-hook refactor: thrash-detector orchestrator. The
+# Phase 9 of stop-hook refactor: thrash-orchestrator. The
 # threshold-init + STATUS guard + budget/help/thrash/gate-progress
 # call sequence (lines 690-905 of the pre-refactor hook) moved into
-# enforce_thrash_detectors() in this lib. The detector functions themselves
-# (check_no_progress_thrash, check_no_gate_progress,
-# count_consecutive_help_emissions, etc.) still live in thrash-detector.sh
-# (Phase 4). Sourced by the hook; tests source the lib directly for
-# structural greps. Not a user-facing entry point.
+# enforce_thrash_detectors() in this lib. The underlying detectors
+# (no-progress, gate-progress, help-escalation, budget) were the retired
+# Phase-4 bash thrash-detector; that enforcement now lives in
+# crates/fno-agents/src/loopcheck.rs. Sourced by the hook; tests source the
+# lib directly for structural greps. Not a user-facing entry point.
 thrash-orchestrator.sh
 
 # Phase 10 of stop-hook refactor: pre-case-statement BLOCKED writer for
@@ -139,8 +140,8 @@ verified-merge.sh
 # Phase 12 of stop-hook refactor: budget-display computation. Reads
 # total_cost_usd + budget_cap_usd from STATE_FILE; sets COST_DISPLAY for
 # the resume system message. Pure display logic; the actual budget
-# enforcement (BLOCKED trip) lives in thrash-detector.sh. Sourced by the
-# hook; not a user-facing entry point.
+# enforcement (cap trip) lives in crates/fno-agents/src/loopcheck.rs.
+# Sourced by the hook; not a user-facing entry point.
 budget-display.sh
 
 # Advisory body-length lint for gate artifacts. Soft warning only;

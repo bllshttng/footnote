@@ -3,9 +3,10 @@
 #
 # Lifted from hooks/target-stop-hook.sh (Phase 12 of stop-hook refactor).
 # Pure display logic - no gates, no kills. The actual budget enforcement
-# (the trip that flips status to BLOCKED with stuck:budget_exceeded) lives
-# in scripts/lib/thrash-detector.sh under check_budget_exceeded. This lib
-# only computes the cosmetic suffix the resume system message includes
+# (the cap trip that terminates the loop with TerminationReason::Budget)
+# lives in crates/fno-agents/src/loopcheck.rs (the budget_cost_cap_usd /
+# budget_wall_clock_cap_minutes caps). This lib only computes the cosmetic
+# suffix the resume system message includes
 # (e.g. " | Cost: $1.42/$5.00 (approaching cap)").
 #
 # Reads total_cost_usd (or legacy total_cost) and budget_cap_usd from
@@ -14,9 +15,9 @@
 # the cost is over budget, near (>80%) the cap, or under.
 #
 # May emit a `budget_exceeded` event (informational) when total > cap.
-# This is hook-only telemetry; it does NOT block exit. The thrash
-# detector emits its own typed `budget_exceeded` when the wall-clock or
-# cost cap from settings.yaml is exceeded - that one DOES trip BLOCKED.
+# This is hook-only telemetry; it does NOT block exit. loop-check
+# (crates/fno-agents/src/loopcheck.rs) applies its own wall-clock / cost
+# caps from settings.yaml - that path DOES terminate the loop (Budget).
 #
 # Side effects:
 #   - Sets COST_DISPLAY global (read by the resume system-message builder)

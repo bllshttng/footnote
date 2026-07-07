@@ -36,8 +36,8 @@ pricing-only -> /3), node-level cost_usd aggregates are recomputed, and
 unknown sessions are left alone (counted and printed). Graph mutations go
 through fno.graph.store.locked_mutate_graph - the lock-protected,
 hash-sidecar-respecting canonical write path. `session_id` fields in both
-files are never modified (thrash-detector's compute_session_cost greps by
-session_id prefix).
+files are never modified (fno.cost._session_cost keys the per-session cost
+lookup off session_id).
 
 Concurrency contract: the ledger pass holds the same flock the register
 path uses (/tmp/abilities-ledger.lock, see register-task.py), and --apply

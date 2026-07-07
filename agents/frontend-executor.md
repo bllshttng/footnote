@@ -420,5 +420,5 @@ tests will catch the drift.
 
 The two-tier verdict (critique_target/critique_floor) and the finding
 classification table (in_diff / out_of_diff_blocking / out_of_diff_latent)
-are NEW in this version of the agent (Phase 01 of ab-028ad6e8). The shell
+are NEW in this version of the agent (Phase 01 of this agent's rework). The shell
 port does not yet implement these; they are tracked in Phase 03.

@@ -3,7 +3,7 @@
 The always-on backlog drain: a supervised background task inside the per-user
 supervisor daemon that continuously claims ready backlog nodes for a project and
 dispatches them one at a time through the existing megawalk loop primitive,
-sleeping between drains. Config-gated, default-off, fail-safe. Node `x-c070`.
+sleeping between drains. Config-gated, default-off, fail-safe.
 
 ## Why
 

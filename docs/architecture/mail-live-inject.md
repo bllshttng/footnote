@@ -1,6 +1,6 @@
 # Architecture: live-inject-first a2a delivery and the `<fno_mail>` envelope
 
-`fno mail send` delivers an agent-to-agent message to a LIVE recipient first and queues the durable bus only as a fallback. This is the unification (node x-1f23, epic x-07c1) that sits on top of the G1 substrate (node x-26df): one send interface, one wire envelope, one live primitive per provider, with the durable bus demoted from a peer system to the offline pending-queue.
+`fno mail send` delivers an agent-to-agent message to a LIVE recipient first and queues the durable bus only as a fallback. This is the unification that sits on top of the G1 substrate: one send interface, one wire envelope, one live primitive per provider, with the durable bus demoted from a peer system to the offline pending-queue.
 
 ## The delivery model
 
@@ -16,7 +16,7 @@ The per-agent flock that `dispatch_send` already holds serializes concurrent sen
 
 Every live transport carries the same `<fno_mail>`-wrapped turn:
 
-- **claude**: dual-lane by recipient spawn-style (node x-849b), resolved in one place by `roundtrip.resolve_live_lane` (worker beats control; the two `host_mode`s are mutually exclusive for one uuid):
+- **claude**: dual-lane by recipient spawn-style, resolved in one place by `roundtrip.resolve_live_lane` (worker beats control; the two `host_mode`s are mutually exclusive for one uuid):
   - an **owned-PTY worker** (`host_mode == "interactive"`, a footnote-spawned daemon worker) has no `control.sock` handle, so it is driven over its `worker.sock` via `roundtrip.submit_via_worker` (`worker.submit` RPC). Without this lane, mail to an owned-PTY worker silently fell to the durable queue a finished `/think` never drains. The worker inject is framed in bracketed paste (`ESC[200~ ... ESC[201~`, `worker.rs::submit_keys`) so claude's TUI buffers it atomically instead of dropping chars under render load. If the resolved `worker.sock` is gone (a stale live-looking interactive row can coexist with a valid adopted row for one uuid), delivery falls through to the control lane below rather than demoting to durable, mirroring the relay's claim-based dispatch (`daemon.py:351-365`).
   - an **adopted `claude --bg`** session (`host_mode == "attached"`) takes the proven `control.sock` `op:'reply'` inject through the `fno-agents mail-inject` verb (see below). The stream-json switchboard and MCP-channel fast lanes still apply first for peers that are live stream threads or MCP-routed; the `control.sock` inject is the successor to the dead per-worker messaging socket.
   - Both lanes carry the SAME `<fno_mail>` envelope (`_deliver_live` wraps the turn before lane selection), so an owned-PTY worker's turn is the same agent-vs-human-discriminated turn an adopted session gets.
@@ -67,7 +67,7 @@ Both are accepted tradeoffs of live-inject-first. Hard exactly-once would carry 
 
 The cross-session relay PTY hop (`cli/src/fno/relay/envelope.py`) frames provenance on the same `<fno_mail>` tag, but as the SINGLE-LINE, no-close transport variant: `<fno_mail from="..." harness="..."[ model="..."]> <one-line body>`. It cannot carry the paired multiline form because the PTY Enter submits on newline. It shares the tag name and `harness` vocabulary so `grep <fno_mail>` reconstructs relay hops too.
 
-### Cross-harness hop (G4, x-3f34)
+### Cross-harness hop (G4)
 
 The relay graph spans harnesses (claude -> codex, codex -> gemini, ...), not just claude<->claude. The hop splits into two halves with opposite generality:
 

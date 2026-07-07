@@ -40,6 +40,12 @@ CANONICAL_MODULE = "cli/src/fno/graph/_constants.py"
 # branch alongside it. New entries here require an equivalent justification.
 LEGACY_FASTPATH_FILES = {
     "hooks/helpers/init-target-state.sh",
+    # The node-ID LEAK SCANNER itself: a portable bash CI gate that greps
+    # shipped prose for the node-ID format literal. It cannot import the Python
+    # canonical helper (it runs as a standalone shell script, per-line grep), so
+    # the format regex here IS the intended, load-bearing use - not a stray
+    # re-implementation. (finding A2, x-ae52)
+    "scripts/ci/check-no-internal-refs.sh",
 }
 
 # A hardcoded format matcher: ``ab-`` glued to a hex character class.

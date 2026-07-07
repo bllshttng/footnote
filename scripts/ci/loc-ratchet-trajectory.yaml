@@ -305,3 +305,8 @@ entries:
       explicitly forbidden from the manifest/claim mutations that could race the
       one-holder invariant. Control-plane initiative remains far ahead of
       baseline (cumulative -7598).
+  - date: 2026-07-06
+    pr: 225
+    branch: feature/x-ae52
+    delta: 28
+    reason: "Web-merge retro backstop + dead-reference correction (x-ae52). The +28 in-glob delta is net-new backstop behavior, not refactor padding: +20 in hooks/reconcile-session-start.sh (a pending-retro-sentinel advisory block plus its comment - the recovery-visibility line so a stranded sentinel re-surfaces each session - and a gemini-review fail-open fix wrapping the advisory find so it can never abort the load-bearing reconcile trigger under set -e), +7 in scripts/lib/reconcile-throttle.sh (chaining fno retro run after reconcile inside the existing detached, throttled nohup job, plus its explaining comment), and +1 comment line in scripts/lib/budget-display.sh from correcting a dead pointer to the retired thrash-detector.sh. It closes a live gap: a GitHub web-UI merge drops no local event, so retro-pending sentinels were stranded with no consumer. No offsetting deletion exists because the consumer did not exist before. Structurally incapable of regressing the loop: the retro run is inside the already-detached best-effort job (guarded with || true), never blocks session start, and retro run retains a sentinel on a failed harvest. Finding A's new scanner (scripts/ci/check-no-session-urls.sh) is off the manifest glob and does not contribute; the ~18 prose node-ID cleanups and the two hermetic test suites are off-glob or test-excluded. Cumulative initiative remains far ahead of baseline (-7750 before this borrow)."

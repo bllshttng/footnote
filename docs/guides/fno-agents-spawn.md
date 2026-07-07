@@ -46,7 +46,7 @@ Create, exchange, tear down: stdout is the model's reply verbatim (the deliverab
 By default a spawned worker inherits the caller's working directory. When the caller sits inside a git worktree that leaks the worktree into the worker, and a `/target`-class worker started there fights other sessions over the shared `.fno/` session state (manifest, claims, STATE), because a worktree's `.fno/` is symlinked back to canonical. `--fresh` resolves the worker's cwd to the **canonical main checkout** (the parent of `git rev-parse --git-common-dir`) regardless of where the caller runs:
 
 ```bash
-fno agents spawn w1 "/target ab-12345678" -p claude --fresh
+fno agents spawn w1 "/target ab-1234abcd" -p claude --fresh
 ```
 
 Precedence is `--cwd` > `--fresh` > caller cwd. An explicit `--cwd` always wins; `--here` (alias `--in-place`) opts back out of `--fresh` and keeps the caller cwd. `--fresh` is a no-op when the caller is already at canonical, and falls back to the caller cwd (the safe side) when resolution is ambiguous: a bare or `--separate-git-dir` checkout, or no `git` on `$PATH`. A real redirect prints one stderr line so it is never silent.

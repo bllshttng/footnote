@@ -62,7 +62,7 @@ fno mail list --all          # full history including read messages
 ## Acknowledge a message
 
 ```bash
-fno mail ack msg-a4f1b2 [--triaged-into ab-c93b1234]
+fno mail ack msg-a4f1b2 [--triaged-into ab-1234abcd]
 ```
 
 The `--triaged-into` flag links the inbox message to the graph node it produced (only relevant for triaged heads-ups).
