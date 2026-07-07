@@ -137,6 +137,28 @@ expect "sed --in-place graph.json blocked" block \
 expect "sed -Ei graph.json blocked" block \
   '{"tool_name":"Bash","tool_input":{"command":"sed -Ei s/a/b/ ~/.fno/graph.json"}}'
 
+# ── Codex review regressions ──────────────────────────────────────────────────
+# P1: quoted protected paths in a Bash write must be caught (quoting is normal shell).
+expect "P1 quoted redirect \$HOME blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"echo x > \"$HOME/.fno/graph.json\""}}'
+expect "P1 quoted tee ./ blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"tee \"./.fno/target-state.md\""}}'
+# P1: separator-equivalent paths (// and /./) resolve to the same protected file.
+expect "P1 double-slash redirect blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"echo x > ~/.fno//graph.json"}}'
+expect "P1 dot-segment redirect blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"echo x > ~/.fno/./target-state.md"}}'
+expect "P1 double-slash Edit blocked" block \
+  '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno//graph.json","old_string":"a","new_string":"b"}}'
+expect "P1 dot-segment Edit blocked" block \
+  '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/./target-state.md","old_string":"a","new_string":"b"}}'
+# P2: in-place editor bound to the path within its clause; a mention in a DIFFERENT
+# clause with sed -i on an unrelated file must NOT false-block.
+expect "P2 sed -i on unrelated file (mention in prior clause) approved" approve \
+  '{"tool_name":"Bash","tool_input":{"command":"echo see .fno/graph.json; sed -i s/a/b/ notes.md"}}'
+expect "P2 jq -i on unrelated file (mention in prior clause) approved" approve \
+  '{"tool_name":"Bash","tool_input":{"command":"grep .fno/target-state.md docs.md && jq -i . notes.json"}}'
+
 # ── AC1-UI: single JSON verdict + exit 0 ──────────────────────────────────────
 _OUT=$(printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/graph.json"}}' | bash "$GUARD"; echo "RC=$?")
 _RC=$(printf '%s' "$_OUT" | sed -n 's/.*RC=//p')

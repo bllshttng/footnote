@@ -52,9 +52,16 @@ _block()   { jq -n --arg r "$1" '{"decision":"block","reason":$r}' 2>/dev/null \
 # per design x-4c48; not Turing-complete coverage (merge-gate artifact backstop).
 _bash_targets_protected() {
     local cmd="$1"
-    # A protected-path token bounded on the right by a shell separator or EOL.
-    local pp='[^[:space:];|&<>"'\'']*\.fno/(graph\.json|target-state\.md)([[:space:];|&<>"'\'']|$)'
-    local mention='\.fno/(graph\.json|target-state\.md)'
+    # A protected-path token. The prefix (leading dir/`~`/`$HOME`/quote chars up
+    # to `.fno/`) excludes only whitespace and command separators/redirects, NOT
+    # quotes - a quoted path like `> "$HOME/.fno/graph.json"` is normal shell and
+    # must still match (codex P1). Right-bounded by a shell separator/quote or EOL.
+    local pp='[^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md)([[:space:];|&<>"'\'']|$)'
+    # A run of non-separator chars (stays inside one command clause), and a
+    # clause tail that ends at a protected path. Kept in vars because an inline
+    # `[^;|&]` breaks `[[ =~ ]]` parsing (`;`/`|` are shell-special there).
+    local nosep='[^;|&]*'
+    local clause="${nosep}"'\.fno/(graph\.json|target-state\.md)'
     # redirect immediately targeting the path: >, >>, 2>, &>, >&, >|, >!
     # (bracket forms, not \>, to avoid the GNU word-boundary reading of \>).
     [[ "$cmd" =~ ([>]{1,2}|\&[>]|[>]\&|[>][|]|[>]!)[[:space:]]*$pp ]] && return 0
@@ -66,45 +73,56 @@ _bash_targets_protected() {
     [[ "$cmd" =~ (^|[^[:alnum:]_])(cp|mv|install|truncate)[[:space:]].*[[:space:]]$pp ]] && return 0
     # dd of=path
     [[ "$cmd" =~ (^|[^[:alnum:]_])dd[[:space:]].*of=$pp ]] && return 0
-    # in-place editors: the path is an argument, not necessarily adjacent to the flag
-    if [[ "$cmd" =~ $mention ]]; then
-        # -i, combined short flags (-Ei, -ri), and the --in-place long form.
-        [[ "$cmd" =~ (^|[^[:alnum:]_])(sed|perl)[[:space:]].*(-[a-zA-Z]*i|--in-place) ]] && return 0
-        [[ "$cmd" =~ (^|[^[:alnum:]_])jq[[:space:]].*(-i|--in-place) ]] && return 0
-        [[ "$cmd" =~ (^|[^[:alnum:]_])(ex|ed)[[:space:]] ]] && return 0
-    fi
+    # in-place editors: bind the editor to the protected path WITHIN its own
+    # command clause (codex P2) - `echo see .fno/graph.json; sed -i x notes.md`
+    # mentions the path in a different clause and must NOT match. `[^;|&]*`
+    # keeps the flag and the path in the same clause as the sed/perl/jq/ed verb.
+    # -i, combined short flags (-Ei, -ri), and the --in-place long form.
+    local re_sed="(^|[^[:alnum:]_])(sed|perl)[[:space:]]${nosep}(-[a-zA-Z]*i|--in-place)${clause}"
+    local re_jq="(^|[^[:alnum:]_])jq[[:space:]]${nosep}(-i|--in-place)${clause}"
+    local re_ed="(^|[^[:alnum:]_])(ex|ed)[[:space:]]${clause}"
+    [[ "$cmd" =~ $re_sed ]] && return 0
+    [[ "$cmd" =~ $re_jq  ]] && return 0
+    [[ "$cmd" =~ $re_ed  ]] && return 0
     return 1
 }
 
 PAYLOAD=$(cat)
 
 # ── 1. jq-free pre-filter ──────────────────────────────────────────────────────
-# No protected path token anywhere -> this call cannot target a protected file.
-# Match the bare `.fno/<file>` token so a relative-path write (a cwd-relative
-# .fno redirect target) is caught too, not only an absolute one. Also match the
-# JSON-escaped slash form `.fno\/<file>`: JSON permits `\/`, so a payload could
-# carry the escaped slash and slip past a raw-substring test into fast-approve
-# (the parser below would decode it, but the pre-filter short-circuits first).
-# Broader is safe: precise parse below keys on the write TARGET.
-if [[ "$PAYLOAD" != *".fno/graph.json"*      && "$PAYLOAD" != *'.fno\/graph.json'* \
-   && "$PAYLOAD" != *".fno/target-state.md"* && "$PAYLOAD" != *'.fno\/target-state.md'* ]]; then
+# Key on the bare protected FILENAMEs, not the full `.fno/<file>` token. These
+# names are rare enough to stay selective, and matching the filename alone is
+# tolerant of every separator/escaping variant that writes the same file - a
+# JSON-escaped slash (`.fno\/graph.json`), a doubled slash (`.fno//graph.json`),
+# a dot segment (`.fno/./graph.json`), or a quoted path all still contain the
+# filename (codex P1). If NEITHER filename appears, the call cannot target a
+# protected file: approve fast without calling jq. Over-match is safe: the
+# precise parse + normalization below keys on the write TARGET.
+if [[ "$PAYLOAD" != *"graph.json"* && "$PAYLOAD" != *"target-state.md"* ]]; then
     _approve
 fi
 
 # ── 2. Precise parse (jq -> python3 -> fail closed) ────────────────────────────
-# One parser invocation, three newline-separated fields (command newlines are
-# flattened to spaces so the third `read` gets the whole command on one line).
+# One parser invocation, three newline-separated fields. The parser also
+# NORMALIZES the file_path/command slashes (`/+`->`/`, `/./`->`/`) so a
+# separator-equivalent path like `~/.fno//graph.json` or `.fno/./target-state.md`
+# resolves to the canonical form the checks below key on (codex P1). Command
+# newlines are flattened to spaces so the third `read` gets it on one line.
 TOOL="" FILE_PATH="" COMMAND=""
 if command -v jq >/dev/null 2>&1; then
-    { read -r TOOL; read -r FILE_PATH; read -r COMMAND; } < <(printf '%s' "$PAYLOAD" \
-        | jq -r '.tool_name // "", .tool_input.file_path // "", (.tool_input.command // "" | gsub("\n";" "))' 2>/dev/null)
+    { read -r TOOL; read -r FILE_PATH; read -r COMMAND; } < <(printf '%s' "$PAYLOAD" | jq -r '
+        def norm: gsub("/+";"/") | gsub("/\\./";"/");
+        .tool_name // "",
+        (.tool_input.file_path // "" | norm),
+        (.tool_input.command // "" | gsub("\n";" ") | norm)' 2>/dev/null)
 elif command -v python3 >/dev/null 2>&1; then
     { read -r TOOL; read -r FILE_PATH; read -r COMMAND; } < <(printf '%s' "$PAYLOAD" | python3 -c '
-import sys, json
+import sys, json, re
+def norm(s): return re.sub(r"/\./", "/", re.sub(r"/+", "/", s))
 try:
     d = json.load(sys.stdin); ti = d.get("tool_input") or {}
-    print(d.get("tool_name") or ""); print(ti.get("file_path") or "")
-    print((ti.get("command") or "").replace("\n", " "))
+    print(d.get("tool_name") or ""); print(norm(ti.get("file_path") or ""))
+    print(norm((ti.get("command") or "").replace("\n", " ")))
 except Exception:
     pass' 2>/dev/null)
 else
