@@ -639,91 +639,19 @@ def _fetch_pr_review_logins(
     return logins
 
 
-def _gate_escape_already_emitted(
-    events_path: Path, pr_number: Optional[int], reason: str
-) -> bool:
-    """Dedup on (pr, reason): True if events.jsonl already holds a matching
-    gate_escape (AC4-INV). Reconcile closes a node once, but two reconcile runs
-    racing the same events.jsonl (e.g. SessionStart in two worktrees) would
-    otherwise double-count. A missing/unreadable log reads as 'not emitted'."""
-    if pr_number is None or pr_number <= 0:
-        return False
-    try:
-        text = events_path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    for line in text.splitlines():
-        if '"gate_escape"' not in line:
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(ev, dict):
-            continue
-        if ev.get("type") != "gate_escape":
-            continue
-        data = ev.get("data") or {}
-        if data.get("reason") == reason and data.get("pr") == pr_number:
-            return True
-    return False
-
-
-def _canonical_events_path(cwd: Optional[str] = None) -> Path:
-    """The single events log gate_escape telemetry lands in. A closed node
-    outlives its worktree and per-worktree events.jsonl are NOT shared, so the
-    metric must aggregate from the canonical root (the same rationale retro uses
-    for filed nodes). Retro reads this exact path.
-
-    Resolve the canonical root from the CLOSED record's ``cwd`` when given: a
-    full-graph reconcile can run from repo A and close a node whose worktree is
-    in repo B, so the escape must land under B (where ``retro run`` reads it),
-    not the process repo A (codex P2 on PR #232). Falls back to the process-cwd
-    canonical root when ``cwd`` is absent or not a working tree."""
-    from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree
-
-    if cwd:
-        canon = resolve_canonical_worktree(Path(cwd))
-        if canon is not None:
-            return canon.resolve() / ".fno" / "events.jsonl"
-    return resolve_canonical_repo_root() / ".fno" / "events.jsonl"
-
-
-def gate_escape_failure_log_path(events_path: Path) -> Path:
-    """The durable emit-failure counter, sitting beside its events log so both
-    resolve together (retro reads this for AC7)."""
-    return events_path.parent / "gate_escape_emit_failures.jsonl"
-
-
-def _record_gate_escape_emit_failure(
-    log_path: Optional[Path], node_id: str, reason: str, exc: Exception
-) -> None:
-    """Append one line to a durable emit-failure log so retro can surface a
-    broken counter (AC7-FR): a fail-open emit that silently drops would make the
-    metric under-report and OVERSTATE autonomy. Best-effort - a failure to log
-    the failure is swallowed; we never raise from the telemetry path."""
-    print(
-        f"reconcile: gate_escape emit failed for {node_id} (reason={reason}): "
-        f"{type(exc).__name__}: {exc}; merge close unaffected, telemetry fails open",
-        file=sys.stderr,
-    )
-    if log_path is None:
-        return
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(
-            {
-                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "node": node_id,
-                "reason": reason,
-                "error": f"{type(exc).__name__}: {exc}",
-            },
-            separators=(",", ":"),
-        )
-        with log_path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except Exception:
-        pass  # ponytail: the failure-log write is itself best-effort; never raise
+# Tier-1 reuses the shared gate_escape emit machinery (x-91b5): the canonical
+# events path, the durable failure-log, and the final dedup+append all live in
+# ONE place (fno.events.gate_escape) so Tier-1 (dead-bot) and Tier-2 (spawn-cap
+# + the manual verb) never drift into parallel telemetry paths (Locked Decision
+# 4). The `_canonical_events_path` alias is kept in THIS module's namespace so
+# the resolve-before-fetch failure path (test_ac7_production_default) stays
+# monkeypatchable.
+from fno.events.gate_escape import (  # noqa: E402
+    canonical_events_path as _canonical_events_path,
+    emit_gate_escape as _emit_gate_escape,
+    failure_log_path as gate_escape_failure_log_path,
+    record_emit_failure as _record_gate_escape_emit_failure,
+)
 
 
 def emit_gate_escape_for_record(
@@ -788,21 +716,18 @@ def emit_gate_escape_for_record(
         if not unmet:
             return None  # AC2b: every required bot reviewed; gate was met
 
-        if _gate_escape_already_emitted(resolved_events, record.pr_number, reason):
-            return None  # AC4: already counted this (pr, reason)
-
-        from fno.events import _build, append_event
-
-        data: dict[str, Any] = {"reason": reason, "pr": record.pr_number}
-        if record.node_id:
-            data["graph_node_id"] = record.node_id
         # Name the wedged bot(s) so retro's ranked output can point at the fix.
-        data["detail"] = "required bot(s) never reviewed: " + ", ".join(sorted(unmet))
-        event = _build("gate_escape", "backlog", data)
-
-        append_event(event, events_path=resolved_events)
-        return resolved_events
-    except Exception as exc:  # telemetry fails OPEN (AC5) + visible (AC7)
+        detail = "required bot(s) never reviewed: " + ", ".join(sorted(unmet))
+        # Delegate the dedup+append to the shared emit (dedup on (pr, reason),
+        # fail-open + durable failure-log on an append error - AC4/AC5/AC7).
+        return _emit_gate_escape(
+            reason,
+            pr=record.pr_number,
+            node_id=record.node_id or None,
+            detail=detail,
+            events_path=resolved_events,
+        )
+    except Exception as exc:  # a fetch/resolve failure fails OPEN (AC5) + visible (AC7)
         fail_log = (
             gate_escape_failure_log_path(resolved_events)
             if resolved_events is not None

@@ -289,11 +289,20 @@ def run_rebase(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             phase_continue = True
     repo = cwd or os.getcwd()
     try:
-        if phase_continue:
-            return _phase_b_continue(base, repo)
-        return _phase_a(base, repo)
+        rc = _phase_b_continue(base, repo) if phase_continue else _phase_a(base, repo)
     except ToolMissing:
         # git not on PATH -> clean failed verdict, never a raw traceback.
         sys.stderr.write("Error: git CLI not installed or not found on PATH\n")
         _emit("failed", base, {"reason": "git CLI not found"})
         return 1
+    if rc == 0:
+        # Advisory-only nudge (x-91b5, AC1-UI): a hand-rebase is a common
+        # stale-base escape the loop should have caught. The nudge NEVER emits
+        # on its own - it just prints the copy-paste tag line so retro's
+        # autonomy-debt ranking can see stale-base interventions the operator
+        # chooses to record.
+        sys.stderr.write(
+            "note: if this rebase resolved a stale base the loop should have "
+            'caught, tag it: fno event gate-escape stale-base --detail "hand-rebase"\n'
+        )
+    return rc

@@ -2319,6 +2319,9 @@ event_types:
         detail:
           type: string
           description: "Free text, especially for reason=other; retro flags an empty detail as low-signal (optional)."
+        dedup_key:
+          type: string
+          description: "PR-less dedup bucket (reason:session:day) for a spawn-cap/manual escape with no `pr`. Collapses a looped intervention to one count (x-91b5); not consumed by retro (optional)."
     consumers: [fno retro run]
 
 # Size cap per Failure Modes (Boundaries): the system rejects events whose

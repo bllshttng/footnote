@@ -163,6 +163,82 @@ def emit(
         typer.echo(success_token)
 
 
+@cli.command("gate-escape")
+def gate_escape(
+    ctx: typer.Context,
+    reason: str = typer.Argument(
+        ...,
+        help="intervention class: dead-bot | flake | stale-base | wedge | spawn-cap | other",
+    ),
+    pr: Optional[int] = typer.Option(
+        None,
+        "--pr-number",
+        "--pr",
+        help="PR the escape rode on (becomes the dedup key when set)",
+    ),
+    node: Optional[str] = typer.Option(
+        None, "--node", help="graph node the escape rode on (attribution)"
+    ),
+    detail: Optional[str] = typer.Option(
+        None, "--detail", help="free-text context (retro flags an empty detail as low-signal)"
+    ),
+    dedup_key: Optional[str] = typer.Option(
+        None,
+        "--dedup-key",
+        help="explicit PR-less dedup bucket; defaults to reason:session:day",
+    ),
+    events_path: Optional[Path] = typer.Option(
+        None, "--events", help="path to events.jsonl (default: canonical root)"
+    ),
+) -> None:
+    """Tag a human intervention the loop should have handled (x-91b5, Tier-2).
+
+    Low-friction manual sugar for the reasons with no clean auto chokepoint
+    (flake / stale-base / wedge): an operator runs this at the moment they
+    intervene, so retro's autonomy-debt ranking sees all five reason buckets,
+    not just the auto-emitted dead-bot (reconcile) and spawn-cap (spawn gates).
+    Fail-closed on an unknown reason (loud non-zero exit, emits nothing).
+    Deduped so a looped intervention counts once.
+    """
+    from fno.events import ValidationError
+    from fno.events.gate_escape import default_dedup_key, emit_gate_escape
+
+    # A PR-bearing escape dedups on (reason, pr); a PR-less one on an explicit
+    # or default (reason, session, day) bucket. Reject both explicitly rather
+    # than silently dropping --dedup-key (gemini review on #241).
+    effective_pr = pr if (pr is not None and pr > 0) else None
+    if effective_pr is not None and dedup_key is not None:
+        typer.echo("error: pass --pr-number XOR --dedup-key, not both", err=True)
+        raise typer.Exit(code=1)
+    key = None if effective_pr else (dedup_key or default_dedup_key(reason))
+    try:
+        out = emit_gate_escape(
+            reason,
+            pr=pr,
+            node_id=node,
+            detail=detail,
+            dedup_key=key,
+            source="backlog",
+            events_path=events_path,
+        )
+    except ValidationError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    json_mode = bool(ctx.obj and ctx.obj.get("json", False))
+    if out is None:
+        # Dedup-skip or a swallowed fail-open error: report, do not fail the caller.
+        if json_mode:
+            typer.echo(json.dumps({"emitted": False, "reason": reason}))
+        else:
+            typer.echo(f"gate_escape[{reason}] not emitted (already counted or fail-open)")
+        return
+    if json_mode:
+        typer.echo(json.dumps({"emitted": True, "reason": reason, "events": str(out)}))
+    else:
+        typer.echo(str(out))
+
+
 @cli.command()
 def audit(
     ctx: typer.Context,
