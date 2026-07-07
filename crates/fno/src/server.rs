@@ -1398,10 +1398,11 @@ impl Core {
     /// The layout-change protocol (Locked 4), per client: resize PTYs/grids
     /// of every VIEWED tab to its rects, then for each client against ITS
     /// view: ModeSync (if its viewed tab's focused pane's modes differ from
-    /// what that client's terminal last saw), flush stale frame slots, send
-    /// its `Layout`, and (when `reemit`) queue full frames for its visible
-    /// panes. Focus-only changes pass `reemit: false` - rects are unchanged,
-    /// so queued frames stay valid. Unviewed tabs are untouched: grids keep
+    /// what that client's terminal last saw), send its `Layout`, and (when
+    /// `reemit`) flush stale frame slots and queue full frames for its
+    /// visible panes. Focus-only changes pass `reemit: false` - rects are
+    /// unchanged, so queued frames stay valid (and are kept: a pending
+    /// quiet-pane frame has no other copy). Unviewed tabs are untouched: grids keep
     /// feeding, geometry keeps its last size, nothing crosses the wire.
     fn push_layout(&mut self, reemit: bool) {
         // Geometry pass: each distinct viewed tab, once, at its view-scoped
@@ -1491,9 +1492,6 @@ impl Core {
                 }
                 c.synced_modes = focused_modes;
             }
-            // Flush-then-re-emit: every frame a client draws after this is
-            // consistent with the Layout generation it just received.
-            c.dirty.lock().unwrap().clear();
             if c.reliable_tx.try_send(layout_msg).is_err() {
                 dead.push(c.id);
                 continue;
@@ -1512,7 +1510,20 @@ impl Core {
             };
             c.visible = frame_ids.iter().copied().collect();
             if reemit {
+                // Flush-then-re-emit: geometry changed, so queued frames are
+                // stale - drop them and re-seed every visible pane in one
+                // locked pass, so every frame the client draws after this is
+                // consistent with the Layout generation it just received.
+                //
+                // A focus-only push (reemit=false) must NOT flush: rects are
+                // unchanged, so queued frames stay valid (the contract in
+                // this function's doc) - and a quiet pane's pending output
+                // frame has no other copy. Clearing it between the output's
+                // dirty-insert and the writer's drain blanked the pane until
+                // its NEXT output (broadcast_pane only fires on output),
+                // which for an idle shell is never: the x-0296 CI flake.
                 let mut d = c.dirty.lock().unwrap();
+                d.clear();
                 for pid in &frame_ids {
                     if let Some(entry) = self.panes.get(pid) {
                         d.insert(*pid, entry.vt.frame());
@@ -5548,6 +5559,61 @@ mod tests {
             "every Layout pane's initial frame must ride the reliable \
              channel AFTER the Layout - a dirty-map-only seed is droppable \
              and a passive reattach never recovers it (x-0296)"
+        );
+    }
+
+    #[test]
+    fn focus_only_push_layout_preserves_pending_pane_frames() {
+        // AC1-FR (x-0296, the CI root cause): a pane's output-driven frame
+        // sits in the client's droppable dirty map until the writer drains
+        // it, and it is the ONLY copy - a quiet pane produces no further
+        // output to regenerate it (broadcast_pane fires on output only). A
+        // focus-only push_layout(reemit=false) landing in that window must
+        // not flush it: rects are unchanged, so the frame is still valid.
+        // Pre-fix, the unconditional clear() destroyed it 100% here; on the
+        // loaded CI runner the shell's "$ " prompt frame died in exactly
+        // this window and the pane stayed blank forever.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let p1 = core.spawn_pane(24, 40, "/tmp").expect("pane 1");
+        core.session.add_squad(
+            1,
+            vec!["/tmp/x0296".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(p1),
+                focus: p1,
+            },
+        );
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        let dirty: DirtyMap = Arc::default();
+        core.attach(
+            9,
+            24,
+            80,
+            "/tmp/x0296".into(),
+            "/tmp/x0296".into(),
+            tx,
+            dirty.clone(),
+            Arc::new(Notify::new()),
+        );
+        // Drain the attach traffic (not under test), then land the shell's
+        // prompt: the output broadcast seeds the dirty map.
+        while rx.try_recv().is_ok() {}
+        core.panes.get_mut(&p1).unwrap().vt.feed(b"$ ");
+        core.broadcast_pane(p1);
+        assert!(
+            dirty.lock().unwrap().contains_key(&p1),
+            "output must seed the dirty map"
+        );
+        // A focus-only push races in before the writer drains the frame.
+        core.push_layout(false);
+        assert!(
+            dirty.lock().unwrap().contains_key(&p1),
+            "a reemit=false push_layout must preserve a pending frame: it is \
+             the only copy of a quiet pane's latest output (x-0296)"
         );
     }
 
