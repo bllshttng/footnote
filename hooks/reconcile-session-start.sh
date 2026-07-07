@@ -40,7 +40,11 @@ fi
 # `fno retro run` in step 2 resolves the dir via Python and honors the override.
 RETRO_PENDING_DIR="${RETRO_PENDING_DIR:-$HOME/.fno/retro-pending}"
 if [[ -d "$RETRO_PENDING_DIR" ]]; then
-    pending_n=$(find "$RETRO_PENDING_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+    # Fail-open inside the substitution: under this hook's `set -euo pipefail`, a
+    # non-zero `find` (permission race, dir removed after the -d check) would
+    # otherwise abort the hook BEFORE the load-bearing reconcile_maybe_fire below.
+    # A cosmetic advisory must never kill the reconcile trigger. (gemini review)
+    pending_n=$( (find "$RETRO_PENDING_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null || true) | wc -l | tr -d ' ')
     if [[ "$pending_n" =~ ^[0-9]+$ ]] && (( pending_n > 0 )); then
         echo "retro: ${pending_n} sentinel(s) pending harvest; the background job harvests them, or run \`fno retro run\`."
     fi
