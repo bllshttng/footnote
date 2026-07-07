@@ -72,9 +72,14 @@ done
 expect_env "AC1-ERR: jq+python3 absent -> block" block "$_STUB" \
   '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/graph.json","old_string":"a","new_string":"b"}}'
 # And with python3 present, the same payload parses and blocks normally.
-PY_DIR=$(dirname "$(command -v python3)")
-expect_env "AC1-ERR: python3 fallback -> block" block "$_STUB:$PY_DIR" \
-  '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/graph.json","old_string":"a","new_string":"b"}}'
+PY_BIN=$(command -v python3 2>/dev/null || true)
+if [[ -n "$PY_BIN" ]]; then
+  PY_DIR=$(dirname "$PY_BIN")
+  expect_env "AC1-ERR: python3 fallback -> block" block "$_STUB:$PY_DIR" \
+    '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/graph.json","old_string":"a","new_string":"b"}}'
+else
+  pass "AC1-ERR: python3 fallback (skipped - python3 not installed)"
+fi
 rm -rf "$_STUB"
 
 # ── AC2-ERR: malformed payload, no protected token -> approve ─────────────────
@@ -116,6 +121,21 @@ expect "cp onto graph.json blocked" block \
   '{"tool_name":"Bash","tool_input":{"command":"cp /tmp/forged.json ~/.fno/graph.json"}}'
 expect "cp from graph.json (backup read) approved" approve \
   '{"tool_name":"Bash","tool_input":{"command":"cp ~/.fno/graph.json /tmp/backup.json"}}'
+
+# ── Gemini review regressions: bypass vectors that must NOT slip through ───────
+# HIGH: JSON-escaped slash in the payload must still be caught by the pre-filter.
+expect "escaped-slash Edit graph.json blocked" block \
+  '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno\/graph.json","old_string":"a","new_string":"b"}}'
+# MEDIUM: force-clobber (>|) and combined stdout+stderr (>&) redirects.
+expect ">| clobber target-state.md blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"echo x >| .fno/target-state.md"}}'
+expect ">& redirect graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"echo x >& ~/.fno/graph.json"}}'
+# MEDIUM: sed --in-place long form and combined short flags (-Ei).
+expect "sed --in-place graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"sed --in-place s/a/b/ ~/.fno/graph.json"}}'
+expect "sed -Ei graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"sed -Ei s/a/b/ ~/.fno/graph.json"}}'
 
 # ── AC1-UI: single JSON verdict + exit 0 ──────────────────────────────────────
 _OUT=$(printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/graph.json"}}' | bash "$GUARD"; echo "RC=$?")

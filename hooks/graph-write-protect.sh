@@ -55,8 +55,9 @@ _bash_targets_protected() {
     # A protected-path token bounded on the right by a shell separator or EOL.
     local pp='[^[:space:];|&<>"'\'']*\.fno/(graph\.json|target-state\.md)([[:space:];|&<>"'\'']|$)'
     local mention='\.fno/(graph\.json|target-state\.md)'
-    # redirect (>, >>, 2>, &>) immediately targeting the path
-    [[ "$cmd" =~ \>\>?[[:space:]]*$pp ]] && return 0
+    # redirect immediately targeting the path: >, >>, 2>, &>, >&, >|, >!
+    # (bracket forms, not \>, to avoid the GNU word-boundary reading of \>).
+    [[ "$cmd" =~ ([>]{1,2}|\&[>]|[>]\&|[>][|]|[>]!)[[:space:]]*$pp ]] && return 0
     # tee [flags] path  (also `... | tee path`)
     [[ "$cmd" =~ (^|[^[:alnum:]_])tee[[:space:]]+(-[^[:space:]]+[[:space:]]+)*$pp ]] && return 0
     # sponge path
@@ -67,7 +68,8 @@ _bash_targets_protected() {
     [[ "$cmd" =~ (^|[^[:alnum:]_])dd[[:space:]].*of=$pp ]] && return 0
     # in-place editors: the path is an argument, not necessarily adjacent to the flag
     if [[ "$cmd" =~ $mention ]]; then
-        [[ "$cmd" =~ (^|[^[:alnum:]_])(sed|perl)[[:space:]].*-i ]] && return 0
+        # -i, combined short flags (-Ei, -ri), and the --in-place long form.
+        [[ "$cmd" =~ (^|[^[:alnum:]_])(sed|perl)[[:space:]].*(-[a-zA-Z]*i|--in-place) ]] && return 0
         [[ "$cmd" =~ (^|[^[:alnum:]_])jq[[:space:]].*(-i|--in-place) ]] && return 0
         [[ "$cmd" =~ (^|[^[:alnum:]_])(ex|ed)[[:space:]] ]] && return 0
     fi
@@ -79,21 +81,32 @@ PAYLOAD=$(cat)
 # ── 1. jq-free pre-filter ──────────────────────────────────────────────────────
 # No protected path token anywhere -> this call cannot target a protected file.
 # Match the bare `.fno/<file>` token so a relative-path write (a cwd-relative
-# .fno redirect target) is caught too, not only an absolute one. Broader is safe: precise
-# parse below keys on the write TARGET, so extra payloads just get inspected.
-if [[ "$PAYLOAD" != *".fno/graph.json"* && "$PAYLOAD" != *".fno/target-state.md"* ]]; then
+# .fno redirect target) is caught too, not only an absolute one. Also match the
+# JSON-escaped slash form `.fno\/<file>`: JSON permits `\/`, so a payload could
+# carry the escaped slash and slip past a raw-substring test into fast-approve
+# (the parser below would decode it, but the pre-filter short-circuits first).
+# Broader is safe: precise parse below keys on the write TARGET.
+if [[ "$PAYLOAD" != *".fno/graph.json"*      && "$PAYLOAD" != *'.fno\/graph.json'* \
+   && "$PAYLOAD" != *".fno/target-state.md"* && "$PAYLOAD" != *'.fno\/target-state.md'* ]]; then
     _approve
 fi
 
 # ── 2. Precise parse (jq -> python3 -> fail closed) ────────────────────────────
+# One parser invocation, three newline-separated fields (command newlines are
+# flattened to spaces so the third `read` gets the whole command on one line).
+TOOL="" FILE_PATH="" COMMAND=""
 if command -v jq >/dev/null 2>&1; then
-    TOOL=$(printf '%s' "$PAYLOAD"      | jq -r '.tool_name // ""'            2>/dev/null)
-    FILE_PATH=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.file_path // ""' 2>/dev/null)
-    COMMAND=$(printf '%s' "$PAYLOAD"   | jq -r '.tool_input.command // ""'   2>/dev/null)
+    { read -r TOOL; read -r FILE_PATH; read -r COMMAND; } < <(printf '%s' "$PAYLOAD" \
+        | jq -r '.tool_name // "", .tool_input.file_path // "", (.tool_input.command // "" | gsub("\n";" "))' 2>/dev/null)
 elif command -v python3 >/dev/null 2>&1; then
-    TOOL=$(printf '%s' "$PAYLOAD"      | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("tool_name") or "")'                      2>/dev/null)
-    FILE_PATH=$(printf '%s' "$PAYLOAD" | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("tool_input") or {}).get("file_path") or "")' 2>/dev/null)
-    COMMAND=$(printf '%s' "$PAYLOAD"   | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("tool_input") or {}).get("command") or "")'   2>/dev/null)
+    { read -r TOOL; read -r FILE_PATH; read -r COMMAND; } < <(printf '%s' "$PAYLOAD" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin); ti = d.get("tool_input") or {}
+    print(d.get("tool_name") or ""); print(ti.get("file_path") or "")
+    print((ti.get("command") or "").replace("\n", " "))
+except Exception:
+    pass' 2>/dev/null)
 else
     # A protected token is present but no parser exists to resolve the target.
     # Fail CLOSED (old finding b was the opposite: parser-absence fail-open).
