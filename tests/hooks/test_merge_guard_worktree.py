@@ -253,6 +253,157 @@ def test_unreadable_state_path_does_not_raise():
         Path("/nonexistent/abilities-test/target-state.md")) is None
 
 
+# ---------------------------------------------------------------------------
+# Command-position tokenization (the matcher fix)
+# ---------------------------------------------------------------------------
+
+_MERGE = "gh pr merge"  # kept out of a raw string so this file's own text
+#                         never trips a loose gh-pr-merge matcher
+
+
+def test_command_segments_quoted_separator_stays_intact():
+    """A separator inside a quoted argument is NOT a segment boundary."""
+    segs = git_protection._command_segments(
+        'fno backlog update x --details "a; b && c"')
+    assert len(segs) == 1
+    assert segs[0][:5] == ["fno", "backlog", "update", "x", "--details"]
+
+
+def test_find_merge_segment_ignores_quoted_phrase():
+    """The 2026-07-06 live false positive: merge phrase inside a --details
+    string, with a separator inside the quotes, must not be recognized."""
+    segs = git_protection._command_segments(
+        f'fno backlog update x --details "next step; {_MERGE} after review"')
+    assert git_protection._find_merge_segment(segs) is None
+
+
+def test_find_merge_segment_matches_command_position():
+    segs = git_protection._command_segments(f"echo hi && {_MERGE} 5")
+    assert git_protection._find_merge_segment(segs) == f"{_MERGE} 5"
+
+
+def test_find_git_segments_catches_compound_push():
+    """Closes the startswith('git') bypass: git at command position after &&."""
+    segs = git_protection._command_segments("cd /tmp && git push origin main")
+    assert git_protection._find_git_segments(segs) == ["git push origin main"]
+
+
+def test_find_merge_segment_newline_multiline():
+    """Regression: a merge on line 2 of a multi-line command must be caught
+    (shlex eats newlines in whitespace_split mode, so the physical-line split
+    is what makes line 2 its own segment)."""
+    segs = git_protection._command_segments(f"git status\n{_MERGE} 356 --squash")
+    assert git_protection._find_merge_segment(segs) is not None
+
+
+def test_find_merge_segment_prefix_forms_are_caught():
+    """Regression: wrapper/assignment/path/subshell prefixes must not hide the
+    merge verb (the old regex-anywhere matcher caught all of these)."""
+    fm = git_protection._find_merge_segment
+    seg = git_protection._command_segments
+    for cmd in (
+        f"GH_TOKEN=x {_MERGE} 356 --squash",
+        f"env {_MERGE} 356",
+        f"sudo {_MERGE} 356",
+        f"/usr/bin/gh pr merge 356",
+        f"(gh pr merge 356)",
+    ):
+        assert fm(seg(cmd)) is not None, f"prefix bypass not caught: {cmd!r}"
+
+
+def test_find_git_segments_prefix_forms_are_caught():
+    seg = git_protection._command_segments
+    fg = git_protection._find_git_segments
+    for cmd in (
+        "GIT_DIR=/x git push origin main",
+        "sudo git push origin main",
+        "/usr/bin/git push origin main",
+    ):
+        assert fg(seg(cmd)), f"git prefix bypass not caught: {cmd!r}"
+
+
+def test_find_git_segments_pipe_does_not_false_split_git():
+    """A pipe is a separator; `git log | grep x` still recognizes the git verb
+    and stays allowed (grep segment is not git)."""
+    segs = git_protection._command_segments("git log | grep foo")
+    assert git_protection._find_git_segments(segs) == ["git log"]
+
+
+def test_backslash_line_continuation_does_not_bypass():
+    """Regression (gemini, PR #227): a backslash line-continuation joins two
+    physical lines into one command; the gate must see it joined, not split
+    with the branch target / flag judged in isolation."""
+    seg = git_protection._command_segments
+    fg = git_protection._find_git_segments
+    fm = git_protection._find_merge_segment
+    # --no-verify on the continuation line is still caught
+    assert fg(seg("git commit \\\n  --no-verify -m x")) == ["git commit --no-verify -m x"]
+    # branch target on the continuation line is still caught
+    assert fg(seg("git push \\\n  origin main")) == ["git push origin main"]
+    # merge verb split by a continuation is still caught
+    assert fm(seg(f"{_MERGE} \\\n  5")) == f"{_MERGE} 5"
+    # a mid-token continuation rejoins (shell semantics: removed, not spaced)
+    assert fg(seg("git pu\\\nsh origin main")) == ["git push origin main"]
+
+
+def test_command_segments_unbalanced_quote_raises():
+    try:
+        git_protection._command_segments(f'{_MERGE} 5 --body "unclosed')
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError on unbalanced quote")
+
+
+# ---------------------------------------------------------------------------
+# State placement + opt-out marker + flag race-safety (subprocess)
+# ---------------------------------------------------------------------------
+
+def _run_hook_subprocess(command, fno_home, cwd=None):
+    env = dict(os.environ, FNO_HOME=str(fno_home))
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    p = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload,
+                       capture_output=True, text=True, env=env, cwd=cwd)
+    return p.stdout, p.returncode
+
+
+def test_state_writes_land_under_fno_home():
+    """A blocked protected push writes git-protection.json under FNO_HOME and
+    creates nothing under a harness state dir in the sandbox (AC2-HP)."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        out, _ = _run_hook_subprocess("git push origin main", fno)
+        assert '"permissionDecision": "deny"' in out
+        assert (fno / "git-protection.json").exists()
+        assert not (Path(td) / ".claude").exists()
+
+
+def test_disable_marker_short_circuits():
+    """$FNO_HOME/git-protection.disabled -> exit 0, no decision (AC1-EDGE)."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        (fno / "git-protection.disabled").write_text("")
+        out, rc = _run_hook_subprocess("git push origin main", fno)
+        assert out.strip() == ""
+        assert rc == 0
+
+
+def test_no_verify_flag_consumed_once_and_missing_is_safe():
+    """Approved --no-verify allows and consumes the flag; a subsequent call
+    with the flag gone denies without crashing on the missing flag (AC1-FR:
+    the unlink(missing_ok=True) race-safety)."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        (fno / "approve_no_verify.flag").write_text("")
+        out1, _ = _run_hook_subprocess("git commit --no-verify -m x", fno)
+        assert '"permissionDecision": "allow"' in out1
+        assert not (fno / "approve_no_verify.flag").exists()
+        out2, rc2 = _run_hook_subprocess("git commit --no-verify -m x", fno)
+        assert '"permissionDecision": "deny"' in out2
+        assert "Traceback" not in out2
+
+
 def _run_standalone():
     failed = 0
     for name, fn in list(globals().items()):

@@ -4,7 +4,7 @@ PreCompact/SessionEnd hook: saves a readable session transcript with rich metada
 
 Reads hook input from stdin (session_id, transcript_path, cwd).
 Reads statusline sidecar (~/.claude/.session-context.json) for model, cost, context_window, etc.
-Saves to ~/.claude/sessions/{session_id}-{timestamp}-{trigger}.md
+Saves to ${FNO_HOME:-~/.fno}/sessions/{session_id}-{timestamp}-{trigger}.md
 """
 
 import json
@@ -14,7 +14,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SESSIONS_DIR = Path.home() / ".claude" / "sessions"
+# Footnote state lives under ${FNO_HOME:-~/.fno}, never .claude/ (placement
+# rule, ab-f063 Wave 2). The sidecar we READ is Claude Code's own statusline
+# file and legitimately stays under ~/.claude/.
+FNO_HOME = Path(os.environ.get("FNO_HOME") or (Path.home() / ".fno"))
+SESSIONS_DIR = FNO_HOME / "sessions"
 SIDECAR_PATH = Path.home() / ".claude" / ".session-context.json"
 SKIP_TYPES = {"progress", "file-history-snapshot"}
 NOISE_PREFIXES = (
