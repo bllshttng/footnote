@@ -128,6 +128,7 @@ jobs:
         run: |
           bash tests/hooks/test_loop_check_shim.sh
           bash tests/hooks/test_manifest_immutable.sh
+          bash tests/hooks/test_graph_write_protect.sh
           bash tests/hooks/test_init_target_session_id.sh
           bash tests/hooks/test_agy_stop_hook.sh
 
