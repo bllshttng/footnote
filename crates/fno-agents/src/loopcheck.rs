@@ -357,31 +357,38 @@ fn value_as_peers(v: &serde_yaml_ng::Value) -> Vec<PeerEntry> {
         provider: s,
         identity: None,
     };
+    // One map entry -> a PeerEntry (provider/identity read order-independently).
+    let map_entry = |it: &Value| -> Option<PeerEntry> {
+        let provider = it
+            .get("provider")
+            .and_then(yaml_scalar_string)
+            .unwrap_or_default();
+        let identity = it
+            .get("identity")
+            .and_then(yaml_scalar_string)
+            .filter(|s| !s.is_empty());
+        if provider.is_empty() && identity.is_none() {
+            None
+        } else {
+            Some(PeerEntry { provider, identity })
+        }
+    };
     match v {
         Value::Sequence(items) => items
             .iter()
             .filter_map(|it| match it {
-                Value::Mapping(_) => {
-                    let provider = it
-                        .get("provider")
-                        .and_then(yaml_scalar_string)
-                        .unwrap_or_default();
-                    let identity = it
-                        .get("identity")
-                        .and_then(yaml_scalar_string)
-                        .filter(|s| !s.is_empty());
-                    if provider.is_empty() && identity.is_none() {
-                        None
-                    } else {
-                        Some(PeerEntry { provider, identity })
-                    }
-                }
+                Value::Mapping(_) => map_entry(it),
                 _ => yaml_scalar_string(it)
                     .filter(|s| !s.is_empty())
                     .map(scalar_entry),
             })
             .collect(),
         Value::String(s) if !s.is_empty() => vec![scalar_entry(s.clone())],
+        // A single top-level mapping is ONE peer - parity with Python's
+        // coerce_peers, which wraps a dict as [dict]. Dropping it to empty (as
+        // this arm did before the codex peer review) silently discards a
+        // configured peer gate -> fail-open, the class this PR removes.
+        Value::Mapping(_) => map_entry(v).into_iter().collect(),
         _ => Vec::new(),
     }
 }
@@ -4461,6 +4468,26 @@ mod tests {
             s.required_bots,
             Some(vec!["chatgpt-codex-connector".to_string()])
         );
+    }
+
+    #[test]
+    fn parse_settings_peers_single_mapping_is_one_peer() {
+        // codex peer review P1: a single top-level mapping for peers (what
+        // Python's coerce_peers wraps as [dict]) must parse as ONE peer, not be
+        // silently dropped - dropping it is a fail-open on a configured peer gate.
+        let block = parse_settings(
+            "config:\n  review:\n    peers:\n      provider: codex\n      identity: fno-codex-bot\n",
+        );
+        assert_eq!(block.peers.len(), 1, "block-map peers must be one peer");
+        assert_eq!(block.peers[0].provider, "codex");
+        assert_eq!(block.peers[0].identity.as_deref(), Some("fno-codex-bot"));
+        // Flow-map form parses identically.
+        let flow = parse_settings(
+            "config:\n  review:\n    peers: {provider: gemini, identity: fno-gemini-bot}\n",
+        );
+        assert_eq!(flow.peers.len(), 1);
+        assert_eq!(flow.peers[0].provider, "gemini");
+        assert_eq!(flow.peers[0].identity.as_deref(), Some("fno-gemini-bot"));
     }
 
     #[test]
