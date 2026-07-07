@@ -810,6 +810,11 @@ struct PrInfo {
     /// while others run, so the DoneAwaitingMerge terminal must consult this to
     /// avoid firing while the session's own in-flight job could still turn red.
     ci_has_pending: bool,
+    /// GitHub mergeable state ("MERGEABLE" | "CONFLICTING" | "UNKNOWN"). The
+    /// DoneAwaitingMerge terminal must not fire on a "CONFLICTING" PR: the human
+    /// cannot merge past main-red until the branch is rebased, and the terminal
+    /// would drop the node from retry circulation while it is un-mergeable.
+    mergeable: String,
     /// Newest review/comment/inline-comment activity (ISO8601 or "none");
     /// folded into the fingerprint's 4th component on done() fires.
     latest_review_ts: String,
@@ -930,13 +935,13 @@ fn read_pr_info(
     head_sha: &str,
     events_path: &Path,
 ) -> Result<PrInfo, (String, String)> {
-    // Read 1: PR state + number + head OID
+    // Read 1: PR state + number + head OID + mergeability
     let pr_view_out = Command::new(gh_bin)
         .args([
             "pr",
             "view",
             "--json",
-            "state,number,headRefName,headRefOid",
+            "state,number,headRefName,headRefOid,mergeable",
         ])
         .current_dir(cwd)
         .output()
@@ -954,6 +959,7 @@ fn read_pr_info(
                 ci_conclusion: CiConclusion::None,
                 failing_checks: Vec::new(),
                 ci_has_pending: false,
+                mergeable: "UNKNOWN".to_string(),
                 latest_review_ts: "none".to_string(),
                 reviewed: false,
                 missing_bots: Vec::new(),
@@ -980,6 +986,14 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // GitHub's mergeable state: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" (still
+    // computing). Only "CONFLICTING" is a definitive no; UNKNOWN must not hold
+    // the terminal (it clears on its own). Missing field -> "UNKNOWN".
+    let mergeable = pr_json
+        .get("mergeable")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN")
+        .to_string();
 
     // x-8b64 (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
     // web/mobile, or `gh pr merge`) is done regardless of whether the required
@@ -999,6 +1013,7 @@ fn read_pr_info(
             ci_conclusion: CiConclusion::Skipped,
             failing_checks: Vec::new(),
             ci_has_pending: false,
+            mergeable,
             latest_review_ts: "none".to_string(),
             reviewed: true,
             missing_bots: Vec::new(),
@@ -1208,6 +1223,7 @@ fn read_pr_info(
         ci_conclusion,
         failing_checks,
         ci_has_pending,
+        mergeable,
         latest_review_ts,
         reviewed,
         missing_bots,
@@ -1274,19 +1290,13 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
 // subset, check-name granularity so the mux flakes rotating test names between
 // runs stay matched). Any PR-unique red, or any gh uncertainty, holds as today.
 
-/// How many latest completed main runs to union failing job names over. Sized to
-/// cover roughly ONE main commit's workflow fan-out (this repo fires ~4 workflow
-/// runs per push), so the union reflects the current main HEAD rather than a
-/// single workflow. Small + bounded so classification cost is constant.
-///
-/// Tradeoff (accepted, human-gated): a wider window would tolerate a check that
-/// flaked green on the latest run but was red just before, at the cost of
-/// counting a check that was genuinely FIXED on a newer main commit as still
-/// red - a false "pre-existing main-red" classification. Because the terminal
-/// NEVER merges and NEVER marks the node done (a human decides on the notify),
-/// the worst case of either error is a bounded, recoverable misclassification,
-/// so this stays deliberately narrow to favor precision over flake-tolerance.
-const MAIN_RUN_LOOKBACK: usize = 4;
+/// How many latest completed main runs to scan. `main_head_failing_checks` keeps
+/// only the runs whose headSha equals the newest run's (the current main HEAD),
+/// so this bound just needs to comfortably cover ONE commit's workflow fan-out
+/// (this repo fires ~4-5 workflow runs per push); a value above that is harmless
+/// because the headSha scope discards any older commit's runs. Bounded so the
+/// per-fire gh cost stays constant.
+const MAIN_RUN_LOOKBACK: usize = 10;
 
 /// Failing check/job names on a `gh pr checks --json name,bucket` payload
 /// (bucket fail|cancel), the same granularity a main-HEAD job carries. Non-fail
@@ -1329,14 +1339,17 @@ fn ci_has_pending_checks(checks: &Value) -> bool {
 }
 
 /// databaseIds of failed workflow runs from a `gh run list --json
-/// databaseId,conclusion` payload. Only conclusion=="failure" runs (a cancelled
-/// or in-progress run is not proof of a red check).
-fn parse_failing_run_ids(run_list: &Value) -> Vec<i64> {
+/// databaseId,conclusion,headSha` payload, scoped to a single `head_sha`. Only
+/// conclusion=="failure" runs whose headSha equals the current main HEAD count
+/// (a cancelled or in-progress run is not proof; a run from an OLDER main commit
+/// that has since been fixed is not proof of CURRENT main-red).
+fn parse_failing_run_ids(run_list: &Value, head_sha: &str) -> Vec<i64> {
     let Some(arr) = run_list.as_array() else {
         return Vec::new();
     };
     arr.iter()
         .filter(|r| r.get("conclusion").and_then(|v| v.as_str()) == Some("failure"))
+        .filter(|r| r.get("headSha").and_then(|v| v.as_str()) == Some(head_sha))
         .filter_map(|r| r.get("databaseId").and_then(|v| v.as_i64()))
         .collect()
 }
@@ -1364,11 +1377,15 @@ fn is_pre_existing_main_red(pr_failing: &[String], main_failing: &[String]) -> b
     pr_failing.iter().all(|c| main_failing.contains(c))
 }
 
-/// Union of failing job names across the latest N completed runs on current main
-/// HEAD (`--branch main`). Fail-CLOSED: any gh error, non-zero exit, malformed
-/// JSON, or ZERO completed runs returns `None` (unknown -> the caller holds as
-/// today). A clean read with no failures returns `Some(empty)` -> the subset
-/// rule then fails and the caller holds; only positive proof fires the terminal.
+/// Union of failing job names on the CURRENT main HEAD commit, scanning the
+/// latest N completed runs on `--branch main` and keeping only those whose
+/// headSha matches the newest run's (i.e. the current main HEAD). N is sized to
+/// cover one commit's workflow fan-out with margin; scoping by headSha means a
+/// larger N never pulls in a stale older commit's failures. Fail-CLOSED: any gh
+/// error, non-zero exit, malformed JSON, ZERO completed runs, or a missing
+/// headSha returns `None` (unknown -> the caller holds as today). A clean read
+/// with no failures on HEAD returns `Some(empty)` -> the subset rule then fails
+/// and the caller holds; only positive proof fires the terminal.
 fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<String>> {
     let list_out = Command::new(gh_bin)
         .args([
@@ -1381,7 +1398,7 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
             "--limit",
             &n.to_string(),
             "--json",
-            "databaseId,conclusion",
+            "databaseId,conclusion,headSha",
         ])
         .current_dir(cwd)
         .output()
@@ -1390,11 +1407,16 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
         return None; // gh error -> unknown -> hold
     }
     let list: Value = serde_json::from_slice(&list_out.stdout).ok()?;
+    let arr = list.as_array()?;
     // Zero completed runs (new/quiet repo) is not proof -> unknown.
-    if list.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-        return None;
-    }
-    let failing_run_ids = parse_failing_run_ids(&list);
+    // The newest run's headSha IS the current main HEAD; classify against only
+    // that commit's runs so a failure fixed on a later commit never counts.
+    let head_sha = arr
+        .first()
+        .and_then(|r| r.get("headSha"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+    let failing_run_ids = parse_failing_run_ids(&list, head_sha);
 
     let mut names: Vec<String> = Vec::new();
     for id in failing_run_ids {
@@ -1443,7 +1465,9 @@ fn best_effort_notify(title: &str, body: &str) {
     if std::env::var("FNO_LOOPCHECK_NO_NOTIFY").as_deref() == Ok("1") {
         return;
     }
-    let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    // var_os avoids a lossy UTF-8 conversion on a path/binary env value and
+    // hands the raw OsString straight to Command (gemini review).
+    let fno_bin = std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
     let _ = Command::new(fno_bin).args(["notify", title, body]).spawn();
 }
 
@@ -3045,7 +3069,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // partial-CI fire where the session's OWN new job is still
                 // pending and about to turn red. The terminal must see fully
                 // settled-red CI, never partial.
-                if pr_open && pr_info.reviewed && head_shipped && !ci_ok && !pr_info.ci_has_pending
+                //
+                // `mergeable != "CONFLICTING"` guards a reviewed PR whose branch
+                // conflicts with main: the human cannot merge past main-red until
+                // it is rebased, so terminating here would drop the node from
+                // retry circulation while it is un-mergeable. UNKNOWN (still
+                // computing) is allowed - it clears on its own.
+                if pr_open
+                    && pr_info.reviewed
+                    && head_shipped
+                    && !ci_ok
+                    && !pr_info.ci_has_pending
+                    && pr_info.mergeable != "CONFLICTING"
                 {
                     if let Some(main_failing) =
                         main_head_failing_checks(gh_bin, &cwd, MAIN_RUN_LOOKBACK)
@@ -3772,6 +3807,7 @@ mod tests {
             ci_conclusion: CiConclusion::Pending,
             failing_checks: vec![],
             ci_has_pending: false,
+            mergeable: "UNKNOWN".to_string(),
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
@@ -3927,14 +3963,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_failing_run_ids_only_failures() {
+    fn parse_failing_run_ids_only_failures_on_head_sha() {
+        // Only failures whose headSha matches the current main HEAD count. Run 4
+        // failed but belongs to an OLDER commit (headSha "old"), so a check it
+        // failed that main HEAD has since fixed must NOT be classified pre-existing.
         let list = serde_json::json!([
-            {"databaseId": 1, "conclusion": "failure"},
-            {"databaseId": 2, "conclusion": "success"},
-            {"databaseId": 3, "conclusion": "cancelled"},
-            {"databaseId": 4, "conclusion": "failure"},
+            {"databaseId": 1, "conclusion": "failure", "headSha": "head"},
+            {"databaseId": 2, "conclusion": "success", "headSha": "head"},
+            {"databaseId": 3, "conclusion": "cancelled", "headSha": "head"},
+            {"databaseId": 4, "conclusion": "failure", "headSha": "old"},
+            {"databaseId": 5, "conclusion": "failure", "headSha": "head"},
         ]);
-        assert_eq!(parse_failing_run_ids(&list), vec![1, 4]);
+        assert_eq!(parse_failing_run_ids(&list, "head"), vec![1, 5]);
+        // A different HEAD sha selects that commit's failures only.
+        assert_eq!(parse_failing_run_ids(&list, "old"), vec![4]);
     }
 
     #[test]
