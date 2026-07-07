@@ -371,6 +371,68 @@ combos_cli = typer.Typer(
 cli.add_typer(combos_cli, name="combos")
 
 
+benchmarks_cli = typer.Typer(
+    name="benchmarks",
+    help="Cache + view the OpenRouter coding benchmark snapshot (routing source of truth).",
+    no_args_is_help=True,
+)
+cli.add_typer(benchmarks_cli, name="benchmarks")
+
+
+@benchmarks_cli.command("refresh")
+def benchmarks_refresh() -> None:
+    """Fetch the OpenRouter coding benchmarks and cache them atomically.
+
+    Fails loud (non-zero) on any network/auth error, never leaving a truncated
+    snapshot. Meant to run manually at a fortnightly cadence; dispatch-time tier
+    resolution reads the cache, never the network.
+    """
+    from fno.adapters.providers.benchmarks import BenchmarkError, refresh
+    from fno.paths import benchmarks_json
+
+    try:
+        snapshot = refresh()
+    except BenchmarkError as exc:
+        typer.echo(f"benchmarks refresh: {exc}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"refreshed {len(snapshot['models'])} models -> {benchmarks_json()}"
+    )
+
+
+@benchmarks_cli.command("show")
+def benchmarks_show() -> None:
+    """Render the cached benchmark snapshot; warn once if it is stale (>14 days)."""
+    from fno.adapters.providers.benchmarks import (
+        is_stale,
+        load_snapshot,
+        reachable,
+        staleness_seconds,
+    )
+
+    snapshot = load_snapshot()
+    if snapshot is None:
+        typer.echo(
+            "no benchmark snapshot; run `fno providers benchmarks refresh`",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if is_stale(snapshot):
+        age = staleness_seconds(snapshot) or 0
+        typer.echo(
+            f"WARNING: benchmark snapshot is {int(age // 86400)} days old (>14); "
+            "run `fno providers benchmarks refresh`",
+            err=True,
+        )
+    typer.echo(f"source: {snapshot.get('source')}  fetched_at: {snapshot.get('fetched_at')}")
+    for row in snapshot.get("models", []):
+        name = row.get("name", "?")
+        pct = row.get("coding_percentile")
+        mapped = reachable(name)
+        route = f"{mapped[0]}:{mapped[1]}" if mapped else "unmapped (not routable)"
+        typer.echo(f"  {name:<24} coding={pct!s:<6} -> {route}")
+
+
 def _combos_settings_path(scope: str) -> Path:
     """Resolve settings path for combos commands (mirrors providers scope)."""
     return _settings_path_for_scope(scope)
