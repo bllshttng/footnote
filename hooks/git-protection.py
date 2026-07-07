@@ -180,6 +180,23 @@ def extract_branch_from_push(command):
 
     return None
 
+def push_names_explicit_dest(command):
+    """True only when the push unambiguously names a concrete destination
+    branch: the `git push <remote> <branch>` form (>=2 positional args) whose
+    target is not HEAD/@ (which resolve to the current branch). A remote-only
+    `git push origin`, a bare `git push`, or `git push origin HEAD` is ambiguous
+    (the destination is really the current branch) and returns False so the
+    caller falls through to the current-branch check."""
+    # Collapse shell line-continuations so multiline pushes count correctly.
+    cleaned = re.sub(r'\\\s*\n', ' ', command)
+    # Drop flags (and stop at '=' so `--repo=x` leaves no positional token).
+    cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)', ' ', cleaned)
+    m = re.search(r'git\s+push\b(.*)$', cleaned)
+    if not m:
+        return False
+    args = m.group(1).split()
+    return len(args) >= 2 and args[-1] not in ('HEAD', '@')
+
 def get_current_branch():
     """Try to get current branch from git (if in git repo)."""
     try:
@@ -214,11 +231,13 @@ def is_push_to_protected_branch(command):
     if explicit_branch and explicit_branch in PROTECTED_BRANCHES:
         return True, explicit_branch
 
-    # An explicit non-protected destination is safe regardless of the session
-    # cwd's branch; without this a `git push origin feature/x` from a cwd on
-    # main (every background /target ship) is wrongly blocked. Bare pushes
-    # (explicit_branch is None) still fall through to the current-branch check.
-    if explicit_branch:
+    # An explicit, non-protected DESTINATION branch is authoritative regardless
+    # of the session cwd's branch; without this a `git push origin feature/x`
+    # from a cwd on main (every background /target ship) is wrongly blocked.
+    # Gated on push_names_explicit_dest so an ambiguous single-token push
+    # (`git push origin`, remote-only) or a current-branch push (`git push
+    # origin HEAD`) still falls through and is blocked on a protected branch.
+    if explicit_branch and push_names_explicit_dest(command):
         return False, None
 
     # If no explicit branch, check current branch

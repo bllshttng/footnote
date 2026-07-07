@@ -49,9 +49,42 @@ def test_refspec_to_protected_dest_still_blocked():
         "git push origin feature/x:main") == (True, "main")
 
 
+# The early return must not fire on an ambiguous single-token or current-branch
+# push: `extract_branch_from_push` returns the REMOTE ("origin") or "HEAD" as if
+# it were a branch, which would otherwise bypass protection on `main`.
+
+def test_remote_only_push_on_main_still_blocked():
+    _on_main("main")
+    assert git_protection.is_push_to_protected_branch(
+        "git push origin") == (True, "main")
+
+
+def test_force_remote_only_push_on_main_still_blocked():
+    _on_main("main")
+    assert git_protection.is_push_to_protected_branch(
+        "git push --force origin") == (True, "main")
+
+
+def test_push_head_on_main_still_blocked():
+    _on_main("main")
+    assert git_protection.is_push_to_protected_branch(
+        "git push origin HEAD") == (True, "main")
+
+
+def test_push_at_alias_on_main_still_blocked():
+    _on_main("main")
+    assert git_protection.is_push_to_protected_branch(
+        "git push origin @") == (True, "main")
+
+
+def test_upstream_flag_feature_push_still_allowed():
+    _on_main("main")
+    assert git_protection.is_push_to_protected_branch(
+        "git push -u origin feature/x") == (False, None)
+
+
 if __name__ == "__main__":
-    test_feature_push_from_cwd_on_main_is_allowed()
-    test_explicit_push_to_main_still_blocked()
-    test_bare_push_on_protected_branch_still_blocked()
-    test_refspec_to_protected_dest_still_blocked()
-    print("ok: all 4 git-protection push scenarios pass")
+    for _name, _fn in sorted(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            _fn()
+    print("ok: all git-protection push scenarios pass")
