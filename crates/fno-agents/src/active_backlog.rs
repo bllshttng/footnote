@@ -739,6 +739,20 @@ fn map_outcome(
         return DrainOutcome::Dispatched { node };
     }
 
+    // DoneAwaitingMerge: the node built successfully (PR up, reviewed)
+    // but could not merge past a proven pre-existing main-red. That is a
+    // SUCCESSFUL dispatch for the daemon, not a failure - the node is closed at
+    // the human merge by `fno backlog reconcile`, exactly like DoneBatched. Keep
+    // it out of the cross-tick circuit breaker (mirror the DoneBatched keep-set).
+    if matches!(last.evidence.reason, TerminationReason::DoneAwaitingMerge) {
+        breaker.record_success(&node);
+        let _ = journal.append(
+            "active_backlog_dispatched",
+            json!({"node_id": node, "termination": "DoneAwaitingMerge", "awaiting_merge": true}),
+        );
+        return DrainOutcome::Dispatched { node };
+    }
+
     match &last.close {
         CloseOutcome::Closed => {
             breaker.record_success(&node);

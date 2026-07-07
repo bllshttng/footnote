@@ -27,6 +27,15 @@ pub enum TerminationReason {
     /// per-node PR to go green. Terminal, but NOT a ship reason - the batch's
     /// own `/pr create` graduates the plan; a member must not.
     DoneBatched,
+    /// Work complete (PR open, mergeable, reviewed, HEAD shipped) but `done()`
+    /// fails SOLELY on CI-green because main itself is red on the same checks,
+    /// and a bg agent cannot merge. Proven pre-existing main-red (strict
+    /// check-name subset against current main HEAD) terminates the loop with a
+    /// one-shot merge-recommendation notify instead of burning to NoProgress.
+    /// Terminal, but NOT a ship reason (like DoneBatched): never merges, never
+    /// marks the node done - a human merge then the out-of-band-merge reconcile
+    /// path closes it, and DonePRGreen always wins when observable.
+    DoneAwaitingMerge,
     NoWork,
     Budget,
     NoProgress,
@@ -792,6 +801,10 @@ struct PrInfo {
     /// on #447: a green PR must not complete a session with unpushed work).
     head_oid: String,
     ci_conclusion: CiConclusion,
+    /// Every failing check/job name on the PR head (bucket fail|cancel), at the
+    /// same granularity as `gh pr checks .name`. Feeds the DoneAwaitingMerge
+    /// subset rule against main's failing set. Empty when CI is green/pending.
+    failing_checks: Vec<String>,
     /// Newest review/comment/inline-comment activity (ISO8601 or "none");
     /// folded into the fingerprint's 4th component on done() fires.
     latest_review_ts: String,
@@ -934,6 +947,7 @@ fn read_pr_info(
                 number: 0,
                 head_oid: String::new(),
                 ci_conclusion: CiConclusion::None,
+                failing_checks: Vec::new(),
                 latest_review_ts: "none".to_string(),
                 reviewed: false,
                 missing_bots: Vec::new(),
@@ -977,6 +991,7 @@ fn read_pr_info(
             number,
             head_oid,
             ci_conclusion: CiConclusion::Skipped,
+            failing_checks: Vec::new(),
             latest_review_ts: "none".to_string(),
             reviewed: true,
             missing_bots: Vec::new(),
@@ -986,9 +1001,11 @@ fn read_pr_info(
         });
     }
 
-    // Read 2: CI checks
-    let ci_conclusion = if ci_declared_none {
-        CiConclusion::Skipped
+    // Read 2: CI checks. Compute the conclusion AND the full failing-check-name
+    // set from the same payload (the set feeds the DoneAwaitingMerge subset
+    // rule; empty unless CI is red).
+    let (ci_conclusion, failing_checks) = if ci_declared_none {
+        (CiConclusion::Skipped, Vec::new())
     } else {
         let checks_out = Command::new(gh_bin)
             .args(["pr", "checks", "--json", "name,state,bucket"])
@@ -1003,7 +1020,11 @@ fn read_pr_info(
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
             .map_err(|_| ("pr_checks_parse".to_string(), String::new()))?;
 
-        compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?
+        let failing = failing_check_names(&checks);
+        (
+            compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?,
+            failing,
+        )
     };
 
     // Reads 3+4: reviews + inline findings. Skipped when the session declares
@@ -1175,6 +1196,7 @@ fn read_pr_info(
         number,
         head_oid,
         ci_conclusion,
+        failing_checks,
         latest_review_ts,
         reviewed,
         missing_bots,
@@ -1229,6 +1251,160 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
         return Ok(CiConclusion::Pending);
     }
     Ok(CiConclusion::Success)
+}
+
+// ── DoneAwaitingMerge classifier ───────────────────────────────────────────────
+//
+// When done() fails SOLELY on CI-green (PR open+mergeable, reviewed, HEAD
+// shipped) the loop would burn to NoProgress while a bg agent waits on a merge
+// it cannot perform - but only pathologically so when main ITSELF is red on the
+// same checks. `pre_existing_main_red` proves that condition mechanically:
+// every failing PR check name must also be failing on current main HEAD (strict
+// subset, check-name granularity so the mux flakes rotating test names between
+// runs stay matched). Any PR-unique red, or any gh uncertainty, holds as today.
+
+/// How many latest completed main runs to union failing job names over. Small +
+/// bounded so classification cost is constant; any-red-within-N catches a flake
+/// that happened to pass on the single latest run but failed on the prior ones.
+const MAIN_RUN_LOOKBACK: usize = 3;
+
+/// Failing check/job names on a `gh pr checks --json name,bucket` payload
+/// (bucket fail|cancel), the same granularity a main-HEAD job carries. Non-fail
+/// buckets (pass|pending|skipping) are ignored. Malformed entries are skipped.
+fn failing_check_names(checks: &Value) -> Vec<String> {
+    let Some(arr) = checks.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter(|c| {
+            let bucket = c
+                .get("bucket")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            matches!(bucket.as_str(), "fail" | "cancel")
+        })
+        .filter_map(|c| c.get("name").and_then(|v| v.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// databaseIds of failed workflow runs from a `gh run list --json
+/// databaseId,conclusion` payload. Only conclusion=="failure" runs (a cancelled
+/// or in-progress run is not proof of a red check).
+fn parse_failing_run_ids(run_list: &Value) -> Vec<i64> {
+    let Some(arr) = run_list.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter(|r| r.get("conclusion").and_then(|v| v.as_str()) == Some("failure"))
+        .filter_map(|r| r.get("databaseId").and_then(|v| v.as_i64()))
+        .collect()
+}
+
+/// Failing job names from a `gh run view <id> --json jobs` payload. The `jobs`
+/// `.name` field is the same namespace as `gh pr checks .name` (both are the
+/// check-run/job name), so a name from here matches a PR failing-check name.
+fn parse_failing_job_names(jobs_json: &Value) -> Vec<String> {
+    let Some(jobs) = jobs_json.get("jobs").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    jobs.iter()
+        .filter(|j| j.get("conclusion").and_then(|v| v.as_str()) == Some("failure"))
+        .filter_map(|j| j.get("name").and_then(|v| v.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// The strict subset rule: main's failing set must COVER every failing PR check.
+/// Empty PR-failing is never eligible (that is the DonePRGreen path, not here);
+/// any PR-unique failing check blocks the terminal (the session's own breakage).
+fn is_pre_existing_main_red(pr_failing: &[String], main_failing: &[String]) -> bool {
+    if pr_failing.is_empty() {
+        return false;
+    }
+    pr_failing.iter().all(|c| main_failing.contains(c))
+}
+
+/// Union of failing job names across the latest N completed runs on current main
+/// HEAD (`--branch main`). Fail-CLOSED: any gh error, non-zero exit, malformed
+/// JSON, or ZERO completed runs returns `None` (unknown -> the caller holds as
+/// today). A clean read with no failures returns `Some(empty)` -> the subset
+/// rule then fails and the caller holds; only positive proof fires the terminal.
+fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<String>> {
+    let list_out = Command::new(gh_bin)
+        .args([
+            "run",
+            "list",
+            "--branch",
+            "main",
+            "--status",
+            "completed",
+            "--limit",
+            &n.to_string(),
+            "--json",
+            "databaseId,conclusion",
+        ])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !list_out.status.success() {
+        return None; // gh error -> unknown -> hold
+    }
+    let list: Value = serde_json::from_slice(&list_out.stdout).ok()?;
+    // Zero completed runs (new/quiet repo) is not proof -> unknown.
+    if list.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        return None;
+    }
+    let failing_run_ids = parse_failing_run_ids(&list);
+
+    let mut names: Vec<String> = Vec::new();
+    for id in failing_run_ids {
+        let view_out = Command::new(gh_bin)
+            .args(["run", "view", &id.to_string(), "--json", "jobs"])
+            .current_dir(cwd)
+            .output()
+            .ok()?;
+        if !view_out.status.success() {
+            return None; // any per-run gh error -> unknown -> hold (fail closed)
+        }
+        let view: Value = serde_json::from_slice(&view_out.stdout).ok()?;
+        for name in parse_failing_job_names(&view) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    Some(names)
+}
+
+/// Idempotency guard (Concurrency AC): true iff a prior `termination` event with
+/// reason `DoneAwaitingMerge` for this session already exists, so a re-evaluation
+/// (crash restart, or the two consumers racing) does not double-emit or
+/// double-notify. Fail-open (false) on an unreadable events file: at worst one
+/// extra notify, never a silent skip of the terminal.
+fn already_emitted_awaiting_merge(events_path: &Path, session_id: &str) -> bool {
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        return false;
+    };
+    content.lines().any(|line| {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            return false;
+        };
+        val.get("type").and_then(|v| v.as_str()) == Some("termination")
+            && val.pointer("/data/session_id").and_then(|v| v.as_str()) == Some(session_id)
+            && val.pointer("/data/reason").and_then(|v| v.as_str()) == Some("DoneAwaitingMerge")
+    })
+}
+
+/// Best-effort `fno notify TITLE BODY`. Spawned detached and never waited on;
+/// any failure (missing binary, non-zero exit) is non-fatal - the terminal
+/// completes on the durable event row alone (AC2-FR). Suppressed under
+/// `FNO_LOOPCHECK_NO_NOTIFY=1` so unit tests never spawn a real notifier.
+fn best_effort_notify(title: &str, body: &str) {
+    if std::env::var("FNO_LOOPCHECK_NO_NOTIFY").as_deref() == Ok("1") {
+        return;
+    }
+    let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    let _ = Command::new(fno_bin).args(["notify", title, body]).spawn();
 }
 
 /// Known bot logins that count as reviewers when external_reviewers is not configured.
@@ -2812,6 +2988,83 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     );
                 }
 
+                // DoneAwaitingMerge: done() failed SOLELY on CI-green
+                // (PR open, reviewed, HEAD shipped, but CI red). Reached only
+                // when !ci_ok because the DonePRGreen arm above returned - so
+                // DonePRGreen precedence holds, and a merge that flipped the PR
+                // green would have been caught by the fresh run_done this fire
+                // (AC1-FR). If current main HEAD is red on the SAME checks
+                // (strict subset, check-name granularity), a bg agent cannot
+                // merge past it: terminate clean with a one-shot notify instead
+                // of burning to NoProgress. Any PR-unique red or any gh
+                // uncertainty falls through to the hold below (fail closed).
+                if pr_open && pr_info.reviewed && head_shipped && !ci_ok {
+                    if let Some(main_failing) =
+                        main_head_failing_checks(gh_bin, &cwd, MAIN_RUN_LOOKBACK)
+                    {
+                        if is_pre_existing_main_red(&pr_info.failing_checks, &main_failing) {
+                            let proof = format!(
+                                "same checks red on main (last {} completed runs): {}",
+                                MAIN_RUN_LOOKBACK,
+                                pr_info.failing_checks.join(", ")
+                            );
+                            let msg = format!(
+                                "PR #{} complete and reviewed; awaiting merge past pre-existing main-red ({proof})",
+                                pr_info.number
+                            );
+                            // Idempotency (Concurrency AC): emit + notify at most
+                            // once per session; a re-eval or the two consumers
+                            // racing still returns the terminal but does not
+                            // double-notify.
+                            if !already_emitted_awaiting_merge(&project_events, &session_id) {
+                                emit(
+                                    "termination",
+                                    serde_json::json!({
+                                        "session_id": session_id,
+                                        "reason": "DoneAwaitingMerge",
+                                        "message": msg.clone()
+                                    }),
+                                );
+                                emit(
+                                    "loop_check",
+                                    serde_json::json!({
+                                        "session_id": session_id,
+                                        "fingerprint": fingerprint,
+                                        "fires": this_fire,
+                                        "consecutive_unchanged": consecutive_after,
+                                        "decision": "allow",
+                                        "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
+                                        "intent_source": intent_source,
+                                        "pr_state": pr_info.state.as_str(),
+                                        "ci": pr_info.ci_conclusion.render(),
+                                        "reviewed": pr_info.reviewed,
+                                        "review_skipped": pr_info.review_skipped,
+                                        "unaddressed_blocking": pr_info.unaddressed_findings.len(),
+                                        "fp_read_failed": fp_read_failed
+                                    }),
+                                );
+                                best_effort_notify(
+                                    &format!(
+                                        "PR #{} ready - merge past pre-existing main-red",
+                                        pr_info.number
+                                    ),
+                                    &msg,
+                                );
+                            }
+                            return (
+                                0,
+                                allow_output(
+                                    "allow",
+                                    Some(TerminationReason::DoneAwaitingMerge),
+                                    &msg,
+                                    this_fire,
+                                    Some(fingerprint),
+                                ),
+                            );
+                        }
+                    }
+                }
+
                 if backstop_tripped && (!pr_open || !ci_ok || !pr_info.reviewed) {
                     // Backstop tripped + done() false -> NoProgress
                     emit(
@@ -3469,6 +3722,7 @@ mod tests {
             number: 455,
             head_oid: "abc".to_string(),
             ci_conclusion: CiConclusion::Pending,
+            failing_checks: vec![],
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
@@ -3574,6 +3828,116 @@ mod tests {
         let result = compute_ci_conclusion(&checks).unwrap();
         assert_eq!(result, CiConclusion::Success);
         assert_eq!(result.render(), "SUCCESS");
+    }
+
+    // ── DoneAwaitingMerge classifier ───────────────────────────────────────
+
+    #[test]
+    fn failing_check_names_collects_fail_and_cancel_only() {
+        let checks = serde_json::json!([
+            {"name": "smoke",        "bucket": "fail"},
+            {"name": "loc-ratchet",  "bucket": "pass"},
+            {"name": "prompt-drift", "bucket": "cancel"},
+            {"name": "self-test",    "bucket": "pending"},
+            {"name": "doc-colo",     "bucket": "skipping"},
+        ]);
+        let mut got = failing_check_names(&checks);
+        got.sort();
+        assert_eq!(got, vec!["prompt-drift".to_string(), "smoke".to_string()]);
+    }
+
+    #[test]
+    fn failing_check_names_empty_when_all_green() {
+        let checks = serde_json::json!([{"name": "smoke", "bucket": "pass"}]);
+        assert!(failing_check_names(&checks).is_empty());
+        // Malformed input never panics, yields empty.
+        assert!(failing_check_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn parse_failing_run_ids_only_failures() {
+        let list = serde_json::json!([
+            {"databaseId": 1, "conclusion": "failure"},
+            {"databaseId": 2, "conclusion": "success"},
+            {"databaseId": 3, "conclusion": "cancelled"},
+            {"databaseId": 4, "conclusion": "failure"},
+        ]);
+        assert_eq!(parse_failing_run_ids(&list), vec![1, 4]);
+    }
+
+    #[test]
+    fn parse_failing_job_names_only_failed_jobs() {
+        let view = serde_json::json!({
+            "jobs": [
+                {"name": "codex",   "conclusion": "success"},
+                {"name": "cargo test + schema parity", "conclusion": "failure"},
+                {"name": "gemini",  "conclusion": "failure"},
+            ]
+        });
+        let mut got = parse_failing_job_names(&view);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "cargo test + schema parity".to_string(),
+                "gemini".to_string()
+            ]
+        );
+        // No jobs key -> empty, never panics.
+        assert!(parse_failing_job_names(&serde_json::json!({})).is_empty());
+    }
+
+    /// AC1-HP: the core shape - PR fails only the one check main also fails.
+    #[test]
+    fn subset_rule_pr_failing_is_covered_by_main() {
+        let pr = vec!["cargo test + schema parity".to_string()];
+        let main = vec![
+            "cargo test + schema parity".to_string(),
+            "some other main-only red".to_string(),
+        ];
+        assert!(is_pre_existing_main_red(&pr, &main));
+    }
+
+    /// AC1-EDGE: a PR-unique failing check (its own breakage) blocks the terminal.
+    #[test]
+    fn subset_rule_pr_unique_red_blocks() {
+        let pr = vec![
+            "cargo test + schema parity".to_string(),
+            "fmt gate".to_string(), // the session's own breakage
+        ];
+        let main = vec!["cargo test + schema parity".to_string()];
+        assert!(!is_pre_existing_main_red(&pr, &main));
+    }
+
+    #[test]
+    fn subset_rule_empty_pr_failing_never_eligible() {
+        // Empty PR-failing is the DonePRGreen path, not this one.
+        assert!(!is_pre_existing_main_red(&[], &["x".to_string()]));
+        // Non-empty PR vs green main (empty) -> hold.
+        assert!(!is_pre_existing_main_red(&["x".to_string()], &[]));
+    }
+
+    #[test]
+    fn already_emitted_awaiting_merge_detects_prior_and_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        // Absent file -> false (fail open).
+        assert!(!already_emitted_awaiting_merge(&events, "sess-A"));
+        // A DonePRGreen termination for the same session must NOT count.
+        std::fs::write(
+            &events,
+            "{\"type\":\"termination\",\"data\":{\"session_id\":\"sess-A\",\"reason\":\"DonePRGreen\"}}\n",
+        )
+        .unwrap();
+        assert!(!already_emitted_awaiting_merge(&events, "sess-A"));
+        // A prior DoneAwaitingMerge for sess-A counts; a different session does not.
+        std::fs::write(
+            &events,
+            "{\"type\":\"termination\",\"data\":{\"session_id\":\"sess-A\",\"reason\":\"DoneAwaitingMerge\"}}\n",
+        )
+        .unwrap();
+        assert!(already_emitted_awaiting_merge(&events, "sess-A"));
+        assert!(!already_emitted_awaiting_merge(&events, "sess-B"));
     }
 
     /// AC5-HP: enums parse known gh strings.

@@ -199,6 +199,10 @@ pub(crate) fn exit_code_for_reason(reason: &TerminationReason) -> i32 {
         TerminationReason::DonePRGreen
         | TerminationReason::DoneAdvisory
         | TerminationReason::DoneBatched
+        // DoneAwaitingMerge: work complete, human-merge-gated past proven main
+        // red - a clean stop like the other Done* terminals. The reason string
+        // (not the exit code) is what a wrapper reads to distinguish it.
+        | TerminationReason::DoneAwaitingMerge
         | TerminationReason::NoWork => 0,
         TerminationReason::Budget | TerminationReason::NoProgress | TerminationReason::Aborted => 1,
         TerminationReason::Interrupted => 130,
