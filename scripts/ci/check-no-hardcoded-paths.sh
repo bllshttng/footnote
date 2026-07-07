@@ -124,6 +124,12 @@ add_violation "Python bare Path.home() / \".fno\" violations in cli/src/fno/:" "
 # Bash: bare $HOME/.fno/ WITHOUT ${VAR:-...} fallback wrapper
 # Scopes: hooks/, skills/ (not scripts/tests/, not paths.sh, not this script)
 # Excludes: comment lines, lines with ${VAR:-$HOME/.fno} pattern
+#
+# The comment filter must match AFTER grep -rn's `path:lineno:` prefix, so it
+# anchors on that prefix (`^[^:]*:[0-9]*:[[:space:]]*#`), NOT a bare `^\s*#`
+# (which never matches, since every line starts with the file path). A bare
+# anchor silently disabled comment exclusion and let a $HOME/.fno example in a
+# comment fail the gate.
 # ---------------------------------------------------------------------------
 
 HOOKS_SH_HITS=$(
@@ -132,7 +138,7 @@ HOOKS_SH_HITS=$(
         --include='*.sh' \
         2>/dev/null \
     | grep -v ':-.*\$HOME/\.fno' \
-    | grep -v '^\s*#' \
+    | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' \
     || true
 )
 add_violation "hooks/ bare \$HOME/.fno/ violations:" "$HOOKS_SH_HITS"
@@ -143,7 +149,7 @@ SKILLS_SH_HITS=$(
         --include='*.sh' \
         2>/dev/null \
     | grep -v ':-.*\$HOME/\.fno' \
-    | grep -v '^\s*#' \
+    | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' \
     || true
 )
 add_violation "skills/ bare \$HOME/.fno/ violations:" "$SKILLS_SH_HITS"
@@ -159,7 +165,7 @@ SCRIPTS_SH_HITS=$(
     | grep -v 'scripts/ci/' \
     | grep -v 'scripts/lib/paths\.sh' \
     | grep -v ':-.*\$HOME/\.fno' \
-    | grep -v '^\s*#' \
+    | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' \
     || true
 )
 add_violation "scripts/ bare \$HOME/.fno/ violations (excluding tests/ and ci/):" "$SCRIPTS_SH_HITS"
