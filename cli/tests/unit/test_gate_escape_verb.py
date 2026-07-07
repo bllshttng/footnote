@@ -75,6 +75,19 @@ def test_pr_dedups_a_pr_bearing_escape(tmp_path):
     assert escapes[0]["data"]["pr"] == 42
 
 
+def test_pr_and_dedup_key_together_rejected(tmp_path):
+    """The verb rejects --pr + --dedup-key with a clean error instead of
+    silently dropping --dedup-key (gemini review on #241)."""
+    ev = tmp_path / "events.jsonl"
+    res = runner.invoke(
+        cli,
+        ["gate-escape", "flake", "--pr", "7", "--dedup-key", "k", "--events", str(ev)],
+    )
+    assert res.exit_code != 0
+    assert "XOR" in res.output
+    assert not ev.exists()
+
+
 def test_ac1_ui_rebase_success_prints_nudge_no_event(monkeypatch, capsys, tmp_path):
     """AC1-UI: a successful rebase prints ONE stderr note suggesting the tag
     command, and the nudge emits no event by itself."""

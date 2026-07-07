@@ -204,8 +204,13 @@ def gate_escape(
     from fno.events.gate_escape import default_dedup_key, emit_gate_escape
 
     # A PR-bearing escape dedups on (reason, pr); a PR-less one on an explicit
-    # or default (reason, session, day) bucket. Never both - PR wins.
-    key = None if pr else (dedup_key or default_dedup_key(reason))
+    # or default (reason, session, day) bucket. Reject both explicitly rather
+    # than silently dropping --dedup-key (gemini review on #241).
+    effective_pr = pr if (pr is not None and pr > 0) else None
+    if effective_pr is not None and dedup_key is not None:
+        typer.echo("error: pass --pr-number XOR --dedup-key, not both", err=True)
+        raise typer.Exit(code=1)
+    key = None if effective_pr else (dedup_key or default_dedup_key(reason))
     try:
         out = emit_gate_escape(
             reason,

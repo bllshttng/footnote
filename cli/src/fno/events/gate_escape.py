@@ -133,29 +133,39 @@ def already_emitted(
     Dedup on ``(reason, pr)`` for a PR-bearing escape (Tier-1 dead-bot) or
     ``(reason, dedup_key)`` for a PR-less one (Tier-2). With neither key there
     is nothing to dedup on -> not a duplicate. A missing/unreadable log reads
-    as 'not emitted' (fail-open toward emitting)."""
+    as 'not emitted' (fail-open toward emitting).
+
+    This read is NOT atomic with the append that follows in ``emit_gate_escape``
+    (they take the events lock separately). Two same-bucket emits racing (e.g.
+    the Rust and Python bypass paths in one session/day) can both read
+    'not emitted' and both append - a rare, bounded double-count the design
+    explicitly accepts, mirroring Tier-1's stance. The tested AC2-INV contract
+    (a sequential burst in one process) holds because each read follows the
+    prior append."""
     if pr is None and dedup_key is None:
         return False
     try:
-        text = Path(events_path).read_text(encoding="utf-8")
-    except OSError:
+        # Stream line-by-line: the canonical events log grows unboundedly, so
+        # never slurp it whole just to scan for a dup (gemini review on #241).
+        with Path(events_path).open("r", encoding="utf-8") as fh:
+            for line in fh:
+                if '"gate_escape"' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(ev, dict) or ev.get("type") != "gate_escape":
+                    continue
+                data = ev.get("data")
+                if not isinstance(data, dict) or data.get("reason") != reason:
+                    continue
+                if pr is not None and data.get("pr") == pr:
+                    return True
+                if dedup_key is not None and data.get("dedup_key") == dedup_key:
+                    return True
+    except (OSError, UnicodeDecodeError):
         return False
-    for line in text.splitlines():
-        if '"gate_escape"' not in line:
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(ev, dict) or ev.get("type") != "gate_escape":
-            continue
-        data = ev.get("data") or {}
-        if data.get("reason") != reason:
-            continue
-        if pr is not None and data.get("pr") == pr:
-            return True
-        if dedup_key is not None and data.get("dedup_key") == dedup_key:
-            return True
     return False
 
 
