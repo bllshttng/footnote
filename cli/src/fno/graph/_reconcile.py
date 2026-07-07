@@ -665,8 +665,24 @@ def _gate_escape_already_emitted(
     return False
 
 
+def _canonical_events_path() -> Path:
+    """The single events log gate_escape telemetry lands in. A closed node
+    outlives its worktree and per-worktree events.jsonl are NOT shared, so the
+    metric must aggregate from the canonical root (the same rationale retro uses
+    for filed nodes). Retro reads this exact path."""
+    from fno.paths import resolve_canonical_repo_root
+
+    return resolve_canonical_repo_root() / ".fno" / "events.jsonl"
+
+
+def gate_escape_failure_log_path(events_path: Path) -> Path:
+    """The durable emit-failure counter, sitting beside its events log so both
+    resolve together (retro reads this for AC7)."""
+    return events_path.parent / "gate_escape_emit_failures.jsonl"
+
+
 def _record_gate_escape_emit_failure(
-    cwd: Optional[str], node_id: str, reason: str, exc: Exception
+    log_path: Optional[Path], node_id: str, reason: str, exc: Exception
 ) -> None:
     """Append one line to a durable emit-failure log so retro can surface a
     broken counter (AC7-FR): a fail-open emit that silently drops would make the
@@ -677,10 +693,9 @@ def _record_gate_escape_emit_failure(
         f"{type(exc).__name__}: {exc}; merge close unaffected, telemetry fails open",
         file=sys.stderr,
     )
-    if not (isinstance(cwd, str) and cwd):
+    if log_path is None:
         return
     try:
-        log_path = Path(cwd) / ".fno" / "gate_escape_emit_failures.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(
             {
@@ -702,6 +717,7 @@ def emit_gate_escape_for_record(
     *,
     required_bots: list[str],
     reviews_fetcher: Callable[..., set[str]] = _fetch_pr_review_logins,
+    events_path: Optional[Path] = None,
 ) -> Optional[Path]:
     """Tier-1 auto-emit (x-f894): a ``gate_escape{reason:dead-bot}`` when
     reconcile closes an out-of-band-merged node whose required review bot never
@@ -715,12 +731,15 @@ def emit_gate_escape_for_record(
       - some required bot never reviewed -> escape: the loop should have waited
                                         for / resolved that review (AC1).
 
-    Dedup on (pr, reason) against the owning worktree's events.jsonl (AC4).
-    Telemetry fails OPEN: any failure logs a durable emit-failure line (AC7) and
-    returns None, never raising - the gate_escape emit must never abort the
-    reconcile close (AC5). Returns the events.jsonl path on a successful emit.
+    Lands in the CANONICAL events log (``events_path`` overrides for tests) so a
+    closed node's telemetry outlives its worktree and retro aggregates one
+    coherent log. Dedup on (pr, reason) (AC4). Telemetry fails OPEN: any failure
+    logs a durable emit-failure line beside the events log (AC7) and returns
+    None, never raising - the emit must never abort the reconcile close (AC5).
+    Returns the events.jsonl path on a successful emit.
     """
     reason = _GATE_ESCAPE_REASON_DEADBOT
+    resolved_events: Optional[Path] = events_path
     try:
         wanted = [b for b in (required_bots or []) if isinstance(b, str) and b.strip()]
         if not wanted:
@@ -736,14 +755,9 @@ def emit_gate_escape_for_record(
         if not unmet:
             return None  # AC2b: every required bot reviewed; gate was met
 
-        events_path = (
-            Path(record.cwd) / ".fno" / "events.jsonl"
-            if isinstance(record.cwd, str) and record.cwd
-            else None
-        )
-        if events_path is not None and _gate_escape_already_emitted(
-            events_path, record.pr_number, reason
-        ):
+        if resolved_events is None:
+            resolved_events = _canonical_events_path()
+        if _gate_escape_already_emitted(resolved_events, record.pr_number, reason):
             return None  # AC4: already counted this (pr, reason)
 
         from fno.events import _build, append_event
@@ -755,11 +769,13 @@ def emit_gate_escape_for_record(
         data["detail"] = "required bot(s) never reviewed: " + ", ".join(sorted(unmet))
         event = _build("gate_escape", "backlog", data)
 
-        if events_path is not None:
-            append_event(event, events_path=events_path)
-            return events_path
-        append_event(event)
-        return None
+        append_event(event, events_path=resolved_events)
+        return resolved_events
     except Exception as exc:  # telemetry fails OPEN (AC5) + visible (AC7)
-        _record_gate_escape_emit_failure(record.cwd, record.node_id, reason, exc)
+        fail_log = (
+            gate_escape_failure_log_path(resolved_events)
+            if resolved_events is not None
+            else None
+        )
+        _record_gate_escape_emit_failure(fail_log, record.node_id, reason, exc)
         return None
