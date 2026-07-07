@@ -34,6 +34,17 @@ review from the bot account and never satisfies a `required_bots` gate.
   a genuinely different model (GLM via z.ai), which satisfies the distinct-model
   trust invariant (see step 3b).
 - **base** (optional): override the diff base (default `origin/main`).
+- **`adversarial`** (optional token, anywhere in the args): swaps the brief from
+  defect-hunting to a design-challenge framing (`MODE=adversarial`; default
+  `MODE=defect`). Everything else (RESOLVE, SPAWN, RELAY, advisory-by-default) is
+  unchanged.
+- **focus** (optional free text, adversarial mode only): after `adversarial`, the
+  target, and the provider are removed, every remaining token is collected verbatim
+  (in order) as a focus string that steers the challenge, e.g.
+  `/review peer adversarial 208 gemini does the pr_number disjunct actually matter`.
+  The target is only ever a token that is a PR number or resolves to a git branch, so
+  a focus word is never mistaken for the target; with no such token the target is the
+  current branch and every extra token is focus. Ignored in `MODE=defect`.
 - **`--post`** (optional flag): after getting the review, POST it to the PR
   under `config.review.peer_identity` so it satisfies the login-based loop-check
   gate. This is the ONE mode where a peer review is a gate, not advisory (see
@@ -43,6 +54,16 @@ review from the bot account and never satisfies a `required_bots` gate.
 ## Flow: RESOLVE -> BRIEF -> SPAWN (agent is the runner) -> RELAY -> OFFER
 
 ### 1. RESOLVE the diff
+
+**Parse the mode first.** Strip an `adversarial` token from the peer args to set
+`MODE=adversarial` (default `MODE=defect`). Then resolve the target
+deterministically: the target is the single token that is a PR number (all digits)
+or resolves to a git ref (`git rev-parse --verify <tok>`); `codex`/`gemini` is the
+provider; `--*` are flags. In adversarial mode, every remaining token is collected
+verbatim (in order) into `FOCUS`. Because only a PR#/branch token can be the target,
+a focus word is never swallowed as the target; if no token resolves, the target is
+the current branch and all leftovers are focus. `FOCUS` is only consumed by the
+adversarial brief (step 2); ignore it in `MODE=defect`.
 
 Pick the target and write the diff to a scratch file. Prefer the background-job
 tmp dir when set, else the system temp dir:
@@ -72,17 +93,38 @@ codex/gemini get a prose brief (they cannot interpret a slash command). Write th
 full brief - instructions plus the diff - to a file so diff content containing
 quotes, backticks, or `$` can never break the shell in step 3.
 
+Use the defect brief for `MODE=defect`, the challenge brief for
+`MODE=adversarial`. Both write the same `$BRIEF` file and carry the diff the same
+way, so step 3 is identical.
+
 ```bash
 BRIEF="$TMP/peer-brief.txt"
-{
-  echo "You are doing a focused code review. Review the diff below for <PR #$N | branch $BRANCH>."
-  echo "Context: <one line - the user's stated goal, or the repo's purpose from AGENTS.md>."
-  echo "Report findings as P1 (blocking), P2 (should-fix), P3 (nit), each with file:line and a concrete fix."
-  echo "Be concise; skip praise. If the diff is clean, say so plainly."
-  echo
-  echo "--- DIFF ---"
-  cat "$DIFF"
-} > "$BRIEF"
+if [ "${MODE:-defect}" = "adversarial" ]; then
+  {
+    echo "You are challenging a proposed change, not hunting defects. The diff below is for <PR #$N | branch $BRANCH>."
+    echo "Context: <one line - the user's stated goal, or the repo's purpose from AGENTS.md>."
+    echo "Question whether this should ship AS DESIGNED. Address, grounded in the diff:"
+    echo "  - Is this the right approach, or is there a simpler / different design that does the job?"
+    echo "  - What assumptions does it depend on, and what breaks if they do not hold?"
+    echo "  - Where does it fail under real-world conditions: scale, concurrency, partial failure, empty/edge state, migration/rollback?"
+    echo "  - What are the tradeoffs vs the alternatives - what does this design give up?"
+    if [ -n "$FOCUS" ]; then echo "Focus: $FOCUS"; fi
+    echo "Be concise and specific; skip praise. Do not invent findings - if the design is sound, say so plainly and say why."
+    echo
+    echo "--- DIFF ---"
+    cat "$DIFF"
+  } > "$BRIEF"
+else
+  {
+    echo "You are doing a focused code review. Review the diff below for <PR #$N | branch $BRANCH>."
+    echo "Context: <one line - the user's stated goal, or the repo's purpose from AGENTS.md>."
+    echo "Report findings as P1 (blocking), P2 (should-fix), P3 (nit), each with file:line and a concrete fix."
+    echo "Be concise; skip praise. If the diff is clean, say so plainly."
+    echo
+    echo "--- DIFF ---"
+    cat "$DIFF"
+  } > "$BRIEF"
+fi
 ```
 
 **Large diff (> ~120 KB).** A multi-hundred-KB brief can exceed the argv limit in
