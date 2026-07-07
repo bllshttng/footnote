@@ -157,6 +157,18 @@ def ship(
         pr_url = pr.get("url", f"https://github.com/pull/{pr_number}")
         action = "pr_exists"
     else:
+        # Stale-base guard: a branch cut from a stale local HEAD ships a PR full
+        # of phantom deletions. Refuse before gh pr create (the same check the
+        # /pr create router runs; bypass FNO_PR_BASE_OK=stale-acknowledged).
+        from fno.pr._preflight import check_stale_base
+
+        base_code, base_msg = check_stale_base(base=f"origin/{base_branch}")
+        if base_code != 0:
+            return {
+                "action": "error",
+                "error": base_msg or "stale base: refused to open PR from a stale base",
+                "branch": branch,
+            }
         # Create new PR
         create_result = subprocess.run(
             [

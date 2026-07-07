@@ -74,6 +74,20 @@ fi
 
 (If `origin/main` is not the right base for this repo, set `BASE` accordingly. If the base does not resolve, fall through and let the worker resolve it - do not block on an unknown base.)
 
+### 2a-bis. Stale-base guard (before any dispatch)
+
+A branch cut from a stale local HEAD ships a PR full of phantom deletions (changes you never made appear as reverts). Refuse before dispatching the worker; the check fails open on a fetch flake and points at `fno pr rebase`:
+
+```bash
+if command -v fno >/dev/null 2>&1; then
+  fno pr base-check --base "$BASE" || {
+    rc=$?
+    # 3 = stale, 4 = unrelated histories (both refuse); fresh/bypass/fail-open exit 0.
+    [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
+  }
+fi
+```
+
 ### 2b. Dispatch the Haiku PR worker (the router stays in main context)
 
 Announce the dispatch, then dispatch the bundled **pr-creator** subagent via the Task/Agent tool. The heavy PR-description generation runs in Haiku's cheap, fresh context; the router never does it inline - that is the whole cost property:
