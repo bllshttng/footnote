@@ -328,12 +328,25 @@ fn value_as_reviewers(v: &serde_yaml_ng::Value) -> Vec<String> {
     use serde_yaml_ng::Value;
     match v {
         Value::Null => Vec::new(),
-        Value::Sequence(items) => items
-            .iter()
-            .filter_map(yaml_scalar_string)
-            .map(|r| normalize_reviewer(&r))
-            .filter(|r| !r.is_empty())
-            .collect(),
+        Value::Sequence(items) => {
+            let mut out = Vec::new();
+            for it in items {
+                match yaml_scalar_string(it) {
+                    Some(s) => {
+                        let n = normalize_reviewer(&s);
+                        if !n.is_empty() {
+                            out.push(n);
+                        }
+                    }
+                    // A non-scalar item (nested map/seq) is structurally wrong;
+                    // Python raises on it, so fail CLOSED with the sentinel
+                    // rather than silently dropping it (gemini medium) - matches
+                    // the top-level-mapping arm below.
+                    None => return vec![MALFORMED_REVIEWERS_SENTINEL.to_string()],
+                }
+            }
+            out
+        }
         Value::String(s) => {
             let n = normalize_reviewer(s);
             if n.is_empty() {
@@ -4286,6 +4299,20 @@ mod tests {
             !reviewers_all_attested(&p, &s.reviewers, "h"),
             "a malformed-reviewers sentinel must never be satisfiable"
         );
+    }
+
+    #[test]
+    fn parse_settings_reviewers_seq_with_nonscalar_fails_closed() {
+        // gemini medium: a non-scalar item INSIDE the reviewers list (Python
+        // raises on it) must fail CLOSED with the sentinel, not silently drop
+        // the entry and gate on the survivors.
+        let bad =
+            parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n      - {a: b}\n");
+        assert_eq!(bad.reviewers, vec![MALFORMED_REVIEWERS_SENTINEL.to_string()]);
+        // A clean all-scalar list still parses normally.
+        let ok =
+            parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n      - declare\n");
+        assert_eq!(ok.reviewers, vec!["sigma".to_string(), "declare".to_string()]);
     }
 
     #[test]
