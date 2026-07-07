@@ -221,7 +221,7 @@ class TestRunGate:
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
         guard = spawn_gate.run_gate("w2", "bg")
         err = capsys.readouterr().err
-        assert "spawn queued: 1 live workers >= max_live 1" in err
+        assert "spawn queued: 1 live worker slots >= max_live 1" in err
         assert "--no-wait" in err and "--force" in err
         guard.release()
 

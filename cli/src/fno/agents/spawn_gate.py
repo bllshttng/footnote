@@ -5,8 +5,11 @@ Called at the top of ``cmd_spawn`` before the substrate fan-out. Mirrors
 exclusive execution paths (the front door execs the binary for bg/headless;
 the Rust ``pane`` arm re-execs this CLI), so every spawn passes exactly one.
 
-The gate is READ-ONLY over the fno registry and claude's daemon roster; its
-only writes are its own claims (``spawn-gate`` check→dispatch mutex,
+The gate is READ-ONLY: the ``max_live`` slot cap counts fno registry rows
+(worker provenance), the RAM floor reads real system RAM, and the claude
+daemon roster is kept for the ``fno agents top`` display but is NOT counted
+toward the slot cap (x-bdf9 — its non-work sessions must not consume slots).
+Its only writes are its own claims (``spawn-gate`` check→dispatch mutex,
 ``worker:<name>`` headless slot claims, both under the GLOBAL claims root —
 the RAM budget is machine-wide). Every guard fails OPEN on read errors: the
 gate must never become the thing that bricks spawning.
@@ -111,17 +114,34 @@ class LiveCensus:
 
     @property
     def count(self) -> int:
+        """The full union size (fno rows + roster sessions + slot claims). The
+        RAM-ground-truth / ``fno agents top`` display number — NOT the slot cap
+        denominator."""
         return len(self.workers) + self.slot_claims
+
+    @property
+    def slot_count(self) -> int:
+        """Worker SLOTS in use for the ``max_live`` cap (x-bdf9): fno-sourced
+        rows + headless slot claims only. The claude roster (``source ==
+        "claude"``) is excluded — its ~dozens of claude-mem observers and
+        resident-idle sessions are not fno work and must not consume slots.
+        Their RAM cost stays honored by the separate ``min_free_gb`` floor."""
+        return sum(1 for w in self.workers if w.source == "fno") + self.slot_claims
 
 
 def census() -> LiveCensus:
-    """The union live-count: fno registry ∪ claude roster (deduped by claude
-    session short_id) + live ``worker:<name>`` slot claims. Read-only; every
-    source failure degrades to zero contribution with one warning."""
+    """The full union: fno registry ∪ claude roster (deduped by claude session
+    short_id) + live ``worker:<name>`` slot claims. This is the display /
+    RAM-ground-truth view (``fno agents top`` renders every row). The spawn
+    gate's ``max_live`` decision uses :attr:`LiveCensus.slot_count`, which
+    counts fno-sourced rows only — the roster is kept here for visibility but
+    does NOT consume worker slots (x-bdf9). Read-only; every source failure
+    degrades to zero contribution with one warning."""
     out = LiveCensus()
     counted_short_ids: set[str] = set()
 
-    # claude roster first: RAM ground truth for foreign `claude --bg` sessions.
+    # claude roster first: display + dedup key for adopted sessions. Kept in the
+    # union for `fno agents top`, but excluded from the slot cap (see slot_count).
     roster_workers: dict[str, dict] = {}
     try:
         raw = json.loads(_roster_path().read_text(encoding="utf-8"))
@@ -360,7 +380,8 @@ def run_gate(
             c = census()
             for w in c.warnings:
                 _warn(w)
-            if c.count < cap:
+            slots = c.slot_count
+            if slots < cap:
                 try:
                     _check_ram_floor(floor_gb)
                 except GateRefused:
@@ -376,14 +397,14 @@ def run_gate(
 
             if no_wait:
                 _warn(
-                    f"spawn-gate: {c.count} live workers >= max_live {cap}; "
+                    f"spawn-gate: {slots} live worker slots >= max_live {cap}; "
                     f"refusing (--no-wait). See `fno agents top`."
                 )
                 raise GateRefused(EXIT_NO_WAIT)
             now = time.monotonic()
             if not announced:
                 _warn(
-                    f"spawn queued: {c.count} live workers >= max_live {cap}; "
+                    f"spawn queued: {slots} live worker slots >= max_live {cap}; "
                     f"waiting for a free slot (--no-wait to fail fast, "
                     f"--force to bypass)"
                 )
@@ -391,7 +412,7 @@ def run_gate(
                 last_progress = now
             elif now - last_progress >= QUEUE_PROGRESS_EVERY_S:
                 _warn(
-                    f"still queued: {c.count}/{cap} live, "
+                    f"still queued: {slots}/{cap} live worker slots, "
                     f"waited {int(now - started)}s"
                 )
                 last_progress = now
