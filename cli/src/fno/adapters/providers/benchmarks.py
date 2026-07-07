@@ -50,7 +50,8 @@ REACHABILITY: dict[str, tuple[str, str]] = {
     "glm-5.2": ("claude", "glm-5.2"),
     "glm-4.7": ("claude", "glm-4.7"),
     "glm-4.5-air": ("claude", "glm-4.5-air"),
-    "gpt-5.1-codex": ("codex", "gpt-5.1-codex"),
+    "gpt-5.5": ("codex", "gpt-5.5"),
+    "gpt-5.4": ("codex", "gpt-5.4"),
 }
 
 # Static fallback tier bands (curated) used ONLY when no snapshot exists, so tier
@@ -58,8 +59,10 @@ REACHABILITY: dict[str, tuple[str, str]] = {
 # blocks. The resolver picks the cheapest reachable model within a band; order
 # here is not significant.
 STATIC_TIERS: dict[str, list[str]] = {
-    "high": ["claude-opus-4-8", "gpt-5.1-codex"],
-    "medium": ["claude-sonnet-5", "glm-5.2"],
+    # gpt-5.5 is the current codex flagship (high); gpt-5.4, the prior flagship,
+    # sits a band down (medium). Both route on the codex harness.
+    "high": ["claude-opus-4-8", "gpt-5.5"],
+    "medium": ["claude-sonnet-5", "gpt-5.4", "glm-5.2"],
     "low": ["glm-4.7", "glm-4.5-air", "claude-haiku-4-5"],
 }
 

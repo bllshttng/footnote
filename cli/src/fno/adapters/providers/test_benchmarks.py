@@ -115,6 +115,9 @@ def test_staleness_and_is_stale(tmp_path):
 def test_reachable_maps_known_and_rejects_unknown():
     assert bm.reachable("claude-opus-4-8") == ("claude", "claude-opus-4-8")
     assert bm.reachable("glm-4.7") == ("claude", "glm-4.7")
+    # codex flagships route on the codex harness
+    assert bm.reachable("gpt-5.5") == ("codex", "gpt-5.5")
+    assert bm.reachable("gpt-5.4") == ("codex", "gpt-5.4")
     assert bm.reachable("some-unmapped-model") is None
 
 
