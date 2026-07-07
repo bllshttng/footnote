@@ -1258,6 +1258,41 @@ impl Core {
             passive,
         });
         self.push_layout(true);
+        // Cold-attach snapshot rides the RELIABLE channel (x-0296). The
+        // dirty-map seed push_layout just wrote is droppable by design, and
+        // a passive reattach with quiet panes produces no PTY output, so a
+        // lost seed never recovers (`broadcast_pane` only fires on output).
+        // Re-send every visible pane's frame on the reliable queue - ordered
+        // after the Layout queued above - and drop the now-redundant
+        // droppable seeds. Steady-state delivery (DirtyMap + broadcast_pane)
+        // is unchanged; the wire message set is unchanged (same `Frame`
+        // variant, so no proto bump).
+        if let Some(c) = self.clients.iter().find(|c| c.id == id) {
+            let mut pids: Vec<u64> = c.visible.iter().copied().collect();
+            pids.sort_unstable();
+            let mut d = c.dirty.lock().unwrap();
+            for pid in pids {
+                if let Some(entry) = self.panes.get(&pid) {
+                    let sent = c
+                        .reliable_tx
+                        .try_send(ServerMsg::Frame {
+                            pane_id: pid,
+                            frame: entry.vt.frame(),
+                        })
+                        .is_ok();
+                    // Only drop the droppable seed push_layout wrote once the
+                    // reliable frame actually landed. A failed send means a
+                    // wedged client (unreachable at birth: fresh 256-cap
+                    // channel, dead clients already reaped by push_layout) -
+                    // but if it ever happens, keep the seed so the already-
+                    // notified droppable path stays the fallback rather than
+                    // leaving the pane with no delivery at all.
+                    if sent {
+                        d.remove(&pid);
+                    }
+                }
+            }
+        }
     }
 
     /// The sender's current view, when it is still registered.
@@ -5392,6 +5427,74 @@ mod tests {
         );
         assert_eq!(core.clients.len(), 1);
         assert!(core.clients[0].passive, "the (0,0) client is passive");
+    }
+
+    #[test]
+    fn cold_attach_delivers_every_pane_frame_on_the_reliable_channel() {
+        // AC1-FR (x-0296): the cold-attach snapshot must NOT depend on the
+        // droppable dirty map or later PTY output. Deterministic mechanism
+        // guard: after attach, the client's reliable queue holds the Layout
+        // followed by a Frame for EVERY pane in it. Pre-fix this fails 100%
+        // (seeds sat only in the dirty map); no timing involved.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let p1 = core.spawn_pane(24, 40, "/tmp").expect("pane 1");
+        let p2 = core.spawn_pane(24, 40, "/tmp").expect("pane 2");
+        core.session.add_squad(
+            1,
+            vec!["/tmp/x0296".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Branch {
+                    axis: Axis::Horizontal,
+                    children: vec![(0.5, Node::Leaf(p1)), (0.5, Node::Leaf(p2))],
+                },
+                focus: p1,
+            },
+        );
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        core.attach(
+            9,
+            24,
+            80,
+            "/tmp/x0296".into(),
+            "/tmp/x0296".into(),
+            tx,
+            Arc::default(),
+            Arc::new(Notify::new()),
+        );
+        let mut msgs = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            msgs.push(m);
+        }
+        let layout_at = msgs
+            .iter()
+            .position(|m| matches!(m, ServerMsg::Layout { .. }))
+            .expect("attach queues a Layout reliably");
+        let layout_panes: HashSet<u64> = match &msgs[layout_at] {
+            ServerMsg::Layout { panes, .. } => panes.iter().map(|(pid, _)| *pid).collect(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            layout_panes,
+            HashSet::from([p1, p2]),
+            "both panes are in the attach Layout"
+        );
+        let framed: HashSet<u64> = msgs[layout_at + 1..]
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::Frame { pane_id, .. } => Some(*pane_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            framed, layout_panes,
+            "every Layout pane's initial frame must ride the reliable \
+             channel AFTER the Layout - a dirty-map-only seed is droppable \
+             and a passive reattach never recovers it (x-0296)"
+        );
     }
 
     #[test]
