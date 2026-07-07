@@ -171,7 +171,10 @@ def gate_escape(
         help="intervention class: dead-bot | flake | stale-base | wedge | spawn-cap | other",
     ),
     pr: Optional[int] = typer.Option(
-        None, "--pr", help="PR the escape rode on (becomes the dedup key when set)"
+        None,
+        "--pr-number",
+        "--pr",
+        help="PR the escape rode on (becomes the dedup key when set)",
     ),
     node: Optional[str] = typer.Option(
         None, "--node", help="graph node the escape rode on (attribution)"
