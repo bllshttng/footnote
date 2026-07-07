@@ -12,6 +12,7 @@ Bias toward caution over speed; for trivial tasks, use judgment. Derived from [K
 2. **Simplicity first.** Minimum code that solves the problem. No speculative features, single-use abstractions, unrequested config, or error handling for impossible cases. If 200 lines could be 50, rewrite.
 3. **Surgical changes.** Touch only what the task requires. Don't refactor working code or restyle adjacent lines. Match existing style. Remove orphans *your* change created; flag pre-existing dead code, don't delete it. Every changed line should trace to the request.
 4. **Goal-driven execution.** Turn tasks into verifiable goals ("add validation" → "write failing tests for invalid input, then make them pass"). State a brief plan with a verify step each. Strong success criteria let you loop independently.
+5. **Comments earn their place.** Same discipline as code. Default to no comment: a good name beats a comment. Write one only when the code can't say it itself (a non-obvious invariant, a race, why not the obvious approach). Not every function needs a docstring. Don't restate the code or narrate the happy path; one tight line beats a paragraph. Full rule: [.claude/rules/comments.md](.claude/rules/comments.md).
 
 ## Repository
 
@@ -32,6 +33,7 @@ footnote/
 
 - **Worktrees:** `claude --worktree <name>` is intercepted by footnote's `WorktreeCreate` hook (`hooks/worktree-setup.sh`); after creation, `bash scripts/setup/setup-worktree.sh` links shared state from canonical. Placement rule and full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
 - **Search hygiene:** prefer `rg` / the Grep tool over `grep -r` (which ignores `.gitignore` and descends into nested worktree checkouts, returning hundreds of false hits). If you must use `grep -r`, scope it to a path.
+- **Comments:** terse, high-signal, only when needed. Default to no comment; not every function needs a docstring. Full rule: [.claude/rules/comments.md](.claude/rules/comments.md).
 - **Multi-CLI:** skills are portable; orchestration needs per-CLI hook config. Gemini defaults to sequential execution; Codex uses `.codex/agents/`. Substrate facts in [docs/HARNESSES.md](docs/HARNESSES.md), wiring in [docs/architecture/multi-cli-hooks.md](docs/architecture/multi-cli-hooks.md), per-skill compat in [docs/SKILL-COMPAT-MATRIX.md](docs/SKILL-COMPAT-MATRIX.md). [RTK](https://github.com/rtk-ai/rtk) is a recommended companion for long loops (`/fno:setup` wires it).
 
 ## Commands
