@@ -75,16 +75,23 @@ reconcile_maybe_fire() {
     # Detach fully: nohup + background + redirect so the reconcile outlives the
     # hook process and never blocks. Atomic result publish via tmp + mv.
     #
-    # `fno backlog capture tidy` co-fires within the SAME throttle window (it
-    # shares the stamp claimed above): once the window elapses, reconcile closes
-    # drifted nodes AND tidy ejects completed filed lines / rebuilds the inbox
-    # digest, so neither hammers its file independently. tidy is best-effort and
-    # sequenced AFTER reconcile so a tidy failure never affects the reconcile
-    # result publish; it stays runnable by hand via `fno backlog capture tidy`.
+    # `fno retro run` and `fno backlog capture tidy` co-fire within the SAME
+    # throttle window (both share the stamp claimed above). Sequenced AFTER
+    # reconcile: reconcile closes drifted nodes and writes their retro-pending
+    # sentinels, then `retro run` consumes those (plus any older pending ones) so
+    # a GitHub web-UI merge - which drops no local event and never triggers a
+    # human `/pr merged` - still gets its carveout/retro harvest within one
+    # SessionStart+throttle window. retro run is the UNIVERSAL sentinel consumer;
+    # it scopes each sentinel's review harvest to that sentinel's own pr_url repo
+    # (foreign-repo sentinels file project=None, never mis-harvested against this
+    # repo). Both retro run and tidy are best-effort (|| true): a failure never
+    # affects the reconcile result publish and, per retro's own contract, a
+    # failed harvest RETAINS the sentinel for the next window's retry.
     nohup bash -c '
         cd "$1" 2>/dev/null || exit 0
         "$2" backlog reconcile --json > "$3.tmp" 2>/dev/null \
             && mv -f "$3.tmp" "$3" 2>/dev/null
+        "$2" retro run >/dev/null 2>&1 || true
         "$2" backlog capture tidy >/dev/null 2>&1 || true
     ' _ "$repo_root" "$abi_cmd" "$result" >/dev/null 2>&1 &
     disown 2>/dev/null || true

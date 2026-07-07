@@ -42,6 +42,12 @@ echo "$*" >> "$FNO_CALL_LOG"
 if [[ "${1:-}" == "backlog" && "${2:-}" == "reconcile" ]]; then
     echo '{"dry_run": false, "candidates": [], "closed": [{"node_id":"ab-faketest","pr_number":1}], "failures": []}'
 fi
+# `retro run` optionally fails when the harness asks (FNO_RETRO_FAIL=1) so the
+# isolation test can prove a failed harvest never aborts the chained job.
+if [[ "${1:-}" == "retro" && "${2:-}" == "run" ]]; then
+    [[ "${FNO_RETRO_FAIL:-0}" == "1" ]] && exit 1
+    echo "(no retro-pending sentinels to triage)"
+fi
 FAKE
 chmod +x "$FAKEBIN/fno"
 export PATH="$FAKEBIN:$PATH"
@@ -78,6 +84,17 @@ grep -q -- "--dry-run" "$FNO_CALL_LOG" \
     && fail "fire: reconcile was invoked with --dry-run (must be mutate mode)"
 grep -q "ab-faketest" "$RESULT1" || fail "fire: result json missing reconcile output"
 pass "fire: absent stamp fires mutate reconcile, publishes result, writes stamp"
+
+# AC3-HP: the same fired job chains `fno retro run` AFTER reconcile (the
+# web-merge harvest backstop), so a merge that dropped no local event still gets
+# its retro/carveout harvest within one throttle window.
+grep -q "^retro run$" "$FNO_CALL_LOG" \
+    || fail "chain: 'retro run' was not invoked in the fired job (got: $(cat "$FNO_CALL_LOG"))"
+recon_line=$(grep -n "backlog reconcile --json" "$FNO_CALL_LOG" | head -1 | cut -d: -f1)
+retro_line=$(grep -n "^retro run$" "$FNO_CALL_LOG" | head -1 | cut -d: -f1)
+[[ -n "$recon_line" && -n "$retro_line" && "$retro_line" -gt "$recon_line" ]] \
+    || fail "chain: 'retro run' did not run AFTER reconcile (recon@$recon_line retro@$retro_line)"
+pass "chain: retro run fires after reconcile in the same throttled job"
 
 # ============================================================================
 # AC: gate — a directory without a .fno/ is never reconciled and is NEVER
@@ -168,6 +185,50 @@ touch "$REPO6/.fno/.reconcile-stamp"   # suppress fire for determinism
 CLAUDE_PROJECT_DIR="$REPO6" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" >/dev/null 2>&1 \
     || fail "non-blocking: hook returned non-zero"
 pass "non-blocking: hook exits 0 with no prior result"
+
+# ============================================================================
+# AC3-ERR: a failing `retro run` (|| true) never aborts the chained job -
+# reconcile result still publishes and tidy still runs. (Sentinel RETENTION on
+# failure is retro run's own contract; here we prove the chain's isolation.)
+# ============================================================================
+log "chain: retro run failure does not sink the job"
+REPO_RF="$WORK/repo-retrofail"; mkdir -p "$REPO_RF/.fno"
+RESULT_RF="$REPO_RF/.fno/.reconcile-result.json"
+: > "$FNO_CALL_LOG"
+FNO_RETRO_FAIL=1 RECONCILE_THROTTLE_SECONDS=0 reconcile_maybe_fire "$REPO_RF"
+wait_for_file "$RESULT_RF" || fail "chain-fail: result json not published despite retro failing"
+grep -q "^retro run$" "$FNO_CALL_LOG" || fail "chain-fail: retro run not attempted"
+grep -q "backlog capture tidy" "$FNO_CALL_LOG" \
+    || fail "chain-fail: tidy skipped after retro failure (job aborted early)"
+pass "chain: failed retro run is isolated; reconcile publish + tidy still run"
+
+# ============================================================================
+# AC3-UI: >=1 pending sentinel -> advisory line with the count renders.
+# AC3-EDGE: 0 pending sentinels -> silent (no advisory line).
+# The pending dir is env-injected (RETRO_PENDING_DIR) so the test never touches
+# the real ~/.fno; a fresh stamp suppresses a fire during the render assertion.
+# ============================================================================
+log "advisory: pending sentinels render a count line"
+REPO_ADV="$WORK/repo-adv"; mkdir -p "$REPO_ADV/.fno"
+touch "$REPO_ADV/.fno/.reconcile-stamp"
+PENDING_DIR="$WORK/pending-adv"; mkdir -p "$PENDING_DIR"
+printf '{"node_id":"x-1111","pr_url":"https://github.com/o/r/pull/1"}' > "$PENDING_DIR/x-1111.json"
+printf '{"node_id":"x-2222","pr_url":"https://github.com/o/r/pull/2"}' > "$PENDING_DIR/x-2222.json"
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_ADV" RETRO_PENDING_DIR="$PENDING_DIR" \
+      RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+echo "$OUT" | grep -q "retro: 2 sentinel(s) pending harvest" \
+    || fail "advisory: missing '2 sentinel(s) pending harvest' line (got: $OUT)"
+pass "advisory: pending count line renders"
+
+log "advisory: zero sentinels is silent"
+REPO_ADV0="$WORK/repo-adv0"; mkdir -p "$REPO_ADV0/.fno"
+touch "$REPO_ADV0/.fno/.reconcile-stamp"
+EMPTY_DIR="$WORK/pending-empty"; mkdir -p "$EMPTY_DIR"
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_ADV0" RETRO_PENDING_DIR="$EMPTY_DIR" \
+      RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+echo "$OUT" | grep -q "pending harvest" \
+    && fail "advisory: emitted a line with zero pending sentinels (got: $OUT)"
+pass "advisory: zero sentinels is silent"
 
 echo "[reconcile-ss] all reconcile-session-start tests passed"
 exit 0
