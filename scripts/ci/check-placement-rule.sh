@@ -31,7 +31,10 @@
 # wave's scope:
 #   1. Reading Claude Code's OWN files: ~/.claude/sessions, ~/.claude/projects
 #      (transcripts), ~/.claude/jobs, .claude/settings.json /
-#      settings.local.json (Claude Code's config, not footnote's state).
+#      settings.local.json (Claude Code's config, not footnote's state), and
+#      scripts/save-session.py's read of the ~/.claude/.session-context.json
+#      statusline sidecar (its OWN transcript writes were re-homed to
+#      ${FNO_HOME}/sessions - see below - so only the sidecar READ remains).
 #      This is a large, actively-developed surface (multi-provider agent
 #      discovery) - allowlisted by file below rather than re-derived here.
 #   2. The worktree-harness integration: `.claude/worktrees/<name>` is the
@@ -45,13 +48,16 @@
 #      the various watermark files, insights.md) - only corrections.log and
 #      corrections-rejected.log were in scope (see skills/autocorrect/SKILL.md).
 #
-# Two files (hooks/git-protection.py's ~/.claude/state/git-protection.json +
-# approve_no_verify.flag, scripts/save-session.py's ~/.claude/sessions/*.md)
-# ARE genuine footnote-state placement-rule violations this wave found but
-# did NOT fix - git-protection.py gates branch pushes and PR merges, so
-# relocating its state carries real behavioral/security risk that wants its
-# own reviewed change, not a drive-by. Allowlisted for now; filed as a
-# carveout for follow-up triage rather than silently ignored.
+# Carveout cv-8dc3c6dc (RESOLVED): git-protection.py's state
+# (git-protection.json + approve_no_verify.flag) and save-session.py's
+# transcripts used to write under the harness state dir. Both were re-homed
+# to ${FNO_HOME:-~/.fno} in the git-protection-hook re-home change:
+#   - hooks/git-protection.py is now OFF this allowlist entirely - it writes
+#     nothing under the harness dir and holds no reference to it, so CI
+#     enforces the placement rule for it with no exception.
+#   - scripts/save-session.py stays listed above under category (1): its
+#     transcript WRITES moved to ${FNO_HOME}/sessions, and its only remaining
+#     reference is the legitimate READ of Claude Code's own statusline sidecar.
 #
 # A file not on this list that starts referencing .claude/ must be a
 # conscious addition: either it's another instance of (1)-(3) above (add it
@@ -208,7 +214,6 @@ scripts/rename/rename-to-fno.sh
 scripts/setup/setup-worktree.sh
 scripts/setup/worktree-create-hook.sh
 scripts/worktree-lifecycle.sh
-hooks/git-protection.py
 scripts/save-session.py
 EOF
 )

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Tests for the session-aware gh pr merge gate in git-protection.py
-# Run from any directory - uses a temp HOME + temp repo for full isolation.
-# Real ~/.claude/state/ is never touched.
+# Tests for the session-aware gh pr merge gate in git-protection.py.
+# Exercises the REPO copy of the hook (not any user-global install) with a
+# temp HOME + temp FNO_HOME + temp repo for full isolation. Real ~/.fno and
+# ~/.claude are never touched; green on a machine with no ~/.claude/hooks/.
 
 set -uo pipefail
 
-HOOK=~/.claude/hooks/git-protection.py
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+HOOK="$REPO_ROOT/hooks/git-protection.py"
 PASS=0
 FAIL=0
 
@@ -49,9 +51,11 @@ assert_deny() {
 TMP=$(mktemp -d)
 trap "rm -rf '$TMP'" EXIT
 
-# Sandbox HOME so STATE_DIR resolves to $TMP/.claude/state
+# Sandbox HOME and FNO_HOME so the hook's state (git-protection.json,
+# approve_no_verify.flag) resolves under the temp dir, never the host.
 export HOME="$TMP"
-mkdir -p "$HOME/.claude/state"
+export FNO_HOME="$TMP/.fno"
+mkdir -p "$FNO_HOME"
 
 # Create a temp git repo so git rev-parse works
 REPO="$TMP/repo"
@@ -71,17 +75,20 @@ run_hook() {
 result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 1: no state file -> deny" "$result"
 
-# ---- Case 2: fresh state file with auto_merge_approved: true -> allowed ----
+# ---- Case 2: fresh state file, approved + external skipped -> allowed ----
+# Two-factor: auto_merge_approved (factor 1) + external_review_passed: skipped
+# (factor 2a, the --no-external path) authorizes without an artifact.
 
 cat > "$REPO/.fno/target-state.md" <<'STATE'
 ---
 status: IN_PROGRESS
 auto_merge_approved: true
+external_review_passed: skipped
 ---
 STATE
 
 result=$(run_hook "gh pr merge 42 --merge")
-assert_allow "case 2: fresh state file approved -> allow" "$result"
+assert_allow "case 2: approved + external skipped -> allow" "$result"
 
 # ---- Case 3: state file with auto_merge_approved: false -> denied ----
 
@@ -122,7 +129,9 @@ assert_deny "regression 1: git commit --no-verify -> deny" "$result"
 result=$(run_hook "git push origin main")
 assert_deny "regression 2: git push origin main -> deny" "$result"
 
-# ---- Case 5: LOOPING status with auto_merge_approved: true -> allowed ----
+# ---- Case 5: megawalk-state.md does NOT authorize a merge -> denied ----
+# Megawalk orchestrates target subagents; only target's own target-state.md
+# authorizes shipping. A megawalk-state.md, even approved, must not merge.
 
 cat > "$REPO/.fno/megawalk-state.md" <<'STATE'
 ---
@@ -132,7 +141,7 @@ auto_merge_approved: true
 STATE
 
 result=$(run_hook "gh pr merge 42 --merge")
-assert_allow "case 5: LOOPING status approved -> allow" "$result"
+assert_deny "case 5: megawalk-state.md does not authorize merge -> deny" "$result"
 rm -f "$REPO/.fno/megawalk-state.md"
 
 # ---- Case 6: COMPLETE status with auto_merge_approved: true -> denied ----
@@ -179,23 +188,24 @@ rm -f "$REPO/.fno/target-state.md"
 # ---- Case 9: corrupt/binary state file -> hook must not crash and must deny ----
 
 # Write a file with binary-like content (null bytes etc.)
-printf '---\nstatus: IN_PROGRESS\n---\n\x00\x01\x02 corrupt data' > "$REPO/.fno/target-state.md"
+printf -- '---\nstatus: IN_PROGRESS\n---\n\x00\x01\x02 corrupt data' > "$REPO/.fno/target-state.md"
 
 result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 9: corrupt state file -> deny (no crash)" "$result"
 rm -f "$REPO/.fno/target-state.md"
 
-# ---- Case 10: auto_merge_approved: true + status: IN_PROGRESS -> allowed ----
+# ---- Case 10: approved + external skipped + IN_PROGRESS -> allowed ----
 
 cat > "$REPO/.fno/target-state.md" <<'STATE'
 ---
 status: IN_PROGRESS
 auto_merge_approved: true
+external_review_passed: skipped
 ---
 STATE
 
 result=$(run_hook "gh pr merge 42 --merge")
-assert_allow "case 10: IN_PROGRESS + approved -> allow (positive case)" "$result"
+assert_allow "case 10: IN_PROGRESS + approved + external skipped -> allow" "$result"
 rm -f "$REPO/.fno/target-state.md"
 
 # ---- Summary ----
