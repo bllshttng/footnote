@@ -75,17 +75,19 @@ def test_pr_dedups_a_pr_bearing_escape(tmp_path):
     assert escapes[0]["data"]["pr"] == 42
 
 
-def test_ac1_ui_rebase_success_prints_nudge_no_event(monkeypatch, capsys):
+def test_ac1_ui_rebase_success_prints_nudge_no_event(monkeypatch, capsys, tmp_path):
     """AC1-UI: a successful rebase prints ONE stderr note suggesting the tag
     command, and the nudge emits no event by itself."""
     from fno.pr import _rebase
 
     monkeypatch.setattr(_rebase, "_phase_a", lambda base, cwd: 0)
-    rc = _rebase.run_rebase([], cwd="/tmp")
+    rc = _rebase.run_rebase([], cwd=str(tmp_path))
     assert rc == 0
     err = capsys.readouterr().err
     assert "gate-escape stale-base" in err
     assert err.count("note:") == 1
+    # Advisory-only: the nudge writes NO gate_escape event of its own (AC1-UI).
+    assert _escapes(tmp_path / ".fno" / "events.jsonl") == []
 
 
 def test_rebase_failure_no_nudge(monkeypatch, capsys):

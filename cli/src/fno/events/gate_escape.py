@@ -180,6 +180,18 @@ def emit_gate_escape(
     (an unwritable log, a resolve error) fails OPEN here and is recorded to a
     durable counter so retro can surface an under-reporting metric (AC1-FR).
     """
+    # Normalize a placeholder/unassigned PR to "no PR" HERE (one place), so the
+    # (pr, reason) dedup and the emitted payload agree. Then enforce the dedup
+    # contract loudly: an escape dedups on (reason, pr) XOR (reason, dedup_key),
+    # never both - passing both would let already_emitted OR-match and suppress a
+    # genuinely-new escape that merely shares one field, silently miscounting the
+    # trust-core metric. No current caller passes both; the guard protects future
+    # ones (sigma type-design review).
+    if pr is not None and pr <= 0:
+        pr = None
+    if pr is not None and dedup_key is not None:
+        raise ValueError("emit_gate_escape: pass pr XOR dedup_key, not both")
+
     resolved: Optional[Path] = Path(events_path) if events_path is not None else None
     from fno.events import ValidationError, _build, append_event
 

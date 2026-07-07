@@ -95,6 +95,28 @@ def test_bad_reason_raises_no_event(tmp_path):
     assert not ev.exists()
 
 
+def test_pr_and_dedup_key_together_raises(tmp_path):
+    """The dedup contract is fail-loud: passing both pr AND dedup_key is a
+    caller bug (already_emitted would OR-match and miscount), so it raises
+    rather than silently emitting."""
+    import pytest
+
+    ev = tmp_path / "events.jsonl"
+    with pytest.raises(ValueError):
+        ge.emit_gate_escape("flake", pr=7, dedup_key="k", events_path=ev)
+    assert not ev.exists()
+
+
+def test_placeholder_pr_normalized_to_no_pr(tmp_path):
+    """A pr<=0 (placeholder) is normalized to 'no PR' in one place, so the
+    payload never carries a bogus pr and dedup does not key on it."""
+    ev = tmp_path / "events.jsonl"
+    ge.emit_gate_escape("flake", pr=0, dedup_key="k", events_path=ev)
+    escapes = _escapes(ev, "flake")
+    assert len(escapes) == 1
+    assert "pr" not in escapes[0]["data"]
+
+
 def test_run_gate_bypass_under_pytest_emits_nothing(tmp_path, monkeypatch):
     """AC1-EDGE: FNO_SPAWN_GATE=0 in a test context (PYTEST_CURRENT_TEST is set
     by pytest itself) must emit zero spawn-cap events even though the gate is
