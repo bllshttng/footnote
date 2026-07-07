@@ -5503,6 +5503,9 @@ done
             eprintln!("skip promote_claude_spawns_live_stream_thread: worker bin not built");
             return;
         };
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = short_home("cle2e");
         // Hermetic claims: point `fno claim` at the test home so the real
         // acquire (daemon, this process) AND the worker child (inherits this env)
@@ -5559,6 +5562,9 @@ done
             eprintln!("skip promote_claude_dead_on_arrival_resume_rejected: worker bin not built");
             return;
         };
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = short_home("cldoa");
         std::env::set_var("FNO_CLAIMS_ROOT", home.root());
         let ctx = test_ctx(home.clone(), worker_bin);

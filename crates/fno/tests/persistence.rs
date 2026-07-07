@@ -7,8 +7,11 @@ mod common;
 
 use std::time::Duration;
 
-use common::{spawn_server, ClientHarness, FakeClient, Scratch};
-use fno::proto::{read_msg_sync, write_msg_sync, Cell, ClientMsg, Frame, ServerMsg};
+use common::{connect_with_retry, spawn_server, ClientHarness, FakeClient, Scratch};
+use fno::proto::{
+    read_msg_sync, write_msg_sync, Cell, ClientMsg, ControlVerb, Frame, ServerMsg, BUILD_VERSION,
+    PROTO_VERSION,
+};
 
 /// Count live processes whose command line carries this scratch's socket
 /// path: exactly the servers of this test's session (the path is unique per
@@ -32,6 +35,29 @@ fn kill_server(scratch: &Scratch) {
         .arg("-f")
         .arg(scratch.main_sock().to_str().unwrap())
         .status();
+}
+
+fn pane_send(scratch: &Scratch, pane: u64, bytes: &[u8]) {
+    let mut stream = connect_with_retry(&scratch.main_sock());
+    write_msg_sync(
+        &mut stream,
+        &ClientMsg::Control {
+            proto: PROTO_VERSION,
+            build: BUILD_VERSION.to_string(),
+            verb: ControlVerb::PaneSend {
+                pane,
+                bytes: bytes.to_vec(),
+            },
+        },
+    )
+    .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    match read_msg_sync::<_, ServerMsg>(&mut stream) {
+        Ok(ServerMsg::Ok) => {}
+        other => panic!("pane send failed: {other:?}"),
+    }
 }
 
 #[test]
@@ -320,8 +346,11 @@ fn persistence_zero_client_session_survives_and_resyncs_fully() {
     let pane = c
         .wait_layout(10, "first layout", |l| l.panes.len() == 1)
         .focus;
+    c.wait_prompt(pane);
     c.input(b"echo survives-detach#\r");
-    c.wait_pane_text(15, pane, |t| t.contains("survives-detach#"));
+    c.wait_pane_text(15, pane, |t| {
+        t.lines().any(|l| l.trim() == "survives-detach#")
+    });
     c.detach();
     drop(c);
     std::thread::sleep(Duration::from_millis(800));
@@ -360,11 +389,15 @@ fn persistence_last_pane_exit_with_zero_clients_ends_the_server() {
     let pane = c
         .wait_layout(10, "first layout", |l| l.panes.len() == 1)
         .focus;
-    // Arm the exit, prove it reached the shell, then leave before it fires.
-    c.input(b"echo armed#; sleep 1; exit\r");
-    c.wait_pane_text(15, pane, |t| t.contains("armed#"));
+    c.wait_prompt(pane);
+    // Arm the exit behind a shell read, prove the command reached the shell,
+    // then detach. A control send releases the read after the client is gone,
+    // so the pane child exits while the registered client count is zero.
+    c.input(b"echo armed#; read _; exit\r");
+    c.wait_pane_text(15, pane, |t| t.lines().any(|l| l.trim() == "armed#"));
     c.detach();
     drop(c);
+    pane_send(&scratch, pane, b"\r");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let status = loop {

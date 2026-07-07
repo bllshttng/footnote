@@ -1,3 +1,5 @@
+#![allow(unused_variables)]
+
 /// Integration tests for loop_target.rs (TargetQueue, run_loop_verb) and
 /// loop_dispatch.rs (ShelloutDispatcher, preflight, driver_default_max).
 ///

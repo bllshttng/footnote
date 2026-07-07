@@ -16,6 +16,8 @@
 //! is enforced by `fno backlog next`'s live-claims filter (Python-side tests).
 //! AC2-EDGE (disable mid-flight) is covered by the Python resolver tests.
 
+#![allow(unused_imports)]
+
 use fno_agents::active_backlog::{drain_tick, CircuitBreaker, DrainConfig, DrainOutcome};
 use fno_agents::loop_runtime::{GlobalJournalPath, Journal, ProjectJournalPath};
 use std::fs;

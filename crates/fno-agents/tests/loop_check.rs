@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+
 /// Integration tests for `fno-agents loop-check` verb.
 ///
 /// Each test drives the public `run_loop_check` function directly (no process

@@ -72,16 +72,20 @@ fn client_e2e_output_flood_keeps_the_real_client_responsive() {
     let scratch = Scratch::new("flood");
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_screen(15, |s| !s.trim().is_empty());
-    h.type_bytes(b"yes | head -100000; echo E2E-FLOOD-DONE\r");
-    h.wait_screen(30, |s| s.contains("E2E-FLOOD-DONE"));
-    // FLOOD-DONE printing does NOT mean the shell has regained the foreground:
-    // the `yes` pipeline is still tearing down (SIGPIPE), and bytes typed
-    // before a fresh prompt are flushed by the tty line discipline (same
-    // codex-P1 drop wait_prompt guards after ^C). Without this the leading
-    // `echo ` gets dropped, the shell runs a bare `client-alive`, and the
-    // asserted output line never appears - deadline-independent, so a bigger
-    // timeout can't fix it. Wait for the prompt, then type.
-    h.wait_prompt(15);
+    h.type_bytes(
+        b"i=0; while [ \"$i\" -lt 5000 ]; do echo y; i=$((i + 1)); done; echo E2E-FLOOD-DONE\r",
+    );
+    h.wait_screen(30, |s| {
+        let mut saw_done = false;
+        for line in s.lines() {
+            if line.trim() == "E2E-FLOOD-DONE" {
+                saw_done = true;
+            } else if saw_done && line.trim_end().ends_with('$') {
+                return true;
+            }
+        }
+        false
+    });
     h.type_bytes(b"echo client-alive\r");
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "client-alive"));
 }

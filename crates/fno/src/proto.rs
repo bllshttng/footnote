@@ -948,7 +948,11 @@ where
     }
     let len = check_len(u32::from_be_bytes(len_buf))?;
     let mut body = vec![0u8; len];
-    r.read_exact(&mut body).await?;
+    match r.read_exact(&mut body).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(ProtoError::Closed),
+        Err(e) => return Err(e.into()),
+    }
     decode_body(&body)
 }
 
@@ -970,7 +974,11 @@ pub fn read_msg_sync<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, Proto
     }
     let len = check_len(u32::from_be_bytes(len_buf))?;
     let mut body = vec![0u8; len];
-    r.read_exact(&mut body)?;
+    match r.read_exact(&mut body) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(ProtoError::Closed),
+        Err(e) => return Err(e.into()),
+    }
     decode_body(&body)
 }
 
@@ -1690,6 +1698,16 @@ mod tests {
     #[test]
     fn proto_clean_eof_reads_as_closed() {
         let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let res: Result<ServerMsg, _> = read_msg_sync(&mut cursor);
+        assert!(matches!(res, Err(ProtoError::Closed)), "{res:?}");
+    }
+
+    #[test]
+    fn proto_mid_body_eof_reads_as_closed() {
+        let body = br#"{"Ok":null}"#;
+        let mut bytes = ((body.len() + 1) as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(body);
+        let mut cursor = std::io::Cursor::new(bytes);
         let res: Result<ServerMsg, _> = read_msg_sync(&mut cursor);
         assert!(matches!(res, Err(ProtoError::Closed)), "{res:?}");
     }
