@@ -165,8 +165,11 @@ def extract_branch_from_push(command):
     #   git push -u origin main
     #   git push --set-upstream origin main
 
-    # Remove flags
-    cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)', ' ', command)
+    # Remove flags, including an attached =value (so `--force-with-lease=origin/x`
+    # is dropped whole; without this the leftover `=origin/x` shifts the
+    # positional parse and a `... =origin/x origin main` reads the destination as
+    # the remote, letting a force-with-lease to a protected branch slip through).
+    cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)(=\S+)?', ' ', command)
 
     # Match: git push [optional remote] [branch-or-refspec]
     match = re.search(r'git\s+push\s+(?:\S+\s+)?(\S+)', cleaned)
@@ -179,6 +182,24 @@ def extract_branch_from_push(command):
         return refspec.split(':')[-1] if ':' in refspec else refspec
 
     return None
+
+def push_names_explicit_dest(command):
+    """True only when the push unambiguously names a concrete destination
+    branch: the `git push <remote> <branch>` form (>=2 positional args) whose
+    target is not HEAD/@ (which resolve to the current branch). A remote-only
+    `git push origin`, a bare `git push`, or `git push origin HEAD` is ambiguous
+    (the destination is really the current branch) and returns False so the
+    caller falls through to the current-branch check."""
+    # Collapse shell line-continuations so multiline pushes count correctly.
+    cleaned = re.sub(r'\\\s*\n', ' ', command)
+    # Drop flags including an attached =value, so `--force-with-lease=origin/x`
+    # leaves no positional token to miscount.
+    cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)(=\S+)?', ' ', cleaned)
+    m = re.search(r'git\s+push\b(.*)$', cleaned)
+    if not m:
+        return False
+    args = m.group(1).split()
+    return len(args) >= 2 and args[-1] not in ('HEAD', '@')
 
 def get_current_branch():
     """Try to get current branch from git (if in git repo)."""
@@ -213,6 +234,15 @@ def is_push_to_protected_branch(command):
     # Check explicit branch
     if explicit_branch and explicit_branch in PROTECTED_BRANCHES:
         return True, explicit_branch
+
+    # An explicit, non-protected DESTINATION branch is authoritative regardless
+    # of the session cwd's branch; without this a `git push origin feature/x`
+    # from a cwd on main (every background /target ship) is wrongly blocked.
+    # Gated on push_names_explicit_dest so an ambiguous single-token push
+    # (`git push origin`, remote-only) or a current-branch push (`git push
+    # origin HEAD`) still falls through and is blocked on a protected branch.
+    if explicit_branch and push_names_explicit_dest(command):
+        return False, None
 
     # If no explicit branch, check current branch
     current_branch = get_current_branch()
