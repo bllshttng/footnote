@@ -38,11 +38,13 @@ review from the bot account and never satisfies a `required_bots` gate.
   defect-hunting to a design-challenge framing (`MODE=adversarial`; default
   `MODE=defect`). Everything else (RESOLVE, SPAWN, RELAY, advisory-by-default) is
   unchanged.
-- **focus** (optional free text, adversarial mode only): any trailing tokens that
-  are not a PR number, a branch, a provider, or a flag are collected verbatim as a
-  focus string that steers the challenge, e.g.
+- **focus** (optional free text, adversarial mode only): after `adversarial`, the
+  target, and the provider are removed, every remaining token is collected verbatim
+  (in order) as a focus string that steers the challenge, e.g.
   `/review peer adversarial 208 gemini does the pr_number disjunct actually matter`.
-  Ignored in `MODE=defect`.
+  The target is only ever a token that is a PR number or resolves to a git branch, so
+  a focus word is never mistaken for the target; with no such token the target is the
+  current branch and every extra token is focus. Ignored in `MODE=defect`.
 - **`--post`** (optional flag): after getting the review, POST it to the PR
   under `config.review.peer_identity` so it satisfies the login-based loop-check
   gate. This is the ONE mode where a peer review is a gate, not advisory (see
@@ -54,10 +56,14 @@ review from the bot account and never satisfies a `required_bots` gate.
 ### 1. RESOLVE the diff
 
 **Parse the mode first.** Strip an `adversarial` token from the peer args to set
-`MODE=adversarial` (default `MODE=defect`); the remaining `[PR#|branch] [provider]`
-parse is unchanged. In adversarial mode, collect any leftover tokens (not a PR
-number, branch, provider, or flag) verbatim into `FOCUS`. `FOCUS` is only consumed
-by the adversarial brief (step 2); ignore it in `MODE=defect`.
+`MODE=adversarial` (default `MODE=defect`). Then resolve the target
+deterministically: the target is the single token that is a PR number (all digits)
+or resolves to a git ref (`git rev-parse --verify <tok>`); `codex`/`gemini` is the
+provider; `--*` are flags. In adversarial mode, every remaining token is collected
+verbatim (in order) into `FOCUS`. Because only a PR#/branch token can be the target,
+a focus word is never swallowed as the target; if no token resolves, the target is
+the current branch and all leftovers are focus. `FOCUS` is only consumed by the
+adversarial brief (step 2); ignore it in `MODE=defect`.
 
 Pick the target and write the diff to a scratch file. Prefer the background-job
 tmp dir when set, else the system temp dir:
@@ -102,7 +108,7 @@ if [ "${MODE:-defect}" = "adversarial" ]; then
     echo "  - What assumptions does it depend on, and what breaks if they do not hold?"
     echo "  - Where does it fail under real-world conditions: scale, concurrency, partial failure, empty/edge state, migration/rollback?"
     echo "  - What are the tradeoffs vs the alternatives - what does this design give up?"
-    [ -n "$FOCUS" ] && echo "Focus: $FOCUS"
+    if [ -n "$FOCUS" ]; then echo "Focus: $FOCUS"; fi
     echo "Be concise and specific; skip praise. Do not invent findings - if the design is sound, say so plainly and say why."
     echo
     echo "--- DIFF ---"
