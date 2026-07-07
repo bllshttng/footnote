@@ -51,6 +51,35 @@ def _warn(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def _maybe_emit_spawn_cap_escape() -> None:
+    """Auto-emit ``gate_escape{reason:spawn-cap}`` when an operator bypasses the
+    gate (``FNO_SPAWN_GATE=0``) OUTSIDE a test context (x-91b5, Locked Decision
+    2). Fully fail-open: any error is swallowed so a spawn is NEVER blocked by
+    telemetry (AC1-FR).
+
+    The test-context guard is load-bearing: ``FNO_SPAWN_GATE=0`` also disables
+    the gate for the test suite, so without it every CI run would count as an
+    escape and the metric would read pure noise (AC1-EDGE). The Rust gate emits
+    the same event on its own bypass path; a shared fixture enforces the two
+    guards agree (AC2-FR)."""
+    try:
+        from fno.events.gate_escape import (
+            default_dedup_key,
+            emit_gate_escape,
+            should_emit_spawn_cap,
+        )
+
+        if not should_emit_spawn_cap():
+            return
+        emit_gate_escape(
+            "spawn-cap",
+            dedup_key=default_dedup_key("spawn-cap"),
+            detail="FNO_SPAWN_GATE=0 operator bypass",
+        )
+    except Exception:
+        pass  # ponytail: telemetry must never block a spawn (AC1-FR)
+
+
 # ---------------------------------------------------------------------------
 # Layer 2: available RAM
 # ---------------------------------------------------------------------------
@@ -385,6 +414,7 @@ def run_gate(
     # precedent): test suites exercising spawn plumbing must not queue behind
     # the REAL machine's live workers, and it doubles as an operator escape.
     if os.environ.get("FNO_SPAWN_GATE") == "0":
+        _maybe_emit_spawn_cap_escape()
         return GateGuard()
     try:
         from fno.config import load_settings

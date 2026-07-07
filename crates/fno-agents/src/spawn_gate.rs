@@ -335,6 +335,43 @@ impl Drop for GateGuard {
     }
 }
 
+/// Pure parity core (x-91b5, AC2-FR): would a bypass in this env emit
+/// `spawn-cap`? True iff `FNO_SPAWN_GATE=0` AND no non-empty test-context
+/// marker. Mirrors `fno.events.gate_escape.should_emit_spawn_cap` exactly; a
+/// shared JSON fixture (`gate_escape_spawn_cap_parity.json`) asserts the two
+/// implementations agree on every row, so neither can drift (Locked Decision 5).
+pub fn spawn_cap_would_emit(get: impl Fn(&str) -> Option<String>) -> bool {
+    let is_set = |k: &str| get(k).is_some_and(|v| !v.is_empty());
+    get("FNO_SPAWN_GATE").as_deref() == Some("0")
+        && !["PYTEST_CURRENT_TEST", "CI", "FNO_E2E"]
+            .iter()
+            .any(|k| is_set(k))
+}
+
+/// Auto-emit `gate_escape{reason:spawn-cap}` on an operator bypass of THIS gate
+/// (`FNO_SPAWN_GATE=0`) outside a test context (Locked Decision 2). Best-effort:
+/// shells the shared `fno event gate-escape` verb (which owns the dedup key +
+/// canonical-log resolution, one emit path) and ignores every failure so a
+/// spawn is never blocked by telemetry (AC1-FR). The verb, not this shell,
+/// computes the `(reason, session, day)` dedup bucket, so a Rust-emitted and a
+/// Python-emitted spawn-cap in the same session/day still collapse to one.
+fn maybe_emit_spawn_cap_escape() {
+    if !spawn_cap_would_emit(|k| std::env::var(k).ok()) {
+        return;
+    }
+    let _ = std::process::Command::new("fno")
+        .args([
+            "event",
+            "gate-escape",
+            "spawn-cap",
+            "--detail",
+            "FNO_SPAWN_GATE=0 operator bypass",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// Run the full gate for a `bg`/`headless` spawn. Returns a guard to keep
 /// alive across dispatch on pass, or `Err(exit_code)` on refusal/timeout.
 /// All human-facing output goes to stderr (LD10: the stdout receipt is
@@ -350,6 +387,7 @@ pub fn run_gate(
     // precedent): test suites exercising spawn plumbing must not queue behind
     // the REAL machine's live workers, and it doubles as an operator escape.
     if std::env::var_os("FNO_SPAWN_GATE").is_some_and(|v| v == "0") {
+        maybe_emit_spawn_cap_escape();
         return Ok(GateGuard::default());
     }
     let cap = agents_config::max_live(config_cwd) as usize;
