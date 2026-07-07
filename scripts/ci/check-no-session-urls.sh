@@ -29,12 +29,13 @@
 
 set -uo pipefail
 
-# Single pattern: a real session URL is always `claude.ai/code/<session-path>`,
-# and the `Claude-Session:` trailer embeds that same form - so requiring the
-# trailing slash covers every real leak while letting prose that merely NAMES
-# the concept ("scans for claude.ai/code") pass, including this gate's own PR
-# body and docs.
-PATTERN='claude\.ai/code/'
+# A real session URL always carries an actual session token right after
+# `/code/` (e.g. `.../code/session_01...`), and the `Claude-Session:` trailer
+# embeds that same form. Requiring one alphanumeric path char catches every
+# real leak while letting prose that merely NAMES the concept pass - a bare
+# `claude.ai/code` or an angle-bracket placeholder `claude.ai/code/<session-id>`
+# (as this gate's own commits, PR body, and docs use) does not match.
+PATTERN='claude\.ai/code/[A-Za-z0-9]'
 
 BASE="${PR_BASE_SHA:-}"
 HEAD="${PR_HEAD_SHA:-HEAD}"

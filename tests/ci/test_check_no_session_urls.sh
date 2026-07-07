@@ -80,6 +80,21 @@ echo "$OUT" | grep -q "\[PR body\]" || fail "AC1-UI: did not name 'PR body' ($OU
 echo "$OUT" | grep -q "edit the field" || fail "AC1-UI: missing 'edit the field' remediation"
 pass "AC1-UI: leaky body fails, names field + remediation"
 
+# --- doc/meta forms do NOT fire (the self-reference guard) --------------------
+# A real URL carries a session token after /code/; the gate must NOT trip on a
+# commit/body that merely NAMES the concept (bare domain, or an angle-bracket
+# placeholder) - otherwise this gate's own commits and PR body cannot describe
+# it. Locks the trailing-path-char requirement against a future over-broadening.
+log "meta/doc mentions do not fire"
+PARENT_DOC=$(git rev-parse HEAD)   # scope the range to ONLY the doc commit
+echo d > d.txt; git add d.txt
+git commit -q -m "docs: a real url is claude.ai/code/<session-id>; the bare claude.ai/code concept"
+HEAD_DOC=$(git rev-parse HEAD)
+OUT=$(run_gate "$PARENT_DOC" "$HEAD_DOC" "mentions claude.ai/code inline" \
+      "the form is claude.ai/code/<session-id>, base path claude.ai/code"); RC=$?
+(( RC == 0 )) || fail "meta: expected 0 for placeholder/bare mentions, got $RC ($OUT)"
+pass "meta: bare + angle-bracket-placeholder mentions pass clean"
+
 # --- AC1-FR: unfetched base fails loud (not a vacuous green) ------------------
 log "AC1-FR: unfetched base fails loud"
 MISSING="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
