@@ -44,9 +44,13 @@ fi
 # Unreadable transcript -> outstanding-work is UNKNOWN -> decline (no false handoff).
 [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]] || exit 0
 
-# <promise> in the last assistant turn -> the session is finishing, do not arm.
+# <promise> in the LAST assistant turn -> the session is finishing, do not arm.
+# Select the last assistant message FIRST, then scan only its text, so a stale
+# <promise> from an earlier turn does not suppress arming when the latest turn
+# still has outstanding work.
 if command -v jq >/dev/null 2>&1; then
-  LAST_ASSISTANT="$(jq -rR 'fromjson? | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' "$TRANSCRIPT" 2>/dev/null | tail -c 20000 || true)"
+  LAST_ASSISTANT="$(jq -cR 'fromjson? | select(.type=="assistant")' "$TRANSCRIPT" 2>/dev/null | tail -n 1 \
+    | jq -r '.message.content[]? | select(.type=="text") | .text' 2>/dev/null || true)"
   printf '%s' "$LAST_ASSISTANT" | grep -q '<promise>' && exit 0
 fi
 

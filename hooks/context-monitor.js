@@ -240,12 +240,14 @@ process.stdin.on('end', () => {
     // (both latch, so nothing is lost — the context warning re-fires next tick).
     const spend = checkSpendAndDrift(sessionId, data.transcript_path, os.tmpdir())
     if (spend.message) {
-      process.stdout.write(
-        JSON.stringify({
-          hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: spend.message },
-        })
-      )
-      // Latch the one-shot only after the warning actually reached stdout.
+      const payload = JSON.stringify({
+        hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: spend.message },
+      })
+      // Synchronous write so an EPIPE throws HERE (caught by the outer try),
+      // BEFORE we latch. process.stdout.write() only queues on a pipe and can
+      // fail asynchronously, which would latch a warning that never reached the
+      // reader. Latch the one-shot only after the bytes are actually written.
+      fs.writeSync(1, payload)
       spend.commit()
       process.exit(0)
     }

@@ -59,7 +59,9 @@ esac
 
 # Non-Anthropic model. If the base URL is empty or an anthropic.com host, the
 # request silently falls back to the primary Anthropic model (the x-db50 bug).
-if [[ -z "$BASE_HOST" || "$BASE_HOST" == *anthropic.com ]]; then
+# Match the host exactly or as a subdomain - a bare *anthropic.com glob would
+# also match e.g. notanthropic.com.
+if [[ -z "$BASE_HOST" || "$BASE_HOST" == "anthropic.com" || "$BASE_HOST" == *.anthropic.com ]]; then
   echo "⚠️  MODEL ROUTING DRIFT: ANTHROPIC_MODEL='${MODEL}' names a non-Anthropic model but ANTHROPIC_BASE_URL is ${BASE_HOST:-unset} (Anthropic). Requests will silently fall back to the primary Anthropic model. Fix the routing env or unset ANTHROPIC_MODEL before relying on this session."
   exit 0
 fi

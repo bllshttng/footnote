@@ -62,6 +62,12 @@ OUT="$(run_hook "glm-4.6" "https://open.bigmodel.cn/api/anthropic" "sk-real-apik
 echo "$OUT" | grep -q "ROUTING DRIFT" && fail "false DRIFT on a real routed lane: $OUT" \
   || pass "foreign model + foreign base is coherent (no drift)"
 
+# 4b. Look-alike host: a foreign base whose host merely ENDS in "anthropic.com"
+#     as a substring (notanthropic.com) must NOT trip the drift warning.
+OUT="$(run_hook "glm-4.6" "https://notanthropic.com/api" "sk-real-apikey" 2>/dev/null)"
+echo "$OUT" | grep -q "ROUTING DRIFT" && fail "false DRIFT on look-alike host notanthropic.com: $OUT" \
+  || pass "notanthropic.com is not treated as an Anthropic host"
+
 # 5. OAuth-scrub catch: foreign base but an Anthropic OAuth token.
 OUT="$(run_hook "glm-4.6" "https://open.bigmodel.cn/api/anthropic" "sk-ant-oat-xxxx" 2>/dev/null)"
 echo "$OUT" | grep -q "OAuth" && pass "oat token on routed lane -> OAuth warning" \

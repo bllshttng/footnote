@@ -94,6 +94,16 @@ run_arm "$TMP/f"
 [[ ! -f "$TMP/f/.fno/.handoff-armed-$SID" ]] && pass "no arm when owner pid is dead" \
   || fail "armed on stale (dead-owner) state"
 
+# 6b. Stale <promise> in an EARLIER turn, but the LAST assistant turn has
+#     outstanding work -> must still arm (only the last turn counts).
+setup_ws "$TMP/p" 160000 "still working, nothing done yet"
+# Prepend an older assistant turn that DID carry a promise.
+printf '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"<promise>MISSION COMPLETE: earlier subtask</promise>"}]}}\n%s' \
+  "$(cat "$TMP/p/transcript.jsonl")" > "$TMP/p/transcript.jsonl.new" && mv "$TMP/p/transcript.jsonl.new" "$TMP/p/transcript.jsonl"
+run_arm "$TMP/p"
+[[ -f "$TMP/p/.fno/.handoff-armed-$SID" ]] && pass "arms despite a stale <promise> in an earlier turn" \
+  || fail "stale earlier <promise> wrongly suppressed arming"
+
 # 7. PostCompact re-surfaces an armed marker (even though target_is_active is
 #    false for the statusless manifest).
 setup_ws "$TMP/g" 160000 "working"
