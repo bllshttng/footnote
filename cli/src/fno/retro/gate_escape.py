@@ -45,13 +45,15 @@ def summarize_gate_escapes(
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(ev, dict):
+            continue
         if ev.get("type") != "gate_escape":
             continue
         data = ev.get("data") or {}
         reason = data.get("reason") or "other"
         counts[reason] += 1
         pr = data.get("pr")
-        if isinstance(pr, int) and pr not in prs[reason]:
+        if isinstance(pr, int) and pr > 0 and pr not in prs[reason]:
             prs[reason].append(pr)
         node = data.get("graph_node_id")
         if isinstance(node, str) and node and node not in nodes[reason]:

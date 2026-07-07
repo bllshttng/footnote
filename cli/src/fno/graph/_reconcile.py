@@ -626,6 +626,8 @@ def _fetch_pr_review_logins(
         row = json.loads(result.stdout or "{}")
     except json.JSONDecodeError as exc:
         raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
+    if not isinstance(row, dict):
+        raise ReconcileError("gh stdout was not a JSON object")
     logins: set[str] = set()
     for rev in row.get("reviews") or []:
         if not isinstance(rev, dict):
@@ -644,7 +646,7 @@ def _gate_escape_already_emitted(
     gate_escape (AC4-INV). Reconcile closes a node once, but two reconcile runs
     racing the same events.jsonl (e.g. SessionStart in two worktrees) would
     otherwise double-count. A missing/unreadable log reads as 'not emitted'."""
-    if pr_number is None:
+    if pr_number is None or pr_number <= 0:
         return False
     try:
         text = events_path.read_text(encoding="utf-8")
@@ -656,6 +658,8 @@ def _gate_escape_already_emitted(
         try:
             ev = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
             continue
         if ev.get("type") != "gate_escape":
             continue
@@ -741,6 +745,8 @@ def emit_gate_escape_for_record(
     reason = _GATE_ESCAPE_REASON_DEADBOT
     resolved_events: Optional[Path] = events_path
     try:
+        if record.pr_number <= 0:
+            return None  # placeholder/unassigned PR number: nothing to escape
         wanted = [b for b in (required_bots or []) if isinstance(b, str) and b.strip()]
         if not wanted:
             return None  # AC2: nothing required, so nothing to escape

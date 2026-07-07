@@ -279,9 +279,9 @@ validate_event() {
     # value so it is never a silent bucket in the retro ranking.
     if [[ "$type" == "gate_escape" ]]; then
         local ge_reason enum_match
-        ge_reason=$(jq -r '.data.reason // empty' <<<"$payload" 2>/dev/null)
+        ge_reason=$(jq -r '.data.reason // empty' <<<"$payload" 2>/dev/null || true)
         if [[ -n "$ge_reason" ]]; then
-            enum_match=$(jq -r --arg r "$ge_reason" '.event_types[] | select(.name == "gate_escape") | .data.properties.reason.enum[]? | select(. == $r)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
+            enum_match=$(jq -r --arg r "$ge_reason" '.event_types[] | select(.name == "gate_escape") | .data.properties.reason.enum[]? | select(. == $r)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null || true)
             if [[ -z "$enum_match" ]]; then
                 _ev_warn "unknown reason: $ge_reason"
                 return 1
