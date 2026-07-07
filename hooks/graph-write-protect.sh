@@ -78,8 +78,8 @@ PAYLOAD=$(cat)
 
 # ── 1. jq-free pre-filter ──────────────────────────────────────────────────────
 # No protected path token anywhere -> this call cannot target a protected file.
-# Match the bare `.fno/<file>` token so a relative path (`>> .fno/target-state.md`)
-# is caught too, not only an absolute/`~/` one. Broader here is safe: the precise
+# Match the bare `.fno/<file>` token so a relative-path write (a cwd-relative
+# .fno redirect target) is caught too, not only an absolute one. Broader is safe: precise
 # parse below keys on the write TARGET, so extra payloads just get inspected.
 if [[ "$PAYLOAD" != *".fno/graph.json"* && "$PAYLOAD" != *".fno/target-state.md"* ]]; then
     _approve
