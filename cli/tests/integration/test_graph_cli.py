@@ -139,6 +139,31 @@ def test_configured_prefix_mint_and_resolve(tmp_graph, monkeypatch):
     assert entries[0]["priority"] == "p1"
 
 
+def test_update_model_tier_valid_writes_node(tmp_graph):
+    r = _invoke("graph", "add", "Tiered Feature")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("graph", "update", nid, "--model-tier", "LOW")
+    assert r2.exit_code == 0, r2.output
+    assert _read_graph(tmp_graph)[0]["model_tier"] == "low"  # normalized
+
+
+def test_update_model_tier_invalid_exits_2(tmp_graph):
+    r = _invoke("graph", "add", "Tiered Feature")
+    nid = json.loads(r.output)["id"]
+    r2 = runner.invoke(app, ["graph", "update", nid, "--model-tier", "turbo"])
+    assert r2.exit_code == 2
+    assert "invalid --model-tier" in r2.output
+    assert "model_tier" not in _read_graph(tmp_graph)[0]
+
+
+def test_update_model_tier_null_clears(tmp_graph):
+    r = _invoke("graph", "add", "Tiered Feature")
+    nid = json.loads(r.output)["id"]
+    _invoke("graph", "update", nid, "--model-tier", "high")
+    _invoke("graph", "update", nid, "--model-tier", "null")
+    assert _read_graph(tmp_graph)[0]["model_tier"] is None
+
+
 def test_pick_extract_id_ignores_prefixed_non_id_tokens(monkeypatch):
     """gemini HIGH: picker extraction must use the strict matcher so a token
     that merely starts with the prefix (e.g. a project name `fno-cli`) is not

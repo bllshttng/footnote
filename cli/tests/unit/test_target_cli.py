@@ -119,6 +119,75 @@ def test_target_init_size_sets_target_size_env(monkeypatch, tmp_path):
     _clear_root_cache()
 
 
+def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
+    """--model/--provider persist to the init env so the bash writer stamps them."""
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            captured["env"] = dict(env or {})
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    result = runner.invoke(
+        app, ["target", "init", "--input", "x", "--model", "glm-4.7", "--provider", "codex"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["env"].get("TARGET_DISPATCH_MODEL") == "glm-4.7"
+    assert captured["env"].get("TARGET_DISPATCH_PROVIDER") == "codex"
+    _clear_root_cache()
+
+
+def test_target_init_no_pins_no_dispatch_env(monkeypatch, tmp_path):
+    """Byte-for-byte: without pins the dispatch env vars are absent."""
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            captured["env"] = dict(env or {})
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x"])
+    assert result.exit_code == 0, result.output
+    assert "TARGET_DISPATCH_MODEL" not in captured["env"]
+    assert "TARGET_DISPATCH_PROVIDER" not in captured["env"]
+    _clear_root_cache()
+
+
+def test_target_init_empty_model_rejected(monkeypatch, tmp_path):
+    """AC2-ERR: an empty --model exits 2 with a usage error, no shell-out."""
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+
+    def _no_run(*a, **k):
+        raise AssertionError("must not shell out on an empty --model")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _no_run)
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--model", "  "])
+    assert result.exit_code == 2
+    assert "--model must not be empty" in result.output
+    _clear_root_cache()
+
+
 def test_target_init_rejects_invalid_size(monkeypatch, tmp_path):
     """Invalid --size exits 2 with a clear message (script resolves fine)."""
     fake_root = _fake_plugin_root(tmp_path)
@@ -299,6 +368,36 @@ def test_work_start_dispatch_reads_claimed_node(tmp_path, monkeypatch):
 
     target_cli._maybe_dispatch_work_start()
     assert seen == ["x-122a"]
+
+
+def test_work_start_dispatch_overlays_dispatch_pins(tmp_path, monkeypatch):
+    """AC1-HP wiring: manifest dispatch_model/provider ride onto the node so the
+    work-start /think spawn carries `fno target start --model X`'s choice."""
+    _arm_work_start(monkeypatch)
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    (fno_dir / "target-state.md").write_text(
+        "session_id: s1\ngraph_node_id: x-122a\nattended: false\n"
+        "dispatch_model: glm-4.7\ndispatch_provider: codex\n",
+        encoding="utf-8",
+    )
+    import json as _json
+    from fno import paths as _paths
+    from fno.provenance import spawn_think as _st
+
+    node = {"id": "x-122a", "title": "lifecycle"}
+    g = tmp_path / "graph.json"
+    g.write_text(_json.dumps({"entries": [node]}), encoding="utf-8")
+
+    monkeypatch.setattr(_paths, "resolve_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(_paths, "graph_json", lambda: g)
+    seen = []
+    monkeypatch.setattr(_st, "on_node_work_start", lambda n, **k: seen.append(n))
+
+    target_cli._maybe_dispatch_work_start()
+    assert len(seen) == 1
+    assert seen[0]["model"] == "glm-4.7"
+    assert seen[0]["provider"] == "codex"
 
 
 def test_work_start_dispatch_skips_null_node(tmp_path, monkeypatch):

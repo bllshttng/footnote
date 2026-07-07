@@ -282,9 +282,12 @@ def cmd_watch(
 def cmd_spawn(
     name: str = typer.Argument(..., help="Agent name."),
     message: str = typer.Argument("", help="Initial message (optional; empty string if omitted)."),
-    provider: str = typer.Option(
-        ..., "--provider", "-p",
-        help="claude | codex | gemini (required).",
+    provider: str | None = typer.Option(
+        None, "--provider", "-p",
+        help=(
+            "claude | codex | gemini (optional). Defaults to the invoking "
+            "harness, then claude. An explicit value wins."
+        ),
     ),
     once: bool = typer.Option(
         False, "--once", "-o",
@@ -416,8 +419,27 @@ def cmd_spawn(
     (Rust runtime); this Python path exits 13 with guidance.
     """
     from fno.agents.dispatch import DispatchAskError, SpawnResult, dispatch_spawn
+    from fno.agents.provider_resolve import (
+        DispatchFlagError,
+        reject_empty_model,
+        resolve_dispatch_provider,
+    )
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
+
+    # --provider is optional: resolve it (explicit > invoking harness > claude)
+    # and reject an empty --model before anything spawns. `provider` is a
+    # concrete string from here down; the provider-name set is validated
+    # substrate-aware further in.
+    try:
+        provider, provider_source = resolve_dispatch_provider(provider)
+        model = reject_empty_model(model)
+    except DispatchFlagError as exc:
+        print(str(exc), file=sys.stderr)
+        raise typer.Exit(code=2) from exc
+    # Provenance rides the pane receipt's provider_source field below (the
+    # default substrate). The bg/once stdout receipts stay byte-parity-locked
+    # with the Rust client, so they don't carry it.
 
     # x-2c27 named the substrate axis; 4a-G2 retargeted its default: `pane`
     # is mux-hosted and Python OWNS that back half (rust_runtime carves pane
@@ -479,6 +501,7 @@ def cmd_spawn(
                     "name": pane_result.name,
                     "short_id": "",
                     "provider": pane_result.provider,
+                    "provider_source": provider_source,
                     "status": "live",
                     "mux_session": pane_result.session,
                     "pane_id": pane_result.pane_id,

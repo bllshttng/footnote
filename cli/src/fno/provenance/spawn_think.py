@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Optional
 
 from fno import _subprocess_util
+from fno import route_resolve as _route_resolve
 from fno.provenance.resolver import resolve_transcript
 
 _LOG = logging.getLogger(__name__)
@@ -596,6 +597,7 @@ def _spawn_think_worker(
     reason: str = REASON_BIRTH,
     invocation_suffix: Optional[str] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> str:
     """Dispatch a fire-and-forget ``/think`` claude bg worker carrying the seed.
 
@@ -609,7 +611,11 @@ def _spawn_think_worker(
     # x-2c27: a conversational /think handoff is a DETACHED thread, so route it
     # to the `claude --bg` substrate explicitly (the x-3ab8 default `pane` would
     # land an owned-PTY pane that stalls a fire-and-forget dispatch).
-    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
+    # provider defaults to claude (the bg substrate is claude-only); a dispatch
+    # flag overriding it rides through and fails loud downstream if the substrate
+    # cannot host it, rather than being silently dropped.
+    prov = (provider or "").strip() or "claude"
+    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", prov, "--substrate", "bg"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -1136,7 +1142,8 @@ def maybe_spawn_think(
             node_slug,
             reason,
             invocation_suffix,
-            model=node.get("model"),
+            model=_route_resolve.node_model(node),
+            provider=node.get("provider"),
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder)

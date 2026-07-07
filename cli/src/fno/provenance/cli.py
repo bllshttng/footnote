@@ -50,6 +50,15 @@ def dispatch(
         None, "--harness",
         help="Live session harness (default: ambiently detected; claude/codex/gemini).",
     ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m",
+        help="Model to pass to the spawned worker's provider CLI (exact passthrough).",
+    ),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-p",
+        help="Provider for the spawned worker (default: claude; the bg substrate is "
+             "claude-only, so a non-claude value fails loud at spawn).",
+    ),
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit the dispatch result as JSON."
     ),
@@ -61,10 +70,28 @@ def dispatch(
     offered, 1 skipped (e.g. dedup / daily-cap), 2 bad input (no live session id
     or node not found).
     """
+    from fno.agents.provider_resolve import (
+        DispatchFlagError,
+        reject_empty_model,
+        resolve_dispatch_provider,
+    )
     from fno.graph.cli import _graph_path, _session_provenance
     from fno.graph.fuzzy import resolve_node
     from fno.graph.store import read_graph
     from fno.provenance.spawn_think import dispatch_conversational
+
+    # Validate the dispatch flags up front (empty --model/--provider is a usage
+    # error, not a silently-forwarded empty argv token). Provider is resolved only
+    # when given: absent, the bg /think substrate keeps its claude default rather
+    # than inferring the invoking harness (which bg cannot host anyway).
+    try:
+        model = reject_empty_model(model)
+        resolved_provider = (
+            resolve_dispatch_provider(provider)[0] if provider is not None else None
+        )
+    except DispatchFlagError as exc:
+        typer.echo(f"fno think dispatch: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     # Resolve the LIVE session pointer ambiently across all three harnesses (the
     # same capture node-birth provenance uses, x-30f6), so the verb works in a
@@ -106,6 +133,16 @@ def dispatch(
     root = project_root_from_settings(proj) if proj else None
     if root:
         target["_resolved_cwd"] = root
+
+    # Overlay the dispatch-time model/provider onto the node. dispatch_conversational
+    # spreads the node into its live overlay, and maybe_spawn_think reads
+    # node["model"]/node["provider"] at the spawn seam, so a plain key overlay
+    # carries the flags all the way to `fno agents spawn` without threading a
+    # parameter through every layer.
+    if model is not None:
+        target["model"] = model
+    if resolved_provider is not None:
+        target["provider"] = resolved_provider
 
     result = dispatch_conversational(
         target, session_id=sid, cwd=live_cwd, harness=live_harness,

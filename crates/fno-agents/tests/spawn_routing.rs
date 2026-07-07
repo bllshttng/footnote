@@ -936,21 +936,23 @@ fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_pane() {
     );
 }
 
-/// AC6-CLIENT: `spawn` without --provider must exit 2 with a usage error.
+/// AC6-CLIENT (bg): `spawn --substrate bg` without --provider must exit 2. A
+/// detached thread cannot infer a harness, so provider stays required on the
+/// client-side bg/headless lane (maybe_run_spawn), unlike the pane substrate.
 #[test]
-fn client_spawn_no_provider_exits_2() {
+fn client_spawn_bg_no_provider_exits_2() {
     let home_dir = tmpdir("cli-spawn-noprov-home");
     let bin = find_client_bin();
     if !bin.exists() {
         eprintln!(
-            "skipping client_spawn_no_provider_exits_2: binary not found at {:?}",
+            "skipping client_spawn_bg_no_provider_exits_2: binary not found at {:?}",
             bin
         );
         return;
     }
 
     let out = std::process::Command::new(&bin)
-        .args(["spawn", "myagent", "hello"])
+        .args(["spawn", "myagent", "hello", "--substrate", "bg"])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_AGENTS_HOME", &home_dir)
         .output()
@@ -959,7 +961,7 @@ fn client_spawn_no_provider_exits_2() {
     assert_eq!(
         out.status.code(),
         Some(2),
-        "spawn without --provider must exit 2, got {:?}; stderr: {}",
+        "bg spawn without --provider must exit 2, got {:?}; stderr: {}",
         out.status.code(),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -967,6 +969,48 @@ fn client_spawn_no_provider_exits_2() {
     assert!(
         stderr.contains("provider"),
         "stderr must mention 'provider': {}",
+        stderr
+    );
+}
+
+/// Pane parity with the optional-provider Python resolver: `spawn` on the pane
+/// substrate (the default) without --provider is NO LONGER a client-side exit 2.
+/// It falls through to the Python re-exec, which resolves the provider from the
+/// invoking harness. With no `fno` front door on PATH the re-exec fails (127),
+/// but the point is the client no longer rejects a missing provider on this arm.
+#[test]
+fn client_spawn_pane_no_provider_falls_through() {
+    let home_dir = tmpdir("cli-spawn-pane-noprov-home");
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!(
+            "skipping client_spawn_pane_no_provider_falls_through: binary not found at {:?}",
+            bin
+        );
+        return;
+    }
+
+    let out = std::process::Command::new(&bin)
+        .args(["spawn", "myagent", "hello"]) // pane is the default substrate
+        .env("FNO_SPAWN_GATE", "0")
+        .env("FNO_AGENTS_HOME", &home_dir)
+        // Ensure the `fno` front door cannot be found, so the re-exec fails
+        // deterministically (127) rather than launching a real pane.
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("failed to run fno-agents");
+
+    assert_ne!(
+        out.status.code(),
+        Some(2),
+        "pane spawn without --provider must NOT be a client-side exit 2; got {:?}; stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("provider is required to spawn a new agent"),
+        "pane arm must no longer emit the client-side provider-required error: {}",
         stderr
     );
 }

@@ -281,6 +281,20 @@ def init(
         "resolves the matching skip-flag profile. Without it, target_size is "
         "left blank and the caller must set TARGET_SIZE by hand.",
     ),
+    model: Optional[str] = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help="Pin a model for this session's dispatched workers (exact "
+        "passthrough). Persisted to the manifest so it survives into the do phase.",
+    ),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        "-p",
+        help="Pin a provider for this session's dispatched workers. Absent, the "
+        "spawn path infers it from the invoking harness at dispatch time.",
+    ),
 ) -> None:
     """Bootstrap a target session via the canonical init script.
 
@@ -330,6 +344,25 @@ def init(
                 err=True,
             )
             raise typer.Exit(code=2)
+
+    # Validate the dispatch pins before writing any state. Empty --model/--provider
+    # is a usage error (never a forwarded empty argv token); provider is resolved
+    # only when given, so an absent pin lets the spawn path infer the harness at
+    # dispatch time rather than freezing it here.
+    from fno.agents.provider_resolve import (
+        DispatchFlagError,
+        reject_empty_model,
+        resolve_dispatch_provider,
+    )
+
+    try:
+        dispatch_model = reject_empty_model(model)
+        dispatch_provider = (
+            resolve_dispatch_provider(provider)[0] if provider is not None else None
+        )
+    except DispatchFlagError as exc:
+        typer.echo(f"fno target init: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     # Blast-radius modulation (x-518f): a deterministic blast read on the plan's
     # File Ownership Map can raise ceremony to an M floor (high blast) or drop to
@@ -397,6 +430,10 @@ def init(
         env["TARGET_PLAN_PATH"] = plan_path
     if normalized_size:
         env["TARGET_SIZE"] = normalized_size
+    if dispatch_model:
+        env["TARGET_DISPATCH_MODEL"] = dispatch_model
+    if dispatch_provider:
+        env["TARGET_DISPATCH_PROVIDER"] = dispatch_provider
 
     result = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if result.returncode == 0:
@@ -498,6 +535,18 @@ def _maybe_dispatch_work_start() -> None:
             None,
         )
         if node is not None:
+            # Carry the session's persisted dispatch pins into the work-start
+            # /think spawn. maybe_spawn_think reads node["model"]/node["provider"]
+            # at the spawn seam, so overlaying the manifest fields here is all it
+            # takes for `fno target start --model X` to reach the spawned worker.
+            dm = re.search(r"^dispatch_model\s*:\s*(.*)$", text, re.MULTILINE)
+            dp = re.search(r"^dispatch_provider\s*:\s*(.*)$", text, re.MULTILINE)
+            model_pin = dm.group(1).strip().strip("\"'") if dm else ""
+            provider_pin = dp.group(1).strip().strip("\"'") if dp else ""
+            if model_pin:
+                node["model"] = model_pin
+            if provider_pin:
+                node["provider"] = provider_pin
             on_node_work_start(node, project_root=repo_root)
     except Exception:  # noqa: BLE001 - additive; never affect the init exit code
         pass
@@ -602,6 +651,14 @@ def start(
     size: Optional[str] = typer.Option(
         None, "--size", help="Size profile: S, M, or L (forwarded to init)."
     ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m",
+        help="Pin a model for this session's dispatched workers (forwarded to init).",
+    ),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-p",
+        help="Pin a provider for this session's dispatched workers (forwarded to init).",
+    ),
 ) -> None:
     """Cold-start a worktree-isolated target session in ONE verb.
 
@@ -689,6 +746,10 @@ def start(
         init_cmd += ["--plan-path", plan_path]
     if size:
         init_cmd += ["--size", size]
+    if model:
+        init_cmd += ["--model", model]
+    if provider:
+        init_cmd += ["--provider", provider]
     init = subprocess.run(init_cmd, cwd=str(wt_path))
     if init.returncode != 0:
         typer.echo(

@@ -30,6 +30,10 @@ input: "Add AI chat feature"          # original user argument (idea or plan pat
 plan_path: null                       # resolved plan path; may be first-filled post-init
                                       # via `fno state set --field plan_path`
 target_size: M                        # S | M | L
+dispatch_model: ""                    # model pin from `fno target start/init --model`;
+                                      # empty = unpinned. Carried to dispatched workers.
+dispatch_provider: ""                 # provider pin from `--provider`; empty = infer the
+                                      # invoking harness at dispatch time. Init-time only.
 ```
 
 ### Skip flags (set from CLI flags or config; never mutated after init)

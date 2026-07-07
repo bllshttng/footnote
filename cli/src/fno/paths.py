@@ -364,6 +364,23 @@ def ledger_json() -> Path:
     return _resolve("~/.fno/") / "ledger.json"
 
 
+def benchmarks_json() -> Path:
+    """Return the path to the OpenRouter benchmark snapshot (``benchmarks.json``).
+
+    The snapshot is cross-project by nature (one cached routing source of truth
+    per machine), so it follows an absolute ``config.state_dir`` (the ``~/.fno``
+    default and test sandboxes both qualify) and otherwise pins to user-global
+    ``~/.fno`` rather than forking into a repo checkout. No dedicated
+    ``config.paths`` override: callers that need isolation pass an explicit path
+    to the benchmarks module (the refresh/show/load functions all accept one).
+    """
+    settings = _settings()
+    raw = os.path.expanduser(os.path.expandvars(settings.config.state_dir))
+    if os.path.isabs(raw):
+        return state_dir() / "benchmarks.json"
+    return _resolve("~/.fno/") / "benchmarks.json"
+
+
 def loops_paused_json() -> Path:
     """Return the path to the global loops pause-all sentinel.
 

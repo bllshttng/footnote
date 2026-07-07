@@ -310,6 +310,37 @@ unchanged (surface the error, do not fabricate a pin). When `/blueprint`
 decomposes a scope:epic into child nodes, apply the same transcription to each
 child id it creates. No pin present -> write nothing (no `--model` call).
 
+### Model Routing (tier assignment, parallel to executor routing)
+
+Beyond an exact pin, a plan may express a **minimum quality tier** and let
+dispatch pick the cheapest reachable model that clears it (pareto routing). This
+mirrors executor routing: judged once at planning time, honored at every
+dispatch, and unset = today's provider default (no behavior change).
+
+Assign a tier per the task's nature, one line of rationale each:
+
+- **`low`** - mechanical work: a rename, a codemod, a doc tweak, boilerplate.
+- **`medium`** - a standard feature or fix that needs real reasoning but no
+  load-bearing judgment.
+- **`high`** - gate semantics, security, concurrency, migrations, or an
+  architecture decision where a weaker model's error is expensive.
+
+Precedence is `model:` (exact) over `model_tier:` (tier) over the provider
+default; an exact pin on the same task wins. Transcribe a plan-wide default from
+frontmatter onto the node (AFTER `$NODE_ID` is minted), idempotently:
+
+```bash
+# Plan frontmatter `model_tier:` (scope to the frontmatter block).
+MODEL_TIER="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^model_tier:/{sub(/^model_tier:[[:space:]]*/,""); print; exit}' "$PLAN_INDEX")"
+[[ -n "$MODEL_TIER" ]] && fno backlog update "$NODE_ID" --model-tier "$MODEL_TIER"
+```
+
+`fno backlog update --model-tier` validates the band (`high|medium|low`); an
+invalid value exits non-zero and leaves the node unchanged (surface it, do not
+fabricate a tier). Per-task tiers ride in task blocks as `model_tier:` lines
+(the do-phase reads them the same way it reads `executor:` task blocks). No tier
+and no pin present -> write nothing.
+
 ## PRODUCT.md Prereq Check (when executor: impeccable is locked)
 
 When `/blueprint` generates a plan that locks `executor: impeccable` at the plan
