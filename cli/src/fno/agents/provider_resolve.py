@@ -38,17 +38,21 @@ class DispatchFlagError(ValueError):
 
 
 def infer_invoking_harness(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
-    """Return the invoking harness name from env markers, or None if absent.
+    """Return the invoking harness name from env markers, or None if unclear.
 
-    Highest-priority marker wins (claude > codex > gemini), matching
-    ``_capture_parent_edge``. A bg worker exposes ``CLAUDE_CODE_SESSION_ID`` too,
-    so a dispatch running inside a claude session correctly infers ``claude``.
+    Inference never guesses: it returns a harness only when *exactly one* marker
+    is present. Zero markers (bare shell) or two-plus (a nested/inherited env
+    with e.g. both ``CODEX_SESSION_ID`` and ``GEMINI_SESSION_ID``) are ambiguous
+    and fall through to None, so the caller lands on the builtin default rather
+    than picking the wrong provider.
     """
     environ = os.environ if env is None else env
-    for marker, harness in _HARNESS_MARKERS:
-        if (environ.get(marker) or "").strip():
-            return harness
-    return None
+    present = [
+        harness
+        for marker, harness in _HARNESS_MARKERS
+        if (environ.get(marker) or "").strip()
+    ]
+    return present[0] if len(present) == 1 else None
 
 
 def resolve_dispatch_provider(

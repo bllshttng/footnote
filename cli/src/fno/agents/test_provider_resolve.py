@@ -68,13 +68,18 @@ def test_harness_inferred_from_marker(marker, expected):
     )
 
 
-def test_harness_precedence_claude_wins():
-    env = {"CLAUDE_CODE_SESSION_ID": "a", "CODEX_SESSION_ID": "b"}
-    assert infer_invoking_harness(env) == "claude"
+def test_multiple_markers_are_ambiguous():
+    # Inference never guesses: two markers -> None (caller falls to builtin).
+    env = {"CODEX_SESSION_ID": "b", "GEMINI_SESSION_ID": "c"}
+    assert infer_invoking_harness(env) is None
+    assert resolve_dispatch_provider(None, env=env) == ("claude", "builtin-default")
 
 
 def test_whitespace_marker_is_absent():
     assert infer_invoking_harness({"CLAUDE_CODE_SESSION_ID": "  "}) is None
+    # A whitespace-only marker does not count toward the ambiguity tally either.
+    env = {"CLAUDE_CODE_SESSION_ID": "sid", "CODEX_SESSION_ID": "  "}
+    assert infer_invoking_harness(env) == "claude"
 
 
 # --- builtin default (bottom) ---------------------------------------------
