@@ -1,7 +1,7 @@
 ---
 name: review
 description: "Review a diff or a research brief. Routes to the internal six-agent Claude panel (sigma, default), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'get a second opinion', 'have codex review this PR', 'review this research brief', 'declare this reviewed'."
-argument-hint: "[sigma|peer|research|declare]  (peer: [PR#|branch] [codex|gemini]; research: [brief.md])   e.g. (bare = sigma), `peer 657 codex`, `research out/topic.md`, `declare`"
+argument-hint: "[sigma|peer|research|declare]  (peer: [adversarial] [PR#|branch] [codex|gemini] [focus...]; research: [brief.md])   e.g. (bare = sigma), `peer 657 codex`, `peer adversarial codex`, `research out/topic.md`, `declare`"
 requires:
   binaries:
     - "fno >= 0.1"
@@ -82,6 +82,8 @@ Never present a partial panel as a complete one, and never omit a reviewer that 
 ## Step 3: peer mode (cross-model second opinion)
 
 Load [peer.md](references/peer.md) and execute it in full, in this context. That reference is the canonical cross-model peer-review process. It assembles the diff, spawns `codex` or `gemini` via `fno agents spawn --once` (the agent is the runner), and relays the findings honestly.
+
+Adversarial sub-mode: an `adversarial` token anywhere in peer's args swaps the brief from defect-hunting to a design-challenge framing (is this the right approach, what assumptions does it depend on, where does it fail under real-world conditions, what are the tradeoffs), steerable by trailing focus text. It is parsed inside peer's own args (like `[PR#|branch] [provider]`), not a new top-level router mode, and stays advisory - it gates only with `--post`, same as the defect brief.
 
 The peer review is **advisory**: it runs on a coding-account quota, not the bot account, and never satisfies a `required_bots` review gate. A human still merges.
 
