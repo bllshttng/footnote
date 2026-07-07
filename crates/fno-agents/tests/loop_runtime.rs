@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// Integration tests for `fno-agents` loop_runtime module.
 ///
 /// Each test drives `run_loop` directly via in-process mock impls of the

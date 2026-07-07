@@ -8,6 +8,8 @@
 //!   latest `Layout`, per-pane frames + counts (the AC5-EDGE
 //!   no-frames-for-inactive assertion), `ModeSync` bytes, and `Notice`s.
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};

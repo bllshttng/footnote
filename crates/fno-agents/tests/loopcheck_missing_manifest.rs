@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![allow(unused_mut)]
 /// Regression test: loop-check with a NONEXISTENT --state file returns exit 0
 /// and decision "allow" with message containing "missing manifest".
 ///

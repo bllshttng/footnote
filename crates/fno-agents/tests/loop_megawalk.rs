@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+
 /// Integration tests for loop_megawalk.rs (MegawalkQueue + verb glue).
 ///
 /// Tests use stub `fno` binaries (via FNO_BIN env override) that record

@@ -50,7 +50,7 @@ jobs:
       RUSTFMT_TOOLCHAIN: "1.94.1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install pinned rustfmt toolchain
         # rustup ships on ubuntu-latest runners. Pin the exact toolchain via
@@ -74,13 +74,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry + build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -96,12 +96,12 @@ jobs:
         # Rust flock and Python fcntl.flock serialize correctly. ubuntu-latest
         # ships with Python 3 on PATH; this step ensures a known version and
         # installs the abilities package so the parity check can also run.
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install uv + sync cli
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v8
         with:
           version: "latest"
 
@@ -176,7 +176,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install cargo-audit (prebuilt)
         # Prebuilt binary install; compiling cargo-audit from source costs
