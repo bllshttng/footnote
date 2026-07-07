@@ -727,7 +727,10 @@ MemAvailable:    8000000 kB\n";
             std::env::set_var("FNO_CLAUDE_DAEMON_DIR", &daemon);
             let mut rworkers = Vec::new();
             for (j, r) in sc["roster"].as_array().unwrap().iter().enumerate() {
-                let short = format!("{:08x}", 0xaaaa_0000u32 + j as u32);
+                let short = r["short"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{:08x}", 0xaaaa_0000u32 + j as u32));
                 let pidf = resolve(&r["pid"])
                     .map(|p| format!(r#","pid":{p}"#))
                     .unwrap_or_default();
@@ -751,8 +754,12 @@ MemAvailable:    8000000 kB\n";
                 let pidf = resolve(&row["pid"])
                     .map(|p| format!(r#","pid":{p}"#))
                     .unwrap_or_default();
+                let csidf = row["claude_short_id"]
+                    .as_str()
+                    .map(|s| format!(r#","claude_short_id":"{s}""#))
+                    .unwrap_or_default();
                 entries.push(format!(
-                    r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z"{pidf}}}"#
+                    r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z"{pidf}{csidf}}}"#
                 ));
             }
             let reg = dir.join("registry.json");

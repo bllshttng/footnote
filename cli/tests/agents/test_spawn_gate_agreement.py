@@ -51,7 +51,7 @@ def test_slot_count_agrees_with_rust_gate_fixture(name, sc, tmp_path, monkeypatc
     # Materialize the roster the slot count must ignore.
     workers = {}
     for j, r in enumerate(sc["roster"]):
-        short = f"{0xAAAA0000 + j:08x}"
+        short = r.get("short") or f"{0xAAAA0000 + j:08x}"
         w = {"sessionId": f"{short}-1-2-3-4"}
         p = _pid(r["pid"])
         if p is not None:
@@ -69,6 +69,7 @@ def test_slot_count_agrees_with_rust_gate_fixture(name, sc, tmp_path, monkeypatc
             log_path="/tmp/log",
             status=row["status"],
             pid=_pid(row["pid"]),
+            claude_short_id=row.get("claude_short_id"),
             short_id="",
         )
         for row in sc["registry"]

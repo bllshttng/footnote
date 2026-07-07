@@ -22,7 +22,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import unquote
 
 # Exit codes, distinct from existing dispatch codes (2, 13, 14, 15, 18, 127)
@@ -97,7 +97,7 @@ def _roster_path() -> Path:
 class LiveWorker:
     """One live process row, shared by the gate count and ``fno agents top``."""
 
-    source: str  # "fno" | "claude"
+    source: Literal["fno", "claude"]
     name: str
     provider: str
     substrate: str
@@ -111,6 +111,10 @@ class LiveCensus:
     warnings: list[str] = field(default_factory=list)
     #: live worker:<name> slot claims (headless one-shots, no process row yet)
     slot_claims: int = 0
+    #: live fno registry work rows, counted straight from the registry
+    #: (dedup-independent) so the slot cap mirrors the Rust gate exactly — see
+    #: :attr:`slot_count`.
+    fno_slot_workers: int = 0
 
     @property
     def count(self) -> int:
@@ -121,12 +125,15 @@ class LiveCensus:
 
     @property
     def slot_count(self) -> int:
-        """Worker SLOTS in use for the ``max_live`` cap (x-bdf9): fno-sourced
-        rows + headless slot claims only. The claude roster (``source ==
-        "claude"``) is excluded — its ~dozens of claude-mem observers and
-        resident-idle sessions are not fno work and must not consume slots.
-        Their RAM cost stays honored by the separate ``min_free_gb`` floor."""
-        return sum(1 for w in self.workers if w.source == "fno") + self.slot_claims
+        """Worker SLOTS in use for the ``max_live`` cap (x-bdf9): live fno
+        registry rows + headless slot claims. Counted straight from the
+        registry, NOT by filtering the display union — a bg/adopted fno worker
+        is display-deduped into its roster row (``source == "claude"``) but is
+        still fno work and must hold a slot, exactly as the Rust gate counts it.
+        The claude roster's non-work sessions (claude-mem observers, resident
+        idle) never enter this count; their RAM cost stays honored by the
+        separate ``min_free_gb`` floor."""
+        return self.fno_slot_workers + self.slot_claims
 
 
 def census() -> LiveCensus:
@@ -177,38 +184,44 @@ def census() -> LiveCensus:
                 )
             )
 
-    # fno registry rows, skipping ones already counted via the roster.
+    # fno registry rows: every live one holds a worker slot; the roster only
+    # decides whether to add a DUPLICATE display row for a bg/adopted worker.
     try:
         from fno.agents.registry import load_registry
 
         rows = load_registry()
     except Exception as exc:
         out.warnings.append(
-            f"spawn-gate: fno registry unreadable ({exc}); counting claude roster only"
+            f"spawn-gate: fno registry unreadable ({exc}); registry rows omitted from the census"
         )
         rows = []
     for row in rows:
         if row.status not in LIVE_STATUSES:
             continue
+        if not _pid_alive(row.pid, row.pid_start_time):
+            continue
+        # A live fno row is fno work: it holds a slot regardless of the display
+        # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
+        # but its registry row is the slot, matching the registry-only Rust gate).
+        out.fno_slot_workers += 1
         dedup_key = row.claude_short_id or row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
-            continue
-        if _pid_alive(row.pid, row.pid_start_time):
-            if dedup_key:
-                counted_short_ids.add(dedup_key)
-            substrate = "pane" if getattr(row, "mux", None) else (
-                "bg" if row.claude_short_id else "worker"
+            continue  # already shown as its roster row in the display union
+        if dedup_key:
+            counted_short_ids.add(dedup_key)
+        substrate = "pane" if getattr(row, "mux", None) else (
+            "bg" if row.claude_short_id else "worker"
+        )
+        out.workers.append(
+            LiveWorker(
+                source="fno",
+                name=row.name,
+                provider=row.provider,
+                substrate=substrate,
+                pid=row.pid,
+                status=str(row.status),
             )
-            out.workers.append(
-                LiveWorker(
-                    source="fno",
-                    name=row.name,
-                    provider=row.provider,
-                    substrate=substrate,
-                    pid=row.pid,
-                    status=str(row.status),
-                )
-            )
+        )
 
     out.slot_claims = _live_worker_slot_claims(out.warnings)
     return out
