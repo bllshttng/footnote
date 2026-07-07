@@ -12,6 +12,7 @@ Bias toward caution over speed; for trivial tasks, use judgment. Derived from [K
 2. **Simplicity first.** Minimum code that solves the problem. No speculative features, single-use abstractions, unrequested config, or error handling for impossible cases. If 200 lines could be 50, rewrite.
 3. **Surgical changes.** Touch only what the task requires. Don't refactor working code or restyle adjacent lines. Match existing style. Remove orphans *your* change created; flag pre-existing dead code, don't delete it. Every changed line should trace to the request.
 4. **Goal-driven execution.** Turn tasks into verifiable goals ("add validation" → "write failing tests for invalid input, then make them pass"). State a brief plan with a verify step each. Strong success criteria let you loop independently.
+5. **Comments earn their place.** Same discipline as code. A comment must say what the code can't: a non-obvious invariant, a race, why not the obvious approach. Don't restate the code, narrate the happy path, or re-explain a name. One tight line beats a paragraph, and a comment that just describes a symbol is noise. Delete a comment before it outlives the code. No ticket/PR/node IDs in comments (see the no-internal-refs rule).
 
 ## Repository
 
