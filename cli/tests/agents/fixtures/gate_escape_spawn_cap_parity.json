@@ -1,0 +1,14 @@
+{
+  "description": "x-91b5 AC2-FR: the Python gate (fno.events.gate_escape.should_emit_spawn_cap) and the Rust gate (spawn_gate::spawn_cap_would_emit) must agree on EVERY row. Both read this file. An empty string counts as unset (shell -n semantics), so a `CI=` env is NOT a test context.",
+  "scenarios": [
+    {"name": "bypass_no_test_ctx", "env": {"FNO_SPAWN_GATE": "0"}, "expect": true},
+    {"name": "bypass_pytest", "env": {"FNO_SPAWN_GATE": "0", "PYTEST_CURRENT_TEST": "t::case"}, "expect": false},
+    {"name": "bypass_ci", "env": {"FNO_SPAWN_GATE": "0", "CI": "true"}, "expect": false},
+    {"name": "bypass_fno_e2e", "env": {"FNO_SPAWN_GATE": "0", "FNO_E2E": "1"}, "expect": false},
+    {"name": "bypass_empty_ci_is_unset", "env": {"FNO_SPAWN_GATE": "0", "CI": ""}, "expect": true},
+    {"name": "bypass_all_test_markers", "env": {"FNO_SPAWN_GATE": "0", "PYTEST_CURRENT_TEST": "a", "CI": "1", "FNO_E2E": "1"}, "expect": false},
+    {"name": "gate_on", "env": {"FNO_SPAWN_GATE": "1"}, "expect": false},
+    {"name": "gate_empty_not_zero", "env": {"FNO_SPAWN_GATE": ""}, "expect": false},
+    {"name": "gate_unset", "env": {}, "expect": false}
+  ]
+}

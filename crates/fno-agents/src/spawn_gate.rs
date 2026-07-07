@@ -646,6 +646,25 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, claude_short_id: &str) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn spawn_cap_guard_agrees_with_python_gate_fixture() {
+        // x-91b5 AC2-FR: this Rust guard must agree with the Python
+        // should_emit_spawn_cap on every fixture row. Both read the same JSON;
+        // a drift on either side fails its own assertion.
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/tests/agents/fixtures/gate_escape_spawn_cap_parity.json");
+        let raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("read fixture {}: {e}", fixture_path.display()));
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        for sc in fixture["scenarios"].as_array().unwrap() {
+            let name = sc["name"].as_str().unwrap();
+            let env = sc["env"].clone();
+            let get = |k: &str| env.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let expect = sc["expect"].as_bool().unwrap();
+            assert_eq!(spawn_cap_would_emit(get), expect, "row {name}");
+        }
+    }
+
     const VM_STAT: &str = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
 Pages free:                              100000.\n\
 Pages active:                            500000.\n\
