@@ -93,8 +93,10 @@ Before outputting `<promise>`, verify the pipeline actually completed: sigma-rev
 `graph_node_id` other than `null` in the manifest body) and a PR was created,
 confirm `node.pr_number` equals the PR you are about to promise - the last-line
 guard for any ship that reached pre-promise through a path that skipped the
-ship-phase link step. This is a cheap read; on mismatch, re-link and re-verify
-before promising (an unlinked node re-dispatches as duplicate work):
+ship-phase link step. This is a cheap read; on mismatch, re-link before
+promising (an unlinked node re-dispatches as duplicate work). loop-check then
+verifies the world independently, so this backstop re-links but does not need to
+re-read - the ship-phase step already owns the verified retry:
 
 ```bash
 if [[ -n "${NODE_ID:-}" && "$NODE_ID" != "null" && -n "${PR_NUMBER:-}" ]]; then

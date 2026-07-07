@@ -285,6 +285,12 @@ def install(
     typer.echo(f"Written: {plist_path}")
 
     if activate:
+        # Unload first so a RE-install (changed --interval / fno_binary / PATH)
+        # actually reloads the new plist. launchctl load on an already-loaded
+        # job returns nonzero and leaves the STALE agent running; the unload is
+        # best-effort (a no-op when nothing is loaded).
+        if _launchctl_is_loaded():
+            _run_launchctl("unload", str(plist_path))
         rc = _run_launchctl("load", str(plist_path))
         if rc == 0:
             typer.echo(f"Activated: launchctl load {plist_path}")
@@ -341,6 +347,15 @@ def ensure_activated(
             plist_path.write_text(plist_text, encoding="utf-8")
         except OSError:
             return "write-failed"
+    else:
+        # Re-enable of an existing plist: bump its mtime so doctor's
+        # healthy-pending grace (install-age < 2x interval) applies until the
+        # first fresh tick, instead of a transient false "dead" from the old
+        # tick still being stale.
+        try:
+            plist_path.touch()
+        except OSError:
+            pass
 
     rc = _run_launchctl("load", str(plist_path))
     return "activated" if rc == 0 else "load-failed"

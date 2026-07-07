@@ -372,6 +372,7 @@ def test_install_activates_by_default(tmp_home, tmp_launch_agents, capsys, monke
     """install(activate=True) runs launchctl load and reports activation."""
     m = _install()
     monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
     calls: list[tuple] = []
     monkeypatch.setattr(m, "_run_launchctl", lambda *a: calls.append(a) or 0)
 
@@ -407,10 +408,53 @@ def test_install_no_activate_skips_load(tmp_home, tmp_launch_agents, capsys, mon
     assert "To activate" in out
 
 
+def test_install_reload_unloads_first_when_loaded(tmp_home, tmp_launch_agents, monkeypatch):
+    """A re-install of an already-loaded agent unloads before loading (stale-plist fix)."""
+    m = _install()
+    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+    calls: list[tuple] = []
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: calls.append(a) or 0)
+
+    m.install(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+        dry_run=False,
+        activate=True,
+    )
+
+    verbs = [a[0] for a in calls]
+    assert verbs == ["unload", "load"], f"expected unload then load, got {verbs}"
+
+
+def test_ensure_activated_refreshes_existing_plist_mtime(tmp_home, tmp_launch_agents, monkeypatch):
+    """Re-enable of an existing plist bumps its mtime (avoids transient false 'dead')."""
+    import os
+    import time as _time
+
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist/>")
+    old = _time.time() - 10_000
+    os.utime(plist, (old, old))
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: 0)
+
+    m.ensure_activated(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+    )
+
+    assert plist.stat().st_mtime > old + 100, "existing plist mtime should be refreshed"
+
+
 def test_install_activation_failure_is_loud(tmp_home, tmp_launch_agents, capsys, monkeypatch):
     """A failing launchctl load prints a loud WARNING but still writes the plist (AC1-ERR)."""
     m = _install()
     monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
     monkeypatch.setattr(m, "_run_launchctl", lambda *a: 1)
 
     m.install(

@@ -77,6 +77,20 @@ def test_activation_failure_is_loud_and_keeps_config(tmp_home, monkeypatch):
     assert load_settings().config.pr_watch.enabled is True
 
 
+def test_disable_unload_failure_is_loud(tmp_home, monkeypatch):
+    """A failed unload on disable warns loudly - a still-ticking watcher must not go silent."""
+    import fno.pr_watch.cli as pwcli
+
+    monkeypatch.setattr(pwcli, "ensure_watcher_activated", lambda: "activated")
+    monkeypatch.setattr(pwcli, "deactivate_watcher", lambda: "unload-failed")
+    from fno.config_cli import app
+
+    r = CliRunner().invoke(app, ["set", "config.pr_watch.enabled", "false"])
+    assert r.exit_code == 0, r.output
+    assert "WARNING" in r.output
+    assert "may still be running" in r.output
+
+
 def test_unrelated_key_does_not_touch_watcher(tmp_home, monkeypatch):
     calls = _stub_coupling(monkeypatch)
     from fno.config_cli import app

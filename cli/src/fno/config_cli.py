@@ -497,7 +497,19 @@ def _couple_pr_watch(enabled: bool) -> None:
             )
     else:
         outcome = deactivate_watcher()
-        typer.echo(f"pr-watch: agent {outcome} (disabled).")
+        if outcome == "unload-failed":
+            # Inverse of the found incident: config says disabled but the agent
+            # keeps ticking. Surface as loudly as the enable path - doctor's
+            # liveness line stays silent once enabled=false, so this is the only
+            # signal that the watcher did not actually stop.
+            typer.echo(
+                "pr-watch: WARNING disable set but launchctl unload failed; the "
+                "agent may still be running. Run `fno pr-watch uninstall` or "
+                "`launchctl unload ~/Library/LaunchAgents/sh.fno.pr-watcher.plist`.",
+                file=sys.stderr,
+            )
+        else:
+            typer.echo(f"pr-watch: agent {outcome} (disabled).")
 
 
 @app.command("unset")

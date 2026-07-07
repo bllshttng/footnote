@@ -550,7 +550,16 @@ def _pr_watch_liveness() -> dict[str, Any]:
 
         return m.liveness_report_live()
     except Exception:
-        return {"enabled": False, "verdict": "unknown", "detail": "", "fix": None}
+        # Same dict shape as liveness_report so a future non-.get() reader
+        # cannot KeyError on the exception path.
+        return {
+            "enabled": False,
+            "verdict": "unknown",
+            "detail": "",
+            "fix": None,
+            "loaded": False,
+            "last_tick": None,
+        }
 
 
 # ---------------------------------------------------------------------------
