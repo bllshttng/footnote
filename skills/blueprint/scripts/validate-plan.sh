@@ -23,7 +23,22 @@ echo ""
 # -------------------------------------------------------------------
 echo "--- Structure ---"
 
-if [[ -f "$PLAN_DIR/00-INDEX.md" ]]; then
+# The only authored plan shape is a single .md (G1). A directory is a legacy
+# folder plan still on disk (folder READING is removed in G3); validate its
+# 00-INDEX + phase files for now. A single file skips the folder checks.
+if [[ -f "$PLAN_DIR" ]]; then
+    if [[ "$PLAN_DIR" == *.md ]]; then
+        ok "single-doc plan: $(basename "$PLAN_DIR")"
+        if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
+                | grep -qE '^[[:space:]]*project:'; then
+            ok "has 'project:' field"
+        else
+            warn "missing 'project:' field in frontmatter (intake will fall back to cwd-based inference)"
+        fi
+    else
+        error "not a .md plan file: $PLAN_DIR"
+    fi
+elif [[ -f "$PLAN_DIR/00-INDEX.md" ]]; then
     ok "00-INDEX.md exists"
     # Scope the project-field check to the frontmatter block (between
     # the first two --- fences). A bare grep on the whole file would
@@ -38,11 +53,13 @@ else
     error "Missing 00-INDEX.md"
 fi
 
-PHASE_COUNT=$(find "$PLAN_DIR" -maxdepth 1 -name '[0-9][0-9]*.md' ! -name '00-INDEX.md' 2>/dev/null | wc -l | tr -d ' ')
-if [[ "$PHASE_COUNT" -gt 0 ]]; then
-    ok "$PHASE_COUNT phase file(s) found"
-else
-    error "No phase files found (expected files like 01-*.md)"
+if [[ -d "$PLAN_DIR" ]]; then
+    PHASE_COUNT=$(find "$PLAN_DIR" -maxdepth 1 -name '[0-9][0-9]*.md' ! -name '00-INDEX.md' 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$PHASE_COUNT" -gt 0 ]]; then
+        ok "$PHASE_COUNT phase file(s) found"
+    else
+        error "No phase files found (expected files like 01-*.md)"
+    fi
 fi
 
 # -------------------------------------------------------------------
@@ -51,7 +68,16 @@ fi
 echo ""
 echo "--- Execution Strategy ---"
 
-if [[ -f "$PLAN_DIR/00-INDEX.md" ]] && grep -q "execution_mode:" "$PLAN_DIR/00-INDEX.md" 2>/dev/null; then
+# execution_mode lives in a single doc's frontmatter or a folder's 00-INDEX.md.
+# A single-doc quick plan legitimately omits it (no waves), so only warn for a
+# folder plan that lacks it.
+if [[ -f "$PLAN_DIR" ]]; then
+    if grep -q "execution_mode:" "$PLAN_DIR" 2>/dev/null; then
+        ok "execution_mode defined"
+    else
+        ok "no execution_mode (single-task / quick plan)"
+    fi
+elif [[ -f "$PLAN_DIR/00-INDEX.md" ]] && grep -q "execution_mode:" "$PLAN_DIR/00-INDEX.md" 2>/dev/null; then
     ok "execution_mode defined"
 else
     warn "No execution_mode in 00-INDEX.md"
@@ -317,32 +343,19 @@ KNOWN_PREDICATES_RE='^(iteration[[:space:]]*[><=]+[[:space:]]*[0-9]+|same_test_f
 check_kill_criteria_file() {
     local file="$1"
     local label="$2"     # display name for error messages
-    local source="$3"    # "frontmatter" or "fenced"
     local block=""
-    if [[ "$source" == "frontmatter" ]]; then
-        # Extract lines inside the top-level frontmatter (between first two ---)
-        # then the kill_criteria: block up to the next top-level key.
-        block=$(awk '
-            /^---/ { c++; if (c==2) exit; next }
-            c==1 { print }
-        ' "$file" | awk '
-            /^kill_criteria:/ { in_block=1; next }
-            in_block && /^[A-Za-z_][A-Za-z0-9_]*:/ { in_block=0 }
-            in_block { print }
-        ')
-    else
-        # Fenced YAML under ## Kill Criteria heading (quick mode).
-        block=$(awk '
-            /^## Kill Criteria[[:space:]]*$/ { found=1; next }
-            found && /^## / { exit }
-            found && /^```/ { in_fence=!in_fence; next }
-            found && in_fence { print }
-        ' "$file" | awk '
-            /^kill_criteria:/ { in_block=1; next }
-            in_block && /^[A-Za-z_][A-Za-z0-9_]*:/ { in_block=0 }
-            in_block { print }
-        ')
-    fi
+    # kill_criteria always lives in the plan frontmatter (the heading form is
+    # no longer authored - G1). Extract lines inside the top-level frontmatter
+    # (between the first two ---) then the kill_criteria: block up to the next
+    # top-level key.
+    block=$(awk '
+        /^---/ { c++; if (c==2) exit; next }
+        c==1 { print }
+    ' "$file" | awk '
+        /^kill_criteria:/ { in_block=1; next }
+        in_block && /^[A-Za-z_][A-Za-z0-9_]*:/ { in_block=0 }
+        in_block { print }
+    ')
 
     if [[ -z "$block" ]]; then
         return 0  # no kill_criteria declared - defaults apply, not an error
@@ -377,17 +390,18 @@ check_kill_criteria_file() {
     ok "$label: kill_criteria has $count entr$([[ $count -eq 1 ]] && echo y || echo ies)"
 }
 
-# Check INDEX frontmatter (full-mode plans)
+# Legacy folder plans still on disk carry kill_criteria in 00-INDEX.md
+# frontmatter; validate it there too (folder reading is removed in G3).
 if [[ -f "$PLAN_DIR/00-INDEX.md" ]]; then
-    check_kill_criteria_file "$PLAN_DIR/00-INDEX.md" "00-INDEX.md" "frontmatter"
+    check_kill_criteria_file "$PLAN_DIR/00-INDEX.md" "00-INDEX.md"
 fi
 
-# Check quick-mode single-file plans: any *.md not named 00-INDEX.md that has
-# a ## Kill Criteria fenced YAML block. Quick plans don't always live in a
-# folder with INDEX, but the validator accepts a file path or a folder path
-# as $PLAN_DIR - when it's a single file, handle that too.
+# Check single-doc plans (the only authored shape): any *.md that carries
+# kill_criteria in its frontmatter. Quick and full single-doc plans alike keep
+# kill_criteria in frontmatter - the `## Kill Criteria` heading form is invisible
+# to the stamp/validate parser and is no longer authored (G1).
 if [[ -f "$PLAN_DIR" && "$PLAN_DIR" != *00-INDEX.md ]]; then
-    check_kill_criteria_file "$PLAN_DIR" "$(basename "$PLAN_DIR")" "fenced"
+    check_kill_criteria_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
 fi
 
 # -------------------------------------------------------------------
