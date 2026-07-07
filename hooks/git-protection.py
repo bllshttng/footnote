@@ -214,6 +214,13 @@ def is_push_to_protected_branch(command):
     if explicit_branch and explicit_branch in PROTECTED_BRANCHES:
         return True, explicit_branch
 
+    # An explicit non-protected destination is safe regardless of the session
+    # cwd's branch; without this a `git push origin feature/x` from a cwd on
+    # main (every background /target ship) is wrongly blocked. Bare pushes
+    # (explicit_branch is None) still fall through to the current-branch check.
+    if explicit_branch:
+        return False, None
+
     # If no explicit branch, check current branch
     current_branch = get_current_branch()
     if current_branch and current_branch in PROTECTED_BRANCHES:
