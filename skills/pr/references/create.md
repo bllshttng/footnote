@@ -180,6 +180,23 @@ EOF
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
 
+### 5.5 Link the PR to the backlog node
+
+If `.fno/target-state.md` carries a `graph_node_id`, stamp the node so the
+dispatcher's selection guard (`_has_unmerged_open_pr`) and `fno backlog
+reconcile` see the in-flight PR - otherwise the node's `pr_number` stays null
+through the whole review window and a lapsed claim lets the 5-min dispatcher
+re-spawn a finished node (x-a166). Best-effort: a stamp failure is logged, never
+fatal; re-stamping the same PR is a no-op.
+
+```bash
+NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | tr -d "\"'")
+if [[ -n "$NODE_ID" && "$NODE_ID" != "null" && -n "$PR_NUMBER" ]]; then
+  fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" \
+    || echo "warn: node<->PR stamp failed for $NODE_ID PR #$PR_NUMBER (PR still created)" >&2
+fi
+```
+
 ### 6. Report the result (RESULT contract)
 
 After creating the PR, state the human-readable line AND emit the machine-readable `RESULT:` contract as your FINAL line. A dispatcher (e.g. `/pr create`) parses the `RESULT:` line to decide success vs failure; without it, a successfully-opened PR can be misread as a failed worker.

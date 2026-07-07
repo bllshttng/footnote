@@ -186,3 +186,94 @@ def test_ac4_hp_ship_arms_automerge(tmp_path, monkeypatch):
         )
 
     assert result.get("auto_merge_armed") is True
+
+
+# ---- x-a166: ship stamps the backlog node <-> PR link ----
+
+def _make_state_with_node(tmp_path: Path, node_id: str) -> Path:
+    """target-state.md with graph_node_id appended to the BODY (below the
+    frontmatter), exactly as init-target-state.sh writes it."""
+    path = _make_state(tmp_path)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"graph_node_id: {node_id}\n")
+    return path
+
+
+def test_ac2_hp_ship_stamps_node_pr_link(tmp_path):
+    """AC2-HP: with a graph_node_id, ship() runs `fno backlog update --pr-number`."""
+    state_path = _make_state_with_node(tmp_path, "x-1a2b")
+
+    # Calls: git rev-parse, gh pr list, gh pr create, fno backlog update.
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),  # git rev-parse
+        MagicMock(returncode=0, stdout="[]", stderr=""),               # gh pr list
+        MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/42", stderr=""),  # gh pr create
+        MagicMock(returncode=0, stdout="", stderr=""),                 # fno backlog update
+    ]
+
+    with patch("subprocess.run", mock_run):
+        from fno.worker.ship import ship
+        result = ship(
+            state_path=state_path,
+            title="feat: test",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "pr_created"
+    stamp_cmd = mock_run.call_args_list[3][0][0]
+    assert stamp_cmd == [
+        "fno", "backlog", "update", "x-1a2b",
+        "--pr-number", "42",
+        "--pr-url", "https://github.com/owner/repo/pull/42",
+    ]
+
+
+def test_ac2_err_stamp_failure_never_fails_ship(tmp_path):
+    """AC2-ERR: a non-zero stamp is logged but ship still reports the PR created."""
+    state_path = _make_state_with_node(tmp_path, "x-1a2b")
+
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),  # git rev-parse
+        MagicMock(returncode=0, stdout="[]", stderr=""),               # gh pr list
+        MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/42", stderr=""),  # gh pr create
+        MagicMock(returncode=1, stdout="", stderr="graph locked"),     # fno backlog update FAILS
+    ]
+
+    with patch("subprocess.run", mock_run):
+        from fno.worker.ship import ship
+        result = ship(
+            state_path=state_path,
+            title="feat: test",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "pr_created"
+    assert result["pr_number"] == 42
+
+
+def test_no_node_id_skips_stamp(tmp_path):
+    """No graph_node_id (the pre-x-a166 manifest) => no stamp subprocess is issued."""
+    state_path = _make_state(tmp_path)  # no graph_node_id in body
+
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),  # git rev-parse
+        MagicMock(returncode=0, stdout="[]", stderr=""),               # gh pr list
+        MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/42", stderr=""),  # gh pr create
+    ]
+
+    with patch("subprocess.run", mock_run):
+        from fno.worker.ship import ship
+        ship(
+            state_path=state_path,
+            title="feat: test",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    # Exactly 3 subprocess calls: no 4th (stamp) call.
+    assert mock_run.call_count == 3
