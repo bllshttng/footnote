@@ -133,7 +133,7 @@ fi
 if [[ -z "$BIN" ]]; then
     emit_event_both "loop_check_binary_missing" "{\"session_id\":\"${SESSION_ID}\"}"
     echo "target stop-hook: WARNING: fno-agents binary not found for an active session" >&2
-    echo "target stop-hook: install with: cargo install --path crates/fno-agents --bins" >&2
+    echo "target stop-hook: install with: cargo install --path crates/fno-agents --bins (needs a Rust toolchain/rustup)" >&2
     unavailable_block_or_allow
 fi
 
