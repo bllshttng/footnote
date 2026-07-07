@@ -39,9 +39,8 @@ fn kill_server(scratch: &Scratch) {
 
 fn pane_send(scratch: &Scratch, pane: u64, bytes: &[u8]) {
     let mut stream = connect_with_retry(&scratch.main_sock());
-    let mut w = stream.try_clone().unwrap();
     write_msg_sync(
-        &mut w,
+        &mut stream,
         &ClientMsg::Control {
             proto: PROTO_VERSION,
             build: BUILD_VERSION.to_string(),
