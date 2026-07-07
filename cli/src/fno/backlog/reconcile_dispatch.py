@@ -129,7 +129,9 @@ def _contract_dependents(closed_node_id: str) -> list[dict]:
             "cwd": e.get("cwd"),
             # x-571f: carry the model pin so the reconcile worker (a /target
             # --reconcile build) honors it, not just advance's dependents.
+            # model_tier rides alongside so the tier resolver sees the annotation.
             "model": e.get("model"),
+            "model_tier": e.get("model_tier"),
         })
     return out
 
@@ -336,7 +338,7 @@ def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceRe
             if isinstance(e, dict) and e.get("id") == node_id:
                 dep = {"id": node_id, "project": e.get("project"),
                        "slug": e.get("slug") or e.get("title"), "cwd": e.get("cwd"),
-                       "model": e.get("model")}
+                       "model": e.get("model"), "model_tier": e.get("model_tier")}
                 break
         if dep is None:
             dep = {"id": node_id, "cwd": str(root)}

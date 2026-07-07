@@ -261,6 +261,20 @@ def test_advance_threads_node_pins_to_spawn(iso, monkeypatch):
     assert captured == {"model": "glm-4.7", "provider": "codex"}
 
 
+def test_direct_dependents_carry_model_tier(monkeypatch):
+    """Codex P2: the reduced dependent dict must carry model_tier so the tier
+    resolver sees it on the cross-project/dependent dispatch path."""
+    graph = [
+        {"id": "ab-closed11", "project": "fno"},
+        {"id": "ab-dep00001", "project": "fno", "blocked_by": ["ab-closed11"],
+         "_status": "ready", "model_tier": "high", "cwd": "/w"},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda p: graph)
+    deps = adv._direct_dependents("ab-closed11", "fno")
+    assert deps and deps[0]["id"] == "ab-dep00001"
+    assert deps[0]["model_tier"] == "high"
+
+
 def test_advance_resolves_node_tier_to_model(iso, monkeypatch):
     """AC3-HP wiring: a node's model_tier resolves to a concrete --model at the
     advance spawn (no snapshot -> the deterministic static table)."""
