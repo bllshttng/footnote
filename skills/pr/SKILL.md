@@ -79,6 +79,7 @@ fi
 A branch cut from a stale local HEAD ships a PR full of phantom deletions (changes you never made appear as reverts). Refuse before dispatching the worker; the check fails open on a fetch flake and points at `fno pr rebase`:
 
 ```bash
+BASE="${BASE:-origin/main}"   # re-default: this block may run standalone
 if command -v fno >/dev/null 2>&1; then
   fno pr base-check --base "$BASE" || {
     rc=$?
