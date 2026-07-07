@@ -1829,8 +1829,27 @@ fn make_fingerprint(
     pr_state: &str,
     ci_conclusion: &str,
     latest_ts: &str,
+    promise_hash: &str,
 ) -> String {
-    format!("{head_sha}|{pr_state}|{ci_conclusion}|{latest_ts}")
+    format!("{head_sha}|{pr_state}|{ci_conclusion}|{latest_ts}|{promise_hash}")
+}
+
+/// Stable 64-bit FNV-1a hash of the promise text, hex-formatted. Used as the
+/// fifth fingerprint component so an IDENTICAL re-asserted promise produces the
+/// same fingerprint (streak keeps climbing toward the no-progress backstop -
+/// churn is not progress), while a genuinely NEW promise changes it (the streak
+/// resets, giving the fresh intent its own backstop window). FNV-1a is chosen
+/// over DefaultHasher because the fingerprint is persisted to events.jsonl and
+/// re-read on the next fire (a new process): the hash must be identical across
+/// process runs, which DefaultHasher does not guarantee. `"none"` is used when
+/// there is no promise this fire, so the pre-promise streak is unaffected.
+fn promise_fingerprint(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 /// Count prior loop_check events for this session_id in the project events file.
@@ -2706,12 +2725,27 @@ pub fn decide(args: &[String]) -> (i32, String) {
         _ => (PrState::None, CiConclusion::None, "none".to_string(), true),
     };
 
+    // Promise-churn axis of the fingerprint: an IDENTICAL re-asserted promise
+    // hashes the same (streak keeps climbing toward the backstop - re-asserting
+    // MISSION COMPLETE is not progress), a genuinely NEW promise changes it
+    // (fresh intent gets its own window). "none" when this fire carries no
+    // promise, so the pre-promise streak is unaffected. When the intent came
+    // from the transcript lookback (no last_assistant_message payload), all such
+    // fires hash identically via the "promise" fallback - the safe direction
+    // (churn stays inert), never a spurious reset.
+    let promise_hash = if intent == Intent::Promise {
+        promise_fingerprint(last_assistant_message.as_deref().unwrap_or("promise"))
+    } else {
+        "none".to_string()
+    };
+
     // Build a tentative fingerprint from this fire's gh reads.
     let tentative_fp = make_fingerprint(
         &head_sha,
         fp_pr_state.as_str(),
         &fp_ci.render(),
         &fp_review_ts,
+        &promise_hash,
     );
 
     // Read prior fires. We pass the tentative_fp for streak counting; if the gh
@@ -2915,6 +2949,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         fp_pr_state.as_str(),
                         &fp_ci.render(),
                         &max_ts(&fp_review_ts, &pr_info.latest_review_ts),
+                        &promise_hash,
                     );
                     if done_fp != fingerprint {
                         let (_, streak, _) =
@@ -3740,8 +3775,43 @@ mod tests {
 
     #[test]
     fn fingerprint_format() {
-        let fp = make_fingerprint("sha123", "OPEN", "SUCCESS", "2026-06-05T01:00:00Z");
-        assert_eq!(fp, "sha123|OPEN|SUCCESS|2026-06-05T01:00:00Z");
+        let fp = make_fingerprint("sha123", "OPEN", "SUCCESS", "2026-06-05T01:00:00Z", "none");
+        assert_eq!(fp, "sha123|OPEN|SUCCESS|2026-06-05T01:00:00Z|none");
+    }
+
+    // ── promise-churn backstop ─────────────────────────────────────────────
+
+    #[test]
+    fn promise_fingerprint_is_stable_and_distinguishing() {
+        // Deterministic (must be identical across process runs - it is persisted
+        // and re-read next fire).
+        assert_eq!(
+            promise_fingerprint("MISSION COMPLETE: shipped X"),
+            promise_fingerprint("MISSION COMPLETE: shipped X")
+        );
+        // Distinct text -> distinct hash.
+        assert_ne!(
+            promise_fingerprint("MISSION COMPLETE: shipped X"),
+            promise_fingerprint("MISSION COMPLETE: shipped Y")
+        );
+        // Known FNV-1a anchor guards against an accidental algorithm change that
+        // would silently invalidate every persisted fingerprint.
+        assert_eq!(promise_fingerprint(""), "cbf29ce484222325");
+    }
+
+    /// AC2-EDGE: an identical re-asserted promise keeps the fingerprint equal
+    /// (streak is NOT reset), a genuinely new promise changes it (streak resets).
+    #[test]
+    fn identical_promise_keeps_fingerprint_new_promise_changes_it() {
+        let h1 = promise_fingerprint("MISSION COMPLETE: did the thing");
+        let same = make_fingerprint("sha", "OPEN", "FAILURE:mux", "none", &h1);
+        let again = make_fingerprint("sha", "OPEN", "FAILURE:mux", "none", &h1);
+        // Byte-identical promise over identical world-state -> identical fp.
+        assert_eq!(same, again);
+
+        let h2 = promise_fingerprint("MISSION COMPLETE: did a different thing");
+        let changed = make_fingerprint("sha", "OPEN", "FAILURE:mux", "none", &h2);
+        assert_ne!(same, changed);
     }
 
     #[test]
