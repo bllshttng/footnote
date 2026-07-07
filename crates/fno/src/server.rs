@@ -802,6 +802,21 @@ async fn run_dispatch_one(session: &str, node: Option<&str>) -> String {
     }
 }
 
+/// x-0296 CI diagnostics: timestamped breadcrumbs for the e2e server log
+/// (`<session>.log`, dumped by the test harness on a wait_screen timeout).
+/// FNO_E2E-gated so a production server writes none of it; the gate is
+/// latched once so the hot call sites (push_layout) never re-read the env.
+fn e2e_log(msg: std::fmt::Arguments<'_>) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("FNO_E2E").is_some()) {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        eprintln!("fno mux e2e[{ms} pid {}]: {msg}", std::process::id());
+    }
+}
+
 /// Shell `fno-agents claim sweep --json`, bounded + fail-open (the digest
 /// idiom, x-4e2d): returns the live-claim map (node id -> holder) for the
 /// work-queue overlay (x-54fa), or `None` on missing binary / non-zero exit /
@@ -994,6 +1009,7 @@ impl Core {
         cmd: Option<String>,
     ) {
         self.next_pane_id += 1;
+        e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
         self.panes.insert(
             id,
             PaneEntry {
@@ -1258,6 +1274,48 @@ impl Core {
             passive,
         });
         self.push_layout(true);
+        // Cold-attach snapshot rides the RELIABLE channel (x-0296). The
+        // dirty-map seed push_layout just wrote is droppable by design, and
+        // a passive reattach with quiet panes produces no PTY output, so a
+        // lost seed never recovers (`broadcast_pane` only fires on output).
+        // Re-send every visible pane's frame on the reliable queue - ordered
+        // after the Layout queued above - and drop the now-redundant
+        // droppable seeds. Steady-state delivery (DirtyMap + broadcast_pane)
+        // is unchanged; the wire message set is unchanged (same `Frame`
+        // variant, so no proto bump).
+        if let Some(c) = self.clients.iter().find(|c| c.id == id) {
+            let mut sent_n = 0usize;
+            let mut pids: Vec<u64> = c.visible.iter().copied().collect();
+            pids.sort_unstable();
+            let visible_n = pids.len();
+            let mut d = c.dirty.lock().unwrap();
+            for pid in pids {
+                if let Some(entry) = self.panes.get(&pid) {
+                    let sent = c
+                        .reliable_tx
+                        .try_send(ServerMsg::Frame {
+                            pane_id: pid,
+                            frame: entry.vt.frame(),
+                        })
+                        .is_ok();
+                    // Only drop the droppable seed push_layout wrote once the
+                    // reliable frame actually landed. A failed send means a
+                    // wedged client (unreachable at birth: fresh 256-cap
+                    // channel, dead clients already reaped by push_layout) -
+                    // but if it ever happens, keep the seed so the already-
+                    // notified droppable path stays the fallback rather than
+                    // leaving the pane with no delivery at all.
+                    if sent {
+                        sent_n += 1;
+                        d.remove(&pid);
+                    }
+                }
+            }
+            drop(d);
+            e2e_log(format_args!(
+                "attach client {id}: {visible_n} visible panes, {sent_n} reliable frames"
+            ));
+        }
     }
 
     /// The sender's current view, when it is still registered.
@@ -1340,10 +1398,11 @@ impl Core {
     /// The layout-change protocol (Locked 4), per client: resize PTYs/grids
     /// of every VIEWED tab to its rects, then for each client against ITS
     /// view: ModeSync (if its viewed tab's focused pane's modes differ from
-    /// what that client's terminal last saw), flush stale frame slots, send
-    /// its `Layout`, and (when `reemit`) queue full frames for its visible
-    /// panes. Focus-only changes pass `reemit: false` - rects are unchanged,
-    /// so queued frames stay valid. Unviewed tabs are untouched: grids keep
+    /// what that client's terminal last saw), send its `Layout`, and (when
+    /// `reemit`) flush stale frame slots and queue full frames for its
+    /// visible panes. Focus-only changes pass `reemit: false` - rects are
+    /// unchanged, so queued frames stay valid (and are kept: a pending
+    /// quiet-pane frame has no other copy). Unviewed tabs are untouched: grids keep
     /// feeding, geometry keeps its last size, nothing crosses the wire.
     fn push_layout(&mut self, reemit: bool) {
         // Geometry pass: each distinct viewed tab, once, at its view-scoped
@@ -1433,13 +1492,15 @@ impl Core {
                 }
                 c.synced_modes = focused_modes;
             }
-            // Flush-then-re-emit: every frame a client draws after this is
-            // consistent with the Layout generation it just received.
-            c.dirty.lock().unwrap().clear();
             if c.reliable_tx.try_send(layout_msg).is_err() {
                 dead.push(c.id);
                 continue;
             }
+            e2e_log(format_args!(
+                "layout -> client {}: {} rects, reemit={reemit}",
+                c.id,
+                rects.len()
+            ));
             // An observer subscribes to all panes; a driving client to just
             // its viewed tab's rects.
             let frame_ids: Vec<u64> = if c.passive {
@@ -1449,7 +1510,20 @@ impl Core {
             };
             c.visible = frame_ids.iter().copied().collect();
             if reemit {
+                // Flush-then-re-emit: geometry changed, so queued frames are
+                // stale - drop them and re-seed every visible pane in one
+                // locked pass, so every frame the client draws after this is
+                // consistent with the Layout generation it just received.
+                //
+                // A focus-only push (reemit=false) must NOT flush: rects are
+                // unchanged, so queued frames stay valid (the contract in
+                // this function's doc) - and a quiet pane's pending output
+                // frame has no other copy. Clearing it between the output's
+                // dirty-insert and the writer's drain blanked the pane until
+                // its NEXT output (broadcast_pane only fires on output),
+                // which for an idle shell is never: the x-0296 CI flake.
                 let mut d = c.dirty.lock().unwrap();
+                d.clear();
                 for pid in &frame_ids {
                     if let Some(entry) = self.panes.get(pid) {
                         d.insert(*pid, entry.vt.frame());
@@ -1464,6 +1538,9 @@ impl Core {
         // re-push, survivors stay clamped to the dead client's dims until
         // some later event. Terminates: each pass removes >= 1 client.
         if !dead.is_empty() {
+            e2e_log(format_args!(
+                "push_layout dropped wedged clients {dead:?} (reliable send failed)"
+            ));
             self.push_layout(true);
         }
     }
@@ -2817,6 +2894,7 @@ impl Core {
                         c.dims = (rows, cols);
                     }
                 }
+                e2e_log(format_args!("resize client {id} -> {rows}x{cols}"));
                 self.push_layout(true);
                 Flow::Continue
             }
@@ -2878,6 +2956,7 @@ impl Core {
                 // constraining client releases its clamp, so the tab regrows
                 // for the survivors in this same pass - Detach and an abrupt
                 // socket death take the identical path.
+                e2e_log(format_args!("client {id} gone"));
                 self.clients.retain(|c| c.id != id);
                 self.push_layout(true);
                 Flow::Continue
@@ -3429,6 +3508,12 @@ async fn serve(
                 Ok((stream, _)) => {
                     let id = next_id;
                     next_id += 1;
+                    // Peer pid names WHICH client process this is (the e2e
+                    // harness logs its children's pids for the join).
+                    e2e_log(format_args!(
+                        "conn {id} accepted (peer pid {:?})",
+                        stream.peer_cred().ok().and_then(|c| c.pid())
+                    ));
                     tokio::spawn(handle_client(
                         stream,
                         accept_core_tx.clone(),
@@ -3471,6 +3556,11 @@ async fn serve(
     let mut idle_count_rx = client_count_rx.clone();
     let mut idle_deadline = tokio::time::Instant::now() + idle_grace;
 
+    // x-0296 diagnostics: which panes' output the CORE LOOP has seen. Pairs
+    // with the pty reader thread's own first-chunk line to split "shell never
+    // spoke" from "core loop never drained it".
+    let mut e2e_first_out: HashSet<u64> = HashSet::new();
+
     let flow = loop {
         tokio::select! {
             chunk = out_rx.recv() => {
@@ -3483,6 +3573,12 @@ async fn serve(
                 }
                 // out_tx lives in Core, so recv never yields None.
                 let Some((pid, bytes)) = chunk else { break Flow::Shutdown };
+                if e2e_first_out.insert(pid) {
+                    e2e_log(format_args!(
+                        "core loop: first output from pane {pid} ({} bytes)",
+                        bytes.len()
+                    ));
+                }
                 let mut touched = HashSet::new();
                 if let Some(entry) = core.panes.get_mut(&pid) {
                     entry.vt.feed(&bytes);
@@ -3506,7 +3602,9 @@ async fn serve(
             }
             exited = exit_rx.recv() => {
                 let Some(pid) = exited else { break Flow::Shutdown };
+                e2e_log(format_args!("pane {pid} child exited"));
                 if core.close_pane(pid) == Flow::Shutdown {
+                    e2e_log(format_args!("last pane gone; shutting down"));
                     break Flow::Shutdown;
                 }
             }
@@ -3790,6 +3888,7 @@ async fn handle_client(
                 let _ = write_msg(&mut stream, &ServerMsg::Bye { reason }).await;
                 return;
             }
+            e2e_log(format_args!("conn {id} attach read ({rows}x{cols})"));
             (rows, cols, cwd)
         }
         // Pre-Attach management pair (wire shapes FROZEN, no version
@@ -3821,6 +3920,7 @@ async fn handle_client(
     };
 
     let squad_key = resolve_squad_key(&resolver, &cwd).await;
+    e2e_log(format_args!("conn {id} squad key resolved"));
 
     let (reliable_tx, reliable_rx) = mpsc::channel::<ServerMsg>(RELIABLE_CAP);
     let dirty: DirtyMap = Arc::default();
@@ -5392,6 +5492,129 @@ mod tests {
         );
         assert_eq!(core.clients.len(), 1);
         assert!(core.clients[0].passive, "the (0,0) client is passive");
+    }
+
+    #[test]
+    fn cold_attach_delivers_every_pane_frame_on_the_reliable_channel() {
+        // AC1-FR (x-0296): the cold-attach snapshot must NOT depend on the
+        // droppable dirty map or later PTY output. Deterministic mechanism
+        // guard: after attach, the client's reliable queue holds the Layout
+        // followed by a Frame for EVERY pane in it. Pre-fix this fails 100%
+        // (seeds sat only in the dirty map); no timing involved.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let p1 = core.spawn_pane(24, 40, "/tmp").expect("pane 1");
+        let p2 = core.spawn_pane(24, 40, "/tmp").expect("pane 2");
+        core.session.add_squad(
+            1,
+            vec!["/tmp/x0296".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Branch {
+                    axis: Axis::Horizontal,
+                    children: vec![(0.5, Node::Leaf(p1)), (0.5, Node::Leaf(p2))],
+                },
+                focus: p1,
+            },
+        );
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        core.attach(
+            9,
+            24,
+            80,
+            "/tmp/x0296".into(),
+            "/tmp/x0296".into(),
+            tx,
+            Arc::default(),
+            Arc::new(Notify::new()),
+        );
+        let mut msgs = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            msgs.push(m);
+        }
+        let layout_at = msgs
+            .iter()
+            .position(|m| matches!(m, ServerMsg::Layout { .. }))
+            .expect("attach queues a Layout reliably");
+        let layout_panes: HashSet<u64> = match &msgs[layout_at] {
+            ServerMsg::Layout { panes, .. } => panes.iter().map(|(pid, _)| *pid).collect(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            layout_panes,
+            HashSet::from([p1, p2]),
+            "both panes are in the attach Layout"
+        );
+        let framed: HashSet<u64> = msgs[layout_at + 1..]
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::Frame { pane_id, .. } => Some(*pane_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            framed, layout_panes,
+            "every Layout pane's initial frame must ride the reliable \
+             channel AFTER the Layout - a dirty-map-only seed is droppable \
+             and a passive reattach never recovers it (x-0296)"
+        );
+    }
+
+    #[test]
+    fn focus_only_push_layout_preserves_pending_pane_frames() {
+        // AC1-FR (x-0296, the CI root cause): a pane's output-driven frame
+        // sits in the client's droppable dirty map until the writer drains
+        // it, and it is the ONLY copy - a quiet pane produces no further
+        // output to regenerate it (broadcast_pane fires on output only). A
+        // focus-only push_layout(reemit=false) landing in that window must
+        // not flush it: rects are unchanged, so the frame is still valid.
+        // Pre-fix, the unconditional clear() destroyed it 100% here; on the
+        // loaded CI runner the shell's "$ " prompt frame died in exactly
+        // this window and the pane stayed blank forever.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let p1 = core.spawn_pane(24, 40, "/tmp").expect("pane 1");
+        core.session.add_squad(
+            1,
+            vec!["/tmp/x0296".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(p1),
+                focus: p1,
+            },
+        );
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        let dirty: DirtyMap = Arc::default();
+        core.attach(
+            9,
+            24,
+            80,
+            "/tmp/x0296".into(),
+            "/tmp/x0296".into(),
+            tx,
+            dirty.clone(),
+            Arc::new(Notify::new()),
+        );
+        // Drain the attach traffic (not under test), then land the shell's
+        // prompt: the output broadcast seeds the dirty map.
+        while rx.try_recv().is_ok() {}
+        core.panes.get_mut(&p1).unwrap().vt.feed(b"$ ");
+        core.broadcast_pane(p1);
+        assert!(
+            dirty.lock().unwrap().contains_key(&p1),
+            "output must seed the dirty map"
+        );
+        // A focus-only push races in before the writer drains the frame.
+        core.push_layout(false);
+        assert!(
+            dirty.lock().unwrap().contains_key(&p1),
+            "a reemit=false push_layout must preserve a pending frame: it is \
+             the only copy of a quiet pane's latest output (x-0296)"
+        );
     }
 
     #[test]

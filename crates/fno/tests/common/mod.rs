@@ -57,6 +57,10 @@ pub struct ClientHarness {
     output: Arc<Mutex<Vec<u8>>>,
     consumed: usize,
     pub pane: Pane,
+    /// The scratch dir, for post-mortem server-log dumps (x-0296): the
+    /// autospawned server's stderr lands in `<session>.log` here, and the
+    /// dir is gone before anyone can read it once the test unwinds.
+    scratch_dir: PathBuf,
     // Keep the master alive for the harness lifetime.
     _master: Box<dyn portable_pty::MasterPty + Send>,
 }
@@ -135,6 +139,7 @@ impl ClientHarness {
             output,
             consumed: 0,
             pane: Pane::new(24, 60),
+            scratch_dir: scratch.0.clone(),
             _master: pty.master,
         }
     }
@@ -169,10 +174,72 @@ impl ClientHarness {
                 return screen;
             }
             if Instant::now() >= deadline {
-                panic!("screen never matched within {secs}s; last screen:\n{screen}");
+                panic!(
+                    "screen never matched within {secs}s; last screen:\n{screen}\n{}",
+                    self.diagnostics()
+                );
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Everything a CI-only timeout needs to be diagnosed from the job log
+    /// alone (x-0296): the client's raw byte stream (pre/post-TUI eprintln
+    /// lines land here - "previous session ended", "session ended (server
+    /// closed)", spawn errors) and every server log in the scratch dir (the
+    /// setsid'd server's stderr, destroyed with the scratch before anyone
+    /// can read it otherwise). Distinguishes a dead/respawned/wedged server
+    /// from lost frame delivery, which the settled screen alone cannot.
+    pub fn diagnostics(&self) -> String {
+        // ESC made visible so the panic message stays one readable block.
+        fn tail(s: &str, max: usize) -> &str {
+            let mut start = s.len().saturating_sub(max);
+            while !s.is_char_boundary(start) {
+                start += 1;
+            }
+            &s[start..]
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let raw = self.raw_output().replace('\x1b', "\\e");
+        let mut out = format!(
+            "--- diagnostics at unix_ms {now_ms}, client pid {:?} ---\n--- client raw output ({} bytes, tail) ---\n{}\n",
+            self.child.process_id(),
+            raw.len(),
+            tail(&raw, 3000)
+        );
+        if let Ok(rd) = std::fs::read_dir(&self.scratch_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "sock") {
+                    // Is anything still listening? Refused/absent = the server
+                    // process is gone; connected = at least the OS-level
+                    // listener survives (a wedged runtime still accepts via
+                    // the backlog, so this cannot prove liveness - only death).
+                    let probe = std::os::unix::net::UnixStream::connect(&p);
+                    out.push_str(&format!(
+                        "--- socket {}: {} ---\n",
+                        p.display(),
+                        match &probe {
+                            Ok(_) => "accepting connections".to_string(),
+                            Err(e) => format!("connect failed: {e}"),
+                        }
+                    ));
+                }
+                if p.extension().is_some_and(|x| x == "log") {
+                    let body = std::fs::read_to_string(&p).unwrap_or_default();
+                    out.push_str(&format!(
+                        "--- server log {} ({} bytes, tail) ---\n{}\n",
+                        p.display(),
+                        body.len(),
+                        tail(&body, 3000)
+                    ));
+                }
+            }
+        }
+        out
     }
 
     /// Wait until the shell sits at a fresh prompt: a fresh prompt line ends

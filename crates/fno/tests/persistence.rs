@@ -201,12 +201,16 @@ fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
     h.wait_screen(15, |s| !s.trim().is_empty());
     h.type_bytes(b"OLD_WORLD=yes\r");
     std::thread::sleep(Duration::from_millis(300));
+    let h_diag = h.diagnostics(); // captured pre-drop; h is gone at the assert
     drop(h); // client gone first, so nothing redraws during the kill
     kill_server(&scratch);
     // The socket file survives the SIGKILL - that is the stale-socket case.
+    // A missing socket here means the server already exited CLEANLY (its
+    // SocketGuard unlinked) before the pkill, or never came up at all - the
+    // captured diagnostics name why (x-0296).
     assert!(
         scratch.main_sock().exists(),
-        "SIGKILL must leave the stale socket behind for this test to mean anything"
+        "SIGKILL must leave the stale socket behind for this test to mean anything\n{h_diag}"
     );
 
     let mut h2 = ClientHarness::spawn(&scratch);
