@@ -805,6 +805,11 @@ struct PrInfo {
     /// same granularity as `gh pr checks .name`. Feeds the DoneAwaitingMerge
     /// subset rule against main's failing set. Empty when CI is green/pending.
     failing_checks: Vec<String>,
+    /// True iff any check on the PR head is still pending (a non-terminal
+    /// bucket). `ci_conclusion` reports `Failure` as soon as ONE check fails even
+    /// while others run, so the DoneAwaitingMerge terminal must consult this to
+    /// avoid firing while the session's own in-flight job could still turn red.
+    ci_has_pending: bool,
     /// Newest review/comment/inline-comment activity (ISO8601 or "none");
     /// folded into the fingerprint's 4th component on done() fires.
     latest_review_ts: String,
@@ -948,6 +953,7 @@ fn read_pr_info(
                 head_oid: String::new(),
                 ci_conclusion: CiConclusion::None,
                 failing_checks: Vec::new(),
+                ci_has_pending: false,
                 latest_review_ts: "none".to_string(),
                 reviewed: false,
                 missing_bots: Vec::new(),
@@ -992,6 +998,7 @@ fn read_pr_info(
             head_oid,
             ci_conclusion: CiConclusion::Skipped,
             failing_checks: Vec::new(),
+            ci_has_pending: false,
             latest_review_ts: "none".to_string(),
             reviewed: true,
             missing_bots: Vec::new(),
@@ -1001,11 +1008,12 @@ fn read_pr_info(
         });
     }
 
-    // Read 2: CI checks. Compute the conclusion AND the full failing-check-name
-    // set from the same payload (the set feeds the DoneAwaitingMerge subset
-    // rule; empty unless CI is red).
-    let (ci_conclusion, failing_checks) = if ci_declared_none {
-        (CiConclusion::Skipped, Vec::new())
+    // Read 2: CI checks. Compute the conclusion, the full failing-check-name set,
+    // AND whether any check is still pending from the same payload (the set feeds
+    // the DoneAwaitingMerge subset rule; the pending flag gates that terminal so
+    // it never fires on partial CI).
+    let (ci_conclusion, failing_checks, ci_has_pending) = if ci_declared_none {
+        (CiConclusion::Skipped, Vec::new(), false)
     } else {
         let checks_out = Command::new(gh_bin)
             .args(["pr", "checks", "--json", "name,state,bucket"])
@@ -1021,9 +1029,11 @@ fn read_pr_info(
             .map_err(|_| ("pr_checks_parse".to_string(), String::new()))?;
 
         let failing = failing_check_names(&checks);
+        let has_pending = ci_has_pending_checks(&checks);
         (
             compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?,
             failing,
+            has_pending,
         )
     };
 
@@ -1197,6 +1207,7 @@ fn read_pr_info(
         head_oid,
         ci_conclusion,
         failing_checks,
+        ci_has_pending,
         latest_review_ts,
         reviewed,
         missing_bots,
@@ -1263,10 +1274,19 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
 // subset, check-name granularity so the mux flakes rotating test names between
 // runs stay matched). Any PR-unique red, or any gh uncertainty, holds as today.
 
-/// How many latest completed main runs to union failing job names over. Small +
-/// bounded so classification cost is constant; any-red-within-N catches a flake
-/// that happened to pass on the single latest run but failed on the prior ones.
-const MAIN_RUN_LOOKBACK: usize = 3;
+/// How many latest completed main runs to union failing job names over. Sized to
+/// cover roughly ONE main commit's workflow fan-out (this repo fires ~4 workflow
+/// runs per push), so the union reflects the current main HEAD rather than a
+/// single workflow. Small + bounded so classification cost is constant.
+///
+/// Tradeoff (accepted, human-gated): a wider window would tolerate a check that
+/// flaked green on the latest run but was red just before, at the cost of
+/// counting a check that was genuinely FIXED on a newer main commit as still
+/// red - a false "pre-existing main-red" classification. Because the terminal
+/// NEVER merges and NEVER marks the node done (a human decides on the notify),
+/// the worst case of either error is a bounded, recoverable misclassification,
+/// so this stays deliberately narrow to favor precision over flake-tolerance.
+const MAIN_RUN_LOOKBACK: usize = 4;
 
 /// Failing check/job names on a `gh pr checks --json name,bucket` payload
 /// (bucket fail|cancel), the same granularity a main-HEAD job carries. Non-fail
@@ -1286,6 +1306,26 @@ fn failing_check_names(checks: &Value) -> Vec<String> {
         })
         .filter_map(|c| c.get("name").and_then(|v| v.as_str()).map(str::to_string))
         .collect()
+}
+
+/// True iff any check is still in a non-terminal bucket (`pending`, or an
+/// unrecognized bucket that is not one of pass|fail|cancel|skipping). The
+/// DoneAwaitingMerge terminal must not fire while any check is unresolved: a
+/// still-running check (e.g. the session's own new job) could turn red, so a
+/// partial `Failure` is not yet proof that the ONLY problem is pre-existing
+/// main-red.
+fn ci_has_pending_checks(checks: &Value) -> bool {
+    let Some(arr) = checks.as_array() else {
+        return false;
+    };
+    arr.iter().any(|c| {
+        let bucket = c
+            .get("bucket")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        !matches!(bucket.as_str(), "pass" | "fail" | "cancel" | "skipping")
+    })
 }
 
 /// databaseIds of failed workflow runs from a `gh run list --json
@@ -1829,27 +1869,8 @@ fn make_fingerprint(
     pr_state: &str,
     ci_conclusion: &str,
     latest_ts: &str,
-    promise_hash: &str,
 ) -> String {
-    format!("{head_sha}|{pr_state}|{ci_conclusion}|{latest_ts}|{promise_hash}")
-}
-
-/// Stable 64-bit FNV-1a hash of the promise text, hex-formatted. Used as the
-/// fifth fingerprint component so an IDENTICAL re-asserted promise produces the
-/// same fingerprint (streak keeps climbing toward the no-progress backstop -
-/// churn is not progress), while a genuinely NEW promise changes it (the streak
-/// resets, giving the fresh intent its own backstop window). FNV-1a is chosen
-/// over DefaultHasher because the fingerprint is persisted to events.jsonl and
-/// re-read on the next fire (a new process): the hash must be identical across
-/// process runs, which DefaultHasher does not guarantee. `"none"` is used when
-/// there is no promise this fire, so the pre-promise streak is unaffected.
-fn promise_fingerprint(text: &str) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in text.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{h:016x}")
+    format!("{head_sha}|{pr_state}|{ci_conclusion}|{latest_ts}")
 }
 
 /// Count prior loop_check events for this session_id in the project events file.
@@ -2725,27 +2746,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
         _ => (PrState::None, CiConclusion::None, "none".to_string(), true),
     };
 
-    // Promise-churn axis of the fingerprint: an IDENTICAL re-asserted promise
-    // hashes the same (streak keeps climbing toward the backstop - re-asserting
-    // MISSION COMPLETE is not progress), a genuinely NEW promise changes it
-    // (fresh intent gets its own window). "none" when this fire carries no
-    // promise, so the pre-promise streak is unaffected. When the intent came
-    // from the transcript lookback (no last_assistant_message payload), all such
-    // fires hash identically via the "promise" fallback - the safe direction
-    // (churn stays inert), never a spurious reset.
-    let promise_hash = if intent == Intent::Promise {
-        promise_fingerprint(last_assistant_message.as_deref().unwrap_or("promise"))
-    } else {
-        "none".to_string()
-    };
-
     // Build a tentative fingerprint from this fire's gh reads.
     let tentative_fp = make_fingerprint(
         &head_sha,
         fp_pr_state.as_str(),
         &fp_ci.render(),
         &fp_review_ts,
-        &promise_hash,
     );
 
     // Read prior fires. We pass the tentative_fp for streak counting; if the gh
@@ -2949,7 +2955,6 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         fp_pr_state.as_str(),
                         &fp_ci.render(),
                         &max_ts(&fp_review_ts, &pr_info.latest_review_ts),
-                        &promise_hash,
                     );
                     if done_fp != fingerprint {
                         let (_, streak, _) =
@@ -3033,7 +3038,15 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // merge past it: terminate clean with a one-shot notify instead
                 // of burning to NoProgress. Any PR-unique red or any gh
                 // uncertainty falls through to the hold below (fail closed).
-                if pr_open && pr_info.reviewed && head_shipped && !ci_ok {
+                //
+                // `!pr_info.ci_has_pending` is load-bearing: ci_conclusion
+                // reports Failure as soon as ONE check fails while others still
+                // run, so without this guard the terminal could fire on a
+                // partial-CI fire where the session's OWN new job is still
+                // pending and about to turn red. The terminal must see fully
+                // settled-red CI, never partial.
+                if pr_open && pr_info.reviewed && head_shipped && !ci_ok && !pr_info.ci_has_pending
+                {
                     if let Some(main_failing) =
                         main_head_failing_checks(gh_bin, &cwd, MAIN_RUN_LOOKBACK)
                     {
@@ -3758,6 +3771,7 @@ mod tests {
             head_oid: "abc".to_string(),
             ci_conclusion: CiConclusion::Pending,
             failing_checks: vec![],
+            ci_has_pending: false,
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
@@ -3775,43 +3789,8 @@ mod tests {
 
     #[test]
     fn fingerprint_format() {
-        let fp = make_fingerprint("sha123", "OPEN", "SUCCESS", "2026-06-05T01:00:00Z", "none");
-        assert_eq!(fp, "sha123|OPEN|SUCCESS|2026-06-05T01:00:00Z|none");
-    }
-
-    // ── promise-churn backstop ─────────────────────────────────────────────
-
-    #[test]
-    fn promise_fingerprint_is_stable_and_distinguishing() {
-        // Deterministic (must be identical across process runs - it is persisted
-        // and re-read next fire).
-        assert_eq!(
-            promise_fingerprint("MISSION COMPLETE: shipped X"),
-            promise_fingerprint("MISSION COMPLETE: shipped X")
-        );
-        // Distinct text -> distinct hash.
-        assert_ne!(
-            promise_fingerprint("MISSION COMPLETE: shipped X"),
-            promise_fingerprint("MISSION COMPLETE: shipped Y")
-        );
-        // Known FNV-1a anchor guards against an accidental algorithm change that
-        // would silently invalidate every persisted fingerprint.
-        assert_eq!(promise_fingerprint(""), "cbf29ce484222325");
-    }
-
-    /// AC2-EDGE: an identical re-asserted promise keeps the fingerprint equal
-    /// (streak is NOT reset), a genuinely new promise changes it (streak resets).
-    #[test]
-    fn identical_promise_keeps_fingerprint_new_promise_changes_it() {
-        let h1 = promise_fingerprint("MISSION COMPLETE: did the thing");
-        let same = make_fingerprint("sha", "OPEN", "FAILURE:mux", "none", &h1);
-        let again = make_fingerprint("sha", "OPEN", "FAILURE:mux", "none", &h1);
-        // Byte-identical promise over identical world-state -> identical fp.
-        assert_eq!(same, again);
-
-        let h2 = promise_fingerprint("MISSION COMPLETE: did a different thing");
-        let changed = make_fingerprint("sha", "OPEN", "FAILURE:mux", "none", &h2);
-        assert_ne!(same, changed);
+        let fp = make_fingerprint("sha123", "OPEN", "SUCCESS", "2026-06-05T01:00:00Z");
+        assert_eq!(fp, "sha123|OPEN|SUCCESS|2026-06-05T01:00:00Z");
     }
 
     #[test]
@@ -3922,6 +3901,29 @@ mod tests {
         assert!(failing_check_names(&checks).is_empty());
         // Malformed input never panics, yields empty.
         assert!(failing_check_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn ci_has_pending_gates_partial_ci() {
+        // One check failed while another still runs -> pending (must hold, not
+        // terminate: the pending job could be the session's own new red).
+        let partial = serde_json::json!([
+            {"name": "smoke",   "bucket": "fail"},
+            {"name": "rust-ci", "bucket": "pending"},
+        ]);
+        assert!(ci_has_pending_checks(&partial));
+        // Fully settled red -> no pending -> eligible for the terminal.
+        let settled = serde_json::json!([
+            {"name": "smoke",   "bucket": "fail"},
+            {"name": "rust-ci", "bucket": "pass"},
+            {"name": "doc",     "bucket": "skipping"},
+        ]);
+        assert!(!ci_has_pending_checks(&settled));
+        // Unrecognized bucket is treated as pending (fail safe).
+        let unknown = serde_json::json!([{"name": "x", "bucket": "queued"}]);
+        assert!(ci_has_pending_checks(&unknown));
+        // Malformed input never panics.
+        assert!(!ci_has_pending_checks(&serde_json::json!({})));
     }
 
     #[test]
