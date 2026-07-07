@@ -33,6 +33,22 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     return yaml.safe_load(rest[:end]) or {}
 
 
+def _read_graph_node_id(state_path: Path) -> Optional[str]:
+    """The backlog node id, appended to the manifest BODY by
+    init-target-state.sh (below the frontmatter _read_state parses). Returns
+    None when absent or ``null`` so the caller skips the node<->PR stamp.
+    """
+    try:
+        for line in state_path.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"^\s*graph_node_id:\s*(.*?)\s*$", line)
+            if m:
+                raw = m.group(1).strip().strip('"').strip("'")
+                return raw if raw and raw != "null" else None
+    except OSError:
+        return None
+    return None
+
+
 def _extract_pr_number(url_or_output: str) -> Optional[int]:
     """Extract PR number from a GitHub URL or plain number string."""
     m = re.search(r"/pull/(\d+)", url_or_output)
@@ -181,6 +197,29 @@ def ship(
     # from a forged artifact. atomic_write uses filelock + tempfile + os.replace.
     from fno.state.io import atomic_write
     atomic_write(artifact_path, artifact_content)
+
+    # Step 2.5: stamp the backlog node <-> PR link (x-a166). Without this the
+    # node's pr_number stays null through the whole PR review window, so the
+    # _has_unmerged_open_pr selection guard and `fno backlog reconcile` cannot
+    # see the in-flight/merged PR - leaving only the 2h PID claim to guard the
+    # node, which lapses and lets the dispatcher re-spawn a finished node.
+    # Best-effort + idempotent (re-stamping the same PR is a no-op); a stamp
+    # failure logs but never fails the ship.
+    node_id = _read_graph_node_id(state_path)
+    if node_id and pr_number:
+        stamp = subprocess.run(
+            ["fno", "backlog", "update", node_id,
+             "--pr-number", str(pr_number), "--pr-url", pr_url],
+            capture_output=True,
+            text=True,
+        )
+        if stamp.returncode != 0:
+            import sys
+            print(
+                f"worker.ship: node<->PR stamp failed for {node_id} "
+                f"PR {pr_number}: {(stamp.stderr or stamp.stdout).strip()[:200]}",
+                file=sys.stderr,
+            )
 
     # Step 3: arm auto-merge if approved
     auto_merge_armed = False
