@@ -3782,6 +3782,9 @@ def _chat_adopt(
         prior is not None
         and getattr(prior, "host_mode", None) == "interactive"
         and getattr(prior, "claude_session_uuid", None) == uuid
+        # Only reuse a LIVE host; a dead row (released/crashed) falls through to a
+        # fresh spawn instead of handing back a dead switchboard target.
+        and getattr(prior, "status", None) == "live"
     ):
         return True, host, f"reusing the live channel {host}", True
     res = _daemon_rpc(

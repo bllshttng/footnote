@@ -159,3 +159,19 @@ def test_ac7_production_default_logs_fetch_failure_at_canonical(tmp_path, monkey
     fail_log = tmp_path / ".fno" / "gate_escape_emit_failures.jsonl"
     assert fail_log.exists(), "review-fetch blind spot must be durably logged"
     assert len([x for x in fail_log.read_text().splitlines() if x.strip()]) == 1
+
+
+def test_placeholder_pr_number_no_emit_no_fetch(tmp_path):
+    """A placeholder/unassigned PR number (0) is not an escape and must short
+    circuit BEFORE the review fetch (gemini review on PR #232). The injected
+    fetcher raises if reached, so a regressed guard fails the test loudly."""
+    rec = _record(tmp_path, pr=0)
+
+    def _boom(*a, **k):
+        raise AssertionError("reviews_fetcher must not run for a placeholder PR")
+
+    out = emit_gate_escape_for_record(
+        rec, required_bots=["codex"], reviews_fetcher=_boom, events_path=_epath(tmp_path)
+    )
+    assert out is None
+    assert _gate_escapes(tmp_path) == []

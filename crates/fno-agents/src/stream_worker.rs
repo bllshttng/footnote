@@ -34,7 +34,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{UnixListener, UnixStream};
 
 /// The single-writer claim a stream worker holds while its child is live. The
@@ -72,6 +72,10 @@ pub struct StreamWorkerConfig {
     /// runs with no claim management (internal tests); the daemon front door
     /// sets it (uuid + holder together, by construction).
     pub session_claim: Option<SessionClaim>,
+    /// Idle grace before release-on-idle. Defaults to [`IDLE_GRACE`] via
+    /// `new()`; only tests set it short. Private so it stays an internal plumbing
+    /// default, not a user-facing knob (locked: G is not config).
+    idle_grace: Duration,
 }
 
 impl StreamWorkerConfig {
@@ -87,6 +91,7 @@ impl StreamWorkerConfig {
             cwd: cwd.into(),
             argv,
             session_claim: None,
+            idle_grace: IDLE_GRACE,
         }
     }
 }
@@ -652,6 +657,15 @@ fn answer_control_request(
 const MAX_FRAMES: usize = 4096;
 const STDERR_TAIL_CAP: usize = 8192;
 
+/// Grace before an idle resident worker releases its claim and exits. Constant,
+/// not config; `StreamWorkerConfig::idle_grace` defaults to it and only tests
+/// shorten it (a per-worker field, not an env var, so parallel tests don't race).
+const IDLE_GRACE: Duration = Duration::from_secs(15 * 60);
+
+/// Idle/liveness re-check cadence: the run loop's `liveness` interval and the
+/// per-read timeout in `serve_connection`.
+const IDLE_TICK: Duration = Duration::from_millis(250);
+
 #[derive(Default)]
 struct FrameLog {
     frames: VecDeque<StreamFrame>,
@@ -678,6 +692,17 @@ impl FrameLog {
         let out: Vec<StreamFrame> = self.frames.iter().skip(from).cloned().collect();
         (out, end, gap)
     }
+
+    /// At a rest point (no turn in flight)? Rest = empty ring, `Result`, or
+    /// `System`. Everything else (mid-turn or unclassifiable) fails LIVE, so the
+    /// worker never exits mid-turn or on a frame it can't read.
+    fn last_is_at_rest(&self) -> bool {
+        match self.frames.back() {
+            None => true,
+            Some(StreamFrame::Result { .. }) | Some(StreamFrame::System { .. }) => true,
+            _ => false,
+        }
+    }
 }
 
 struct StreamSession {
@@ -691,6 +716,9 @@ struct StreamSession {
     /// Set by the reader thread when the child's stdout hits EOF.
     eof: Arc<AtomicBool>,
     child_pid: Option<u32>,
+    /// Last activity, the "nobody's home" half of the idle decision. Re-armed by
+    /// any child frame or reader/writer RPC; birth-armed to spawn time.
+    last_activity: Arc<Mutex<Instant>>,
 }
 
 impl StreamSession {
@@ -719,6 +747,8 @@ impl StreamSession {
         let log = Arc::new(Mutex::new(FrameLog::default()));
         let eof = Arc::new(AtomicBool::new(false));
         let stderr_tail = Arc::new(Mutex::new(String::new()));
+        // Birth-armed: an untouched worker still drains IDLE_GRACE after spawn.
+        let last_activity = Arc::new(Mutex::new(Instant::now()));
 
         // The headless permission posture (ab-28feac77): read the session cwd's
         // project permission settings once, here, so the reader thread can answer
@@ -733,6 +763,7 @@ impl StreamSession {
             let eof = Arc::clone(&eof);
             let stdin = Arc::clone(&stdin);
             let posture = Arc::clone(&posture);
+            let last_activity = Arc::clone(&last_activity);
             std::thread::spawn(move || {
                 let reader = BufReader::new(out);
                 for line in reader.lines() {
@@ -755,6 +786,10 @@ impl StreamSession {
                             // Recover a poisoned log lock rather than dropping the
                             // frame silently on the (unlikely) poison path.
                             log.lock().unwrap_or_else(|e| e.into_inner()).push(frame);
+                            // Any child frame re-arms the idle timer (subsumes
+                            // control activity, since a control_request is a frame).
+                            *last_activity.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Instant::now();
                         }
                         Err(e) => {
                             // A genuine I/O fault on stdout is distinct from a
@@ -801,7 +836,31 @@ impl StreamSession {
             stderr_tail,
             eof,
             child_pid,
+            last_activity,
         })
+    }
+
+    /// Re-arm the idle timer on a reader/writer RPC (an attached watcher holds
+    /// its host alive).
+    fn touch(&self) {
+        *self.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+    }
+
+    /// Idle iff at rest AND untouched for `grace`. Both required: silence alone
+    /// never qualifies (a long tool call is quiet but working).
+    fn is_idle(&self, grace: Duration) -> bool {
+        let quiet = self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .elapsed()
+            >= grace;
+        quiet
+            && self
+                .log
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .last_is_at_rest()
     }
 
     /// Write a user turn to the child's stdin as one stream-json line. The bytes
@@ -929,18 +988,20 @@ pub async fn run(cfg: StreamWorkerConfig) -> Result<(), StreamWorkerError> {
     let listener = UnixListener::bind(&sock_path)?;
     let _ = paths::set_file_mode_0600(&sock_path);
 
-    let mut liveness = tokio::time::interval(Duration::from_millis(250));
+    let mut liveness = tokio::time::interval(IDLE_TICK);
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut shutdown_requested = false;
+    let mut idle_released = false;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _addr)) => {
-                        if serve_connection(&session, stream).await {
-                            shutdown_requested = true;
-                            break;
+                        match serve_connection(&session, stream, cfg.idle_grace).await {
+                            ServeOutcome::Shutdown => { shutdown_requested = true; break; }
+                            ServeOutcome::IdleExit => { idle_released = true; break; }
+                            ServeOutcome::Dropped => {} // client left; keep the child alive
                         }
                     }
                     Err(_) => continue,
@@ -949,6 +1010,13 @@ pub async fn run(cfg: StreamWorkerConfig) -> Result<(), StreamWorkerError> {
             _ = liveness.tick() => {
                 if session.eof.load(Ordering::SeqCst) && !session.is_child_alive() {
                     break; // child exited / broken pipe
+                }
+                // Release-on-idle: return cleanly (dropping the claim guard, child
+                // left alive). This break is the single decision point, so an ask
+                // racing it routes to a fresh worker rather than splitting the writer.
+                if session.is_idle(cfg.idle_grace) {
+                    idle_released = true;
+                    break;
                 }
             }
         }
@@ -961,7 +1029,13 @@ pub async fn run(cfg: StreamWorkerConfig) -> Result<(), StreamWorkerError> {
     // adopt path lands, would make a deliberately-stopped session look
     // adoptable). A child that died on its own (EOF/broken pipe) is the orphan
     // (AC1-FR).
-    let reason = if shutdown_requested {
+    // idle-release is a CLEAN worker exit distinct from both a deliberate
+    // shutdown and a child that died on its own: the child is deliberately left
+    // alive, so the reason is its own value and the status is Exited (not
+    // Orphaned - the session is re-adoptable, not crashed).
+    let reason = if idle_released {
+        "idle-release"
+    } else if shutdown_requested {
         "shutdown"
     } else {
         "child_exited"
@@ -986,52 +1060,95 @@ pub async fn run(cfg: StreamWorkerConfig) -> Result<(), StreamWorkerError> {
         }),
     );
 
-    // A child that died on its own is an ORPHAN (the adopted thread is gone);
-    // a clean shutdown is Exited. Flip the registry row accordingly if present.
-    let new_status = if shutdown_requested {
+    // idle-release REMOVES the row (not Orphaned/Exited): it frees the host name
+    // so a re-adopt spawns fresh without the daemon's same-name AgentExists refusal.
+    if idle_released {
+        if let Err(e) = state::update_registry(&home.registry_json(), |r| {
+            r.entries.retain(|e| e.short_id != cfg.short_id);
+        }) {
+            eprintln!(
+                "fno-agents stream-worker: registry idle-release removal failed for {}: {e}",
+                cfg.short_id
+            );
+        }
+    } else {
+        let new_status = if shutdown_requested {
+            AgentStatus::Exited
+        } else {
+            AgentStatus::Orphaned
+        };
+        if let Err(e) = state::update_registry(&home.registry_json(), |r| {
+            if let Some(entry) = r.entries.iter_mut().find(|e| e.short_id == cfg.short_id) {
+                entry.status = new_status;
+            }
+        }) {
+            eprintln!(
+                "fno-agents stream-worker: registry exit-update failed for {}: {e}",
+                cfg.short_id
+            );
+        }
+    }
+
+    // The claim is released by `_claim_guard` on drop (every return path).
+
+    // On idle-release the row is gone, so this state.json is an inert tombstone.
+    st.status = if shutdown_requested || idle_released {
         AgentStatus::Exited
     } else {
         AgentStatus::Orphaned
     };
-    if let Err(e) = state::update_registry(&home.registry_json(), |r| {
-        if let Some(entry) = r.entries.iter_mut().find(|e| e.short_id == cfg.short_id) {
-            entry.status = new_status;
-        }
-    }) {
-        eprintln!(
-            "fno-agents stream-worker: registry exit-update failed for {}: {e}",
-            cfg.short_id
-        );
-    }
-
-    // The single-writer claim is released by `_claim_guard` on drop (covers this
-    // path and every early-error path), so a later adopt (after this orphaned)
-    // can re-take it.
-
-    // Terminal state.json write + cleanup.
-    st.status = new_status;
     st.ready = false;
     let _ = state::write_state_atomic(&state_path, &st);
-    session.kill();
+    // idle-release leaves the child ALIVE (re-adoptable); only shutdown/orphan kill.
+    if !idle_released {
+        session.kill();
+    }
     let _ = std::fs::remove_file(&sock_path);
     Ok(())
 }
 
-/// Serve one daemon connection until EOF or `stream.shutdown`. A dropped
-/// connection (daemon died / closed) returns `false` so the worker keeps the
-/// child alive (Outcome B): only an explicit shutdown ends the worker.
-async fn serve_connection(session: &StreamSession, mut stream: UnixStream) -> bool {
+/// `Dropped` = client closed (keep child alive); `Shutdown` = `stream.shutdown`;
+/// `IdleExit` = child went idle. IdleExit is reachable here (not just the run
+/// loop's tick) because the tick isn't polled while a connection is being served.
+enum ServeOutcome {
+    Dropped,
+    Shutdown,
+    IdleExit,
+}
+
+/// Serve one connection until it closes, `stream.shutdown`, or the child goes
+/// idle. Reads are bounded by `IDLE_TICK` so a silent-but-open connection can't
+/// starve the idle/child-death check.
+async fn serve_connection(
+    session: &StreamSession,
+    mut stream: UnixStream,
+    idle_grace: Duration,
+) -> ServeOutcome {
     loop {
-        let req = match read_request(&mut stream).await {
-            Ok(r) => r,
-            Err(ProtocolError::UnexpectedEof) | Err(_) => return false,
+        let req = match tokio::time::timeout(IDLE_TICK, read_request(&mut stream)).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(ProtocolError::UnexpectedEof)) | Ok(Err(_)) => return ServeOutcome::Dropped,
+            Err(_elapsed) => {
+                // No request within the tick: run the liveness/idle checks, keep waiting.
+                if session.eof.load(Ordering::SeqCst) && !session.is_child_alive() {
+                    return ServeOutcome::Dropped;
+                }
+                if session.is_idle(idle_grace) {
+                    return ServeOutcome::IdleExit;
+                }
+                continue;
+            }
         };
         let (resp, shutdown) = handle(session, &req);
         if write_response(&mut stream, &resp).await.is_err() {
-            return shutdown;
+            return if shutdown {
+                ServeOutcome::Shutdown
+            } else {
+                ServeOutcome::Dropped
+            };
         }
         if shutdown {
-            return true;
+            return ServeOutcome::Shutdown;
         }
     }
 }
@@ -1041,6 +1158,7 @@ fn handle(session: &StreamSession, req: &Request) -> (Response, bool) {
     match req.method.as_str() {
         "stream.ping" => (Response::ok(req.id, json!({"pong": true})), false),
         "stream.write_turn" => {
+            session.touch(); // inbound ask re-arms the idle timer
             let text = req.params.get("text").and_then(|v| v.as_str());
             match text {
                 Some(t) => match session.write_turn(t) {
@@ -1061,6 +1179,7 @@ fn handle(session: &StreamSession, req: &Request) -> (Response, bool) {
             }
         }
         "stream.read_frames" => {
+            session.touch(); // a reader poll (an attached watcher) re-arms the idle timer
             let cursor = req
                 .params
                 .get("cursor")
@@ -1280,6 +1399,73 @@ mod tests {
         assert!(gap, "overflow must report a gap");
         assert_eq!(next, (MAX_FRAMES + 10) as u64);
         assert_eq!(frames.len(), MAX_FRAMES);
+    }
+
+    // ---- idle-classifier unit tests -----------------------
+
+    fn log_ending_in(f: StreamFrame) -> FrameLog {
+        let mut log = FrameLog::default();
+        log.push(f);
+        log
+    }
+
+    #[test]
+    fn at_rest_empty_ring_is_true_for_birth_arming() {
+        // A never-started child (no frames) is at rest, so a worker given no turn
+        // still drains after grace (AC1-HP birth-armed).
+        assert!(FrameLog::default().last_is_at_rest());
+    }
+
+    #[test]
+    fn at_rest_true_at_a_turn_boundary() {
+        assert!(log_ending_in(StreamFrame::Result {
+            subtype: "success".into(),
+            result: Some("done".into()),
+            is_error: false,
+        })
+        .last_is_at_rest());
+        // A bare system announce (init'd, no turn given) is also a rest point.
+        assert!(log_ending_in(StreamFrame::System {
+            subtype: "init".into()
+        })
+        .last_is_at_rest());
+    }
+
+    #[test]
+    fn at_rest_false_mid_turn_so_a_long_tool_call_never_exits() {
+        // AC1-EDGE: silence during a long tool call must NOT read as idle. Every
+        // mid-turn frame keeps the worker alive.
+        for f in [
+            StreamFrame::Assistant {
+                text: "partial".into(),
+            },
+            StreamFrame::StreamEvent {
+                delta: Some("tok".into()),
+            },
+            StreamFrame::ControlRequest {
+                request_id: "r".into(),
+                subtype: "can_use_tool".into(),
+                tool_name: "Bash".into(),
+                input: Value::Null,
+            },
+            StreamFrame::UserEcho, // a turn just started; the reply is pending
+        ] {
+            assert!(
+                !log_ending_in(f.clone()).last_is_at_rest(),
+                "mid-turn {f:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn at_rest_false_on_unclassifiable_frame_fails_live() {
+        // AC1-ERR: a frame we cannot classify must fail LIVE (never idle), so a
+        // garbled last frame never triggers an exit.
+        assert!(!log_ending_in(StreamFrame::Other {
+            type_name: "future".into()
+        })
+        .last_is_at_rest());
+        assert!(!log_ending_in(StreamFrame::Malformed).last_is_at_rest());
     }
 
     // ---- worker integration tests (FAKE stream-json emitter) -----------
@@ -1576,6 +1762,221 @@ cat >/dev/null
             e.status,
             AgentStatus::Orphaned,
             "child EOF must orphan the registry row"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_worker_releases_and_drains_with_idle_release_reason() {
+        // AC1-HP + AC1-UI: a hosted session at rest (last frame = init, no turn in
+        // flight) with no reader/writer activity for the grace exits CLEAN - the
+        // row is REMOVED (fully drained, so a re-adopt hits no name collision),
+        // and the exit event carries the distinct reason "idle-release" so a
+        // watcher renders it truthfully. The RAII claim guard releases on this
+        // return like every other (covered by release_session_claim_drops_*).
+        let home = tmp_home("idle");
+        seed_live_row(&home, "swI");
+        // Emit init, then block on stdin so the child stays ALIVE but idle (no
+        // further frames, no turn). Last frame = system -> at rest.
+        let script = r#"printf '%s\n' '{"type":"system","subtype":"init"}'; cat >/dev/null"#;
+        let mut cfg = fake_cfg("swI", &home, script);
+        cfg.idle_grace = Duration::from_millis(300);
+        tokio::time::timeout(Duration::from_secs(30), run(cfg))
+            .await
+            .expect("idle worker did not exit within 30s")
+            .expect("run() returned an error");
+
+        let reg_path = AgentsHome::at(&home).registry_json();
+        let r = state::load_registry(&reg_path).unwrap();
+        assert!(
+            r.entries.iter().all(|e| e.short_id != "swI"),
+            "idle release must REMOVE the row (frees the host name for re-adopt), \
+             not leave a lingering terminal row"
+        );
+
+        let events = AgentsHome::at(&home).events_jsonl();
+        let text = std::fs::read_to_string(&events).expect("events.jsonl missing");
+        let ev = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["kind"] == "agent_exited" && v["lane"] == "stream")
+            .expect("no agent_exited stream event emitted");
+        assert_eq!(
+            ev["reason"], "idle-release",
+            "idle exit must carry reason=idle-release"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mid_turn_silence_does_not_idle_exit() {
+        // AC1-EDGE: a session inside a long tool call produces no frames
+        // for a while, but its last frame is NOT a turn boundary (assistant text,
+        // no result). The worker must stay alive PAST the grace - at-rest is
+        // false regardless of how long it is quiet, so this is deterministic, not
+        // a race. Proven by a ping surviving well after the grace.
+        let home = tmp_home("midturn");
+        // One turn ends at an assistant frame (no result), then blocks on stdin.
+        let script = r#"
+printf '%s\n' '{"type":"system","subtype":"init"}'
+while IFS= read -r line; do
+  printf '%s\n' '{"type":"user","message":{"role":"user"}}'
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"mid"}]}}'
+done
+"#;
+        let mut cfg = fake_cfg("swM", &home, script);
+        cfg.idle_grace = Duration::from_millis(300);
+        let sock = start_worker(cfg).await;
+        let mut conn = connect_retry(&sock).await;
+
+        write_request(
+            &mut conn,
+            &Request::new(1, "stream.write_turn", json!({"text": "do a long thing"})),
+        )
+        .await
+        .unwrap();
+        let _ = read_response(&mut conn).await.unwrap();
+
+        // Poll until the assistant frame lands, then STOP touching.
+        let mut cursor = 0u64;
+        let mut saw_assistant = false;
+        for i in 0..100 {
+            write_request(
+                &mut conn,
+                &Request::new(100 + i, "stream.read_frames", json!({"cursor": cursor})),
+            )
+            .await
+            .unwrap();
+            let res = read_response(&mut conn).await.unwrap();
+            let res = res.result().unwrap();
+            cursor = res["next"].as_u64().unwrap();
+            if res["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["kind"] == "assistant")
+            {
+                saw_assistant = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(saw_assistant, "assistant frame never arrived");
+
+        // Wait well past the grace WITHOUT any read/write, then prove alive: ping
+        // does not touch the idle timer, so a surviving pong means the worker
+        // stayed up because the last frame was mid-turn (not at rest).
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        write_request(&mut conn, &Request::new(9, "stream.ping", json!({})))
+            .await
+            .unwrap();
+        let pong = read_response(&mut conn).await.unwrap();
+        assert!(
+            !pong.is_err() && pong.result().unwrap()["pong"] == true,
+            "worker idle-exited during a mid-turn (last frame was not a boundary)"
+        );
+
+        write_request(&mut conn, &Request::new(99, "stream.shutdown", json!({})))
+            .await
+            .unwrap();
+        let _ = read_response(&mut conn).await;
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn watcher_polls_keep_alive_then_detach_drains() {
+        // AC2-EDGE: a reader poll (an attached watcher) re-arms the idle
+        // timer, so continuous polling past the grace keeps the worker alive;
+        // when the watcher detaches, the timer arms and the worker drains a grace
+        // later. Grace is generous vs the poll interval (400ms vs 80ms) so the
+        // keep-alive phase is robust under CI scheduling.
+        let home = tmp_home("watch");
+        seed_live_row(&home, "swW");
+        // Init then block: last frame = system (at rest), so ONLY the polling
+        // keeps it alive - the moment polls stop, it is idle-eligible.
+        let script = r#"printf '%s\n' '{"type":"system","subtype":"init"}'; cat >/dev/null"#;
+        let mut cfg = fake_cfg("swW", &home, script);
+        cfg.idle_grace = Duration::from_millis(400);
+        let sock = start_worker(cfg).await;
+        let mut conn = connect_retry(&sock).await;
+
+        // Phase 1: poll every 80ms for ~1.2s (3x grace). Each poll re-arms.
+        let mut cursor = 0u64;
+        for i in 0..15 {
+            write_request(
+                &mut conn,
+                &Request::new(100 + i, "stream.read_frames", json!({"cursor": cursor})),
+            )
+            .await
+            .unwrap();
+            let res = read_response(&mut conn).await.unwrap();
+            cursor = res.result().unwrap()["next"].as_u64().unwrap();
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+        // Still alive after > grace of continuous polling.
+        write_request(&mut conn, &Request::new(9, "stream.ping", json!({})))
+            .await
+            .unwrap();
+        let pong = read_response(&mut conn).await.unwrap();
+        assert!(
+            !pong.is_err() && pong.result().unwrap()["pong"] == true,
+            "an attached watcher's polls must keep the worker alive"
+        );
+
+        // Phase 2: detach (stop polling). The timer arms; a grace later it drains.
+        drop(conn);
+        let reg_path = AgentsHome::at(&home).registry_json();
+        let mut drained = false;
+        for _ in 0..200 {
+            if let Ok(r) = state::load_registry(&reg_path) {
+                // idle-release REMOVES the row; the seeded "swW" disappearing is
+                // the drain signal.
+                if r.entries.iter().all(|e| e.short_id != "swW") {
+                    drained = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            drained,
+            "worker did not drain a grace after the watcher detached"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_open_silent_connection_still_idle_exits() {
+        // Finding 2 (codex P2 on PR#237): the run loop's liveness tick is not
+        // polled while a connection is being served, so serve_connection runs the
+        // idle check itself. A client that connects and then goes SILENT (holds
+        // the socket open, sends no request) must NOT wedge an at-rest child past
+        // its grace. Held continuously from spawn, the ONLY path that can trigger
+        // the drain is serve_connection's per-read timeout.
+        let home = tmp_home("heldopen");
+        seed_live_row(&home, "swH");
+        let script = r#"printf '%s\n' '{"type":"system","subtype":"init"}'; cat >/dev/null"#;
+        let mut cfg = fake_cfg("swH", &home, script);
+        cfg.idle_grace = Duration::from_millis(300);
+        let sock = start_worker(cfg).await;
+
+        // Open a connection and hold it WITHOUT ever sending a request.
+        let _conn = connect_retry(&sock).await;
+
+        let reg_path = AgentsHome::at(&home).registry_json();
+        let mut drained = false;
+        for _ in 0..200 {
+            if let Ok(r) = state::load_registry(&reg_path) {
+                if r.entries.iter().all(|e| e.short_id != "swH") {
+                    drained = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            drained,
+            "a silent held-open connection wedged idle reaping (Finding 2)"
         );
         std::fs::remove_dir_all(&home).ok();
     }
