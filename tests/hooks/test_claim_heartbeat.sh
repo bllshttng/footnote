@@ -39,6 +39,7 @@ setup_env() {
   cat > "${CWD}/.fno/target-state.md" <<'EOF'
 ---
 session_id: 20260707T203700Z-cl55246-f3fe72
+claude_session_id: 182b29c8-owner-uuid
 plan_path: ""
 ---
 # Mission
@@ -68,8 +69,15 @@ teardown_env() { rm -rf "$TMP_DIR"; unset STUB_HOLDER STUB_REFRESH_RC; }
 
 run_hook() {
   # No throttle stamp is written by the harness unless a test does so; a fresh
-  # tmp project has none, so the throttle gate passes.
+  # tmp project has none, so the throttle gate passes. No session_id on stdin,
+  # so the identity gate fails open and the holder gate is what is exercised.
   printf '{"cwd": "%s"}' "$CWD" | bash "$HOOK"
+}
+
+# Like run_hook but with a Claude session uuid on stdin, so the identity gate
+# (current session vs manifest claude_session_id) is exercised. $1 = uuid.
+run_hook_sid() {
+  printf '{"cwd": "%s", "session_id": "%s"}' "$CWD" "$1" | bash "$HOOK"
 }
 
 # ── T1: AC3-HP - we hold the claim -> refresh is issued ──────────────────────
@@ -138,6 +146,28 @@ if [[ -z "$out" ]]; then
   pass "T6 not-holder no-op is silent on stdout"
 else
   fail "T6 no-op printed to stdout: [$out]"
+fi
+teardown_env
+
+# ── T7: identity match - current session IS the manifest owner -> refresh ────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+if grep -q "claim refresh node:x-a166" "$CALLLOG"; then
+  pass "T7 stdin session_id == manifest claude_session_id -> refresh"
+else
+  fail "T7 owner session did not refresh; calls: $(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T8: codex P1 - a different session on a stale manifest -> NO refresh ──────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"  # stale manifest's holder
+run_hook_sid "some-other-live-uuid" >/dev/null 2>&1
+if grep -q "claim refresh" "$CALLLOG"; then
+  fail "T8 revived a dead owner's claim from a different session (codex P1)"
+else
+  pass "T8 different session on a stale manifest does not refresh"
 fi
 teardown_env
 

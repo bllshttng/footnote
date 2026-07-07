@@ -40,8 +40,10 @@ HEARTBEAT_TTL="${FNO_CLAIM_HEARTBEAT_TTL:-2h}"
 # honor a cwd on stdin JSON and $CLAUDE_PROJECT_DIR. The manifest is per-worktree.
 STDIN="$(cat 2>/dev/null || true)"
 CWD=""
+CUR_CLAUDE_SID=""
 if [[ -n "$STDIN" ]] && command -v jq >/dev/null 2>&1; then
   CWD="$(printf '%s' "$STDIN" | jq -r '.cwd // empty' 2>/dev/null)"
+  CUR_CLAUDE_SID="$(printf '%s' "$STDIN" | jq -r '.session_id // empty' 2>/dev/null)"
 fi
 [[ -z "$CWD" ]] && CWD="${CLAUDE_PROJECT_DIR:-$PWD}"
 
@@ -53,6 +55,23 @@ NODE_ID="$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' "$MANIFEST" | h
 [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]] || exit 0
 SESSION_ID="$(sed -n 's/^[[:space:]]*session_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
 [[ -n "$SESSION_ID" ]] || exit 0
+
+# Identity gate (codex P1): prove the CURRENT running session owns this manifest,
+# not a stale target-state.md a dead session left behind in this worktree. The
+# manifest records the owner's Claude session uuid at init; Claude Code passes
+# the live session's uuid on stdin. A POSITIVE mismatch means a different session
+# is sitting on a stale manifest whose session_id still matches an abandoned
+# (stale/suspect) node claim - the holder gate below would then REVIVE that dead
+# claim and block dispatch from reclaiming the node. This check is pid-independent
+# (the claim's pid arm is unreliable by design - the whole reason this hook
+# exists), so it cannot regress a dead-pid claim the way a state==live gate would.
+# Fail OPEN when either side is unknown (no stdin uuid on a non-Claude harness, or
+# an older manifest without the field): the holder gate still applies, so this
+# only ever ADDS a refusal, never widens refresh.
+MANIFEST_CLAUDE_SID="$(sed -n 's/^[[:space:]]*claude_session_id:[[:space:]]*//p' "$MANIFEST" | head -1 | tr -d "\"'")"
+if [[ -n "$CUR_CLAUDE_SID" && -n "$MANIFEST_CLAUDE_SID" && "$CUR_CLAUDE_SID" != "$MANIFEST_CLAUDE_SID" ]]; then
+  exit 0
+fi
 
 # Throttle: skip when the stamp is younger than THROTTLE seconds.
 STAMP="$CWD/.fno/.claim-heartbeat.stamp"
