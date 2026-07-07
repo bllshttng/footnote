@@ -5,14 +5,16 @@
 //! in `fno/agents/spawn_gate.py` is the sole gate on that path — exactly one
 //! gate evaluation per spawn, LD1).
 //!
-//! The gate is READ-ONLY: the `max_live` slot cap reads the fno registry
-//! (worker provenance), the RAM floor reads system `vm_stat`/meminfo, and the
-//! claude daemon roster is read only by the post-spawn QoS demotion helper —
-//! NOT by the slot count (x-bdf9: the roster's non-work sessions must not
-//! consume worker slots). The gate's only writes are its own claims
-//! (`spawn-gate` check→dispatch mutex, `worker:<name>` headless slot claims).
-//! Every guard fails OPEN on read errors (LD5): the gate is protective
-//! infrastructure and must never become the thing that bricks spawning.
+//! The gate is READ-ONLY: the `max_live` slot cap counts the fno registry
+//! (worker provenance) and the RAM floor reads system `vm_stat`/meminfo. The
+//! claude daemon roster is consulted only as a LIVENESS ORACLE for fno bg rows
+//! that carry no local pid, and by the post-spawn QoS demotion helper — never
+//! as a population to count (x-bdf9: the roster's non-work sessions must not
+//! consume worker slots; only rows that are ALSO in the fno registry count).
+//! The gate's only writes are its own claims (`spawn-gate` check→dispatch mutex,
+//! `worker:<name>` headless slot claims). Every guard fails OPEN on read errors
+//! (LD5): the gate is protective infrastructure and must never become the thing
+//! that bricks spawning.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -149,12 +151,38 @@ fn available_bytes() -> Option<u64> {
 /// provenance (spawn writes the row), so the registry alone is the slot
 /// denominator. The roster's RAM cost is still honored elsewhere:
 /// [`check_ram_floor`] reads real available RAM from `vm_stat`/meminfo, which
-/// already reflects every process the roster holds — so dropping the roster
-/// here changes only the slot denominator, not RAM behavior.
+/// already reflects every process the roster holds.
+///
+/// The roster IS still read here, but only as a LIVENESS ORACLE, not as a
+/// population to count: a fno `claude --bg` row is minted with a `claude_short_id`
+/// but NO local `pid` (its process lives in the claude daemon, so liveness is in
+/// the roster — see `claude_ask.rs`). Such a row's liveness is resolved by
+/// looking its `claude_short_id` up in the roster. This counts real fno bg
+/// workers (which a pid-only filter would drop, letting the cap admit unbounded
+/// bg workers — Codex P1 on PR #235) WITHOUT counting non-fno sessions: a
+/// claude-mem observer has no registry row, so it is never reached.
 ///
 /// Read-only; a registry read failure degrades to a 0 contribution with one
 /// warning line pushed to `warnings` (LD5, fail open).
 pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
+    // Live roster short_ids: the liveness oracle for pid-less fno bg rows only.
+    // A roster read failure degrades this to empty (bg rows then fall back to
+    // their local pid, i.e. uncounted) — fail open, never wedge.
+    let live_roster_short_ids: std::collections::HashSet<String> =
+        match ClaudeRoster::load_default() {
+            Ok(roster) => roster
+                .workers_deduped()
+                .iter()
+                .filter(|w| w.pid.map(|p| pid_is_ours(p, w.proc_start)).unwrap_or(false))
+                .map(|w| w.short_id().to_string())
+                .collect(),
+            Err(e) => {
+                warnings.push(format!(
+                    "spawn-gate: claude roster unreadable ({e}); pid-less bg rows uncounted"
+                ));
+                Default::default()
+            }
+        };
     let mut count = 0usize;
     match load_registry(registry_path) {
         Ok(Registry { entries, .. }) => {
@@ -162,10 +190,20 @@ pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
                 if !status_is_liveish(&e.status) {
                     continue;
                 }
-                let alive = e
-                    .pid
-                    .map(|p| pid_is_ours(p, e.pid_start_time))
-                    .unwrap_or(false);
+                let alive = match e.pid {
+                    // Local pid: liveness by PID/start-time, same as claims.
+                    Some(p) => pid_is_ours(p, e.pid_start_time),
+                    // No local pid: a fno bg/adopted row whose process is the
+                    // claude daemon's — resolve liveness via the roster by its
+                    // claude_short_id. (A row without either signal is a
+                    // disk-only ghost and stays uncounted.)
+                    None => e
+                        .claude_short_id
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(|sid| live_roster_short_ids.contains(sid))
+                        .unwrap_or(false),
+                };
                 if alive {
                     count += 1;
                 }

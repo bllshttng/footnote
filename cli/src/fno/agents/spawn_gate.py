@@ -6,10 +6,12 @@ exclusive execution paths (the front door execs the binary for bg/headless;
 the Rust ``pane`` arm re-execs this CLI), so every spawn passes exactly one.
 
 The gate is READ-ONLY: the ``max_live`` slot cap counts fno registry rows
-(worker provenance), the RAM floor reads real system RAM, and the claude
-daemon roster is kept for the ``fno agents top`` display but is NOT counted
-toward the slot cap (x-bdf9 — its non-work sessions must not consume slots).
-Its only writes are its own claims (``spawn-gate`` check→dispatch mutex,
+(worker provenance) and the RAM floor reads real system RAM. The claude daemon
+roster feeds the ``fno agents top`` display and serves as a LIVENESS ORACLE for
+fno bg rows that carry no local pid, but is never a population to count toward
+the slot cap (x-bdf9 — only a row that is ALSO in the fno registry counts, so
+non-work sessions never consume slots). Its only writes are its own claims
+(``spawn-gate`` check→dispatch mutex,
 ``worker:<name>`` headless slot claims, both under the GLOBAL claims root —
 the RAM budget is machine-wide). Every guard fails OPEN on read errors: the
 gate must never become the thing that bricks spawning.
@@ -184,6 +186,12 @@ def census() -> LiveCensus:
                 )
             )
 
+    # Snapshot the LIVE roster short_ids before the registry loop mutates
+    # counted_short_ids. This is the liveness oracle for fno bg rows that carry
+    # no local pid (their process is the claude daemon's), NOT a population to
+    # count — only a row that is ALSO in the fno registry is ever counted.
+    roster_live_short_ids = set(counted_short_ids)
+
     # fno registry rows: every live one holds a worker slot; the roster only
     # decides whether to add a DUPLICATE display row for a bg/adopted worker.
     try:
@@ -198,7 +206,20 @@ def census() -> LiveCensus:
     for row in rows:
         if row.status not in LIVE_STATUSES:
             continue
-        if not _pid_alive(row.pid, row.pid_start_time):
+        pid_alive = _pid_alive(row.pid, row.pid_start_time)
+        # A fno `claude --bg` row is minted with a claude_short_id but no local
+        # pid (liveness lives in the claude daemon roster). Resolve it via the
+        # roster so real fno bg workers hold slots — a pid-only filter would drop
+        # them and let the cap admit unbounded bg workers (Codex P1, PR #235).
+        # Still no non-fno session counted: a claude-mem observer has no
+        # registry row and never reaches here.
+        bg_alive = (
+            not pid_alive
+            and row.pid is None
+            and bool(row.claude_short_id)
+            and row.claude_short_id in roster_live_short_ids
+        )
+        if not (pid_alive or bg_alive):
             continue
         # A live fno row is fno work: it holds a slot regardless of the display
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,

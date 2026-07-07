@@ -49,6 +49,26 @@
         {"short": "abcd1234", "pid": "self"}
       ],
       "expect_slot_count": 1
+    },
+    {
+      "name": "bg_row_no_local_pid_alive_via_roster",
+      "registry": [
+        {"name": "bgw", "status": "live", "claude_short_id": "beef0001"}
+      ],
+      "roster": [
+        {"short": "beef0001", "pid": "self"}
+      ],
+      "expect_slot_count": 1
+    },
+    {
+      "name": "bg_row_no_local_pid_dead_roster_not_counted",
+      "registry": [
+        {"name": "stalebg", "status": "live", "claude_short_id": "dead0002"}
+      ],
+      "roster": [
+        {"short": "dead0002", "pid": "dead"}
+      ],
+      "expect_slot_count": 0
     }
   ]
 }
