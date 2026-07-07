@@ -325,7 +325,7 @@ Two new event kinds join the loop stream. Schema in `events-schema.yaml` only; N
 
 ## The megatron driver (removed)
 
-The megatron fleet-orchestration driver (`loop_megatron.rs`, `cli/src/fno/megatron/`, the `/megatron` skill, and the `--driver megatron` arm) was removed in the cutlist (x-f539). `-P` spawn-into-project plus auto-worktree (x-9c4c) now covers multi-repo work, and a multi-repo feature is modeled as one backlog node per project linked by `blocked_by`, each shipping its own PR. The unified loop now exposes two drivers: `target` and `megawalk`.
+The megatron fleet-orchestration driver (`loop_megatron.rs`, `cli/src/fno/megatron/`, the `/megatron` skill, and the `--driver megatron` arm) was removed in the cutlist. `-P` spawn-into-project plus auto-worktree now covers multi-repo work, and a multi-repo feature is modeled as one backlog node per project linked by `blocked_by`, each shipping its own PR. The unified loop now exposes two drivers: `target` and `megawalk`.
 
 ### Batch-queue deprecation (task 3.2)
 

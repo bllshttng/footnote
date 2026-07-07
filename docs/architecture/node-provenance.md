@@ -2,7 +2,7 @@
 
 When a backlog node (idea / follow-up / carveout) is created mid-pipeline, the reason it needed to exist lives in the originating conversation transcript. That transcript does not auto-carry into a fresh thread, and the node's title + details are a lossy paraphrase. A later session that picks the node up starts from a reconstruction, not the ground truth that justified it. The same gap exists for spawned workers: the mesh can trace a worker forward (its node, logs, own transcript) but not backward to the conversation that decided to spawn it.
 
-This feature (backlog node `x-30f6`) records that backward edge at the moment of creation, so a node or worker can be resolved back to the session and transcript that produced it.
+This feature records that backward edge at the moment of creation, so a node or worker can be resolved back to the session and transcript that produced it.
 
 ## The load-bearing principle: capture is ambient, never volunteered
 
@@ -58,4 +58,4 @@ Read-only. For each edge a node carries (node-birth and/or spawn), it runs the r
 
 ## Scope and sequencing
 
-This is the field + ambient stamp + claude resolver. Out of scope and tracked separately: the presence-aware `/think` spawn mechanism that consumes these pointers is `x-6a10` (blocked by this node); the codex and antigravity resolver lanes are deferred. Historical backfill of provenance for pre-existing nodes is best-effort and out of scope here: `source_session_id` was never captured for old nodes and is unrecoverable; forward-stamping is the cheap, high-leverage path and makes every future creation self-describing.
+This is the field + ambient stamp + claude resolver. Out of scope and tracked separately: the presence-aware `/think` spawn mechanism that consumes these pointers is a separate effort (blocked by this node); the codex and antigravity resolver lanes are deferred. Historical backfill of provenance for pre-existing nodes is best-effort and out of scope here: `source_session_id` was never captured for old nodes and is unrecoverable; forward-stamping is the cheap, high-leverage path and makes every future creation self-describing.

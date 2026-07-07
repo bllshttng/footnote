@@ -43,7 +43,7 @@ Rust staleness folds into the overall status (`stale`) and the exit code (1).
 A binary-embedded commit cross-check remains separately planned for
 machines where the marker is absent.
 
-Plus an advisory **mux front-door** check (x-c267): now that the Rust mux binary
+Plus an advisory **mux front-door** check: now that the Rust mux binary
 (`crates/fno`) is meant to own `fno` on PATH, `doctor` reports whether it does -
 `mux_front_door` is `active` (mux cargo-installed and `fno` on PATH resolves to
 it), `shadowed` (installed but a Python `fno-py`, or nothing, wins PATH), or
