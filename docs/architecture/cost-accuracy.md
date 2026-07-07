@@ -37,7 +37,7 @@ transcript JSONL ──parse (dedup by message.id+requestId)──> SessionMetri
                                                                  ▼
 stop hook ──register-session-cost.sh──> session-cost.py ──> ledger.json
                                                                  │
-                budget cap (thrash-detector compute_session_cost)┤
+                budget cap (loopcheck.rs cost/wall-clock caps)   ┤
                 graph.json cost_sessions (register path)─────────┤
                 ledger.md render ────────────────────────────────┘
 ```
