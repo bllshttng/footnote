@@ -464,6 +464,41 @@ def set_cmd(
         # Scope + path printed once (AC2-UI).
         typer.echo(f"({results[0].scope}: {results[0].path})")
 
+    # x-e106: setting pr_watch.enabled couples to the launchd agent so enabled
+    # means running. Loud on failure, never reverts config (doctor is the guard).
+    for r in results:
+        if r.key.endswith("pr_watch.enabled"):
+            _couple_pr_watch(bool(r.value))
+            break
+
+
+def _couple_pr_watch(enabled: bool) -> None:
+    """Install+load (or unload) the PR-watch agent to match pr_watch.enabled."""
+    import sys
+
+    try:
+        from fno.pr_watch.cli import deactivate_watcher, ensure_watcher_activated
+    except Exception as exc:  # noqa: BLE001 - coupling is best-effort
+        typer.echo(f"pr-watch coupling unavailable: {exc}", file=sys.stderr)
+        return
+
+    if enabled:
+        outcome = ensure_watcher_activated()
+        if outcome == "activated":
+            typer.echo("pr-watch: agent installed and loaded.")
+        elif outcome == "already-running":
+            typer.echo("pr-watch: agent already running.")
+        else:
+            # AC1-ERR: activation failed but enable stuck; surface loudly.
+            typer.echo(
+                f"pr-watch: WARNING enabled but activation failed ({outcome}); "
+                "config stays enabled. Run `fno pr-watch install` or check `fno doctor`.",
+                file=sys.stderr,
+            )
+    else:
+        outcome = deactivate_watcher()
+        typer.echo(f"pr-watch: agent {outcome} (disabled).")
+
 
 @app.command("unset")
 def unset_cmd(

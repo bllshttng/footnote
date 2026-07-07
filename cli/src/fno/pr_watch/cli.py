@@ -228,12 +228,17 @@ def install(
     dry_run: bool = typer.Option(False, "-N", "--dry-run", help="Print plist; write nothing."),
     interval: int = typer.Option(0, "--interval", help="Poll interval in seconds (0 = use config)."),
     model: str = typer.Option("", "--model", help="Model for headless fires (empty = use config)."),
+    no_activate: bool = typer.Option(
+        False,
+        "--no-activate",
+        help="Write the plist but do NOT launchctl load it (packaging/CI escape).",
+    ),
 ) -> None:
-    """Render and (optionally) install the global PR-state watcher LaunchAgent.
+    """Render and install the global PR-state watcher LaunchAgent, then load it.
 
     Prints the full plist before writing.  Requires explicit confirmation
-    before writing to ~/Library/LaunchAgents/.  Does NOT run launchctl load
-    (human gate: you review the plist and load it yourself).
+    before writing to ~/Library/LaunchAgents/, then runs ``launchctl load`` so
+    enabled means running (x-e106).  Pass ``--no-activate`` to write only.
     """
     from fno.pr_watch import _install as m
 
@@ -248,7 +253,37 @@ def install(
         install_path=os.environ.get("PATH", "/usr/bin:/bin"),
         interval=_interval,
         dry_run=dry_run,
+        activate=not no_activate,
     )
+
+
+# ---------------------------------------------------------------------------
+# Activation coupling entrypoints (called by `fno config set pr_watch.enabled`)
+# ---------------------------------------------------------------------------
+
+
+def ensure_watcher_activated() -> str:
+    """Install + load the global watcher if absent (idempotent, non-interactive).
+
+    The config-set hook path: it must never prompt (the interactive install
+    confirm would wedge a headless `fno config set`).  Returns the outcome
+    string from ``_install.ensure_activated``.
+    """
+    from fno.pr_watch import _install as m
+
+    return m.ensure_activated(
+        launch_agents_dir=_LAUNCH_AGENTS_DIR,
+        fno_binary=_resolve_fno_binary(),
+        install_path=os.environ.get("PATH", "/usr/bin:/bin"),
+        interval=load_settings().config.pr_watch.interval_seconds,
+    )
+
+
+def deactivate_watcher() -> str:
+    """Unload the watcher (keep the plist) when pr_watch.enabled is set false."""
+    from fno.pr_watch import _install as m
+
+    return m.unload_only(launch_agents_dir=_LAUNCH_AGENTS_DIR)
 
 
 # ---------------------------------------------------------------------------
