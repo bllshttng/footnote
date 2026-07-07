@@ -51,13 +51,19 @@ class MigrateResult:
 
 
 def _phase_files(folder: Path) -> list[Path]:
-    """Return the ``NN-*.md`` phase files in numeric order, excluding 00-INDEX."""
+    """Return the ``NN[a-z]*-*.md`` phase files in order, excluding 00-INDEX.
+
+    Matches both plain (``01-foo.md``) and letter-suffixed (``02b-foo.md``)
+    phase names - the vault uses both, and a name the regex missed would be
+    silently dropped from the migrated doc. Lexicographic sort orders them
+    correctly (``01`` < ``01a`` < ``02`` < ``02b``).
+    """
     phases = [
         p
         for p in folder.iterdir()
         if p.is_file()
         and p.name != "00-INDEX.md"
-        and re.match(r"^\d{2}-.*\.md$", p.name)
+        and re.match(r"^\d{2}[a-z]*-.*\.md$", p.name)
     ]
     return sorted(phases, key=lambda p: p.name)
 
@@ -76,20 +82,28 @@ def _build_single_doc(folder: Path) -> tuple[str, int, bool]:
     byte-identical; phase bodies are inlined frontmatter-stripped in order; a
     COMPLETION.md (if present) becomes a ``## Completion Log`` section.
     """
-    index_text = (folder / "00-INDEX.md").read_text(encoding="utf-8")
+    def _read(path: Path) -> str:
+        # A read failure here happens before any write, so the folder stays
+        # intact; surface it as a clean MigrateError instead of a raw traceback.
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise MigrateError(
+                f"cannot read {path.name}: {exc}", kind="read-failed"
+            ) from exc
+
+    index_text = _read(folder / "00-INDEX.md")
     parts = [index_text.rstrip("\n")]
 
     phases = _phase_files(folder)
     for phase in phases:
-        body = _strip_frontmatter(phase.read_text(encoding="utf-8")).strip("\n")
+        body = _strip_frontmatter(_read(phase)).strip("\n")
         parts.append(f"<!-- phase: {phase.name} -->\n\n{body}")
 
     completion = folder / "COMPLETION.md"
     folded = completion.exists()
     if folded:
-        comp_body = _strip_frontmatter(
-            completion.read_text(encoding="utf-8")
-        ).strip("\n")
+        comp_body = _strip_frontmatter(_read(completion)).strip("\n")
         parts.append(f"## Completion Log\n\n{comp_body}")
 
     return "\n\n".join(parts) + "\n", len(phases), folded
@@ -199,12 +213,14 @@ def migrate_folder(
     # folder. On folder-rename failure, unlink the target so no partial doc
     # survives and the folder is left untouched (AC2-ERR).
     tmp = folder.parent / f".{folder.name}.md.tmp"
-    tmp.write_text(content, encoding="utf-8")
     try:
+        tmp.write_text(content, encoding="utf-8")
         os.replace(tmp, target)
-    except OSError:
+    except OSError as exc:
         tmp.unlink(missing_ok=True)
-        raise
+        raise MigrateError(
+            f"failed writing {target.name}: {exc}", kind="write-failed"
+        ) from exc
     try:
         os.rename(folder, archived_dir)
     except OSError as exc:
@@ -216,7 +232,18 @@ def migrate_folder(
 
     node_updated = False
     if update_node is not None:
-        _set_node_plan_path(update_node, str(target))
+        # Migration already landed; a graph-update failure leaves plan_path
+        # unchanged (the folder stays archived, doc stays put). Surface it
+        # cleanly rather than as a raw traceback.
+        try:
+            _set_node_plan_path(update_node, str(target))
+        except MigrateError:
+            raise
+        except OSError as exc:
+            raise MigrateError(
+                f"migrated, but plan_path repoint failed (plan_path unchanged): {exc}",
+                kind="node-update-failed",
+            ) from exc
         node_updated = True
 
     msg = (

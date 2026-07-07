@@ -63,6 +63,33 @@ def test_relocation_preserves_frontmatter_and_exec_strategy_verbatim(tmp_path):
     assert res.new_doc_path.name == "2026-05-20-example.md"
 
 
+def test_lettered_phase_files_are_not_dropped(tmp_path):
+    # The vault uses letter-suffixed phases (02b-, 04c-); dropping one would
+    # silently lose a phase body. All must inline, in order.
+    d = tmp_path / "2026-05-20-example"
+    d.mkdir()
+    (d / "00-INDEX.md").write_text("---\nstatus: done\n---\n\n# Head\n", encoding="utf-8")
+    (d / "01-a.md").write_text("# P1\n\nalpha\n", encoding="utf-8")
+    (d / "01b-a.md").write_text("# P1b\n\nbeta\n", encoding="utf-8")
+    (d / "02-a.md").write_text("# P2\n\ngamma\n", encoding="utf-8")
+
+    res = migrate_folder(d)
+    doc = res.new_doc_path.read_text(encoding="utf-8")
+    assert res.phase_count == 3
+    assert doc.index("alpha") < doc.index("beta") < doc.index("gamma")
+
+
+def test_read_failure_surfaces_clean_error(tmp_path):
+    d = _folder(tmp_path)
+    # A phase file that is not valid UTF-8 -> clean MigrateError, folder intact.
+    (d / "01-bad.md").write_bytes(b"\xff\xfe not utf8")
+    with pytest.raises(MigrateError) as exc:
+        migrate_folder(d)
+    assert exc.value.kind == "read-failed"
+    assert d.is_dir()
+    assert not (tmp_path / "2026-05-20-example.md").exists()
+
+
 def test_completion_folds_in_as_section(tmp_path):
     d = _folder(tmp_path, phases=("body",), completion="Shipped in PR #3. All green.")
     res = migrate_folder(d)
