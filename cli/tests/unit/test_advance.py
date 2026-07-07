@@ -261,6 +261,27 @@ def test_advance_threads_node_pins_to_spawn(iso, monkeypatch):
     assert captured == {"model": "glm-4.7", "provider": "codex"}
 
 
+def test_advance_resolves_node_tier_to_model(iso, monkeypatch):
+    """AC3-HP wiring: a node's model_tier resolves to a concrete --model at the
+    advance spawn (no snapshot -> the deterministic static table)."""
+    captured = {}
+
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+        captured.update(model=model)
+        return "sid"
+
+    # Force the static table so the resolution is deterministic in CI.
+    from fno.adapters.providers import benchmarks as _bm
+    monkeypatch.setattr(_bm, "load_snapshot", lambda path=None: None)
+
+    node = {**NODE, "model_tier": "low"}
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    monkeypatch.setattr(adv, "_spawn_worker", spawn)
+    res = adv.advance(project="fno", events_path=iso)
+    assert res.decision == "dispatched"
+    assert captured["model"] == "glm-4.7"  # STATIC_TIERS['low'][0]
+
+
 def test_advance_cli_pin_overrides_node(iso, monkeypatch):
     """Locked Decision 1: a dispatch-time model/provider outranks node annotations."""
     captured = {}

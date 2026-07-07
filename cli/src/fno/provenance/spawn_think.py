@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Optional
 
 from fno import _subprocess_util
+from fno import route_resolve as _route_resolve
 from fno.provenance.resolver import resolve_transcript
 
 _LOG = logging.getLogger(__name__)
@@ -1141,7 +1142,7 @@ def maybe_spawn_think(
             node_slug,
             reason,
             invocation_suffix,
-            model=node.get("model"),
+            model=_route_resolve.node_model(node),
             provider=node.get("provider"),
         )
     except SpawnAlreadyRunning:

@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Optional
 
 from fno import _subprocess_util
+from fno import route_resolve as _route_resolve
 
 _LOG = logging.getLogger(__name__)
 
@@ -747,7 +748,7 @@ def dispatch_lanes(
             _seed_lane_local_settings(worktree, node_id, base_pid)
             short_id = _spawn_worker(
                 node_id, str(worktree), slug,
-                model=model if model is not None else node.get("model"),
+                model=_route_resolve.node_model(node, explicit=model),
                 provider=provider if provider is not None else node.get("provider"),
             )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
@@ -960,7 +961,7 @@ def advance(
     try:
         short_id = _spawn_worker(
             node_id, node_cwd, node.get("slug") or node.get("title"),
-            model=model if model is not None else node.get("model"),
+            model=_route_resolve.node_model(node, explicit=model),
             provider=provider if provider is not None else node.get("provider"),
         )
     except SpawnAlreadyRunning:
@@ -1192,7 +1193,7 @@ def _dispatch_one_dependent(
     try:
         short_id = _spawn_worker(
             node_id, root, dep.get("slug"),
-            model=model if model is not None else dep.get("model"),
+            model=_route_resolve.node_model(dep, explicit=model),
             provider=provider if provider is not None else dep.get("provider"),
         )
     except SpawnAlreadyRunning:
