@@ -273,6 +273,22 @@ validate_event() {
         fi
     fi
 
+    # gate_escape: reason enum check (x-f894 autonomy-debt counter) - mirrors
+    # the Python validator so a producer typo fails loud in both. reason is a
+    # required field (caught above if absent); this rejects a present-but-bad
+    # value so it is never a silent bucket in the retro ranking.
+    if [[ "$type" == "gate_escape" ]]; then
+        local ge_reason enum_match
+        ge_reason=$(jq -r '.data.reason // empty' <<<"$payload" 2>/dev/null)
+        if [[ -n "$ge_reason" ]]; then
+            enum_match=$(jq -r --arg r "$ge_reason" '.event_types[] | select(.name == "gate_escape") | .data.properties.reason.enum[]? | select(. == $r)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
+            if [[ -z "$enum_match" ]]; then
+                _ev_warn "unknown reason: $ge_reason"
+                return 1
+            fi
+        fi
+    fi
+
     # Size cap: encode data and check bytes.
     local max_bytes data_size
     max_bytes=$(jq -r '.limits.max_data_bytes // 65536' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)

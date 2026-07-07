@@ -216,6 +216,17 @@ def validate(event: dict[str, Any]) -> None:
                 f"(allowed: {allowed})"
             )
 
+    # Same chokepoint rationale: gate_escape's reason drives the retro
+    # autonomy-debt ranking (x-f894). A typo'd reason must fail CLOSED here so
+    # it is loud, not a silent bucket - the design's #1 correctness invariant.
+    if type_name == "gate_escape":
+        allowed = type_spec["data"]["properties"]["reason"]["enum"]
+        if data.get("reason") not in allowed:
+            raise ValidationError(
+                f"unknown gate_escape data.reason: {data.get('reason')!r} "
+                f"(allowed: {allowed})"
+            )
+
     serialized = _json.dumps(data, separators=(",", ":")).encode("utf-8")
     if len(serialized) > MAX_DATA_BYTES:
         raise ValidationError(

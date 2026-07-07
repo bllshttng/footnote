@@ -110,3 +110,7 @@
 {"expect":"valid","reason":"review_attestation head-pinned pass","event":{"ts":"2026-07-05T09:30:42Z","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"abc123","verdict":"pass"}}}
 {"expect":"invalid","reason":"review_attestation missing head_sha","event":{"ts":"2026-07-05T09:30:42Z","type":"review_attestation","source":"target","data":{"reviewer":"sigma","verdict":"pass"}}}
 {"expect":"invalid","reason":"review_attestation out-of-enum verdict","event":{"ts":"2026-07-05T09:30:42Z","type":"review_attestation","source":"target","data":{"reviewer":"sigma","head_sha":"abc123","verdict":"maybe"}}}
+{"expect":"valid","reason":"gate_escape dead-bot from reconcile with pr attribution","event":{"ts":"2026-07-07T00:00:00Z","type":"gate_escape","source":"backlog","data":{"reason":"dead-bot","pr":218,"graph_node_id":"x-cccc"}}}
+{"expect":"valid","reason":"gate_escape manual catch-all (other) with detail","event":{"ts":"2026-07-07T00:00:00Z","type":"gate_escape","source":"test","data":{"reason":"other","detail":"hand-unblocked a wedged spawn"}}}
+{"expect":"invalid","reason":"gate_escape bad reason enum (typo must fail closed, not silent bucket)","event":{"ts":"2026-07-07T00:00:00Z","type":"gate_escape","source":"backlog","data":{"reason":"deadbot"}}}
+{"expect":"invalid","reason":"gate_escape missing required reason","event":{"ts":"2026-07-07T00:00:00Z","type":"gate_escape","source":"backlog","data":{"pr":218}}}
