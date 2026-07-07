@@ -178,6 +178,29 @@ def test_classify_ambiguous_is_inbox_not_guessed() -> None:
     assert disposition == DISPOSITION_INBOX and cand is not None and cand.tier == "inbox"
 
 
+def test_classify_interrupted_wedge_is_node_not_archived() -> None:
+    """x-42f6 regression: a finalize-format Interrupted/Aborted postmortem must
+    classify by body, NOT auto-archive on the interrupt/abort substring - else
+    the widened stuck-session corpus is silently dropped (codex P2)."""
+    for reason in ("Interrupted", "Aborted"):
+        disposition, cand = classify_postmortem(
+            _item("worker hit a split-brain after respawn", subkind=reason)
+        )
+        assert disposition == DISPOSITION_NODE, f"{reason} wedge must be a node"
+        assert cand is not None and cand.tier == "node"
+
+
+def test_classify_interrupted_benign_is_inbox_not_archived() -> None:
+    """A stuck-reason postmortem with no wedge text surfaces to inbox (not
+    archived, not guessed into a node)."""
+    for reason in ("Interrupted", "Aborted"):
+        disposition, cand = classify_postmortem(
+            _item("session was cancelled while doing normal work", subkind=reason)
+        )
+        assert disposition == DISPOSITION_INBOX, f"{reason} no-wedge must be inbox"
+        assert cand is not None and cand.tier == "inbox"
+
+
 def test_classify_reasonless_cancel_wording_is_not_archived() -> None:
     """Archive requires an EXPLICIT one-off reason kind: a reason-less gist
     merely quoting cancel-ish words (.target-cancelled sentinel) is ambiguous
