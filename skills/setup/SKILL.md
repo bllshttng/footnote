@@ -97,6 +97,31 @@ fno config set config.review.external_reviewers gemini,codex
 fno config set config.auto_merge.enabled false
 ```
 
+## Step 2b: Review gate (how a PR is allowed to go green)
+
+`fno setup plan` asks about `config.review.external_reviewers` (which logins to *request* and *recognize*), but the GATE - what `fno-agents loop-check` REQUIRES before `/target` promises - lives in three `advanced`-tier keys the default plan does not surface, so most users never learn the bot-less options exist. Offer the choice explicitly (ask; default = none / PR + CI only). These are additive - a repo can require both a bot AND a local sigma pass:
+
+> "How should review gate a PR before `/target` considers it done?
+>  1. **GitHub App bots** - a bot login (e.g. `chatgpt-codex-connector`, `gemini-code-assist`) must post a review. Needs the bot installed on the repo.
+>  2. **Local attestation** - `/target` runs a `/review sigma` panel in-session and attests on a clean pass; no GitHub bot needed. Best for a solo / claude-only harness. (`declare` is a bare 'I looked' self-cert, not a review - offer it only as an escape hatch.)
+>  3. **CLI peers** - a codex/gemini CLI posts a real PR review under a distinct machine account.
+>  4. **None** - PR + CI only (default)."
+
+Map the answer to keys and write them (use `--local` for a per-repo gate; global otherwise). `/target` runs whatever you set here before it promises - so a `reviewers`/`peers` gate always has a producer and never hangs the loop:
+
+```bash
+# 1. GitHub bots (the gate list, distinct from external_reviewers)
+fno config set config.review.github_apps chatgpt-codex-connector,gemini-code-assist --local
+# 2. Local attestation (sigma = real six-agent review; declare = self-cert escape hatch)
+fno config set config.review.reviewers sigma --local      # or: declare
+# 3. CLI peers (also set the identity the review posts under + its PAT env var)
+fno config set config.review.peers codex --local
+fno config set config.review.peer_identity fno-peer-bot --local
+fno config set config.review.peer_token_env GH_PEER_TOKEN --local
+```
+
+Leaving all three empty keeps today's PR + CI-only behavior.
+
 ## Step 3: Workspace / project topology (`config.work.workspaces`)
 
 The `config.work` map (workspace -> projects[]) is topology, not a scalar leaf,

@@ -41,6 +41,8 @@ Do not assess the code yourself in lieu of waiting - the agents exist precisely 
 
 If both sigma-review agents AND external review (`/pr check`) flag the same issue, that's confirmation - fix it once, both gates benefit.
 
+**Skip this pre-ship run when `config.review.reviewers` includes `sigma`.** In that case sigma is a *configured gate*, not advisory, and runs exactly once post-ship on the final shipped HEAD (see the Completion section of SKILL.md), where it emits the head-pinned attestation loop-check requires. Running it here too would be a wasted second panel whose attestation any later fix invalidates. When `sigma` is NOT a configured reviewer, run it here as the cheap advisory insurance as usual.
+
 ## Intent verification (no promise-time self-grade)
 
 There is no promise-time self-grade phase (control-plane step 6, ab-f8e5f214).
