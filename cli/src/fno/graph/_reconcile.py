@@ -745,6 +745,15 @@ def emit_gate_escape_for_record(
         if not wanted:
             return None  # AC2: nothing required, so nothing to escape
 
+        # Resolve the events log NOW - before the review fetch - so a fetch
+        # failure still knows where to write the durable emit-failure counter
+        # (AC7). If this were resolved only after the fetch, a gh-auth blind spot
+        # would log nothing and retro would read a silent zero (the exact
+        # silent-low-reading the metric exists to prevent). Resolved AFTER the
+        # no-required-bots return above, so a clean repo never touches the log.
+        if resolved_events is None:
+            resolved_events = _canonical_events_path()
+
         # On a review-fetch failure we CANNOT tell whether a required bot
         # reviewed, so we fail open (do not emit): a missed escape (under-report)
         # is the safe direction, and the failure is logged so retro surfaces the
@@ -755,8 +764,6 @@ def emit_gate_escape_for_record(
         if not unmet:
             return None  # AC2b: every required bot reviewed; gate was met
 
-        if resolved_events is None:
-            resolved_events = _canonical_events_path()
         if _gate_escape_already_emitted(resolved_events, record.pr_number, reason):
             return None  # AC4: already counted this (pr, reason)
 

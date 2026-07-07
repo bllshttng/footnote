@@ -124,3 +124,24 @@ def test_review_fetch_failure_is_a_logged_blind_spot(tmp_path):
     assert out is None
     assert _gate_escapes(tmp_path) == []
     assert (tmp_path / ".fno" / "gate_escape_emit_failures.jsonl").exists()
+
+
+def test_ac7_production_default_logs_fetch_failure_at_canonical(tmp_path, monkeypatch):
+    """AC7 in the PRODUCTION shape: events_path=None (reconcile's real call). A
+    review-fetch failure must still land a durable failure line at the canonical
+    log - resolving it only after the fetch would silently drop it (the bug the
+    reviewer caught: fetch fails before resolved_events is set)."""
+    import fno.graph._reconcile as recon
+
+    monkeypatch.setattr(recon, "_canonical_events_path", lambda: _epath(tmp_path))
+
+    def _raise(*a, **k):
+        raise RuntimeError("gh auth expired")
+
+    out = emit_gate_escape_for_record(
+        _record(tmp_path), required_bots=["codex"], reviews_fetcher=_raise
+    )  # events_path defaults to None, as in cmd_reconcile
+    assert out is None
+    fail_log = tmp_path / ".fno" / "gate_escape_emit_failures.jsonl"
+    assert fail_log.exists(), "review-fetch blind spot must be durably logged"
+    assert len([x for x in fail_log.read_text().splitlines() if x.strip()]) == 1

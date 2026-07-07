@@ -4445,6 +4445,10 @@ def cmd_reconcile(
                 try:
                     from fno.config import load_settings_for_repo
                     _settings = load_settings_for_repo(Path(record.cwd))
+                    # github_apps is the bot half of the required gate; a local
+                    # peer reviewer that never reviewed is NOT counted here. That
+                    # under-reports (fail-safe direction) and is acceptable for a
+                    # Tier-1 metric - dead-bot is the recurring escape this catches.
                     _required_bots = list(
                         getattr(getattr(_settings, "review", None), "github_apps", None)
                         or []
