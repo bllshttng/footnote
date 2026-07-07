@@ -153,6 +153,33 @@ def test_bare_ref_compares_remote_not_local(tmp_path):
     assert code == 3  # would be 0 (pass) if it compared the stale local main
 
 
+def test_slash_base_resolves_to_origin_not_phantom_remote(tmp_path):
+    """A slash-containing base branch ('releases/v1') with no matching remote
+    resolves to origin/releases/v1, not a phantom remote 'releases' whose fetch
+    would fail and silently skip the guard."""
+    now = datetime.now(timezone.utc)
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True)
+    work = tmp_path / "work"
+    subprocess.run(["git", "init", "-b", "main", str(work)], check=True)
+    _git(work, "config", "user.email", "t@t.t")
+    _git(work, "config", "user.name", "t")
+    _commit(work, "base.txt", now - timedelta(days=3), "init")  # old merge-base
+    _git(work, "remote", "add", "origin", str(bare))
+    _git(work, "push", "-u", "origin", "main")
+    _git(work, "checkout", "-b", "releases/v1")
+    _git(work, "push", "-u", "origin", "releases/v1")
+    _git(work, "checkout", "-b", "feature/x")
+    _commit(work, "feature.txt", now, "feature work")
+    _git(work, "checkout", "releases/v1")
+    _commit(work, "release-advance.txt", now, "release advances")
+    _git(work, "push", "origin", "releases/v1")
+    _git(work, "checkout", "feature/x")
+    code, msg = _preflight.check_stale_base(base="releases/v1", cwd=str(work))
+    assert code == 3  # refused, not silently skipped by a failed fetch
+    assert "days behind" in (msg or "")
+
+
 def test_wrong_bypass_value_still_refuses(tmp_path):  # AC1-FR
     work = _repo(tmp_path, timedelta(days=3))
     code, _ = _preflight.check_stale_base(cwd=str(work), env={"FNO_PR_BASE_OK": "1"})

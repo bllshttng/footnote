@@ -49,11 +49,19 @@ def _committer_epoch(ref: str, cwd: str) -> Optional[int]:
         return None
 
 
-def _split_base(base: str) -> Tuple[str, str]:
-    """``origin/main`` -> ``("origin", "main")``; a bare ref fetches all of origin."""
+def _split_base(base: str, cwd: str) -> Tuple[str, str]:
+    """``origin/main`` -> ``("origin", "main")``. A leading segment is treated as
+    the remote ONLY when it matches a real git remote; otherwise the whole ref is
+    fetched from ``origin``, so a slash-containing branch (``releases/v1``) is not
+    mis-split into a phantom remote ``releases`` (which would fail the fetch and
+    silently skip the guard)."""
     if "/" in base:
         remote, ref = base.split("/", 1)
-        return remote, ref
+        res = _git(["remote"], cwd)
+        if res.returncode == 0:
+            remotes = {ln.strip() for ln in res.stdout.splitlines() if ln.strip()}
+            if remote in remotes:
+                return remote, ref
     return "origin", base
 
 
@@ -117,13 +125,15 @@ def check_stale_base(
         _emit_bypass(repo, e, events_path)
         return OK, None
 
-    remote, ref = _split_base(base)
-    # Compare against the remote-tracking ref we actually fetch. `git fetch` only
-    # advances refs/remotes/<remote>/<ref>, never a local branch, so a bare
-    # `--base main` must still read origin/main - comparing local `main` would
-    # read a ref the fetch never touched and pass exactly when it should refuse.
-    compare = f"{remote}/{ref}"
     try:
+        # _split_base shells `git remote`, so it shares the fail-open ToolMissing
+        # guard with the fetch. Compare against the remote-tracking ref we
+        # actually fetch: `git fetch` advances refs/remotes/<remote>/<ref>, never
+        # a local branch, so a bare `--base main` must still read origin/main -
+        # comparing local `main` would read a ref the fetch never touched and
+        # pass exactly when it should refuse.
+        remote, ref = _split_base(base, repo)
+        compare = f"{remote}/{ref}"
         fetch = _git(["fetch", remote, ref, "--quiet"], repo)
     except ToolMissing:
         return OK, "could not run git; stale-base check skipped"
@@ -138,6 +148,10 @@ def check_stale_base(
         return UNRELATED, _unrelated_message(compare)
 
     behind = _git(["rev-list", "--count", f"{mb_sha}..{compare}"], repo)
+    if behind.returncode != 0:
+        # Fail-open on an unexpected rev-list error rather than misreading empty
+        # stdout as behind-count 0 (a false "up to date" pass).
+        return OK, "could not determine behind count; stale-base check skipped"
     if behind.stdout.strip() == "0":
         return OK, None  # up to date; merge-base age is irrelevant
 
