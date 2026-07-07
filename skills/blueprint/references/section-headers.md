@@ -5,11 +5,11 @@
 1. **Humans** browsing a plan in Obsidian or GitHub can navigate by section.
 2. **Backlog wikilinks** (`plan_path: internal/.../00-INDEX.md#wave-3-component-2-profile-sweep-nh-first`) resolve to a specific shippable unit by hashing into the slug-form of the header. Without a stable header, the link silently breaks.
 
-`scripts/validate-plan.sh` enforces the wave-header subset via `validate_wave_section_headers()`. Other headers are convention, not validated, but emitted by [`index-template.md`](./index-template.md) for consistency.
+`scripts/validate-plan.sh` enforces the wave-header subset via `validate_wave_section_headers()`. Other headers are convention, not validated, but emitted into the single plan doc by the mutation script ([`../scripts/mutate_doc.py`](../scripts/mutate_doc.py)) for consistency.
 
 ## Canonical headers
 
-In emit order for full-mode plans:
+In emit order, inside the single plan doc's `## Execution Strategy` waves:
 
 | Header | Required | Purpose |
 |--------|----------|---------|
@@ -25,7 +25,7 @@ In emit order for full-mode plans:
 | `## File Ownership Map` | optional | Per-task file ownership for parallel-wave conflict detection |
 | `## Out of Scope` | optional | Explicit non-goals |
 
-Quick-mode (single-file) plans skip waves entirely and inline `## Kill Criteria` as a fenced YAML block — they do not produce wave headers.
+Quick plans skip waves entirely and carry `kill_criteria` in frontmatter (never a `## Kill Criteria` heading — the heading form is invisible to the stamp/validate parser) — they do not produce wave headers.
 
 ## Obsidian slug rules
 
@@ -86,8 +86,8 @@ When splitting a previously-monolithic plan into per-wave nodes, point each sibl
 
 | File | Role |
 |------|------|
-| [`index-template.md`](./index-template.md) | Emits `## Wave N: <name>` blocks after `## Execution Strategy` |
+| [`../scripts/mutate_doc.py`](../scripts/mutate_doc.py) | Appends `## Execution Strategy` (and, per wave, `## Wave N: <name>`) to the single plan doc |
 | [`../scripts/validate-plan.sh`](../scripts/validate-plan.sh) | `validate_wave_section_headers()` asserts YAML-vs-headers parity |
 | This file | Reference doc — slug rules, examples, backlog usage |
 
-Adding a new canonical header? Update the table in the [Canonical headers](#canonical-headers) section above and (if it should be enforced) add a check to `validate-plan.sh`. Adding to the template alone is not enough — the convention has to be queryable from outside `/blueprint`.
+Adding a new canonical header? Update the table in the [Canonical headers](#canonical-headers) section above and (if it should be enforced) add a check to `validate-plan.sh`. Adding to the emitter alone is not enough — the convention has to be queryable from outside `/blueprint`.
