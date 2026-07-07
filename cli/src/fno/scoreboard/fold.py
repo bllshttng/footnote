@@ -16,11 +16,29 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# termination_reason -> outcome class. "Done*" is a delivered ship; the wedge
-# set is the stuck-terminal set. Everything else (Interrupted, delegated,
-# NoWork, or no reason at all) is neither and lands in "other" so the spend
-# split always reconciles to the window total.
+# termination_reason -> outcome class. The delivered-ship set is the explicit
+# _SHIPPED_TERMINALS allowlist below; the wedge set is the stuck-terminal set.
+# Everything else (Interrupted, delegated, NoWork, DoneAwaitingMerge, or no
+# reason at all) is neither and lands in "other" so the spend split always
+# reconciles to the window total.
 _WEDGE_REASONS = frozenset({"NoProgress", "Budget", "Aborted"})
+
+# Terminal reasons that count a node as DELIVERED for telemetry (cost
+# attribution + shipped/surviving node sets). An explicit allowlist, NOT a
+# `startswith("Done")` prefix match: DoneAwaitingMerge is a Done* terminal
+# (the agent finished) but the PR is NOT merged and its CI is red pending a
+# human merge past pre-existing main-red, so counting it as delivered would
+# inflate autonomy/survival metrics before the work actually lands. DoneBatched
+# stays (it delivers via the shared batch PR). This is intentionally looser than
+# finalize.SHIP_REASONS (which gates plan stamp/graduate on DonePRGreen|
+# DoneAdvisory only) - "delivered for telemetry" and "graduate the plan" differ.
+_SHIPPED_TERMINALS = frozenset({"DonePRGreen", "DoneAdvisory", "DoneBatched"})
+
+
+def _is_shipped_reason(termination_reason: str | None) -> bool:
+    """True iff a terminal reason counts as a delivered node for telemetry."""
+    return (termination_reason or "") in _SHIPPED_TERMINALS
+
 
 # Survival follow-up window: a fix-node created within this many days of a
 # node's ship counts against that node's survival.
@@ -163,7 +181,7 @@ def build_scoreboard(
     for r in windowed:
         cost = _num(r.get("cost_usd"))  # a malformed cost never crashes the fold
         tr = r.get("termination_reason")
-        if tr and tr.startswith("Done"):
+        if _is_shipped_reason(tr):
             ship_cost += cost
         elif tr in _WEDGE_REASONS:
             wedge_cost += cost
@@ -176,7 +194,7 @@ def build_scoreboard(
     }
 
     # Shipped nodes in window: distinct graph_node_id among Done* rows.
-    ship_rows = [r for r in windowed if (r.get("termination_reason") or "").startswith("Done")]
+    ship_rows = [r for r in windowed if _is_shipped_reason(r.get("termination_reason"))]
     shipped_nodes = {r["graph_node_id"] for r in ship_rows if r.get("graph_node_id")}
 
     autonomy = _autonomy(touch_events, shipped_nodes, cutoff, now)
@@ -323,7 +341,7 @@ def build_calibration(verdict_events: list[dict], rows: list[dict], graph_nodes:
     ship_ts: dict[str, datetime] = {}
     for r in rows:
         nid = r.get("graph_node_id")
-        if nid and (r.get("termination_reason") or "").startswith("Done"):
+        if nid and _is_shipped_reason(r.get("termination_reason")):
             dt = _parse_ts(r.get("completed"))
             if dt and (nid not in ship_ts or dt > ship_ts[nid]):
                 ship_ts[nid] = dt
@@ -573,7 +591,7 @@ def build_skill_scoreboard(
 
     for r in windowed:
         skills, method = _extract_skill_runs(r, read_transcript=read_transcript)
-        shipped = (r.get("termination_reason") or "").startswith("Done")
+        shipped = _is_shipped_reason(r.get("termination_reason"))
         nid = r.get("graph_node_id")
         cost = _num(r.get("cost_usd"))
         touches = touches_by_node.get(nid, 0) if nid else 0

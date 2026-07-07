@@ -50,7 +50,11 @@ use std::process::Command;
 
 /// Terminal reasons that ran an actual ship (PR landed or advisory-complete).
 /// Only these run the completion side-effects (stamp/graduate/handoff); every
-/// terminal reason runs the ledger record.
+/// terminal reason runs the ledger record. `DoneBatched` and `DoneAwaitingMerge`
+/// are deliberately ABSENT: both are terminal-but-not-ship (the batch PR ships a
+/// batched member; a human merge past pre-existing main-red closes an
+/// awaiting-merge node via reconcile) - they get the always-branch ledger row
+/// but must never stamp/graduate the plan.
 const SHIP_REASONS: &[&str] = &["DonePRGreen", "DoneAdvisory"];
 
 /// Terminal reasons that signal a STUCK session: the loop-check verb saw no
@@ -111,7 +115,7 @@ const HELP: &str = "fno-agents finalize - terminal-only side-effect writer (step
 Usage: fno-agents finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> \\\n\
                            [--transcript <transcript.jsonl>] [--events <p>] [--global-events <p>] \\\n\
                            [--settings <p>] [--handoffs-dir <p>] [--postmortems-dir <p>]\n\
-Reason values: DonePRGreen|DoneAdvisory|NoWork|Budget|NoProgress|Interrupted|Aborted";
+Reason values: DonePRGreen|DoneAdvisory|DoneBatched|DoneAwaitingMerge|NoWork|Budget|NoProgress|Interrupted|Aborted";
 
 // ── manifest fields finalize reads directly ────────────────────────────────
 

@@ -24,6 +24,7 @@ from fno.scoreboard.fold import (
     _default_read_transcript,
     _default_skill_version,
     _extract_skill_runs,
+    _is_shipped_reason,
     _node_outcome,
     _parse_ts,
     _pct,
@@ -120,7 +121,7 @@ def build_corpus(
 
         nid = r.get("graph_node_id")
         session_id = _first_session_id(r)
-        shipped = (r.get("termination_reason") or "").startswith("Done")
+        shipped = _is_shipped_reason(r.get("termination_reason"))
         judgeable = bool(shipped and nid and w4_available and nid in by_id)
         outcome = (
             _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes)
