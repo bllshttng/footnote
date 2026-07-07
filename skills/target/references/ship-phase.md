@@ -32,8 +32,12 @@ flight. Without this, a `no-merge` worker opens the PR, exits, its PID-based
 `node:<id>` claim goes stale, and the node reads as fresh `ready` work again -
 a duplicate dispatch then rebuilds the already-shipped work into a conflicting PR.
 
-Do this BEFORE the optional rebase/merge step below, so the link lands even
-when no merge ever happens:
+This link is the linchpin of the promise-to-merge window: `pr-watch` discovery,
+`fno backlog reconcile`, and merge-triggered auto-continue all find the PR via
+`node.pr_number`. A dropped link blinds the whole chain for exactly that window,
+so the step is **verified, not fire-and-forget**: write, read back, retry once,
+and **refuse to promise** if it still did not stick (x-e106). Do this BEFORE the
+optional rebase/merge step below, so the link lands even when no merge happens:
 
 ```bash
 # graph_node_id lives in the target-state.md manifest BODY (below the closing
@@ -49,15 +53,38 @@ NODE_ID=$(awk '
     if ($0 != "" && $0 != "null") { print; exit }
   }
 ' .fno/target-state.md 2>/dev/null)
+
 if [[ -n "$NODE_ID" && "$NODE_ID" != "-" && -n "${PR_NUMBER:-}" ]]; then
-  fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" \
-    || echo "ship: WARN failed to link PR #$PR_NUMBER to node $NODE_ID (non-fatal)" >&2
+  existing=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]')
+  if [[ -n "$existing" && "$existing" != "null" && "$existing" != "$PR_NUMBER" ]]; then
+    # AC1-EDGE: an out-of-band authority (reconcile's merge ground truth) already
+    # linked a DIFFERENT PR. Surface, do NOT overwrite - the node is linked and
+    # the window is owned; reconcile stays the merge-time authority.
+    echo "ship: node $NODE_ID already linked to PR #$existing (out-of-band authority); leaving as-is, not writing #$PR_NUMBER" >&2
+  else
+    link_ok=""
+    for attempt in 1 2; do
+      # Idempotent: re-writing the same PR_NUMBER converges (AC2-FR crash re-run).
+      fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" 2>/dev/null || true
+      got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]')
+      [[ "$got" == "$PR_NUMBER" ]] && { link_ok=1; break; }
+    done
+    if [[ -z "$link_ok" ]]; then
+      # AC2-ERR: the write did not stick after one retry. REFUSE TO PROMISE - an
+      # unlinked node re-dispatches as duplicate work; blocking is cheaper than
+      # the cleanup. Emit help and STOP; do NOT emit <promise>.
+      echo "<help reason=\"pr-node-link-failed\" evidence=\"node $NODE_ID pr_number=${got:-<none>} expected=$PR_NUMBER\">PR #$PR_NUMBER did not link to backlog node $NODE_ID after one retry; refusing to promise. Fix then re-ship: fno backlog update $NODE_ID --pr-number $PR_NUMBER --pr-url $PR_URL</help>"
+      exit 1
+    fi
+  fi
 fi
 ```
 
-Non-fatal: a failed link must never block the ship - it is a best-effort
-in-flight signal. `_reconcile.py` still overwrites `pr_number` authoritatively
-from merge ground truth at merge time, so a double-link cannot break close.
+The read-back is the gate: a `fno backlog update` that reports success but does
+not persist (graph-lock contention, a partial write) is caught by re-reading
+`pr_number` and comparing. `_reconcile.py` remains the merge-time authority on
+`pr_number` - the verified retry never fights it (the different-value branch
+above defers to it), and the same-value race converges benignly.
 
 ## When to Invoke fno pr rebase
 

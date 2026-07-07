@@ -89,6 +89,23 @@ fi
 
 Before outputting `<promise>`, verify the pipeline actually completed: sigma-review ran and found no blocking issues, tests pass, validate is green, a PR exists (unless no_ship), and external review is satisfied (unless no_external). These are not gate booleans to read from a file - they are things you did during the session. If any phase was skipped unintentionally, run it before emitting the promise.
 
+**PR→node link assertion (x-e106).** When this session is node-bound (a
+`graph_node_id` other than `null` in the manifest body) and a PR was created,
+confirm `node.pr_number` equals the PR you are about to promise - the last-line
+guard for any ship that reached pre-promise through a path that skipped the
+ship-phase link step. This is a cheap read; on mismatch, re-link and re-verify
+before promising (an unlinked node re-dispatches as duplicate work):
+
+```bash
+if [[ -n "${NODE_ID:-}" && "$NODE_ID" != "null" && -n "${PR_NUMBER:-}" ]]; then
+  got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]')
+  if [[ "$got" != "$PR_NUMBER" ]]; then
+    echo "pre-promise: node $NODE_ID pr_number=$got != PR #$PR_NUMBER; re-linking before promise" >&2
+    fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" 2>/dev/null || true
+  fi
+fi
+```
+
 The loop-check verb (`fno-agents loop-check`) will verify the world independently: PR exists for HEAD + CI green + reviewed. A premature promise does not close the loop - it blocks with the failing read named, and the session continues until the world catches up or the backstop fires.
 
 ## Memory Pass (advisory)
