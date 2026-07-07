@@ -408,6 +408,7 @@ def _spawn_worker(
     *,
     reconcile_manifest: Optional[str] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> str:
     """Dispatch a fire-and-forget detached ``claude --bg`` ``/target`` worker.
 
@@ -432,7 +433,11 @@ def _spawn_worker(
     agent_name = _worker_agent_name(
         node_id, node_slug, prefix="reconcile" if is_reconcile else "target"
     )
-    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", "claude", "--substrate", "bg"]
+    # provider defaults to claude (the bg substrate is claude-only); a per-node or
+    # dispatch-time provider pin overrides it and fails loud downstream if the
+    # substrate cannot host it, rather than being silently dropped.
+    prov = (provider or "").strip() or "claude"
+    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", prov, "--substrate", "bg"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -649,8 +654,13 @@ def dispatch_lanes(
     project_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
     claims_root: Optional[Path] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> list[dict]:
     """Select and spawn up to ``max_lanes`` isolated background lanes.
+
+    A dispatch-time ``model``/``provider`` applies to every lane spawned this run
+    and outranks each node's own annotation (Locked Decision 1).
 
     The parallel-mode dispatcher (epic x-42d5, group 3). Selects distinct-domain
     ready nodes via :func:`select_lane_fill` (which atomically holds a lane slot
@@ -735,7 +745,11 @@ def dispatch_lanes(
         try:
             worktree = _ensure_lane_worktree(node_id, canonical_root=canonical)
             _seed_lane_local_settings(worktree, node_id, base_pid)
-            short_id = _spawn_worker(node_id, str(worktree), slug, model=node.get("model"))
+            short_id = _spawn_worker(
+                node_id, str(worktree), slug,
+                model=model if model is not None else node.get("model"),
+                provider=provider if provider is not None else node.get("provider"),
+            )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
             # Release BOTH the boot-window reservation and the dispatch-time lane
             # slot so the node returns to the pool (a later tick re-dispatches it).
@@ -860,8 +874,14 @@ def advance(
     project_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
     verbose: bool = False,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> AdvanceResult:
     """Dispatch the next now-unblocked node, if armed and unclaimed.
+
+    A dispatch-time ``model``/``provider`` (from ``fno backlog advance -m/-p``)
+    is the operator's in-the-moment word and outranks the node's own annotation
+    (Locked Decision 1); absent, the node's ``model``/``provider`` keys are used.
 
     Invoked ONLY after the node-close write commits (keyed by ``closed_node_id``,
     AC1-RACE), so within one reconcile/post-merge run the closed node is already
@@ -939,7 +959,9 @@ def advance(
     #    is non-raising (_safe_release) so the decision event below always lands.
     try:
         short_id = _spawn_worker(
-            node_id, node_cwd, node.get("slug") or node.get("title"), model=node.get("model")
+            node_id, node_cwd, node.get("slug") or node.get("title"),
+            model=model if model is not None else node.get("model"),
+            provider=provider if provider is not None else node.get("provider"),
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -1083,7 +1105,8 @@ def _walker_live_at(project_root: str) -> bool:
 
 
 def _dispatch_one_dependent(
-    dep: dict, closed_node_id: str, ev_path: Path, verbose: bool
+    dep: dict, closed_node_id: str, ev_path: Path, verbose: bool,
+    *, model: Optional[str] = None, provider: Optional[str] = None,
 ) -> AdvanceResult:
     """Resolve one dependent's own project root, dedup, and spawn its worker.
 
@@ -1167,7 +1190,11 @@ def _dispatch_one_dependent(
         return skip("claim-error", detail=str(exc))
 
     try:
-        short_id = _spawn_worker(node_id, root, dep.get("slug"), model=dep.get("model"))
+        short_id = _spawn_worker(
+            node_id, root, dep.get("slug"),
+            model=model if model is not None else dep.get("model"),
+            provider=provider if provider is not None else dep.get("provider"),
+        )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed")
@@ -1203,6 +1230,8 @@ def advance_dependents(
     project_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
     verbose: bool = False,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> list[AdvanceResult]:
     """Dispatch the closed node's now-unblocked direct dependents (G1 + RC1).
 
@@ -1250,4 +1279,9 @@ def advance_dependents(
         )
         return [AdvanceResult("skipped", EVENT_SKIPPED, reason="dependents-error", detail=str(exc))]
 
-    return [_dispatch_one_dependent(dep, closed_node_id, ev_path, verbose) for dep in deps]
+    return [
+        _dispatch_one_dependent(
+            dep, closed_node_id, ev_path, verbose, model=model, provider=provider
+        )
+        for dep in deps
+    ]

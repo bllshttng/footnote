@@ -151,7 +151,7 @@ def test_dispatch_reservation_held(iso, monkeypatch):
 def test_dispatched_happy_path_and_claim_survives(iso, monkeypatch):
     """AC1-HP + AC1-CLAIM: dispatch + reservation stays LIVE after advance returns."""
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None: "deadbeef")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None, provider=None: "deadbeef")
 
     res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
 
@@ -170,7 +170,7 @@ def test_idempotent_same_merge_twice(iso, monkeypatch):
     """AC1-FR: a second advance for the same node does not double-dispatch."""
     calls = []
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None: calls.append(node_id) or "sid")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda node_id, node_cwd, node_slug=None, model=None, provider=None: calls.append(node_id) or "sid")
 
     first = adv.advance(project="fno", events_path=iso)
     second = adv.advance(project="fno", events_path=iso)
@@ -182,7 +182,7 @@ def test_idempotent_same_merge_twice(iso, monkeypatch):
 
 def test_spawn_failure_releases_reservation(iso, monkeypatch):
     """AC1-ERR / AC2-FR: a spawn failure releases dispatch:<id> + emits failed."""
-    def boom(node_id, node_cwd, node_slug=None, model=None):
+    def boom(node_id, node_cwd, node_slug=None, model=None, provider=None):
         raise adv.SpawnError("daemon unreachable")
 
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -200,7 +200,7 @@ def test_spawn_failure_releases_reservation(iso, monkeypatch):
 
 def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
     """A name-collision (peer beat us) -> already-claimed, reservation released."""
-    def collide(node_id, node_cwd, node_slug=None, model=None):
+    def collide(node_id, node_cwd, node_slug=None, model=None, provider=None):
         raise adv.SpawnAlreadyRunning("tgt-... already exists")
 
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -219,7 +219,7 @@ def test_failed_then_retry_dispatches(iso, monkeypatch):
     'the reservation is free')."""
     n = {"calls": 0}
 
-    def spawn(node_id, node_cwd, node_slug=None, model=None):
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
         n["calls"] += 1
         if n["calls"] == 1:
             raise adv.SpawnError("transient daemon blip")
@@ -235,12 +235,54 @@ def test_failed_then_retry_dispatches(iso, monkeypatch):
     assert second.decision == "dispatched" and second.short_id == "sid2"
 
 
+def test_advance_cli_empty_model_exits_2(monkeypatch):
+    """AC2-ERR at the advance verb: an empty --model is a usage error, no dispatch."""
+    monkeypatch.setattr(
+        adv, "advance", lambda **k: pytest.fail("must not dispatch on an empty --model")
+    )
+    r = runner.invoke(app, ["backlog", "advance", "--model", "  "])
+    assert r.exit_code == 2
+    assert "must not be empty" in r.output
+
+
+def test_advance_threads_node_pins_to_spawn(iso, monkeypatch):
+    """A node's own model/provider annotation reaches the dispatched worker."""
+    captured = {}
+
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+        captured.update(model=model, provider=provider)
+        return "sid"
+
+    node = {**NODE, "model": "glm-4.7", "provider": "codex"}
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    monkeypatch.setattr(adv, "_spawn_worker", spawn)
+    res = adv.advance(project="fno", events_path=iso)
+    assert res.decision == "dispatched"
+    assert captured == {"model": "glm-4.7", "provider": "codex"}
+
+
+def test_advance_cli_pin_overrides_node(iso, monkeypatch):
+    """Locked Decision 1: a dispatch-time model/provider outranks node annotations."""
+    captured = {}
+
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
+        captured.update(model=model, provider=provider)
+        return "sid"
+
+    node = {**NODE, "model": "node-model", "provider": "gemini"}
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    monkeypatch.setattr(adv, "_spawn_worker", spawn)
+    res = adv.advance(project="fno", events_path=iso, model="cli-model", provider="codex")
+    assert res.decision == "dispatched"
+    assert captured == {"model": "cli-model", "provider": "codex"}
+
+
 def test_release_raises_still_emits_and_never_raises(iso, monkeypatch):
     """LD#12 regression: if release_claim itself raises on the spawn-failure
     path, advance still emits exactly one decision event and does not raise."""
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
 
-    def boom_spawn(node_id, node_cwd, node_slug=None, model=None):
+    def boom_spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
         raise adv.SpawnError("spawn boom")
 
     monkeypatch.setattr(adv, "_spawn_worker", boom_spawn)
@@ -304,6 +346,36 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
     assert cmd[-1] == "/target no-merge ab-2222aaaa"  # no-merge rides as a token
     # subscription lane only - never the API-credit/-p lane.
     assert "-p" not in cmd and "--print" not in cmd and "--bare" not in cmd
+
+
+def test_spawn_worker_threads_model_and_provider(monkeypatch):
+    """A per-node/dispatch pin reaches the spawn cmd as --model / --provider."""
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker("ab-2222aaaa", "/w", model="glm-4.7", provider="codex")
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--provider") + 1] == "codex"
+    assert cmd[cmd.index("--model") + 1] == "glm-4.7"
+
+
+def test_spawn_worker_default_provider_claude(monkeypatch):
+    """Byte-for-byte default: no provider pin -> --provider claude."""
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker("ab-2222aaaa", "/w")
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--provider") + 1] == "claude"
+    assert "--model" not in cmd
 
 
 def test_spawn_worker_argv_fresh_when_no_cwd(monkeypatch):
@@ -512,7 +584,7 @@ def test_dependents_cross_project_dispatch(iso, monkeypatch):
     _map_project(monkeypatch, {"web": "/mapped/web"})
     captured = {}
 
-    def fake_spawn(node_id, node_cwd, node_slug=None, model=None):
+    def fake_spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
         captured["args"] = (node_id, node_cwd, node_slug)
         return "depsid01"
 
@@ -598,7 +670,7 @@ def test_dependents_idempotent_double_call(iso, monkeypatch):
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
     _map_project(monkeypatch, {"web": "/mapped/web"})
     calls = []
-    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None: calls.append(nid) or "sid")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None, provider=None: calls.append(nid) or "sid")
 
     first = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -649,7 +721,7 @@ def test_dependents_same_project_dispatch(iso, monkeypatch):
     _map_project(monkeypatch, {"fno": "/mapped/fno"})
     captured = {}
 
-    def fake_spawn(node_id, node_cwd, node_slug=None, model=None):
+    def fake_spawn(node_id, node_cwd, node_slug=None, model=None, provider=None):
         captured["args"] = (node_id, node_cwd, node_slug)
         return "samesid1"
 
@@ -676,7 +748,7 @@ def test_dependents_same_project_falls_back_to_recorded_cwd(iso, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         adv, "_spawn_worker",
-        lambda nid, cwd, slug=None, model=None: captured.update(cwd=cwd) or "sid",
+        lambda nid, cwd, slug=None, model=None, provider=None: captured.update(cwd=cwd) or "sid",
     )
 
     results = adv.advance_dependents(
@@ -732,7 +804,7 @@ def test_dependents_dispatch_independent_of_next_selection(iso, monkeypatch):
         adv, "_next_node",
         lambda project: pytest.fail("advance_dependents must not select via `next`"),
     )
-    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None: "edgesid")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda nid, cwd, slug=None, model=None, provider=None: "edgesid")
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso

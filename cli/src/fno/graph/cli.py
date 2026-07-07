@@ -2076,6 +2076,14 @@ def cmd_dispatch_lanes(
     mission: Optional[str] = typer.Option(
         None, "--mission", help="Restrict dispatch to this mission's nodes."
     ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m",
+        help="Pin a model for every lane spawned this run, overriding node annotations.",
+    ),
+    provider: Optional[str] = typer.Option(
+        None, "--provider",
+        help="Pin a provider for every lane. (No -p short: it is --project here.)",
+    ),
 ) -> None:
     """Spawn up to max_lanes isolated background lanes (parallel mode, group 3).
 
@@ -2086,13 +2094,25 @@ def cmd_dispatch_lanes(
     receipt per lane (``status`` dispatched | skipped). ``max_lanes < 2`` spawns
     nothing (sequential: use ``fno backlog advance`` / ``next``).
     """
+    from fno.agents.provider_resolve import (
+        DispatchFlagError,
+        reject_empty_model,
+        resolve_dispatch_provider,
+    )
     from fno.backlog.advance import dispatch_lanes
+
+    try:
+        model = reject_empty_model(model)
+        provider = resolve_dispatch_provider(provider)[0] if provider is not None else None
+    except DispatchFlagError as exc:
+        typer.echo(f"dispatch-lanes: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     if max_lanes is None:
         from fno.config import load_settings
         max_lanes = load_settings().config.parallel.max_lanes
 
-    receipts = dispatch_lanes(max_lanes, project, mission=mission)
+    receipts = dispatch_lanes(max_lanes, project, mission=mission, model=model, provider=provider)
     typer.echo(json.dumps(receipts, indent=2))
 
 
@@ -4207,6 +4227,14 @@ def cmd_advance(
     verbose: bool = typer.Option(
         False, "--verbose", help="Print the dispatch decision to stderr."
     ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m",
+        help="Pin a model for the dispatched worker(s), overriding node annotations.",
+    ),
+    provider: Optional[str] = typer.Option(
+        None, "--provider",
+        help="Pin a provider for the dispatched worker(s). (No -p short: it is --project here.)",
+    ),
 ) -> None:
     """Dispatch a fresh /target no-merge worker for the next now-unblocked node.
 
@@ -4216,8 +4244,22 @@ def cmd_advance(
     /target, and /megatron all inherit it without driver-specific code. Always
     exits 0 (a dispatch decision is never an error to the host op).
     """
+    from fno.agents.provider_resolve import (
+        DispatchFlagError,
+        reject_empty_model,
+        resolve_dispatch_provider,
+    )
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
+
+    # Validate the dispatch pins before any spawn; provider is resolved only when
+    # given so an absent pin lets the spawn path keep its per-node/default choice.
+    try:
+        model = reject_empty_model(model)
+        provider = resolve_dispatch_provider(provider)[0] if provider is not None else None
+    except DispatchFlagError as exc:
+        typer.echo(f"advance: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     # RC2 (x-33b2): closed_project is the CLOSED NODE's own project, read from the
     # graph - NEVER the --project next-selection flag. --project restricts which
@@ -4238,14 +4280,20 @@ def cmd_advance(
             closed_project = None
 
     try:
-        result = _advance(closed_node_id=closed, project=project, verbose=verbose)
+        result = _advance(
+            closed_node_id=closed, project=project, verbose=verbose,
+            model=model, provider=provider,
+        )
         # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
         # Only meaningful with --closed (an edge source); the project-scoped
         # next selection above never reaches a foreign dependent. Shares the
         # dispatch:<id> dedup with reconcile's call so a node seen by both the
         # reconcile sweep and this explicit verb dispatches at most once.
         if closed:
-            _advance_deps(closed_node_id=closed, closed_project=closed_project, verbose=verbose)
+            _advance_deps(
+                closed_node_id=closed, closed_project=closed_project, verbose=verbose,
+                model=model, provider=provider,
+            )
             # G4: route the closed node's contract dependents to a reconcile pass
             # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
             # advance paths so a node seen by all three dispatches at most once.

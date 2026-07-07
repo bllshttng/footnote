@@ -411,18 +411,14 @@ async fn run(args: Vec<String>) -> i32 {
         if substrate == "pane" {
             use fno_agents::claude_ask::py_repr;
             use std::os::unix::process::CommandExt;
-            // Provider parity with maybe_run_spawn BEFORE the re-exec: a
-            // missing/unknown --provider stays a client-side exit 2 even
-            // where the `fno` front door is absent (CI).
+            // Provider parity with the optional-provider Python resolver: a
+            // MISSING --provider is legal on the pane substrate (the Python
+            // re-exec resolves it from the invoking harness), so let None fall
+            // through. An UNKNOWN provider is still a client-side exit 2 even
+            // where the `fno` front door is absent (CI), matching the resolver's
+            // downstream substrate-aware rejection.
             match params.get("provider").and_then(|v| v.as_str()) {
-                None => {
-                    eprintln!(
-                        "provider is required to spawn a new agent {}; pass --provider one of: {}",
-                        py_repr(&agent_name),
-                        known_providers_csv()
-                    );
-                    return 2;
-                }
+                None => {}
                 Some(p) if !KNOWN_PROVIDERS.contains(&p) => {
                     eprintln!(
                         "unknown provider {}; supported: {}",

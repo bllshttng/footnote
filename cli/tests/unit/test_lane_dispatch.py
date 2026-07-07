@@ -43,7 +43,7 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
         calls["worktrees"].append(node_id)
         return wt
 
-    def fake_spawn(node_id, cwd, slug, model=None):
+    def fake_spawn(node_id, cwd, slug, model=None, provider=None):
         calls["spawns"].append((node_id, cwd, slug))
         if spawn is not None:
             return spawn(node_id)
