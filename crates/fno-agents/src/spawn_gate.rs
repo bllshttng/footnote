@@ -765,7 +765,10 @@ MemAvailable:    8000000 kB\n";
             let reg = dir.join("registry.json");
             std::fs::write(
                 &reg,
-                format!(r#"{{"schema_version":1,"entries":[{}]}}"#, entries.join(",")),
+                format!(
+                    r#"{{"schema_version":1,"entries":[{}]}}"#,
+                    entries.join(",")
+                ),
             )
             .unwrap();
 
