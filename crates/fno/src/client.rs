@@ -106,7 +106,13 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
     // pane run reaches here without going through run_inner's ensure (AC1-EDGE).
     proto::ensure_mux_dir().map_err(|e| format!("cannot prepare the mux dir: {e}"))?;
     match proto::connect_unix_timeout(path, ATTACH_CONNECT_TIMEOUT) {
-        Ok(s) => return Ok(s),
+        Ok(s) => {
+            e2e_client_log(format_args!(
+                "connected to live server at {}",
+                path.display()
+            ));
+            return Ok(s);
+        }
         // A connect timeout means something holds the socket but never
         // accepted: a wedged server. Spawning over it would just lose the
         // bind race, so report instead - never hang, never clobber.
@@ -119,7 +125,9 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
                 log_path(path).display()
             ));
         }
-        Err(_) => {}
+        Err(e) => {
+            e2e_client_log(format_args!("connect failed ({e}); spawning a server"));
+        }
     }
     if path.exists() {
         eprintln!("fno: previous session ended; starting a fresh one");
@@ -143,6 +151,30 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
 
 fn log_path(socket: &Path) -> PathBuf {
     socket.with_extension("log")
+}
+
+/// x-0296 CI diagnostics: connect-path breadcrumbs, FNO_E2E-gated, appended
+/// to `<mux_dir>/client-<pid>.log` (the e2e harness dumps every `*.log` in
+/// its scratch on a timeout). NEVER stderr: pre-TUI stderr reaches the
+/// client's PTY, and any byte there trips the harness's screen-not-empty
+/// gates before the client has actually attached.
+fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
+    if std::env::var_os("FNO_E2E").is_none() {
+        return;
+    }
+    let path = proto::mux_dir().join(format!("client-{}.log", std::process::id()));
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        use std::io::Write as _;
+        let _ = writeln!(f, "[{ms} pid {}] {msg}", std::process::id());
+    }
 }
 
 /// Spawn `fno --server <socket>` detached: its own session (setsid) so the

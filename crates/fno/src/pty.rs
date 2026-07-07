@@ -444,11 +444,18 @@ fn spawn_reader(
     std::thread::Builder::new()
         .name("fno-mux-pty-reader".into())
         .spawn(move || {
+            // x-0296 diagnostics: the first chunk logged from THIS std thread
+            // proves the child spoke even when the tokio runtime is wedged.
+            let e2e = std::env::var_os("FNO_E2E").is_some();
+            let mut first = true;
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        if e2e && std::mem::take(&mut first) {
+                            eprintln!("fno mux e2e: pty reader pane {pane_id}: first {n} bytes");
+                        }
                         // blocking_send backpressures the reader (and thus the
                         // child) when the core loop lags; never unbounded.
                         if out_tx.blocking_send((pane_id, buf[..n].to_vec())).is_err() {

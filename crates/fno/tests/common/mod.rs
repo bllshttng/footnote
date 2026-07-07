@@ -190,7 +190,7 @@ impl ClientHarness {
     /// setsid'd server's stderr, destroyed with the scratch before anyone
     /// can read it otherwise). Distinguishes a dead/respawned/wedged server
     /// from lost frame delivery, which the settled screen alone cannot.
-    fn diagnostics(&self) -> String {
+    pub fn diagnostics(&self) -> String {
         // ESC made visible so the panic message stays one readable block.
         fn tail(s: &str, max: usize) -> &str {
             let mut start = s.len().saturating_sub(max);
@@ -205,7 +205,8 @@ impl ClientHarness {
             .unwrap_or(0);
         let raw = self.raw_output().replace('\x1b', "\\e");
         let mut out = format!(
-            "--- diagnostics at unix_ms {now_ms} ---\n--- client raw output ({} bytes, tail) ---\n{}\n",
+            "--- diagnostics at unix_ms {now_ms}, client pid {:?} ---\n--- client raw output ({} bytes, tail) ---\n{}\n",
+            self.child.process_id(),
             raw.len(),
             tail(&raw, 3000)
         );

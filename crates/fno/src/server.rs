@@ -813,7 +813,7 @@ fn e2e_log(msg: std::fmt::Arguments<'_>) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        eprintln!("fno mux e2e[{ms}]: {msg}");
+        eprintln!("fno mux e2e[{ms} pid {}]: {msg}", std::process::id());
     }
 }
 
@@ -1009,6 +1009,7 @@ impl Core {
         cmd: Option<String>,
     ) {
         self.next_pane_id += 1;
+        e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
         self.panes.insert(
             id,
             PaneEntry {
@@ -1526,6 +1527,9 @@ impl Core {
         // re-push, survivors stay clamped to the dead client's dims until
         // some later event. Terminates: each pass removes >= 1 client.
         if !dead.is_empty() {
+            e2e_log(format_args!(
+                "push_layout dropped wedged clients {dead:?} (reliable send failed)"
+            ));
             self.push_layout(true);
         }
     }
@@ -3493,7 +3497,12 @@ async fn serve(
                 Ok((stream, _)) => {
                     let id = next_id;
                     next_id += 1;
-                    e2e_log(format_args!("conn {id} accepted"));
+                    // Peer pid names WHICH client process this is (the e2e
+                    // harness logs its children's pids for the join).
+                    e2e_log(format_args!(
+                        "conn {id} accepted (peer pid {:?})",
+                        stream.peer_cred().ok().and_then(|c| c.pid())
+                    ));
                     tokio::spawn(handle_client(
                         stream,
                         accept_core_tx.clone(),
@@ -3536,6 +3545,11 @@ async fn serve(
     let mut idle_count_rx = client_count_rx.clone();
     let mut idle_deadline = tokio::time::Instant::now() + idle_grace;
 
+    // x-0296 diagnostics: which panes' output the CORE LOOP has seen. Pairs
+    // with the pty reader thread's own first-chunk line to split "shell never
+    // spoke" from "core loop never drained it".
+    let mut e2e_first_out: HashSet<u64> = HashSet::new();
+
     let flow = loop {
         tokio::select! {
             chunk = out_rx.recv() => {
@@ -3548,6 +3562,12 @@ async fn serve(
                 }
                 // out_tx lives in Core, so recv never yields None.
                 let Some((pid, bytes)) = chunk else { break Flow::Shutdown };
+                if e2e_first_out.insert(pid) {
+                    e2e_log(format_args!(
+                        "core loop: first output from pane {pid} ({} bytes)",
+                        bytes.len()
+                    ));
+                }
                 let mut touched = HashSet::new();
                 if let Some(entry) = core.panes.get_mut(&pid) {
                     entry.vt.feed(&bytes);
@@ -3571,7 +3591,9 @@ async fn serve(
             }
             exited = exit_rx.recv() => {
                 let Some(pid) = exited else { break Flow::Shutdown };
+                e2e_log(format_args!("pane {pid} child exited"));
                 if core.close_pane(pid) == Flow::Shutdown {
+                    e2e_log(format_args!("last pane gone; shutting down"));
                     break Flow::Shutdown;
                 }
             }
