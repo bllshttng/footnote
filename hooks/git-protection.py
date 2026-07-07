@@ -118,7 +118,9 @@ def load_state():
     try:
         with open(STATE_FILE, 'r') as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        # OSError covers an unreadable path / a directory at STATE_FILE: a
+        # PreToolUse crash silently drops the gate, so degrade to defaults.
         return _default_state()
 
 def save_state(state):
@@ -509,22 +511,44 @@ def _check_pr_merge_allowed(command=""):
 # also closes the opposite hole: `cd /tmp && git push origin main` used to
 # bypass the protected-branch gate because the string did not start with 'git'.
 
-# Shell separators that end a command-position segment, and keywords after which
-# a new command begins.
-_SEGMENT_SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
+# Shell separators that end a command-position segment (within one physical
+# line), and keywords after which a new command begins. Newlines are handled by
+# splitting on physical lines BEFORE shlex: shlex in whitespace_split mode
+# silently eats a newline as whitespace, so it can never be a separator token -
+# a `git status\ngh pr merge` two-liner would otherwise collapse into one
+# segment and hide the merge on line 2.
+_SEGMENT_SEPARATORS = {";", "&&", "||", "|", "&"}
 _SEGMENT_KEYWORDS = {"then", "do"}
+
+# Command wrappers and env-assignment prefixes that precede the real executable.
+# Stripped before identifying a segment's command so `sudo gh pr merge`,
+# `env FOO=bar gh pr merge`, `GH_TOKEN=x gh pr merge`, `/usr/bin/gh pr merge`,
+# and `(gh pr merge)` are all still recognized (the old regex-anywhere matcher
+# caught them; command-position matching must not silently drop them).
+_CMD_WRAPPERS = {"sudo", "env", "command", "time", "nice", "builtin", "exec",
+                 "xargs", "nohup", "stdbuf"}
+_ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 
 def _command_segments(command):
     """Split a shell command into command-position segments (lists of tokens).
 
-    Each segment is a token run that begins a command: the start of the string
-    and everything after a shell separator or a then/do keyword. Uses stdlib
-    shlex in POSIX mode so quoted arguments stay single tokens and separators
-    inside quotes are not treated as separators. Raises ValueError on unbalanced
-    quotes; the caller then falls back to legacy whole-command matching.
+    Splits on physical lines first (shlex eats newlines), then each line into
+    segments at shell separators. Each segment is a token run that begins a
+    command. Uses stdlib shlex in POSIX mode so quoted arguments stay single
+    tokens and separators inside quotes are not treated as separators. Raises
+    ValueError on unbalanced quotes (in any line); the caller then falls back to
+    legacy whole-command matching.
     """
-    lexer = shlex.shlex(command, punctuation_chars=True, posix=True)
+    segments = []
+    for line in command.split("\n"):
+        if line.strip():
+            segments.extend(_segments_one_line(line))
+    return segments
+
+
+def _segments_one_line(line):
+    lexer = shlex.shlex(line, punctuation_chars=True, posix=True)
     lexer.whitespace_split = True
     tokens = list(lexer)  # ValueError on unbalanced quotes
     segments, current = [], []
@@ -546,20 +570,44 @@ def _command_segments(command):
     return segments
 
 
+def _effective_argv(seg):
+    """Strip a leading run of subshell `(`, env-assignments (NAME=value), and
+    command wrappers (sudo/env/...) so the real executable token lands at
+    argv[0]. Keeps a wrapper prefix from hiding a gated verb."""
+    i, n = 0, len(seg)
+    while i < n:
+        tok = seg[i]
+        if tok == "(" or _ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        if tok.rsplit("/", 1)[-1] in _CMD_WRAPPERS:
+            i += 1
+            continue
+        break
+    return seg[i:]
+
+
 def _find_merge_segment(segments):
-    """Return the joined string of the first `gh pr merge` segment at command
-    position, else None."""
+    """Return the joined string of the first segment that is a `gh pr merge`
+    invocation (ignoring any wrapper/assignment prefix), else None."""
     for seg in segments:
-        if (len(seg) >= 3 and seg[0].lower() == "gh"
-                and seg[1].lower() == "pr" and seg[2].lower() == "merge"):
+        argv = _effective_argv(seg)
+        if (len(argv) >= 3 and argv[0].rsplit("/", 1)[-1].lower() == "gh"
+                and argv[1].lower() == "pr" and argv[2].lower() == "merge"):
             return " ".join(seg)
     return None
 
 
 def _find_git_segments(segments):
-    """Return joined strings of every command-position segment whose first token
-    is `git`. Catches compound commands a bare startswith('git') would miss."""
-    return [" ".join(seg) for seg in segments if seg and seg[0] == "git"]
+    """Return the executable-onward string of every segment whose command is
+    `git` (wrapper/assignment prefix stripped). Catches compound commands a bare
+    startswith('git') would miss, and git behind sudo/env/an assignment."""
+    out = []
+    for seg in segments:
+        argv = _effective_argv(seg)
+        if argv and argv[0].rsplit("/", 1)[-1] == "git":
+            out.append(" ".join(argv))
+    return out
 
 
 def _emit(decision, reason):

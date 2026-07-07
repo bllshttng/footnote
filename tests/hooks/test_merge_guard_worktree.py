@@ -288,6 +288,47 @@ def test_find_git_segments_catches_compound_push():
     assert git_protection._find_git_segments(segs) == ["git push origin main"]
 
 
+def test_find_merge_segment_newline_multiline():
+    """Regression: a merge on line 2 of a multi-line command must be caught
+    (shlex eats newlines in whitespace_split mode, so the physical-line split
+    is what makes line 2 its own segment)."""
+    segs = git_protection._command_segments(f"git status\n{_MERGE} 356 --squash")
+    assert git_protection._find_merge_segment(segs) is not None
+
+
+def test_find_merge_segment_prefix_forms_are_caught():
+    """Regression: wrapper/assignment/path/subshell prefixes must not hide the
+    merge verb (the old regex-anywhere matcher caught all of these)."""
+    fm = git_protection._find_merge_segment
+    seg = git_protection._command_segments
+    for cmd in (
+        f"GH_TOKEN=x {_MERGE} 356 --squash",
+        f"env {_MERGE} 356",
+        f"sudo {_MERGE} 356",
+        f"/usr/bin/gh pr merge 356",
+        f"(gh pr merge 356)",
+    ):
+        assert fm(seg(cmd)) is not None, f"prefix bypass not caught: {cmd!r}"
+
+
+def test_find_git_segments_prefix_forms_are_caught():
+    seg = git_protection._command_segments
+    fg = git_protection._find_git_segments
+    for cmd in (
+        "GIT_DIR=/x git push origin main",
+        "sudo git push origin main",
+        "/usr/bin/git push origin main",
+    ):
+        assert fg(seg(cmd)), f"git prefix bypass not caught: {cmd!r}"
+
+
+def test_find_git_segments_pipe_does_not_false_split_git():
+    """A pipe is a separator; `git log | grep x` still recognizes the git verb
+    and stays allowed (grep segment is not git)."""
+    segs = git_protection._command_segments("git log | grep foo")
+    assert git_protection._find_git_segments(segs) == ["git log"]
+
+
 def test_command_segments_unbalanced_quote_raises():
     try:
         git_protection._command_segments(f'{_MERGE} 5 --body "unclosed')
