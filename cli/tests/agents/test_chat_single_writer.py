@@ -277,6 +277,55 @@ def test_chat_failed_setup_does_not_unwind_reused_host(monkeypatch, tmp_path):
     assert any("reusing" in n.lower() for n in res.notes)
 
 
+def test_chat_adopt_does_not_reuse_a_dead_host_row(monkeypatch, tmp_path):
+    # A stale interactive host row with a matching uuid must NOT be reported as a
+    # reusable live channel. Release-on-idle can leave a host row dead (or, when
+    # it removes the row, absent) so the guard requires status=live; a dead row
+    # falls through to a fresh spawn resuming the same uuid instead of handing
+    # back a dead switchboard target (codex P2 on PR#237).
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.registry import AgentEntry
+
+    _base(monkeypatch, tmp_path)
+    a_uuid = "11111111-1111-4111-8111-111111111111"
+    peer = AgentEntry(
+        name="agent-a",
+        provider="claude",
+        cwd="/tmp",
+        log_path="/tmp/agent-a.log",
+        claude_short_id="aaaa1111",
+        claude_session_uuid=a_uuid,
+        status="live",
+    )
+    dead_host = AgentEntry(
+        name="agent-a-chat",
+        provider="claude",
+        cwd="/tmp",
+        log_path="/tmp/agent-a-chat.log",
+        claude_short_id="ac111111",
+        claude_session_uuid=a_uuid,
+        status="exited",
+        host_mode="interactive",
+    )
+    spawn_calls: list = []
+
+    def _rpc(method, params, **kw):
+        spawn_calls.append((method, params.get("name")))
+        return {"ok": True}  # a fresh spawn succeeds
+
+    monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
+
+    adopted, host, note, reused = dispatch_mod._chat_adopt(
+        peer, tmp_path, existing_by_name={"agent-a-chat": dead_host}
+    )
+
+    assert reused is False, "a dead interactive host row must NOT be reused"
+    assert ("agent.spawn", "agent-a-chat") in spawn_calls, (
+        "a dead row must fall through to a fresh spawn resuming the same uuid"
+    )
+    assert adopted is True  # the fresh spawn succeeded
+
+
 # ---------------------------------------------------------------------------
 # unknown agent -> failed, nothing adopted
 # ---------------------------------------------------------------------------
