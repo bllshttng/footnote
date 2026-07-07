@@ -95,7 +95,10 @@ quotes, backticks, or `$` can never break the shell in step 3.
 
 Use the defect brief for `MODE=defect`, the challenge brief for
 `MODE=adversarial`. Both write the same `$BRIEF` file and carry the diff the same
-way, so step 3 is identical.
+way, so step 3 is identical. The **defect** brief is additionally shaped per
+provider (codex vs gemini) - see **Provider framing** below; GPT-5-class models
+respond to a different header shape than Claude. The challenge brief is
+provider-neutral.
 
 ```bash
 BRIEF="$TMP/peer-brief.txt"
@@ -115,6 +118,10 @@ if [ "${MODE:-defect}" = "adversarial" ]; then
     cat "$DIFF"
   } > "$BRIEF"
 else
+  # DEFECT brief. The four generic-core lines below are what routed-claude (step 3b)
+  # and any unknown/future provider get UNCHANGED. For codex/gemini, reshape the
+  # header per the "Provider framing" table below - keeping the same severity scale
+  # and honesty rule; framing reorders/extends the core, it never drops it.
   {
     echo "You are doing a focused code review. Review the diff below for <PR #$N | branch $BRANCH>."
     echo "Context: <one line - the user's stated goal, or the repo's purpose from AGENTS.md>."
@@ -126,6 +133,40 @@ else
   } > "$BRIEF"
 fi
 ```
+
+**Provider framing (defect brief).** The four generic-core lines are the fallback.
+When `$PROVIDER` is `codex` or `gemini`, replace those header lines with the
+provider-shaped header below (the severity scale and the "if clean, say so plainly -
+do not invent findings" honesty rule survive in every variant; framing may not
+override the core). The shaping lives entirely in the header text, so it is
+inspectable in `$BRIEF` on disk and adds only ~5 short lines (never affects the
+step-2 size decision).
+
+- **codex (GPT-5, default).** State the output contract FIRST, before any context -
+  GPT-5-class models weight early structural instructions and explicit prohibitions
+  over trailing style hints. Lead with the exact shape, then hard "do not"
+  constraints, then a stop condition; use imperative single-purpose lines. e.g.:
+
+  ```
+  Output contract (follow exactly): emit sections in order P1, P2, P3, verdict. One finding per line as `file:line - problem - fix`. End with a one-line verdict.
+  Do not: write a preamble, restate the diff, or add praise. After the verdict line, stop.
+  Review the diff below for <PR #$N | branch $BRANCH> for defects (P1 blocking, P2 should-fix, P3 nit). If the diff is clean, say so plainly - do not invent findings.
+  ```
+
+- **gemini.** A short numbered constraint list; name the output format but
+  lighter-weight; keep the one-line context (gemini uses it well with long inline
+  diffs); explicitly demand file:line anchors (its most common drift is unanchored
+  prose findings). e.g.:
+
+  ```
+  Review the diff below for <PR #$N | branch $BRANCH>. Context: <one line - the user's stated goal>.
+  Constraints: 1) group findings as P1 (blocking) / P2 (should-fix) / P3 (nit); 2) every finding cites file:line and a concrete fix; 3) no praise, no diff restatement; 4) if the diff is clean, say so plainly.
+  ```
+
+- **routed claude (GLM via z.ai, step 3b) and any unknown/future provider.** Emit
+  the generic core unchanged - byte-identical to today's brief. The routed transport
+  is `claude -p` and the generic shape is already Claude-idiomatic; GLM-specific
+  tuning is future work, not this node.
 
 **Large diff (> ~120 KB).** A multi-hundred-KB brief can exceed the argv limit in
 step 3. In that case, do NOT inline the diff. `$DIFF` lives in a temp dir that a
@@ -139,6 +180,7 @@ body:
 cp "$DIFF" .git/peer-review.diff   # workspace-relative; readable by a sandboxed model
 # ...and in the brief, replace the `--- DIFF ---` block with:
 #   echo "Read the diff at .git/peer-review.diff."
+# The provider-shaped header above is unaffected - only the DIFF block changes.
 ```
 
 Unlike a `gh`/`git` call, a local file read works even when the sandbox blocks
