@@ -126,7 +126,9 @@ def run_sync_canonical(
     # Wrong-repo guard: the PR's own url must sit in the resolved canonical's
     # repo before we let sync_command run `git checkout main` there.
     pr_slug = _slug_from_pr_url(row.get("url"))
-    if pr_slug and pr_slug != origin:
+    # GitHub owner/repo are case-insensitive; compare lowercased so a casing
+    # mismatch (Owner/Repo vs owner/repo) is not a false-positive refusal.
+    if pr_slug and pr_slug.lower() != origin.lower():
         typer.echo(
             f"post-merge sync: PR repo {pr_slug} != canonical origin {origin}; "
             f"refusing to sync the wrong repo",
@@ -152,7 +154,8 @@ def run_sync_canonical(
     holder = f"sync-canonical:{pr_number}"
     try:
         claims.acquire_claim(
-            lock_key, holder, ttl_ms=_SYNC_CLAIM_TTL_MS, reason="post-merge canonical sync"
+            lock_key, holder, ttl_ms=_SYNC_CLAIM_TTL_MS,
+            reason="post-merge canonical sync", root=canonical,
         )
     except claims.ClaimHeldByOther:
         typer.echo(f"post-merge sync: in progress elsewhere for {sha[:12]}; skipping")
@@ -192,7 +195,7 @@ def run_sync_canonical(
         return rc
     finally:
         try:
-            claims.release_claim(lock_key, holder)
+            claims.release_claim(lock_key, holder, root=canonical)
         except Exception:
             pass  # lock is TTL-bounded; a failed release recovers on its own
 

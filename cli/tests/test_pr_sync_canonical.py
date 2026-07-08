@@ -161,6 +161,20 @@ def test_wrong_repo_guard_skips(tmp_path, capsys):
     assert shell.calls == []
 
 
+def test_repo_slug_compare_is_case_insensitive(tmp_path, capsys):
+    """GitHub slugs are case-insensitive: a casing mismatch must NOT refuse."""
+    shell = _Shell(rc=0)
+    rc = _run(
+        tmp_path,
+        runner=_git_origin("git@github.com:Owner/Repo.git"),
+        gh_json=_gh_row(url="https://github.com/owner/repo/pull/7"),
+        shell_runner=shell,
+    )
+    assert rc == 0
+    assert "wrong repo" not in capsys.readouterr().err
+    assert len(shell.calls) == 1  # proceeded to sync, not refused
+
+
 def test_no_origin_skips(tmp_path, capsys):
     def no_origin(cmd, cwd=None, **kw):
         return Result(returncode=1, stdout="", stderr="no origin")
