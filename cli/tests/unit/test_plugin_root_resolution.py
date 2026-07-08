@@ -116,8 +116,9 @@ def test_worktree_root_canonicalizes_to_main(tmp_path):
 
 
 def test_persisted_worktree_pointer_self_heals_to_canonical(tmp_path, isolated_home):
-    """An older hook that wrote a WORKTREE path to the pointer still resolves to
-    the canonical init script, so a cold-start receipt stays clean."""
+    """The session-start hook writes the CURRENT worktree to the pointer; the
+    reader canonicalizes it so resolution runs the canonical init script and a
+    cold-start receipt stays clean. This is the sole canonicalization point."""
     canon, wt = _make_worktree_plugin(tmp_path)
     isolated_home.mkdir(parents=True, exist_ok=True)
     (isolated_home / "plugin-root").write_text(str(wt) + "\n")
@@ -125,11 +126,15 @@ def test_persisted_worktree_pointer_self_heals_to_canonical(tmp_path, isolated_h
     assert got is not None and got.resolve() == canon.resolve()
 
 
-def test_persist_writes_canonical_for_worktree_root(tmp_path, isolated_home):
-    """Persisting a worktree root stores the canonical path, never the worktree."""
-    canon, wt = _make_worktree_plugin(tmp_path)
-    paths._persist_plugin_root(wt)
-    assert Path((isolated_home / "plugin-root").read_text().strip()).resolve() \
-        == canon.resolve()
+def test_persist_stays_subprocess_free(tmp_path, isolated_home, monkeypatch):
+    """Persisting must not shell out (a git call here would trip the target-init
+    'must not shell out' guards): it stores the raw root; the reader canonicalizes."""
+    canon, wt = _make_worktree_plugin(tmp_path)  # git setup BEFORE the boom patch
+
+    def _boom(*a, **k):
+        raise AssertionError("persist must not shell out")
+    monkeypatch.setattr(paths.subprocess, "run", _boom)
+    paths._persist_plugin_root(wt)  # would raise if it shelled out
+    assert (isolated_home / "plugin-root").read_text().strip() == str(wt)
 
 

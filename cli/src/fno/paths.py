@@ -977,8 +977,10 @@ def _canonical_plugin_root(root: Path) -> Path:
 def _read_persisted_plugin_root() -> "Path | None":
     """Read ~/.fno/plugin-root, returning it only if it still looks like
     the plugin (marker present). A stale pointer (plugin moved/removed) returns
-    None so resolution falls through rather than handing back a dead path. A
-    worktree pointer written by an older hook self-heals to canonical here."""
+    None so resolution falls through rather than handing back a dead path. The
+    session-start hook writes the CURRENT (often a linked-worktree) checkout, so
+    the pointer is canonicalized to the main checkout here - the sole read point
+    - rather than shelling out in the subprocess-sensitive persist/env path."""
     try:
         pointer = _plugin_root_pointer()
         if not pointer.is_file():
@@ -993,10 +995,10 @@ def _persist_plugin_root(root: Path) -> None:
     """Best-effort cache of *root* to ~/.fno/plugin-root. Only writes a
     root carrying the plugin manifest (.claude-plugin/plugin.json), so an
     env/test fake with just a stub hook can never poison the pointer. A
-    worktree root is canonicalized first so the pointer never points at a
-    worktree. Never raises - priming is an optimization, not a contract."""
+    worktree root is canonicalized at READ time (_read_persisted_plugin_root),
+    not here, so this stays subprocess-free. Never raises - priming is an
+    optimization, not a contract."""
     try:
-        root = _canonical_plugin_root(root)
         if not (root / ".claude-plugin" / "plugin.json").is_file():
             return
         pointer = _plugin_root_pointer()
