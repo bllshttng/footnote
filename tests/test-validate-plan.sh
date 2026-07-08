@@ -265,6 +265,38 @@ else
     fail "AC6e: Should report ERROR for scope without trace"
 fi
 
+# Test: Critical Path Trace present but NO Scope Classification section at all
+# (gemini-code-assist PR #257 finding). Under `set -eo pipefail`, the SCOPE=
+# command substitution's grep finds no match and exits 1; without `|| true`
+# on that pipeline the whole script aborted here instead of falling back to
+# the "unknown" scope warning path.
+PLAN_TRACE_NO_SCOPE="$TMPDIR_BASE/trace_no_scope.md"
+cat > "$PLAN_TRACE_NO_SCOPE" <<'HEREDOC'
+execution_mode: sequential
+
+## Critical Path Trace
+
+Journey: User creates item
+User clicks "Create" → ✅ CreateForm → ✅ Database
+
+### Task 1.1
+Acceptance Criteria: AC1
+Steps:
+Step 1: Do thing
+HEREDOC
+OUTPUT=$(bash "$VALIDATE" "$PLAN_TRACE_NO_SCOPE" 2>&1)
+EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]]; then
+    pass "AC6g: Trace present, no Scope Classification section - degrades instead of crashing"
+else
+    fail "AC6g: Should not abort (pipefail bug) when scope classification is absent (got exit $EXIT_CODE)"
+fi
+if echo "$OUTPUT" | grep -q "No scope classification found"; then
+    pass "AC6g: Reports WARN for missing scope classification"
+else
+    fail "AC6g: Should warn about missing scope classification"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="

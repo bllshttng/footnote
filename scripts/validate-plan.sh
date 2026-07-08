@@ -213,7 +213,7 @@ if [[ -f "$PLAN_DIR" ]]; then
         # Check for scope classification
         # Extract scope from the Scope Classification section only (not the whole file)
         # Note: scope value lives INSIDE a YAML code fence by design, so don't filter fences here
-        SCOPE=$(awk '/^## Scope Classification/{found=1; next} found && /^## /{exit} found{print}' "$PLAN_DIR" | grep -oE 'scope: (feature|scaffolding|poc)' | head -1 | awk '{print $2}')
+        SCOPE=$(awk '/^## Scope Classification/{found=1; next} found && /^## /{exit} found{print}' "$PLAN_DIR" | grep -oE 'scope: (feature|scaffolding|poc)' | head -1 | awk '{print $2}' || true)
         if [[ -z "$SCOPE" ]]; then
             warn "No scope classification found (add 'scope: feature|scaffolding|poc')"
             SCOPE="unknown"
