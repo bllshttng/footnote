@@ -75,40 +75,67 @@ marker write is chained onto the installer through the shell:
 the write on a zero install exit. Windows keeps the `subprocess.run` path and
 writes the marker after a zero return.
 
-## The `installed-rust-rev` marker
+## Rust freshness: the binary self-reports
 
-A parallel marker at `~/.fno/installed-rust-rev`, written by `fno update`
-(or the standalone cargo refresh helper) **only on a successful `cargo install`
-exit** and atomically via the same temp-file-rename pattern. It stores the
-output of `git log -1 --format=%H -- crates/` - the hash of the last commit
-that touched the `crates/` subtree - rather than `HEAD`. This means Python-only
-commits never advance the marker and never trigger a redundant Rust rebuild in
-auto mode.
+Both `fno update`'s Rust-leg gate and `fno doctor`'s Rust verdict interrogate
+the installed binary itself, not a marker file. Every `fno-agents` build bakes
+in (via `crates/fno-agents/build.rs`, surfaced by `fno-agents version --json`):
 
-`fno doctor` computes `rust_source_rev` the same way (last commit touching
-`crates/`), reads `installed-rust-rev` as `rust_installed_rev`, and sets
-`rust_stale: true` only when all four facts are known and the values differ.
-If the marker is absent, binary is absent, or the subtree rev is
-uncomputable (e.g. no git checkout), the field degrades to `unknown`.
+- `crates_rev` - the last commit touching `crates/` at the built HEAD. This is
+  the freshness signal, and it is true for ANY install path, including a bare
+  `cargo install` outside `fno update`.
+- `git_rev` - the full HEAD the binary was built at (build provenance only).
+- `dirty` - whether the working tree was dirty at build time.
+
+**`fno update` gate:** the Rust leg skips `cargo install` only when the
+installed binary self-reports a `crates_rev` equal to source's `crates/`
+subtree rev AND is not dirty. A missing binary, an unparseable / hung /
+timed-out `version --json`, an `"unknown"` rev, or a dirty build all classify
+as stale and rebuild (fail toward rebuild, never toward a false-fresh skip).
+After a rebuild, update re-interrogates the deployed binary as a **post-deploy
+verify** and halts loud if `crates_rev` still mismatches - catching a cargo that
+reused a stale artifact or installed to a root the runtime does not resolve.
+This is the exact lie the old marker gate hid (marker said fresh, binary was
+stale, dispatch broke).
+
+**Triad sync:** the three bins (`fno-agents`, `fno-agents-daemon`,
+`fno-agents-worker`) must stay a coherent same-build set in every install
+location, because the daemon resolves as a same-dir sibling of the client
+(`resolve_daemon_bin`). On both the rebuilt and the fresh path, update copies
+the whole triad (atomically: temp file + `os.replace`) into every OTHER live
+install location that already hosts one of the three - never seeding a new
+location, halting loud on an unwritable one. Running on the fresh path too lets
+an interrupted prior run's other locations converge on a later run. A split pair
+surfaces as `DaemonBinMissing`, whose message now names `fno update` and
+`FNO_AGENTS_DAEMON_BIN` as the fixes.
+
+**`fno doctor` verdict:** computes `rust_source_rev` (last commit touching
+`crates/`), reads the binary's `crates_rev` as `rust_installed_rev`, and sets
+`rust_stale: true` only when a cargo binary exists, both revs are known, and
+they differ. `git_rev` is shown as labeled build provenance only, never
+compared to source - so "rust bins fresh" and a rev-mismatch line can never
+coexist. A python-only commit advancing HEAD past the last `crates/` change is
+not a mismatch.
+
+**Legacy `~/.fno/installed-rust-rev` marker:** update still writes it as an
+inert breadcrumb, but NO freshness verdict reads it anymore. Both consumers read
+the binary's embedded `crates_rev` instead, which is correct for a bare
+`cargo install` that the marker never tracked.
 
 **`fno update` Rust leg gating table:**
 
 | Condition | Rust leg runs? |
 |-----------|----------------|
-| `--rust` flag present (force / first-install) | always |
+| `--rust` flag present (force / first-install) | always (rebuild + post-deploy verify) |
 | `--no-rust` flag present | never |
-| auto (neither flag): cargo binary exists AND crates subtree moved past marker | yes |
-| auto: no cargo binary on this machine | no (never installs on a first-time machine without `--rust`) |
-| auto: marker absent (binary present, marker missing) | no (treats as unknown, not stale) |
+| auto: binary self-reports `crates_rev` == source AND not dirty | no (fresh; still syncs the triad to other live locations) |
+| auto: binary stale / dirty / unparseable / absent | yes (rebuild + verify) |
+| auto: rebuild needed but cargo not on PATH | warn and skip the Rust leg |
 
 On cargo failure the Rust leg warns and continues to the Python reinstall
-rather than aborting the entire update.
-
-**Manual `cargo install` caveat:** the `installed-rust-rev` marker tracks only
-what `fno update` (or the cargo refresh helper) installed. A manual
-`cargo install --path crates/fno-agents --bins` run outside of those paths
-updates the binary but does not write the marker, so `fno doctor` may report
-`rust_stale: true` until the next `fno update` run re-syncs the marker.
+rather than aborting the entire update; a post-deploy verify mismatch or a
+triad-sync failure, by contrast, HALTS update (a silently stale or split deploy
+is the stale-deploy outage class this section exists to prevent).
 
 `fno update --rust / --no-rust` let you force or skip the Rust leg explicitly.
 
