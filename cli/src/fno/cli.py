@@ -103,33 +103,34 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
 # ---------------------------------------------------------------------------
 
 def _load_v2_config_flag(repo_root: Path) -> bool:
-    """Read ``config.v2_enabled`` from ``.fno/settings.yaml``.
+    """Read ``v2_enabled`` from the project's config (config.toml, else legacy
+    settings.yaml).
 
     Returns False on any read/parse failure - v2 is strictly opt-in.
     Local settings win over the per-user global file.
 
-    yaml + fno.paths are imported inside this function so the cli
-    module body stays cheap to load.
+    Imports are deferred so the cli module body stays cheap to load.
     """
-    import yaml
-    from fno import paths as _paths
+    from fno.config import config_read_candidates, read_config_flat
 
-    candidate_builders = [
-        lambda: repo_root / ".fno" / "settings.yaml",
-        lambda: _paths.config_file(),
-    ]
-    for builder in candidate_builders:
+    def _flag_set(path: Path) -> bool:
         try:
-            path = builder()
-            if not path.is_file():
-                continue
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            config = data.get("config") if isinstance(data, dict) else None
-            if isinstance(config, dict) and config.get("v2_enabled") is True:
-                return True
+            return path.is_file() and read_config_flat(path).get("v2_enabled") is True
         except Exception:
-            continue
-    return False
+            return False
+
+    # Project-local candidates first - resolving them never raises - so a local
+    # config.toml wins even when the global fallback is malformed. config_file()
+    # is resolved only after, and guarded, since it can raise on a bad global
+    # config; that must fail open (return False), never shadow the local file.
+    if any(_flag_set(p) for p in config_read_candidates([repo_root / ".fno" / "settings.yaml"])):
+        return True
+    try:
+        from fno import paths as _paths
+        fallback = config_read_candidates([_paths.config_file()])
+    except Exception:
+        return False
+    return any(_flag_set(p) for p in fallback)
 
 
 def _warn_deprecated_alias_if_needed() -> None:

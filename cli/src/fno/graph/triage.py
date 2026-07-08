@@ -228,31 +228,18 @@ def _collect_inbox_items() -> list[dict]:
 
 
 def _load_goals() -> list[dict]:
-    """Read project goals from settings.yaml.
+    """Read project goals from the project config (config.toml, else legacy
+    settings.yaml)."""
+    from fno.config import config_read_candidates, read_config_flat
 
-    PyYAML is already a dependency of the CLI (used by cli.py, loop.py,
-    megawalk.py) so there's no reason to hand-parse the YAML here — the
-    previous text-walker was brittle on editor quirks like trailing
-    whitespace, flow-style lists, or indentation variants.
-    """
-    import yaml
-
-    candidates = [
-        Path(".fno/settings.yaml"),
-        _paths.config_file(),
-    ]
+    candidates = config_read_candidates([Path(".fno/settings.yaml"), _paths.config_file()])
     for path in candidates:
         if not path.exists():
             continue
-        try:
-            data = yaml.safe_load(path.read_text())
-        except (OSError, yaml.YAMLError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        # settings.yaml nests goals under `project.goals`, but older
-        # schemas had a top-level `goals:` block. Accept either so a
-        # mid-migration config still yields useful context.
+        data = read_config_flat(path)
+        # Config nests goals under `project.goals`, but older schemas had a
+        # top-level `goals:` block. Accept either so a mid-migration config
+        # still yields useful context.
         project = data.get("project")
         goals = None
         if isinstance(project, dict) and isinstance(project.get("goals"), list):

@@ -872,29 +872,24 @@ def resolve_dispatch_target(
         )
 
     # 3. settings active_combo - project-local-over-global, mirroring
-    #    load_providers/load_combos. Walk both candidates so a global
-    #    combo declared in ~/.fno/settings.yaml is reachable when
-    #    no project-local override exists. (PR #230 Gemini MEDIUM #2:
-    #    the previous implementation only inspected project-local.)
-    import yaml as _yaml
+    #    load_providers/load_combos. Walk both roots (config.toml, else legacy
+    #    settings.yaml) so a global combo is reachable when no project-local
+    #    override exists. (PR #230 Gemini MEDIUM #2: the previous
+    #    implementation only inspected project-local.)
     from pathlib import Path as _Path
+
+    from fno.config import config_read_candidates, read_config_flat
+
     active_combo: str | None = None
-    for candidate in (
+    for candidate in config_read_candidates([
         root / ".fno" / "settings.yaml",
-        # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference)
+        # Bootstrap: cannot use paths.config_file() here (settings loader self-reference)
         _Path.home() / ".fno" / "settings.yaml",
-    ):
+    ]):
         if not candidate.is_file():
             continue
-        try:
-            data = _yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
-        except (_yaml.YAMLError, OSError) as exc:
-            log.warning(
-                "resolve_dispatch_target: failed to read active_combo at %s: %s",
-                candidate, exc,
-            )
-            continue
-        ac = data.get("config", {}).get("providers", {}).get("active_combo")
+        providers = read_config_flat(candidate).get("providers")
+        ac = providers.get("active_combo") if isinstance(providers, dict) else None
         if ac:
             active_combo = ac
             break  # project-local wins; do not consult global
