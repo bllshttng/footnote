@@ -215,7 +215,7 @@ def brief(
 )
 def validate(
     plan_path: str = typer.Argument(..., help="Path to the plan markdown file"),
-    json_out: bool = typer.Option(False, "--json", help="Emit the report as JSON."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
 ) -> None:
     """Report every frontmatter schema violation in one read-only pass."""
     from pydantic import ValidationError
