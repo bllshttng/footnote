@@ -422,6 +422,17 @@ def graph_json() -> Path:
     return state_dir() / "graph.json"
 
 
+def graph_archive_json() -> Path:
+    """Return the path to graph-archive.json (terminal-node archive sweep).
+
+    A sibling of graph.json so it follows any ``config.paths.graph_json``
+    override automatically - the archive must live next to the graph it drains
+    from. No override of its own (and so no bare ``~/.fno``): it is never
+    meaningful to separate the archive from its working graph.
+    """
+    return graph_json().parent / "graph-archive.json"
+
+
 def ledger_json() -> Path:
     """Return the path to ledger.json.
 

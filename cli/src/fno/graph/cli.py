@@ -2310,6 +2310,30 @@ def cmd_get(
         else:
             typer.echo(json.dumps(e, indent=2))
         return
+
+    # Read-through fallback: a node the sweep archived still resolves here
+    # (read-only). Mutating verbs stay working-graph-only and error instead.
+    from fno.paths import graph_archive_json
+
+    archive_path = graph_archive_json()
+    if archive_path.exists():
+        archived = read_graph(archive_path)
+        amatch = resolve_node(id, archived)
+        if amatch.kind == "exact":
+            e = dict(amatch.candidates[0])
+            e["_archived"] = True
+            if field:
+                value = e.get(field)
+                if value is None:
+                    typer.echo("null")
+                elif isinstance(value, (list, dict)):
+                    typer.echo(json.dumps(value))
+                else:
+                    typer.echo(value)
+            else:
+                typer.echo(json.dumps(e, indent=2))
+            return
+
     typer.echo(f"No node matching '{id}' (id/slug/bare-hex) in {_graph_path()}", err=True)
     raise typer.Exit(code=1)
 
@@ -5387,51 +5411,88 @@ def cmd_rank(
 
 @cli.command("archive")
 def cmd_archive(
-    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
+    apply: bool = typer.Option(
+        False, "--apply", help="Move the entries (default: dry-run, report only)."
+    ),
+    older_than_days: int = typer.Option(
+        30, "--older-than-days", help="Only archive terminal nodes older than N days."
+    ),
+    roadmap_id: Optional[str] = typer.Option(
+        None, "--roadmap-id", help="Restrict the sweep to this roadmap group."
+    ),
 ) -> None:
-    from fno.graph.store import locked_mutate_graph
-    from fno.graph.store import _apply_graph_defaults, _read_json, _write_json
-    from fno.graph._constants import GRAPH_ARCHIVE_JSON
+    """Sweep old terminal (done/superseded) nodes into graph-archive.json.
+
+    Dry-run by default: prints how many would move and why some are held back.
+    ``--apply`` mutates under the graph lock (archive written first, then the
+    working graph, so a crash duplicates rather than loses). Never archives a
+    node an OPEN node still references (blocker, parent, or supersede target).
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.store import (
+        _apply_graph_defaults,
+        _read_json,
+        _write_json,
+        read_graph,
+        locked_mutate_graph,
+        GraphCorruptError,
+    )
+    from fno.graph.archive import partition_for_archive, merge_into_archive
+
+    now = datetime.now(timezone.utc)
+
+    def _split(entries):
+        pool = entries
+        if roadmap_id:
+            pool = [e for e in entries if e.get("roadmap_id") == roadmap_id]
+        to_archive, _remaining_pool, skipped = partition_for_archive(
+            pool, older_than_days, now
+        )
+        arch_ids = {e["id"] for e in to_archive}
+        remaining = [e for e in entries if e.get("id") not in arch_ids]
+        return to_archive, remaining, skipped
+
+    if not apply:
+        to_archive, _rem, skipped = _split(read_graph(_graph_path()))
+        typer.echo(
+            f"[dry-run] would archive {len(to_archive)} terminal node(s) "
+            f"older than {older_than_days}d to {_archive_path()}"
+        )
+        held = {}
+        for s in skipped:
+            held[s["_skip"]] = held.get(s["_skip"], 0) + 1
+        for reason, n in sorted(held.items()):
+            typer.echo(f"  held back ({reason}): {n}")
+        typer.echo("Re-run with --apply to move them.")
+        return
 
     archived_count: list = [0]
 
     def mutator(entries):
-        if roadmap_id:
-            to_archive = [e for e in entries if e.get("_status") == "done" and e.get("roadmap_id") == roadmap_id]
-            remaining = [e for e in entries if not (e.get("_status") == "done" and e.get("roadmap_id") == roadmap_id)]
-        else:
-            to_archive = [e for e in entries if e.get("_status") == "done"]
-            remaining = [e for e in entries if e.get("_status") != "done"]
-
+        to_archive, remaining, _skipped = _split(entries)
         if not to_archive:
             return entries
-
         archived_count[0] = len(to_archive)
-        archived_ids = {e["id"] for e in to_archive}
 
-        for e in remaining:
-            blocked = e.get("blocked_by", [])
-            if blocked:
-                e["blocked_by"] = [b for b in blocked if b not in archived_ids]
-
+        # Archive-first: append (deduped) and write the archive BEFORE returning
+        # `remaining` for the graph write, so a crash leaves a duplicate (healed
+        # on the next sweep) rather than a lost node.
         archive_path = _archive_path()
-        from fno.graph.store import GraphCorruptError
         try:
-            archive_entries = _apply_graph_defaults(_read_json(archive_path))
+            existing = _apply_graph_defaults(_read_json(archive_path))
         except GraphCorruptError:
             typer.echo(f"Warning: {archive_path} corrupt, starting fresh archive", err=True)
-            archive_entries = []
-        archive_entries.extend(to_archive)
+            existing = []
         archive_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(archive_entries, archive_path)
-
+        _write_json(merge_into_archive(existing, to_archive), archive_path)
         return remaining
 
     locked_mutate_graph(_graph_path(), mutator)
     if archived_count[0]:
-        typer.echo(f"Archived {archived_count[0]} done features to {_archive_path()}")
+        typer.echo(f"Archived {archived_count[0]} terminal node(s) to {_archive_path()}")
     else:
-        typer.echo("No done features to archive.")
+        typer.echo("No terminal nodes eligible to archive.")
 
 
 # -- Internal helpers for intake / update (avoid circular imports) --

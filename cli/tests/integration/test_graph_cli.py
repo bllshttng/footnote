@@ -832,12 +832,21 @@ def test_ac1_hp_graph_archive(tmp_graph):
     through the archive file. A weak exit-code check could mask a
     regression where archive prints success but does not actually move
     the node off the live graph or into the archive file.
+
+    The sweep is now dry-run by default with a 30-day age filter, so a
+    freshly-completed node needs `--apply --older-than-days 0` to move.
     """
     r = _invoke("graph", "add", "ToArchive")
     node_id = json.loads(r.output)["id"]
     _invoke("graph", "update", node_id, "--completed")
 
+    # Dry-run default: nothing moves.
     r = _invoke("graph", "archive")
+    assert r.exit_code == 0
+    assert "dry-run" in r.output
+    assert not (tmp_graph.parent / "graph-archive.json").exists()
+
+    r = _invoke("graph", "archive", "--apply", "--older-than-days", "0")
     assert r.exit_code == 0
 
     # State round-trip (#23): the node must be GONE from graph.json AND
