@@ -19,6 +19,19 @@ from fno import update
 from fno.cli import app
 
 
+@pytest.fixture(autouse=True)
+def _isolate_triad_install_dirs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Safety net: never let a test's ``_sync_triad`` reach REAL install locations.
+
+    ``_triad_install_dirs`` reads the live PATH / HOME (``~/.cargo/bin`` etc.), so a
+    test that drives ``_refresh_rust_bins`` down its fresh/rebuilt path would copy
+    its tmp fixture bins over the developer's actual fno-agents install. Default
+    every test to an empty install-dir list; the dedicated ``_sync_triad`` tests
+    override this with their own tmp dirs.
+    """
+    monkeypatch.setattr(update, "_triad_install_dirs", lambda: [])
+
+
 def _write_pyproject(directory: Path, name: str = "fno") -> None:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "pyproject.toml").write_text(
