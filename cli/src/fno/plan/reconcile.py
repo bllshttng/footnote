@@ -66,23 +66,13 @@ def reconcile_plan(
 ) -> ReconcileDelta:
     """Classify each file path a plan names as present or stale-reference.
 
-    ``plan_path`` may carry a ``#fragment`` index pointer; it is stripped. A
-    FOLDER plan (a directory with ``00-INDEX.md``) resolves to its index file
-    via the shared ``locate_plan`` so wave plans keep a reconcile line instead
-    of degrading to "Is a directory". Any read error degrades to a ``note``
-    rather than raising -- the report must print ``unknown`` + the resolving
-    command, never abort init.
+    ``plan_path`` may carry a ``#fragment`` index pointer; it is stripped. Any
+    read error degrades to a ``note`` rather than raising -- the report must
+    print ``unknown`` + the resolving command, never abort init.
     """
     raw = str(plan_path)
     file_part = raw.split("#", 1)[0]
     read_target = Path(file_part)
-    try:
-        from fno.plan._locate import locate_plan
-
-        resolved = locate_plan(file_part)
-        read_target = resolved.index_path or resolved.root_path
-    except FileNotFoundError:
-        pass  # missing / dir-without-index -> let the read below degrade
     try:
         text = read_target.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:

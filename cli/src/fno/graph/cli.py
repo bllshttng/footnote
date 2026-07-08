@@ -990,7 +990,6 @@ def _intake_impl(
     project: Optional[str] = None,
     force_new_roadmap: bool = False,
     batch: bool = False,
-    force_batch: bool = False,
     dry_run: bool = False,
     claims: Optional[str] = None,
 ) -> None:
@@ -1030,7 +1029,6 @@ def _intake_impl(
     args.deps = deps
     args.points = points
     args.force_new_roadmap = force_new_roadmap
-    args.force_batch = force_batch
     args.dry_run = dry_run
     args.batch = False
     args.from_list = from_list
@@ -1069,7 +1067,7 @@ def _intake_impl(
     if len(all_paths) > 1:
         _do_intake_multi(
             args, all_paths,
-            roadmap_id=roadmap_id, batch_mode=False, dry_run=dry_run,
+            roadmap_id=roadmap_id, dry_run=dry_run,
         )
         return
 
@@ -1233,7 +1231,6 @@ def cmd_intake(
     project: Optional[str] = typer.Option(None, "--project", help="Override the project field (beats frontmatter and cwd inference)"),
     force_new_roadmap: bool = typer.Option(False, "--force-new-roadmap"),
     batch: bool = typer.Option(False, "--batch", hidden=True),
-    force_batch: bool = typer.Option(False, "--force-batch"),
     dry_run: bool = typer.Option(False, "--dry-run", "-N"),
     claims: Optional[str] = typer.Option(
         None, "--claims",
@@ -1256,7 +1253,6 @@ def cmd_intake(
         project=project,
         force_new_roadmap=force_new_roadmap,
         batch=batch,
-        force_batch=force_batch,
         dry_run=dry_run,
         claims=claims,
     )
@@ -5302,13 +5298,12 @@ def _collect_intake_paths_typer(plan_paths: list[str], from_list: Optional[str])
     return paths
 
 
-def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, batch_mode, dry_run) -> None:
+def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None:
     """Multi-path intake flow delegating to intake helpers."""
     from fno.graph._constants import PRIORITY_ORDER
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         _prepare_intake, _build_intake_node, _validate_cli_deps,
-        _folder_is_single_feature_plan_fn, _numbered_plan_files_fn,
     )
     from fno.graph.depends import _derive_title
 
@@ -5317,38 +5312,18 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, batch_mode, dry_
     )
     _validate_cli_deps(cli_deps, read_graph(_graph_path()))
 
-    force_batch = getattr(args, "force_batch", False)
     resolved: list[dict] = []
     for raw in all_paths:
         if not os.path.exists(raw):
             resolved.append({"path": raw, "files": [], "status": "missing"})
             continue
-        if os.path.isdir(raw) and batch_mode:
-            if _folder_is_single_feature_plan_fn(Path(raw)) and not force_batch:
-                resolved.append({"path": raw, "files": [], "status": "single_feature"})
-                continue
-            candidates = _numbered_plan_files_fn(Path(raw))
-            if not candidates:
-                resolved.append({"path": raw, "files": [], "status": "empty_batch"})
-                continue
-            resolved.append({"path": raw, "files": [str(c) for c in candidates], "status": "ready"})
-        else:
-            resolved.append({"path": raw, "files": [raw], "status": "ready"})
+        resolved.append({"path": raw, "files": [raw], "status": "ready"})
 
     concrete_files = [f for r in resolved if r["status"] == "ready" for f in r["files"]]
     if not concrete_files:
         for r in resolved:
             if r["status"] == "missing":
                 typer.echo(f"warning: not found, skipped: {r['path']}", err=True)
-            elif r["status"] == "empty_batch":
-                typer.echo(f"warning: --batch folder has no [0-9][0-9]-*.md files: {r['path']}", err=True)
-            elif r["status"] == "single_feature":
-                typer.echo(
-                    f"warning: --batch refused for {r['path']} - INDEX has "
-                    "wave/phase structure (single-feature plan). Drop --batch "
-                    "or pass --force-batch to override.",
-                    err=True,
-                )
         typer.echo(
             f"Error: nothing to intake (0 of {len(all_paths)} paths resolved)",
             err=True,
@@ -5373,9 +5348,6 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, batch_mode, dry_
             if r["status"] == "missing":
                 typer.echo(f"  warning: not found, skipped: {r['path']}")
                 continue
-            if r["status"] in ("empty_batch", "single_feature"):
-                typer.echo(f"  warning: skipped: {r['path']}")
-                continue
             for f in r["files"]:
                 t = _derive_title(Path(f), args.title) if os.path.isfile(f) else os.path.basename(f.rstrip(os.sep))
                 typer.echo(f'  would intake: "{t}"  (plan: {f})')
@@ -5390,10 +5362,7 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, batch_mode, dry_
     def mutator(es):
         for r in resolved:
             if r["status"] != "ready":
-                if r["status"] == "missing":
-                    typer.echo(f"  warning: not found, skipped: {r['path']}")
-                elif r["status"] in ("empty_batch", "single_feature"):
-                    typer.echo(f"  warning: skipped: {r['path']}")
+                typer.echo(f"  warning: not found, skipped: {r['path']}")
                 continue
             for f in r["files"]:
                 prep = _prepare_intake(
@@ -5422,7 +5391,7 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, batch_mode, dry_
     for proj in sorted(landed_projects):
         _warn_unknown_project(proj, known=known)
 
-    missing = sum(1 for r in resolved if r["status"] in ("missing", "empty_batch", "single_feature"))
+    missing = sum(1 for r in resolved if r["status"] == "missing")
     typer.echo(
         f'\n{tallies["intaked"]} newly intaked, '
         f'{tallies["already"]} already intaked, '
