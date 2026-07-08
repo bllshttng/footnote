@@ -646,6 +646,35 @@ fn write_ledger_record(
 /// derived: stamp the URL but skip graduate, so the plan can never graduate
 /// before all project PRs land (conservative; graduation then happens on a
 /// later fire or via reconcile).
+/// After a stamp writes, validate the plan's frontmatter via `fno plan validate`
+/// (the same read-only verb). Non-fatal-but-loud: a non-zero exit (e.g. a stamp
+/// that left `status` unset) is reported on stderr for the next session to fix;
+/// the stamp is never rolled back and finalize never fails on it (AC1-FR). A
+/// concurrent edit is fine - the verb reads whatever snapshot is on disk.
+fn validate_stamped_frontmatter(cwd: &Path, plan_path: &str) {
+    if plan_path.is_empty() {
+        return;
+    }
+    let full = cwd.join(plan_path);
+    match py_module(cwd)
+        .arg("-m")
+        .arg("fno.cli")
+        .arg("plan")
+        .arg("validate")
+        .arg(&full)
+        .output()
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => eprintln!(
+            "finalize: post-stamp `fno plan validate` FAILED (exit {:?}); stamp NOT rolled back - fix the plan frontmatter next session:\n{}\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => eprintln!("finalize: post-stamp `fno plan validate` spawn failed: {e}"),
+    }
+}
+
 fn stamp_and_graduate(
     cwd: &Path,
     plan_path: &str,
@@ -678,6 +707,12 @@ fn stamp_and_graduate(
         );
         return Err("stamp".into());
     }
+
+    // Post-stamp schema check (AC1-FR): validate the freshly-stamped frontmatter
+    // against fno.plan.schema. Non-fatal-but-loud - a schema-invalidating stamp
+    // is surfaced for the next session, never rolled back and never failing
+    // finalize (finalize is idempotent/non-fatal by design).
+    validate_stamped_frontmatter(cwd, plan_path);
 
     if !do_graduate {
         eprintln!(
