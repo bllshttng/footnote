@@ -250,6 +250,36 @@ out="$(bash "$DISPATCH" ab-ffff6666 ab-7777aaaa 2>&1)"
   && pass "gate: blocked + deferred nodes parked, never dispatched" \
   || fail "gate: blocked/deferred not parked: $out"
 
+# ---- gate: an EXPLICITLY-NAMED idea node dispatches (naming is the vet) ----
+# A triage-pile node is _status: idea (there is no distinct `triage` status), so
+# this covers the whole "idea/triage" surface. A real launch (not dry-run)
+# exercises the reserving spawn-guard + Guard 3 + receipt path for a non-ready
+# status, not just the --no-reserve dry-run short-circuit.
+reset_mock; set_status ab-8888dddd idea; set_claim ab-8888dddd free
+out="$(bash "$DISPATCH" ab-8888dddd 2>&1)"
+echo "$out" | grep -q "^launched ab-8888dddd name=target-ab-8888dddd session=deadbeef01" \
+  && pass "gate: explicit idea node dispatches via a real launch (think->blueprint->do)" \
+  || fail "gate: explicit idea not dispatched: $out"
+
+# ---- gate: --all-ready parks an idea node even if the enumeration leaked it ----
+reset_mock
+printf '[{"id":"ab-aaaa1111"},{"id":"ab-8888dddd"}]\n' > "$MOCKSTATE/ready.json"
+set_status ab-aaaa1111 ready; set_status ab-8888dddd idea
+out="$(bash "$DISPATCH" --all-ready --dry-run 2>&1)"
+echo "$out" | grep -q '^launched ab-aaaa1111 ' && echo "$out" | grep -q '^parked ab-8888dddd ' \
+  && pass "gate: --all-ready stays ready-only (leaked idea node parked)" \
+  || fail "gate: --all-ready idea guard wrong: $out"
+
+# ---- gate: an explicit idea node under --all-ready is still parked (guard is
+#      ALL_READY-scoped per the maintainer's decided scope, not per-id) ----
+reset_mock
+printf '[{"id":"ab-aaaa1111"}]\n' > "$MOCKSTATE/ready.json"
+set_status ab-aaaa1111 ready; set_status ab-8888dddd idea
+out="$(bash "$DISPATCH" --all-ready --dry-run ab-8888dddd 2>&1)"
+echo "$out" | grep -q '^parked ab-8888dddd ' \
+  && pass "gate: idea node parked under --all-ready even when also named (ready-only invariant)" \
+  || fail "gate: --all-ready + explicit idea guard wrong: $out"
+
 # ---- AC5-FR: dispatch never mutates the caller's target-state.md ----
 reset_mock; set_status ab-aaaa1111 ready
 STATE="$TMP/.fno"; mkdir -p "$STATE"
