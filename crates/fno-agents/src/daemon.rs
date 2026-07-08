@@ -579,7 +579,27 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
 /// failure leaves the marker for the next tick (retry); a marker whose session is
 /// already gone is dropped as stale.
 async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
-    let markers = crate::terminal_stop::read_markers(home);
+    // read_markers (dir list + N file reads) and the roster load/parse are
+    // blocking fs; run them off the async runtime so a slow disk or a large
+    // marker dir never stalls a tokio worker thread. Returns the markers plus
+    // the roster load result (an ERROR is kept distinct from a MISSING roster).
+    let home_read = home.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        let markers = crate::terminal_stop::read_markers(&home_read);
+        if markers.is_empty() {
+            return (markers, None);
+        }
+        let roster = crate::claude_roster::ClaudeRoster::load_default();
+        (markers, Some(roster))
+    })
+    .await;
+    let (markers, roster) = match loaded {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("daemon: terminal-stop sweep: read task failed: {e}");
+            return;
+        }
+    };
     if markers.is_empty() {
         return;
     }
@@ -589,22 +609,28 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
     // workers this sweep exists to stop. Skip the tick and retry next time;
     // markers persist. A MISSING roster is a benign empty (Ok), correctly
     // yielding RemoveStale for a genuinely untracked session.
-    let roster = match crate::claude_roster::ClaudeRoster::load_default() {
-        Ok(r) => r,
-        Err(e) => {
+    let roster = match roster {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
             eprintln!("daemon: terminal-stop sweep: roster load failed: {e} (retry next tick)");
             return;
         }
+        None => return,
     };
     for marker in markers {
         let short = roster.find(&marker.uuid).map(|w| w.short_id().to_string());
         match crate::terminal_stop::stop_decision(short) {
             crate::terminal_stop::StopAction::Stop(short) => {
                 // Bound the subprocess so a hung `claude` can never wedge the
-                // serve-loop tick. A timeout leaves the marker for the next tick.
+                // sweep. A timeout leaves the marker for the next tick.
+                // `kill_on_drop`: on timeout the `output()` future is dropped;
+                // without this the hung child keeps running, and since the
+                // marker is retried every tick that would leak a subprocess per
+                // tick — the exact failure this feature exists to prevent.
                 let stop = tokio::process::Command::new("claude")
                     .arg("stop")
                     .arg(&short)
+                    .kill_on_drop(true)
                     .output();
                 let stopped = tokio::time::timeout(Duration::from_secs(15), stop).await;
                 match stopped {

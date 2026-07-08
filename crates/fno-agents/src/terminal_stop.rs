@@ -131,11 +131,18 @@ fn read_markers_in(dir: &Path) -> Vec<Marker> {
 }
 
 /// Remove a consumed / stale marker. Best-effort; a missing file is not an error.
+/// An unexpected failure (e.g. permissions) is logged, not silent: the marker
+/// would otherwise persist and the sweep would re-visit it every tick with no
+/// hint why.
 pub fn remove_marker(home: &AgentsHome, uuid: &str) {
     if !is_valid_uuid(uuid) {
         return;
     }
-    let _ = std::fs::remove_file(home.terminal_stop_dir().join(uuid));
+    if let Err(e) = std::fs::remove_file(home.terminal_stop_dir().join(uuid)) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("terminal_stop: failed to remove marker {uuid}: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
