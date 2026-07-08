@@ -78,6 +78,14 @@ impl AgentsHome {
         self.root.join("events.jsonl")
     }
 
+    /// Directory of terminal-stop markers (x-fcbf). `finalize` drops one file
+    /// per fire-and-forget `claude --bg` session whose loop reached a terminal
+    /// decision; the daemon sweep consumes it to `claude stop` the parked
+    /// worker. Filename = the claude session uuid; content = the reason.
+    pub fn terminal_stop_dir(&self) -> PathBuf {
+        self.root.join("terminal-stop")
+    }
+
     /// Operator override dir for detection manifests: a readable
     /// `<provider>.toml` here beats the bundled copy
     /// (`crate::manifest::load_manifest` resolution chain).

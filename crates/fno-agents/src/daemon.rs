@@ -567,6 +567,102 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
     summary
 }
 
+/// Terminal-stop sweep (x-fcbf): `claude stop` any fire-and-forget `claude --bg`
+/// worker that `finalize` marked terminal. finalize (running as the worker's own
+/// child) cannot self-exit it, so this daemon sweep — external to every worker —
+/// runs the shipped stop on its behalf. A clean stop settles the session `(done)`
+/// and is never Claude-daemon-respawned; roster-presence itself excludes owned-PTY
+/// panes and operator terminals (never `claude --bg` daemon jobs), so a present +
+/// marked job is exactly a done fire-and-forget bg worker.
+///
+/// Cheap in steady state: no markers -> one dir stat, no roster load. A stop
+/// failure leaves the marker for the next tick (retry); a marker whose session is
+/// already gone is dropped as stale.
+async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
+    // read_markers (dir list + N file reads) and the roster load/parse are
+    // blocking fs; run them off the async runtime so a slow disk or a large
+    // marker dir never stalls a tokio worker thread. Returns the markers plus
+    // the roster load result (an ERROR is kept distinct from a MISSING roster).
+    let home_read = home.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        let markers = crate::terminal_stop::read_markers(&home_read);
+        if markers.is_empty() {
+            return (markers, None);
+        }
+        let roster = crate::claude_roster::ClaudeRoster::load_default();
+        (markers, Some(roster))
+    })
+    .await;
+    let (markers, roster) = match loaded {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("daemon: terminal-stop sweep: read task failed: {e}");
+            return;
+        }
+    };
+    if markers.is_empty() {
+        return;
+    }
+    // A load ERROR (e.g. a torn read while Claude rewrites roster.json, or a
+    // future roster-format drift) must NOT be read as "session absent" — that
+    // would delete every marker as stale and permanently leak the parked
+    // workers this sweep exists to stop. Skip the tick and retry next time;
+    // markers persist. A MISSING roster is a benign empty (Ok), correctly
+    // yielding RemoveStale for a genuinely untracked session.
+    let roster = match roster {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
+            eprintln!("daemon: terminal-stop sweep: roster load failed: {e} (retry next tick)");
+            return;
+        }
+        None => return,
+    };
+    for marker in markers {
+        let short = roster.find(&marker.uuid).map(|w| w.short_id().to_string());
+        match crate::terminal_stop::stop_decision(short) {
+            crate::terminal_stop::StopAction::Stop(short) => {
+                // Bound the subprocess so a hung `claude` can never wedge the
+                // sweep. A timeout leaves the marker for the next tick.
+                // `kill_on_drop`: on timeout the `output()` future is dropped;
+                // without this the hung child keeps running, and since the
+                // marker is retried every tick that would leak a subprocess per
+                // tick — the exact failure this feature exists to prevent.
+                let stop = tokio::process::Command::new("claude")
+                    .arg("stop")
+                    .arg(&short)
+                    .kill_on_drop(true)
+                    .output();
+                let stopped = tokio::time::timeout(Duration::from_secs(15), stop).await;
+                match stopped {
+                    Err(_) => eprintln!("daemon: claude stop {short} timed out (retry next tick)"),
+                    Ok(Ok(o)) if o.status.success() => {
+                        let _ = emitter.emit(
+                            "bg_worker_terminal_stopped",
+                            &json!({
+                                "short_id": short,
+                                "session_id": marker.uuid,
+                                "reason": marker.reason,
+                            }),
+                        );
+                        crate::terminal_stop::remove_marker(home, &marker.uuid);
+                    }
+                    // Non-fatal: leave the marker so the next tick retries.
+                    Ok(Ok(o)) => eprintln!(
+                        "daemon: claude stop {short} failed: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ),
+                    Ok(Err(e)) => eprintln!("daemon: could not exec `claude stop`: {e}"),
+                }
+            }
+            // The session already exited on its own (or a prior tick stopped it):
+            // drop the stale marker so the dir does not grow without bound.
+            crate::terminal_stop::StopAction::RemoveStale => {
+                crate::terminal_stop::remove_marker(home, &marker.uuid);
+            }
+        }
+    }
+}
+
 /// Is `pid` still OUR worker, not a recycled PID? True iff the process exists,
 /// we may signal it, AND its current start time matches `recorded`
 /// (ab-d19e6458). If a start time is unavailable on either side (`None` — lookup
@@ -815,6 +911,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // Screen-manifest scrape gate: at most one sweep in flight (a slow mux
     // stalls its own sweep, never the loop or a pile-up of sweeps).
     let scrape_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Terminal-stop sweep gate (x-fcbf): same one-in-flight discipline. Each
+    // `claude stop` is a subprocess; a large marker set must never serialize
+    // inline in the select arm and starve accept()/SIGTERM.
+    let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     loop {
         tokio::select! {
@@ -859,6 +959,21 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // registry write); the grace window makes exact cadence
                 // non-critical, so running it on the idle tick is fine.
                 let _ = gc_sweep(&ctx.home, &ctx.emitter, ctx.opts.dead_row_grace);
+                // Terminal-stop sweep (x-fcbf): exit fire-and-forget `claude --bg`
+                // workers finalize marked terminal, so a shipped bg /target frees
+                // its slot instead of parking at an idle prompt forever. Spawned
+                // off the select arm behind a one-in-flight gate (mirrors the
+                // scrape sweep) so N serialized `claude stop`s never starve
+                // accept()/SIGTERM. Cheap when there are no markers.
+                if !terminal_stop_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&terminal_stop_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    tokio::spawn(async move {
+                        terminal_stop_sweep(&home, &emitter).await;
+                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                }
                 let empty = state::load_registry(&ctx.home.registry_json())
                     .map(|r| r.entries.is_empty())
                     .unwrap_or(true);
