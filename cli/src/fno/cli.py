@@ -103,29 +103,28 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
 # ---------------------------------------------------------------------------
 
 def _load_v2_config_flag(repo_root: Path) -> bool:
-    """Read ``config.v2_enabled`` from ``.fno/settings.yaml``.
+    """Read ``v2_enabled`` from the project's config (config.toml, else legacy
+    settings.yaml).
 
     Returns False on any read/parse failure - v2 is strictly opt-in.
     Local settings win over the per-user global file.
 
-    yaml + fno.paths are imported inside this function so the cli
-    module body stays cheap to load.
+    Imports are deferred so the cli module body stays cheap to load.
     """
-    import yaml
-    from fno import paths as _paths
+    from fno.config import config_read_candidates, read_config_flat
 
-    candidate_builders = [
-        lambda: repo_root / ".fno" / "settings.yaml",
-        lambda: _paths.config_file(),
-    ]
-    for builder in candidate_builders:
+    try:
+        from fno import paths as _paths
+        candidates = config_read_candidates(
+            [repo_root / ".fno" / "settings.yaml", _paths.config_file()]
+        )
+    except Exception:
+        # Fail open: a malformed global config that makes config_file() raise
+        # must not propagate - v2 is strictly opt-in (Finding 6, P2).
+        return False
+    for path in candidates:
         try:
-            path = builder()
-            if not path.is_file():
-                continue
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            config = data.get("config") if isinstance(data, dict) else None
-            if isinstance(config, dict) and config.get("v2_enabled") is True:
+            if path.is_file() and read_config_flat(path).get("v2_enabled") is True:
                 return True
         except Exception:
             continue

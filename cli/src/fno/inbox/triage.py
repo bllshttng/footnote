@@ -86,29 +86,29 @@ class TriageFailedError(Exception):
 # ---------------------------------------------------------------------------
 
 def read_triage_settings(cwd: Optional[Path] = None) -> TriageSettings:
-    """Read TriageSettings from nearest .fno/settings.yaml."""
+    """Read TriageSettings from nearest .fno/ config (config.toml, else legacy
+    settings.yaml)."""
+    from fno.config import read_config_flat
+
     search = cwd if cwd is not None else Path.cwd()
 
     while True:
-        candidate = search / ".fno" / "settings.yaml"
-        if candidate.is_file():
-            try:
-                data = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
-            except (OSError, yaml.YAMLError) as e:
-                print(
-                    f"warning: malformed {candidate}: {type(e).__name__}: {e}",
-                    file=sys.stderr,
-                )
-                data = {}
-            if isinstance(data, dict):
-                triage_cfg = (
-                    data.get("config", {}).get("inbox", {}).get("triage", {})
-                ) or {}
-                return TriageSettings(
-                    model=triage_cfg.get("model", None),
-                    timeout_sec=int(triage_cfg.get("timeout_sec", 60)),
-                    log_decisions=bool(triage_cfg.get("log_decisions", True)),
-                )
+        fno_dir = search / ".fno"
+        toml_file = fno_dir / "config.toml"
+        yaml_file = fno_dir / "settings.yaml"
+        data: Optional[dict] = None
+        if toml_file.is_file():
+            data = read_config_flat(toml_file)
+        elif yaml_file.is_file():
+            data = _read_triage_yaml(yaml_file)
+        if isinstance(data, dict):
+            inbox = data.get("inbox")
+            triage_cfg = (inbox.get("triage") if isinstance(inbox, dict) else None) or {}
+            return TriageSettings(
+                model=triage_cfg.get("model", None),
+                timeout_sec=int(triage_cfg.get("timeout_sec", 60)),
+                log_decisions=bool(triage_cfg.get("log_decisions", True)),
+            )
 
         parent = search.parent
         if parent == search:
@@ -116,6 +116,21 @@ def read_triage_settings(cwd: Optional[Path] = None) -> TriageSettings:
         search = parent
 
     return TriageSettings()
+
+
+def _read_triage_yaml(path: Path) -> dict:
+    """Parse a legacy settings.yaml to the flat (config-unwrapped) shape, warning
+    to stderr on an unreadable/malformed file so a config typo stays observable."""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as e:
+        print(
+            f"warning: malformed {path}: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return {}
+    config = data.get("config") if isinstance(data, dict) else None
+    return config if isinstance(config, dict) else {}
 
 
 # ---------------------------------------------------------------------------

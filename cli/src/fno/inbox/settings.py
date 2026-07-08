@@ -29,56 +29,65 @@ class WatchSettings:
 
 
 def _load_inbox_config(repo_root: Path | None) -> dict[str, Any] | None:
-    """Walk up from repo_root (or cwd) to the first .fno/settings.yaml,
-    parse it, and return `config.inbox` as a dict. Returns None when no file
-    is found, parse fails, or the inbox block is absent or malformed.
+    """Walk up from repo_root (or cwd) to the first .fno/ config (config.toml,
+    else legacy settings.yaml), parse it, and return the `inbox` block as a
+    dict. Returns None when no file is found, parse fails, or the inbox block
+    is absent or malformed.
 
     Centralizing the walk + extraction keeps the three readers below honest
     about their semantics (their job is "given the inbox block, give me X")
     and means tests for one reader cannot accidentally cover bugs in another.
 
-    Errors are split: `OSError` (permission denied, encoding error reading
-    the file) and `yaml.YAMLError` (malformed YAML) both surface a stderr
-    warning before returning None. Without the warning, a typo on line 200
-    of settings.yaml is indistinguishable from "no peers configured" - the
-    fire-and-forget messaging substrate would go dark with zero signal.
+    A malformed legacy settings.yaml still surfaces a stderr warning before
+    returning None. Without it, a typo on line 200 is indistinguishable from
+    "no peers configured" - the fire-and-forget messaging substrate would go
+    dark with zero signal.
     """
-    import yaml  # lazy import to avoid hard dep at module level
+    from fno.config import read_config_flat
 
     start = (repo_root if repo_root is not None else Path.cwd()).resolve()
     for candidate in [start, *start.parents]:
-        settings_file = candidate / ".fno" / "settings.yaml"
-        if not settings_file.exists():
-            continue
-        try:
-            text = settings_file.read_text(encoding="utf-8")
-        except OSError as e:
-            print(
-                f"inbox.settings: cannot read {settings_file}: {e}",
-                file=sys.stderr,
-            )
-            return None
-        try:
-            data = yaml.safe_load(text)
-        except yaml.YAMLError as e:
-            print(
-                f"inbox.settings: malformed YAML in {settings_file}: {e}",
-                file=sys.stderr,
-            )
-            return None
-        if not isinstance(data, dict):
-            return None
-        # Type-check each level: dict.get(key, default) returns default ONLY
-        # when the key is missing, not when its value is null. A user with
-        # `config:` written as a bare key (parsed as None) would otherwise
-        # crash with `AttributeError: 'NoneType' object has no attribute
-        # 'get'`. Caught by gemini-code-assist on PR #214.
-        config = data.get("config")
-        if not isinstance(config, dict):
-            return None
-        inbox = config.get("inbox")
-        return inbox if isinstance(inbox, dict) else None
+        fno_dir = candidate / ".fno"
+        toml_file = fno_dir / "config.toml"
+        if toml_file.is_file():
+            inbox = read_config_flat(toml_file).get("inbox")
+            return inbox if isinstance(inbox, dict) else None
+        settings_file = fno_dir / "settings.yaml"
+        if settings_file.is_file():
+            inbox = _load_inbox_from_yaml(settings_file)
+            return inbox if isinstance(inbox, dict) else None
     return None
+
+
+def _load_inbox_from_yaml(settings_file: Path) -> dict[str, Any] | None:
+    """Parse a legacy settings.yaml and return its `config.inbox` block, warning
+    to stderr on an unreadable/malformed file (the substrate-dark signal)."""
+    import yaml  # lazy import to avoid hard dep at module level
+
+    try:
+        text = settings_file.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"inbox.settings: cannot read {settings_file}: {e}", file=sys.stderr)
+        return None
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        print(
+            f"inbox.settings: malformed YAML in {settings_file}: {e}",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+    # Type-check each level: dict.get(key, default) returns default ONLY when
+    # the key is missing, not when its value is null. A user with `config:`
+    # written as a bare key (parsed as None) would otherwise crash with
+    # AttributeError. Caught by gemini-code-assist on PR #214.
+    config = data.get("config")
+    if not isinstance(config, dict):
+        return None
+    inbox = config.get("inbox")
+    return inbox if isinstance(inbox, dict) else None
 
 
 def read_watch_settings(repo_root: Path | None = None) -> WatchSettings:
