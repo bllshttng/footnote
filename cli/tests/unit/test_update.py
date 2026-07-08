@@ -570,10 +570,13 @@ def test_refresh_rust_bins_gating_outcomes(
         monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
         monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: None)
     elif setup == "fresh":
-        # binary self-reports the source crates/ rev (gate on the binary)
+        # binary self-reports the source crates/ rev (gate on the binary), and the
+        # daemon + worker siblings are present so the fresh fast path is taken.
         (source.parent / "crates" / "fno-agents").mkdir(parents=True)
         fake_bin = tmp_path / "fake-fno-agents"
         fake_bin.write_text("x")
+        for _n in update._triad_names():
+            (tmp_path / _n).write_text("x")
         monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
         monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "abc123" * 2)
         monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: "abc123" * 2)
@@ -723,6 +726,8 @@ def test_refresh_rust_bins_installs_mux_on_fresh_marker_when_absent(
 
     fake_bin = tmp_path / "fake-fno-agents"
     fake_bin.write_text("x")
+    for _n in update._triad_names():
+        (tmp_path / _n).write_text("x")  # triad siblings present (fresh fast path)
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
     monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree_rev)  # fresh
@@ -759,6 +764,8 @@ def test_refresh_rust_bins_fresh_marker_mux_present_installs_nothing(
 
     fake_bin = tmp_path / "fake-fno-agents"
     fake_bin.write_text("x")
+    for _n in update._triad_names():
+        (tmp_path / _n).write_text("x")  # triad siblings present (fresh fast path)
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
     monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree_rev)  # fresh
@@ -777,13 +784,15 @@ def test_refresh_rust_bins_fresh_marker_mux_present_installs_nothing(
     assert not [c for c in recorded if c[:2] == ["cargo", "install"]], recorded
 
 
-# --- ab-703f2ed2: refreshed-no-marker outcome granularity ---
+# --- legacy marker-write failure is a SUCCESSFUL refresh (post-deploy verify passed) ---
 
-def test_refresh_rust_bins_marker_write_failure_returns_no_marker(
+def test_refresh_rust_bins_marker_write_failure_still_refreshed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """Cargo succeeds but the marker write fails -> 'refreshed-no-marker'
-    plus a stderr warning, not conflated into 'refreshed'."""
+    """Cargo succeeds and post-deploy verify passes, but the LEGACY marker write
+    fails -> 'refreshed' (the bins are repaired; no verdict reads the marker).
+    Reporting 'refreshed-no-marker' would make `fno doctor --fix` exit 1 on a
+    successful repair."""
     source = tmp_path / "cli"
     source.mkdir()
     (source.parent / "crates" / "fno-agents").mkdir(parents=True)
@@ -812,7 +821,7 @@ def test_refresh_rust_bins_marker_write_failure_returns_no_marker(
     )
 
     result = update._refresh_rust_bins(source)
-    assert result == "refreshed-no-marker"
+    assert result == "refreshed"
     captured = capsys.readouterr()
     assert "marker" in captured.err
 
@@ -1028,6 +1037,8 @@ def test_ac1_edge_fresh_marker_skips_cargo(
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: tmp_path / "fake-bin")
     (tmp_path / "fake-bin").write_text("x")
+    for _n in update._triad_names():
+        (tmp_path / _n).write_text("x")  # triad siblings present (fresh fast path)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: rev)
     monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: rev)  # fresh
 
@@ -1589,3 +1600,69 @@ def test_sync_triad_skips_byte_identical_location(
     monkeypatch.setattr(update.shutil, "copy2", lambda s, d: calls.append((s, d)))
     update._sync_triad(cargo)
     assert calls == []
+
+
+def test_fresh_path_missing_daemon_sibling_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1: a fresh client whose same-dir daemon sibling is MISSING must NOT take
+    the fresh fast path - that would skip the rebuild and leave the split (the
+    exact DaemonBinMissing case this change repairs). It falls through to cargo,
+    which reinstalls the full triad coherently."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
+    bindir = tmp_path / "cargo" / "bin"
+    bindir.mkdir(parents=True)
+    fake_bin = bindir / "fno-agents"
+    fake_bin.write_text("x")
+    (bindir / "fno-agents-worker").write_text("x")  # worker present, daemon ABSENT
+    subtree = "a" * 40
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree)
+    monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
+    state = {"built": False}
+
+    def _fake_run(cmd, **kw):
+        if cmd and cmd[0] == "cargo":
+            state["built"] = True
+            for n in update._triad_names():
+                (bindir / n).write_text("new")  # cargo writes the full triad
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(update.subprocess, "run", _fake_run)
+    # The client reports fresh even before the rebuild - that is the split: a
+    # current client next to a vanished daemon. The gate must still rebuild.
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree)
+
+    result = update._refresh_rust_bins(source)
+    assert result == "refreshed", "a missing daemon must force a rebuild, not 'fresh'"
+    assert state["built"] is True, "cargo must run to repair the split triad"
+
+
+def test_fresh_path_complete_triad_short_circuits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1 counterpart: a fresh client WITH both siblings present takes the fresh
+    fast path (no cargo) - the presence check must not over-trigger a rebuild."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
+    bindir = tmp_path / "cargo" / "bin"
+    bindir.mkdir(parents=True)
+    subtree = "a" * 40
+    for n in update._triad_names():
+        (bindir / n).write_text("x")  # full triad present
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: bindir / "fno-agents")
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree)
+    ran = []
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        lambda cmd, **kw: (ran.append(cmd), types.SimpleNamespace(returncode=0))[1],
+    )
+    result = update._refresh_rust_bins(source)
+    assert result == "fresh"
+    assert not [c for c in ran if c and c[0] == "cargo"], "complete fresh triad must skip cargo"

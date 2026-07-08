@@ -607,7 +607,18 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # skip cargo only when that rev matches source AND the build is not dirty.
     # A marker could advance past a stale/out-of-band binary and lie "fresh".
     installed_rev = None if installed_bin is None else _installed_bin_crates_rev(installed_bin)
-    if not force and installed_rev is not None and installed_rev == subtree:
+    # The fresh fast path also requires the daemon + worker siblings to be present
+    # beside the fresh client. A fresh client next to a MISSING daemon is the exact
+    # split this change repairs (resolve_daemon_bin -> DaemonBinMissing): taking the
+    # fresh path there would skip the rebuild AND hand _sync_triad an incomplete
+    # source it silently no-ops on, so the split would never heal. Any absent
+    # sibling -> fall through to cargo, which rebuilds the whole triad coherently.
+    # (daemon/worker carry no version verb, so presence is the checkable signal;
+    # cargo installs all three together, so a present sibling is the same build.)
+    triad_present = installed_bin is not None and all(
+        (installed_bin.parent / n).is_file() for n in _triad_names()
+    )
+    if not force and installed_rev is not None and installed_rev == subtree and triad_present:
         typer.echo(
             f"fno update: rust bins fresh (rev {installed_rev[:12]} from binary);"
             " skipping cargo install"
@@ -710,14 +721,17 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         typer.echo(f"fno update: rust bins refreshed (rev {subtree[:12]})")
         outcome = "refreshed"
     else:
-        # Marker write failed. Harmless now (no verdict reads it); the
-        # outcome string is retained for `fno doctor --fix`'s existing branching.
+        # Marker write failed, but the deploy already passed post-deploy verify
+        # above - the bins ARE repaired, and no verdict reads the legacy marker.
+        # So this is a SUCCESSFUL refresh, not `refreshed-no-marker` (which
+        # `fno doctor --fix` treats as a failed repair and exits 1). Warn about the
+        # cosmetic breadcrumb, return success.
         typer.echo(
-            "fno update: WARNING: rust bins refreshed but the legacy marker write"
-            f" failed (check {_RUST_MARKER_FILE.parent} permissions)",
+            "fno update: note: rust bins refreshed; the legacy marker write failed"
+            f" (harmless, no verdict reads it; check {_RUST_MARKER_FILE.parent} permissions)",
             err=True,
         )
-        outcome = "refreshed-no-marker"
+        outcome = "refreshed"
 
     # Best-effort daemon advisory: warn if the old binary is still running.
     try:
