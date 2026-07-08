@@ -74,7 +74,9 @@ def test_ac2_hp_ship_creates_pr(tmp_path, monkeypatch):
         MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/42", stderr=""),  # gh pr create
     ]
 
-    with patch("subprocess.run", mock_run):
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ):
         from fno.worker.ship import ship
         result = ship(
             state_path=state_path,
@@ -108,7 +110,9 @@ def test_ac2_hp_ship_writes_artifact(tmp_path, monkeypatch):
         MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/99", stderr=""),  # gh pr create
     ]
 
-    with patch("subprocess.run", mock_run):
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ):
         from fno.worker.ship import ship
         ship(
             state_path=state_path,
@@ -174,7 +178,9 @@ def test_ac4_hp_ship_arms_automerge(tmp_path, monkeypatch):
         MagicMock(returncode=0, stdout="", stderr=""),                 # gh pr merge
     ]
 
-    with patch("subprocess.run", mock_run):
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ):
         from importlib import reload
         import fno.worker.ship as ship_mod
         reload(ship_mod)
@@ -212,7 +218,9 @@ def test_ac2_hp_ship_stamps_node_pr_link(tmp_path):
         MagicMock(returncode=0, stdout="", stderr=""),                 # fno backlog update
     ]
 
-    with patch("subprocess.run", mock_run):
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ):
         from fno.worker.ship import ship
         result = ship(
             state_path=state_path,
@@ -242,7 +250,9 @@ def test_ac2_err_stamp_failure_never_fails_ship(tmp_path):
         MagicMock(returncode=1, stdout="", stderr="graph locked"),     # fno backlog update FAILS
     ]
 
-    with patch("subprocess.run", mock_run):
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ):
         from fno.worker.ship import ship
         result = ship(
             state_path=state_path,
@@ -266,7 +276,9 @@ def test_no_node_id_skips_stamp(tmp_path):
         MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/42", stderr=""),  # gh pr create
     ]
 
-    with patch("subprocess.run", mock_run):
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ):
         from fno.worker.ship import ship
         ship(
             state_path=state_path,
@@ -277,3 +289,38 @@ def test_no_node_id_skips_stamp(tmp_path):
 
     # Exactly 3 subprocess calls: no 4th (stamp) call.
     assert mock_run.call_count == 3
+
+
+# ---- AC1-UI: a stale base short-circuits before gh pr create ----
+
+def test_stale_base_refusal_blocks_pr_create(tmp_path, monkeypatch):
+    """A stale base makes ship() error out with the refusal text and never
+    reach gh pr create."""
+    monkeypatch.chdir(tmp_path)
+    state_path = _make_state(tmp_path)
+
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),  # git rev-parse
+        MagicMock(returncode=0, stdout="[]", stderr=""),               # gh pr list
+    ]
+    refusal = "stale base: your branch's merge-base with origin/main is 3.0 days behind"
+
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(3, refusal)
+    ):
+        from importlib import reload
+        import fno.worker.ship as ship_mod
+        reload(ship_mod)
+        result = ship_mod.ship(
+            state_path=state_path,
+            title="feat: stale",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "error"
+    assert refusal in result["error"]
+    # gh pr create was never invoked (only git rev-parse + gh pr list ran).
+    assert mock_run.call_count == 2
+    assert not any("create" in str(c) for c in mock_run.call_args_list)

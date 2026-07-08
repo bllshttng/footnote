@@ -91,6 +91,26 @@ def status(pr_number: int = typer.Argument(..., help="GitHub PR number")) -> Non
 
 
 @pr_app.command(
+    "base-check",
+    help=(
+        "Refuse a PR whose branch base is > 24h of main history behind "
+        "origin/main (phantom-deletion guard). Exit 0 fresh|bypass|fail-open, "
+        "3 stale (points at `fno pr rebase`), 4 unrelated histories. Bypass "
+        "with FNO_PR_BASE_OK=stale-acknowledged (emits gate_escape)."
+    ),
+)
+def base_check(
+    base: str = typer.Option(
+        "origin/main", "--base", help="Base ref to compare the branch against"
+    ),
+) -> None:
+    from fno.pr import _preflight
+
+    rc = _preflight.run_base_check(base=base)
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
     "rebase",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
