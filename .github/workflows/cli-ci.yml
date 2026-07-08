@@ -132,6 +132,11 @@ jobs:
           bash tests/hooks/test_init_target_session_id.sh
           bash tests/hooks/test_agy_stop_hook.sh
 
+      - name: ship-phase PR->node link verify guard (x-e106)
+        # The link step is verified (read-back + one retry + refuse-to-promise),
+        # not fire-and-WARN; pre-promise carries the last-line node-link assertion.
+        run: bash tests/target/test_ship_phase_link_verify.sh
+
       - name: docs-before-ship phase-ordering guard (ab-2e4a09f1)
         # Regression guard: the docs phase must run BEFORE ship so docs ride in
         # the same PR and are never stranded by an auto-merge firing on external

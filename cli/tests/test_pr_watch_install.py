@@ -361,3 +361,253 @@ def test_config_pr_watch_null_degrades_to_defaults():
 
     cb = ConfigBlock.model_validate({"pr_watch": None})
     assert cb.pr_watch.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# x-e106 AC1-HP: install activates (launchctl load) unless --no-activate
+# ---------------------------------------------------------------------------
+
+
+def test_install_activates_by_default(tmp_home, tmp_launch_agents, capsys, monkeypatch):
+    """install(activate=True) runs launchctl load and reports activation."""
+    m = _install()
+    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
+    calls: list[tuple] = []
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: calls.append(a) or 0)
+
+    m.install(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+        dry_run=False,
+        activate=True,
+    )
+
+    assert any(a and a[0] == "load" for a in calls), "launchctl load must be called"
+    assert "Activated" in capsys.readouterr().out
+
+
+def test_install_no_activate_skips_load(tmp_home, tmp_launch_agents, capsys, monkeypatch):
+    """install(activate=False) writes the plist but does NOT launchctl load."""
+    m = _install()
+    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
+    calls: list[tuple] = []
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: calls.append(a) or 0)
+
+    m.install(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+        dry_run=False,
+        activate=False,
+    )
+
+    assert not any(a and a[0] == "load" for a in calls), "--no-activate must skip load"
+    out = capsys.readouterr().out
+    assert "To activate" in out
+
+
+def test_install_reload_unloads_first_when_loaded(tmp_home, tmp_launch_agents, monkeypatch):
+    """A re-install of an already-loaded agent unloads before loading (stale-plist fix)."""
+    m = _install()
+    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+    calls: list[tuple] = []
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: calls.append(a) or 0)
+
+    m.install(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+        dry_run=False,
+        activate=True,
+    )
+
+    verbs = [a[0] for a in calls]
+    assert verbs == ["unload", "load"], f"expected unload then load, got {verbs}"
+
+
+def test_ensure_activated_rerenders_existing_plist(tmp_home, tmp_launch_agents, monkeypatch):
+    """Re-enable of an existing plist re-renders it (config drift + fresh mtime)."""
+    import os
+    import time as _time
+
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist/>")  # stale stub content
+    old = _time.time() - 10_000
+    os.utime(plist, (old, old))
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: 0)
+
+    m.ensure_activated(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+    )
+
+    content = plist.read_text()
+    assert "sh.fno.pr-watcher" in content, "existing plist should be re-rendered, not left stale"
+    assert plist.stat().st_mtime > old + 100, "re-render refreshes the plist mtime"
+
+
+def test_install_activation_failure_is_loud(tmp_home, tmp_launch_agents, capsys, monkeypatch):
+    """A failing launchctl load prints a loud WARNING but still writes the plist (AC1-ERR)."""
+    m = _install()
+    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: 1)
+
+    m.install(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+        dry_run=False,
+        activate=True,
+    )
+
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "launchctl load failed" in out
+    assert (tmp_launch_agents / "sh.fno.pr-watcher.plist").exists()
+
+
+# ---------------------------------------------------------------------------
+# x-e106: ensure_activated + unload_only (config-set coupling primitives)
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_activated_noop_when_loaded(tmp_home, tmp_launch_agents, monkeypatch):
+    """ensure_activated is a no-op when the agent is already loaded."""
+    m = _install()
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: pytest.fail("must not load"))
+
+    assert m.ensure_activated(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+    ) == "already-running"
+
+
+def test_ensure_activated_installs_and_loads(tmp_home, tmp_launch_agents, monkeypatch):
+    """ensure_activated writes the plist and loads it when absent."""
+    m = _install()
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
+    loaded: list[tuple] = []
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: loaded.append(a) or 0)
+
+    outcome = m.ensure_activated(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+    )
+
+    assert outcome == "activated"
+    assert (tmp_launch_agents / "sh.fno.pr-watcher.plist").exists()
+    assert loaded and loaded[0][0] == "load"
+
+
+def test_ensure_activated_reports_load_failure(tmp_home, tmp_launch_agents, monkeypatch):
+    """A launchctl failure returns 'load-failed' (never raises); AC1-ERR upstream."""
+    m = _install()
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: 1)
+
+    assert m.ensure_activated(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+    ) == "load-failed"
+
+
+def test_unload_only_missing_plist_is_noop(tmp_home, tmp_launch_agents):
+    """unload_only on an absent plist is a clean no-op."""
+    m = _install()
+    assert m.unload_only(launch_agents_dir=tmp_launch_agents) == "not-installed"
+
+
+def test_unload_only_unloads_loaded_agent(tmp_home, tmp_launch_agents, monkeypatch):
+    """unload_only unloads a loaded agent but keeps the plist."""
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist/>")
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+    monkeypatch.setattr(m, "_run_launchctl", lambda *a: 0)
+
+    assert m.unload_only(launch_agents_dir=tmp_launch_agents) == "unloaded"
+    assert plist.exists(), "disable keeps the plist"
+
+
+# ---------------------------------------------------------------------------
+# x-e106 AC1-UI / AC1-FR: liveness verdict from tick recency (pure function)
+# ---------------------------------------------------------------------------
+
+
+def _live(**over):
+    """liveness_report with sane defaults, overridden per test."""
+    m = _install()
+    base = dict(
+        enabled=True,
+        interval_seconds=600,
+        loaded=True,
+        last_tick_ts="2026-06-14T01:00:00Z",
+        plist_exists=True,
+        plist_mtime=0.0,
+        now=0.0,
+    )
+    base.update(over)
+    return m.liveness_report(**base)
+
+
+def test_liveness_disabled_is_silent():
+    assert _live(enabled=False)["verdict"] == "disabled"
+
+
+def test_liveness_healthy_recent_tick():
+    # tick at now (age 0) < 2x interval -> healthy
+    now = _install()._parse_ts("2026-06-14T01:00:00Z")
+    assert _live(now=now)["verdict"] == "healthy"
+
+
+def test_liveness_dead_stale_tick():
+    # tick is 3600s old, 2x interval is 1200s -> dead (AC1-UI)
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    v = _live(now=tick + 3600)
+    assert v["verdict"] == "dead"
+    assert "pr-watch install" in v["fix"]
+
+
+def test_liveness_dead_not_loaded():
+    assert _live(loaded=False)["verdict"] == "dead"
+
+
+def test_liveness_dead_no_plist():
+    assert _live(plist_exists=False)["verdict"] == "dead"
+
+
+def test_liveness_fresh_install_no_tick_is_pending():
+    # No tick yet, plist installed just now (< 2x interval) -> healthy-pending
+    v = _live(last_tick_ts=None, plist_mtime=100.0, now=200.0)
+    assert v["verdict"] == "healthy-pending"
+
+
+def test_liveness_no_tick_old_install_is_dead():
+    # No tick and plist installed long ago (> 2x interval) -> dead (AC1-FR class)
+    v = _live(last_tick_ts=None, plist_mtime=0.0, now=5000.0)
+    assert v["verdict"] == "dead"
+
+
+def test_liveness_reenabled_plist_newer_than_old_tick_is_pending():
+    # Re-enable case: an OLD tick exists, but the plist was re-rendered just now
+    # (newer than the tick, within grace) -> healthy-pending, not a false dead.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    v = _live(last_tick_ts="2026-06-14T01:00:00Z", plist_mtime=tick + 5000, now=tick + 5100)
+    assert v["verdict"] == "healthy-pending"
+
+
+def test_liveness_old_tick_and_old_plist_still_dead():
+    # Old tick AND old plist (not freshly reinstalled) -> genuinely dead.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    v = _live(last_tick_ts="2026-06-14T01:00:00Z", plist_mtime=tick, now=tick + 5000)
+    assert v["verdict"] == "dead"

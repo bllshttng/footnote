@@ -89,6 +89,31 @@ fi
 
 Before outputting `<promise>`, verify the pipeline actually completed: sigma-review ran and found no blocking issues, tests pass, validate is green, a PR exists (unless no_ship), and external review is satisfied (unless no_external). These are not gate booleans to read from a file - they are things you did during the session. If any phase was skipped unintentionally, run it before emitting the promise.
 
+**PR→node link assertion (x-e106).** When this session is node-bound (a
+`graph_node_id` other than `null` in the manifest body) and a PR was created,
+confirm `node.pr_number` equals the PR you are about to promise - the last-line
+assertion for any ship that reached pre-promise through a path that skipped the
+ship-phase link step. On mismatch, re-link, **read back**, and refuse to promise
+if it still did not stick - a silently-unlinked node re-dispatches as duplicate
+work, so this backstop is a real assertion, not a fire-and-forget re-link:
+
+```bash
+if [[ -n "${NODE_ID:-}" && "$NODE_ID" != "null" && -n "${PR_NUMBER:-}" ]]; then
+  # `|| true`: a failing get must not abort the shell under set -e; treat it as
+  # a mismatch that drives the re-link + refuse path below.
+  got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)
+  if [[ "$got" != "$PR_NUMBER" ]]; then
+    echo "pre-promise: node $NODE_ID pr_number=$got != PR #$PR_NUMBER; re-linking" >&2
+    fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" 2>/dev/null || true
+    got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)
+    if [[ "$got" != "$PR_NUMBER" ]]; then
+      echo "<help reason=\"pr-node-link-failed\" evidence=\"node $NODE_ID pr_number=${got:-<none>} expected=$PR_NUMBER\">pre-promise re-link did not stick; refusing to promise. Fix: fno backlog update $NODE_ID --pr-number $PR_NUMBER --pr-url $PR_URL</help>"
+      exit 1
+    fi
+  fi
+fi
+```
+
 The loop-check verb (`fno-agents loop-check`) will verify the world independently: PR exists for HEAD + CI green + reviewed. A premature promise does not close the loop - it blocks with the failing read named, and the session continues until the world catches up or the backstop fires.
 
 ## Memory Pass (advisory)

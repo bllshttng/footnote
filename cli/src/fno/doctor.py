@@ -539,6 +539,29 @@ def _orphan_report() -> list[str]:
     return sorted(found)
 
 
+def _pr_watch_liveness() -> dict[str, Any]:
+    """Ground-truth liveness verdict for the global PR-watch agent (x-e106).
+
+    Advisory: never changes doctor's status/exit. Degrades to ``unknown``
+    (silent) rather than crying wolf when the check itself can't run.
+    """
+    try:
+        from fno.pr_watch import _install as m
+
+        return m.liveness_report_live()
+    except Exception:
+        # Same dict shape as liveness_report so a future non-.get() reader
+        # cannot KeyError on the exception path.
+        return {
+            "enabled": False,
+            "verdict": "unknown",
+            "detail": "",
+            "fix": None,
+            "loaded": False,
+            "last_tick": None,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
@@ -748,6 +771,19 @@ def _emit_human(
             f"capture paths (safe to delete): {', '.join(orphans)}"
         )
 
+    # PR-watch liveness (x-e106). Advisory: only speak up when the enabled
+    # watcher is not actually running, or is freshly installed and pending.
+    pw = result.get("pr_watch") or {}
+    pw_verdict = pw.get("verdict")
+    if pw_verdict == "dead":
+        fix = pw.get("fix") or "fno pr-watch install"
+        out(
+            f"fno doctor: pr-watch enabled but not running ({pw.get('detail')}); "
+            f"run `{fix}`, then verify with `fno pr-watch status`."
+        )
+    elif pw_verdict == "healthy-pending":
+        out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
+
 
 # ---------------------------------------------------------------------------
 # Command
@@ -818,6 +854,11 @@ def doctor_command(
 
     # Advisory orphan-file check (Group 3 GC); never changes status/exit.
     result["orphan_files"] = _orphan_report()
+
+    # Advisory PR-watch liveness (x-e106): enabled-but-dead ran silently for
+    # weeks with zero signal; the verdict derives from tick recency (ground
+    # truth), never from config alone. Never changes status/exit.
+    result["pr_watch"] = _pr_watch_liveness()
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).
