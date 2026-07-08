@@ -32,20 +32,20 @@ const SESSION_CONTEXT_PATH = path.join(os.homedir(), '.claude', '.session-contex
 // Guards (a) Layer 2 (model drift) + (b) interactive spend cap.
 const SPEND_THROTTLE_MS = 60_000 // at most one cost/drift check per minute
 
-// Read config.budget.interactive.cap_usd from settings.yaml (local > global).
+// Read config.budget.interactive.cap_usd from config.toml (local > global).
 // This value is intentionally UNMODELED (rides extra="ignore" like budget.attended),
-// so `fno config get` rejects it — read the raw YAML directly. Parsed natively in
+// so `fno config get` rejects it — read the raw TOML directly. Parsed natively in
 // JS (no python3 / PyYAML dependency, no per-tick process spawn — gemini review).
-// The regex is LINE-ANCHORED so `cost_cap_usd:` (config.budget.attended /
+// The regex is LINE-ANCHORED so `cost_cap_usd =` (config.budget.attended /
 // unattended, which contains "cap_usd" as a substring) cannot false-match the
-// interactive `cap_usd:`. Returns a positive number, or null (feature off).
+// interactive `cap_usd =`. Returns a positive number, or null (feature off).
 function readInteractiveCap() {
-  const files = ['.fno/settings.yaml', path.join(os.homedir(), '.fno', 'settings.yaml')]
+  const files = ['.fno/config.toml', path.join(os.homedir(), '.fno', 'config.toml')]
   for (const p of files) {
     try {
       if (!fs.existsSync(p)) continue
       const content = fs.readFileSync(p, 'utf8')
-      const m = content.match(/^[ \t]*cap_usd:[ \t]*([0-9.]+)/m)
+      const m = content.match(/^[ \t]*cap_usd[ \t]*=[ \t]*([0-9.]+)/m)
       if (m) {
         const n = parseFloat(m[1])
         if (Number.isFinite(n) && n > 0) return n

@@ -104,8 +104,8 @@ INITIAL_INPUT="${TARGET_INPUT:-}"
 INITIAL_PLAN_PATH="${TARGET_PLAN_PATH:-}"
 unset TARGET_INPUT TARGET_PLAN_PATH
 
-LOCAL_SETTINGS="$REPO_ROOT/.fno/settings.yaml"
-GLOBAL_SETTINGS="${HOME}/.fno/settings.yaml"
+LOCAL_SETTINGS="$REPO_ROOT/.fno/config.toml"
+GLOBAL_SETTINGS="${HOME}/.fno/config.toml"
 
 # ── Provider detection ───────────────────────────────────────────────
 detect_provider() {

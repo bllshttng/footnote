@@ -59,7 +59,7 @@ if command -v fno >/dev/null 2>&1; then
     [[ -f "$PATHS_SH" ]] && source "$PATHS_SH" 2>/dev/null || true
 fi
 SETTINGS=""
-for cfg in "$MAIN_REPO/.fno/settings.yaml" "${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/settings.yaml}"; do
+for cfg in "$MAIN_REPO/.fno/config.toml" "${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/config.toml}"; do
     if [[ -f "$cfg" ]]; then
         SETTINGS="$cfg"
         break
@@ -70,13 +70,13 @@ done
 wt_config() {
     local key="$1"
     local default="$2"
-    if [[ -n "$SETTINGS" ]]; then
-        local val
-        val=$(sed -n "/^worktree:/,/^[^ ]/{ /^[[:space:]]*${key}:/{ s/.*${key}:[[:space:]]*//; s/[[:space:]]*$//; p; }; }" "$SETTINGS" 2>/dev/null | head -1)
-        # Strip surrounding quotes only (preserve internal quotes)
-        val="${val%\"}"; val="${val#\"}"
-        val="${val%\'}"; val="${val#\'}"
-        [[ -n "$val" ]] && echo "$val" || echo "$default"
+    local val=""
+    if [[ -n "$SETTINGS" ]] && command -v yq >/dev/null 2>&1; then
+        # Flat config.toml: worktree keys live under the [worktree] table.
+        val=$(yq -p toml -r ".worktree.${key} // \"\"" "$SETTINGS" 2>/dev/null)
+    fi
+    if [[ -n "$val" && "$val" != "null" ]]; then
+        echo "$val"
     else
         echo "$default"
     fi

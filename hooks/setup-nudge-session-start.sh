@@ -7,9 +7,9 @@
 
 set -uo pipefail
 
-LOCAL_SETTINGS=".fno/settings.yaml"
+LOCAL_SETTINGS=".fno/config.toml"
 # GLOBAL_SETTINGS = per-user global; never alias the active/local file.
-GLOBAL_SETTINGS="${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/settings.yaml}"
+GLOBAL_SETTINGS="${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/config.toml}"
 
 # Silent once configured anywhere (local override > global).
 if [[ -f "$LOCAL_SETTINGS" || -f "$GLOBAL_SETTINGS" ]]; then

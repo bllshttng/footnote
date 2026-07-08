@@ -20,7 +20,7 @@ export HOOK_LOGS_DIR="$STATE_DIR/hook-logs"
 export PLANS_DIR="$REPO_ROOT/.fno/plans"
 export INBOX_DIR="$REPO_ROOT/.fno/inbox"
 export HANDOFFS_DIR="$STATE_DIR/handoffs/$(basename "$REPO_ROOT")"
-export CONFIG_FILE="$STATE_DIR/settings.yaml"
+export CONFIG_FILE="$STATE_DIR/config.toml"
 
 paths_plan_file() {
   local name="$1"
