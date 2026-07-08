@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -2428,18 +2429,58 @@ class ConfigBlock(BaseModel):
         return self
 
 
-class SettingsModel(BaseModel):
-    """Root settings model. Mirrors the shape of settings.yaml."""
+def _unwrap_config_dict(raw: dict[str, object]) -> dict[str, object]:
+    """Normalize a settings dict to the FLAT canonical shape.
 
-    model_config = ConfigDict(extra="ignore")
+    Config fields live at the top level now (flat config.toml). Legacy files
+    nest every setting under a ``config:`` key; lift those to the top level so
+    both shapes validate into the same flat model. Top-level siblings the model
+    ignores (``worktree``) and ``schema_version`` are preserved; a ``config``
+    block key wins over a stray top-level key of the same name (canonical beats
+    legacy). No-ops on an already-flat dict.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    cfg = raw.get("config")
+    # Accept a ConfigBlock instance too (e.g. SettingsModel(config=ConfigBlock(...))
+    # in tests), not just a parsed dict. exclude_unset preserves which fields were
+    # explicitly set, so partial-override semantics (e.g. a provider entry that
+    # overrides only base_url, keeping the built-in api_key_env) survive.
+    if isinstance(cfg, BaseModel):
+        cfg = cfg.model_dump(exclude_unset=True)
+    if not isinstance(cfg, dict):
+        return raw
+    rest = {k: v for k, v in raw.items() if k != "config"}
+    return _deep_merge(rest, cfg)
 
-    # schema_version is the ONLY top-level key (it versions the file format,
-    # not behavior). Every setting lives under `config:` - including `work` and
-    # `project`, which were top-level historically. The loader aliases legacy
-    # top-level `work:` / `project:` into `config.work` / `config.project`
-    # (see _alias_legacy_keys), so existing files keep working with no migration.
+
+class SettingsModel(ConfigBlock):
+    """Root settings model. Config fields live at the TOP level (flat).
+
+    Historically every setting nested under a ``config:`` key; the file is now
+    flat (``config.toml`` with top-level blocks). ``SettingsModel`` inherits
+    ``ConfigBlock`` so ``settings.review`` / ``settings.project`` resolve
+    directly. The legacy ``config:``-wrapped shape still loads via the
+    ``_unwrap`` before-validator (so ``SettingsModel(config={...})`` and old
+    YAML both work), and legacy readers of ``settings.config.<x>`` keep working
+    via the ``config`` property below.
+    """
+
+    # schema_version versions the file format, not behavior.
     schema_version: int = 1
-    config: ConfigBlock = Field(default_factory=ConfigBlock)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unwrap(cls, data: object) -> object:
+        if isinstance(data, dict):
+            return _unwrap_config_dict(data)
+        return data
+
+    @property
+    def config(self) -> "ConfigBlock":
+        # Back-compat: legacy code reads settings.config.<block>. The flat model
+        # IS the config block, so return self.
+        return self
 
 
 # Keys a per-worktree `.fno/settings.local.yaml` may override on top of the
@@ -2525,7 +2566,26 @@ def _candidate_paths() -> list[Path]:
     if canonical_candidate not in candidates:
         candidates.append(canonical_candidate)
     candidates.append(_global_settings_path())
-    return candidates
+    return _prefer_toml(candidates)
+
+
+def _prefer_toml(paths: list[Path]) -> list[Path]:
+    """For each ``settings.yaml`` candidate, try its ``config.toml`` sibling first.
+
+    Adds the new flat-TOML file as a higher-priority read candidate wherever the
+    legacy YAML was a candidate, so a ``config.toml`` wins per-key while an
+    existing ``settings.yaml`` still loads. Env-pinned non-YAML paths (e.g.
+    ``/dev/null`` for test isolation) get no sibling and pass through untouched.
+    """
+    out: list[Path] = []
+    for p in paths:
+        if p.name == "settings.yaml":
+            toml = p.with_name("config.toml")
+            if toml not in out:
+                out.append(toml)
+        if p not in out:
+            out.append(p)
+    return out
 
 
 # Module-level variable recording the path that load_settings() actually read.
@@ -2541,21 +2601,26 @@ def loaded_from() -> Optional[Path]:
 
 
 def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
-    """Load a YAML file and return (data, parse_succeeded).
+    """Load a settings file and return (data, parse_succeeded).
 
-    Returns ({}, False) on any OS or YAML error so callers can fall through
-    to the next candidate. Logs a WARNING on parse failure so the user knows
-    their settings.yaml was not applied.
+    Parses TOML for a ``.toml`` suffix (config.toml), YAML otherwise
+    (settings.yaml). Returns ({}, False) on any OS or parse error so callers
+    can fall through to the next candidate. Logs a WARNING on parse failure so
+    the user knows their config was not applied.
 
     Returns (data, True) when the file parsed successfully (even if the dict
-    is empty, i.e. the file was blank or contained only ``null``).
+    is empty, i.e. the file was blank).
     """
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        if path.suffix == ".toml":
+            data = tomllib.loads(text)
+        else:
+            data = yaml.safe_load(text)
         return (data if isinstance(data, dict) else {}, True)
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, yaml.YAMLError, tomllib.TOMLDecodeError) as exc:
         _LOG.warning(
-            "settings.yaml at %s failed to parse: %s; using defaults",
+            "config file at %s failed to parse: %s; using defaults",
             path,
             exc,
         )
@@ -2697,6 +2762,7 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
         return raw
 
     config = raw.get("config")
+    had_config = isinstance(config, dict)
     if not isinstance(config, dict):
         config = {}
 
@@ -2729,10 +2795,12 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
         raw["config"] = config
 
     # --- top-level project.* -> config.project.* -------------------------
-    # The whole top-level `project` block is deprecated (id + vision); lift any
-    # field config.project hasn't already set. canonical (config.project) wins.
+    # Only a genuinely legacy file (a `config:` block present) treats top-level
+    # `project` as the deprecated location. In the flat canonical shape there is
+    # no `config:` block and top-level `project` IS canonical - skip silently so
+    # a flat config.toml never draws a spurious deprecation warning.
     top_project = raw.get("project")
-    if isinstance(top_project, dict):
+    if had_config and isinstance(top_project, dict):
         cfg_project = config.get("project")
         cfg_project = cfg_project if isinstance(cfg_project, dict) else {}
         lifted = False
@@ -2749,8 +2817,10 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
             )
 
     # --- top-level work -> config.work ------------------------------------
+    # As with `project`, only alias when a legacy `config:` block is present;
+    # flat-shape top-level `work` is canonical.
     top_work = raw.get("work")
-    if isinstance(top_work, dict) and not isinstance(config.get("work"), dict):
+    if had_config and isinstance(top_work, dict) and not isinstance(config.get("work"), dict):
         config["work"] = top_work
         raw["config"] = config
         _LOG.warning(
@@ -2825,9 +2895,14 @@ def load_settings() -> SettingsModel:
     # (Finding 3: paths.config_file must agree with the loader, not re-derive).
     _loaded_from = layers[0][0] if layers else None
 
+    # Flatten the legacy config:-wrapped shape to the canonical top-level shape
+    # before warning/validation so unknown-key warnings key off real block names
+    # (the model is flat; a residual `config` key would look "unknown").
+    raw = _unwrap_config_dict(raw)
+
     # Warn about unknown top-level and nested keys BEFORE model construction
     # so the message appears even if validation later raises.
-    # The recursive walker handles nested blocks (config, paths, etc.) automatically;
+    # The recursive walker handles nested blocks (paths, review, etc.) automatically;
     # there is no need for an additional explicit nested call (which caused duplicate emission).
     _warn_unknown_keys(raw, SettingsModel)
 
@@ -2873,10 +2948,10 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
     """
     layers: list[tuple[Path, dict[str, object]]] = []
 
-    candidates = [
+    candidates = _prefer_toml([
         repo_root / ".fno" / "settings.yaml",
         _global_settings_path(),
-    ]
+    ])
     for candidate in candidates:
         if candidate.is_file():
             parsed, ok = _load_raw(candidate)

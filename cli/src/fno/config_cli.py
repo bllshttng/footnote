@@ -381,6 +381,10 @@ def get_cmd(
         return (True, node)
 
     ok, node = _traverse(key)
+    if not ok and key.startswith("config."):
+        # The model is flat now (config fields at the top level); a legacy
+        # `config.`-prefixed key resolves once the prefix is dropped.
+        ok, node = _traverse(key[len("config.") :])
     if not ok and not key.startswith("config."):
         ok, node = _traverse(f"config.{key}")
     if not ok:

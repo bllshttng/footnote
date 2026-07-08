@@ -224,16 +224,18 @@ def test_vault_template_with_obsidian_disabled_rejected(
 def test_top_level_project_id_logs_deprecation_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A legacy top-level project.id is aliased into config.project.id (the
-    loader lifts it) and emits a deprecation WARNING.
+    """In a legacy DUAL-shape file (a `config:` block AND a top-level
+    `project` block), the top-level `project.id` is the deprecated location:
+    it is lifted into config.project.id and emits a deprecation WARNING.
 
-    There is no longer a top-level `project` field on the model; the value
-    resolves to config.project.id.
+    The model is flat now, so a bare top-level `project` with NO `config:`
+    block is the canonical shape and draws no warning (see
+    test_config_project_id_no_warning); only the mixed legacy file warns.
     """
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     settings_file = _write_settings(
         tmp_path,
-        "schema_version: 1\nproject:\n  id: my-top-level-project\n",
+        "schema_version: 1\nproject:\n  id: my-top-level-project\nconfig:\n  review: {}\n",
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 

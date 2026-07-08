@@ -139,7 +139,9 @@ def test_bash_get_config_defaults_match_model() -> None:
             except OSError:
                 continue
             for key, bash_default in pattern.findall(text):
-                leaf = f"config.{key}"
+                # Model leaves are flat now; a bash key may carry the legacy
+                # `config.` prefix or not - normalize either to the flat leaf.
+                leaf = key[len("config.") :] if key.startswith("config.") else key
                 if leaf not in defaults:
                     continue  # not a modeled leaf; out of scope for this guard
                 checked += 1

@@ -4,128 +4,128 @@
 
 | Key | Type | Default | Wizard | Description |
 |-----|------|---------|--------|-------------|
+| `state_dir` | str | `~/.fno/` | advanced | Root dir for global fno state. |
+| `plans_dir` | str | `.fno/plans/` | advanced | Where folder plans are written. |
+| `branch.prefix` | str | `fno` | advanced | Prefix for dispatched worktree branches: <prefix>/<slug>-<node>. |
+| `paths.graph_json` | str (optional) | _(none)_ | never | Override path to the backlog graph.json. |
+| `paths.ledger_json` | str (optional) | _(none)_ | never | Override path to ledger.json. |
+| `paths.briefs_dir` | str (optional) | _(none)_ | never | Override path to the sidecar briefs dir. |
+| `paths.fleet_dir` | str (optional) | _(none)_ | never | Override path to the megatron fleet dir. |
+| `paths.postmortems_dir` | str (optional) | _(none)_ | never | Override path to the postmortems dir. |
+| `paths.worktrees_base` | str (optional) | _(none)_ | never | Override base dir for worktrees. |
+| `paths.memory_dir` | str (optional) | _(none)_ | never | Override path to the memory dir. |
+| `paths.hook_logs_dir` | str (optional) | _(none)_ | never | Override path to hook logs. |
+| `paths.inbox_dir` | str (optional) | _(none)_ | never | Override path to the cross-project messaging inbox dir. |
+| `paths.inbox_path` | str (optional) | _(none)_ | never | Override path to the capture-tier inbox/parking-lot file. |
+| `paths.agents_registry_path` | str (optional) | _(none)_ | never | Override path to the agents registry.json. |
+| `paths.handoffs_dir` | str (optional) | _(none)_ | never | Override path to the handoffs dir. |
+| `paths.retro_pending_dir` | str (optional) | _(none)_ | never | Override path to the retro-pending dir. |
+| `paths.bus_dir` | str (optional) | _(none)_ | never | Override path to the cross-project mail bus dir. |
+| `paths.loops_paused_json` | str (optional) | _(none)_ | never | Override path to the loops pause-all sentinel. |
+| `paths.observer_reports_dir` | str (optional) | _(none)_ | never | Override path to the observer harness digest dir. |
+| `obsidian.enabled` | bool | `false` | always | Whether this project uses an Obsidian vault for plans/docs. |
+| `obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
+| `project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
+| `project.vision` | str (optional) | _(none)_ | always | One-paragraph statement of what this codebase is and why. |
+| `blueprint.max_prs_per_epic` | int | `4` | advanced | Cap on group PRs per decomposed epic. |
+| `backlog.maintain.staleness_days` | int | `30` | advanced | Age (days) before an idea is flagged stale. |
+| `backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |
+| `backlog.id_prefix` | str (optional) | _(none)_ | always | Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-). |
+| `backlog.id_hex_width` | int | `8` | advanced | Hex width of minted node IDs (4-8). |
+| `batch.enabled` | bool | `false` | advanced | Coalesce same-domain nodes into one batch PR (opt-in). |
+| `batch.max_nodes` | int | `3` | advanced | Nodes per batch before it closes (default 3). |
+| `batch.max_loc` | int (optional) | _(none)_ | advanced | Optional cumulative-diff LOC ceiling for a batch (off by default). |
+| `post_merge.parking_lot_path` | str (optional) | _(none)_ | advanced | Per-repo vault parking-lot path for the post-merge ritual (repo-relative). |
+| `post_merge.enabled` | bool | `true` | advanced | Whether the post-merge ritual runs. |
+| `post_merge.self_reap` | bool | `false` | never | Whether a post-merge watcher self-reaps. |
+| `research.output_dir` | str (optional) | _(none)_ | advanced | Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses). |
+| `review.github_apps` | list[str] (optional) | _(none)_ | advanced | GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots. |
+| `review.required_bots` | list[str] (optional) | _(none)_ | never | Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set. |
+| `review.peers` | list[Any] | `[]` | advanced | Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries. |
+| `review.peer_identity` | str (optional) | _(none)_ | advanced | The distinct machine-account login peers post their review under (must not be the author account). |
+| `review.peer_token_env` | str (optional) | _(none)_ | advanced | Env var holding the PAT for peer_identity used to post peer reviews to the PR. |
+| `review.optional_apps` | list[str] | `[]` | advanced | Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it. |
+| `review.reviewers` | list[str] | `[]` | advanced | Local-attestation reviewers (sigma | /code-review | declare) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot. |
+| `review.external_reviewers` | list[str] | `[]` | always | Which AI reviewers /pr requests a review from (the INVOCATION list). |
+| `review.agent_providers` | dict[str, str] | `{}` | never | Per-agent provider routing for the cross-model review panel. |
+| `review.cross_model.enabled` | bool | `false` | advanced | Enable cross-model (codex/gemini) second-opinion review. |
+| `target.dedupe_dead_duplicates` | bool | `false` | never | Opt-in cleanup of provably-dead duplicate state files. |
+| `target.auto_launch_on_blueprint` | bool | `false` | advanced | Auto-launch a bg /target worker when a node reaches ready via /blueprint. |
+| `target.handoff.enabled` | bool | `true` | advanced | Enable target self-handoff at pipeline boundaries. |
+| `target.handoff.used_pct_trigger` | int | `50` | never | Context-used %% that triggers a wave-boundary handoff. |
+| `target.handoff.generation_cap` | int | `4` | never | Max handoff generations before refusing further delegation. |
+| `target.blast.enabled` | bool | `false` | never | Enable blast-radius routing. |
+| `target.blast.downgrade` | bool | `true` | never | Allow token-saving downgrades in blast routing. |
+| `target.blast.reuse_loc_manifest` | bool | `true` | never | Include loc-ratchet globs in the blast map. |
+| `target.blast.high_blast_globs` | list[str] | `[]` | never | Per-project high-blast glob extensions. |
+| `target.defaults.no_external` | bool | `false` | never | Session-input default: skip external review (size-profile driven). |
+| `target.defaults.no_docs` | bool | `false` | never | Session-input default: skip docs (size-profile driven). |
+| `target.defaults.max_iterations` | int | `40` | advanced | Session-input default: max pipeline iterations. |
+| `agents.a2a.auto` | bool | `true` | advanced | Allow agents to auto-open agent-to-agent threads. |
+| `agents.a2a.turn_ceiling` | int | `6` | advanced | Max turns in an agent-to-agent thread. |
+| `agents.confirm` | str | `auto` | never | Agent-launch confirmation policy (auto/always/never). |
+| `agents.dead_row_grace` | int | `3600` | advanced | Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600). |
+| `agents.codex.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless codex workers. |
+| `agents.gemini.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless gemini workers. |
+| `agents.max_live` | int | `3` | advanced | Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3). |
+| `agents.min_free_gb` | float | `4.0` | advanced | Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4). |
+| `agents.worker_qos` | str | `utility` | advanced | Worker CPU/IO priority: utility (background QoS, default) or off. |
+| `auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |
+| `think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node. |
+| `think_spawn.max_per_run` | int | `5` | advanced | Blast-radius cap on /think spawns per node-generation run. |
+| `think_spawn.idle_threshold_s` | int | `0` | advanced | Idle seconds before an attended operator downgrades to away (0 = off). |
+| `think_spawn.on_work_start` | bool | `false` | advanced | A2: dispatch a context /think when /target claims a node to work it (default OFF). |
+| `think_spawn.on_retro` | bool | `false` | advanced | A2: dispatch a context /think when `fno backlog done` closes a node (default OFF). |
+| `think_spawn.daily_cap` | int | `20` | advanced | Per-install per-day ceiling on /think spawns (firehose guard; 0 = off). |
+| `think_spawn.attended` | str | `offer` | advanced | Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think). |
+| `active_backlog.enabled` | bool | dict[str, bool] | `false` | advanced | Always-on backlog drain: true (every project) or a per-project map. |
+| `active_backlog.interval` | str | `5m` | advanced | Poll-floor cadence for the drain daemon (e.g. 5m, 30s). |
+| `active_backlog.failure_limit` | int | `3` | advanced | Consecutive dispatch failures before a node is parked. |
+| `active_backlog.max_concurrent` | int | `1` | never | In-flight nodes per project per tick (v1 == 1). |
+| `active_backlog.mission` | str (optional) | _(none)_ | never | Scope the drain daemon to a single mission's nodes. |
+| `parallel.max_lanes` | int | `1` | advanced | Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in). |
+| `auto_merge.enabled` | bool | `false` | always | Auto-merge a PR once external review passes. |
+| `auto_merge.merge_strategy` | str | `merge` | advanced | Merge strategy: merge | squash | rebase. |
+| `auto_merge.delete_branch_on_merge` | bool | `true` | advanced | Delete the branch after an auto-merge. |
+| `auto_merge.require_checks_pass` | bool | `true` | advanced | Require CI green before auto-merge. |
+| `auto_merge.conflict_resolution` | str | `opus` | never | Conflict-resolution agent for auto-merge rebases. |
+| `auto_merge.allowed_invokers` | list[str] | `[]` | never | Who may trigger auto-merge. |
+| `auto_merge.remediation` | str | `attempt` | never | Post-failure remediation policy for auto-merge. |
+| `pr_watch.enabled` | bool | `false` | advanced | Enable the global PR-state watcher daemon. |
+| `pr_watch.interval_seconds` | int | `600` | never | PR-watcher poll interval (seconds). |
+| `pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |
+| `pr_watch.max_age_days` | int | `14` | never | PR-watcher: park PRs older than N days. |
+| `pr_watch.model` | str | `claude-haiku-4-5` | never | Claude model used for headless PR-watcher skill fires. |
+| `recovery.enabled` | bool | `true` | advanced | Enable the session auto-recovery watchdog (resumes idle-but-incomplete bg sessions; rides the pr_watch tick). |
+| `recovery.idle_threshold_seconds` | int | `900` | never | How stale a bg session must be before a resume nudge fires (seconds). |
+| `recovery.max_nudges` | int | `3` | never | Per-session cap on resume nudges before the watchdog gives up. |
+| `health_monitor.enabled` | bool | `true` | advanced | Enable backlog health monitoring. |
+| `health_monitor.thresholds.idea_pile_depth` | int | `25` | never | Breach threshold: idea pile depth. |
+| `health_monitor.thresholds.stale_ready_days` | int | `30` | never | Breach threshold: stale-ready age (days). |
+| `health_monitor.thresholds.failure_prone_attempts` | int | `2` | never | Breach threshold: failure-prone attempts. |
+| `health_monitor.thresholds.collision_count` | int | `3` | never | Breach threshold: collision count. |
+| `health_monitor.thresholds.project_cwd_mismatch` | int | `0` | never | Breach threshold: project/cwd mismatch count. |
+| `health_monitor.notifications.surfaces` | list[str] | `["terminal"]` | never | Health notification surfaces (terminal/discord/webhook/log_only). |
+| `health_monitor.notifications.discord_channel` | str (optional) | _(none)_ | never | Discord channel for health notifications. |
+| `health_monitor.notifications.webhook_url` | str (optional) | _(none)_ | never | Webhook URL for health notifications. |
+| `health_monitor.notifications.throttle_minutes` | int | `60` | never | Health notification throttle (minutes). |
+| `health_monitor.history.enabled` | bool | `true` | never | Append health-history entries. |
+| `health_monitor.history.path` | str (optional) | _(none)_ | never | Override health-history path. |
+| `health_monitor.history.retain_days` | int | `90` | never | Health-history retention (days). |
+| `collision.severity_thresholds.high_count` | float | `3` | never | Collision scoring: high-severity shared-file count. |
+| `collision.severity_thresholds.high_ratio` | float | `0.5` | never | Collision scoring: high-severity shared-file ratio. |
+| `collision.severity_thresholds.medium_count` | float | `2` | never | Collision scoring: medium-severity shared-file count. |
+| `collision.severity_thresholds.medium_ratio` | float | `0.25` | never | Collision scoring: medium-severity shared-file ratio. |
+| `work.workspaces` | dict[str, WorkspaceEntry] | `{}` | advanced | Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). |
+| `model_routing.enabled` | bool | `true` | advanced | Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) to a secondary provider at spawn. |
+| `model_routing.providers` | dict[str, ModelProvider] | `{}` | never | Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in. |
+| `model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7'). |
+| `model_routing.extra_env` | dict[str, str] | `{}` | never | Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides). |
+| `mux.shell_integration` | str | `mux-panes` | advanced | Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc. |
+| `mux.notify_on_blocked` | bool | `true` | advanced | Fire an OS notification when an agent badge enters 'blocked' (default on). |
+| `mux.notify_on_done` | bool | `false` | advanced | Also notify on a terminal 'done' hook transition (default off). |
+| `mux.attach_digest` | bool | `true` | advanced | Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on). |
+| `mux.attach_digest_threshold_min` | int | `10` | advanced | Minutes since last detach before the catch-up digest overlay shows (default 10). |
+| `mux.hover_focus` | bool | `true` | advanced | Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on). |
+| `loops` | dict[str, LoopEntry] | `{}` | advanced | Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report). |
 | `schema_version` | int | `1` | never | Settings schema version; managed by fno, not hand-set. |
-| `config.state_dir` | str | `~/.fno/` | advanced | Root dir for global fno state. |
-| `config.plans_dir` | str | `.fno/plans/` | advanced | Where folder plans are written. |
-| `config.branch.prefix` | str | `fno` | advanced | Prefix for dispatched worktree branches: <prefix>/<slug>-<node>. |
-| `config.paths.graph_json` | str (optional) | _(none)_ | never | Override path to the backlog graph.json. |
-| `config.paths.ledger_json` | str (optional) | _(none)_ | never | Override path to ledger.json. |
-| `config.paths.briefs_dir` | str (optional) | _(none)_ | never | Override path to the sidecar briefs dir. |
-| `config.paths.fleet_dir` | str (optional) | _(none)_ | never | Override path to the megatron fleet dir. |
-| `config.paths.postmortems_dir` | str (optional) | _(none)_ | never | Override path to the postmortems dir. |
-| `config.paths.worktrees_base` | str (optional) | _(none)_ | never | Override base dir for worktrees. |
-| `config.paths.memory_dir` | str (optional) | _(none)_ | never | Override path to the memory dir. |
-| `config.paths.hook_logs_dir` | str (optional) | _(none)_ | never | Override path to hook logs. |
-| `config.paths.inbox_dir` | str (optional) | _(none)_ | never | Override path to the cross-project messaging inbox dir. |
-| `config.paths.inbox_path` | str (optional) | _(none)_ | never | Override path to the capture-tier inbox/parking-lot file. |
-| `config.paths.agents_registry_path` | str (optional) | _(none)_ | never | Override path to the agents registry.json. |
-| `config.paths.handoffs_dir` | str (optional) | _(none)_ | never | Override path to the handoffs dir. |
-| `config.paths.retro_pending_dir` | str (optional) | _(none)_ | never | Override path to the retro-pending dir. |
-| `config.paths.bus_dir` | str (optional) | _(none)_ | never | Override path to the cross-project mail bus dir. |
-| `config.paths.loops_paused_json` | str (optional) | _(none)_ | never | Override path to the loops pause-all sentinel. |
-| `config.paths.observer_reports_dir` | str (optional) | _(none)_ | never | Override path to the observer harness digest dir. |
-| `config.obsidian.enabled` | bool | `false` | always | Whether this project uses an Obsidian vault for plans/docs. |
-| `config.obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
-| `config.project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
-| `config.project.vision` | str (optional) | _(none)_ | always | One-paragraph statement of what this codebase is and why. |
-| `config.blueprint.max_prs_per_epic` | int | `4` | advanced | Cap on group PRs per decomposed epic. |
-| `config.backlog.maintain.staleness_days` | int | `30` | advanced | Age (days) before an idea is flagged stale. |
-| `config.backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |
-| `config.backlog.id_prefix` | str (optional) | _(none)_ | always | Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-). |
-| `config.backlog.id_hex_width` | int | `8` | advanced | Hex width of minted node IDs (4-8). |
-| `config.batch.enabled` | bool | `false` | advanced | Coalesce same-domain nodes into one batch PR (opt-in). |
-| `config.batch.max_nodes` | int | `3` | advanced | Nodes per batch before it closes (default 3). |
-| `config.batch.max_loc` | int (optional) | _(none)_ | advanced | Optional cumulative-diff LOC ceiling for a batch (off by default). |
-| `config.post_merge.parking_lot_path` | str (optional) | _(none)_ | advanced | Per-repo vault parking-lot path for the post-merge ritual (repo-relative). |
-| `config.post_merge.enabled` | bool | `true` | advanced | Whether the post-merge ritual runs. |
-| `config.post_merge.self_reap` | bool | `false` | never | Whether a post-merge watcher self-reaps. |
-| `config.research.output_dir` | str (optional) | _(none)_ | advanced | Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses). |
-| `config.review.github_apps` | list[str] (optional) | _(none)_ | advanced | GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots. |
-| `config.review.required_bots` | list[str] (optional) | _(none)_ | never | Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set. |
-| `config.review.peers` | list[Any] | `[]` | advanced | Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries. |
-| `config.review.peer_identity` | str (optional) | _(none)_ | advanced | The distinct machine-account login peers post their review under (must not be the author account). |
-| `config.review.peer_token_env` | str (optional) | _(none)_ | advanced | Env var holding the PAT for peer_identity used to post peer reviews to the PR. |
-| `config.review.optional_apps` | list[str] | `[]` | advanced | Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it. |
-| `config.review.reviewers` | list[str] | `[]` | advanced | Local-attestation reviewers (sigma | /code-review | declare) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot. |
-| `config.review.external_reviewers` | list[str] | `[]` | always | Which AI reviewers /pr requests a review from (the INVOCATION list). |
-| `config.review.agent_providers` | dict[str, str] | `{}` | never | Per-agent provider routing for the cross-model review panel. |
-| `config.review.cross_model.enabled` | bool | `false` | advanced | Enable cross-model (codex/gemini) second-opinion review. |
-| `config.target.dedupe_dead_duplicates` | bool | `false` | never | Opt-in cleanup of provably-dead duplicate state files. |
-| `config.target.auto_launch_on_blueprint` | bool | `false` | advanced | Auto-launch a bg /target worker when a node reaches ready via /blueprint. |
-| `config.target.handoff.enabled` | bool | `true` | advanced | Enable target self-handoff at pipeline boundaries. |
-| `config.target.handoff.used_pct_trigger` | int | `50` | never | Context-used %% that triggers a wave-boundary handoff. |
-| `config.target.handoff.generation_cap` | int | `4` | never | Max handoff generations before refusing further delegation. |
-| `config.target.blast.enabled` | bool | `false` | never | Enable blast-radius routing. |
-| `config.target.blast.downgrade` | bool | `true` | never | Allow token-saving downgrades in blast routing. |
-| `config.target.blast.reuse_loc_manifest` | bool | `true` | never | Include loc-ratchet globs in the blast map. |
-| `config.target.blast.high_blast_globs` | list[str] | `[]` | never | Per-project high-blast glob extensions. |
-| `config.target.defaults.no_external` | bool | `false` | never | Session-input default: skip external review (size-profile driven). |
-| `config.target.defaults.no_docs` | bool | `false` | never | Session-input default: skip docs (size-profile driven). |
-| `config.target.defaults.max_iterations` | int | `40` | advanced | Session-input default: max pipeline iterations. |
-| `config.agents.a2a.auto` | bool | `true` | advanced | Allow agents to auto-open agent-to-agent threads. |
-| `config.agents.a2a.turn_ceiling` | int | `6` | advanced | Max turns in an agent-to-agent thread. |
-| `config.agents.confirm` | str | `auto` | never | Agent-launch confirmation policy (auto/always/never). |
-| `config.agents.dead_row_grace` | int | `3600` | advanced | Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600). |
-| `config.agents.codex.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless codex workers. |
-| `config.agents.gemini.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless gemini workers. |
-| `config.agents.max_live` | int | `3` | advanced | Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3). |
-| `config.agents.min_free_gb` | float | `4.0` | advanced | Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4). |
-| `config.agents.worker_qos` | str | `utility` | advanced | Worker CPU/IO priority: utility (background QoS, default) or off. |
-| `config.auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |
-| `config.think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node. |
-| `config.think_spawn.max_per_run` | int | `5` | advanced | Blast-radius cap on /think spawns per node-generation run. |
-| `config.think_spawn.idle_threshold_s` | int | `0` | advanced | Idle seconds before an attended operator downgrades to away (0 = off). |
-| `config.think_spawn.on_work_start` | bool | `false` | advanced | A2: dispatch a context /think when /target claims a node to work it (default OFF). |
-| `config.think_spawn.on_retro` | bool | `false` | advanced | A2: dispatch a context /think when `fno backlog done` closes a node (default OFF). |
-| `config.think_spawn.daily_cap` | int | `20` | advanced | Per-install per-day ceiling on /think spawns (firehose guard; 0 = off). |
-| `config.think_spawn.attended` | str | `offer` | advanced | Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think). |
-| `config.active_backlog.enabled` | bool | dict[str, bool] | `false` | advanced | Always-on backlog drain: true (every project) or a per-project map. |
-| `config.active_backlog.interval` | str | `5m` | advanced | Poll-floor cadence for the drain daemon (e.g. 5m, 30s). |
-| `config.active_backlog.failure_limit` | int | `3` | advanced | Consecutive dispatch failures before a node is parked. |
-| `config.active_backlog.max_concurrent` | int | `1` | never | In-flight nodes per project per tick (v1 == 1). |
-| `config.active_backlog.mission` | str (optional) | _(none)_ | never | Scope the drain daemon to a single mission's nodes. |
-| `config.parallel.max_lanes` | int | `1` | advanced | Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in). |
-| `config.auto_merge.enabled` | bool | `false` | always | Auto-merge a PR once external review passes. |
-| `config.auto_merge.merge_strategy` | str | `merge` | advanced | Merge strategy: merge | squash | rebase. |
-| `config.auto_merge.delete_branch_on_merge` | bool | `true` | advanced | Delete the branch after an auto-merge. |
-| `config.auto_merge.require_checks_pass` | bool | `true` | advanced | Require CI green before auto-merge. |
-| `config.auto_merge.conflict_resolution` | str | `opus` | never | Conflict-resolution agent for auto-merge rebases. |
-| `config.auto_merge.allowed_invokers` | list[str] | `[]` | never | Who may trigger auto-merge. |
-| `config.auto_merge.remediation` | str | `attempt` | never | Post-failure remediation policy for auto-merge. |
-| `config.pr_watch.enabled` | bool | `false` | advanced | Enable the global PR-state watcher daemon. |
-| `config.pr_watch.interval_seconds` | int | `600` | never | PR-watcher poll interval (seconds). |
-| `config.pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |
-| `config.pr_watch.max_age_days` | int | `14` | never | PR-watcher: park PRs older than N days. |
-| `config.pr_watch.model` | str | `claude-haiku-4-5` | never | Claude model used for headless PR-watcher skill fires. |
-| `config.recovery.enabled` | bool | `true` | advanced | Enable the session auto-recovery watchdog (resumes idle-but-incomplete bg sessions; rides the pr_watch tick). |
-| `config.recovery.idle_threshold_seconds` | int | `900` | never | How stale a bg session must be before a resume nudge fires (seconds). |
-| `config.recovery.max_nudges` | int | `3` | never | Per-session cap on resume nudges before the watchdog gives up. |
-| `config.health_monitor.enabled` | bool | `true` | advanced | Enable backlog health monitoring. |
-| `config.health_monitor.thresholds.idea_pile_depth` | int | `25` | never | Breach threshold: idea pile depth. |
-| `config.health_monitor.thresholds.stale_ready_days` | int | `30` | never | Breach threshold: stale-ready age (days). |
-| `config.health_monitor.thresholds.failure_prone_attempts` | int | `2` | never | Breach threshold: failure-prone attempts. |
-| `config.health_monitor.thresholds.collision_count` | int | `3` | never | Breach threshold: collision count. |
-| `config.health_monitor.thresholds.project_cwd_mismatch` | int | `0` | never | Breach threshold: project/cwd mismatch count. |
-| `config.health_monitor.notifications.surfaces` | list[str] | `["terminal"]` | never | Health notification surfaces (terminal/discord/webhook/log_only). |
-| `config.health_monitor.notifications.discord_channel` | str (optional) | _(none)_ | never | Discord channel for health notifications. |
-| `config.health_monitor.notifications.webhook_url` | str (optional) | _(none)_ | never | Webhook URL for health notifications. |
-| `config.health_monitor.notifications.throttle_minutes` | int | `60` | never | Health notification throttle (minutes). |
-| `config.health_monitor.history.enabled` | bool | `true` | never | Append health-history entries. |
-| `config.health_monitor.history.path` | str (optional) | _(none)_ | never | Override health-history path. |
-| `config.health_monitor.history.retain_days` | int | `90` | never | Health-history retention (days). |
-| `config.collision.severity_thresholds.high_count` | float | `3` | never | Collision scoring: high-severity shared-file count. |
-| `config.collision.severity_thresholds.high_ratio` | float | `0.5` | never | Collision scoring: high-severity shared-file ratio. |
-| `config.collision.severity_thresholds.medium_count` | float | `2` | never | Collision scoring: medium-severity shared-file count. |
-| `config.collision.severity_thresholds.medium_ratio` | float | `0.25` | never | Collision scoring: medium-severity shared-file ratio. |
-| `config.work.workspaces` | dict[str, WorkspaceEntry] | `{}` | advanced | Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). |
-| `config.model_routing.enabled` | bool | `true` | advanced | Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) to a secondary provider at spawn. |
-| `config.model_routing.providers` | dict[str, ModelProvider] | `{}` | never | Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in. |
-| `config.model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider,model', e.g. tidy: 'zai,glm-4.7'). |
-| `config.model_routing.extra_env` | dict[str, str] | `{}` | never | Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides). |
-| `config.mux.shell_integration` | str | `mux-panes` | advanced | Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc. |
-| `config.mux.notify_on_blocked` | bool | `true` | advanced | Fire an OS notification when an agent badge enters 'blocked' (default on). |
-| `config.mux.notify_on_done` | bool | `false` | advanced | Also notify on a terminal 'done' hook transition (default off). |
-| `config.mux.attach_digest` | bool | `true` | advanced | Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on). |
-| `config.mux.attach_digest_threshold_min` | int | `10` | advanced | Minutes since last detach before the catch-up digest overlay shows (default 10). |
-| `config.mux.hover_focus` | bool | `true` | advanced | Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on). |
-| `config.loops` | dict[str, LoopEntry] | `{}` | advanced | Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report). |
