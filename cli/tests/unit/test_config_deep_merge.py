@@ -188,7 +188,8 @@ def test_loaded_from_is_highest_priority_file(
     from fno.config import load_settings, loaded_from
 
     load_settings()
-    assert loaded_from() == project_file.resolve()
+    # Migrate converts the seeded settings.yaml to a flat config.toml sibling.
+    assert loaded_from() == project_file.with_name("config.toml").resolve()
 
 
 def test_global_only_when_no_project_file(
@@ -205,7 +206,7 @@ def test_global_only_when_no_project_file(
 
     s = load_settings()
     assert s.obsidian.vault == "myvault"
-    assert loaded_from() == global_file.resolve()
+    assert loaded_from() == global_file.with_name("config.toml").resolve()
 
 
 # ---------------------------------------------------------------------------

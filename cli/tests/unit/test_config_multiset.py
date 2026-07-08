@@ -7,14 +7,14 @@ AC2-FR (mid-batch write failure leaves the pre-batch file).
 from __future__ import annotations
 
 import pytest
-import yaml
+import tomllib
 from typer.testing import CliRunner
 
 from fno.config.writer import ConfigSetError, set_config_values
 
 
 def _read(tmp_path):
-    return yaml.safe_load((tmp_path / ".fno" / "settings.yaml").read_text())
+    return tomllib.loads((tmp_path / ".fno" / "config.toml").read_text())
 
 
 def test_ac2_hp_multi_set_both_applied(tmp_path):
@@ -28,8 +28,8 @@ def test_ac2_hp_multi_set_both_applied(tmp_path):
     )
     assert len(results) == 2
     data = _read(tmp_path)
-    assert data["config"]["agents"]["a2a"]["auto"] is False
-    assert data["config"]["agents"]["a2a"]["turn_ceiling"] == 7
+    assert data["agents"]["a2a"]["auto"] is False
+    assert data["agents"]["a2a"]["turn_ceiling"] == 7
 
 
 def test_multi_set_across_blocks(tmp_path):
@@ -42,8 +42,8 @@ def test_multi_set_across_blocks(tmp_path):
         repo_root=tmp_path,
     )
     data = _read(tmp_path)
-    assert data["config"]["agents"]["a2a"]["auto"] is True
-    assert data["config"]["auto_merge"]["enabled"] is True
+    assert data["agents"]["a2a"]["auto"] is True
+    assert data["auto_merge"]["enabled"] is True
 
 
 def test_ac2_err_one_invalid_writes_nothing(tmp_path):
@@ -51,7 +51,7 @@ def test_ac2_err_one_invalid_writes_nothing(tmp_path):
     set_config_values(
         [("config.agents.a2a.auto", "false")], scope="project", repo_root=tmp_path
     )
-    before = (tmp_path / ".fno" / "settings.yaml").read_text()
+    before = (tmp_path / ".fno" / "config.toml").read_text()
     with pytest.raises(ConfigSetError) as exc:
         set_config_values(
             [
@@ -64,7 +64,7 @@ def test_ac2_err_one_invalid_writes_nothing(tmp_path):
     # The last-wins value (0) is the one validated and it fails.
     assert exc.value.exit_code == 2
     # Nothing from the batch was written.
-    assert (tmp_path / ".fno" / "settings.yaml").read_text() == before
+    assert (tmp_path / ".fno" / "config.toml").read_text() == before
 
 
 def test_ac2_err_unknown_key_in_batch_exit1(tmp_path):
@@ -78,7 +78,7 @@ def test_ac2_err_unknown_key_in_batch_exit1(tmp_path):
             repo_root=tmp_path,
         )
     assert exc.value.exit_code == 1
-    assert not (tmp_path / ".fno" / "settings.yaml").exists()
+    assert not (tmp_path / ".fno" / "config.toml").exists()
 
 
 def test_ac2_edge_same_key_twice_last_wins(tmp_path):
@@ -90,7 +90,7 @@ def test_ac2_edge_same_key_twice_last_wins(tmp_path):
         scope="project",
         repo_root=tmp_path,
     )
-    assert _read(tmp_path)["config"]["agents"]["a2a"]["turn_ceiling"] == 8
+    assert _read(tmp_path)["agents"]["a2a"]["turn_ceiling"] == 8
     # Deduped to a single result for the key.
     assert len(results) == 1
     assert results[0].value == 8
@@ -112,8 +112,8 @@ def test_multi_set_cross_field_block_validates_on_final_state(tmp_path):
     )
     assert len(results) == 2
     data = _read(tmp_path)
-    assert data["config"]["obsidian"]["enabled"] is True
-    assert data["config"]["obsidian"]["vault"] == "MyVault"
+    assert data["obsidian"]["enabled"] is True
+    assert data["obsidian"]["vault"] == "MyVault"
 
 
 def test_multi_set_cross_field_still_rejects_truly_invalid(tmp_path):
@@ -126,7 +126,7 @@ def test_multi_set_cross_field_still_rejects_truly_invalid(tmp_path):
             repo_root=tmp_path,
         )
     assert exc.value.exit_code == 2
-    assert not (tmp_path / ".fno" / "settings.yaml").exists()
+    assert not (tmp_path / ".fno" / "config.toml").exists()
 
 
 def test_empty_batch_rejected(tmp_path):
@@ -139,14 +139,14 @@ def test_ac2_fr_midbatch_write_failure_intact(tmp_path, monkeypatch):
     set_config_values(
         [("config.agents.a2a.auto", "true")], scope="project", repo_root=tmp_path
     )
-    before = (tmp_path / ".fno" / "settings.yaml").read_text()
+    before = (tmp_path / ".fno" / "config.toml").read_text()
 
     import fno.config.writer as writer_mod
 
     def _boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(writer_mod.yaml, "safe_dump", _boom)
+    monkeypatch.setattr(writer_mod.tomli_w, "dumps", _boom)
     with pytest.raises(ConfigSetError):
         set_config_values(
             [
@@ -156,7 +156,7 @@ def test_ac2_fr_midbatch_write_failure_intact(tmp_path, monkeypatch):
             scope="project",
             repo_root=tmp_path,
         )
-    assert (tmp_path / ".fno" / "settings.yaml").read_text() == before
+    assert (tmp_path / ".fno" / "config.toml").read_text() == before
 
 
 # --- CLI surface ---
@@ -176,9 +176,9 @@ def test_ac2_ui_cli_multi_lists_each_and_scope_once(tmp_path, monkeypatch):
     assert "config.auto_merge.enabled" in res.output
     # The scope appears exactly once (a single trailing summary line).
     assert res.output.count("global") == 1
-    data = yaml.safe_load(gpath.read_text())
-    assert data["config"]["agents"]["a2a"]["auto"] is False
-    assert data["config"]["auto_merge"]["enabled"] is True
+    data = tomllib.loads((gpath.parent / "config.toml").read_text())
+    assert data["agents"]["a2a"]["auto"] is False
+    assert data["auto_merge"]["enabled"] is True
 
 
 def test_cli_legacy_two_token_form_still_works(tmp_path, monkeypatch):
@@ -188,7 +188,7 @@ def test_cli_legacy_two_token_form_still_works(tmp_path, monkeypatch):
 
     res = CliRunner().invoke(app, ["set", "config.agents.a2a.auto", "false"])
     assert res.exit_code == 0, res.output
-    assert yaml.safe_load(gpath.read_text())["config"]["agents"]["a2a"]["auto"] is False
+    assert tomllib.loads((gpath.parent / "config.toml").read_text())["agents"]["a2a"]["auto"] is False
 
 
 def test_cli_single_keyeq_value_token(tmp_path, monkeypatch):
@@ -198,7 +198,7 @@ def test_cli_single_keyeq_value_token(tmp_path, monkeypatch):
 
     res = CliRunner().invoke(app, ["set", "config.agents.a2a.turn_ceiling=5"])
     assert res.exit_code == 0, res.output
-    assert yaml.safe_load(gpath.read_text())["config"]["agents"]["a2a"]["turn_ceiling"] == 5
+    assert tomllib.loads((gpath.parent / "config.toml").read_text())["agents"]["a2a"]["turn_ceiling"] == 5
 
 
 def test_cli_bare_token_without_eq_errors(tmp_path, monkeypatch):

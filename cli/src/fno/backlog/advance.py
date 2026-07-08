@@ -604,20 +604,22 @@ def _ensure_lane_worktree(node_id: str, *, canonical_root: Path) -> Path:
 def _seed_lane_local_settings(
     worktree: Path, node_id: str, base_project_id: str
 ) -> None:
-    """Write the lane's `.fno/settings.local.yaml` per-worktree isolation seed.
+    """Write the lane's `.fno/config.local.toml` per-worktree isolation seed.
 
     Overrides ONLY x-cbce's allowlisted keys on top of the shared (symlinked)
-    settings.yaml: `parking_lot_path` -> the lane's own `.fno/parking-lot.md`
-    (an absolute path that does NOT route through the `internal/` symlink, so two
-    lanes never share one file - AC2-HP), and `project.id` -> a per-lane value so
-    the lane's post-merge writeback / auto-continue is scoped to itself. Written
+    config.toml: `parking_lot_path` -> the lane's own `.fno/parking-lot.md`
+    (a repo-relative path that resolves per-worktree, so two lanes never share
+    one file - AC2-HP), and `project.id` -> a per-lane value so the lane's
+    post-merge writeback / auto-continue is scoped to itself. Written
     unconditionally: a lane worktree is machine-owned and the content is
     deterministic, so a re-dispatch re-seeds identically (idempotent).
     """
+    import tomli_w
+
     fno_dir = worktree / ".fno"
     # A reused worktree may carry `.fno` as a WHOLE-DIR symlink to canonical (the
     # bg-worktree footgun `fno target start` already heals). Writing through it
-    # would create/overwrite the CANONICAL settings.local.yaml, so every lane
+    # would create/overwrite the CANONICAL config.local.toml, so every lane
     # would then share one parking_lot_path/project.id - the exact collision this
     # seed prevents. Unlink and recreate a real per-worktree dir first.
     if fno_dir.is_symlink():
@@ -631,19 +633,19 @@ def _seed_lane_local_settings(
     # per-worktree dir - NOT the shared `internal/` symlink the canonical default
     # (`internal/fno/backlog/parking-lot.md`) rides. The isolation comes from
     # per-worktree resolution, not a distinct string.
-    # Single-quote the id value: it can carry chars a bare YAML scalar mis-parses;
-    # an embedded quote is escaped by doubling.
-    id_val = f"{base_project_id}-{node_id}".replace("'", "''")
-    (fno_dir / "settings.local.yaml").write_text(
+    # Flat config.local.toml (no `config:` wrapper); tomli_w escapes the id value.
+    body = tomli_w.dumps(
+        {
+            "project": {"id": f"{base_project_id}-{node_id}"},
+            "post_merge": {"parking_lot_path": ".fno/parking-lot.md"},
+        }
+    )
+    (fno_dir / "config.local.toml").write_text(
         "# Auto-seeded per-lane isolation (parallel mode, epic x-42d5 G3).\n"
         "# Only x-cbce's per-worktree override allowlist {parking_lot_path,\n"
-        "# project.id}; overrides the shared settings.yaml so concurrent lanes\n"
+        "# project.id}; overrides the shared config.toml so concurrent lanes\n"
         "# never collide on post-merge writeback or node attribution.\n"
-        "config:\n"
-        "  project:\n"
-        f"    id: '{id_val}'\n"
-        "  post_merge:\n"
-        "    parking_lot_path: '.fno/parking-lot.md'\n"
+        + body
     )
 
 
