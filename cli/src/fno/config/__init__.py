@@ -2742,7 +2742,27 @@ def _settings_yaml_locations() -> list[Path]:
     if canonical_candidate not in candidates:
         candidates.append(canonical_candidate)
     candidates.append(_global_settings_path())
-    return candidates
+    return _apply_search_ceiling(candidates)
+
+
+def _apply_search_ceiling(candidates: list[Path]) -> list[Path]:
+    """Drop candidates that resolve outside $FNO_CONFIG_SEARCH_ROOT.
+
+    No-op when unset (all real usage). Tests set it to their tmpdir roots so the
+    git-derived canonical candidate can never reach the developer's real checkout
+    (repo_root/canonical climb via ``git worktree list``, which no HOME redirect
+    can bound). Value is an os.pathsep-separated list because two legitimate test
+    roots exist: the pytest basetemp and the redirected HOME.
+    """
+    raw = os.environ.get("FNO_CONFIG_SEARCH_ROOT")
+    if not raw:
+        return candidates
+    roots = [Path(r).resolve() for r in raw.split(os.pathsep) if r]
+    if not roots:
+        return candidates
+    return [
+        c for c in candidates if any(c.resolve().is_relative_to(r) for r in roots)
+    ]
 
 
 def _candidate_paths() -> list[Path]:
@@ -2775,7 +2795,11 @@ def _prefer_toml(paths: list[Path]) -> list[Path]:
                 out.append(toml)
         if p not in out:
             out.append(p)
-    return out
+    # Bound the final list too: direct-file readers (e.g. _intake's
+    # project<->path map) reach this via config_read_candidates without going
+    # through _settings_yaml_locations, and a cwd-relative candidate resolves
+    # through a worktree symlink to the canonical checkout (the leak this fixes).
+    return _apply_search_ceiling(out)
 
 
 # Module-level variable recording the path that load_settings() actually read.
