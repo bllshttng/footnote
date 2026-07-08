@@ -43,7 +43,8 @@ fi
 
 # Record the resolved intended identity for Layer 2 + post-hoc audit (best effort).
 if [[ -n "$SESSION_ID" ]]; then
-  SIDE="$HOME/.claude/.fno-attest-${SESSION_ID}.json"
+  SIDE="${FNO_HOME:-$HOME/.fno}/attest/${SESSION_ID}.json"
+  mkdir -p "$(dirname "$SIDE")" 2>/dev/null || true
   TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '')"
   printf '{"model":"%s","base_url_host":"%s","provider":"%s","ts":"%s"}\n' \
     "$MODEL" "$BASE_HOST" "$PROVIDER" "$TS" > "$SIDE" 2>/dev/null || true

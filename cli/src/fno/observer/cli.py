@@ -274,7 +274,13 @@ def _emit_run_complete(summary: dict, events_paths: list[Path]) -> bool:
 def _write_digest(summary: dict, skill: str, *, mode: str) -> Path:
     from fno import paths as _paths
 
-    reports_dir = _paths.observer_reports_dir()
+    # Pin the digest to the project that owns the evaluated skill (the skill-id
+    # namespace, e.g. "fno:blueprint" -> "fno"), not the ambient launch cwd -
+    # a sweep fired from a worktree or a sibling repo must still land under
+    # internal/<owner>/, never internal/<that-checkout's-basename>/.
+    sid = str(summary.get("skill_id", ""))
+    owner = sid.split(":", 1)[0] if ":" in sid else None
+    reports_dir = _paths.observer_reports_dir(project_id=owner)
     reports_dir.mkdir(parents=True, exist_ok=True)
     date = datetime.now().strftime("%Y-%m-%d")
     path = reports_dir / f"{skill}-{date}.md"

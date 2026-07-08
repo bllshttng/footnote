@@ -399,7 +399,9 @@ def loops_paused_json() -> Path:
     return _resolve("~/.fno/") / "loops-paused.json"
 
 
-def observer_reports_dir(project_root: Optional[Path] = None) -> Path:
+def observer_reports_dir(
+    project_root: Optional[Path] = None, project_id: Optional[str] = None
+) -> Path:
     """Return the directory where the observer harness writes its
     human-readable digests (x-57a5, ``<skill>-<date>.md``).
 
@@ -411,12 +413,18 @@ def observer_reports_dir(project_root: Optional[Path] = None) -> Path:
          handoffs (Locked Decision 12: state only in ``~/.fno`` /
          ``<project>/.fno`` / ``internal/<project.id>/``).
       3. ``state_dir()/observer-reports/<project>/`` fallback when no vault.
+
+    ``project_id`` pins the report to the project that OWNS the evaluated
+    skill (its skill-id namespace), so a sweep launched from any cwd lands
+    under ``internal/<owner>/`` instead of the ambient checkout's basename.
     """
     settings = _settings()
     override = settings.config.paths.observer_reports_dir
     if override is not None:
         return _resolve(override, project_root=project_root)
-    pid = settings.config.project.id
+    if project_id and ("/" in project_id or ".." in project_id):
+        project_id = None  # a caller-supplied id must not escape internal/<project>/
+    pid = project_id or settings.config.project.id
     if pid:
         project_name = pid
     else:

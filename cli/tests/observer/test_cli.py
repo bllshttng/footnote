@@ -65,6 +65,54 @@ def _good_plan(tmp_path, name):
 # help + A2 rejection
 # --------------------------------------------------------------------------- #
 
+def test_digest_dir_keyed_to_skill_owner(monkeypatch, tmp_path):
+    """The digest lands under the skill's owning project (its skill-id
+    namespace), not the ambient checkout - so a sweep fired from a worktree
+    or a sibling repo never spawns an internal/<basename>/ folder."""
+    import fno.paths as paths
+
+    seen = {}
+
+    def _capture(project_root=None, project_id=None):
+        seen["project_id"] = project_id
+        return tmp_path
+
+    monkeypatch.setattr(paths, "observer_reports_dir", _capture)
+    summary = {
+        "skill_id": "fno:blueprint", "run_id": "obs-x", "coverage_pct": 100,
+        "corpus_size": 1, "pass_count": 1, "degraded_count": 0, "fail_count": 0,
+        "failure_ranking": [],
+    }
+    cli._write_digest(summary, "blueprint", mode="sweep")
+    assert seen["project_id"] == "fno"
+
+
+def test_observer_dir_rejects_traversal_project_id(monkeypatch, tmp_path):
+    """A caller-supplied project_id carrying path separators / traversal must
+    not escape internal/<project>/ - it falls back to the configured id."""
+    import fno.paths as paths
+
+    class _Cfg:
+        class paths:
+            observer_reports_dir = None
+
+        class project:
+            id = "safeproj"
+
+        class obsidian:
+            enabled = False
+            vault = None
+
+    class _S:
+        config = _Cfg()
+
+    monkeypatch.setattr(paths, "_settings", lambda: _S())
+    monkeypatch.setattr(paths, "state_dir", lambda: tmp_path)
+    d = paths.observer_reports_dir(project_id="../../etc")
+    assert ".." not in str(d)
+    assert d == tmp_path / "observer-reports" / "safeproj"
+
+
 def test_help_lists_sweep_and_replay():
     r = runner.invoke(cli.observer_app, ["--help"])
     assert r.exit_code == 0
