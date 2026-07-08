@@ -217,7 +217,7 @@ def test_start_bare_tiered_node_threads_resolved_model(monkeypatch, tmp_path):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None: ("claude-sonnet-5", "task-tier(medium)"),
+        lambda nid, explicit=None, provider=None: ("claude-sonnet-5", "task-tier(medium)"),
     )
     result = runner.invoke(target_app, ["start", "x-d7a7"])
     assert result.exit_code == 0, result.stdout
@@ -249,7 +249,7 @@ def test_start_untiered_node_forwards_no_model(monkeypatch, tmp_path):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None: (None, "provider-default"),
+        lambda nid, explicit=None, provider=None: (None, "provider-default"),
     )
     result = runner.invoke(target_app, ["start", "x-d7a7"])
     assert result.exit_code == 0, result.stdout
@@ -303,13 +303,31 @@ def test_resolve_node_model_uses_route_resolve(monkeypatch):
     assert seen == {"task_model": None, "task_tier": "high"}
 
 
+def test_resolve_node_model_scopes_by_provider(monkeypatch):
+    """The seam scopes tier resolution by the provider it is handed (x-da6e)."""
+    monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda p: [{"id": "x-d7a7", "model_tier": "medium"}],
+    )
+    seen = {}
+
+    def fake_resolve(*, provider, **_kw):
+        seen["provider"] = provider
+        return "claude-sonnet-5", "task-tier(medium)", ["tier(medium)"]
+
+    monkeypatch.setattr("fno.route_resolve.resolve_dispatch_model", fake_resolve)
+    target_cli._resolve_node_model("x-d7a7", provider="claude")
+    assert seen == {"provider": "claude"}
+
+
 def test_resolve_model_command_prints_model(monkeypatch):
     """`fno target resolve-model` prints the resolved model for bash dispatchers."""
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None: ("claude-sonnet-5", "task-tier(medium)"),
+        lambda nid, explicit=None, provider=None: ("claude-sonnet-5", "task-tier(medium)"),
     )
     result = runner.invoke(target_app, ["resolve-model", "x-d7a7"])
     assert result.exit_code == 0
@@ -322,7 +340,7 @@ def test_resolve_model_command_empty_when_no_model(monkeypatch):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None: (None, "provider-default"),
+        lambda nid, explicit=None, provider=None: (None, "provider-default"),
     )
     result = runner.invoke(target_app, ["resolve-model", "x-d7a7"])
     assert result.exit_code == 0
@@ -335,7 +353,7 @@ def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None: ("gpt-5.4", "task-tier(medium)"),
+        lambda nid, explicit=None, provider=None: ("gpt-5.4", "task-tier(medium)"),
     )
     # gpt-5.4 maps to the codex harness in the real REACHABILITY table.
     result = runner.invoke(
@@ -351,7 +369,7 @@ def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None: ("claude-sonnet-5", "task-tier(medium)"),
+        lambda nid, explicit=None, provider=None: ("claude-sonnet-5", "task-tier(medium)"),
     )
     result = runner.invoke(
         target_app, ["resolve-model", "x-d7a7", "--provider", "claude"]

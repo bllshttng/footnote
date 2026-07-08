@@ -33,15 +33,29 @@ _STATIC_FALLTHROUGH = {
 }
 
 
-def _reachable_models_with_pct(snapshot: dict) -> list[tuple[str, float]]:
-    """(name, coding_percentile) for snapshot rows that map to a real harness."""
+def _harness_ok(name: str, provider: Optional[str]) -> bool:
+    """True if ``name`` maps to a harness AND (``provider`` is None or matches it).
+
+    ``provider=None`` = no scoping (any reachable harness); a concrete provider
+    keeps only same-harness candidates so a tier never picks a cross-harness model
+    (Locked Decision 1/2). An unknown provider matches nothing -> all bands empty
+    -> provider default.
+    """
+    reach = bm.reachable(name)
+    return reach is not None and (provider is None or reach[0] == provider)
+
+
+def _reachable_models_with_pct(
+    snapshot: dict, provider: Optional[str] = None
+) -> list[tuple[str, float]]:
+    """(name, coding_percentile) for snapshot rows reachable by ``provider``."""
     out: list[tuple[str, float]] = []
     for row in snapshot.get("models", []):
         if not isinstance(row, dict):
             continue
         name = row.get("name")
         pct = row.get("coding_percentile")
-        if name and bm.reachable(str(name)) is not None and pct is not None:
+        if name and _harness_ok(str(name), provider) and pct is not None:
             try:
                 out.append((str(name), float(pct)))
             except (TypeError, ValueError):
@@ -50,16 +64,26 @@ def _reachable_models_with_pct(snapshot: dict) -> list[tuple[str, float]]:
 
 
 def resolve_tier(
-    tier: Optional[str], *, snapshot: Optional[dict] = None
+    tier: Optional[str],
+    *,
+    snapshot: Optional[dict] = None,
+    provider: Optional[str] = None,
 ) -> tuple[Optional[str], list[str]]:
     """Resolve a tier to a concrete reachable model. Returns ``(model, chain)``.
 
-    ``model`` is None when nothing resolves (the caller uses the provider
-    default). ``chain`` records each step so the receipt can show how the choice
-    (or fallback) was reached. Never raises, never hits the network.
+    ``provider`` scopes the candidate set to one harness (Locked Decision 1): a
+    band left empty by the filter falls through the remaining bands within the
+    same harness, then to None (provider default) -- never a foreign-harness
+    model. ``provider=None`` is unscoped (the dispatch seam resolves the default
+    provider before calling; direct/primitive callers get the old any-harness
+    behavior). ``model`` is None when nothing resolves (the caller uses the
+    provider default). ``chain`` records each step so the receipt shows how the
+    choice (or fallback) was reached. Never raises, never hits the network.
     """
     band = (tier or "").strip().lower()
     chain = [f"tier({band})"]
+    if provider:
+        chain.append(f"provider({provider})")
     if band not in _BAND_FLOOR:
         chain.append("unknown-tier -> provider default")
         return None, chain
@@ -68,7 +92,7 @@ def resolve_tier(
         snapshot = bm.load_snapshot()
 
     if snapshot and snapshot.get("models"):
-        models = _reachable_models_with_pct(snapshot)
+        models = _reachable_models_with_pct(snapshot, provider)
         floor = _BAND_FLOOR[band]
         clearing = [(n, p) for (n, p) in models if p >= floor]
         if clearing:
@@ -90,7 +114,7 @@ def resolve_tier(
     chain.append("no snapshot -> static table")
     for cand_band in _STATIC_FALLTHROUGH[band]:
         for name in bm.STATIC_TIERS.get(cand_band, []):
-            if bm.reachable(name) is not None:
+            if _harness_ok(name, provider):
                 chain.append(f"static {cand_band} -> {name}")
                 return name, chain
     chain.append("static table exhausted -> provider default")
@@ -105,38 +129,53 @@ def resolve_dispatch_model(
     plan_model: Optional[str] = None,
     plan_tier: Optional[str] = None,
     snapshot: Optional[dict] = None,
+    provider: Optional[str] = None,
 ) -> tuple[Optional[str], str, list[str]]:
     """Apply the full precedence chain. Returns ``(model, decision_source, chain)``.
 
     ``model`` is None only when everything falls through to the provider default.
     ``decision_source`` is the receipt vocabulary
     (``explicit`` / ``task-pin`` / ``task-tier(<band>)`` / ``plan-default`` /
-    ``plan-tier(<band>)`` / ``provider-default``).
+    ``plan-tier(<band>)`` / ``provider-default``). ``provider`` scopes tier
+    resolution to one harness; pins (``explicit`` / ``task_model`` / ``plan_model``)
+    bypass the filter -- operator authority outranks routing (Locked Decision 4).
     """
     if explicit:
         return explicit, "explicit", ["explicit"]
     if task_model:
         return task_model, "task-pin", ["task-pin"]
     if task_tier:
-        model, chain = resolve_tier(task_tier, snapshot=snapshot)
+        model, chain = resolve_tier(task_tier, snapshot=snapshot, provider=provider)
         return model, f"task-tier({task_tier.strip().lower()})", chain
     if plan_model:
         return plan_model, "plan-default", ["plan-default"]
     if plan_tier:
-        model, chain = resolve_tier(plan_tier, snapshot=snapshot)
+        model, chain = resolve_tier(plan_tier, snapshot=snapshot, provider=provider)
         return model, f"plan-tier({plan_tier.strip().lower()})", chain
     return None, "provider-default", ["provider-default"]
 
 
 def node_model(
-    node: dict, *, explicit: Optional[str] = None, snapshot: Optional[dict] = None
+    node: dict,
+    *,
+    explicit: Optional[str] = None,
+    snapshot: Optional[dict] = None,
+    provider: Optional[str] = None,
 ) -> Optional[str]:
     """Concrete ``--model`` for a node/task at the spawn seam, or None for default.
 
     Reads the node's own ``model`` pin and ``model_tier`` annotation and applies
-    the precedence with an optional dispatch-time ``explicit`` override. Strictly
-    non-fatal: any resolution error degrades to the explicit override or the
-    node's raw ``model`` pin so a routing hiccup never breaks a spawn.
+    the precedence with an optional dispatch-time ``explicit`` override.
+    ``provider`` scopes tier resolution to the spawn harness so a tier never yields
+    a cross-harness ``<provider> --model <foreign>`` pick. When ``provider`` is
+    None it defaults to ``claude`` -- the bg substrate's own spawn default (see
+    ``advance._spawn_worker``: ``(provider or "").strip() or "claude"``), NOT the
+    ambient/invoking harness. A bg worker is always claude regardless of which
+    harness dispatched it, so scoping by the invoking harness would resolve a
+    codex model for a claude spawn (Locked Decision 3 intent: scope the incident
+    bg-default lane, which is claude). Strictly non-fatal: any resolution error
+    degrades to the explicit override or the node's raw ``model`` pin so a routing
+    hiccup never breaks a spawn (Locked Decision 10).
     """
     try:
         model, _source, _chain = resolve_dispatch_model(
@@ -144,6 +183,7 @@ def node_model(
             task_model=node.get("model"),
             task_tier=node.get("model_tier"),
             snapshot=snapshot,
+            provider=provider or "claude",
         )
         return model
     except Exception:  # noqa: BLE001 - routing degrades, never blocks a spawn

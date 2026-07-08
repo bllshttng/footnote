@@ -28,6 +28,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from fno import route_resolve as _route_resolve
 from fno import stub_manifest as sm
 from fno.backlog.advance import (
     EVENT_DISPATCHED,
@@ -129,9 +130,12 @@ def _contract_dependents(closed_node_id: str) -> list[dict]:
             "cwd": e.get("cwd"),
             # x-571f: carry the model pin so the reconcile worker (a /target
             # --reconcile build) honors it, not just advance's dependents.
-            # model_tier rides alongside so the tier resolver sees the annotation.
+            # model_tier rides alongside so the tier resolver sees the annotation;
+            # provider so the tier scopes to (and the worker spawns on) the same
+            # harness as the other dispatch paths (x-da6e).
             "model": e.get("model"),
             "model_tier": e.get("model_tier"),
+            "provider": e.get("provider"),
         })
     return out
 
@@ -203,7 +207,9 @@ def _dispatch_reconcile(
     try:
         short_id = _spawn_worker(
             node_id, root, dep.get("slug"),
-            reconcile_manifest=str(manifest_path), model=dep.get("model"),
+            reconcile_manifest=str(manifest_path),
+            model=_route_resolve.node_model(dep, provider=dep.get("provider")),
+            provider=dep.get("provider"),
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -338,7 +344,8 @@ def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceRe
             if isinstance(e, dict) and e.get("id") == node_id:
                 dep = {"id": node_id, "project": e.get("project"),
                        "slug": e.get("slug") or e.get("title"), "cwd": e.get("cwd"),
-                       "model": e.get("model"), "model_tier": e.get("model_tier")}
+                       "model": e.get("model"), "model_tier": e.get("model_tier"),
+                       "provider": e.get("provider")}
                 break
         if dep is None:
             dep = {"id": node_id, "cwd": str(root)}
