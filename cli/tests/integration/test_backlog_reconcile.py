@@ -386,6 +386,29 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
     assert node2["completed_at"] == first_ts
 
 
+def test_reconcile_backfills_reverse_mapped_pr_ref(cli_env, monkeypatch):
+    """A reverse-mapped node (dead before stamp) gets its recovered PR ref
+    written back to the graph, not just closed - else the board loses the PR
+    link and detect_reverted_nodes cannot match a later revert (codex P2)."""
+    graph_path, sentinel_dir = cli_env
+    _make_graph(graph_path, [_node("ab-rmap", cwd="/repo")])  # ref-less
+    monkeypatch.setattr(
+        rec, "list_merged_pr_branches",
+        lambda **kw: [{
+            "number": 268, "url": "https://github.com/o/r/pull/268",
+            "headRefName": "feature/ab-rmap", "mergedAt": "2026-07-08T00:00:00Z",
+        }],
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile"])
+    assert result.exit_code == 0, result.output
+
+    node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-rmap")
+    assert node["completed_at"] is not None
+    assert node["pr_number"] == 268
+    assert node["pr_url"] == "https://github.com/o/r/pull/268"
+
+
 def test_reconcile_no_clobber(cli_env, monkeypatch):
     """AC2: an already-done node is left untouched (no timestamp churn)."""
     graph_path, _ = cli_env

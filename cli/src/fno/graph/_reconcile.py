@@ -334,7 +334,9 @@ def reverse_map_unstamped(
         if node_pr_refs(node):
             continue
         cwd = node.get("cwd")
-        if not cwd:
+        # str-only: a non-string cwd (corrupt graph) would become a bad dict key
+        # here and a TypeError at the subprocess cwd= below.
+        if not isinstance(cwd, str) or not cwd:
             continue
         by_cwd.setdefault(cwd, []).append(node)
 

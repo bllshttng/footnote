@@ -56,10 +56,12 @@ fi
 #     we speak only on `dead`. Best-effort; never blocks session start.
 if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     pw_json="$(fno pr-watch status --json 2>/dev/null || true)"
-    pw_verdict="$(printf '%s' "$pw_json" | jq -r '.verdict // empty' 2>/dev/null || true)"
-    if [[ "$pw_verdict" == "dead" ]]; then
-        pw_detail="$(printf '%s' "$pw_json" | jq -r '.detail // ""' 2>/dev/null || true)"
-        echo "pr-watch: dead (${pw_detail}); run: fno pr-watch install"
+    if [[ -n "$pw_json" ]]; then
+        pw_verdict="$(printf '%s' "$pw_json" | jq -r '.verdict // empty' 2>/dev/null || true)"
+        if [[ "$pw_verdict" == "dead" ]]; then
+            pw_detail="$(printf '%s' "$pw_json" | jq -r '.detail // ""' 2>/dev/null || true)"
+            echo "pr-watch: dead (${pw_detail}); run: fno pr-watch install"
+        fi
     fi
 fi
 

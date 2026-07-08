@@ -4443,6 +4443,16 @@ def cmd_reconcile(
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
                     _apply_completion_fields(node_obj)
+                    # Backfill the PR ref for a reverse-mapped node (dead before
+                    # the node<->PR stamp): the recovered number/url live only on
+                    # the record, so without this the closed node stays
+                    # pr_number: null - the board loses the shipped-PR link and
+                    # detect_reverted_nodes() (which reads node_pr_refs) can never
+                    # match a later revert. Only fill when absent so the forward
+                    # path (node already stamped) is untouched.
+                    if record.pr_number and not node_obj.get("pr_number"):
+                        node_obj["pr_number"] = record.pr_number
+                        node_obj["pr_url"] = record.pr_url
                     # Cascade-close now-all-done ancestor epics (x-33b2), uniform
                     # across projects (follows the parent edge, not a filter).
                     cascade_closed_acc.extend(
