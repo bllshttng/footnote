@@ -7,10 +7,12 @@ by the inspectable `--dry-run` path.
 """
 from __future__ import annotations
 
+import subprocess
 import types
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from fno import update
@@ -568,13 +570,13 @@ def test_refresh_rust_bins_gating_outcomes(
         monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
         monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: None)
     elif setup == "fresh":
-        # marker matches subtree rev
+        # binary self-reports the source crates/ rev (gate on the binary)
         (source.parent / "crates" / "fno-agents").mkdir(parents=True)
         fake_bin = tmp_path / "fake-fno-agents"
         fake_bin.write_text("x")
         monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
         monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "abc123" * 2)
-        marker_file.write_text("abc123abc123\n", encoding="utf-8")
+        monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: "abc123" * 2)
     elif setup == "no_cargo":
         # binary + rev exist but cargo not on PATH
         (source.parent / "crates" / "fno-agents").mkdir(parents=True)
@@ -582,7 +584,8 @@ def test_refresh_rust_bins_gating_outcomes(
         fake_bin.write_text("x")
         monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
         monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "stale123stale123")
-        monkeypatch.setattr(update, "_read_rust_marker", lambda: "old-marker")
+        # Binary self-reports stale -> would rebuild, but cargo is absent.
+        monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: None)
         # Patch through update module so _refresh_rust_bins sees it
         monkeypatch.setattr(update.shutil, "which", lambda name: None)
 
@@ -616,12 +619,21 @@ def test_ac1_hp_refresh_rust_bins_refreshed(
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
 
     recorded_calls: list[list[str]] = []
+    state = {"built": False}
 
     def _fake_run(cmd, **kwargs):
         recorded_calls.append(list(cmd))
+        if cmd and cmd[0] == "cargo":
+            state["built"] = True
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
+    # gate + post-deploy verify interrogate the binary. Stale (None) before
+    # cargo runs -> rebuild; the deployed binary reports the source rev -> verify OK.
+    monkeypatch.setattr(
+        update, "_installed_bin_crates_rev",
+        lambda b, **kw: subtree_rev if state["built"] else None,
+    )
 
     result = update._refresh_rust_bins(source)
     assert result == "refreshed"
@@ -666,12 +678,19 @@ def test_refresh_rust_bins_also_installs_mux_front_door(
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
 
     recorded_calls: list[list[str]] = []
+    state = {"built": False}
 
     def _fake_run(cmd, **kwargs):
         recorded_calls.append(list(cmd))
+        if cmd and cmd[0] == "cargo":
+            state["built"] = True
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        update, "_installed_bin_crates_rev",
+        lambda b, **kw: ("a" * 40) if state["built"] else None,
+    )
 
     result = update._refresh_rust_bins(source)
     assert result == "refreshed"
@@ -706,6 +725,7 @@ def test_refresh_rust_bins_installs_mux_on_fresh_marker_when_absent(
     fake_bin.write_text("x")
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree_rev)  # fresh
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)  # mux ABSENT
 
     recorded: list[list[str]] = []
@@ -741,6 +761,7 @@ def test_refresh_rust_bins_fresh_marker_mux_present_installs_nothing(
     fake_bin.write_text("x")
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree_rev)  # fresh
     fake_mux = tmp_path / "fake-mux"
     fake_mux.write_text("x")
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_mux)  # mux PRESENT
@@ -777,9 +798,17 @@ def test_refresh_rust_bins_marker_write_failure_returns_no_marker(
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "b" * 40)
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
+    state = {"built": False}
+
+    def _fake_run(cmd, **kw):
+        if cmd and cmd[0] == "cargo":
+            state["built"] = True
+        return types.SimpleNamespace(returncode=0 if cmd and cmd[0] == "cargo" else 1)
+
+    monkeypatch.setattr(update.subprocess, "run", _fake_run)
     monkeypatch.setattr(
-        update.subprocess, "run",
-        lambda cmd, **kw: types.SimpleNamespace(returncode=0 if cmd[0] == "cargo" else 1),
+        update, "_installed_bin_crates_rev",
+        lambda b, **kw: ("b" * 40) if state["built"] else None,
     )
 
     result = update._refresh_rust_bins(source)
@@ -842,16 +871,23 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
 
     call_order: list[str] = []
     recorded_cargo: list[list[str]] = []
+    state = {"built": False}
 
     def _fake_run(cmd, **kwargs):
         if cmd and cmd[0] == "cargo":
             call_order.append("cargo")
             recorded_cargo.append(list(cmd))
+            state["built"] = True
         elif cmd and cmd[0] == "pgrep":
             pass  # daemon advisory
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
+    # stale before cargo -> rebuild; deployed binary reports source rev -> verify OK.
+    monkeypatch.setattr(
+        update, "_installed_bin_crates_rev",
+        lambda b, **kw: crate_rev if state["built"] else None,
+    )
 
     execvp_calls: list[tuple] = []
 
@@ -889,7 +925,6 @@ def test_ac1_err_cargo_failure_warning_and_python_proceeds(
     fake_bin.write_text("x")
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "b" * 40)
-    monkeypatch.setattr(update, "_read_rust_marker", lambda: "oldrev")
 
     def _fake_run(cmd, **kwargs):
         if cmd and cmd[0] == "cargo":
@@ -923,7 +958,6 @@ def test_ac1_err_cargo_oserror_warns_and_continues(
     fake_bin.write_text("x")
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "b" * 40)
-    monkeypatch.setattr(update, "_read_rust_marker", lambda: "oldrev")
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
 
     def _fake_run(cmd, **kwargs):
@@ -995,6 +1029,7 @@ def test_ac1_edge_fresh_marker_skips_cargo(
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: tmp_path / "fake-bin")
     (tmp_path / "fake-bin").write_text("x")
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: rev)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: rev)  # fresh
 
     cargo_called = []
 
@@ -1007,7 +1042,7 @@ def test_ac1_edge_fresh_marker_skips_cargo(
 
     result = update._refresh_rust_bins(source)
     assert result == "fresh"
-    assert cargo_called == [], "cargo must not be invoked when marker is fresh"
+    assert cargo_called == [], "cargo must not be invoked when the binary is fresh"
 
 
 def test_ac1_edge_force_overrides_fresh_marker(
@@ -1027,13 +1062,20 @@ def test_ac1_edge_force_overrides_fresh_marker(
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: rev)
 
     cargo_called = []
+    state = {"built": False}
 
     def _fake_run(cmd, **kwargs):
         if cmd and cmd[0] == "cargo":
             cargo_called.append(cmd)
+            state["built"] = True
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
+    # force rebuilds even though fresh; post-deploy verify must still see the rev.
+    monkeypatch.setattr(
+        update, "_installed_bin_crates_rev",
+        lambda b, **kw: rev if state["built"] else rev,
+    )
 
     result = update._refresh_rust_bins(source, force=True)
     assert result == "refreshed"
@@ -1049,10 +1091,17 @@ def test_ac1_edge_force_installs_when_no_binary(
     (source.parent / "crates" / "fno-agents").mkdir(parents=True)
     marker_file = tmp_path / "installed-rust-rev"
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
-    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: None)
+    state = {"built": False}
+    post_bin = tmp_path / "cargo-home" / "bin" / "fno-agents"
+    # First-install: no binary at gate time; cargo install creates it, so the
+    # post-deploy verify finds and interrogates the freshly built bin.
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: post_bin if state["built"] else None)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "e" * 40)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: "e" * 40 if state["built"] else None)
 
     def _fake_run(cmd, **kwargs):
+        if cmd and cmd[0] == "cargo":
+            state["built"] = True
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
@@ -1185,12 +1234,16 @@ def test_c3_hp_refresh_root_pinned_to_detected_binary(
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "a" * 40)
 
     recorded_calls: list[list[str]] = []
+    state = {"built": False}
 
     def _fake_run(cmd, **kwargs):
         recorded_calls.append(list(cmd))
+        if cmd and cmd[0] == "cargo":
+            state["built"] = True
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: ("a" * 40) if state["built"] else None)
 
     result = update._refresh_rust_bins(source)
     assert result == "refreshed"
@@ -1225,12 +1278,16 @@ def test_c3_hp_root_equals_detected_bin_parent_parent(
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "b" * 40)
 
     recorded_cmds: list[list[str]] = []
+    state = {"built": False}
 
     def _fake_run(cmd, **kwargs):
         recorded_cmds.append(list(cmd))
+        if cmd and cmd[0] == "cargo":
+            state["built"] = True
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: ("b" * 40) if state["built"] else None)
 
     update._refresh_rust_bins(source)
     cargo_calls = [c for c in recorded_cmds if c and c[0] == "cargo"]
@@ -1256,17 +1313,21 @@ def test_c3_edge_force_no_binary_uses_cargo_home_default(
     (source.parent / "crates" / "fno-agents").mkdir(parents=True)
     marker_file = tmp_path / "installed-rust-rev"
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
-    # Simulate no installed binary (first-install scenario)
-    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: None)
-    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "e" * 40)
-
     fake_cargo_home = tmp_path / "cargo-home"
     monkeypatch.setenv("CARGO_HOME", str(fake_cargo_home))
+    state = {"built": False}
+    post_bin = fake_cargo_home / "bin" / "fno-agents"
+    # First-install: no binary at gate; cargo creates it -> post-deploy verify finds it.
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: post_bin if state["built"] else None)
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "e" * 40)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: "e" * 40 if state["built"] else None)
 
     recorded_cmds: list[list[str]] = []
 
     def _fake_run(cmd, **kwargs):
         recorded_cmds.append(list(cmd))
+        if cmd and cmd[0] == "cargo":
+            state["built"] = True
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
@@ -1301,6 +1362,12 @@ def test_ac1_fr_failed_preserves_marker_retry_updates(
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     new_rev = "g" * 40
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: new_rev)
+    # binary reads stale until a cargo build succeeds, then reports new_rev.
+    state = {"built": False}
+    monkeypatch.setattr(
+        update, "_installed_bin_crates_rev",
+        lambda b, **kw: new_rev if state["built"] else None,
+    )
 
     # First call: cargo fails
     def _fail_run(cmd, **kwargs):
@@ -1313,9 +1380,212 @@ def test_ac1_fr_failed_preserves_marker_retry_updates(
 
     # Second call: cargo succeeds
     def _ok_run(cmd, **kwargs):
+        if cmd and cmd[0] == "cargo":
+            state["built"] = True
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _ok_run)
     result2 = update._refresh_rust_bins(source)
     assert result2 == "refreshed"
     assert marker_file.read_text(encoding="utf-8").strip() == new_rev
+
+
+# ---------------------------------------------------------------------------
+# gate on the binary (version --json), triad sync, post-deploy verify
+# ---------------------------------------------------------------------------
+
+
+def _fake_version_run(stdout=None, *, returncode=0, raise_exc=None):
+    """A subprocess.run stub emitting a canned `version --json` result."""
+    def _run(cmd, **kwargs):
+        if raise_exc is not None:
+            raise raise_exc
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout)
+    return _run
+
+
+def test_installed_bin_crates_rev_fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC1-HP: a clean, non-dirty binary yields its crates_rev."""
+    b = tmp_path / "fno-agents"
+    b.write_text("x")
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        _fake_version_run('{"crates_rev": "abc123", "git_rev": "def456", "dirty": false}'),
+    )
+    assert update._installed_bin_crates_rev(b) == "abc123"
+
+
+def test_installed_bin_crates_rev_dirty_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invariant: a dirty build never reads fresh (fail toward rebuild)."""
+    b = tmp_path / "fno-agents"
+    b.write_text("x")
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        _fake_version_run('{"crates_rev": "abc123", "dirty": true}'),
+    )
+    assert update._installed_bin_crates_rev(b) is None
+
+
+def test_installed_bin_crates_rev_unknown_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Boundary: crates_rev == "unknown" (non-git build) is stale, never fresh."""
+    b = tmp_path / "fno-agents"
+    b.write_text("x")
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        _fake_version_run('{"crates_rev": "unknown", "dirty": false}'),
+    )
+    assert update._installed_bin_crates_rev(b) is None
+
+
+def test_installed_bin_crates_rev_timeout_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC1-ERR: a hung binary (timeout) classifies stale, never crashes update."""
+    b = tmp_path / "fno-agents"
+    b.write_text("x")
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        _fake_version_run(raise_exc=subprocess.TimeoutExpired(cmd="x", timeout=1)),
+    )
+    assert update._installed_bin_crates_rev(b) is None
+
+
+def test_installed_bin_crates_rev_garbage_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC1-ERR: unparseable output is stale, never a crash."""
+    b = tmp_path / "fno-agents"
+    b.write_text("x")
+    monkeypatch.setattr(update.subprocess, "run", _fake_version_run("not json at all"))
+    assert update._installed_bin_crates_rev(b) is None
+
+
+def test_installed_bin_crates_rev_nonzero_exit_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-zero exit (old binary without the verb) is stale."""
+    b = tmp_path / "fno-agents"
+    b.write_text("x")
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        _fake_version_run('{"crates_rev": "abc"}', returncode=3),
+    )
+    assert update._installed_bin_crates_rev(b) is None
+
+
+def test_post_deploy_verify_mismatch_halts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """AC2-HP / AC2-ERR: cargo exits 0 but the deployed binary still self-reports
+    a stale crates_rev -> update HALTS (typer.Exit) naming both revs."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    subtree = "a" * 40
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree)
+    monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.setattr(update.subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0))
+    # gate: stale (rebuild); verify: STILL stale (the deploy did not land).
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: "oldoldold")
+
+    with pytest.raises(typer.Exit):
+        update._refresh_rust_bins(source)
+    assert "post-deploy verify FAILED" in capsys.readouterr().err
+
+
+def test_sync_triad_copies_into_location_hosting_a_bin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2-FR: the whole triad is copied into a location already hosting one bin."""
+    names = update._triad_names()
+    cargo = tmp_path / "cargo" / "bin"
+    cargo.mkdir(parents=True)
+    for n in names:
+        (cargo / n).write_text(f"new-{n}")
+    dest = tmp_path / "local" / "bin"
+    dest.mkdir(parents=True)
+    (dest / names[0]).write_text("old-client")  # hosts one bin -> eligible
+    monkeypatch.setattr(update, "_triad_install_dirs", lambda: [dest])
+
+    update._sync_triad(cargo)
+    for n in names:
+        assert (dest / n).read_text() == f"new-{n}", n
+
+
+def test_sync_triad_never_seeds_empty_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2-EDGE: a location hosting none of the triad is never written to."""
+    names = update._triad_names()
+    cargo = tmp_path / "cargo" / "bin"
+    cargo.mkdir(parents=True)
+    for n in names:
+        (cargo / n).write_text("x")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(update, "_triad_install_dirs", lambda: [empty])
+
+    update._sync_triad(cargo)
+    assert not any((empty / n).exists() for n in names)
+
+
+def test_sync_triad_unwritable_location_halts_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """AC2-ERR: an unwritable live location halts update loud, naming the location."""
+    names = update._triad_names()
+    cargo = tmp_path / "cargo" / "bin"
+    cargo.mkdir(parents=True)
+    for n in names:
+        (cargo / n).write_text("new")
+    dest = tmp_path / "ro" / "bin"
+    dest.mkdir(parents=True)
+    (dest / names[0]).write_text("old")  # eligible, but content differs -> will copy
+    monkeypatch.setattr(update, "_triad_install_dirs", lambda: [dest])
+
+    def _boom(src, dst):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(update.shutil, "copy2", _boom)
+    with pytest.raises(typer.Exit):
+        update._sync_triad(cargo)
+    assert "triad sync FAILED" in capsys.readouterr().err
+
+
+def test_sync_triad_incomplete_cargo_root_is_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cargo root missing one of the three bins propagates nothing (never a
+    half-triad); no enumeration of install dirs occurs."""
+    names = update._triad_names()
+    cargo = tmp_path / "cargo" / "bin"
+    cargo.mkdir(parents=True)
+    (cargo / names[0]).write_text("only-client")  # daemon + worker absent
+    called = {"enumerated": False}
+
+    def _tripwire():
+        called["enumerated"] = True
+        return []
+
+    monkeypatch.setattr(update, "_triad_install_dirs", _tripwire)
+    update._sync_triad(cargo)
+    assert called["enumerated"] is False
+
+
+def test_sync_triad_skips_byte_identical_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh-path fast skip: a location already holding the identical triad is not
+    rewritten (no copy2 call)."""
+    names = update._triad_names()
+    cargo = tmp_path / "cargo" / "bin"
+    cargo.mkdir(parents=True)
+    dest = tmp_path / "local" / "bin"
+    dest.mkdir(parents=True)
+    for n in names:
+        (cargo / n).write_text("same")
+        (dest / n).write_text("same")
+    monkeypatch.setattr(update, "_triad_install_dirs", lambda: [dest])
+
+    calls = []
+    monkeypatch.setattr(update.shutil, "copy2", lambda s, d: calls.append((s, d)))
+    update._sync_triad(cargo)
+    assert calls == []
