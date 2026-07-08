@@ -15,6 +15,13 @@
 #
 # State vocabulary + arbitration: see codex.toml header (same contract):
 #   auth_wall (980) > busy (900) > idle_prompt (100).
+#
+# No [rule.answer] (x-5103): validated against a live agy TUI, agy's trust prompt
+# is an ARROW-ONLY menu ("> Yes, I trust this folder" / "  No, exit" with a
+# "↑/↓ Navigate · enter Confirm" footer) - no numbered options to send a digit
+# to. Per the epic's Open Q1 that is the documented no-op: agy stays focus-only
+# (the existing correct fallback), unlike codex/gemini whose numbered menus got a
+# grammar. Author one here only if agy ever ships a numbered-digit prompt.
 
 [[rule]]
 id = "auth_wall"

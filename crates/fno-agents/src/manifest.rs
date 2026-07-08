@@ -1794,4 +1794,66 @@ mod tests {
         assert_eq!(ans.options[0].keystroke, b"1");
         assert_eq!(ans.options[1].idx, "2");
     }
+
+    // x-5103: the bundled codex trust_prompt is answerable on a real (validated)
+    // borderless "› 1. Yes, continue / 2. No, quit" menu; the "›" marker (U+203A)
+    // and surrounding non-option lines don't break extraction, and send="digit".
+    #[test]
+    fn x5103_bundled_codex_trust_prompt_is_answerable() {
+        let m = bundled("codex");
+        let screen = "> You are in /tmp/foo\n  \
+            Do you trust the contents of this directory? Trusting loads config.\n\
+            \u{203a} 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_eq!(v.rule_id, "trust_prompt");
+        assert_eq!(v.state, "blocked");
+        let ans = ans.expect("codex numbered trust menu is answerable");
+        assert_eq!(ans.options.len(), 2);
+        assert_eq!(ans.options[0].idx, "1");
+        assert_eq!(ans.options[0].label, "Yes, continue");
+        assert_eq!(ans.options[0].keystroke, b"1");
+        assert_eq!(ans.options[1].idx, "2");
+        assert_eq!(ans.options[1].keystroke, b"2");
+    }
+
+    // x-5103: the bundled gemini trust_prompt is answerable on a real (validated)
+    // BOXED radio ("│ ● 1. Trust folder … │"); the option regex consumes the box
+    // border (│ U+2502) + radio marker (● U+25CF) and the trailing border.
+    #[test]
+    fn x5103_bundled_gemini_trust_prompt_is_answerable() {
+        let m = bundled("gemini");
+        let screen = "\u{256d}\u{2500}\u{2500}\u{2500}\u{256e}\n\
+            \u{2502} Do you trust the files in this folder?        \u{2502}\n\
+            \u{2502} Trusting a folder allows Gemini CLI to load.  \u{2502}\n\
+            \u{2502}                                               \u{2502}\n\
+            \u{2502} \u{25cf} 1. Trust folder (foo)                     \u{2502}\n\
+            \u{2502}   2. Trust parent folder (tmp)                \u{2502}\n\
+            \u{2502}   3. Don't trust                              \u{2502}\n\
+            \u{2570}\u{2500}\u{2500}\u{2500}\u{256f}";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_eq!(v.rule_id, "trust_prompt");
+        assert_eq!(v.state, "blocked");
+        let ans = ans.expect("gemini boxed numbered menu is answerable");
+        assert_eq!(ans.options.len(), 3);
+        assert_eq!(ans.options[0].idx, "1");
+        assert_eq!(ans.options[0].label, "Trust folder (foo)");
+        assert_eq!(ans.options[0].keystroke, b"1");
+        assert_eq!(ans.options[2].idx, "3");
+        assert_eq!(ans.options[2].label, "Don't trust");
+    }
+
+    // x-5103: agy's trust prompt is ARROW-ONLY ("> Yes … / No, exit" +
+    // "↑/↓ Navigate") - no numbered options. No agy rule matches it, so it stays
+    // focus-only (the documented Open Q1 no-op), never a fabricated grammar.
+    #[test]
+    fn x5103_bundled_agy_arrow_menu_is_focus_only() {
+        let m = bundled("agy");
+        let screen = "Do you trust the contents of this project?\n\
+            Antigravity CLI requires permission to read, edit, and execute files here.\n\
+            > Yes, I trust this folder\n  No, exit\n  \u{2191}/\u{2193} Navigate \u{b7} enter Confirm";
+        assert!(
+            m.evaluate_answerable(&view(screen)).is_none(),
+            "agy arrow-only menu must not be answerable (focus-only fallback)"
+        );
+    }
 }

@@ -47,3 +47,28 @@ state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(1)"
 gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }
+
+# Answerable numbered prompt (x-5103). Gemini's trust prompt renders a BOXED
+# numbered radio ("│ ● 1. Trust folder … │" / "│   2. … │" / "│   3. Don't trust │"):
+# a left/right box border (│ U+2502) frames each line and the selected row
+# carries a "●" (U+25CF) radio marker. Distinct from codex.toml (borderless, ›
+# marker) - the divergence the per-agent split exists for. Validated against a
+# live gemini TUI (fresh untrusted dir): the bare digit COMMITS and advances to
+# the next screen, so send="digit"; digit_enter would leak a CR into that next
+# prompt. Region is 12 (not codex's 10) because gemini's box padding lines count
+# as non-empty, pushing the "Do you trust" question further up the window. The
+# option regex consumes the optional border + radio marker before the digit and
+# an optional trailing border after the label. Gated on the trust question AND a
+# numbered line; a bare auth wall keeps its focus-only auth_wall fallback.
+[[rule]]
+id = "trust_prompt"
+state = "blocked"
+priority = 985
+region = "bottom_non_empty_lines(12)"
+gate = { all = [
+  { any = [ { contains = "Do you trust" }, { contains = "do you trust" } ] },
+  { line_regex = '^\s*\x{2502}?\s*\x{25cf}?\s*[0-9]\.\s' },
+] }
+[rule.answer]
+option = '^\s*\x{2502}?\s*\x{25cf}?\s*(?P<idx>[0-9])\.\s+(?P<label>.+?)\s*\x{2502}?\s*$'
+send = "digit"
