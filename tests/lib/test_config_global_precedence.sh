@@ -3,7 +3,7 @@
 #
 # GLOBAL_SETTINGS must NEVER alias CONFIG_FILE. CONFIG_FILE (emitted by
 # `fno paths shell-stub`) is the ACTIVE config = the project-local
-# .fno/settings.yaml whenever one exists; aliasing it made both merge tiers
+# .fno/config.toml whenever one exists; aliasing it made both merge tiers
 # point at the local file, hiding every global-only key from bash consumers.
 #
 # CRITICAL test discipline (see the design's Domain Pitfalls): the buggy
@@ -13,6 +13,9 @@
 # the exact bug, so the global-resolution cases must `unset GLOBAL_SETTINGS`.
 # Each case also sets CONFIG_FILE explicitly (non-empty) so the stub-sourcing
 # block at the top of config.sh is skipped and the test stays hermetic.
+#
+# Fixtures are flat config.toml (the post-hard-cut format config.sh reads via
+# `yq -p toml`); there is no `config:` wrapper.
 
 set -uo pipefail
 
@@ -45,18 +48,16 @@ trap 'rm -rf "$TMP"' EXIT
 echo ""
 echo "AC1-HP: global-only key read when a local file exists"
 mkdir -p "$TMP/ac1hp/.fno"
-cat > "$TMP/ac1hp/.fno/settings.yaml" <<'YAML'
-config:
-  local_only_key: local_value
-YAML
-cat > "$TMP/ac1hp/global.yaml" <<'YAML'
-config:
-  global_only_key: GLOBAL_WINS
-YAML
+cat > "$TMP/ac1hp/.fno/config.toml" <<'TOML'
+local_only_key = "local_value"
+TOML
+cat > "$TMP/ac1hp/global.toml" <<'TOML'
+global_only_key = "GLOBAL_WINS"
+TOML
 result=$(
     unset GLOBAL_SETTINGS LOCAL_SETTINGS
-    export CONFIG_FILE="$TMP/ac1hp/.fno/settings.yaml"
-    export FNO_GLOBAL_SETTINGS_PATH="$TMP/ac1hp/global.yaml"
+    export CONFIG_FILE="$TMP/ac1hp/.fno/config.toml"
+    export FNO_GLOBAL_SETTINGS_PATH="$TMP/ac1hp/global.toml"
     source "$CONFIG_SH"
     get_config "global_only_key" "DEFAULT"
 )
@@ -68,18 +69,16 @@ assert_eq "global-only key resolves to the global value (not the default)" "GLOB
 echo ""
 echo "AC2-HP: local key wins over global for a shared key"
 mkdir -p "$TMP/ac2hp/.fno"
-cat > "$TMP/ac2hp/.fno/settings.yaml" <<'YAML'
-config:
-  shared_key: from_local
-YAML
-cat > "$TMP/ac2hp/global.yaml" <<'YAML'
-config:
-  shared_key: from_global
-YAML
+cat > "$TMP/ac2hp/.fno/config.toml" <<'TOML'
+shared_key = "from_local"
+TOML
+cat > "$TMP/ac2hp/global.toml" <<'TOML'
+shared_key = "from_global"
+TOML
 result=$(
     unset GLOBAL_SETTINGS LOCAL_SETTINGS
-    export CONFIG_FILE="$TMP/ac2hp/.fno/settings.yaml"
-    export FNO_GLOBAL_SETTINGS_PATH="$TMP/ac2hp/global.yaml"
+    export CONFIG_FILE="$TMP/ac2hp/.fno/config.toml"
+    export FNO_GLOBAL_SETTINGS_PATH="$TMP/ac2hp/global.toml"
     source "$CONFIG_SH"
     get_config "shared_key" "DEFAULT"
 )
@@ -92,8 +91,8 @@ echo ""
 echo "AC1-ERR: no config files present"
 result=$(
     unset GLOBAL_SETTINGS LOCAL_SETTINGS
-    export CONFIG_FILE="$TMP/absent/local.yaml"
-    export FNO_GLOBAL_SETTINGS_PATH="$TMP/absent/global.yaml"
+    export CONFIG_FILE="$TMP/absent/local.toml"
+    export FNO_GLOBAL_SETTINGS_PATH="$TMP/absent/global.toml"
     source "$CONFIG_SH"
     get_config "anything" "FALLBACK"
 )
@@ -109,16 +108,15 @@ assert_eq "missing files -> exit 0 (no unbound-variable crash)" "0" "$ac1err_exi
 echo ""
 echo "AC1-EDGE: no local file, key only in global"
 mkdir -p "$TMP/ac1edge"
-cat > "$TMP/ac1edge/global.yaml" <<'YAML'
-config:
-  global_key: edge_global
-YAML
+cat > "$TMP/ac1edge/global.toml" <<'TOML'
+global_key = "edge_global"
+TOML
 result=$(
     unset GLOBAL_SETTINGS LOCAL_SETTINGS
     # CONFIG_FILE == the resolved global file (no local file present).
-    export CONFIG_FILE="$TMP/ac1edge/global.yaml"
-    export FNO_GLOBAL_SETTINGS_PATH="$TMP/ac1edge/global.yaml"
-    cd "$TMP/ac1edge"   # so the relative `.fno/settings.yaml` LOCAL fallback is absent
+    export CONFIG_FILE="$TMP/ac1edge/global.toml"
+    export FNO_GLOBAL_SETTINGS_PATH="$TMP/ac1edge/global.toml"
+    cd "$TMP/ac1edge"   # so the relative `.fno/config.toml` LOCAL fallback is absent
     source "$CONFIG_SH"
     get_config "global_key" "DEFAULT"
 )
@@ -126,25 +124,24 @@ assert_eq "no-local: global key still read, no error on absent relative LOCAL" "
 
 # ---------------------------------------------------------------------------
 # AC2-EDGE: empty FNO_GLOBAL_SETTINGS_PATH is treated as unset, falling back to
-# $HOME/.fno/settings.yaml (matching Python's `:-` semantics). HOME is scoped
+# $HOME/.fno/config.toml (matching Python's `:-` semantics). HOME is scoped
 # to a temp dir inside the subshell so the real ~/.fno is never touched.
 # ---------------------------------------------------------------------------
 echo ""
 echo "AC2-EDGE: empty FNO_GLOBAL_SETTINGS_PATH falls back to \$HOME"
 mkdir -p "$TMP/ac2edge/home/.fno"
-cat > "$TMP/ac2edge/home/.fno/settings.yaml" <<'YAML'
-config:
-  home_key: from_home
-YAML
+cat > "$TMP/ac2edge/home/.fno/config.toml" <<'TOML'
+home_key = "from_home"
+TOML
 result=$(
     unset GLOBAL_SETTINGS LOCAL_SETTINGS
     export HOME="$TMP/ac2edge/home"
-    export CONFIG_FILE="$TMP/ac2edge/absent-local.yaml"
+    export CONFIG_FILE="$TMP/ac2edge/absent-local.toml"
     export FNO_GLOBAL_SETTINGS_PATH=""   # empty == unset
     source "$CONFIG_SH"
     get_config "home_key" "DEFAULT"
 )
-assert_eq "empty FNO_GLOBAL_SETTINGS_PATH -> \$HOME/.fno/settings.yaml" "from_home" "$result"
+assert_eq "empty FNO_GLOBAL_SETTINGS_PATH -> \$HOME/.fno/config.toml" "from_home" "$result"
 
 # ---------------------------------------------------------------------------
 # AC1-FR: caller-pinned LOCAL_SETTINGS and GLOBAL_SETTINGS survive the new
@@ -156,27 +153,25 @@ assert_eq "empty FNO_GLOBAL_SETTINGS_PATH -> \$HOME/.fno/settings.yaml" "from_ho
 echo ""
 echo "AC1-FR: caller pins survive the new resolution"
 mkdir -p "$TMP/acfr/local/.fno" "$TMP/acfr/global"
-cat > "$TMP/acfr/local/.fno/settings.yaml" <<'YAML'
-config:
-  pinned_local_key: local_pinned
-YAML
-cat > "$TMP/acfr/global/settings.yaml" <<'YAML'
-config:
-  pinned_global_key: global_pinned
-YAML
+cat > "$TMP/acfr/local/.fno/config.toml" <<'TOML'
+pinned_local_key = "local_pinned"
+TOML
+cat > "$TMP/acfr/global/config.toml" <<'TOML'
+pinned_global_key = "global_pinned"
+TOML
 result_local=$(
-    export LOCAL_SETTINGS="$TMP/acfr/local/.fno/settings.yaml"
-    export GLOBAL_SETTINGS="$TMP/acfr/global/settings.yaml"
-    export CONFIG_FILE="$TMP/acfr/decoy.yaml"
-    export FNO_GLOBAL_SETTINGS_PATH="$TMP/acfr/decoy-global.yaml"
+    export LOCAL_SETTINGS="$TMP/acfr/local/.fno/config.toml"
+    export GLOBAL_SETTINGS="$TMP/acfr/global/config.toml"
+    export CONFIG_FILE="$TMP/acfr/decoy.toml"
+    export FNO_GLOBAL_SETTINGS_PATH="$TMP/acfr/decoy-global.toml"
     source "$CONFIG_SH"
     get_config "pinned_local_key" "DEFAULT"
 )
 result_global=$(
-    export LOCAL_SETTINGS="$TMP/acfr/local/.fno/settings.yaml"
-    export GLOBAL_SETTINGS="$TMP/acfr/global/settings.yaml"
-    export CONFIG_FILE="$TMP/acfr/decoy.yaml"
-    export FNO_GLOBAL_SETTINGS_PATH="$TMP/acfr/decoy-global.yaml"
+    export LOCAL_SETTINGS="$TMP/acfr/local/.fno/config.toml"
+    export GLOBAL_SETTINGS="$TMP/acfr/global/config.toml"
+    export CONFIG_FILE="$TMP/acfr/decoy.toml"
+    export FNO_GLOBAL_SETTINGS_PATH="$TMP/acfr/decoy-global.toml"
     source "$CONFIG_SH"
     get_config "pinned_global_key" "DEFAULT"
 )
@@ -192,19 +187,17 @@ echo ""
 echo "AC2-FR: nested global-only key read with a sparse local file present (yq)"
 if command -v yq >/dev/null 2>&1; then
     mkdir -p "$TMP/ac2fr/.fno"
-    cat > "$TMP/ac2fr/.fno/settings.yaml" <<'YAML'
-config:
-  parking_lot_path: /some/local/path
-YAML
-    cat > "$TMP/ac2fr/global.yaml" <<'YAML'
-config:
-  target:
-    auto_launch_on_blueprint: true
-YAML
+    cat > "$TMP/ac2fr/.fno/config.toml" <<'TOML'
+parking_lot_path = "/some/local/path"
+TOML
+    cat > "$TMP/ac2fr/global.toml" <<'TOML'
+[target]
+auto_launch_on_blueprint = true
+TOML
     result=$(
         unset GLOBAL_SETTINGS LOCAL_SETTINGS
-        export CONFIG_FILE="$TMP/ac2fr/.fno/settings.yaml"
-        export FNO_GLOBAL_SETTINGS_PATH="$TMP/ac2fr/global.yaml"
+        export CONFIG_FILE="$TMP/ac2fr/.fno/config.toml"
+        export FNO_GLOBAL_SETTINGS_PATH="$TMP/ac2fr/global.toml"
         source "$CONFIG_SH"
         get_config "target.auto_launch_on_blueprint" "false"
     )
