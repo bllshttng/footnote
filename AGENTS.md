@@ -2,7 +2,7 @@
 
 Project context and behavioral guidelines for AI agents (Claude Code, Gemini CLI, Codex CLI) in this repo. This file is the canonical source; `CLAUDE.md` and `GEMINI.md` are one-line stubs that `@AGENTS.md`-import it. It is a quick reference and an index: deep subsystem mechanics live in `docs/` (see [Deep-dive docs](#deep-dive-docs)) so this stays lean.
 
-**footnote** is a Claude Code plugin: an autonomous delivery pipeline that takes a feature from idea to shipped PR (think → plan → do → review → ship). First time here? Run `fno setup wizard` (terminal) or `/fno:setup` (in-session) to write a validated `.fno/settings.yaml`. Defaults work, so `/fno:target "..."` runs without it.
+**footnote** is a Claude Code plugin: an autonomous delivery pipeline that takes a feature from idea to shipped PR (think → plan → do → review → ship). First time here? Run `fno setup wizard` (terminal) or `/fno:setup` (in-session) to write a validated `.fno/config.toml`. Defaults work, so `/fno:target "..."` runs without it.
 
 ## Working principles (Karpathy)
 

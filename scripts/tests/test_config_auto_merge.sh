@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for auto_merge getters in scripts/lib/config.sh
 # Run from any directory - uses absolute paths
-# Uses temp HOME directories so real ~/.fno/settings.yaml is never touched.
+# Uses temp HOME directories so real ~/.fno/config.toml is never touched.
 
 set -uo pipefail
 
@@ -53,8 +53,8 @@ echo ""
 echo "test_enabled_default_false"
 TMPDIR_T=$(mktemp -d)
 trap "rm -rf '$TMPDIR_T'" EXIT
-LOCAL_SETTINGS="$TMPDIR_T/nonexistent/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/settings.yaml"
+LOCAL_SETTINGS="$TMPDIR_T/nonexistent/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/config.toml"
 LEGACY_CONFIG="$TMPDIR_T/nonexistent3/config.yaml"
 CLAUDE_SETTINGS="$TMPDIR_T/nonexistent4.json"
 CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"
@@ -67,13 +67,12 @@ assert_eq "test_enabled_default_false: no settings → false" "false" "$result"
 echo ""
 echo "test_enabled_local_true"
 mkdir -p "$TMPDIR_T/local_true/.fno"
-cat > "$TMPDIR_T/local_true/.fno/settings.yaml" <<'YAML'
-config:
-  auto_merge:
-    enabled: true
+cat > "$TMPDIR_T/local_true/.fno/config.toml" <<'YAML'
+[auto_merge]
+enabled = true
 YAML
-LOCAL_SETTINGS="$TMPDIR_T/local_true/.fno/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/settings.yaml"
+LOCAL_SETTINGS="$TMPDIR_T/local_true/.fno/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/config.toml"
 LEGACY_CONFIG="$TMPDIR_T/nonexistent3/config.yaml"
 CLAUDE_SETTINGS="$TMPDIR_T/nonexistent4.json"
 CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"
@@ -86,18 +85,16 @@ assert_eq "test_enabled_local_true: local enabled: true → true" "true" "$resul
 echo ""
 echo "test_local_overrides_global"
 mkdir -p "$TMPDIR_T/local_false/.fno" "$TMPDIR_T/global_true"
-cat > "$TMPDIR_T/local_false/.fno/settings.yaml" <<'YAML'
-config:
-  auto_merge:
-    enabled: false
+cat > "$TMPDIR_T/local_false/.fno/config.toml" <<'YAML'
+[auto_merge]
+enabled = false
 YAML
-cat > "$TMPDIR_T/global_true/settings.yaml" <<'YAML'
-config:
-  auto_merge:
-    enabled: true
+cat > "$TMPDIR_T/global_true/config.toml" <<'YAML'
+[auto_merge]
+enabled = true
 YAML
-LOCAL_SETTINGS="$TMPDIR_T/local_false/.fno/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_T/global_true/settings.yaml"
+LOCAL_SETTINGS="$TMPDIR_T/local_false/.fno/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_T/global_true/config.toml"
 LEGACY_CONFIG="$TMPDIR_T/nonexistent3/config.yaml"
 CLAUDE_SETTINGS="$TMPDIR_T/nonexistent4.json"
 CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"
@@ -110,13 +107,12 @@ assert_eq "test_local_overrides_global: local false beats global true → false"
 echo ""
 echo "test_strategy_invalid_falls_back"
 mkdir -p "$TMPDIR_T/bad_strategy/.fno"
-cat > "$TMPDIR_T/bad_strategy/.fno/settings.yaml" <<'YAML'
-config:
-  auto_merge:
-    merge_strategy: octopus
+cat > "$TMPDIR_T/bad_strategy/.fno/config.toml" <<'YAML'
+[auto_merge]
+merge_strategy = "octopus"
 YAML
-LOCAL_SETTINGS="$TMPDIR_T/bad_strategy/.fno/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/settings.yaml"
+LOCAL_SETTINGS="$TMPDIR_T/bad_strategy/.fno/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/config.toml"
 LEGACY_CONFIG="$TMPDIR_T/nonexistent3/config.yaml"
 CLAUDE_SETTINGS="$TMPDIR_T/nonexistent4.json"
 CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"
@@ -135,8 +131,8 @@ fi
 
 echo ""
 echo "test_conflict_resolution_default_opus"
-LOCAL_SETTINGS="$TMPDIR_T/nonexistent/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/settings.yaml"
+LOCAL_SETTINGS="$TMPDIR_T/nonexistent/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/config.toml"
 LEGACY_CONFIG="$TMPDIR_T/nonexistent3/config.yaml"
 CLAUDE_SETTINGS="$TMPDIR_T/nonexistent4.json"
 CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"
@@ -149,15 +145,13 @@ assert_eq "test_conflict_resolution_default_opus: no setting → opus" "opus" "$
 echo ""
 echo "test_allowed_invokers_restricts"
 mkdir -p "$TMPDIR_T/restricted/.fno"
-cat > "$TMPDIR_T/restricted/.fno/settings.yaml" <<'YAML'
-config:
-  auto_merge:
-    enabled: true
-    allowed_invokers:
-      - target
+cat > "$TMPDIR_T/restricted/.fno/config.toml" <<'YAML'
+[auto_merge]
+enabled = true
+allowed_invokers = ["target"]
 YAML
-LOCAL_SETTINGS="$TMPDIR_T/restricted/.fno/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/settings.yaml"
+LOCAL_SETTINGS="$TMPDIR_T/restricted/.fno/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/config.toml"
 LEGACY_CONFIG="$TMPDIR_T/nonexistent3/config.yaml"
 CLAUDE_SETTINGS="$TMPDIR_T/nonexistent4.json"
 CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"
@@ -170,13 +164,12 @@ assert_exit_1 "test_allowed_invokers_restricts: megawalk not in list → exit 1"
 echo ""
 echo "test_allowed_invokers_omitted_allows_all"
 mkdir -p "$TMPDIR_T/allow_all/.fno"
-cat > "$TMPDIR_T/allow_all/.fno/settings.yaml" <<'YAML'
-config:
-  auto_merge:
-    enabled: true
+cat > "$TMPDIR_T/allow_all/.fno/config.toml" <<'YAML'
+[auto_merge]
+enabled = true
 YAML
-LOCAL_SETTINGS="$TMPDIR_T/allow_all/.fno/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/settings.yaml"
+LOCAL_SETTINGS="$TMPDIR_T/allow_all/.fno/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_T/nonexistent2/config.toml"
 LEGACY_CONFIG="$TMPDIR_T/nonexistent3/config.yaml"
 CLAUDE_SETTINGS="$TMPDIR_T/nonexistent4.json"
 CLAUDE_SETTINGS_LOCAL="$TMPDIR_T/nonexistent5.json"

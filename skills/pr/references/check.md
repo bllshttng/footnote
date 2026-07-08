@@ -31,7 +31,7 @@ if [[ ${#REVIEWER_TYPES[@]} -eq 0 ]]; then
 fi
 ```
 
-**Config schema (settings.yaml `config:` section):**
+**Config schema (config.toml `config:` section):**
 
 ```yaml
 config:
@@ -75,14 +75,14 @@ REVIEWER_NAME="${REVIEWER_BOT%\[bot\]}"
 > matches on bllshttng/footnote even when the reviewer has posted
 > comments. Confirmed on PR #248 (sigma-review missed a P2 finding that
 > chatgpt-codex-connector caught) and PR #254 (3 P1 + 2 P2 findings).
-> If `external_reviewer: codex` is set in settings.yaml without an
+> If `external_reviewer: codex` is set in config.toml without an
 > explicit `external_reviewer_bot:` override, the default below resolves
 > to the correct login.
 
 ### Wait Configuration
 
 Cron checks fire at +5 and +10 minutes after invocation. These are not configurable
-via settings.yaml - the timing matches typical reviewer response times (1-5 min for
+via config.toml - the timing matches typical reviewer response times (1-5 min for
 fast reviewers, up to 10 min for slower ones).
 
 ## Step 0b: Post harness peers (`config.review.peers`)

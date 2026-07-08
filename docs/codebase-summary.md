@@ -219,7 +219,7 @@ The `.fno/` directory at the project root stores runtime state. It is partially 
 | `00-INDEX.md` | Varies | Execution strategy (from /blueprint) |
 | `current-PLAN.md` | No | Active plan for target agents |
 | `CONTEXT.md` | No | User constraints for current task |
-| `settings.yaml` | Yes | Plugin settings |
+| `config.toml` | Yes | Plugin settings |
 
 ### Internal Symlink
 

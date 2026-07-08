@@ -48,7 +48,7 @@ git check-ignore -q .claude/worktrees 2>/dev/null || git check-ignore -q .claude
 ### 2. Create Worktree
 
 Use the shared worktree manager - it handles `worktree_base` resolution
-from settings.yaml (so projects with `~/conductor/workspaces/<project>`
+from config.toml (so projects with `~/conductor/workspaces/<project>`
 configured don't end up under `.claude/worktrees/`), branch naming,
 and idempotent re-creation. See
 [skills/target/references/worktree.md](../../target/references/worktree.md) for the

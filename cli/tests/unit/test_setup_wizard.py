@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-import yaml
+import tomllib
 from typer.testing import CliRunner
 
 from fno.config import schema_gen
@@ -52,7 +52,7 @@ def test_ac4_hp_always_fields_written_and_valid(tmp_path, monkeypatch):
     # The resulting global file loads cleanly into the model (doctor-clean spirit).
     from fno.config import SettingsModel
 
-    data = yaml.safe_load(gpath.read_text())
+    data = tomllib.loads((gpath.parent / "config.toml").read_text())
     SettingsModel.model_validate(data)  # raises on an invalid combination
 
 
@@ -83,9 +83,9 @@ def test_enabling_obsidian_with_vault_succeeds(tmp_path, monkeypatch):
         "obsidian.enabled",
         "obsidian.vault",
     }
-    data = yaml.safe_load(gpath.read_text())
-    assert data["config"]["obsidian"]["enabled"] is True
-    assert data["config"]["obsidian"]["vault"] == "MyVault"
+    data = tomllib.loads((gpath.parent / "config.toml").read_text())
+    assert data["obsidian"]["enabled"] is True
+    assert data["obsidian"]["vault"] == "MyVault"
 
 
 def test_ac4_err_rejected_value_reprompts(tmp_path, monkeypatch):
@@ -148,8 +148,8 @@ def test_deferred_genuine_error_reprompts_not_skipped(tmp_path, monkeypatch):
         "backlog.id_prefix",
         "backlog.id_hex_width",
     }
-    data = yaml.safe_load(gpath.read_text())
-    assert data["config"]["backlog"]["id_prefix"] == "ok"
+    data = tomllib.loads((gpath.parent / "config.toml").read_text())
+    assert data["backlog"]["id_prefix"] == "ok"
 
 
 def test_project_vision_is_project_scoped(tmp_path):
@@ -175,9 +175,9 @@ def test_project_vision_is_project_scoped(tmp_path):
     )
     # The scope was asked, and vision landed in the PROJECT file, not global.
     assert asked == ["project.vision"]
-    data = yaml.safe_load((tmp_path / ".fno" / "settings.yaml").read_text())
+    data = tomllib.loads((tmp_path / ".fno" / "config.toml").read_text())
     assert (
-        data["config"]["project"]["vision"]
+        data["project"]["vision"]
         == "A CLI that ships features end to end."
     )
 
@@ -227,9 +227,9 @@ def test_ac4_edge_project_scoped_key_routes_to_project(tmp_path, monkeypatch):
     # The scope prompt fired for the project-scoped key...
     assert asked_scope == ["post_merge.parking_lot_path"]
     # ...and the value landed in the PROJECT file, not global.
-    data = yaml.safe_load((tmp_path / ".fno" / "settings.yaml").read_text())
+    data = tomllib.loads((tmp_path / ".fno" / "config.toml").read_text())
     assert (
-        data["config"]["post_merge"]["parking_lot_path"]
+        data["post_merge"]["parking_lot_path"]
         == "internal/x/backlog/parking-lot.md"
     )
     assert result["written"] == ["post_merge.parking_lot_path"]
@@ -255,7 +255,7 @@ def test_ac4_fr_cancel_midrun_keeps_written_nothing_partial(tmp_path, monkeypatc
     assert len(result["written"]) <= 1
     if gpath.exists():
         # Whatever did land parses cleanly (no partial / corrupt write).
-        yaml.safe_load(gpath.read_text())
+        tomllib.loads((gpath.parent / "config.toml").read_text())
 
 
 def test_cli_wizard_smoke_accepts_defaults(tmp_path, monkeypatch):

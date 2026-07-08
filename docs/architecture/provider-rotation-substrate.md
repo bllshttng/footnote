@@ -15,7 +15,7 @@ The motivating use case is daily-driver reliability across Jason's accounts: 2x 
 
 ```mermaid
 graph TD
-    YAML["~/.fno/settings.yaml<br/>config.providers.records[]"] --> LOADER["loader.py<br/>load_providers()"]
+    YAML["~/.fno/config.toml<br/>config.providers.records[]"] --> LOADER["loader.py<br/>load_providers()"]
     LOADER --> PR["ProviderRecord<br/>(Pydantic v2)"]
     LOADER --> PC["ProvidersConfig<br/>records + active"]
 
@@ -35,7 +35,7 @@ graph TD
 
 The substrate has four layers, each shipped in its own atomic commit:
 
-1. Config schema (`model.py`, `loader.py`) - typed records read from settings.yaml with project-local-over-global precedence.
+1. Config schema (`model.py`, `loader.py`) - typed records read from config.toml with project-local-over-global precedence.
 2. CLI surface (`cli.py`, `cli/src/fno/cli.py` registration) - `fno providers` Typer sub-app for human-driven management.
 3. Credential staging + dispatch (`staging.py`, `dispatch.py`) - per-account directory with symlink to canonical OAuth dir, plus a pure dispatch_env helper.
 4. Ledger attribution (`cost.py`, `register-task.py`, `session-cost.py`) - cost entries gain `provider_id` and `account_id` fields tagged at write time.
@@ -75,7 +75,7 @@ The substrate package is `cli/src/fno/adapters/providers/`. No code outside this
 
 ## Concurrency Guarantees
 
-`dispatch_env` is a pure function: no caching, no global state, no I/O beyond reading settings.yaml. AC03.3 verifies this with a `concurrent.futures.ThreadPoolExecutor` running 100 calls per provider across 8 workers, asserting that no result for provider A ever leaks values from provider B.
+`dispatch_env` is a pure function: no caching, no global state, no I/O beyond reading config.toml. AC03.3 verifies this with a `concurrent.futures.ThreadPoolExecutor` running 100 calls per provider across 8 workers, asserting that no result for provider A ever leaks values from provider B.
 
 `cost.update` uses the existing `filelock` pattern; AC04.6 covers the concurrent-write case. The substrate inherits the atomic-write guarantee already validated in the broader CLI test suite.
 
@@ -106,7 +106,7 @@ The plan's design doc enumerates failure modes per category. The substrate addre
 | Unresolvable env reference | resolve_env_value raises ProviderUnavailableError naming the reference | 03 |
 | Concurrent dispatch contamination | dispatch_env is pure, ThreadPoolExecutor-tested | 03 |
 | Concurrent ledger write | cost.update uses filelock, atomic temp-file write | 04 |
-| Save against corrupt settings.yaml | save_providers reads strict, raises ProviderConfigError instead of silently overwriting unrelated keys | 01 (added during sigma-review) |
+| Save against corrupt config.toml | save_providers reads strict, raises ProviderConfigError instead of silently overwriting unrelated keys | 01 (added during sigma-review) |
 | Tilde in credentials_source not expanded | field_validator on ProviderRecord.credentials_source calls .expanduser() | 01 (added during sigma-review) |
 
 ## Tests
@@ -116,7 +116,7 @@ Coverage is split between in-package pytest (logic correctness) and out-of-packa
 | Test | Scope | Lines covered |
 |------|-------|---------------|
 | `cli/src/fno/adapters/providers/test_model.py` | Pydantic field validation, conditional auth, regex constraints | model.py |
-| `cli/src/fno/adapters/providers/test_loader.py` | settings.yaml parse, project-local override, save round-trip, corrupt-file refusal | loader.py |
+| `cli/src/fno/adapters/providers/test_loader.py` | config.toml parse, project-local override, save round-trip, corrupt-file refusal | loader.py |
 | `cli/src/fno/adapters/providers/test_cli.py` | Typer CliRunner: list/show/add/test/use/remove + 5 ACs | cli.py |
 | `cli/src/fno/adapters/providers/test_staging.py` | symlink ops, idempotency, error paths | staging.py |
 | `cli/src/fno/adapters/providers/test_dispatch.py` | env resolution, concurrency (ThreadPoolExecutor), keychain mocking | dispatch.py |

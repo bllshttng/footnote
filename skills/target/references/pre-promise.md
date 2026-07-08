@@ -16,7 +16,7 @@ heads-up on the same plan does not get a third message.
 
 Skip the entire step silently when:
 
-- `~/.fno/settings.yaml` has no `config.inbox.peers` block (opt-in).
+- `~/.fno/config.toml` has no `config.inbox.peers` block (opt-in).
 - The plan was not run through /target's PR flow (no `pr_url:` set on
   `target-state.md`).
 - This is a cross-project intermediate ship - the recap fires only on the

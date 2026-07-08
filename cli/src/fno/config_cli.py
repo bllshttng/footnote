@@ -78,54 +78,77 @@ def _load_repo_post_merge(repo_root: Path):
     scaffold-and-note only, so a bad project block degrades to ``None`` rather
     than erroring the verdict.
     """
+    import tomllib
+
     import yaml
 
-    from fno.config import PostMergeBlock, ProjectBlock
+    from fno.config import (
+        PostMergeBlock,
+        ProjectBlock,
+        _deep_merge,
+        _unwrap_config_dict,
+        _worktree_local_override,
+    )
 
-    settings_path = repo_root / ".fno" / "settings.yaml"
-    raw: dict = {}
-    if settings_path.is_file():
-        parsed = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
-        if parsed is not None:
+    fno_dir = repo_root / ".fno"
+
+    def _read_flat(toml_path: Path, yaml_path: Path) -> dict:
+        """Read config as a FLAT dict, config.toml-first with a READ-ONLY legacy
+        settings.yaml fallback. The oracle must never migrate (it is read-only,
+        may run against an unmigrated repo, and test_oracle_is_read_only forbids
+        writes), so it tolerates both formats without converting. A malformed
+        file RAISES so the caller maps it to ``error``, never a false verdict.
+        """
+        if toml_path.is_file():
+            return _unwrap_config_dict(
+                tomllib.loads(toml_path.read_text(encoding="utf-8"))
+            )
+        if yaml_path.is_file():
+            parsed = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+            if parsed is None:
+                return {}
             if not isinstance(parsed, dict):
-                raise ValueError(f"settings.yaml is not a mapping: {settings_path}")
-            raw = parsed
+                raise ValueError(f"config is not a mapping: {yaml_path}")
+            return _unwrap_config_dict(parsed)
+        return {}
+
+    raw: dict = _read_flat(fno_dir / "config.toml", fno_dir / "settings.yaml")
 
     # Per-worktree local override (x-cbce): layer the allowlisted keys
     # (parking_lot_path, project.id) so this oracle agrees with load_settings()
     # and `fno config get`. Repo-local only (the local file is never symlinked
     # to canonical), which preserves the "a global parking_lot_path must not make
     # every repo look ready" guard above - the override is still repo-scoped.
-    local_path = repo_root / ".fno" / "settings.local.yaml"
+    local_toml = fno_dir / "config.local.toml"
+    local_yaml = fno_dir / "settings.local.yaml"
+    local_path = local_toml if local_toml.is_file() else local_yaml
     if local_path.is_file() and not local_path.is_symlink():
-        from fno.config import _deep_merge, _load_raw, _worktree_local_override
-
-        local_parsed, ok = _load_raw(local_path)
-        if ok:
-            override = _worktree_local_override(local_parsed)
+        try:
+            if local_path.suffix == ".toml":
+                local_parsed = tomllib.loads(local_path.read_text(encoding="utf-8"))
+            else:
+                local_parsed = yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
+        except (tomllib.TOMLDecodeError, yaml.YAMLError):
+            local_parsed = {}
+        if isinstance(local_parsed, dict):
+            override = _worktree_local_override(_unwrap_config_dict(local_parsed))
             if override:
                 raw = _deep_merge(raw, override)
 
     if not raw:
         return PostMergeBlock(), None
 
-    config = raw.get("config")
-    config = config if isinstance(config, dict) else {}
-    pm_raw = config.get("post_merge")
+    pm_raw = raw.get("post_merge")
     pm_raw = pm_raw if isinstance(pm_raw, dict) else {}
     pm = PostMergeBlock.model_validate(pm_raw)  # raises on an invalid post_merge value
 
     project_id = None
-    for candidate in (config.get("project"), raw.get("project")):
-        if candidate is None:
-            continue
+    proj = raw.get("project")
+    if isinstance(proj, dict):
         try:
-            pid = ProjectBlock.model_validate(candidate).id
+            project_id = ProjectBlock.model_validate(proj).id or None
         except Exception:  # noqa: BLE001 - project.id is non-blocking; degrade to None
-            pid = None
-        if pid:
-            project_id = pid
-            break
+            project_id = None
     return pm, project_id
 
 

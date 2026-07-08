@@ -36,11 +36,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import tempfile
 import tomllib
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
+import tomli_w
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -2476,17 +2478,18 @@ class SettingsModel(ConfigBlock):
         return data
 
 
-# Keys a per-worktree `.fno/settings.local.yaml` may override on top of the
-# shared (symlinked) settings.yaml. setup-worktree.sh symlinks settings.yaml
+# Keys a per-worktree `.fno/config.local.toml` may override on top of the
+# shared (symlinked) config.toml. setup-worktree.sh symlinks config.toml
 # from canonical into every worktree so backlog/ledger config stays coherent,
 # which also forces these collision-prone keys to be shared. The local file is
 # the one file kept per-worktree; it may diverge ONLY on this allowlist. A key
 # outside it in the local file is ignored (with a warning) so a local file can
-# never silently fork shared config. Dotted, canonical (post-alias) paths.
+# never silently fork shared config. Dotted, FLAT (post-unwrap) paths - the
+# config.local.toml is flat, so no `config.` prefix.
 WORKTREE_LOCAL_KEYS: frozenset[str] = frozenset(
     {
-        "config.post_merge.parking_lot_path",
-        "config.project.id",
+        "post_merge.parking_lot_path",
+        "project.id",
     }
 )
 
@@ -2519,7 +2522,187 @@ def _global_settings_path() -> Path:
     return Path.home() / ".fno" / "settings.yaml"
 
 
-def _candidate_paths() -> list[Path]:
+# ---------------------------------------------------------------------------
+# One-shot yaml -> flat-toml migration (Locked Decision #4: the load-time
+# safety net for the hard cut). This module is the ONLY place PyYAML survives
+# at load time - a legacy settings.yaml is converted to a flat config.toml
+# exactly once, then every reader (Python, Rust, shell) sees config.toml.
+# ---------------------------------------------------------------------------
+
+
+def _strip_none(data: object) -> object:
+    """Recursively drop None-valued keys. TOML cannot represent null, and the
+    loader treats an absent key as its default (== None), so stripping None is
+    lossless and keeps ``tomli_w`` from ever choking on an unserializable value.
+    """
+    if isinstance(data, dict):
+        return {k: _strip_none(v) for k, v in data.items() if v is not None}
+    if isinstance(data, list):
+        return [_strip_none(v) for v in data]
+    return data
+
+
+def _atomic_write_toml(target: Path, data: dict[str, object]) -> None:
+    """Write ``data`` as flat TOML to ``target`` via temp file + ``os.replace``.
+
+    Writes THROUGH a symlink to its real target so a worktree link (pointing at
+    the canonical config) is preserved rather than clobbered by the rename. The
+    temp file lands in the real target's directory so the rename is atomic (same
+    filesystem); on any failure the temp file is unlinked and the original is
+    left intact.
+    """
+    if target.is_symlink():
+        target = Path(os.path.realpath(target))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.tmp.", suffix=".part"
+    )
+    tmp = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            clean = cast("dict[str, Any]", _strip_none(data))
+            f.write(tomli_w.dumps(clean).encode("utf-8"))
+        os.replace(str(tmp), str(target))
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _flat_from_yaml_file(path: Path) -> dict[str, object]:
+    """Read a legacy settings.yaml and return its FLAT (unwrapped) dict.
+
+    Raises ``yaml.YAMLError`` on a malformed file so the caller can leave the
+    original in place rather than convert junk.
+    """
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return {}
+    return _unwrap_config_dict(raw)
+
+
+def _migrate_yaml_to_toml(
+    yaml_path: Path, toml_name: str = "config.toml"
+) -> Optional[Path]:
+    """One-shot convert a legacy YAML config to a flat TOML sibling.
+
+    Idempotent: returns the toml path (no rewrite) when the toml already exists,
+    so a second migrator - or a re-run - is a no-op (AC3-ERR). Atomic + crash
+    safe: the toml is written temp+rename, and the yaml is deleted ONLY after the
+    toml is durable, so an interrupt leaves a readable yaml and no partial toml
+    (AC3-FR / AC4-FR). Converges under concurrency: two racers either short
+    circuit on the existing toml or write identical content.
+
+    ``yaml_path`` may be a symlink (a worktree's link to the canonical config);
+    the toml is written next to the *real* file so every linked worktree
+    resolves the same config.toml.
+    """
+    real_yaml = (
+        Path(os.path.realpath(yaml_path)) if yaml_path.is_symlink() else yaml_path
+    )
+    toml_path = real_yaml.with_name(toml_name)
+    if toml_path.exists():
+        return toml_path
+    if not real_yaml.is_file():
+        return None
+    try:
+        data = _flat_from_yaml_file(real_yaml)
+    except yaml.YAMLError:
+        _LOG.warning(
+            "config migrate: %s is malformed; leaving it in place", real_yaml
+        )
+        return None
+    _atomic_write_toml(toml_path, data)
+    try:
+        real_yaml.unlink()
+    except FileNotFoundError:
+        pass  # a concurrent migrator already removed it
+    return toml_path
+
+
+def run_config_migration(
+    locations: Optional[list[Path]] = None,
+) -> list[tuple[Path, str]]:
+    """Convert every legacy settings.yaml (+ its settings.local.yaml) in the
+    candidate chain to a flat config.toml, returning ``(toml_path, action)`` per
+    file for the CLI to report. ``action`` is ``migrated`` | ``already-migrated``
+    | ``absent``. The explicit ``fno setup migrate-config`` verb over the same
+    one-shot conversion the loader runs, so a deployed install converts on demand
+    (comments are NOT carried across the round-trip). Idempotent + atomic.
+    """
+    out: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for yaml_path in locations if locations is not None else _settings_yaml_locations():
+        if yaml_path.name != "settings.yaml":
+            continue
+        real = (
+            Path(os.path.realpath(yaml_path)) if yaml_path.is_symlink() else yaml_path
+        )
+        for src, toml_name in (
+            (yaml_path, "config.toml"),
+            (real.with_name("settings.local.yaml"), "config.local.toml"),
+        ):
+            toml_path = real.with_name(toml_name)
+            if str(toml_path) in seen:
+                continue
+            seen.add(str(toml_path))
+            # settings.local.yaml is a real per-worktree file; skip a symlinked one.
+            if toml_name == "config.local.toml" and (
+                not src.is_file() or src.is_symlink()
+            ):
+                continue
+            if toml_path.exists():
+                out.append((toml_path, "already-migrated"))
+            elif _migrate_yaml_to_toml(src, toml_name) is not None:
+                out.append((toml_path, "migrated"))
+            else:
+                out.append((toml_path, "absent"))
+    return out
+
+
+def read_config_flat(path: Path) -> dict[str, object]:
+    """Read a single config file (config.toml -> TOML by suffix, else YAML) and
+    return its FLAT dict (a legacy ``config:`` wrapper unwrapped). Returns {} on a
+    missing or unparseable file. For the handful of consumers that read the
+    config file DIRECTLY - the work.workspaces topology map, project detection -
+    instead of through the cached ``load_settings`` (they need global-only reads,
+    no per-process cache, or run at bootstrap).
+    """
+    data, ok = _load_raw(path)
+    return _unwrap_config_dict(data) if ok else {}
+
+
+def config_read_candidates(paths: list[Path]) -> list[Path]:
+    """config.toml-first read candidates for a list of settings.yaml locations
+    (public alias of ``_prefer_toml`` for direct-file readers)."""
+    return _prefer_toml(paths)
+
+
+def _ensure_migrated(locations: list[Path]) -> None:
+    """Convert every legacy settings.yaml (+ its settings.local.yaml) in
+    ``locations`` to a flat config.toml, once. The load-time hard-cut safety net:
+    an unmigrated install is transparently converted on first config load, then
+    read as TOML. NOT a steady-state dual-read - the fast path is the
+    config.toml-exists short-circuit inside ``_migrate_yaml_to_toml``.
+
+    Skipped entirely when ``$FNO_CONFIG`` pins an explicit path: an explicitly
+    handed file is read as-is (``_load_raw`` still parses YAML by suffix), never
+    migrated out from under the caller.
+    """
+    if os.environ.get("FNO_CONFIG"):
+        return
+    for yaml_path in locations:
+        if yaml_path.name != "settings.yaml":
+            continue
+        _migrate_yaml_to_toml(yaml_path)
+        local_yaml = yaml_path.with_name("settings.local.yaml")
+        if local_yaml.is_file() and not local_yaml.is_symlink():
+            _migrate_yaml_to_toml(local_yaml, "config.local.toml")
+
+
+def _settings_yaml_locations() -> list[Path]:
     """Return the ordered list of settings file candidates.
 
     Order:
@@ -2559,7 +2742,21 @@ def _candidate_paths() -> list[Path]:
     if canonical_candidate not in candidates:
         candidates.append(canonical_candidate)
     candidates.append(_global_settings_path())
-    return _prefer_toml(candidates)
+    return candidates
+
+
+def _candidate_paths() -> list[Path]:
+    """Ordered read candidates for the loader, config.toml-first.
+
+    Runs the one-shot yaml->toml auto-migrate over the settings locations, then
+    returns each location's ``config.toml`` (with the legacy ``settings.yaml``
+    kept as a passthrough fallback for the rare case migrate could not convert,
+    e.g. a malformed file). After a successful migrate only the config.toml
+    exists at each location, so the read is effectively toml-only.
+    """
+    locations = _settings_yaml_locations()
+    _ensure_migrated(locations)
+    return _prefer_toml(locations)
 
 
 def _prefer_toml(paths: list[Path]) -> list[Path]:
@@ -2725,7 +2922,7 @@ def _worktree_local_override(local_raw: dict[str, object]) -> dict[str, object]:
             ignored.append(path)
     if ignored:
         _LOG.warning(
-            "settings.local.yaml: ignoring non-worktree-local key(s): %s. "
+            "config.local.toml: ignoring non-worktree-local key(s): %s. "
             "Only %s may be overridden per-worktree; other keys stay shared.",
             ", ".join(sorted(ignored)),
             ", ".join(sorted(WORKTREE_LOCAL_KEYS)),
@@ -2865,16 +3062,16 @@ def load_settings() -> SettingsModel:
         raw = _deep_merge(raw, _alias_legacy_keys(parsed))
 
     # Per-worktree local override (x-cbce). Layer an optional real (non-symlinked)
-    # settings.local.yaml, sitting in the same .fno/ as the primary settings.yaml,
+    # config.local.toml, sitting in the same .fno/ as the primary config.toml,
     # on top of the merged config - but ONLY for WORKTREE_LOCAL_KEYS. This is the
     # one file setup-worktree.sh never symlinks, so sibling worktrees can diverge
     # on parking_lot_path / project.id while everything else stays shared via the
-    # symlinked settings.yaml. Absent (or symlinked) file => no-op, behavior
+    # symlinked config.toml. Absent (or symlinked) file => no-op, behavior
     # unchanged. A symlinked local file is skipped: it would defeat the whole
     # point (re-sharing the collision-prone keys across worktrees).
     candidates = _candidate_paths()
     if candidates:
-        local_path = candidates[0].parent / "settings.local.yaml"
+        local_path = candidates[0].parent / "config.local.toml"
         if local_path.is_file() and not local_path.is_symlink():
             local_parsed, ok = _load_raw(local_path)
             if ok:
@@ -2937,14 +3134,16 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
     candidate PR's repository, without polluting the process-level cache.
 
     Merge order (highest to lowest priority):
-      <repo_root>/.fno/settings.yaml -> ~/.fno/settings.yaml -> built-in defaults.
+      <repo_root>/.fno/config.toml -> ~/.fno/config.toml -> built-in defaults.
     """
     layers: list[tuple[Path, dict[str, object]]] = []
 
-    candidates = _prefer_toml([
+    locations = [
         repo_root / ".fno" / "settings.yaml",
         _global_settings_path(),
-    ])
+    ]
+    _ensure_migrated(locations)
+    candidates = _prefer_toml(locations)
     for candidate in candidates:
         if candidate.is_file():
             parsed, ok = _load_raw(candidate)

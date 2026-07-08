@@ -12,8 +12,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
+import tomllib
+import tomli_w
 
+
+
+def _strip_none_fx(x):
+    if isinstance(x, dict):
+        return {k: _strip_none_fx(v) for k, v in x.items() if v is not None}
+    if isinstance(x, list):
+        return [_strip_none_fx(v) for v in x]
+    return x
 
 def _seed_settings(
     tmp_path: Path,
@@ -22,7 +31,7 @@ def _seed_settings(
     record_ids: list[str],
     max_swaps_per_phase: int | None = None,
 ) -> Path:
-    settings_path = tmp_path / "settings.yaml"
+    settings_path = tmp_path / "config.toml"
     records = []
     for rid in record_ids:
         records.append({
@@ -36,7 +45,7 @@ def _seed_settings(
     if max_swaps_per_phase is not None:
         block["failover"] = {"max_swaps_per_phase": max_swaps_per_phase}
     settings_path.write_text(
-        yaml.safe_dump({"config": {"providers": block}}, sort_keys=False)
+        tomli_w.dumps(_strip_none_fx({"providers": block}))
     )
     return settings_path
 
@@ -64,8 +73,8 @@ class TestStormCap:
         # Counter incremented
         assert ctrl.snapshot_state().swaps_this_phase == 1
         # Settings.yaml mutated
-        loaded = yaml.safe_load(settings_path.read_text())
-        assert loaded["config"]["providers"]["active"] == "bar"
+        loaded = tomllib.loads(settings_path.read_text())
+        assert loaded["providers"]["active"] == "bar"
 
     def test_hp2_multiple_swaps_within_budget(self, tmp_path: Path):
         from fno.adapters.providers.failover import (
@@ -553,10 +562,9 @@ class TestPrioritySafety:
         )
 
         # Two records, one with bad priority string
-        settings_path = tmp_path / "settings.yaml"
-        settings_path.write_text(yaml.safe_dump({
-            "config": {
-                "providers": {
+        settings_path = tmp_path / "config.toml"
+        settings_path.write_text(tomli_w.dumps(_strip_none_fx({
+            "providers": {
                     "active": "a",
                     "records": [
                         {"id": "a", "name": "a", "cli": "claude",
@@ -570,7 +578,7 @@ class TestPrioritySafety:
                     ],
                 }
             }
-        }, sort_keys=False))
+        )))
 
         # b has priority 50, a falls back to default 100; b wins.
         candidate = _next_eligible_provider(

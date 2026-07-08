@@ -41,8 +41,8 @@ set -uo pipefail
 # ----------------------------------------------------------------------
 
 WTM_VERSION="1"
-WTM_LOCAL_SETTINGS="${WTM_LOCAL_SETTINGS:-.fno/settings.yaml}"
-WTM_GLOBAL_SETTINGS="${WTM_GLOBAL_SETTINGS:-$HOME/.fno/settings.yaml}"
+WTM_LOCAL_SETTINGS="${WTM_LOCAL_SETTINGS:-.fno/config.toml}"
+WTM_GLOBAL_SETTINGS="${WTM_GLOBAL_SETTINGS:-$HOME/.fno/config.toml}"
 
 # Resolve the directory holding this script. Used to locate sibling helpers
 # (e.g. scripts/lib/worktree-lifecycle.sh) regardless of the caller's cwd.
@@ -132,11 +132,11 @@ _wtm_yq_project_field() {
     local raw="" settings
     while IFS= read -r settings; do
         [[ -n "$settings" ]] || continue
-        raw=$(_wtm_p="$project" _wtm_f="$field" yq -r \
+        raw=$(_wtm_p="$project" _wtm_f="$field" yq -p toml -r \
               '.work.workspaces[].projects[]? | select(.name == env(_wtm_p)) | .[env(_wtm_f)] // ""' \
               "$settings" 2>/dev/null | head -1)
         if [[ -z "$raw" || "$raw" == "null" ]]; then
-            raw=$(_wtm_p="$project" _wtm_f="$field" yq -r \
+            raw=$(_wtm_p="$project" _wtm_f="$field" yq -p toml -r \
                   '.work.projects[]? | select(.name == env(_wtm_p)) | .[env(_wtm_f)] // ""' \
                   "$settings" 2>/dev/null | head -1)
         fi
@@ -235,7 +235,7 @@ _wtm_config_value() {
         return 0
     fi
     local val
-    val=$(yq -r ".config.worktree.$key // \"\"" "$settings" 2>/dev/null)
+    val=$(yq -p toml -r ".worktree.$key // \"\"" "$settings" 2>/dev/null)
     if [[ -z "$val" || "$val" == "null" ]]; then
         echo "$default"
     else
@@ -252,7 +252,7 @@ _wtm_env_files() {
         return 0
     fi
     local lines
-    lines=$(yq -r '.config.worktree.env_files[]?' "$settings" 2>/dev/null)
+    lines=$(yq -p toml -r '.worktree.env_files[]?' "$settings" 2>/dev/null)
     if [[ -z "$lines" ]]; then
         printf '.env\n.env.local\n.env.development\n.env.development.local\n'
     else

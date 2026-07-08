@@ -15,13 +15,13 @@ Load references as needed when writing guides:
 
 ## Step 0: Check if How-To Guides Enabled (MANDATORY)
 
-Read from settings.yaml -> `config.docs.how_to_guides`
+Read from config.toml -> `config.docs.how_to_guides`
 If absent or false: "How-to guides are not configured. Run `/setup --full` to enable."
 If true: proceed. Read roles from `config.docs.roles`.
 
 ### Locate How-To Directory
 
-Read from settings.yaml -> `config.docs.how_to_path` (default: `docs/howto`)
+Read from config.toml -> `config.docs.how_to_path` (default: `docs/howto`)
 
 ```
 {how_to_path}/{role}/{feature}.md
@@ -29,7 +29,7 @@ Read from settings.yaml -> `config.docs.how_to_path` (default: `docs/howto`)
 
 ### Discover Roles from Config
 
-Read `config.docs.roles` from settings.yaml:
+Read `config.docs.roles` from config.toml:
 
 ```yaml
 config:
@@ -63,7 +63,7 @@ ls {how_to_path}/{role}/
 
 ## Target Audiences
 
-Roles are configured in settings.yaml -> `config.docs.roles`. Example:
+Roles are configured in config.toml -> `config.docs.roles`. Example:
 
 | Role | Directory | Concerns | Tone |
 |------|-----------|----------|------|

@@ -78,7 +78,7 @@ fi
 ## Worktree Creation
 
 For each plan, delegate to the shared worktree manager. Path resolution
-honors the project's `worktree_base` from `settings.yaml` (falling back
+honors the project's `worktree_base` from `config.toml` (falling back
 to `<repo>/.claude/worktrees` for back-compat); branch naming defaults
 to `feature/{slug}`. See [worktree.md](worktree.md)
 for the full decision matrix.

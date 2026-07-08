@@ -66,7 +66,7 @@ For unattended, walk-away execution, target's own loop combined with the `config
 
 Creates matching worktrees in each project defined in your workspace config, dispatches parallel subagents per project, and creates linked PRs. Backend projects execute first (order 1), frontend projects second (order 2).
 
-Requires `~/.fno/settings.yaml` with workspace configuration. Run `/fno:setup` to set this up.
+Requires `~/.fno/config.toml` with workspace configuration. Run `/fno:setup` to set this up.
 
 ## How to choose
 

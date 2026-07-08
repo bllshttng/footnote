@@ -114,7 +114,7 @@ If you need any of the above, use `/do waves` instead.
 
 Lightweight, not forced:
 - If a test file exists for the code being changed, run it after changes
-- If the project has `test_command` in settings.yaml, use it
+- If the project has `test_command` in config.toml, use it
 - No mandatory red-green-refactor protocol
 - Focus on "does it work?" not "did we follow the ceremony?"
 

@@ -564,8 +564,8 @@ fn nonclaude_codex_agent_rc0() {
     let artifact = write(d, "art.md", "agents_dispatched: [reviewer]\n");
     let settings = write(
         d,
-        "settings.yaml",
-        "config:\n  agents:\n    reviewer:\n      provider: codex-prov\n  providers:\n    records:\n      codex-prov:\n        cli: codex\n    active: claude-main\n",
+        "config.toml",
+        "[agents.reviewer]\nprovider = \"codex-prov\"\n\n[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"codex-prov\"\ncli = \"codex\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
@@ -582,8 +582,8 @@ fn nonclaude_all_claude_rc1() {
     // Agent resolves (via global active) to a claude provider -> rc1.
     let settings = write(
         d,
-        "settings.yaml",
-        "config:\n  providers:\n    records:\n      claude-main:\n        cli: claude\n    active: claude-main\n",
+        "config.toml",
+        "[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"claude-main\"\ncli = \"claude\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
@@ -614,8 +614,8 @@ fn nonclaude_dangling_provider_ref_warn_skip() {
     // no non-claude found -> rc1.
     let settings = write(
         d,
-        "settings.yaml",
-        "config:\n  agents:\n    reviewer:\n      provider: ghost\n  providers:\n    records:\n      claude-main:\n        cli: claude\n    active: claude-main\n",
+        "config.toml",
+        "[agents.reviewer]\nprovider = \"ghost\"\n\n[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"claude-main\"\ncli = \"claude\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
@@ -632,8 +632,8 @@ fn nonclaude_no_agents_dispatched_rc1() {
     let artifact = write(d, "art.md", "title: nothing\n");
     let settings = write(
         d,
-        "settings.yaml",
-        "config:\n  providers:\n    records:\n      claude-main:\n        cli: claude\n    active: claude-main\n",
+        "config.toml",
+        "[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"claude-main\"\ncli = \"claude\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
@@ -647,14 +647,8 @@ fn nonclaude_malformed_yaml_warn_rc1() {
     let tmp = tempfile::TempDir::new().unwrap();
     let d = tmp.path();
     let artifact = write(d, "art.md", "agents_dispatched: [reviewer]\n");
-    // Broken YAML (a tab-indented mapping under a key is invalid) -> python3
-    // parse fails -> WARN + rc1. Both sides shell the same python3 check, so the
-    // malformed-detection boundary is identical.
-    let settings = write(
-        d,
-        "settings.yaml",
-        "config:\n  - this: is\n   bad: indent\n",
-    );
+    // Malformed TOML (an unclosed table header) -> parse fails -> WARN + rc1.
+    let settings = write(d, "config.toml", "[bad\nthis = is\n");
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
         settings.to_str().unwrap(),
@@ -670,8 +664,8 @@ fn nonclaude_mixed_agents_one_nonclaude_rc0() {
     let artifact = write(d, "art.md", "agents_dispatched: [alpha, beta]\n");
     let settings = write(
         d,
-        "settings.yaml",
-        "config:\n  agents:\n    alpha:\n      provider: claude-main\n    beta:\n      provider: codex-prov\n  providers:\n    records:\n      claude-main:\n        cli: claude\n      codex-prov:\n        cli: codex\n    active: claude-main\n",
+        "config.toml",
+        "[agents.alpha]\nprovider = \"claude-main\"\n\n[agents.beta]\nprovider = \"codex-prov\"\n\n[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"claude-main\"\ncli = \"claude\"\n\n[[providers.records]]\nid = \"codex-prov\"\ncli = \"codex\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),

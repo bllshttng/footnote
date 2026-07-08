@@ -31,8 +31,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/config.sh"
 
-LOCAL_SETTINGS_FILE="${LOCAL_SETTINGS:-.fno/settings.yaml}"
-GLOBAL_SETTINGS_FILE="${GLOBAL_SETTINGS:-$HOME/.fno/settings.yaml}"
+LOCAL_SETTINGS_FILE="${LOCAL_SETTINGS:-.fno/config.toml}"
+GLOBAL_SETTINGS_FILE="${GLOBAL_SETTINGS:-$HOME/.fno/config.toml}"
 
 declare -a TYPES=()
 
@@ -49,65 +49,49 @@ _read_list_via_yq() {
     # Canonical path is config.review.external_reviewers; the legacy
     # config.external_reviewers is read only as a fallback.
     local file="$1"
-    if yq -e '.config.review.external_reviewers' "$file" >/dev/null 2>&1; then
-        yq -r '.config.review.external_reviewers[]?' "$file" 2>/dev/null
+    if yq -p toml -e '.review.external_reviewers' "$file" >/dev/null 2>&1; then
+        yq -p toml -r '.review.external_reviewers[]?' "$file" 2>/dev/null
         return 0
     fi
-    if yq -e '.config.external_reviewers' "$file" >/dev/null 2>&1; then
-        yq -r '.config.external_reviewers[]?' "$file" 2>/dev/null
+    if yq -p toml -e '.external_reviewers' "$file" >/dev/null 2>&1; then
+        yq -p toml -r '.external_reviewers[]?' "$file" 2>/dev/null
     fi
 }
 
-# Pure-awk fallback. Handles BOTH common YAML forms:
-#   1. Block list:
-#        config:
-#          external_reviewers:
-#            - gemini
-#            - codex
-#   2. Inline list:
-#        config:
-#          external_reviewers: [gemini, codex]
-# Inline-list parsing is intentionally limited to a single line and does not
-# support nested brackets or escaped commas; those rare forms need yq.
+# Pure-awk fallback for flat config.toml (when yq is missing). Reads the
+# `external_reviewers = [ ... ]` array (under a [review] table or top-level),
+# both single-line inline and multi-line forms:
+#     external_reviewers = ["gemini", "codex"]
+#     external_reviewers = [
+#       "gemini",
+#       "codex",
+#     ]
+# Only the first such array is read (matching yq). Nested brackets / escaped
+# commas are out of scope; those rare forms need yq.
 _read_list_via_awk() {
     local file="$1"
     [[ -f "$file" ]] || return 1
     awk '
-        # Track the config: block
-        /^config:[[:space:]]*$/ { in_config = 1; next }
-        in_config && /^[^[:space:]#]/ { in_config = 0 }
-
-        # Inline form: external_reviewers: [a, b, c]
-        in_config && /^[[:space:]]+external_reviewers:[[:space:]]*\[/ {
-            line = $0
-            sub(/^[[:space:]]+external_reviewers:[[:space:]]*\[/, "", line)
-            sub(/\][[:space:]]*$/, "", line)
-            n = split(line, items, ",")
-            for (i = 1; i <= n; i++) {
-                v = items[i]
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
-                gsub(/^["'\'']|["'\'']$/, "", v)
-                if (v != "") print v
+        collecting == 0 && /external_reviewers[[:space:]]*=[[:space:]]*\[/ {
+            collecting = 1
+        }
+        collecting == 1 {
+            acc = acc $0 "\n"
+            if ($0 ~ /\]/) {
+                sub(/^.*external_reviewers[[:space:]]*=[[:space:]]*\[/, "", acc)
+                sub(/\][^]]*$/, "", acc)
+                n = split(acc, items, ",")
+                for (i = 1; i <= n; i++) {
+                    v = items[i]
+                    sub(/#.*/, "", v)
+                    gsub(/[[:space:]]/, "", v)
+                    gsub(/["'\'']/, "", v)
+                    if (v != "") print v
+                }
+                collecting = 0
+                acc = ""
             }
-            in_list = 0
-            next
         }
-
-        # Block form: external_reviewers: (followed by - items)
-        in_config && /^[[:space:]]+external_reviewers:[[:space:]]*$/ {
-            in_list = 1
-            next
-        }
-        in_list && /^[[:space:]]+- / {
-            v = $0
-            sub(/^[[:space:]]+-[[:space:]]+/, "", v)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
-            gsub(/^["'\'']|["'\'']$/, "", v)
-            if (v != "") print v
-            next
-        }
-        # Any non-list line at config-block indent terminates the list
-        in_list && /^[[:space:]]+[^[:space:]-]/ { in_list = 0 }
     ' "$file"
 }
 

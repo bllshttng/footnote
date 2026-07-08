@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Project config loader for target
-# Reads from settings.yaml (config: section) with global → local override
+# Reads from config.toml (flat) with global → local override
 #
 # Lookup order (local wins):
-#   1. .fno/settings.yaml          (project-local override)
-#   2. ~/.fno/settings.yaml  (global defaults)
+#   1. .fno/config.toml            (project-local override)
+#   2. ~/.fno/config.toml    (global defaults)
 #
 # Config section format (inside settings.yaml):
 #   config:
@@ -29,7 +29,7 @@ fi
 # (the ACTIVE config = the project-local file when one exists; aliasing it hid
 # every global-only key from bash consumers - ab-5d6c3d47). Honor
 # FNO_GLOBAL_SETTINGS_PATH so bash matches Python's _global_settings_path().
-GLOBAL_SETTINGS="${GLOBAL_SETTINGS:-${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/settings.yaml}}"
+GLOBAL_SETTINGS="${GLOBAL_SETTINGS:-${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/config.toml}}"
 # LOCAL_SETTINGS is the active project config. Prefer CONFIG_FILE (the stub's
 # resolved local/canonical-root path) when it names a file distinct from the
 # global one, so a linked worktree whose .fno/settings.yaml is not symlinked
@@ -38,7 +38,7 @@ if [[ -z "${LOCAL_SETTINGS:-}" ]]; then
     if [[ -n "${CONFIG_FILE:-}" && "${CONFIG_FILE}" != "${GLOBAL_SETTINGS}" ]]; then
         LOCAL_SETTINGS="$CONFIG_FILE"
     else
-        LOCAL_SETTINGS=".fno/settings.yaml"
+        LOCAL_SETTINGS=".fno/config.toml"
     fi
 fi
 
@@ -48,7 +48,7 @@ _YQ_MISSING_WARNED=0
 _warn_no_yq_once() {
     local key="$1"
     if [[ "$_YQ_MISSING_WARNED" -eq 0 ]]; then
-        echo "[fno/config] warn: yq not found - nested key '${key}' (and other dotted keys like auto_merge.*) cannot be read from settings.yaml. Install yq via: brew install yq  |  apt install yq  |  mise use yq" >&2
+        echo "[fno/config] warn: yq not found - nested key '${key}' (and other dotted keys like auto_merge.*) cannot be read from config.toml. Install yq via: brew install yq  |  apt install yq  |  mise use yq" >&2
         _YQ_MISSING_WARNED=1
     fi
 }
@@ -87,29 +87,26 @@ _get_from_settings() {
     local file="$1" key="$2"
     [[ -f "$file" ]] || return 1
 
-    # For dotted keys like "notifications.enabled", use yq if available
-    if [[ "$key" == *.* ]]; then
-        if command -v yq &>/dev/null; then
-            local value
-            value=$(yq ".config.${key}" "$file" 2>/dev/null)
-            if [[ -n "$value" && "$value" != "null" ]]; then
-                echo "$value"
-                return 0
-            fi
-            return 1
-        else
-            _warn_no_yq_once "$key"
-            return 1
+    # Flat config.toml: every key resolves via yq's TOML mode (no config: wrapper).
+    if command -v yq &>/dev/null; then
+        local value
+        value=$(yq -p toml ".${key}" "$file" 2>/dev/null)
+        if [[ -n "$value" && "$value" != "null" ]]; then
+            echo "$value"
+            return 0
         fi
+        return 1
     fi
 
-    # Simple keys: extract from config: block (indented by 2+ spaces)
+    # yq-absent fallback: only a top-level simple key (`key = value`); a dotted
+    # (nested) key needs yq, so warn and give up.
+    if [[ "$key" == *.* ]]; then
+        _warn_no_yq_once "$key"
+        return 1
+    fi
     local value
-    value=$(sed -n '/^config:/,/^[^ ]/{
-        /^  '"${key}"':/p
-    }' "$file" 2>/dev/null \
+    value=$(sed -n "s/^${key}[[:space:]]*=[[:space:]]*//p" "$file" 2>/dev/null \
         | head -1 \
-        | sed "s/^[[:space:]]*${key}:[[:space:]]*//" \
         | tr -d '"' | tr -d "'")
     if [[ -n "$value" ]]; then
         echo "$value"
@@ -159,12 +156,12 @@ _get_from_workspace() {
     local file="$1" key="$2"
     [[ -f "$file" ]] || return 1
 
-    # Dotted keys resolve via yq; canonical config.work first, then the legacy
-    # top-level work:/workspace: sections, so folded and un-migrated files resolve.
+    # Dotted keys resolve via yq (flat config.toml): canonical `work` first, then
+    # the legacy `workspace` section.
     if [[ "$key" == *.* ]] && command -v yq &>/dev/null; then
         local value root
-        for root in ".config.work" ".work" ".workspace"; do
-            value=$(yq "${root}.${key}" "$file" 2>/dev/null)
+        for root in ".work" ".workspace"; do
+            value=$(yq -p toml "${root}.${key}" "$file" 2>/dev/null)
             [[ -n "$value" && "$value" != "null" ]] && { echo "$value"; return 0; }
         done
         return 1
@@ -366,7 +363,7 @@ get_domain_phase() {
     if command -v yq &>/dev/null; then
         for settings_file in "$LOCAL_SETTINGS" "$GLOBAL_SETTINGS"; do
             if [[ -f "$settings_file" ]]; then
-                value=$(yq ".domains.${domain}.phases.${phase}" "$settings_file" 2>/dev/null)
+                value=$(yq -p toml ".domains.${domain}.phases.${phase}" "$settings_file" 2>/dev/null)
                 if [[ -n "$value" && "$value" != "null" ]]; then
                     echo "$value"
                     return 0
@@ -537,8 +534,8 @@ get_provider_pricing() {
         # quoted ids, flow-style maps). Fall back to awk if yq is missing -
         # the awk path assumes 4-space indentation under records[].
         if command -v yq &>/dev/null; then
-            value=$(yq -r \
-                ".config.providers.records[] | select(.id == \"$provider_id\") | .pricing.${key} // \"\"" \
+            value=$(yq -p toml -r \
+                ".providers.records[] | select(.id == \"$provider_id\") | .pricing.${key} // \"\"" \
                 "$file" 2>/dev/null)
             # yq prints "null" when a path is absent without `// \"\"`; guard anyway.
             [[ "$value" == "null" ]] && value=""
@@ -549,36 +546,20 @@ get_provider_pricing() {
             continue
         fi
         _warn_no_yq_once "providers.records[].pricing.${key}"
+        # Flat config.toml array-of-tables: each record is a [[providers.records]]
+        # block with an id, and its pricing is a [providers.records.pricing] sub-table.
         value=$(awk -v target="$provider_id" -v want="$key" '
-            /^[[:space:]]*records:/ { in_records=1; next }
-            in_records && /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/ {
-                # New record: capture its id
-                cur_id = $0
-                sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", cur_id)
-                gsub(/["'\'']/, "", cur_id)
-                gsub(/[[:space:]]/, "", cur_id)
-                in_pricing = 0
-                next
+            /^\[\[providers\.records\]\]/ { cur_id=""; in_pricing=0; next }
+            /^\[providers\.records\.pricing\]/ { in_pricing = (cur_id == target); next }
+            /^\[/ { in_pricing=0; next }
+            cur_id == "" && /^[[:space:]]*id[[:space:]]*=/ {
+                cur_id=$0; sub(/^[^=]*=[[:space:]]*/, "", cur_id)
+                gsub(/["'\'' ]/, "", cur_id); next
             }
-            in_records && /^[[:space:]]*pricing:/ {
-                if (cur_id == target) in_pricing = 1
-                next
+            in_pricing && $0 ~ ("^[[:space:]]*" want "[[:space:]]*=") {
+                v=$0; sub(/^[^=]*=[[:space:]]*/, "", v)
+                gsub(/["'\'' ]/, "", v); print v; exit
             }
-            in_pricing && cur_id == target {
-                # match "    key: value"
-                line = $0
-                if (line ~ "^[[:space:]]+" want ":") {
-                    sub("^[[:space:]]+" want ":[[:space:]]*", "", line)
-                    gsub(/["'\'']/, "", line)
-                    gsub(/[[:space:]]/, "", line)
-                    print line
-                    exit
-                }
-                # New top-level key under the record (no leading 4+ spaces) ends pricing
-                if (line ~ "^[[:space:]]{2,4}[a-zA-Z]") in_pricing = 0
-            }
-            # End of records block
-            in_records && /^[a-zA-Z]/ { in_records = 0 }
         ' "$file" 2>/dev/null)
         if [[ -n "$value" ]]; then
             echo "$value"

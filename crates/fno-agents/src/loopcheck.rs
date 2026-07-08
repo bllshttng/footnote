@@ -267,7 +267,7 @@ fn strip_inline_comment(raw: &str) -> &str {
     }
 }
 
-/// Fail-closed sentinel for an unparseable settings.yaml (x-81d9 (c)). A YAML
+/// Fail-closed sentinel for an unparseable config.toml (x-81d9 (c)). A
 /// scanner error (e.g. tab-indentation, which YAML forbids) previously caused
 /// the hand-parser to silently drop the whole config.review subtree, yielding
 /// zero required_bots and shipping the PR unreviewed. Now such a file fails
@@ -294,37 +294,36 @@ fn scalar_as_singleton(rest: &str) -> Option<Vec<String>> {
     }
 }
 
-/// A YAML scalar (string / number / bool) as a String; None for structured
-/// values (sequence / mapping / null). Numbers and bools stringify so a
-/// `required_bots: 123` or a stray bool still coerces to a login string,
+/// A TOML scalar (string / integer / float / bool) as a String; None for
+/// structured values (array / table). Numbers and bools stringify so a
+/// `required_bots = 123` or a stray bool still coerces to a login string,
 /// matching the old scalar-tolerant behavior.
-fn yaml_scalar_string(v: &serde_yaml_ng::Value) -> Option<String> {
-    use serde_yaml_ng::Value;
+fn scalar_string(v: &toml::Value) -> Option<String> {
     match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Bool(b) => Some(b.to_string()),
-        Value::Number(n) => Some(n.to_string()),
+        toml::Value::String(s) => Some(s.clone()),
+        toml::Value::Boolean(b) => Some(b.to_string()),
+        toml::Value::Integer(n) => Some(n.to_string()),
+        toml::Value::Float(f) => Some(f.to_string()),
         _ => None,
     }
 }
 
 /// Classify a config.review LOGIN list value (`required_bots` / `github_apps` /
-/// `optional_apps`) off a typed YAML Value, matching the Python loader:
-///   absent / null -> None            (key absent; code default = no gate)
-///   sequence      -> Some(items)     (empty stays Some(empty) = declared no-gate)
-///   scalar        -> singleton gate  (a bare `key: codex` still GATES on codex)
-///   mapping/other -> None            (a `{...}` is not a login; Python drops it)
-fn value_as_login_list(v: &serde_yaml_ng::Value) -> Option<Vec<String>> {
-    use serde_yaml_ng::Value;
+/// `optional_apps`) off a typed TOML Value, matching the Python loader:
+///   absent        -> None            (key absent; code default = no gate)
+///   array         -> Some(items)     (empty stays Some(empty) = declared no-gate)
+///   scalar        -> singleton gate  (a bare `key = "codex"` still GATES on codex)
+///   table/other   -> None            (an inline table is not a login; Python drops it)
+fn value_as_login_list(v: &toml::Value) -> Option<Vec<String>> {
     match v {
-        Value::Null => None,
-        Value::Sequence(items) => Some(items.iter().filter_map(yaml_scalar_string).collect()),
+        toml::Value::Array(items) => Some(items.iter().filter_map(scalar_string).collect()),
         // A bare scalar routes through scalar_as_singleton so its brace/empty
         // semantics (and the direct unit test) stay live and Python-aligned.
-        Value::String(_) | Value::Bool(_) | Value::Number(_) => {
-            yaml_scalar_string(v).and_then(|s| scalar_as_singleton(&s))
-        }
-        // Mapping / tagged: not a login gate -> None (Python parity).
+        toml::Value::String(_)
+        | toml::Value::Boolean(_)
+        | toml::Value::Integer(_)
+        | toml::Value::Float(_) => scalar_string(v).and_then(|s| scalar_as_singleton(&s)),
+        // Table / other: not a login gate -> None (Python parity).
         _ => None,
     }
 }
@@ -333,30 +332,28 @@ fn value_as_login_list(v: &serde_yaml_ng::Value) -> Option<Vec<String>> {
 /// Unlike the login lists, a structurally-wrong mapping fails CLOSED (Python
 /// raises) via the unsatisfiable sentinel, never a silent empty gate. A leading
 /// '/' is normalized off each entry.
-fn value_as_reviewers(v: &serde_yaml_ng::Value) -> Vec<String> {
-    use serde_yaml_ng::Value;
+fn value_as_reviewers(v: &toml::Value) -> Vec<String> {
     match v {
-        Value::Null => Vec::new(),
-        Value::Sequence(items) => {
+        toml::Value::Array(items) => {
             let mut out = Vec::new();
             for it in items {
-                match yaml_scalar_string(it) {
+                match scalar_string(it) {
                     Some(s) => {
                         let n = normalize_reviewer(&s);
                         if !n.is_empty() {
                             out.push(n);
                         }
                     }
-                    // A non-scalar item (nested map/seq) is structurally wrong;
-                    // Python raises on it, so fail CLOSED with the sentinel
-                    // rather than silently dropping it (gemini medium) - matches
-                    // the top-level-mapping arm below.
+                    // A non-scalar item (nested table/array) is structurally
+                    // wrong; Python raises on it, so fail CLOSED with the
+                    // sentinel rather than silently dropping it (gemini medium) -
+                    // matches the top-level-table arm below.
                     None => return vec![MALFORMED_REVIEWERS_SENTINEL.to_string()],
                 }
             }
             out
         }
-        Value::String(s) => {
+        toml::Value::String(s) => {
             let n = normalize_reviewer(s);
             if n.is_empty() {
                 Vec::new()
@@ -364,7 +361,7 @@ fn value_as_reviewers(v: &serde_yaml_ng::Value) -> Vec<String> {
                 vec![n]
             }
         }
-        // A mapping (or other structural shape) fails closed, not empty.
+        // A table (or other structural shape) fails closed, not empty.
         _ => vec![MALFORMED_REVIEWERS_SENTINEL.to_string()],
     }
 }
@@ -373,21 +370,20 @@ fn value_as_reviewers(v: &serde_yaml_ng::Value) -> Vec<String> {
 /// either a scalar (provider only) or a mapping whose `provider`/`identity` keys
 /// are read order-independently (a real map, so no hand key-order handling). A
 /// bare scalar `peers: codex` is one provider (Python's coerce_peers).
-fn value_as_peers(v: &serde_yaml_ng::Value) -> Vec<PeerEntry> {
-    use serde_yaml_ng::Value;
+fn value_as_peers(v: &toml::Value) -> Vec<PeerEntry> {
     let scalar_entry = |s: String| PeerEntry {
         provider: s,
         identity: None,
     };
-    // One map entry -> a PeerEntry (provider/identity read order-independently).
-    let map_entry = |it: &Value| -> Option<PeerEntry> {
+    // One table entry -> a PeerEntry (provider/identity read order-independently).
+    let map_entry = |it: &toml::Value| -> Option<PeerEntry> {
         let provider = it
             .get("provider")
-            .and_then(yaml_scalar_string)
+            .and_then(scalar_string)
             .unwrap_or_default();
         let identity = it
             .get("identity")
-            .and_then(yaml_scalar_string)
+            .and_then(scalar_string)
             .filter(|s| !s.is_empty());
         if provider.is_empty() && identity.is_none() {
             None
@@ -396,21 +392,21 @@ fn value_as_peers(v: &serde_yaml_ng::Value) -> Vec<PeerEntry> {
         }
     };
     match v {
-        Value::Sequence(items) => items
+        toml::Value::Array(items) => items
             .iter()
             .filter_map(|it| match it {
-                Value::Mapping(_) => map_entry(it),
-                _ => yaml_scalar_string(it)
+                toml::Value::Table(_) => map_entry(it),
+                _ => scalar_string(it)
                     .filter(|s| !s.is_empty())
                     .map(scalar_entry),
             })
             .collect(),
-        Value::String(s) if !s.is_empty() => vec![scalar_entry(s.clone())],
-        // A single top-level mapping is ONE peer - parity with Python's
+        toml::Value::String(s) if !s.is_empty() => vec![scalar_entry(s.clone())],
+        // A single top-level table is ONE peer - parity with Python's
         // coerce_peers, which wraps a dict as [dict]. Dropping it to empty (as
         // this arm did before the codex peer review) silently discards a
         // configured peer gate -> fail-open, the class this PR removes.
-        Value::Mapping(_) => map_entry(v).into_iter().collect(),
+        toml::Value::Table(_) => map_entry(v).into_iter().collect(),
         _ => Vec::new(),
     }
 }
@@ -418,13 +414,12 @@ fn value_as_peers(v: &serde_yaml_ng::Value) -> Vec<PeerEntry> {
 /// Read an f64 budget cap off a typed Value: a number is Ok, a non-numeric
 /// scalar fails CLOSED as Some(Err(raw)) (so check_budget trips), an
 /// absent/null key is None (unlimited). Mirrors the manifest cap semantics.
-fn read_f64_cap(v: &serde_yaml_ng::Value, ctx: &str) -> Option<Result<f64, String>> {
-    use serde_yaml_ng::Value;
+fn read_f64_cap(v: &toml::Value, ctx: &str) -> Option<Result<f64, String>> {
     match v {
-        Value::Null => None,
-        Value::Number(n) => Some(Ok(n.as_f64().unwrap_or(f64::NAN))),
+        toml::Value::Integer(n) => Some(Ok(*n as f64)),
+        toml::Value::Float(f) => Some(Ok(*f)),
         other => {
-            let raw = yaml_scalar_string(other).unwrap_or_default();
+            let raw = scalar_string(other).unwrap_or_default();
             Some(raw.parse::<f64>().map_err(|_| {
                 eprintln!(
                     "loop-check: malformed budget cap '{ctx}: {raw}' - failing closed; fix the config"
@@ -436,18 +431,16 @@ fn read_f64_cap(v: &serde_yaml_ng::Value, ctx: &str) -> Option<Result<f64, Strin
 }
 
 /// Read a u64 budget cap off a typed Value (same fail-closed rule as f64).
-fn read_u64_cap(v: &serde_yaml_ng::Value, ctx: &str) -> Option<Result<u64, String>> {
-    use serde_yaml_ng::Value;
+fn read_u64_cap(v: &toml::Value, ctx: &str) -> Option<Result<u64, String>> {
     match v {
-        Value::Null => None,
-        Value::Number(n) => Some(n.as_u64().ok_or_else(|| {
+        toml::Value::Integer(n) => Some(u64::try_from(*n).map_err(|_| {
             eprintln!(
                 "loop-check: malformed budget cap '{ctx}: {n}' - failing closed; fix the config"
             );
             n.to_string()
         })),
         other => {
-            let raw = yaml_scalar_string(other).unwrap_or_default();
+            let raw = scalar_string(other).unwrap_or_default();
             Some(raw.parse::<u64>().map_err(|_| {
                 eprintln!(
                     "loop-check: malformed budget cap '{ctx}: {raw}' - failing closed; fix the config"
@@ -459,7 +452,7 @@ fn read_u64_cap(v: &serde_yaml_ng::Value, ctx: &str) -> Option<Result<u64, Strin
 }
 
 /// Settings with the login gate pinned unsatisfiable - the fail-closed result
-/// when settings.yaml cannot be parsed as YAML at all (x-81d9 (c)). The
+/// when config.toml cannot be parsed as TOML at all (x-81d9 (c)). The
 /// sentinel goes into BOTH github_apps and required_bots: resolved_required_bots
 /// prefers github_apps.or(required_bots), so pinning required_bots alone would
 /// be silently outranked by a parseable global file's github_apps during the
@@ -474,7 +467,7 @@ fn fail_closed_settings() -> Settings {
     }
 }
 
-/// Parse settings.yaml with a real YAML parser (serde_yaml_ng), replacing the
+/// Parse config.toml with the `toml` crate (stage 3), replacing the
 /// former hand-rolled indent state machine that derived one global indent unit
 /// and silently dropped the config.review subtree on tabs or mixed widths
 /// (x-81d9 (c)). A genuine YAML scanner error (e.g. tab indentation) returns
@@ -482,8 +475,7 @@ fn fail_closed_settings() -> Settings {
 /// zeroing the gate. The typed-Value classification preserves every semantic
 /// the old ListForm branches encoded (see the value_as_* helpers).
 fn parse_settings_result(content: &str) -> Result<Settings, String> {
-    use serde_yaml_ng::Value;
-    let root: Value = serde_yaml_ng::from_str(content).map_err(|e| e.to_string())?;
+    let root: toml::Value = content.parse::<toml::Value>().map_err(|e| e.to_string())?;
     let mut s = Settings::default();
 
     // Top-level flat budget cap.
@@ -491,11 +483,9 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         s.flat_budget_cap = read_f64_cap(v, "budget_cap");
     }
 
-    let Some(config) = root.get("config") else {
-        return Ok(s);
-    };
-
-    if let Some(budget) = config.get("budget") {
+    // Flat config.toml: budget / ci / external_reviewers / review are top-level
+    // blocks (no `config:` wrapper). Read them straight off root.
+    if let Some(budget) = root.get("budget") {
         if let Some(att) = budget.get("attended") {
             if let Some(v) = att.get("wall_clock_cap_minutes") {
                 s.attended_wall_cap_minutes = read_u64_cap(v, "attended.wall_clock_cap_minutes");
@@ -515,20 +505,20 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         }
     }
 
-    if let Some(ci) = config.get("ci") {
+    if let Some(ci) = root.get("ci") {
         s.ci_declared_none = ci
             .get("declared_none")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
     }
 
-    if let Some(er) = config.get("external_reviewers") {
-        if let Value::Sequence(items) = er {
-            s.external_reviewers = items.iter().filter_map(yaml_scalar_string).collect();
+    if let Some(er) = root.get("external_reviewers") {
+        if let Some(items) = er.as_array() {
+            s.external_reviewers = items.iter().filter_map(scalar_string).collect();
         }
     }
 
-    if let Some(review) = config.get("review") {
+    if let Some(review) = root.get("review") {
         if let Some(v) = review.get("required_bots") {
             s.required_bots = value_as_login_list(v);
         }
@@ -545,7 +535,7 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
             s.peers = value_as_peers(v);
         }
         if let Some(v) = review.get("peer_identity") {
-            s.peer_identity = yaml_scalar_string(v).filter(|s| !s.is_empty());
+            s.peer_identity = scalar_string(v).filter(|s| !s.is_empty());
         }
     }
 
@@ -2433,7 +2423,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!(
-                    "loop-check: settings.yaml unparseable ({}): {e} - failing the login gate closed",
+                    "loop-check: config.toml unparseable ({}): {e} - failing the login gate closed",
                     path.display()
                 );
                 emit_to_both(
@@ -2456,11 +2446,11 @@ pub fn decide(args: &[String]) -> (i32, String) {
         let global_path = parsed
             .global_settings_path
             .clone()
-            .unwrap_or_else(|| PathBuf::from(&home).join(".fno/settings.yaml"));
+            .unwrap_or_else(|| PathBuf::from(&home).join(".fno/config.toml"));
         let mut merged = std::fs::read_to_string(&global_path)
             .map(|sc| parse_or_emit(&sc, &global_path))
             .unwrap_or_default();
-        let local_path = cwd.join(".fno/settings.yaml");
+        let local_path = cwd.join(".fno/config.toml");
         if let Ok(sc) = std::fs::read_to_string(&local_path) {
             let local = parse_or_emit(&sc, &local_path);
             if local.attended_wall_cap_minutes.is_some() {
@@ -3510,10 +3500,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_settings_four_space_indent() {
-        // gemini HIGH on #447: indent unit is derived, not assumed 2-space.
-        let yaml = "config:\n    budget:\n        unattended:\n            cost_cap_usd: 7.5\n    ci:\n        declared_none: true\n";
-        let s = parse_settings(yaml);
+    fn parse_settings_nested_budget_and_ci() {
+        // Flat config.toml: budget / ci are top-level tables (no config: wrapper).
+        let cfg = "[budget.unattended]\ncost_cap_usd = 7.5\n\n[ci]\ndeclared_none = true\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.unattended_cost_cap_usd, Some(Ok(7.5)));
         assert!(s.ci_declared_none);
     }
@@ -3554,15 +3544,15 @@ mod tests {
 
     #[test]
     fn parse_settings_flat_budget_cap() {
-        let yaml = "budget_cap: 2.5\n";
-        let s = parse_settings(yaml);
+        let cfg = "budget_cap = 2.5\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.flat_budget_cap, Some(Ok(2.5)));
     }
 
     #[test]
     fn parse_settings_nested_budget() {
-        let yaml = "config:\n  budget:\n    attended:\n      wall_clock_cap_minutes: 90\n      cost_cap_usd: 10.0\n    unattended:\n      wall_clock_cap_minutes: 60\n      cost_cap_usd: 5.0\n";
-        let s = parse_settings(yaml);
+        let cfg = "[budget.attended]\nwall_clock_cap_minutes = 90\ncost_cap_usd = 10.0\n\n[budget.unattended]\nwall_clock_cap_minutes = 60\ncost_cap_usd = 5.0\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.attended_wall_cap_minutes, Some(Ok(90)));
         assert_eq!(s.attended_cost_cap_usd, Some(Ok(10.0)));
         assert_eq!(s.unattended_wall_cap_minutes, Some(Ok(60)));
@@ -3571,15 +3561,16 @@ mod tests {
 
     #[test]
     fn parse_settings_ci_declared_none() {
-        let yaml = "config:\n  ci:\n    declared_none: true\n";
-        let s = parse_settings(yaml);
+        let cfg = "[ci]\ndeclared_none = true\n";
+        let s = parse_settings(cfg);
         assert!(s.ci_declared_none);
     }
 
     #[test]
     fn parse_settings_comments_ignored() {
-        let yaml = "# top comment\nbudget_cap: 1.0\n# another\nconfig:\n  # inner\n  ci:\n    declared_none: true\n";
-        let s = parse_settings(yaml);
+        let cfg =
+            "# top comment\nbudget_cap = 1.0\n# another\n[ci]\n# inner\ndeclared_none = true\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.flat_budget_cap, Some(Ok(1.0)));
         assert!(s.ci_declared_none);
     }
@@ -4149,8 +4140,8 @@ mod tests {
     fn budget_flat_key_enforces_cost_cap_ab41b13d9d() {
         // Prove the flat budget_cap key enforces as cost cap for BOTH attended and
         // unattended - this is the ab-41b13d9d fold-in test.
-        let settings_yaml = "budget_cap: 0.10\n";
-        let settings = parse_settings(settings_yaml);
+        let settings_cfg = "budget_cap = 0.10\n";
+        let settings = parse_settings(settings_cfg);
         assert_eq!(settings.flat_budget_cap, Some(Ok(0.10)));
         // No nested blocks configured
         assert!(settings.attended_cost_cap_usd.is_none());
@@ -4314,8 +4305,8 @@ mod tests {
 
     #[test]
     fn parse_settings_malformed_flat_cap_fail_closed() {
-        let yaml = "budget_cap: not_a_number\n";
-        let s = parse_settings(yaml);
+        let cfg = "budget_cap = \"not_a_number\"\n";
+        let s = parse_settings(cfg);
         assert!(
             matches!(s.flat_budget_cap, Some(Err(_))),
             "malformed flat_budget_cap must be Some(Err(...))"
@@ -4426,8 +4417,8 @@ mod tests {
 
     #[test]
     fn parse_settings_required_bots_block_list() {
-        let yaml = "config:\n  review:\n    required_bots:\n      - chatgpt-codex-connector\n      - gemini-code-assist\n";
-        let s = parse_settings(yaml);
+        let cfg = "[review]\nrequired_bots = [\n  \"chatgpt-codex-connector\",\n  \"gemini-code-assist\",\n]\n";
+        let s = parse_settings(cfg);
         assert_eq!(
             s.required_bots,
             Some(vec![
@@ -4441,68 +4432,66 @@ mod tests {
     fn parse_settings_required_bots_inline_empty_is_declared_empty() {
         // The explicit [] form is the ONLY way to declare the no-review-gate
         // path (US3, locked decision 2).
-        let yaml = "config:\n  review:\n    required_bots: []\n";
-        let s = parse_settings(yaml);
+        let cfg = "[review]\nrequired_bots = []\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.required_bots, Some(Vec::new()));
     }
 
     #[test]
     fn parse_settings_required_bots_inline_list() {
-        let yaml = "config:\n  review:\n    required_bots: [\"codex\", 'gemini']\n";
-        let s = parse_settings(yaml);
+        let cfg = "[review]\nrequired_bots = [\"codex\", \"gemini\"]\n";
+        let s = parse_settings(cfg);
         assert_eq!(
             s.required_bots,
             Some(vec!["codex".to_string(), "gemini".to_string()])
         );
     }
 
-    /// A bare scalar `required_bots: gemini` GATES on that one login (parity
+    /// A bare scalar `required_bots = "gemini"` GATES on that one login (parity
     /// with peers + Python), rather than failing OPEN to no-gate on a
     /// bracket-less typo (codex P1 on #205).
     #[test]
     fn parse_settings_required_bots_scalar_is_singleton() {
-        let yaml = "config:\n  review:\n    required_bots: gemini\n";
-        let s = parse_settings(yaml);
+        let cfg = "[review]\nrequired_bots = \"gemini\"\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.required_bots, Some(vec!["gemini".to_string()]));
         // github_apps behaves identically.
-        let g = parse_settings("config:\n  review:\n    github_apps: chatgpt-codex-connector\n");
+        let g = parse_settings("[review]\ngithub_apps = \"chatgpt-codex-connector\"\n");
         assert_eq!(
             g.github_apps,
             Some(vec!["chatgpt-codex-connector".to_string()])
         );
     }
 
-    /// A bare `required_bots:` key with no items is malformed (YAML null, not
-    /// []), so it must NOT accidentally disable the review gate.
+    /// An ABSENT required_bots key resolves to the default (no gate), and a
+    /// following block still parses.
     #[test]
-    fn parse_settings_required_bots_bare_key_no_items_defaults() {
-        let yaml = "config:\n  review:\n    required_bots:\n  ci:\n    declared_none: true\n";
-        let s = parse_settings(yaml);
+    fn parse_settings_absent_required_bots_defaults() {
+        let cfg = "[review]\ngithub_apps = []\n\n[ci]\ndeclared_none = true\n";
+        let s = parse_settings(cfg);
         assert_eq!(
             s.required_bots, None,
-            "bare key must fail closed to default"
+            "absent key resolves to the no-gate default"
         );
-        assert!(s.ci_declared_none, "following keys still parse");
+        assert!(s.ci_declared_none, "following blocks still parse");
     }
 
-    /// codex P2 on #448: YAML inline comments must not change the parsed
-    /// value - `required_bots: []  # no review gate` is still the declared
-    /// empty form, and commented list forms still parse.
+    /// TOML strips inline comments natively - a `required_bots = []  # note` is
+    /// still the declared empty form, and commented list forms still parse.
     #[test]
     fn parse_settings_required_bots_inline_comments_stripped() {
-        let empty = parse_settings("config:\n  review:\n    required_bots: []  # no review gate\n");
+        let empty = parse_settings("[review]\nrequired_bots = []  # no review gate\n");
         assert_eq!(empty.required_bots, Some(Vec::new()));
 
-        let inline = parse_settings(
-            "config:\n  review:\n    required_bots: [chatgpt-codex-connector] # required\n",
-        );
+        let inline =
+            parse_settings("[review]\nrequired_bots = [\"chatgpt-codex-connector\"] # required\n");
         assert_eq!(
             inline.required_bots,
             Some(vec!["chatgpt-codex-connector".to_string()])
         );
 
         let block = parse_settings(
-            "config:\n  review:\n    required_bots: # the gate\n      - chatgpt-codex-connector # codex\n",
+            "[review]\nrequired_bots = [ # the gate\n  \"chatgpt-codex-connector\", # codex\n]\n",
         );
         assert_eq!(
             block.required_bots,
@@ -4511,15 +4500,14 @@ mod tests {
 
         // A scalar (with a trailing comment stripped) coerces to a single-login
         // gate, not no-gate (codex P1 on #205).
-        let scalar = parse_settings("config:\n  review:\n    required_bots: gemini # oops\n");
+        let scalar = parse_settings("[review]\nrequired_bots = \"gemini\" # oops\n");
         assert_eq!(scalar.required_bots, Some(vec!["gemini".to_string()]));
     }
 
     #[test]
-    fn parse_settings_required_bots_four_space_indent() {
-        let yaml =
-            "config:\n    review:\n        required_bots:\n            - chatgpt-codex-connector\n";
-        let s = parse_settings(yaml);
+    fn parse_settings_required_bots_multiline_array() {
+        let cfg = "[review]\nrequired_bots = [\n  \"chatgpt-codex-connector\",\n]\n";
+        let s = parse_settings(cfg);
         assert_eq!(
             s.required_bots,
             Some(vec!["chatgpt-codex-connector".to_string()])
@@ -4527,13 +4515,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_settings_mixed_width_indent_reads_correctly() {
-        // AC3-EDGE: the old hand-parser derived ONE global indent unit and
-        // silently dropped the config.review subtree on a mixed width. A real
-        // YAML parser handles 2-then-6-space nesting fine, so required_bots is
-        // read, not zeroed - this was the actual reported (c) bug.
-        let yaml = "config:\n  review:\n      required_bots:\n        - chatgpt-codex-connector\n";
-        let s = parse_settings(yaml);
+    fn parse_settings_required_bots_reads_under_review_table() {
+        // required_bots lives under the flat [review] table (no config: wrapper).
+        let cfg = "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n";
+        let s = parse_settings(cfg);
         assert_eq!(
             s.required_bots,
             Some(vec!["chatgpt-codex-connector".to_string()])
@@ -4541,21 +4526,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_settings_tab_indent_fails_closed_not_zeroed() {
-        // AC3-EDGE (reality): YAML forbids tabs for indentation, so
-        // serde_yaml_ng REJECTS a tab-indented file. The fix's point is that
-        // this must NOT silently zero the gate (the old fail-open); it fails
-        // CLOSED with an unsatisfiable sentinel so the ship gate blocks visibly.
-        let yaml = "config:\n\treview:\n\t\trequired_bots:\n\t\t  - codex\n";
+    fn parse_settings_malformed_fails_closed_not_zeroed() {
+        // A malformed config.toml must NOT silently zero the gate (the old
+        // fail-open); it fails CLOSED with an unsatisfiable sentinel so the ship
+        // gate blocks visibly. Here: an unclosed table header.
+        let cfg = "[review\nrequired_bots = []\n";
         assert!(
-            parse_settings_result(yaml).is_err(),
-            "tab indentation must be a YAML parse error"
+            parse_settings_result(cfg).is_err(),
+            "malformed TOML must be a parse error"
         );
-        let s = parse_settings(yaml);
+        let s = parse_settings(cfg);
         assert_eq!(
             s.required_bots,
             Some(vec![UNPARSEABLE_SETTINGS_SENTINEL.to_string()]),
-            "a tab-indented file must fail closed, not zero the gate"
+            "a malformed file must fail closed, not zero the gate"
         );
         // The sentinel can never be satisfied by a real bot login.
         assert!(!login_matches_bot(
@@ -4566,12 +4550,12 @@ mod tests {
 
     #[test]
     fn parse_settings_unparseable_fails_closed() {
-        // AC3-UI: a genuinely malformed YAML file leaves the login gate
+        // AC3-UI: a genuinely malformed config file leaves the login gate
         // unsatisfiable (fail closed), never a silent no-gate. The production
         // caller additionally emits loop_check_settings_unparseable.
-        let yaml = "config:\n  review:\n    required_bots: [1, 2, 3\n"; // unclosed flow seq
-        assert!(parse_settings_result(yaml).is_err());
-        let s = parse_settings(yaml);
+        let cfg = "[review]\nrequired_bots = [1, 2, 3\n"; // unclosed array
+        assert!(parse_settings_result(cfg).is_err());
+        let s = parse_settings(cfg);
         assert_eq!(
             resolved_required_bots(&s),
             vec![UNPARSEABLE_SETTINGS_SENTINEL.to_string()]
@@ -4615,37 +4599,27 @@ mod tests {
         // (codex P1 on #205). A numeric scalar stays a singleton (parity too).
         assert_eq!(scalar_as_singleton(" {login: codex}"), None);
         assert_eq!(scalar_as_singleton(" 123"), Some(vec!["123".to_string()]));
-        let g = parse_settings("config:\n  review:\n    github_apps: {login: codex}\n");
-        assert_eq!(g.github_apps, None, "a mapping is not a login gate");
-        let o = parse_settings("config:\n  review:\n    optional_apps: {a: b}\n");
+        let g = parse_settings("[review]\ngithub_apps = {login = \"codex\"}\n");
+        assert_eq!(g.github_apps, None, "an inline table is not a login gate");
+        let o = parse_settings("[review]\noptional_apps = {a = \"b\"}\n");
         assert_eq!(o.optional_apps, None);
     }
 
     #[test]
     fn parse_settings_optional_apps_forms() {
-        // Inline, block-under, key-aligned (PyYAML), and bare-scalar all parse.
-        let inline =
-            parse_settings("config:\n  review:\n    optional_apps: [chatgpt-codex-connector]\n");
+        // Inline, multi-line, and bare-scalar all parse.
+        let inline = parse_settings("[review]\noptional_apps = [\"chatgpt-codex-connector\"]\n");
         assert_eq!(
             inline.optional_apps,
             Some(vec!["chatgpt-codex-connector".to_string()])
         );
-        let block = parse_settings(
-            "config:\n  review:\n    optional_apps:\n      - chatgpt-codex-connector\n",
-        );
+        let block =
+            parse_settings("[review]\noptional_apps = [\n  \"chatgpt-codex-connector\",\n]\n");
         assert_eq!(
             block.optional_apps,
             Some(vec!["chatgpt-codex-connector".to_string()])
         );
-        let key_aligned = parse_settings(
-            "config:\n  review:\n    optional_apps:\n    - chatgpt-codex-connector\n",
-        );
-        assert_eq!(
-            key_aligned.optional_apps,
-            Some(vec!["chatgpt-codex-connector".to_string()])
-        );
-        let scalar =
-            parse_settings("config:\n  review:\n    optional_apps: chatgpt-codex-connector\n");
+        let scalar = parse_settings("[review]\noptional_apps = \"chatgpt-codex-connector\"\n");
         assert_eq!(
             scalar.optional_apps,
             Some(vec!["chatgpt-codex-connector".to_string()])
@@ -4658,27 +4632,25 @@ mod tests {
     fn parse_settings_reviewers_forms() {
         // Inline, block-under, key-aligned (PyYAML), bare scalar all parse; a
         // leading '/' is normalized off (parity with the Python validator).
-        let inline = parse_settings("config:\n  review:\n    reviewers: [sigma, /code-review]\n");
+        let inline = parse_settings("[review]\nreviewers = [\"sigma\", \"/code-review\"]\n");
         assert_eq!(
             inline.reviewers,
             vec!["sigma".to_string(), "code-review".to_string()]
         );
-        let block = parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n");
+        let block = parse_settings("[review]\nreviewers = [\n  \"sigma\",\n]\n");
         assert_eq!(block.reviewers, vec!["sigma".to_string()]);
-        let key_aligned = parse_settings("config:\n  review:\n    reviewers:\n    - declare\n");
-        assert_eq!(key_aligned.reviewers, vec!["declare".to_string()]);
-        let scalar = parse_settings("config:\n  review:\n    reviewers: /code-review\n");
+        let scalar = parse_settings("[review]\nreviewers = \"/code-review\"\n");
         assert_eq!(scalar.reviewers, vec!["code-review".to_string()]);
-        let absent = parse_settings("config:\n  review:\n    github_apps: []\n");
+        let absent = parse_settings("[review]\ngithub_apps = []\n");
         assert!(absent.reviewers.is_empty());
     }
 
     #[test]
     fn parse_settings_reviewers_distinct_from_external_reviewers() {
-        // config.external_reviewers (indent-2) and config.review.reviewers
-        // (indent-4) must not cross-contaminate their block-list items.
-        let yaml = "config:\n  external_reviewers:\n    - gemini\n  review:\n    reviewers:\n      - sigma\n";
-        let s = parse_settings(yaml);
+        // Top-level external_reviewers and review.reviewers must not
+        // cross-contaminate their list items.
+        let cfg = "external_reviewers = [\"gemini\"]\n\n[review]\nreviewers = [\"sigma\"]\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.external_reviewers, vec!["gemini".to_string()]);
         assert_eq!(s.reviewers, vec!["sigma".to_string()]);
     }
@@ -4769,7 +4741,7 @@ mod tests {
         // A `{...}` mapping value must NOT drop to no-gate (Python raises here);
         // Rust stores an unsatisfiable sentinel so the gate stays active but can
         // never clear (codex peer review P1).
-        let s = parse_settings("config:\n  review:\n    reviewers: {a: b}\n");
+        let s = parse_settings("[review]\nreviewers = {a = \"b\"}\n");
         assert_eq!(s.reviewers, vec![MALFORMED_REVIEWERS_SENTINEL.to_string()]);
         let tmp = tempfile::tempdir().unwrap();
         let p = write_events(tmp.path(), &[]);
@@ -4784,15 +4756,13 @@ mod tests {
         // gemini medium: a non-scalar item INSIDE the reviewers list (Python
         // raises on it) must fail CLOSED with the sentinel, not silently drop
         // the entry and gate on the survivors.
-        let bad =
-            parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n      - {a: b}\n");
+        let bad = parse_settings("[review]\nreviewers = [\"sigma\", {a = \"b\"}]\n");
         assert_eq!(
             bad.reviewers,
             vec![MALFORMED_REVIEWERS_SENTINEL.to_string()]
         );
         // A clean all-scalar list still parses normally.
-        let ok =
-            parse_settings("config:\n  review:\n    reviewers:\n      - sigma\n      - declare\n");
+        let ok = parse_settings("[review]\nreviewers = [\"sigma\", \"declare\"]\n");
         assert_eq!(
             ok.reviewers,
             vec!["sigma".to_string(), "declare".to_string()]
@@ -4835,7 +4805,7 @@ mod tests {
         // An optional-only config leaves the REQUIRED set empty (never waited
         // on) while the optional set carries the honored-if-present login.
         let s = parse_settings(
-            "config:\n  review:\n    github_apps: []\n    optional_apps: [chatgpt-codex-connector]\n",
+            "[review]\ngithub_apps = []\noptional_apps = [\"chatgpt-codex-connector\"]\n",
         );
         assert!(
             resolved_required_bots(&s).is_empty(),
@@ -4849,8 +4819,8 @@ mod tests {
 
     #[test]
     fn parse_settings_github_apps_block_list() {
-        let yaml = "config:\n  review:\n    github_apps:\n      - chatgpt-codex-connector\n";
-        let s = parse_settings(yaml);
+        let cfg = "[review]\ngithub_apps = [\n  \"chatgpt-codex-connector\",\n]\n";
+        let s = parse_settings(cfg);
         assert_eq!(
             s.github_apps,
             Some(vec!["chatgpt-codex-connector".to_string()])
@@ -4859,9 +4829,9 @@ mod tests {
 
     #[test]
     fn parse_settings_github_apps_inline_and_empty() {
-        let s = parse_settings("config:\n  review:\n    github_apps: [a, b]\n");
+        let s = parse_settings("[review]\ngithub_apps = [\"a\", \"b\"]\n");
         assert_eq!(s.github_apps, Some(vec!["a".to_string(), "b".to_string()]));
-        let e = parse_settings("config:\n  review:\n    github_apps: []\n");
+        let e = parse_settings("[review]\ngithub_apps = []\n");
         assert_eq!(e.github_apps, Some(Vec::new()));
     }
 
@@ -4886,9 +4856,8 @@ mod tests {
 
     #[test]
     fn parse_settings_peers_inline_scalars() {
-        let yaml =
-            "config:\n  review:\n    peers: [codex, gemini]\n    peer_identity: fno-peer-bot\n";
-        let s = parse_settings(yaml);
+        let cfg = "[review]\npeers = [\"codex\", \"gemini\"]\npeer_identity = \"fno-peer-bot\"\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.peers.len(), 2);
         assert_eq!(s.peers[0].provider, "codex");
         assert_eq!(s.peer_identity.as_deref(), Some("fno-peer-bot"));
@@ -4896,8 +4865,9 @@ mod tests {
 
     #[test]
     fn parse_settings_peers_block_maps_with_identity() {
-        let yaml = "config:\n  review:\n    peers:\n      - provider: codex\n        identity: fno-codex-bot\n      - gemini\n";
-        let s = parse_settings(yaml);
+        // A heterogeneous array: an inline-table peer + a bare scalar provider.
+        let cfg = "[review]\npeers = [{provider = \"codex\", identity = \"fno-codex-bot\"}, \"gemini\"]\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.peers.len(), 2);
         assert_eq!(s.peers[0].provider, "codex");
         assert_eq!(s.peers[0].identity.as_deref(), Some("fno-codex-bot"));
@@ -4954,27 +4924,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_settings_github_apps_key_aligned_items() {
-        // PyYAML / `fno config set` writes block-sequence items at the SAME
-        // indent as the key (default_flow_style=False). These MUST parse, or
-        // the gate fails OPEN for any github_apps written by the CLI.
-        let yaml = "config:\n  review:\n    github_apps:\n    - chatgpt-codex-connector\n    peers:\n    - codex\n    peer_identity: fno-peer-bot\n";
-        let s = parse_settings(yaml);
+    fn parse_settings_github_apps_and_peers_together() {
+        // github_apps + peers + peer_identity in one [review] table all parse.
+        let cfg = "[review]\ngithub_apps = [\"chatgpt-codex-connector\"]\npeers = [\"codex\"]\npeer_identity = \"fno-peer-bot\"\n";
+        let s = parse_settings(cfg);
         assert_eq!(
             s.github_apps,
             Some(vec!["chatgpt-codex-connector".to_string()]),
-            "key-aligned github_apps item must be collected"
+            "github_apps item must be collected"
         );
-        assert_eq!(s.peers.len(), 1, "key-aligned peers item must be collected");
+        assert_eq!(s.peers.len(), 1, "peers item must be collected");
         assert_eq!(s.peers[0].provider, "codex");
         assert_eq!(s.peer_identity.as_deref(), Some("fno-peer-bot"));
     }
 
     #[test]
-    fn parse_settings_required_bots_key_aligned_items() {
-        // Regression for the same drop on the legacy alias.
-        let yaml = "config:\n  review:\n    required_bots:\n    - chatgpt-codex-connector\n";
-        let s = parse_settings(yaml);
+    fn parse_settings_required_bots_single_item() {
+        let cfg = "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n";
+        let s = parse_settings(cfg);
         assert_eq!(
             s.required_bots,
             Some(vec!["chatgpt-codex-connector".to_string()])
@@ -4983,30 +4950,30 @@ mod tests {
 
     #[test]
     fn parse_settings_peers_single_mapping_is_one_peer() {
-        // codex peer review P1: a single top-level mapping for peers (what
+        // codex peer review P1: a single top-level table for peers (what
         // Python's coerce_peers wraps as [dict]) must parse as ONE peer, not be
         // silently dropped - dropping it is a fail-open on a configured peer gate.
         let block = parse_settings(
-            "config:\n  review:\n    peers:\n      provider: codex\n      identity: fno-codex-bot\n",
+            "[review]\npeers = {provider = \"codex\", identity = \"fno-codex-bot\"}\n",
         );
-        assert_eq!(block.peers.len(), 1, "block-map peers must be one peer");
+        assert_eq!(block.peers.len(), 1, "table peers must be one peer");
         assert_eq!(block.peers[0].provider, "codex");
         assert_eq!(block.peers[0].identity.as_deref(), Some("fno-codex-bot"));
-        // Flow-map form parses identically.
-        let flow = parse_settings(
-            "config:\n  review:\n    peers: {provider: gemini, identity: fno-gemini-bot}\n",
+        // A dotted-table form parses identically.
+        let dotted = parse_settings(
+            "[review.peers]\nprovider = \"gemini\"\nidentity = \"fno-gemini-bot\"\n",
         );
-        assert_eq!(flow.peers.len(), 1);
-        assert_eq!(flow.peers[0].provider, "gemini");
-        assert_eq!(flow.peers[0].identity.as_deref(), Some("fno-gemini-bot"));
+        assert_eq!(dotted.peers.len(), 1);
+        assert_eq!(dotted.peers[0].provider, "gemini");
+        assert_eq!(dotted.peers[0].identity.as_deref(), Some("fno-gemini-bot"));
     }
 
     #[test]
     fn parse_settings_peers_bare_scalar_is_one_provider() {
-        // `peers: codex` (scalar) matches Python's coerce_peers -> one peer,
+        // `peers = "codex"` (scalar) matches Python's coerce_peers -> one peer,
         // NOT a silent drop (which would fail open + diverge from Python).
-        let yaml = "config:\n  review:\n    peers: codex\n    peer_identity: fno-peer-bot\n";
-        let s = parse_settings(yaml);
+        let cfg = "[review]\npeers = \"codex\"\npeer_identity = \"fno-peer-bot\"\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.peers.len(), 1);
         assert_eq!(s.peers[0].provider, "codex");
         // The gate then resolves on the shared identity (fail-closed if unset).
@@ -5014,10 +4981,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_settings_peers_key_aligned_maps() {
-        // Key-aligned map entries (PyYAML block map under a key-aligned seq).
-        let yaml = "config:\n  review:\n    peers:\n    - provider: codex\n      identity: fno-codex-bot\n    - gemini\n";
-        let s = parse_settings(yaml);
+    fn parse_settings_peers_array_of_tables() {
+        // An array mixing an inline-table peer and a bare scalar provider.
+        let cfg = "[review]\npeers = [{provider = \"codex\", identity = \"fno-codex-bot\"}, \"gemini\"]\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.peers.len(), 2);
         assert_eq!(s.peers[0].provider, "codex");
         assert_eq!(s.peers[0].identity.as_deref(), Some("fno-codex-bot"));
@@ -5026,12 +4993,10 @@ mod tests {
 
     #[test]
     fn parse_settings_peers_map_identity_before_provider() {
-        // PyYAML sorts keys alphabetically, so `fno config set` emits
-        // `identity:` BEFORE `provider:`. The map parser must be order-agnostic
-        // (gemini HIGH on #205) - otherwise the provider is misparsed and the
-        // per-peer identity is lost.
-        let yaml = "config:\n  review:\n    peers:\n    - identity: fno-codex-bot\n      provider: codex\n    - provider: gemini\n      identity: fno-gemini-bot\n";
-        let s = parse_settings(yaml);
+        // The map parser is order-agnostic (gemini HIGH on #205): `identity`
+        // before `provider` must still resolve both fields.
+        let cfg = "[review]\npeers = [{identity = \"fno-codex-bot\", provider = \"codex\"}, {provider = \"gemini\", identity = \"fno-gemini-bot\"}]\n";
+        let s = parse_settings(cfg);
         assert_eq!(s.peers.len(), 2);
         assert_eq!(s.peers[0].provider, "codex");
         assert_eq!(s.peers[0].identity.as_deref(), Some("fno-codex-bot"));

@@ -1,17 +1,17 @@
-# Settings (.fno/settings.yaml)
+# Settings (.fno/config.toml)
 
 **Load when:** configuring per-project defaults, looking up a config key's behavior, or onboarding a new project.
 
 Unified config file with two sections: `work` (project topology) and `config` (execution defaults).
 
 Lookup order (local wins):
-1. `.fno/settings.yaml` — project-local override
-2. `~/.fno/settings.yaml` — global defaults
+1. `.fno/config.toml` — project-local override
+2. `~/.fno/config.toml` — global defaults
 
 ## Example: project-local override
 
 ```yaml
-# .fno/settings.yaml (project-local override)
+# .fno/config.toml (project-local override)
 config:
   expertise: frontend          # Default expertise injection
   max_iterations: 20           # Lower iteration cap for this project

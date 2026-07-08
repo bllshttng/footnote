@@ -2,7 +2,7 @@
 
 ## Automatic Creation (Step 6)
 
-**Only if `config.linear.enabled: true` in settings.yaml.** Also skippable with `--no-linear` flag.
+**Only if `config.linear.enabled: true` in config.toml.** Also skippable with `--no-linear` flag.
 
 After writing the plan folder, create the Linear ticket if configured:
 

@@ -7,13 +7,31 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
+import tomli_w
+import tomllib
+
+
+def _flatten(d: dict) -> dict:
+    cfg = d.get("config")
+    if not isinstance(cfg, dict):
+        return d
+    out = {k: v for k, v in d.items() if k != "config"}
+    out.update(cfg)
+    return out
+
+
+def _strip_none(x):
+    if isinstance(x, dict):
+        return {k: _strip_none(v) for k, v in x.items() if v is not None}
+    if isinstance(x, list):
+        return [_strip_none(v) for v in x]
+    return x
 
 
 def _write_settings(path: Path, content: dict) -> None:
-    """Write a settings.yaml file at path with content."""
+    """Write a flat config.toml at path (lifts any legacy config: wrapper)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(content, sort_keys=False), encoding="utf-8")
+    path.write_text(tomli_w.dumps(_strip_none(_flatten(content))), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +76,7 @@ class TestLoadProvidersValid:
         from fno.adapters.providers.loader import load_providers
         from fno.adapters.providers.model import ProvidersConfig
 
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, _valid_providers_block())
 
         result = load_providers(repo_root=tmp_path)
@@ -71,7 +89,7 @@ class TestLoadProvidersValid:
         """AC01.1-HP: config.by_id contains all record ids."""
         from fno.adapters.providers.loader import load_providers
 
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, _valid_providers_block())
 
         result = load_providers(repo_root=tmp_path)
@@ -83,7 +101,7 @@ class TestLoadProvidersValid:
         """AC01.1-HP: ProviderRecord fields match the YAML source."""
         from fno.adapters.providers.loader import load_providers
 
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, _valid_providers_block())
 
         result = load_providers(repo_root=tmp_path)
@@ -102,7 +120,7 @@ class TestLoadProvidersEmpty:
         """AC01.3-EDGE: missing config.providers returns empty config without error."""
         from fno.adapters.providers.loader import load_providers
 
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, {"config": {"v2_enabled": True}})
 
         result = load_providers(repo_root=tmp_path)
@@ -113,7 +131,7 @@ class TestLoadProvidersEmpty:
         """AC01.3-EDGE: config.providers.records=[] returns empty config without error."""
         from fno.adapters.providers.loader import load_providers
 
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, {"config": {"providers": {"active": None, "records": []}}})
 
         result = load_providers(repo_root=tmp_path)
@@ -147,7 +165,7 @@ class TestLoadProvidersEmpty:
         from fno.adapters.providers.loader import load_providers
 
         # Fake "global" config with a populated providers block.
-        fake_global = tmp_path / "fake_home" / ".fno" / "settings.yaml"
+        fake_global = tmp_path / "fake_home" / ".fno" / "config.toml"
         _write_settings(fake_global, _valid_providers_block(active="claude-primary"))
 
         # Point the loader's "global" candidate at the fake. Project-local
@@ -194,7 +212,7 @@ class TestLoadProvidersInvalidRecord:
                 }
             }
         }
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, bad_settings)
 
         with pytest.raises(ProviderConfigError) as exc_info:
@@ -225,7 +243,7 @@ class TestLoadProvidersInvalidRecord:
                 }
             }
         }
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, bad_settings)
 
         with pytest.raises(ProviderConfigError) as exc_info:
@@ -247,7 +265,7 @@ class TestLoadProvidersProjectLocalOverride:
 
         # Global: two records
         global_home = tmp_path / "fake-home"
-        global_settings = global_home / ".fno" / "settings.yaml"
+        global_settings = global_home / ".fno" / "config.toml"
         _write_settings(
             global_settings,
             {
@@ -270,7 +288,7 @@ class TestLoadProvidersProjectLocalOverride:
 
         # Project-local: different single record
         project_root = tmp_path / "repo"
-        local_settings = project_root / ".fno" / "settings.yaml"
+        local_settings = project_root / ".fno" / "config.toml"
         _write_settings(
             local_settings,
             {
@@ -312,7 +330,7 @@ class TestLoadProvidersProjectLocalOverride:
         monkeypatch.delenv("FNO_GLOBAL_SETTINGS_PATH", raising=False)
 
         global_home = tmp_path / "fake-home"
-        global_settings = global_home / ".fno" / "settings.yaml"
+        global_settings = global_home / ".fno" / "config.toml"
         _write_settings(
             global_settings,
             {
@@ -370,7 +388,7 @@ class TestLoadProvidersActiveNotFound:
                 }
             }
         }
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, settings_data)
 
         with pytest.raises(ProviderConfigError) as exc_info:
@@ -406,10 +424,10 @@ class TestSaveProviders:
 
         save_providers(cfg, scope="project")
 
-        output = tmp_path / ".fno" / "settings.yaml"
+        output = tmp_path / ".fno" / "config.toml"
         assert output.exists()
-        data = yaml.safe_load(output.read_text())
-        providers = data["config"]["providers"]
+        data = tomllib.loads(output.read_text())
+        providers = data["providers"]
         assert providers["active"] == "claude-saved"
         assert len(providers["records"]) == 1
         assert providers["records"][0]["id"] == "claude-saved"
@@ -423,7 +441,7 @@ class TestSaveProviders:
         monkeypatch.chdir(tmp_path)
 
         # Write existing settings with other keys
-        existing = tmp_path / ".fno" / "settings.yaml"
+        existing = tmp_path / ".fno" / "config.toml"
         _write_settings(
             existing,
             {
@@ -445,13 +463,13 @@ class TestSaveProviders:
 
         save_providers(cfg, scope="project")
 
-        data = yaml.safe_load(existing.read_text())
+        data = tomllib.loads(existing.read_text())
         # Other config keys preserved
-        assert data["config"]["v2_enabled"] is True
-        assert data["config"]["some_other_setting"] == "preserved"
+        assert data["v2_enabled"] is True
+        assert data["some_other_setting"] == "preserved"
         # providers block updated
-        assert "providers" in data["config"]
-        assert len(data["config"]["providers"]["records"]) == 1
+        assert "providers" in data
+        assert len(data["providers"]["records"]) == 1
 
     def test_save_global_scope(self, tmp_path: Path, monkeypatch):
         """save_providers with scope='global' writes to home/.fno/settings.yaml."""
@@ -472,10 +490,10 @@ class TestSaveProviders:
 
         save_providers(cfg, scope="global")
 
-        output = fake_home / ".fno" / "settings.yaml"
+        output = fake_home / ".fno" / "config.toml"
         assert output.exists()
-        data = yaml.safe_load(output.read_text())
-        assert data["config"]["providers"]["active"] == "global-write"
+        data = tomllib.loads(output.read_text())
+        assert data["providers"]["active"] == "global-write"
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +525,7 @@ class TestSaveProvidersCorruptFile:
         )
         abilities_dir = tmp_path / ".fno"
         abilities_dir.mkdir(parents=True, exist_ok=True)
-        settings_path = abilities_dir / "settings.yaml"
+        settings_path = abilities_dir / "config.toml"
         settings_path.write_text(corrupt_content, encoding="utf-8")
 
         original_bytes = settings_path.read_bytes()
@@ -546,7 +564,7 @@ class TestLoadProvidersTildeExpansion:
         """credentials_source: ~/.claude in YAML resolves to Path.home()/'.claude'."""
         from fno.adapters.providers.loader import load_providers
 
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(
             settings,
             {
@@ -585,7 +603,7 @@ class TestLoadProvidersDuplicateIds:
         from fno.adapters.providers.loader import load_providers
         from fno.adapters.providers.model import ProviderConfigError
 
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(
             settings,
             {
@@ -630,7 +648,7 @@ class TestPWDRespected:
         isolation via PWD override is consistent with cli.py's _resolve_cwd."""
         from fno.adapters.providers.loader import load_providers
 
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(
             settings,
             {
@@ -680,7 +698,7 @@ class TestPWDRespected:
         config = ProvidersConfig(records=[record], active=None)
         save_providers(config, scope="project")
 
-        expected_path = tmp_path / ".fno" / "settings.yaml"
+        expected_path = tmp_path / ".fno" / "config.toml"
         assert expected_path.exists(), (
             f"save_providers must write to PWD/.fno/settings.yaml, not cwd. "
             f"Expected {expected_path}"
@@ -696,24 +714,24 @@ class TestAtomicMutate:
     def test_hp1_single_writer_mutation_persists(self, tmp_path: Path):
         from fno.adapters.providers.loader import atomic_mutate_settings
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         _write_settings(settings_path, {
             "config": {"providers": {"active": "foo", "records": []}},
         })
 
         def mutator(d: dict) -> dict:
-            d["config"]["providers"]["active"] = "bar"
+            d["providers"]["active"] = "bar"
             return d
 
         atomic_mutate_settings(mutator, settings_path=settings_path)
 
-        loaded = yaml.safe_load(settings_path.read_text())
-        assert loaded["config"]["providers"]["active"] == "bar"
+        loaded = tomllib.loads(settings_path.read_text())
+        assert loaded["providers"]["active"] == "bar"
 
     def test_hp1b_other_keys_preserved(self, tmp_path: Path):
         from fno.adapters.providers.loader import atomic_mutate_settings
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         _write_settings(settings_path, {
             "config": {
                 "providers": {"active": "foo", "records": []},
@@ -723,13 +741,13 @@ class TestAtomicMutate:
         })
 
         def mutator(d: dict) -> dict:
-            d["config"]["providers"]["active"] = "bar"
+            d["providers"]["active"] = "bar"
             return d
 
         atomic_mutate_settings(mutator, settings_path=settings_path)
 
-        loaded = yaml.safe_load(settings_path.read_text())
-        assert loaded["config"]["other_section"]["keep"] == "me"
+        loaded = tomllib.loads(settings_path.read_text())
+        assert loaded["other_section"]["keep"] == "me"
         assert loaded["top_level_other"] == "alive"
 
     def test_hp2_read_during_mutation_sees_consistent_state(self, tmp_path: Path):
@@ -743,7 +761,7 @@ class TestAtomicMutate:
 
         from fno.adapters.providers.loader import atomic_mutate_settings
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         _write_settings(settings_path, {
             "config": {"providers": {"active": "foo", "records": []}},
         })
@@ -751,7 +769,7 @@ class TestAtomicMutate:
         # Writer holds the lock for ~80ms inside mutator; reader polls during.
         def slow_mutator(d: dict) -> dict:
             time.sleep(0.08)
-            d["config"]["providers"]["active"] = "bar"
+            d["providers"]["active"] = "bar"
             return d
 
         observed_states = []
@@ -760,9 +778,9 @@ class TestAtomicMutate:
             for _ in range(20):
                 try:
                     text = settings_path.read_text()
-                    parsed = yaml.safe_load(text)
-                    observed_states.append(parsed["config"]["providers"]["active"])
-                except (yaml.YAMLError, KeyError, TypeError):
+                    parsed = tomllib.loads(text)
+                    observed_states.append(parsed["providers"]["active"])
+                except (tomllib.TOMLDecodeError, KeyError, TypeError):
                     observed_states.append("CORRUPT")
                 time.sleep(0.005)
 
@@ -781,14 +799,14 @@ class TestAtomicMutate:
     def test_err1_mutator_exception_leaves_file_unchanged(self, tmp_path: Path):
         from fno.adapters.providers.loader import atomic_mutate_settings
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         _write_settings(settings_path, {
             "config": {"providers": {"active": "foo", "records": []}},
         })
         original_text = settings_path.read_text()
 
         def boom(d: dict) -> dict:
-            d["config"]["providers"]["active"] = "wont-stick"
+            d["providers"]["active"] = "wont-stick"
             raise RuntimeError("mutator boom")
 
         with pytest.raises(RuntimeError, match="mutator boom"):
@@ -811,7 +829,7 @@ class TestAtomicMutate:
 
         from fno.adapters.providers.loader import atomic_mutate_settings
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         _write_settings(settings_path, {
             "config": {"providers": {"active": "foo", "records": []}},
         })
@@ -820,7 +838,7 @@ class TestAtomicMutate:
             def m(d: dict) -> dict:
                 # Hold the lock briefly so the threads actually contend.
                 time.sleep(0.01)
-                d["config"]["providers"]["active"] = target
+                d["providers"]["active"] = target
                 return d
             return m
 
@@ -837,8 +855,8 @@ class TestAtomicMutate:
         for t in threads:
             t.join()
 
-        loaded = yaml.safe_load(settings_path.read_text())
-        assert loaded["config"]["providers"]["active"] in {"bar", "baz"}
+        loaded = tomllib.loads(settings_path.read_text())
+        assert loaded["providers"]["active"] in {"bar", "baz"}
 
     def test_edge1b_high_contention_race(self, tmp_path: Path):
         """Many threads × many mutations: file must always parse, final value
@@ -846,13 +864,13 @@ class TestAtomicMutate:
         import threading
         from fno.adapters.providers.loader import atomic_mutate_settings
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         _write_settings(settings_path, {
             "config": {"providers": {"active": "init", "counter": 0, "records": []}},
         })
 
         def increment(d: dict) -> dict:
-            d["config"]["providers"]["counter"] += 1
+            d["providers"]["counter"] += 1
             return d
 
         def worker():
@@ -865,10 +883,10 @@ class TestAtomicMutate:
         for t in threads:
             t.join()
 
-        loaded = yaml.safe_load(settings_path.read_text())
+        loaded = tomllib.loads(settings_path.read_text())
         # Every thread did 50 increments, all under the exclusive lock.
         # No lost updates: counter == 10*50 = 500.
-        assert loaded["config"]["providers"]["counter"] == 500
+        assert loaded["providers"]["counter"] == 500
 
     def test_edge2_orphan_tempfiles_ignored(self, tmp_path: Path):
         """A writer that crashed before os.replace leaves a `.tmp.*` orphan
@@ -876,23 +894,23 @@ class TestAtomicMutate:
         operate on the canonical settings.yaml only."""
         from fno.adapters.providers.loader import atomic_mutate_settings
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         _write_settings(settings_path, {
             "config": {"providers": {"active": "foo", "records": []}},
         })
 
         # Plant an orphan tempfile
-        orphan = tmp_path / ".settings.yaml.tmp.99999.0"
+        orphan = tmp_path / ".config.toml.tmp.99999.0"
         orphan.write_text("garbage: not_yaml: ::: invalid")
 
         def mutator(d: dict) -> dict:
-            d["config"]["providers"]["active"] = "bar"
+            d["providers"]["active"] = "bar"
             return d
 
         atomic_mutate_settings(mutator, settings_path=settings_path)
 
-        loaded = yaml.safe_load(settings_path.read_text())
-        assert loaded["config"]["providers"]["active"] == "bar"
+        loaded = tomllib.loads(settings_path.read_text())
+        assert loaded["providers"]["active"] == "bar"
         # Orphan still on disk (no auto-cleanup is part of this task) but the
         # canonical file is intact.
         assert settings_path.exists()
@@ -938,7 +956,7 @@ class TestAtomicRead:
             read_active_provider_atomic,
         )
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         self._seed(settings_path, active="claude-primary")
 
         snap = read_active_provider_atomic(settings_path=settings_path)
@@ -964,7 +982,7 @@ class TestAtomicRead:
 
         from fno.adapters.providers.loader import read_active_provider_atomic
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         self._seed(settings_path)
 
         # Warm up file cache
@@ -1009,7 +1027,7 @@ class TestAtomicRead:
             read_active_provider_atomic,
         )
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         self._seed(settings_path)
 
         lock_path = _settings_lock_path(settings_path)
@@ -1036,7 +1054,7 @@ class TestAtomicRead:
             read_active_provider_atomic,
         )
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         self._seed(settings_path, active="claude-primary")
 
         # Writer holds the lock for ~80ms while it changes both active and
@@ -1047,7 +1065,7 @@ class TestAtomicRead:
         def slow_swap(d: dict) -> dict:
             writer_started.set()
             time.sleep(0.08)
-            d["config"]["providers"]["active"] = "claude-secondary"
+            d["providers"]["active"] = "claude-secondary"
             return d
 
         observed = []
@@ -1080,7 +1098,7 @@ class TestAtomicRead:
             read_active_provider_atomic,
         )
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         # active points to a record id that isn't in records
         _write_settings(settings_path, {
             "config": {
@@ -1110,7 +1128,7 @@ class TestAtomicRead:
             read_active_provider_atomic,
         )
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         _write_settings(settings_path, {
             "config": {"providers": {"active": None, "records": []}},
         })
@@ -1126,7 +1144,7 @@ class TestAtomicRead:
         it forward without a follow-up shape change."""
         from fno.adapters.providers.loader import read_active_provider_atomic
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         _write_settings(settings_path, {
             "config": {
                 "providers": {
@@ -1151,7 +1169,7 @@ class TestAtomicRead:
     def test_pricing_slot_is_none_when_absent(self, tmp_path: Path):
         from fno.adapters.providers.loader import read_active_provider_atomic
 
-        settings_path = tmp_path / "settings.yaml"
+        settings_path = tmp_path / "config.toml"
         self._seed(settings_path)
         snap = read_active_provider_atomic(settings_path=settings_path)
         assert snap.pricing is None
@@ -1167,7 +1185,7 @@ class TestLoadAgents:
         """AC1-HP: settings.yaml with providers block but no config.agents returns empty dict."""
         from fno.adapters.providers.loader import load_providers
 
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, _valid_providers_block())
 
         result = load_providers(repo_root=tmp_path)
@@ -1179,10 +1197,10 @@ class TestLoadAgents:
         from fno.adapters.providers.loader import load_providers
 
         base = _valid_providers_block()
-        base["config"]["agents"] = {
+        base["agents"] = {
             "code-reviewer": {"provider": "claude-primary"},
         }
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, base)
 
         result = load_providers(repo_root=tmp_path)
@@ -1195,12 +1213,12 @@ class TestLoadAgents:
         from fno.adapters.providers.loader import load_providers
 
         base = _valid_providers_block()
-        base["config"]["agents"] = {
+        base["agents"] = {
             "code-reviewer": {"provider": "claude-primary"},
             "silent-failure-hunter": {"provider": "gemini-backup"},
             "type-coverage-checker": {"provider": "claude-primary"},
         }
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, base)
 
         result = load_providers(repo_root=tmp_path)
@@ -1217,10 +1235,10 @@ class TestLoadAgents:
         from fno.adapters.providers.model import ProviderConfigError
 
         base = _valid_providers_block()
-        base["config"]["agents"] = {
+        base["agents"] = {
             "code-reviewer": {"provider": "nonexistent-provider"},
         }
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, base)
 
         with pytest.raises(ProviderConfigError) as exc_info:
@@ -1246,10 +1264,10 @@ class TestLoadAgents:
         from fno.adapters.providers.model import ProviderConfigError
 
         base = _valid_providers_block()
-        base["config"]["agents"] = {
+        base["agents"] = {
             "code-reviewer": {"provider": "claude-primary", "unknown_field": "x"},
         }
-        settings = tmp_path / ".fno" / "settings.yaml"
+        settings = tmp_path / ".fno" / "config.toml"
         _write_settings(settings, base)
 
         with pytest.raises(ProviderConfigError) as exc_info:

@@ -79,7 +79,7 @@ The loop-check verb emits a `termination` event to `.fno/events.jsonl` with a `T
 | `TerminationReason` | Cause | Recovery |
 |---|---|---|
 | `NoProgress` | 4-component fingerprint (HEAD sha, PR state, CI conclusion, review ts) unchanged for N fires | Address the root cause; re-run `/target` |
-| `Budget` | Wall-clock or cost cap reached | Raise the cap in settings.yaml; re-run `/target` |
+| `Budget` | Wall-clock or cost cap reached | Raise the cap in config.toml; re-run `/target` |
 | `Interrupted` | `.fno/.target-cancelled` sentinel touched | User-initiated; remove sentinel and re-run |
 | `DonePRGreen` | PR green + reviewed (success) | No action needed |
 | `DoneAdvisory` | Advisory mode completion (no_ship) | No action needed |

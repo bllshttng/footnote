@@ -72,7 +72,7 @@ this shape so a key-typo in a consumer is a type error, not a `KeyError`.
 
 ## Severity scoring
 
-Default thresholds (v1 heuristics; tunable via `settings.yaml`):
+Default thresholds (v1 heuristics; tunable via `config.toml`):
 
 | Severity | Trigger |
 |----------|---------|
@@ -81,7 +81,7 @@ Default thresholds (v1 heuristics; tunable via `settings.yaml`):
 | `low`    | shared count == 1 |
 
 Thresholds live under `config.collision.severity_thresholds` in
-`~/.fno/settings.yaml` (or project-local `.fno/settings.yaml`).
+`~/.fno/config.toml` (or project-local `.fno/config.toml`).
 The `/setup` wizard's Step 8e exposes them under "advanced" config and
 defaults to skip; most users never tune them. After running with defaults
 for a few weeks, `fno backlog triage health --json --all` lets you inspect
@@ -179,6 +179,6 @@ stderr warning so a misconfigured environment is visible.
 
 - Module: [cli/src/fno/graph/collision.py](../../cli/src/fno/graph/collision.py)
 - Tests: [cli/tests/integration/test_collision.py](../../cli/tests/integration/test_collision.py)
-- Settings template: [.fno/settings.yaml.example](../../.fno/settings.yaml.example)
+- Settings template: [.fno/config.toml.example](../../.fno/config.toml.example)
 - CLI vocabulary: [CLAUDE.md](../../CLAUDE.md) (Backlog Vocabulary section)
 - Spec wiring: [skills/blueprint/SKILL.md](../../skills/blueprint/SKILL.md) (Quick step 3a, Full step 11a)

@@ -195,7 +195,7 @@ records `stages_run: [delight, polish, critique, harden]` and
 
 ## Configuration reference
 
-Settings live in `.fno/settings.yaml` under `config.executors.impeccable`:
+Settings live in `.fno/config.toml` under `config.executors.impeccable`:
 
 | Key | Default | Effect |
 |-----|---------|--------|

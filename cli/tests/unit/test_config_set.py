@@ -3,18 +3,22 @@
 Covers AC7-HP (set + reflected), AC7-ERR (invalid rejected, unchanged),
 AC7-UI (stdout confirms value + scope), AC7-EDGE (lock-serialized, no
 corruption across two writes), AC7-FR (mid-write failure leaves file intact).
+
+Stage 3 (x-8526): the on-disk file is flat ``config.toml`` (no ``config:``
+wrapper), so ``_read`` returns a flat dict and paths carry no ``config`` key.
 """
 from __future__ import annotations
 
+import tomllib
+
 import pytest
-import yaml
 from typer.testing import CliRunner
 
 from fno.config.writer import ConfigSetError, set_config_value
 
 
 def _read(tmp_path):
-    return yaml.safe_load((tmp_path / ".fno" / "settings.yaml").read_text())
+    return tomllib.loads((tmp_path / ".fno" / "config.toml").read_text())
 
 
 def test_ac7_hp_set_writes_coerced_value(tmp_path):
@@ -22,7 +26,7 @@ def test_ac7_hp_set_writes_coerced_value(tmp_path):
         "config.agents.a2a.auto", "false", scope="project", repo_root=tmp_path
     )
     assert res.value is False
-    assert _read(tmp_path)["config"]["agents"]["a2a"]["auto"] is False
+    assert _read(tmp_path)["agents"]["a2a"]["auto"] is False
 
 
 def test_set_int_coercion(tmp_path):
@@ -30,7 +34,7 @@ def test_set_int_coercion(tmp_path):
         "config.agents.a2a.turn_ceiling", "10", scope="project", repo_root=tmp_path
     )
     assert res.value == 10
-    assert _read(tmp_path)["config"]["agents"]["a2a"]["turn_ceiling"] == 10
+    assert _read(tmp_path)["agents"]["a2a"]["turn_ceiling"] == 10
 
 
 def test_ac7_err_invalid_rejected_unchanged(tmp_path):
@@ -38,7 +42,7 @@ def test_ac7_err_invalid_rejected_unchanged(tmp_path):
     set_config_value(
         "config.agents.a2a.turn_ceiling", "6", scope="project", repo_root=tmp_path
     )
-    before = (tmp_path / ".fno" / "settings.yaml").read_text()
+    before = (tmp_path / ".fno" / "config.toml").read_text()
     with pytest.raises(ConfigSetError) as exc:
         set_config_value(
             "config.agents.a2a.turn_ceiling", "0", scope="project", repo_root=tmp_path
@@ -46,7 +50,7 @@ def test_ac7_err_invalid_rejected_unchanged(tmp_path):
     assert exc.value.exit_code == 2
     assert "turn_ceiling" in str(exc.value)
     # File unchanged (AC7-ERR).
-    assert (tmp_path / ".fno" / "settings.yaml").read_text() == before
+    assert (tmp_path / ".fno" / "config.toml").read_text() == before
 
 
 def test_unknown_key_rejected(tmp_path):
@@ -54,7 +58,7 @@ def test_unknown_key_rejected(tmp_path):
         set_config_value("config.nope.bogus", "x", scope="project", repo_root=tmp_path)
     assert exc.value.exit_code == 1
     assert "unknown config key" in str(exc.value)
-    assert not (tmp_path / ".fno" / "settings.yaml").exists()
+    assert not (tmp_path / ".fno" / "config.toml").exists()
 
 
 def test_setting_a_block_rejected(tmp_path):
@@ -80,11 +84,13 @@ def test_ac7_edge_two_writes_preserve_each_other(tmp_path):
     )
     data = _read(tmp_path)
     # The second write preserved the first key (no clobber / corruption).
-    assert data["config"]["agents"]["a2a"]["auto"] is False
-    assert data["config"]["agents"]["a2a"]["turn_ceiling"] == 9
+    assert data["agents"]["a2a"]["auto"] is False
+    assert data["agents"]["a2a"]["turn_ceiling"] == 9
 
 
 def test_preserves_unrelated_keys(tmp_path):
+    # Seed a legacy wrapped settings.yaml; the writer migrates it to a flat
+    # config.toml on first write, preserving unrelated top-level keys.
     settings = tmp_path / ".fno" / "settings.yaml"
     settings.parent.mkdir(parents=True, exist_ok=True)
     settings.write_text(
@@ -96,32 +102,34 @@ def test_preserves_unrelated_keys(tmp_path):
         "config.agents.a2a.auto", "false", scope="project", repo_root=tmp_path
     )
     data = _read(tmp_path)
-    # Unrelated top-level keys survive the rewrite.
+    # Unrelated top-level keys survive the migrate + rewrite; the legacy yaml is
+    # gone (hard cut).
     assert data["schema_version"] == 1
     assert data["work"]["workspaces"]["ws"]["projects"][0]["name"] == "p"
-    assert data["config"]["agents"]["a2a"]["auto"] is False
+    assert data["agents"]["a2a"]["auto"] is False
+    assert not settings.exists()
 
 
 def test_ac7_fr_midwrite_failure_leaves_intact(tmp_path, monkeypatch):
     set_config_value(
         "config.agents.a2a.auto", "true", scope="project", repo_root=tmp_path
     )
-    before = (tmp_path / ".fno" / "settings.yaml").read_text()
+    before = (tmp_path / ".fno" / "config.toml").read_text()
 
     import fno.config.writer as writer_mod
 
     def _boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(writer_mod.yaml, "safe_dump", _boom)
+    monkeypatch.setattr(writer_mod.tomli_w, "dumps", _boom)
     with pytest.raises(ConfigSetError) as exc:
         set_config_value(
             "config.agents.a2a.auto", "false", scope="project", repo_root=tmp_path
         )
     assert exc.value.exit_code == 1
     # Original intact, no leftover temp files (AC7-FR).
-    assert (tmp_path / ".fno" / "settings.yaml").read_text() == before
-    leftovers = list((tmp_path / ".fno").glob(".settings.yaml.tmp.*"))
+    assert (tmp_path / ".fno" / "config.toml").read_text() == before
+    leftovers = list((tmp_path / ".fno").glob(".config.toml.tmp.*"))
     assert leftovers == []
 
 
@@ -136,7 +144,8 @@ def test_ac7_ui_cli_confirms_value_and_scope(tmp_path, monkeypatch):
     assert "config.agents.a2a.auto" in res.output
     assert "False" in res.output
     assert "global" in res.output
-    assert yaml.safe_load(gpath.read_text())["config"]["agents"]["a2a"]["auto"] is False
+    written = tomllib.loads((gpath.parent / "config.toml").read_text())
+    assert written["agents"]["a2a"]["auto"] is False
 
 
 def test_ac7_err_cli_invalid_exit_nonzero(tmp_path, monkeypatch):
@@ -160,8 +169,8 @@ def test_pep604_union_unwrap():
     assert _unwrap_optional(int) is int
 
 
-def test_set_writes_through_symlinked_settings_to_canonical(tmp_path):
-    """A worktree's .fno/settings.yaml is a symlink to the canonical checkout's
+def test_set_writes_through_symlinked_config_to_canonical(tmp_path):
+    """A worktree's .fno/config.toml is a symlink to the canonical checkout's
     real file (setup-worktree.sh links it). `config set --local` from the
     worktree must write THROUGH the symlink to canonical, preserving the link --
     NOT clobber it into a divergent regular file. `os.replace` (rename) onto a
@@ -175,15 +184,15 @@ def test_set_writes_through_symlinked_settings_to_canonical(tmp_path):
     (canonical / ".fno").mkdir(parents=True)
     (worktree / ".fno").mkdir(parents=True)
 
-    # Canonical holds the real file, seeded with an existing valid value.
-    canon_settings = canonical / ".fno" / "settings.yaml"
-    canon_settings.write_text(
-        "schema_version: 1\nconfig:\n  agents:\n    a2a:\n      turn_ceiling: 6\n",
+    # Canonical holds the real file (flat config.toml), seeded with a value.
+    canon_config = canonical / ".fno" / "config.toml"
+    canon_config.write_text(
+        "[agents.a2a]\nturn_ceiling = 6\n",
         encoding="utf-8",
     )
-    # The worktree's settings.yaml is a symlink pointing at canonical's file.
-    wt_settings = worktree / ".fno" / "settings.yaml"
-    wt_settings.symlink_to(canon_settings)
+    # The worktree's config.toml is a symlink pointing at canonical's file.
+    wt_config = worktree / ".fno" / "config.toml"
+    wt_config.symlink_to(canon_config)
 
     res = set_config_value(
         "config.agents.a2a.auto", "false", scope="project", repo_root=worktree
@@ -191,19 +200,19 @@ def test_set_writes_through_symlinked_settings_to_canonical(tmp_path):
     assert res.value is False
 
     # The symlink is preserved (not replaced by a regular file).
-    assert wt_settings.is_symlink()
-    assert os.path.realpath(wt_settings) == os.path.realpath(canon_settings)
+    assert wt_config.is_symlink()
+    assert os.path.realpath(wt_config) == os.path.realpath(canon_config)
 
     # Canonical's real file received the new value AND kept the seeded one.
-    canon_data = yaml.safe_load(canon_settings.read_text())
-    assert canon_data["config"]["agents"]["a2a"]["auto"] is False
-    assert canon_data["config"]["agents"]["a2a"]["turn_ceiling"] == 6
+    canon_data = tomllib.loads(canon_config.read_text())
+    assert canon_data["agents"]["a2a"]["auto"] is False
+    assert canon_data["agents"]["a2a"]["turn_ceiling"] == 6
 
 
 def test_locked_update_holds_lock_across_read_and_mutate(tmp_path):
     """TOCTOU regression (codex P2, PR #522): the lock must cover the whole
     read-modify-write cycle, not just the final os.replace. Otherwise two
-    concurrent `set` writers both parse the same old YAML and the later replace
+    concurrent `set` writers both parse the same old config and the later replace
     clobbers the earlier writer's key. Proven by attempting a competing
     non-blocking flock from inside `mutate` (which runs after the read): it must
     be denied because `_locked_update` already holds the lock at that point.
@@ -212,8 +221,8 @@ def test_locked_update_holds_lock_across_read_and_mutate(tmp_path):
 
     from fno.config.writer import _locked_update
 
-    target = tmp_path / "settings.yaml"
-    target.write_text("a: 1\n", encoding="utf-8")
+    target = tmp_path / "config.toml"
+    target.write_text("a = 1\n", encoding="utf-8")
     lock_path = target.with_suffix(target.suffix + ".lock")
 
     observed = {}
@@ -238,7 +247,7 @@ def test_locked_update_holds_lock_across_read_and_mutate(tmp_path):
     # ...with the lock held throughout the read+mutate...
     assert observed["lock_held"] is True
     # ...and the merge landed without losing the pre-existing key.
-    assert yaml.safe_load(written.read_text()) == {"a": 1, "b": 2}
+    assert tomllib.loads(written.read_text()) == {"a": 1, "b": 2}
 
 
 # --- list coercion (wizard must be able to set list keys) ---
@@ -252,7 +261,7 @@ def test_set_list_comma_separated(tmp_path):
         repo_root=tmp_path,
     )
     assert res.value == ["gemini", "codex"]
-    assert _read(tmp_path)["config"]["review"]["external_reviewers"] == [
+    assert _read(tmp_path)["review"]["external_reviewers"] == [
         "gemini",
         "codex",
     ]
@@ -282,4 +291,4 @@ def test_set_list_single_item_round_trips(tmp_path):
         "config.review.external_reviewers", "gemini", scope="project", repo_root=tmp_path
     )
     assert res.value == ["gemini"]
-    assert _read(tmp_path)["config"]["review"]["external_reviewers"] == ["gemini"]
+    assert _read(tmp_path)["review"]["external_reviewers"] == ["gemini"]

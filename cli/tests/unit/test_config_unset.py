@@ -8,21 +8,21 @@ AC1-FR (mid-write failure leaves the original intact).
 from __future__ import annotations
 
 import pytest
-import yaml
+import tomllib
 from typer.testing import CliRunner
 
 from fno.config.writer import ConfigSetError, set_config_value, unset_config_value
 
 
 def _read(tmp_path):
-    return yaml.safe_load((tmp_path / ".fno" / "settings.yaml").read_text())
+    return tomllib.loads((tmp_path / ".fno" / "config.toml").read_text())
 
 
 def test_ac1_hp_unset_removes_key_reverts_to_default(tmp_path):
     set_config_value(
         "config.auto_merge.enabled", "true", scope="project", repo_root=tmp_path
     )
-    assert _read(tmp_path)["config"]["auto_merge"]["enabled"] is True
+    assert _read(tmp_path)["auto_merge"]["enabled"] is True
 
     res = unset_config_value(
         "config.auto_merge.enabled", scope="project", repo_root=tmp_path
@@ -40,11 +40,11 @@ def test_ac1_err_unknown_key_exit1_unchanged(tmp_path):
     set_config_value(
         "config.agents.a2a.auto", "false", scope="project", repo_root=tmp_path
     )
-    before = (tmp_path / ".fno" / "settings.yaml").read_text()
+    before = (tmp_path / ".fno" / "config.toml").read_text()
     with pytest.raises(ConfigSetError) as exc:
         unset_config_value("config.nonsense.key", scope="project", repo_root=tmp_path)
     assert exc.value.exit_code == 1
-    assert (tmp_path / ".fno" / "settings.yaml").read_text() == before
+    assert (tmp_path / ".fno" / "config.toml").read_text() == before
 
 
 def test_ac1_edge_absent_key_is_noop(tmp_path):
@@ -57,10 +57,10 @@ def test_ac1_edge_absent_key_is_noop(tmp_path):
     )
     assert res.present is False
     # The seeded key (and the rest of the file) survive.
-    assert _read(tmp_path)["config"]["agents"]["a2a"]["auto"] is False
+    assert _read(tmp_path)["agents"]["a2a"]["auto"] is False
     # Nothing meaningful changed (modulo a harmless reserialize is acceptable,
     # but an absent-key unset on an existing file should not drop other keys).
-    assert "a2a" in _read(tmp_path)["config"]["agents"]
+    assert "a2a" in _read(tmp_path)["agents"]
 
 
 def test_ac1_edge_no_file_is_clean_noop(tmp_path):
@@ -69,7 +69,7 @@ def test_ac1_edge_no_file_is_clean_noop(tmp_path):
         "config.auto_merge.enabled", scope="project", repo_root=tmp_path
     )
     assert res.present is False
-    assert not (tmp_path / ".fno" / "settings.yaml").exists()
+    assert not (tmp_path / ".fno" / "config.toml").exists()
 
 
 def test_ac1_edge_emptied_parent_is_pruned(tmp_path):
@@ -78,7 +78,7 @@ def test_ac1_edge_emptied_parent_is_pruned(tmp_path):
         "config.auto_merge.enabled", "true", scope="project", repo_root=tmp_path
     )
     data = _read(tmp_path)
-    assert list(data["config"]["auto_merge"].keys()) == ["enabled"]
+    assert list(data["auto_merge"].keys()) == ["enabled"]
 
     unset_config_value(
         "config.auto_merge.enabled", scope="project", repo_root=tmp_path
@@ -100,29 +100,29 @@ def test_unset_preserves_sibling_keys(tmp_path):
     )
     data = _read(tmp_path)
     # The sibling under the same block survives; the block is NOT pruned.
-    assert data["config"]["agents"]["a2a"]["turn_ceiling"] == 9
-    assert "auto" not in data["config"]["agents"]["a2a"]
+    assert data["agents"]["a2a"]["turn_ceiling"] == 9
+    assert "auto" not in data["agents"]["a2a"]
 
 
 def test_ac1_fr_midwrite_failure_leaves_intact(tmp_path, monkeypatch):
     set_config_value(
         "config.auto_merge.enabled", "true", scope="project", repo_root=tmp_path
     )
-    before = (tmp_path / ".fno" / "settings.yaml").read_text()
+    before = (tmp_path / ".fno" / "config.toml").read_text()
 
     import fno.config.writer as writer_mod
 
     def _boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(writer_mod.yaml, "safe_dump", _boom)
+    monkeypatch.setattr(writer_mod.tomli_w, "dumps", _boom)
     with pytest.raises(ConfigSetError) as exc:
         unset_config_value(
             "config.auto_merge.enabled", scope="project", repo_root=tmp_path
         )
     assert exc.value.exit_code == 1
-    assert (tmp_path / ".fno" / "settings.yaml").read_text() == before
-    leftovers = list((tmp_path / ".fno").glob(".settings.yaml.tmp.*"))
+    assert (tmp_path / ".fno" / "config.toml").read_text() == before
+    leftovers = list((tmp_path / ".fno").glob(".config.toml.tmp.*"))
     assert leftovers == []
 
 
@@ -160,5 +160,5 @@ def test_cli_rm_alias_unsets(tmp_path, monkeypatch):
     res = runner.invoke(app, ["rm", "config.auto_merge.enabled"])
     assert res.exit_code == 0, res.output
     assert "unset" in res.output
-    data = yaml.safe_load(gpath.read_text())
+    data = tomllib.loads((gpath.parent / "config.toml").read_text())
     assert "enabled" not in data.get("config", {}).get("auto_merge", {})

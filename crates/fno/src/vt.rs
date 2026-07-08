@@ -35,7 +35,7 @@ const SCROLLBACK_LINES: usize = 100_000;
 
 /// Resolve the per-pane scrollback cap. `config.mux.scrollback_lines` is
 /// exported by the launcher as `FNO_MUX_SCROLLBACK_LINES` (the crate reads env,
-/// not settings.yaml - same pattern as `FNO_SESSION`/`FNO_MUX_DIR`); a
+/// not config.toml - same pattern as `FNO_SESSION`/`FNO_MUX_DIR`); a
 /// memory-constrained deployment lowers it. Falls back to the 100k default.
 fn scrollback_lines() -> usize {
     std::env::var("FNO_MUX_SCROLLBACK_LINES")

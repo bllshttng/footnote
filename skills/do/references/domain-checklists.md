@@ -20,7 +20,7 @@ The orchestrator selects the right checklist based on task tags/keywords.
 - UI updates after mutations (no manual refresh needed)
 
 ### Testing Context
-If settings.yaml exists, load `testing.{project}.auth` for login shortcuts
+If config.toml exists, load `testing.{project}.auth` for login shortcuts
 and `testing.{project}.gotchas` for project-specific reminders.
 ```
 

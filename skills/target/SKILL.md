@@ -129,7 +129,7 @@ Docs and browser testing run BEFORE `/pr create` so they ride in the same PR, ge
 
 See [references/usage-detail.md](references/usage-detail.md) for model-optimization rationale (when to keep Opus inline vs spawn cheaper agents).
 
-**Phase applicability is judgment, not a gate.** Every phase above is available; run the ones the work needs. User skip flags (CLI) and project config (`.fno/settings.yaml`) still force-skip. Otherwise judge by what the change is:
+**Phase applicability is judgment, not a gate.** Every phase above is available; run the ones the work needs. User skip flags (CLI) and project config (`.fno/config.toml`) still force-skip. Otherwise judge by what the change is:
 
 - **/think + /blueprint**: only if you started from a bare idea. A bound node or plan skips straight to implement.
 - **/do waves**: for a multi-task plan with parallelizable waves. A single-file or locked refactor runs **inline**, not through the wave orchestrator.
@@ -531,7 +531,7 @@ For Medium and Large size profiles, each completed task or wave MUST produce an 
 1. After completing each task in `fno:do waves`, create a commit scoped to that task's files with a conventional commit message referencing the task
 2. If a wave has multiple sequential tasks, commit after each task
 3. If a wave has parallel tasks (subagent mode), each agent commits its own work
-4. Commit messages follow the project's `commit_style` from settings.yaml
+4. Commit messages follow the project's `commit_style` from config.toml
 5. Never `git add .` or `git add -A` - only stage files relevant to the task
 
 **Commit message format:**
@@ -594,11 +594,11 @@ If the API returns a rate-limit or overload error during execution, present the 
 /target resume   # Continue from target-state.md
 ```
 
-Reads state, skips completed steps, continues from last position. After every resume, re-read `project.vision` and `project.goals` from settings.yaml — context lost during compaction is reconstructed there. See [references/resume.md](references/resume.md).
+Reads state, skips completed steps, continues from last position. After every resume, re-read `project.vision` and `project.goals` from config.toml — context lost during compaction is reconstructed there. See [references/resume.md](references/resume.md).
 
 ## Settings
 
-Configuration lives in `.fno/settings.yaml` (project-local) with `~/.fno/settings.yaml` as global fallback. The full schema (project topology + execution defaults + worktree config + autonomous defaults) is in [references/settings.md](references/settings.md).
+Configuration lives in `.fno/config.toml` (project-local) with `~/.fno/config.toml` as global fallback. The full schema (project topology + execution defaults + worktree config + autonomous defaults) is in [references/settings.md](references/settings.md).
 
 ## References
 
@@ -618,7 +618,7 @@ Configuration lives in `.fno/settings.yaml` (project-local) with `~/.fno/setting
 - [references/pre-promise.md](references/pre-promise.md) - Full pre-promise sequence + promise output
 - [references/model-fallback.md](references/model-fallback.md) - Rate-limit handling
 - [references/resume.md](references/resume.md) - Resume protocol + project vision re-read
-- [references/settings.md](references/settings.md) - settings.yaml schema + state files + cost tracking
+- [references/settings.md](references/settings.md) - config.toml schema + state files + cost tracking
 - [references/multi-plan.md](references/multi-plan.md) - Multi-plan worktree mode
 - [references/domain-profiles.md](references/domain-profiles.md) - Domain phase resolution
 - [references/gate-artifacts.md](references/gate-artifacts.md) - SUPERSEDED: see docs/architecture/control-plane-loop.md

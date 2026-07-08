@@ -8,7 +8,7 @@ Optional phase that removes common AI code slop. Runs between Execute and Review
 
 **`no_clean` starts as `true` (clean is opt-in).** Changed only by:
 1. CLI: `clean` positional modifier sets `no_clean: false`
-2. Config: `no_clean: false` in settings.yaml
+2. Config: `no_clean: false` in config.toml
 
 If `no_clean` is `true`: skip to Review phase.
 

@@ -1,7 +1,7 @@
 """Unit tests for parallel-mode lane dispatch (x-8b48, group 3).
 
 Covers `advance.dispatch_lanes` and its isolation helpers: one isolated worktree
-+ bg worker per selected lane, per-lane `.fno/settings.local.yaml` seeding with
++ bg worker per selected lane, per-lane `.fno/config.local.toml` seeding with
 DISTINCT parking_lot_path + project.id (AC2-HP), and slot-release-on-failure so
 one lane's spawn failure never aborts the fleet (Failure Modes: Errors).
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
+import tomllib
 
 from fno.backlog import advance
 from fno.claims.lanes import active_lane_count, find_lane_slot
@@ -82,8 +82,8 @@ def test_seed_writes_only_allowlist_keys_distinct_per_lane(tmp_path):
     advance._seed_lane_local_settings(wt_a, "n-a", "fno")
     advance._seed_lane_local_settings(wt_b, "n-b", "fno")
 
-    raw_a = yaml.safe_load((wt_a / ".fno" / "settings.local.yaml").read_text())
-    raw_b = yaml.safe_load((wt_b / ".fno" / "settings.local.yaml").read_text())
+    raw_a = tomllib.loads((wt_a / ".fno" / "config.local.toml").read_text())
+    raw_b = tomllib.loads((wt_b / ".fno" / "config.local.toml").read_text())
 
     # x-cbce loader keeps ONLY the allowlist; a seeded key outside it would be
     # dropped here, so passing through the loader proves the seed is well-formed.
@@ -91,8 +91,8 @@ def test_seed_writes_only_allowlist_keys_distinct_per_lane(tmp_path):
     ov_b = _worktree_local_override(raw_b)
     assert set(_leaf_paths(ov_a)) == set(WORKTREE_LOCAL_KEYS)
 
-    park_a = ov_a["config"]["post_merge"]["parking_lot_path"]
-    park_b = ov_b["config"]["post_merge"]["parking_lot_path"]
+    park_a = ov_a["post_merge"]["parking_lot_path"]
+    park_b = ov_b["post_merge"]["parking_lot_path"]
     # Repo-relative (same string) but resolves per-worktree: `.fno` is a real
     # per-worktree dir, so each lane gets its OWN file - isolation from
     # resolution, not a distinct string (AC2-HP), and the value must be
@@ -106,8 +106,8 @@ def test_seed_writes_only_allowlist_keys_distinct_per_lane(tmp_path):
     PostMergeBlock(parking_lot_path=park_a)  # must not raise
 
     # project.id is per-lane too (neuters nested auto-continue).
-    assert ov_a["config"]["project"]["id"] == "fno-n-a"
-    assert ov_b["config"]["project"]["id"] == "fno-n-b"
+    assert ov_a["project"]["id"] == "fno-n-a"
+    assert ov_b["project"]["id"] == "fno-n-b"
 
 
 def _leaf_paths(d, prefix=""):
@@ -186,16 +186,16 @@ def test_seed_heals_symlinked_fno_before_writing(tmp_path):
     the canonical file (which would make every lane share one parking_lot_path)."""
     canonical = tmp_path / "canonical"
     (canonical / ".fno").mkdir(parents=True)
-    (canonical / ".fno" / "settings.local.yaml").write_text("canonical: sentinel\n")
+    (canonical / ".fno" / "config.local.toml").write_text("canonical = 'sentinel'\n")
     wt = tmp_path / "wt"
     wt.mkdir()
     (wt / ".fno").symlink_to(canonical / ".fno")
 
     advance._seed_lane_local_settings(wt, "n-a", "fno")
 
-    assert (canonical / ".fno" / "settings.local.yaml").read_text() == "canonical: sentinel\n"
+    assert (canonical / ".fno" / "config.local.toml").read_text() == "canonical = 'sentinel'\n"
     assert not (wt / ".fno").is_symlink()
-    assert "fno-n-a" in (wt / ".fno" / "settings.local.yaml").read_text()
+    assert "fno-n-a" in (wt / ".fno" / "config.local.toml").read_text()
 
 
 def test_ensure_heals_symlinked_fno_BEFORE_setup_runs(tmp_path, monkeypatch):

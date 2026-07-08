@@ -148,7 +148,7 @@ field is omitted entirely when no impeccable tasks ran.
 
 ## Configuration surface
 
-Project-local settings (`.fno/settings.yaml`) under
+Project-local settings (`.fno/config.toml`) under
 `config.executors.impeccable`:
 
 | Key | Default | Effect |

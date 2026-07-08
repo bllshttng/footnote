@@ -44,29 +44,20 @@ def load_workspaces() -> dict[str, str]:
     (``work.projects.<name>``) shapes. Best-effort: a missing/malformed file
     contributes nothing rather than raising.
     """
-    try:
-        import yaml
-    except ImportError:
-        return {}
-
     # Reuse the canonical settings-file resolver (project-local + global,
     # redirect-aware, de-duped) so this map cannot drift from
     # detect_project_from_settings, and so paths route through fno.paths
     # rather than a hardcoded ~/.fno (the no-hardcoded-paths guard).
+    from fno.config import read_config_flat
     from fno.graph._intake import _settings_candidate_paths
 
     out: dict[str, str] = {}
     for path in _settings_candidate_paths():
         if not path.exists():
             continue
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        # config.work is canonical; fall back to legacy top-level work.
-        work = (data.get("config") or {}).get("work") or data.get("work")
+        # read_config_flat parses config.toml (or a legacy settings.yaml) and
+        # returns the FLAT dict, so `work` is top-level.
+        work = read_config_flat(path).get("work")
         if not isinstance(work, dict):
             continue
         workspaces = work.get("workspaces")

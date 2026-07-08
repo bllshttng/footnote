@@ -6,14 +6,14 @@
 
 set -uo pipefail
 
-LOCAL_SETTINGS=".fno/settings.yaml"
+LOCAL_SETTINGS=".fno/config.toml"
 if command -v fno >/dev/null 2>&1; then
     _PATHS_SH="$(fno paths shell-stub 2>/dev/null || true)"
     [[ -f "$_PATHS_SH" ]] && source "$_PATHS_SH" 2>/dev/null || true
     unset _PATHS_SH
 fi
 # GLOBAL_SETTINGS = per-user global; never alias CONFIG_FILE (active=local file). ab-5d6c3d47
-GLOBAL_SETTINGS="${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/settings.yaml}"
+GLOBAL_SETTINGS="${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/config.toml}"
 
 # Find settings file (local override > global)
 SETTINGS=""
@@ -27,39 +27,17 @@ if [[ -z "$SETTINGS" ]]; then
   exit 0
 fi
 
-# Extract vision (handles both inline and block scalar)
-# Inline: vision: "text" or vision: text
-# Block:  vision: >
-#           multi-line text
-VISION=$(awk '
-  /^  vision:/ {
-    # Try inline value first (vision: "text" or vision: text)
-    inline = $0
-    sub(/^  vision:[[:space:]]*>?[[:space:]]*/, "", inline)
-    gsub(/^"/, "", inline); gsub(/"[[:space:]]*$/, "", inline)
-    if (length(inline) > 0 && inline != ">") { print inline; exit }
-    found=1; next
-  }
-  found && /^  #/ { next }
-  found && /^  [a-z]/ { exit }
-  found && /^[a-z]/ { exit }
-  found { gsub(/^    /, ""); print }
-' "$SETTINGS")
-
-# Extract goal lines (just the id + goal text, not full KRs)
-# Strips quotes from both id and goal values
-GOALS=$(awk '
-  /^    - id:/ {
-    id = $NF
-    gsub(/"/, "", id)
-  }
-  /^      goal:/ {
-    line = $0
-    gsub(/^      goal:[[:space:]]*"?/, "", line)
-    gsub(/"[[:space:]]*$/, "", line)
-    print "- " id ": " line
-  }
-' "$SETTINGS")
+# Read project.vision + project.goals from the flat config.toml via yq (TOML
+# mode). Both degrade to empty when yq is absent or the key is unset, so the
+# hook stays best-effort context injection. goals is an unmodeled array of
+# {id, goal} tables; a hand-added list still renders one line per entry.
+if command -v yq >/dev/null 2>&1; then
+  VISION=$(yq -p toml -r '.project.vision // ""' "$SETTINGS" 2>/dev/null)
+  GOALS=$(yq -p toml -r '.project.goals[]? | "- " + .id + ": " + .goal' "$SETTINGS" 2>/dev/null)
+else
+  VISION=""
+  GOALS=""
+fi
 
 if [[ -z "$VISION" && -z "$GOALS" ]]; then
   # Settings found but nothing parsed — warn so user knows

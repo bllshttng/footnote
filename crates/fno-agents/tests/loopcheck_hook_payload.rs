@@ -99,7 +99,7 @@ fn fixture_with_manifest(manifest_body: &str) -> Fixture {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().to_path_buf();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
-    fs::write(cwd.join(".fno/settings.yaml"), "# isolated test settings\n").unwrap();
+    fs::write(cwd.join(".fno/config.toml"), "# isolated test settings\n").unwrap();
 
     let manifest = cwd.join("target-state.md");
     fs::write(&manifest, manifest_body).unwrap();

@@ -935,9 +935,9 @@ fn resolve_handoffs_dir(
     if let Some(s) = settings_override {
         candidates.push(s.to_path_buf());
     }
-    candidates.push(cwd.join(".fno/settings.yaml"));
+    candidates.push(cwd.join(".fno/config.toml"));
     if let Some(h) = home {
-        candidates.push(h.join(".fno/settings.yaml"));
+        candidates.push(h.join(".fno/config.toml"));
     }
     for sp in &candidates {
         if let Some(raw) = read_path_setting(sp, "handoffs_dir") {
@@ -972,45 +972,36 @@ struct ObsidianBlock {
     vault: Option<String>,
 }
 
-/// Scan one settings.yaml for its (single) `obsidian:` block. Indent-aware
-/// (unlike `read_path_setting`) because `enabled:`/`vault:` are generic key
-/// names reused by other settings.yaml sections (`post_merge.enabled`,
-/// `think_spawn.enabled`, ...); a flat scan would risk picking up an
-/// unrelated section's value.
-fn read_obsidian_block(path: &Path) -> ObsidianBlock {
-    let mut block = ObsidianBlock::default();
-    let Ok(content) = fs::read_to_string(path) else {
-        return block;
-    };
-    let mut block_indent: Option<usize> = None;
-    for line in content.lines() {
-        // Strip inline comments before matching/parsing (consistent with
-        // read_path_setting and yaml_scalar_at in this same file) - otherwise
-        // "obsidian: # comment" fails the block-header match, and a comment
-        // on the vault: line gets folded into the resolved path (gemini
-        // review, PR #185).
-        let t = line.split('#').next().unwrap_or("").trim();
-        if t.is_empty() {
-            continue;
-        }
-        let indent = line.len() - line.trim_start().len();
-        if let Some(bi) = block_indent {
-            if indent <= bi {
-                break; // dedented out of the obsidian: block
-            }
-            if let Some(rest) = t.strip_prefix("enabled:") {
-                block.enabled = Some(rest.trim().eq_ignore_ascii_case("true"));
-            } else if let Some(rest) = t.strip_prefix("vault:") {
-                let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
-                if !v.is_empty() && !v.eq_ignore_ascii_case("null") {
-                    block.vault = Some(v.to_string());
-                }
-            }
-        } else if t == "obsidian:" {
-            block_indent = Some(indent);
-        }
+/// Parse a config.toml file into a table; None on a missing or unparseable file.
+fn load_config_toml(path: &Path) -> Option<toml::Table> {
+    fs::read_to_string(path).ok()?.parse::<toml::Table>().ok()
+}
+
+/// A dotted string value from a config.toml table (e.g. `["paths","handoffs_dir"]`).
+fn toml_string_at(t: &toml::Table, path: &[&str]) -> Option<String> {
+    let mut cur = t.get(*path.first()?)?;
+    for k in &path[1..] {
+        cur = cur.as_table()?.get(*k)?;
     }
-    block
+    cur.as_str().map(str::to_string)
+}
+
+/// Read the `[obsidian]` block (enabled + vault) from a flat config.toml. `None`
+/// in a field means that file did not set the key, so the caller keeps looking
+/// in the next candidate (per-KEY merge, not per-file).
+fn read_obsidian_block(path: &Path) -> ObsidianBlock {
+    let Some(t) = load_config_toml(path) else {
+        return ObsidianBlock::default();
+    };
+    let ob = t.get("obsidian").and_then(|v| v.as_table());
+    ObsidianBlock {
+        enabled: ob.and_then(|o| o.get("enabled")).and_then(|v| v.as_bool()),
+        vault: ob
+            .and_then(|o| o.get("vault"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("null"))
+            .map(str::to_string),
+    }
 }
 
 /// Resolve `obsidian.enabled` + `obsidian.vault`, merged key-by-key across
@@ -1078,32 +1069,12 @@ fn env_dir_unless_null(key: &str) -> Option<PathBuf> {
     Some(PathBuf::from(v))
 }
 
+/// Read a `paths.<key>` value (e.g. `handoffs_dir`, `postmortems_dir`) from a
+/// flat config.toml. A literal `"null"` string is treated as absent (the "use
+/// default" sentinel), so the caller falls through to `~/.fno/<dir>` (x-54c2).
 fn read_path_setting(path: &Path, key: &str) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let prefix = format!("{key}:");
-    for line in content.lines() {
-        let t = line.trim();
-        if t.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = t.strip_prefix(&prefix) {
-            let v = rest
-                .split('#')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .trim_matches(|c| c == '"' || c == '\'');
-            // A YAML `null` scalar (`key: null`) is the "use default" sentinel,
-            // not a literal path. emit_shell writes `postmortems_dir: null` for an
-            // unset path, so reading it as the string "null" sent the writer to
-            // `./null/<date>-<sid>.md` inside the repo (x-54c2). Treat it as absent
-            // so the caller falls through to `~/.fno/<dir>`.
-            if !v.is_empty() && !v.eq_ignore_ascii_case("null") {
-                return Some(v.to_string());
-            }
-        }
-    }
-    None
+    let t = load_config_toml(path)?;
+    toml_string_at(&t, &["paths", key]).filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("null"))
 }
 
 /// Expand `~` and `{project}` in a handoffs_dir template. Returns None when the
@@ -1198,9 +1169,9 @@ fn resolve_project_name(
     if let Some(s) = settings_override {
         candidates.push(s.to_path_buf());
     }
-    candidates.push(cwd.join(".fno/settings.yaml"));
+    candidates.push(cwd.join(".fno/config.toml"));
     if let Some(h) = home {
-        candidates.push(h.join(".fno/settings.yaml"));
+        candidates.push(h.join(".fno/config.toml"));
     }
     for sp in candidates {
         if let Some(id) = read_project_id(&sp) {
@@ -1213,20 +1184,17 @@ fn resolve_project_name(
     repo_project_name(cwd)
 }
 
-/// Read the project id from a settings.yaml, matching the Python loader:
-/// `config.project.id` is canonical; a deprecated top-level `project.id` is the
-/// fallback (the loader lifts legacy `project.id` into `config.project` only
-/// when the canonical value is unset, so config.project wins —
-/// `cli/src/fno/config/__init__.py:1982-1990`). An empty/`null` value, an
-/// unreadable file, or an id outside `[A-Za-z0-9._-]` all yield None so the
-/// caller falls back to the basename.
+/// Read the project id from a flat config.toml (`[project]\nid = "..."`). The
+/// legacy top-level `project.id` and the canonical `config.project.id` both map
+/// to the same flat `project.id`, so one lookup covers both. An empty/`null`
+/// value, an unreadable file, or an id outside `[A-Za-z0-9._-]` yields None so
+/// the caller falls back to the basename.
 fn read_project_id(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let id = yaml_scalar_at(&content, &["config", "project", "id"])
-        .or_else(|| yaml_scalar_at(&content, &["project", "id"]))?;
+    let t = load_config_toml(path)?;
+    let id = toml_string_at(&t, &["project", "id"])?;
     // The Python settings model rejects ids outside [A-Za-z0-9._-]
-    // (config/__init__.py:176-185). A hand-edited invalid value (e.g. `foo/bar`)
-    // must never be spliced into a `{project}` path segment, so degrade to the
+    // (config/__init__.py). A hand-edited invalid value (e.g. `foo/bar`) must
+    // never be spliced into a `{project}` path segment, so degrade to the
     // basename rather than write artifacts outside the project dir.
     valid_project_id(&id).then_some(id)
 }
@@ -1237,58 +1205,6 @@ fn valid_project_id(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-}
-
-/// Read a scalar at a dotted key path (e.g. `config.project.id`) from
-/// block-style YAML via indent tracking. Scoping to the full path means a
-/// false-positive key elsewhere (a `project:` block under another section, or a
-/// legacy top-level one) cannot be mistaken for the canonical value. Inline
-/// comments and surrounding quotes are stripped; an empty/`null` leaf yields
-/// None. Only block-mapping style is understood (the settings.yaml schema);
-/// flow style degrades to None and the caller falls back.
-/// ponytail: bespoke path reader to stay off a YAML dependency, matching the
-/// existing `read_path_setting` hand-scan; swap for serde_yaml if settings
-/// parsing ever needs more than scalar lookups.
-fn yaml_scalar_at(content: &str, path: &[&str]) -> Option<String> {
-    // indents[i] = indentation of the i-th matched path segment's key line.
-    let mut indents: Vec<usize> = Vec::new();
-    // Indent of the leaf level's direct children, so a deeper grandchild key
-    // with the same leaf name cannot be misread as the target.
-    let mut leaf_indent: Option<usize> = None;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let clean = trimmed.split('#').next().unwrap_or("").trim();
-        if clean.is_empty() {
-            continue;
-        }
-        let indent = line.len() - line.trim_start().len();
-        // Pop matched segments we have dedented out of; resetting leaf_indent so
-        // the next sibling subtree restarts its direct-child tracking.
-        while indents.last().is_some_and(|&top| indent <= top) {
-            indents.pop();
-            leaf_indent = None;
-        }
-        let depth = indents.len();
-        if depth + 1 == path.len() {
-            // Leaf level: only accept the parent's direct children.
-            let li = *leaf_indent.get_or_insert(indent);
-            if indent != li {
-                continue;
-            }
-            if let Some(rest) = clean.strip_prefix(&format!("{}:", path[depth])) {
-                let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
-                return (!v.is_empty() && !v.eq_ignore_ascii_case("null")).then(|| v.to_string());
-            }
-        } else if clean == format!("{}:", path[depth]) {
-            // Matched an intermediate mapping key; descend.
-            indents.push(indent);
-            leaf_indent = None;
-        }
-    }
-    None
 }
 
 /// Best-effort PR URL for the current HEAD/branch via `gh`.
@@ -1410,9 +1326,9 @@ fn resolve_postmortems_dir(
     if let Some(s) = settings_override {
         candidates.push(s.to_path_buf());
     }
-    candidates.push(cwd.join(".fno/settings.yaml"));
+    candidates.push(cwd.join(".fno/config.toml"));
     if let Some(h) = home {
-        candidates.push(h.join(".fno/settings.yaml"));
+        candidates.push(h.join(".fno/config.toml"));
     }
     for sp in candidates {
         if let Some(raw) = read_path_setting(&sp, "postmortems_dir") {
@@ -1739,7 +1655,7 @@ mod tests {
         let _ = fs::create_dir_all(&home);
         write_settings(
             &cwd,
-            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: true\n    vault: myvault\n",
+            "[project]\nid = \"demo\"\n[obsidian]\nenabled = true\nvault = \"myvault\"\n",
         );
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
@@ -1757,7 +1673,7 @@ mod tests {
         let _ = fs::create_dir_all(&home);
         write_settings(
             &cwd,
-            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: false\n    vault: myvault\n",
+            "[project]\nid = \"demo\"\n[obsidian]\nenabled = false\nvault = \"myvault\"\n",
         );
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join(".fno/handoffs/demo"));
@@ -1776,7 +1692,7 @@ mod tests {
         let _ = fs::create_dir_all(&home);
         write_settings(
             &cwd,
-            "config:\n  project:\n    id: demo\n  post_merge:\n    enabled: false\n  obsidian:\n    enabled: true\n    vault: myvault\n",
+            "[project]\nid = \"demo\"\n[post_merge]\nenabled = false\n[obsidian]\nenabled = true\nvault = \"myvault\"\n",
         );
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
@@ -1799,12 +1715,9 @@ mod tests {
         let _ = fs::create_dir_all(&home);
         write_settings(
             &cwd,
-            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: false\n",
+            "[project]\nid = \"demo\"\n[obsidian]\nenabled = false\n",
         );
-        write_settings(
-            &home,
-            "config:\n  obsidian:\n    enabled: true\n    vault: myvault\n",
-        );
+        write_settings(&home, "[obsidian]\nenabled = true\nvault = \"myvault\"\n");
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join(".fno/handoffs/demo"));
         let _ = fs::remove_dir_all(&dir);
@@ -1823,9 +1736,9 @@ mod tests {
         let _ = fs::create_dir_all(&home);
         write_settings(
             &cwd,
-            "config:\n  project:\n    id: demo\n  obsidian:\n    enabled: true\n",
+            "[project]\nid = \"demo\"\n[obsidian]\nenabled = true\n",
         );
-        write_settings(&home, "config:\n  obsidian:\n    vault: myvault\n");
+        write_settings(&home, "[obsidian]\nvault = \"myvault\"\n");
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
         let _ = fs::remove_dir_all(&dir);
@@ -1843,7 +1756,7 @@ mod tests {
         let _ = fs::create_dir_all(&home);
         write_settings(
             &cwd,
-            "config:\n  project:\n    id: demo\n  obsidian: # vault settings\n    enabled: true # on\n    vault: myvault # personal vault\n",
+            "[project]\nid = \"demo\"\n[obsidian] # vault settings\nenabled = true # on\nvault = \"myvault\" # personal vault\n",
         );
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
@@ -1893,10 +1806,10 @@ mod tests {
     fn read_path_setting_parses_value() {
         let dir = std::env::temp_dir().join(format!("finalize-set-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let f = dir.join("settings.yaml");
+        let f = dir.join("config.toml");
         fs::write(
             &f,
-            "config:\n  paths:\n    handoffs_dir: ~/myvault/internal/{project}/handoffs/  # note\n    postmortems_dir: ~/pm\n",
+            "[paths]\nhandoffs_dir = \"~/myvault/internal/{project}/handoffs/\"  # note\npostmortems_dir = \"~/pm\"\n",
         )
         .unwrap();
         assert_eq!(
@@ -1918,8 +1831,8 @@ mod tests {
         // read as absent so resolve_*_dir falls through to the `~/.fno` default.
         let dir = std::env::temp_dir().join(format!("finalize-null-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let f = dir.join("settings.yaml");
-        fs::write(&f, "    postmortems_dir: null\n    handoffs_dir: NULL\n").unwrap();
+        let f = dir.join("config.toml");
+        fs::write(&f, "[paths]\n").unwrap();
         assert_eq!(read_path_setting(&f, "postmortems_dir"), None);
         assert_eq!(read_path_setting(&f, "handoffs_dir"), None);
 
@@ -1958,12 +1871,8 @@ mod tests {
             "explicit override wins"
         );
         // A `--settings` override file with postmortems_dir is honored (codex P2).
-        let settings = cwd.join("custom-settings.yaml");
-        fs::write(
-            &settings,
-            "config:\n  paths:\n    postmortems_dir: /srv/pm\n",
-        )
-        .unwrap();
+        let settings = cwd.join("custom-settings.toml");
+        fs::write(&settings, "[paths]\npostmortems_dir = \"/srv/pm\"\n").unwrap();
         assert_eq!(
             resolve_postmortems_dir(None, Some(&settings), Some(&home), &cwd),
             PathBuf::from("/srv/pm"),
@@ -2090,18 +1999,18 @@ mod tests {
     fn write_settings(dir: &Path, body: &str) {
         let cfg = dir.join(".fno");
         fs::create_dir_all(&cfg).unwrap();
-        fs::write(cfg.join("settings.yaml"), body).unwrap();
+        fs::write(cfg.join("config.toml"), body).unwrap();
     }
 
     #[test]
     fn project_id_parses_nested_scalar() {
         let dir = std::env::temp_dir().join(format!("fin-projid-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let f = dir.join("settings.yaml");
+        let f = dir.join("config.toml");
         // basename of the dir differs from project.id on purpose.
         fs::write(
             &f,
-            "config:\n  project:\n    id: fno\n  obsidian:\n    id: ignored\n",
+            "[project]\nid = \"fno\"\n[obsidian]\nid = \"ignored\"\n",
         )
         .unwrap();
         assert_eq!(read_project_id(&f).as_deref(), Some("fno"));
@@ -2113,10 +2022,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fin-projnull-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let null = dir.join("null.yaml");
-        fs::write(&null, "config:\n  project:\n    id: null\n").unwrap();
+        fs::write(&null, "[project]\n").unwrap();
         assert_eq!(read_project_id(&null), None, "null id -> unset");
         let empty = dir.join("empty.yaml");
-        fs::write(&empty, "config:\n  project: {}\n").unwrap();
+        fs::write(&empty, "[project]\n").unwrap();
         assert_eq!(read_project_id(&empty), None, "no id key -> unset");
         assert_eq!(
             read_project_id(&dir.join("absent.yaml")),
@@ -2132,7 +2041,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fin-rpn-pref-{}", std::process::id()));
         let cwd = dir.join("footnote-like");
         let _ = fs::create_dir_all(&cwd);
-        write_settings(&cwd, "config:\n  project:\n    id: fno\n");
+        write_settings(&cwd, "[project]\nid = \"fno\"\n");
         let home = dir.join("home"); // no settings -> not consulted before cwd
         let _ = fs::create_dir_all(&home);
         assert_eq!(resolve_project_name(None, Some(&home), &cwd), "fno");
@@ -2203,8 +2112,8 @@ mod tests {
         let home = dir.join("home");
         let _ = fs::create_dir_all(&cwd);
         let _ = fs::create_dir_all(&home);
-        write_settings(&cwd, "config:\n  project:\n    id: fno\n");
-        write_settings(&home, "config:\n  project:\n    id: other\n");
+        write_settings(&cwd, "[project]\nid = \"fno\"\n");
+        write_settings(&home, "[project]\nid = \"other\"\n");
         assert_eq!(resolve_project_name(None, Some(&home), &cwd), "fno");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2224,7 +2133,7 @@ mod tests {
         let f = write_yaml(
             &dir,
             "s.yaml",
-            "other_tool:\n  project:\n    id: wrong\nconfig: # cfg\n  project: # proj\n    id: right\n",
+            "[other_tool.project]\nid = \"wrong\"\n\n[project]\nid = \"right\"\n",
         );
         assert_eq!(read_project_id(&f).as_deref(), Some("right"));
         let _ = fs::remove_dir_all(&dir);
@@ -2235,14 +2144,10 @@ mod tests {
         // Legacy top-level project.id is only a fallback; config.project wins
         // (config/__init__.py:1982-1990).
         let dir = std::env::temp_dir().join(format!("fin-legacy-{}", std::process::id()));
-        let win = write_yaml(
-            &dir,
-            "win.yaml",
-            "project:\n  id: legacy\nconfig:\n  project:\n    id: canon\n",
-        );
+        let win = write_yaml(&dir, "win.yaml", "[project]\nid = \"canon\"\n");
         assert_eq!(read_project_id(&win).as_deref(), Some("canon"));
         // No canonical block -> legacy top-level is the fallback.
-        let fb = write_yaml(&dir, "fb.yaml", "project:\n  id: legacy\n");
+        let fb = write_yaml(&dir, "fb.toml", "[project]\nid = \"legacy\"\n");
         assert_eq!(read_project_id(&fb).as_deref(), Some("legacy"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2252,7 +2157,7 @@ mod tests {
         // A hand-edited id with a path separator must not reach a path segment
         // (codex P2; mirrors validate_project_id). Falls back to None.
         let dir = std::env::temp_dir().join(format!("fin-inval-{}", std::process::id()));
-        let f = write_yaml(&dir, "s.yaml", "config:\n  project:\n    id: foo/bar\n");
+        let f = write_yaml(&dir, "s.toml", "[project]\nid = \"foo/bar\"\n");
         assert_eq!(read_project_id(&f), None);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2264,7 +2169,7 @@ mod tests {
         let f = write_yaml(
             &dir,
             "s.yaml",
-            "config:\n  project:\n    nested:\n      id: deep\n    id: good\n",
+            "[project]\nid = \"good\"\n\n[project.nested]\nid = \"deep\"\n",
         );
         assert_eq!(read_project_id(&f).as_deref(), Some("good"));
         let _ = fs::remove_dir_all(&dir);

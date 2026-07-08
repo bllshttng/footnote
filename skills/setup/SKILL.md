@@ -5,7 +5,7 @@ description: "Schema-driven setup wizard for footnote settings. Derives its ques
 
 # Setup Wizard
 
-Creates / updates `settings.yaml` by asking only the handful of decisions that
+Creates / updates `config.toml` by asking only the handful of decisions that
 genuinely vary per project, then writing each answer through the validated
 `fno config set` path. Everything else is defaulted by the model.
 
@@ -24,9 +24,9 @@ Each emitted field carries `{path, type, default, tier, question, default_source
 
 | Command | Scope | Fields asked |
 |---------|-------|--------------|
-| `/setup` | global (`~/.fno/settings.yaml`) | the `always` tier (the real decisions) |
+| `/setup` | global (`~/.fno/config.toml`) | the `always` tier (the real decisions) |
 | `/setup advanced` | global | `always` + `advanced` (progressive disclosure) |
-| `/setup local` | project (`.fno/settings.yaml`) | same questions, written project-scoped |
+| `/setup local` | project (`.fno/config.toml`) | same questions, written project-scoped |
 
 There is no separate "full" mode and no hand-maintained question table: `advanced`
 is just "ask the advanced tier too". Keys whose tier is `never` are always
@@ -35,7 +35,7 @@ defaulted and never surfaced.
 ## Step 0: Check existing settings
 
 ```bash
-GLOBAL_PATH="$HOME/.fno/settings.yaml"; LOCAL_PATH=".fno/settings.yaml"
+GLOBAL_PATH="$HOME/.fno/config.toml"; LOCAL_PATH=".fno/config.toml"
 [[ -f "$GLOBAL_PATH" ]] && echo "global exists" || echo "no global"
 [[ -f "$LOCAL_PATH" ]]  && echo "local exists"  || echo "no local"
 ```
@@ -201,4 +201,4 @@ wizard ever surfaces a key that is not a real model leaf.
 
 If RTK is detected (e.g. `~/code/dotfiles/bin/rtk-claude-hook.sh`), note that it
 is already wired and do NOT run `rtk init -g` (it would double-wire). This is
-informational only; it is not a `settings.yaml` key.
+informational only; it is not a `config.toml` key.

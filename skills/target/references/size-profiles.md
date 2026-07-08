@@ -65,7 +65,7 @@ Build it bulletproof. Full treatment.
 ## Resolution Algorithm
 
 1. Parse arguments for -S, -M, -L (mutually exclusive, last wins)
-2. If no size flag: read `default_size` from settings.yaml, default to M
+2. If no size flag: read `default_size` from config.toml, default to M
 3. Load the profile table for the resolved size
 4. For each individual flag in arguments:
    - If it contradicts the profile: override that specific toggle

@@ -20,6 +20,10 @@ from typing import Optional
 
 
 SETTINGS_PATH: Path = (
+    Path(os.path.expanduser("~")) / ".fno" / "config.toml"
+)
+# Legacy fallback for an unmigrated install (read-only; the main loader migrates).
+_LEGACY_SETTINGS_PATH: Path = (
     Path(os.path.expanduser("~")) / ".fno" / "settings.yaml"
 )
 
@@ -57,35 +61,19 @@ def _build_cache() -> dict[str, str]:
     DuplicateShortName -- if two projects share the same name/short_name key.
     yaml.YAMLError    -- (re-raised as cause) if YAML parsing fails.
     """
-    try:
-        import yaml
-    except ImportError:  # pragma: no cover - PyYAML is a hard CLI dep
-        raise ImportError("PyYAML is required; install it with: pip install pyyaml")
+    from fno.config import read_config_flat
 
-    if not SETTINGS_PATH.exists():
+    path = SETTINGS_PATH if SETTINGS_PATH.exists() else _LEGACY_SETTINGS_PATH
+    if not path.exists():
         raise SettingsNotFound(
-            f"settings.yaml not found at {SETTINGS_PATH}; "
-            "run 'fno setup' or create ~/.fno/settings.yaml"
+            f"config.toml not found at {SETTINGS_PATH}; "
+            "run 'fno setup' or create ~/.fno/config.toml"
         )
 
-    try:
-        data = yaml.safe_load(SETTINGS_PATH.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as exc:
-        raise ProjectNotFound(
-            f"settings.yaml at {SETTINGS_PATH} contains invalid YAML"
-        ) from exc
-
-    if not isinstance(data, dict):
-        return {}
-
-    # Accept both the nested `config.work.workspaces` schema (the shape the
-    # canonical ~/.fno/settings.yaml ships) and the legacy top-level `work.*`,
-    # mirroring graph._intake.project_root_from_settings so the two resolvers
-    # cannot drift on where the registry lives. Guard `config` with isinstance:
-    # a malformed YAML where `config` is a scalar/list would make `.get("work")`
-    # raise AttributeError instead of degrading to the empty-registry path.
-    config = data.get("config")
-    work = (config.get("work") if isinstance(config, dict) else None) or data.get("work") or {}
+    # read_config_flat parses config.toml (or a legacy settings.yaml) into the
+    # FLAT dict, so work is top-level; a malformed file degrades to {}.
+    data = read_config_flat(path)
+    work = data.get("work") or {}
     if not isinstance(work, dict):
         return {}
 

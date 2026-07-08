@@ -57,7 +57,7 @@ Two checks run before any code is written:
 
 **Step 1b - Prompt Specificity Check.** The agent inspects the incoming prompt for vague delegation phrases ("based on your findings", "fix the issue", "update as needed"). A prompt that fails this check returns `BLOCKED` immediately with a message requesting a specific prompt from the operator.
 
-**Step 1c - Schema and Type Verification.** Before writing code that touches types, DB columns, or API contracts, the agent reads canonical definitions from `config.schema_sources` (settings.yaml keys: `types`, `db`, `api`, `naming_boundary`). The setup wizard (`skills/setup/SKILL.md`) includes a Schema Sources step so brownfield projects populate these paths during onboarding.
+**Step 1c - Schema and Type Verification.** Before writing code that touches types, DB columns, or API contracts, the agent reads canonical definitions from `config.schema_sources` (config.toml keys: `types`, `db`, `api`, `naming_boundary`). The setup wizard (`skills/setup/SKILL.md`) includes a Schema Sources step so brownfield projects populate these paths during onboarding.
 
 ### Layer 3 - Plan Template
 

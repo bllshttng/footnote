@@ -1,32 +1,42 @@
 """fno.config.writer — the `fno config set` write path (ab-098967b4, US7).
 
 A small write verb alongside the read-only `get` / `doctor`, so toggles like
-``config.agents.a2a.auto`` are settable without hand-editing YAML. The value is
-coerced to the schema field's type and validated by constructing the changed
-*block* in isolation (so a field validator like ``A2aBlock.ceiling_is_positive``
-fires, while unrelated top-level keys such as ``work:`` are never re-validated).
-The write is atomic (temp file + ``os.replace``) under a file lock, so a
-concurrent set / first-use-confirm write serializes and a mid-write failure
-leaves the original settings file intact (AC7-EDGE / AC7-FR).
+``config.agents.a2a.auto`` are settable without hand-editing the config file. The
+value is coerced to the schema field's type and validated by constructing the
+changed *block* in isolation (so a field validator like
+``A2aBlock.ceiling_is_positive`` fires, while unrelated top-level keys such as
+``work:`` are never re-validated). The write is atomic (temp file +
+``os.replace``) under a file lock, so a concurrent set / first-use-confirm write
+serializes and a mid-write failure leaves the original config file intact
+(AC7-EDGE / AC7-FR).
 
-Limitation: PyYAML ``safe_dump`` does not preserve comments, so a `set` rewrites
-the target file without its comments. Acceptable for the machine-managed
-settings file; ruamel.yaml is not a dependency.
+Emits flat ``config.toml`` via ``tomli_w`` (stage 3 hard cut). TOML has no null,
+so None-valued keys are dropped on write (the loader reads an absent key as its
+default); comments are not preserved (machine-managed file). An unmigrated
+``settings.yaml`` at the target location is converted to ``config.toml`` before
+the write (the shared one-shot migrate), so a legacy install is never lost.
 """
 from __future__ import annotations
 
 import copy
 import os
 import tempfile
+import tomllib
 import typing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, get_args, get_origin
+from typing import Any, Callable, Optional, cast, get_args, get_origin
 
+import tomli_w
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from fno.config import SettingsModel, _global_settings_path
+from fno.config import (
+    SettingsModel,
+    _global_settings_path,
+    _migrate_yaml_to_toml,
+    _strip_none,
+)
 
 
 class ConfigSetError(Exception):
@@ -113,12 +123,10 @@ def _resolve_parent_block(
 
 
 def _storage_parts(parts: list[str]) -> list[str]:
-    """The dotted path a key is STORED at in settings.yaml: always under the
-    ``config:`` block. The model is flat, but the on-disk file stays wrapped, so
-    a ``config.``-prefixed key and its bare flat form both map to the same
-    wrapped location (a consistent single-shape file, never a mix)."""
-    flat = parts[1:] if parts and parts[0] == "config" else list(parts)
-    return ["config"] + flat
+    """The dotted path a key is STORED at in config.toml: flat (top-level
+    blocks, no ``config:`` wrapper). A ``config.``-prefixed key and its bare flat
+    form both map to the same flat location, so the file stays single-shape."""
+    return parts[1:] if parts and parts[0] == "config" else list(parts)
 
 
 def _coerce(value: str, ann: Any) -> Any:
@@ -171,38 +179,19 @@ def _coerce(value: str, ann: Any) -> Any:
 
 
 def _target_path(scope: str, repo_root: Optional[Path]) -> Path:
+    """The config.toml this scope writes to, migrating a legacy settings.yaml
+    sibling to config.toml first so an unmigrated install is converted (not
+    lost) before the write lands."""
     if scope == "project":
         if repo_root is None:
             from fno.paths import resolve_repo_root
 
             repo_root = resolve_repo_root()
-        target = repo_root / ".fno" / "settings.yaml"
+        fno_dir = repo_root / ".fno"
     else:
-        target = _global_settings_path()
-    _refuse_if_toml_shadows(target)
-    return target
-
-
-def _refuse_if_toml_shadows(target: Path) -> None:
-    """Fail loud if a higher-priority config.toml would shadow a settings.yaml write.
-
-    The loader prefers config.toml over settings.yaml, but this writer only
-    writes YAML. If a config.toml exists at the same location, writing YAML
-    would report success while load_settings() keeps returning the TOML value -
-    a silent no-op. TOML writes land in a later migration stage; until then,
-    refuse rather than mislead (codex P2, PR #255).
-    """
-    if target.name != "settings.yaml":
-        return
-    toml_sibling = target.with_name("config.toml")
-    if toml_sibling.exists():
-        raise ConfigSetError(
-            f"a config.toml exists at {toml_sibling} and takes read priority over "
-            f"settings.yaml, so this write would be silently ignored on the next "
-            f"load. Edit {toml_sibling} directly (TOML writes are not yet "
-            f"supported by `fno config set`).",
-            1,
-        )
+        fno_dir = _global_settings_path().parent
+    _migrate_yaml_to_toml(fno_dir / "settings.yaml")
+    return fno_dir / "config.toml"
 
 
 def _get_nested(d: dict[str, Any], parts: list[str]) -> Optional[dict[str, Any]]:
@@ -266,10 +255,10 @@ def _locked_update(
             existing: dict[str, Any] = {}
             if target.exists():
                 try:
-                    loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-                except yaml.YAMLError as exc:
+                    loaded = tomllib.loads(target.read_text(encoding="utf-8"))
+                except tomllib.TOMLDecodeError as exc:
                     raise ConfigSetError(
-                        f"existing settings at {target} is malformed: {exc}", 1
+                        f"existing config at {target} is malformed: {exc}", 1
                     ) from exc
                 if isinstance(loaded, dict):
                     existing = loaded
@@ -283,8 +272,9 @@ def _locked_update(
             )
             tmp = Path(tmp_str)
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
+                with os.fdopen(fd, "wb") as f:
+                    clean = cast("dict[str, Any]", _strip_none(data))
+                    f.write(tomli_w.dumps(clean).encode("utf-8"))
                 os.replace(str(tmp), str(target))
             except Exception:
                 try:

@@ -184,7 +184,7 @@ line by line. Never `eval` it. Captured fields: `node`, `node_query`,
 
 **Cross-project target (`-P`/`--project`).** By default a free-text spawn launches
 in the caller's cwd. `-P <project>` retargets it: normalize resolves the registry
-`name`/`short_name` (`config.work.workspaces.*.projects` in settings.yaml) to that
+`name`/`short_name` (`config.work.workspaces.*.projects` in config.toml) to that
 project's work-map root and emits `resolved_cwd`, which you pass to
 `spawn.sh --cwd` (see SPAWN). A natural-language `in <project>` / `in the <project>
 repo` / `as <project>` is YOUR job to translate: when you judge the phrasing is a

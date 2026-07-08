@@ -12,7 +12,7 @@ Reads state, skips completed steps, continues from last position.
 
 After compaction, project vision and goals are lost from context. On every `resume`:
 
-1. Read `project.vision` and `project.goals` from settings.yaml (local → global lookup)
+1. Read `project.vision` and `project.goals` from config.toml (local → global lookup)
 2. Hold these in working memory for the remainder of the session
 3. Use goals (G1-G5 etc.) to validate that current work aligns with project direction
 

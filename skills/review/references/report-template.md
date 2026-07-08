@@ -35,7 +35,7 @@
 
 ### Goal Relevance
 
-_If project goals are defined in settings.yaml:_
+_If project goals are defined in config.toml:_
 
 | Goal | Relevance |
 |------|-----------|
@@ -45,7 +45,7 @@ _If project goals are defined in settings.yaml:_
 
 _No scope creep detected._ / _⚠️ Changes touch areas outside stated goals — verify intent._
 
-_If no project goals defined: "No project goals defined in settings.yaml — skipping relevance check"_
+_If no project goals defined: "No project goals defined in config.toml — skipping relevance check"_
 
 ---
 

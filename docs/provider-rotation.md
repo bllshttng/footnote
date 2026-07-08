@@ -10,7 +10,7 @@ See [What this substrate does NOT do](#what-this-substrate-does-not-do).
 
 ## Concepts
 
-**Provider record** - A named configuration entry in `settings.yaml` describing
+**Provider record** - A named configuration entry in `config.toml` describing
 one CLI account: which binary to use (`claude`, `gemini`, `codex`, etc.), how
 to authenticate (`oauth_dir` or `api_key`), and where credentials live on disk.
 
@@ -29,7 +29,7 @@ at the correct credentials directory.
 
 ## Schema reference
 
-Provider records live under `config.providers` in `settings.yaml`.
+Provider records live under `config.providers` in `config.toml`.
 
 ```yaml
 config:
@@ -98,8 +98,8 @@ observable via `fno agents watch`, but no autonomous back-and-forth runs.
 
 Settings are read from two locations. Project-local wins over global:
 
-1. `.fno/settings.yaml` (project, committed or gitignored)
-2. `~/.fno/settings.yaml` (global, user-wide)
+1. `.fno/config.toml` (project, committed or gitignored)
+2. `~/.fno/config.toml` (global, user-wide)
 
 `fno providers add --scope project` writes to the project file.
 `fno providers add --scope global` writes to the global file.
@@ -218,7 +218,7 @@ invoking the CLI binary. The dict is minimal: only the keys strictly required
 for credential isolation.
 
 **Isolation guarantee:** `dispatch_env()` is a pure function. It reads
-`settings.yaml` and the filesystem but holds no module-level state and
+`config.toml` and the filesystem but holds no module-level state and
 acquires no locks. Safe to call concurrently from a `ThreadPoolExecutor` or
 `asyncio` without additional synchronisation.
 
@@ -345,7 +345,7 @@ portable alternatives. If the item exists but `dispatch_env()` still raises
 `ProviderUnavailableError`, check that the calling process has Keychain access
 (interactive sessions have it automatically; headless scripts may not).
 
-**settings.yaml validation failure on `fno providers add`**
+**config.toml validation failure on `fno providers add`**
 
 The `add` command validates the record via Pydantic before writing. Common
 causes:
@@ -604,7 +604,7 @@ at least one resolved agent is non-Claude:
 
 ### Migration
 
-Existing `settings.yaml` files are unaffected. The `config.agents` block is optional;
+Existing `config.toml` files are unaffected. The `config.agents` block is optional;
 when absent, every sigma-review subagent uses the global active provider exactly as
 before. To opt in, add the block per the schema above. There is no migration step
 or backfill required.
@@ -857,7 +857,7 @@ All paths terminate in setting `TARGET_COMBO=<name>` in the environment of spawn
 
 - **Empty `providers` list:** `Combo.__post_init__` raises `ValueError`; `load_combos` wraps as `ProviderConfigError`.
 - **Invalid strategy:** raised at construction-time.
-- **Unknown provider id in `--providers`:** rejected before `settings.yaml` mutation.
+- **Unknown provider id in `--providers`:** rejected before `config.toml` mutation.
 - **Combo deleted mid-dispatch:** `dispatch_with_combo` raises `ComboNotFoundError`; `sigma_dispatch.resolve_dispatch_target` catches its loader equivalent and falls through.
 - **All members in cooldown:** `dispatch_with_combo` returns `QueueExhausted(retry_after=...)` with the soonest cooldown-expiry hint.
 - **YAML round-trip via PyYAML loses comments:** documented limitation. Use `fno providers combos add/remove` for safe edits, or hand-edit and re-add.

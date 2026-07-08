@@ -18,7 +18,7 @@
 //!     fold returns empty and the overlay stays quiet (fail-open, AC-error).
 //!
 //! Config (`config.mux.attach_digest` + `attach_digest_threshold_min`) is read
-//! straight from settings.yaml (Pattern B) because the interactive attach path
+//! straight from config.toml (Pattern B) because the interactive attach path
 //! has no Python launcher to translate a knob into an env var.
 
 use crate::proto;
@@ -76,7 +76,7 @@ pub fn selector_from_cwd(cwd: &str) -> Option<String> {
     (!base.is_empty()).then(|| base.to_string())
 }
 
-// ── config (Pattern B: read settings.yaml directly) ────────────────────────
+// ── config (Pattern B: read config.toml directly) ─────────────────────────
 
 /// `config.mux.attach_digest` (default ON) — gate the overlay entirely.
 pub fn attach_digest_enabled(cwd: &Path) -> bool {
@@ -113,12 +113,12 @@ fn mux_str(cwd: &Path, key: &str) -> Option<String> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
         return read_mux_file(Path::new(&explicit), key);
     }
-    if let Some(v) = read_mux_file(&cwd.join(".fno/settings.yaml"), key) {
+    if let Some(v) = read_mux_file(&cwd.join(".fno/config.toml"), key) {
         return Some(v);
     }
     let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/settings.yaml")));
+        .map(|p| PathBuf::from(p).with_file_name("config.toml"))
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")));
     global.and_then(|g| read_mux_file(&g, key))
 }
 
@@ -126,47 +126,17 @@ fn read_mux_file(path: &Path, key: &str) -> Option<String> {
     read_mux_value(&std::fs::read_to_string(path).ok()?, key)
 }
 
-/// Scan a settings.yaml body for `config: > mux: > <key>:` and return the raw
-/// (comment- and quote-stripped) value. Indent-unit-agnostic, mirroring
-/// `agents_config::read_mux_bool`.
+/// Read `mux.<key>` from a flat config.toml body, returning the value as a raw
+/// string each caller re-coerces (bool -> "true"/"false", int -> its digits).
 fn read_mux_value(content: &str, key: &str) -> Option<String> {
-    let unit = content
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-        .map(|l| l.len() - l.trim_start().len())
-        .find(|&i| i > 0)
-        .unwrap_or(2);
-    let level = |line: &str| -> usize { (line.len() - line.trim_start().len()) / unit };
-
-    let mut in_config = false;
-    let mut in_mux = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        match level(line) {
-            0 => {
-                in_config = trimmed.starts_with("config:");
-                in_mux = false;
-            }
-            1 if in_config => in_mux = trimmed.starts_with("mux:"),
-            2 if in_mux => {
-                if let Some(rest) = trimmed.strip_prefix(key).and_then(|r| r.strip_prefix(':')) {
-                    let v = rest
-                        .split('#')
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .trim_matches(|c| c == '"' || c == '\'')
-                        .to_string();
-                    return (!v.is_empty()).then_some(v);
-                }
-            }
-            _ => {}
-        }
+    let t = content.parse::<toml::Table>().ok()?;
+    match t.get("mux")?.as_table()?.get(key)? {
+        toml::Value::String(s) => Some(s.clone()),
+        toml::Value::Boolean(b) => Some(b.to_string()),
+        toml::Value::Integer(i) => Some(i.to_string()),
+        toml::Value::Float(f) => Some(f.to_string()),
+        _ => None,
     }
-    None
 }
 
 fn parse_bool(v: &str) -> Option<bool> {
@@ -297,8 +267,7 @@ mod tests {
 
     #[test]
     fn reads_mux_values() {
-        let yaml =
-            "config:\n  mux:\n    attach_digest: false\n    attach_digest_threshold_min: 30\n";
+        let yaml = "[mux]\nattach_digest = false\nattach_digest_threshold_min = 30\n";
         assert_eq!(
             read_mux_value(yaml, "attach_digest").as_deref(),
             Some("false")

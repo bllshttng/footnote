@@ -7,7 +7,7 @@ status: accepted
 
 ## Overview
 
-The target pipeline (think → plan → execute → review → validate → ship) is now domain-agnostic. Instead of hardcoded code-specific skills at each phase, the pipeline resolves skills from **domain profiles** defined in settings.yaml. The `code` domain remains the implicit default — all existing behavior is unchanged.
+The target pipeline (think → plan → execute → review → validate → ship) is now domain-agnostic. Instead of hardcoded code-specific skills at each phase, the pipeline resolves skills from **domain profiles** defined in config.toml. The `code` domain remains the implicit default — all existing behavior is unchanged.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ graph TD
     subgraph "Domain Resolution"
         FLAG["--domain flag"]
         PLAN["Plan domain: field"]
-        SETTINGS["settings.yaml default_domain"]
+        SETTINGS["config.toml default_domain"]
         DEFAULT["code (implicit)"]
         FLAG --> RD
         PLAN --> RD
@@ -110,7 +110,7 @@ domains:
 | `get_domain_phase(domain, phase)` | Resolves phase skill via domain profile → code default |
 | `resolve_domain(flag, plan, settings)` | Resolves domain via lookup chain |
 | `domain_allows_claw(domain)` | Checks if autonomous execution is permitted |
-| `domain_exists(domain)` | Checks if domain is defined in settings.yaml |
+| `domain_exists(domain)` | Checks if domain is defined in config.toml |
 | `_warn_no_yq_once()` | Shared guard for degraded domain features |
 
 All functions are bash 3.2 compatible (no associative arrays). `yq` is required for non-code domain profiles — without it, functions fall back to code defaults with a warning.

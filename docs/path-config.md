@@ -1,13 +1,13 @@
 # Path configuration
 
-footnote stores all user-data files under `~/.fno/` by default. Every path is configurable via `~/.fno/settings.yaml`. This page documents the full schema, environment variables, template variables, and the migration flow.
+footnote stores all user-data files under `~/.fno/` by default. Every path is configurable via `~/.fno/config.toml`. This page documents the full schema, environment variables, template variables, and the migration flow.
 
 ## Quick start
 
 Run `fno config doctor` to see your current resolved paths and detect common problems:
 
 ```
-[doctor] settings source: /Users/you/.fno/settings.yaml
+[doctor] settings source: /Users/you/.fno/config.toml
 [doctor] schema_version: 1
 [doctor] state_dir: /Users/you/.fno
 
@@ -21,9 +21,9 @@ Exit code 0 means clean. Non-zero means at least one path needs attention.
 The CLI reads every candidate that exists and **deep-merges** them, with higher-priority files overriding lower-priority ones key-by-key. Candidate priority, highest first:
 
 1. `$FNO_CONFIG` (explicit path override; when set, the only candidate)
-2. `<repo-root>/.fno/settings.yaml` (project-local to this checkout)
-3. `<canonical-root>/.fno/settings.yaml` (the main checkout's config, reached via `git worktree list`, so a linked worktree reads shared project config; deduped when it equals candidate 2)
-4. `~/.fno/settings.yaml` (per-user global)
+2. `<repo-root>/.fno/config.toml` (project-local to this checkout)
+3. `<canonical-root>/.fno/config.toml` (the main checkout's config, reached via `git worktree list`, so a linked worktree reads shared project config; deduped when it equals candidate 2)
+4. `~/.fno/config.toml` (per-user global)
 5. Built-in defaults (when no file exists)
 
 The merge is per key: nested maps merge recursively, while scalars and lists replace wholesale (a project-level `config.external_reviewers` list fully replaces the global one rather than appending). A key absent from a higher-priority file falls through to the next file down. So the per-user global can hold shared defaults (for example `config.obsidian.vault`) while each repo's project-local file sets only its deltas (for example `config.post_merge.parking_lot_path`). The project-local file no longer shadows the entire global; it overrides only the keys it actually sets.
@@ -81,8 +81,8 @@ Unknown keys are silently ignored for forward compatibility. Glob characters (`*
 
 | Variable | Effect |
 |----------|--------|
-| `FNO_CONFIG` | Absolute path to a specific settings.yaml file. Overrides all path-based discovery. |
-| `FNO_GLOBAL_SETTINGS_PATH` | Overrides the per-user global candidate (`~/.fno/settings.yaml`) without affecting the project-local candidate. Set to `/dev/null` to disable the global candidate entirely. Used by `cli/src/fno/conftest.py` to keep unit tests isolated from the developer's real global config. Empty-string value is treated as unset. |
+| `FNO_CONFIG` | Absolute path to a specific config.toml file. Overrides all path-based discovery. |
+| `FNO_GLOBAL_SETTINGS_PATH` | Overrides the per-user global candidate (`~/.fno/config.toml`) without affecting the project-local candidate. Set to `/dev/null` to disable the global candidate entirely. Used by `cli/src/fno/conftest.py` to keep unit tests isolated from the developer's real global config. Empty-string value is treated as unset. |
 | `HOME` | Determines `~` expansion in path values. Set by the OS; override in tests only. |
 | `FNO_REPO_ROOT` | Overrides `git rev-parse --show-toplevel` for tests and CI environments where git is unavailable. Scopes **project/config resolution only**, not events-schema resolution (the schema self-locates inside the plugin; see [architecture/schema-config-resolution.md](architecture/schema-config-resolution.md)). Do NOT export it to fix a `schema unavailable` miss: pinning it to the footnote checkout from inside another repo silently repoints `fno config get` at the wrong project. `fno` warns (non-fatal) when it detects that foreign pin. |
 | `FNO_SKIP_MIGRATION` | Set to `1` to skip the automatic startup migration check. Useful in CI. |
@@ -143,7 +143,7 @@ Project-relative paths (`plans_dir`, `inbox_dir`) anchor relative strings to the
 On a clean install:
 
 ```
-[doctor] settings source: /Users/you/.fno/settings.yaml
+[doctor] settings source: /Users/you/.fno/config.toml
 [doctor] schema_version: 1
 [doctor] state_dir: /Users/you/.fno
 
@@ -153,7 +153,7 @@ On a clean install:
 When a suspicious path is found:
 
 ```
-[doctor] settings source: /Users/you/.fno/settings.yaml
+[doctor] settings source: /Users/you/.fno/config.toml
 [doctor] schema_version: 1
 [doctor] state_dir: /private/tmp/fno
 
@@ -176,7 +176,7 @@ Suspicious patterns and their reasons:
 
 ## `fno setup migrate-paths` flow
 
-On first run after install, the CLI automatically writes `~/.fno/settings.yaml` with built-in defaults. The sentinel `~/.fno/.path-migration-done` prevents re-running.
+On first run after install, the CLI automatically writes `~/.fno/config.toml` with built-in defaults. The sentinel `~/.fno/.path-migration-done` prevents re-running.
 
 To regenerate settings explicitly:
 
@@ -184,7 +184,7 @@ To regenerate settings explicitly:
 fno setup migrate-paths --force
 ```
 
-This rewrites `settings.yaml` from the built-in defaults. Any custom values are overwritten; back up the file first if you have customizations.
+This rewrites `config.toml` from the built-in defaults. Any custom values are overwritten; back up the file first if you have customizations.
 
 ## Deprecation pathway
 
@@ -203,4 +203,4 @@ def test_my_feature(tmp_path, monkeypatch):
     # paths.graph_json() now resolves under tmp_path; real ~/.fno untouched
 ```
 
-The helper writes a minimal `settings.yaml`, sets `FNO_CONFIG`, and clears both `load_settings` and `_settings` caches.
+The helper writes a minimal `config.toml`, sets `FNO_CONFIG`, and clears both `load_settings` and `_settings` caches.

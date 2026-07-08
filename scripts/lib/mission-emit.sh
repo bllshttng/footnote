@@ -68,22 +68,18 @@ if common_root_arg:
     except OSError:
         pass
 
-settings = Path(os.path.expanduser("~")) / ".fno" / "settings.yaml"
+settings = Path(os.path.expanduser("~")) / ".fno" / "config.toml"
 fallback = repo_root.name
 
 if not settings.exists():
     print(fallback)
     sys.exit(0)
 
-try:
-    import yaml
-except ImportError:
-    print(fallback)
-    sys.exit(0)
+import tomllib
 
 try:
-    data = yaml.safe_load(settings.read_text(encoding="utf-8")) or {}
-except yaml.YAMLError:
+    data = tomllib.loads(settings.read_text(encoding="utf-8")) or {}
+except tomllib.TOMLDecodeError:
     print(fallback)
     sys.exit(0)
 

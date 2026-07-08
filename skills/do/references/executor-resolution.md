@@ -69,7 +69,7 @@ Or override at the plan level by adding `executor: do` to the plan
 frontmatter to disable inference for the entire plan.
 
 To disable surface inference globally for the project, set in
-`.fno/settings.yaml`:
+`.fno/config.toml`:
 
 ```yaml
 config:

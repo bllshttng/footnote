@@ -5,11 +5,12 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PASS=0
 FAIL=0
 
 # Source the config library
-source "$SCRIPT_DIR/config.sh"
+source "$REPO_ROOT/scripts/lib/config.sh"
 
 # ---- Test helpers ----
 
@@ -30,28 +31,22 @@ assert_eq() {
 TMPDIR_TEST=$(mktemp -d)
 trap "rm -rf '$TMPDIR_TEST'" EXIT
 
-# ---- AC1: Load config from settings.yaml config: section ----
+# ---- AC1: Load config from flat config.toml ----
 
 echo ""
-echo "AC1: Load config from settings.yaml config: section"
+echo "AC1: Load config from flat config.toml"
 mkdir -p "$TMPDIR_TEST/ac1/.fno"
-cat > "$TMPDIR_TEST/ac1/.fno/settings.yaml" <<'YAML'
-work:
-  workspaces:
-    test:
-      projects: []
-
-config:
-  expertise: frontend
-  max_iterations: 20
-YAML
-LOCAL_SETTINGS="$TMPDIR_TEST/ac1/.fno/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_TEST/nonexistent/settings.yaml"
+cat > "$TMPDIR_TEST/ac1/.fno/config.toml" <<'TOML'
+expertise = "frontend"
+max_iterations = 20
+TOML
+LOCAL_SETTINGS="$TMPDIR_TEST/ac1/.fno/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_TEST/nonexistent/config.toml"
 LEGACY_CONFIG="$TMPDIR_TEST/nonexistent/config.yaml"
 result=$(get_config "expertise" "")
-assert_eq "get_config reads from settings.yaml config section" "frontend" "$result"
+assert_eq "get_config reads from config.toml" "frontend" "$result"
 result=$(get_config "max_iterations" "40")
-assert_eq "get_config reads numeric value from config section" "20" "$result"
+assert_eq "get_config reads numeric value" "20" "$result"
 
 # ---- AC2: Default value when key missing ----
 
@@ -64,8 +59,8 @@ assert_eq "get_config returns default for missing key" "fallback" "$result"
 
 echo ""
 echo "AC3: Works when no settings files exist"
-LOCAL_SETTINGS="$TMPDIR_TEST/nonexistent/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_TEST/nonexistent2/settings.yaml"
+LOCAL_SETTINGS="$TMPDIR_TEST/nonexistent/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_TEST/nonexistent2/config.toml"
 LEGACY_CONFIG="$TMPDIR_TEST/nonexistent3/config.yaml"
 result=$(get_config "expertise" "")
 assert_eq "get_config returns empty default when no files exist" "" "$result"
@@ -75,24 +70,22 @@ assert_eq "get_config returns empty default when no files exist" "" "$result"
 echo ""
 echo "AC4: Local settings override global settings"
 mkdir -p "$TMPDIR_TEST/ac4_global" "$TMPDIR_TEST/ac4_local/.fno"
-cat > "$TMPDIR_TEST/ac4_global/settings.yaml" <<'YAML'
-config:
-  expertise: backend
-  budget_cap: 50
-YAML
-cat > "$TMPDIR_TEST/ac4_local/.fno/settings.yaml" <<'YAML'
-config:
-  expertise: frontend
-YAML
-GLOBAL_SETTINGS="$TMPDIR_TEST/ac4_global/settings.yaml"
-LOCAL_SETTINGS="$TMPDIR_TEST/ac4_local/.fno/settings.yaml"
+cat > "$TMPDIR_TEST/ac4_global/config.toml" <<'TOML'
+expertise = "backend"
+budget_cap = 50
+TOML
+cat > "$TMPDIR_TEST/ac4_local/.fno/config.toml" <<'TOML'
+expertise = "frontend"
+TOML
+GLOBAL_SETTINGS="$TMPDIR_TEST/ac4_global/config.toml"
+LOCAL_SETTINGS="$TMPDIR_TEST/ac4_local/.fno/config.toml"
 LEGACY_CONFIG="$TMPDIR_TEST/nonexistent/config.yaml"
 result=$(get_config "expertise" "")
 assert_eq "local settings override global" "frontend" "$result"
 result=$(get_config "budget_cap" "25")
 assert_eq "global settings used when key not in local" "50" "$result"
 
-# ---- AC5: Legacy config.yaml fallback ----
+# ---- AC5: Legacy config.yaml fallback (still flat YAML via _get_from_legacy) ----
 
 echo ""
 echo "AC5: Legacy config.yaml fallback"
@@ -100,8 +93,8 @@ mkdir -p "$TMPDIR_TEST/ac5/.fno"
 cat > "$TMPDIR_TEST/ac5/.fno/config.yaml" <<'YAML'
 expertise: legacy_value
 YAML
-LOCAL_SETTINGS="$TMPDIR_TEST/nonexistent/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_TEST/nonexistent2/settings.yaml"
+LOCAL_SETTINGS="$TMPDIR_TEST/nonexistent/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_TEST/nonexistent2/config.toml"
 LEGACY_CONFIG="$TMPDIR_TEST/ac5/.fno/config.yaml"
 result=$(get_config "expertise" "")
 assert_eq "legacy config.yaml used as fallback" "legacy_value" "$result"
@@ -111,14 +104,13 @@ assert_eq "legacy config.yaml used as fallback" "legacy_value" "$result"
 echo ""
 echo "config_is_true: truthy/falsy values"
 mkdir -p "$TMPDIR_TEST/ac_bool/.fno"
-cat > "$TMPDIR_TEST/ac_bool/.fno/settings.yaml" <<'YAML'
-config:
-  no_external: true
-  no_docs: false
-  budget_cap: 20
-YAML
-LOCAL_SETTINGS="$TMPDIR_TEST/ac_bool/.fno/settings.yaml"
-GLOBAL_SETTINGS="$TMPDIR_TEST/nonexistent/settings.yaml"
+cat > "$TMPDIR_TEST/ac_bool/.fno/config.toml" <<'TOML'
+no_external = true
+no_docs = false
+budget_cap = 20
+TOML
+LOCAL_SETTINGS="$TMPDIR_TEST/ac_bool/.fno/config.toml"
+GLOBAL_SETTINGS="$TMPDIR_TEST/nonexistent/config.toml"
 LEGACY_CONFIG="$TMPDIR_TEST/nonexistent/config.yaml"
 if config_is_true "no_external"; then
     pass "config_is_true returns true for 'true' value"
@@ -136,18 +128,17 @@ else
     fail "config_is_true returns false for missing key"
 fi
 
-# ---- AC6: Nested YAML keys via yq ----
+# ---- AC6: Nested keys via yq ----
 
 echo ""
-echo "AC6: Nested YAML keys via yq"
+echo "AC6: Nested keys via yq"
 mkdir -p "$TMPDIR_TEST/ac6/.fno"
-cat > "$TMPDIR_TEST/ac6/.fno/settings.yaml" <<'YAML'
-config:
-  notifications:
-    enabled: true
-    channel: slack
-YAML
-LOCAL_SETTINGS="$TMPDIR_TEST/ac6/.fno/settings.yaml"
+cat > "$TMPDIR_TEST/ac6/.fno/config.toml" <<'TOML'
+[notifications]
+enabled = true
+channel = "slack"
+TOML
+LOCAL_SETTINGS="$TMPDIR_TEST/ac6/.fno/config.toml"
 result=$(get_config "notifications.enabled" "false")
 assert_eq "get_config handles nested key with dot notation" "true" "$result"
 result=$(get_config "notifications.channel" "email")

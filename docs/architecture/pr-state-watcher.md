@@ -43,7 +43,7 @@ The daemon never merges, closes, comments on, or mutates a PR or a graph node - 
 
 ## Configuration
 
-Under `config.pr_watch.*` in settings.yaml (all bounded, opt-in):
+Under `config.pr_watch.*` in config.toml (all bounded, opt-in):
 
 | Key | Default | Meaning |
 |---|---|---|

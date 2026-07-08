@@ -103,11 +103,27 @@ def parse_json(stdout: str) -> dict:
 
 
 def write_settings(home: Path, settings_yaml: str) -> Path:
-    """Write a global settings.yaml under $HOME/.fno/."""
+    """Write a global flat config.toml under $HOME/.fno/ (parses the YAML fixture
+    text, lifts any legacy config: wrapper, strips None, emits TOML)."""
+    import tomli_w
+    import yaml
+
     fno = home / ".fno"
     fno.mkdir(parents=True, exist_ok=True)
-    path = fno / "settings.yaml"
-    path.write_text(settings_yaml)
+    data = yaml.safe_load(settings_yaml) or {}
+    cfg = data.get("config")
+    if isinstance(cfg, dict):
+        data = {**{k: v for k, v in data.items() if k != "config"}, **cfg}
+
+    def _sn(x):
+        if isinstance(x, dict):
+            return {k: _sn(v) for k, v in x.items() if v is not None}
+        if isinstance(x, list):
+            return [_sn(v) for v in x]
+        return x
+
+    path = fno / "config.toml"
+    path.write_text(tomli_w.dumps(_sn(data)))
     return path
 
 

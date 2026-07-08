@@ -89,7 +89,7 @@ There are two parts to setup:
 1. **Preflight checks** - Verifies required tools are installed
 2. **Global directory** - Creates `~/.fno/` for global config
 3. **Checkpoints** - Creates `.fno/checkpoints/`
-4. **Settings scaffold** - Creates `.fno/settings.yaml` with placeholder fields
+4. **Settings scaffold** - Creates `.fno/config.toml` with placeholder fields
 
 **Interactive skill** (`/fno:setup`) - guides you through filling in the values:
 - Project vision, goals, and constraints
@@ -102,13 +102,13 @@ There are two parts to setup:
 ```
 your-project/
   .fno/
-    settings.yaml        # Project configuration
+    config.toml        # Project configuration
     checkpoints/         # State checkpoints
 ```
 
 ### Manual setup
 
-You can skip the wizard and edit `.fno/settings.yaml` directly. See the [Configuration Guide](configuration-guide.md) for the full schema.
+You can skip the wizard and edit `.fno/config.toml` directly. See the [Configuration Guide](configuration-guide.md) for the full schema.
 
 ---
 
@@ -261,7 +261,7 @@ footnote/                          # Repository root
         metrics/                    # Metrics analysis scripts
       CLAUDE.md                     # Plugin context for Claude Code
   .fno/                       # Runtime state (created by setup)
-    settings.yaml                   # Project configuration
+    config.toml                   # Project configuration
     checkpoints/                    # State checkpoints
   docs/                             # Documentation
   .github/workflows/                # CI/CD workflows
@@ -285,7 +285,7 @@ If you installed via symlink, the update takes effect immediately in your next C
 Check the [Changelog](changelog.md) for any breaking changes between versions. Key areas to watch:
 
 - Hook event changes (new hooks added, existing hooks renamed)
-- Settings schema additions (new required fields in `settings.yaml`)
+- Settings schema additions (new required fields in `config.toml`)
 - Agent definition changes (may require re-running sync scripts for Gemini/Codex)
 
 ### Re-running setup after upgrade
@@ -382,7 +382,7 @@ The external loop runner (`scripts/run-target-loop.sh`) re-invokes the CLI until
 | `~/.claude/plugins/footnote/` | Permanent plugin installation |
 | `~/.fno/` | Global config directory (signals, global settings) |
 | `.fno/` | Project-scoped runtime state |
-| `.fno/settings.yaml` | Project configuration |
+| `.fno/config.toml` | Project configuration |
 | `.fno/target-state.md` | Active target pipeline state |
 | `.fno/STATE.md` | Wave/task progress tracking |
 | `.fno/SUMMARY.md` | Task completion notes |
@@ -414,5 +414,5 @@ The external loop runner (`scripts/run-target-loop.sh`) re-invokes the CLI until
 
 ### All providers
 
-- **Settings portability** - `.fno/settings.yaml` is provider-agnostic. The same settings file works across all three CLIs.
+- **Settings portability** - `.fno/config.toml` is provider-agnostic. The same settings file works across all three CLIs.
 - **Script compatibility** - all shell scripts target `bash` and should work on macOS (with Homebrew bash) and Linux.

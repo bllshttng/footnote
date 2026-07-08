@@ -379,17 +379,13 @@ def _iter_settings_projects() -> Iterator[tuple[str, str]]:
         from fno.graph._intake import _settings_candidate_paths
     except ImportError:
         return
+    from fno.config import read_config_flat
+
     for path in _settings_candidate_paths():
         if not path.exists():
             continue
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        # config.work is canonical; fall back to legacy top-level work.
-        work = (data.get("config") or {}).get("work") or data.get("work")
+        # config.toml (or legacy settings.yaml) -> flat dict; work is top-level.
+        work = read_config_flat(path).get("work")
         if not isinstance(work, dict):
             continue
         workspaces = work.get("workspaces")

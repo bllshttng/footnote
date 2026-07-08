@@ -8,7 +8,7 @@ The single place that says where git worktrees go for this repo and what to do a
 
 - **Unset (OSS-neutral default):** harness-native `<repo>/.claude/worktrees/<name>`. That directory is gitignored, so `rg`/Grep already skip it. No relocation, zero config.
 - **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>`.
-- **This repo's setup:** the maintainer sets `config.paths.worktrees_base: ~/conductor/workspaces` in their **global** `~/.fno/settings.yaml`, so every footnote worktree lands at `~/conductor/workspaces/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`, e.g. `footnote`).
+- **This repo's setup:** the maintainer sets `config.paths.worktrees_base: ~/conductor/workspaces` in their **global** `~/.fno/config.toml`, so every footnote worktree lands at `~/conductor/workspaces/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`, e.g. `footnote`).
 - **`worktree.use_conductor_canonical: true` is DEPRECATED:** it still works (behaves as `worktrees_base = ~/conductor/workspaces`), but prefer `config.paths.worktrees_base`. The single knob is honored by the `WorktreeCreate` hook, `cli/src/fno/worktree.py` (the megawalk walker), and `cli/src/fno/worktree_paths.py` (the agents runtime; its own neutral default is `~/.fno/worktrees/{proj}-{name}`).
 
 After `git worktree add`, run the canonical setup script (paths below assume the maintainer's `~/conductor/workspaces` base; substitute your own base or the harness-native default):
@@ -42,7 +42,7 @@ It enforces strict pre-removal checks (clean working tree, no unpushed commits, 
 |---|---|---|
 | Conductor | Conductor UI | `conductor.json` `scripts.setup` runs `setup-worktree.sh`; worktree path is set by Conductor itself |
 | Raw `git worktree add` | Agent or terminal | Agent reads `AGENTS.md`, sees this rule, places at the configured base (`<worktrees_base>/<repo>/<name>`, e.g. `~/conductor/workspaces/footnote/...`) or harness-native `.claude/worktrees/<name>` when unset, then runs the setup script |
-| `claude --worktree <name>` (footnote-ecosystem project) | Claude Code CLI + footnote plugin | The plugin's `WorktreeCreate` hook (`hooks/worktree-setup.sh`) reads `config.paths.worktrees_base` from `.fno/settings.yaml` (via `fno config get`). Set -> relocate to `<base>/<repo>/<name>`; the deprecated `worktree.use_conductor_canonical: true` -> `~/conductor/workspaces/<repo>/<name>`; unset -> leave harness-native `<repo>/.claude/worktrees/<name>` in place. Then runs its existing setup (env copy, dep install, verification). Repo name from `basename $(git rev-parse --show-toplevel)`. |
+| `claude --worktree <name>` (footnote-ecosystem project) | Claude Code CLI + footnote plugin | The plugin's `WorktreeCreate` hook (`hooks/worktree-setup.sh`) reads `config.paths.worktrees_base` from `.fno/config.toml` (via `fno config get`). Set -> relocate to `<base>/<repo>/<name>`; the deprecated `worktree.use_conductor_canonical: true` -> `~/conductor/workspaces/<repo>/<name>`; unset -> leave harness-native `<repo>/.claude/worktrees/<name>` in place. Then runs its existing setup (env copy, dep install, verification). Repo name from `basename $(git rev-parse --show-toplevel)`. |
 | `claude --worktree <name>` (non-footnote project) | Claude Code CLI | Wire `scripts/setup/worktree-create-hook.sh` into your **user-global** `~/.claude/settings.json` (recipe below). Falls back to Claude's default `.claude/worktrees/<name>` if not wired. |
 | Warp tab from `git worktree add` | Warp UI | Place the worktree at the canonical location first; point Warp at it after (see Warp TOML snippet in `AGENTS.md` history). |
 
@@ -101,7 +101,7 @@ The granular contract is in `scripts/setup/setup-worktree.sh`. In summary:
 | Path | Treatment | Why |
 |---|---|---|
 | `internal/` | Symlink to canonical's `internal/` (absolute) | Obsidian vault link; depth-independent because absolute |
-| `.fno/settings.yaml`, `tasks.json`, `tasks.md`, `ledger.json`, `ledger.md` | Symlink to canonical | Shared project state; target gates and backlog must be coherent across worktrees |
+| `.fno/config.toml`, `tasks.json`, `tasks.md`, `ledger.json`, `ledger.md` | Symlink to canonical | Shared project state; target gates and backlog must be coherent across worktrees |
 | `.fno/codemap.md` | Symlink (regenerable artifact; last-writer-wins) | Latest map visible everywhere |
 | `.fno/wake-signals/` | Symlink to canonical | Wake signals dropped by the inbox drain; read per-project, not per-worktree |
 | `internal/agents/abilities/inbox.md` | Reached via the `internal/` symlink (no separate link) | Cross-project inbox lives in the Obsidian vault, not under `.fno/` |

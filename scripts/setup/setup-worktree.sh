@@ -138,10 +138,10 @@ link_dir() {
 link_dir "internal"
 
 # Shared abilities state (project-level, propagates across worktrees)
-link_file ".fno/settings.yaml"
-# settings.local.yaml is deliberately NOT linked: it is the one config file kept
-# per-worktree, layering the collision-prone keys (config.post_merge.parking_lot_path,
-# config.project.id) on top of the shared settings.yaml (x-cbce). Do not add a
+link_file ".fno/config.toml"
+# config.local.toml is deliberately NOT linked: it is the one config file kept
+# per-worktree, layering the collision-prone keys (post_merge.parking_lot_path,
+# project.id) on top of the shared config.toml (x-cbce). Do not add a
 # link_file for it here - a link would re-share exactly the keys it exists to
 # diverge. Absent by default (= shared behavior); seed one only when a worktree
 # needs its own value.

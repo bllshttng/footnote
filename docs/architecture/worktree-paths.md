@@ -45,7 +45,7 @@ Flat wins on operator ergonomics; the prefix carries the provenance.
                 │
                 ▼
    fno.worktree_paths   <-- single source of truth
-   ├── resolve_project_id     (settings.yaml -> git remote -> repo basename)
+   ├── resolve_project_id     (config.toml -> git remote -> repo basename)
    ├── worktree_path           (canonical full path)
    ├── legacy_worktree_path    (old shape; detection only)
    └── worktree_base           (~/.fno/worktrees/)
@@ -57,7 +57,7 @@ The runtime layer (`fno.runtime.worktree`) is a separate caller of the same help
 
 `resolve_project_id(repo_root)` walks three sources, in order, and returns the first match:
 
-1. `project.id` in `<repo_root>/.fno/settings.yaml`
+1. `project.id` in `<repo_root>/.fno/config.toml`
 2. Basename of `git remote get-url origin` (with `.git` suffix stripped)
 3. `repo_root.name` (final fallback)
 
@@ -66,7 +66,7 @@ The chosen id is validated against `^[A-Za-z0-9][A-Za-z0-9._-]*$` with an explic
 A typical project declares `project.id` explicitly:
 
 ```yaml
-# .fno/settings.yaml
+# .fno/config.toml
 project:
   id: fno
   name: footnote    # long form, display only

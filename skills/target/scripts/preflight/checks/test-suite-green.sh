@@ -12,8 +12,8 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 RUN_TESTS="${PREFLIGHT_RUN_TESTS:-0}"
 
 # Check settings.yaml for test_suite_check: true
-if [[ "$RUN_TESTS" != "1" && -f "$REPO_ROOT/.fno/settings.yaml" ]]; then
-    if grep -q "test_suite_check:\s*true" "$REPO_ROOT/.fno/settings.yaml" 2>/dev/null; then
+if [[ "$RUN_TESTS" != "1" && -f "$REPO_ROOT/.fno/config.toml" ]]; then
+    if grep -qE "test_suite_check[[:space:]]*=[[:space:]]*true" "$REPO_ROOT/.fno/config.toml" 2>/dev/null; then
         RUN_TESTS=1
     fi
 fi

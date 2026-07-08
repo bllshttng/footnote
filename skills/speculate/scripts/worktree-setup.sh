@@ -51,7 +51,7 @@ if command -v fno >/dev/null 2>&1; then
     unset _PATHS_SH
 fi
 SETTINGS=""
-for cfg in "$MAIN_REPO/.fno/settings.yaml" "${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/settings.yaml}"; do
+for cfg in "$MAIN_REPO/.fno/config.toml" "${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/config.toml}"; do
     if [[ -f "$cfg" ]]; then
         SETTINGS="$cfg"
         break

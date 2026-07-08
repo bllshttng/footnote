@@ -46,7 +46,7 @@ cmd_spawn --role  ->  dispatch_spawn  ->  _claude_create_path  ->  bg_create(rol
 
 ## Config
 
-`config.model_routing` in `~/.fno/settings.yaml` (global) or `.fno/settings.yaml` (project-local override):
+`config.model_routing` in `~/.fno/config.toml` (global) or `.fno/config.toml` (project-local override):
 
 | Key | Default | Purpose |
 |-----|---------|---------|
@@ -76,7 +76,7 @@ config:
       API_TIMEOUT_MS: "3000000"
 ```
 
-The key (secret) never lives in `settings.yaml`: it is read from the process env var named by the provider's `api_key_env` (the built-in `zai` uses `ZAI_API_KEY`), falling back to `api_key_file` (e.g. modelkit's `.env`); process env wins. The endpoint and model are config fields, so swapping a vendor's endpoint or bumping the GLM version is a settings edit, not a code change.
+The key (secret) never lives in `config.toml`: it is read from the process env var named by the provider's `api_key_env` (the built-in `zai` uses `ZAI_API_KEY`), falling back to `api_key_file` (e.g. modelkit's `.env`); process env wins. The endpoint and model are config fields, so swapping a vendor's endpoint or bumping the GLM version is a settings edit, not a code change.
 
 ## Scope and deferrals
 

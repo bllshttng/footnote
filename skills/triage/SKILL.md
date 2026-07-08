@@ -100,7 +100,7 @@ translate positional words into the equivalent flag:
 ## Process
 
 1. **Gather context.** Run the context generator to get pending nodes
-   plus project goals from settings.yaml. Forward the user's positional
+   plus project goals from config.toml. Forward the user's positional
    modifiers as the matching flags (e.g. `deep` -> `--deep`):
 
    ```bash
@@ -326,7 +326,7 @@ hygiene without human attention, use the deterministic check:
 
 Exit code 4 indicates a threshold breach (idea pile, stale-ready,
 failure-prone, or collisions). Configurable via
-`config.health_monitor` in settings.yaml; full schema in
+`config.health_monitor` in config.toml; full schema in
 [CLAUDE.md > Backlog Health Monitoring](../../CLAUDE.md#backlog-health-monitoring-2026-04-27-plan-ab-571c072b).
 The monitor is pull-based (poll every interval) and never auto-mutates
 the graph; breaches notify and the human (or a follow-up `/triage`)

@@ -78,7 +78,7 @@ If no decision text in arguments, ask (batched, one AskUserQuestion):
 
 Load [workflow.md](workflow.md) Phase 2.
 
-Read project vision from settings.yaml. Read recent git log (last 20 commits).
+Read project vision from config.toml. Read recent git log (last 20 commits).
 Check for existing think docs or plans. Build product context block for injection
 into persona prompts.
 
@@ -152,7 +152,7 @@ If no chain: present options:
 | standard (default) | 4 + DA | 2 | ~7 min | ~50K |
 | deep | all + DA | 3 | ~12 min | ~80K |
 
-Project default personas (from settings.yaml) and the user seat are always included regardless of depth.
+Project default personas (from config.toml) and the user seat are always included regardless of depth.
 Actual persona count = trimmed built-in count + project defaults + user seat + DA.
 Finding limit per persona: `ceil(24 / actual_persona_count)`.
 Time and token estimates scale linearly with additional personas.

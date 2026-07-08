@@ -44,7 +44,7 @@ REVIEWER_TYPE=$(get_config "external_reviewer" "gemini")
 ```
 
 If `REVIEWER_TYPE` is `"none"`:
-- Update target-state.md: set `external_review_passed: skipped`, `no_external: true` (provenance: settings.yaml)
+- Update target-state.md: set `external_review_passed: skipped`, `no_external: true` (provenance: config.toml)
 - Log: "External review disabled in settings — skipping"
 
 Otherwise:

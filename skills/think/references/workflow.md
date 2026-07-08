@@ -34,7 +34,7 @@ If no decision text provided, use interactive setup (one batched AskUserQuestion
 Build product context for persona prompts. This is NOT code analysis.
 
 **Sources:**
-1. Project vision and goals from settings.yaml (`project.vision`, `project.goals`)
+1. Project vision and goals from config.toml (`project.vision`, `project.goals`)
 2. Recent git log: `git log --oneline -20` (what's been shipped recently)
 3. Existing think docs or plans in the plans directory (if any)
 4. User-provided context from the invocation
@@ -43,8 +43,8 @@ Build product context for persona prompts. This is NOT code analysis.
 
 ```
 Product Context:
-- Vision: {from settings.yaml}
-- Goals: {G1-G5 from settings.yaml}
+- Vision: {from config.toml}
+- Goals: {G1-G5 from config.toml}
 - Recent work: {1-line summaries of last 5-10 commits}
 - Related plans: {titles of existing think/plan docs if relevant}
 - User context: {any additional context from the user}
@@ -61,7 +61,7 @@ In autonomous mode, the human won't be available to inject ground truth mid-sess
 Search for quantitative facts the panel will need:
 - Read any existing think-tank reports in the plans directory (prior sessions on related topics)
 - Read recent session state files in `.fno/think-tank-sessions/` for related decisions
-- Check settings.yaml for project constraints, goals, and metrics
+- Check config.toml for project constraints, goals, and metrics
 - Read the decision text carefully for embedded data ("we have X users", "pricing is $Y")
 
 **Step 2: Identify information gaps**
@@ -81,14 +81,14 @@ Autonomous Briefing:
 - Known facts: {quantitative data extracted from existing docs/settings}
 - Prior decisions: {relevant recommendations from past think-tank sessions}
 - Information gaps: {what we don't know - panel should flag these as open questions rather than speculating}
-- Constraints: {budget, timeline, team size, technical limits from settings.yaml}
+- Constraints: {budget, timeline, team size, technical limits from config.toml}
 ```
 
 **Step 4: Inject briefing as ground truth**
 
 The enriched context block replaces user interjections. Personas should treat briefing facts as authoritative (equivalent to the human saying "actually it's 2% not 1%") and flag information gaps explicitly rather than making assumptions.
 
-**If no enriched context can be gathered** (no prior sessions, minimal settings.yaml): proceed with standard context only. The panel will be less informed but the session is still useful - it will surface what questions need answering.
+**If no enriched context can be gathered** (no prior sessions, minimal config.toml): proceed with standard context only. The panel will be less informed but the session is still useful - it will surface what questions need answering.
 
 ## Phase 3: Persona Generation
 
@@ -101,7 +101,7 @@ Load and configure the persona panel.
 2. **Persona loading order:**
    a. If `custom` (inline YAML) with inline YAML: use custom set only (skip project defaults)
    b. If `--personas default|startup|adversarial`: load built-in set
-   c. Read `.fno/settings.yaml` -> `think_tank.default_personas`
+   c. Read `.fno/config.toml` -> `think_tank.default_personas`
    d. If project defaults exist and no `custom` (inline YAML): insert project default personas BEFORE Devil's Advocate in the panel. Trim built-in personas (not project defaults) if depth preset requires fewer personas. DA is always last, project defaults are always included.
    e. If project defaults + DA exceed the depth limit, expand the depth limit to fit.
 3. **User seat resolution** (see persona-templates.md "User Persona" section):

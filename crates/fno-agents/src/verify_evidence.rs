@@ -327,12 +327,12 @@ fn resolve_has_nonclaud_agent(
         None => {
             let repo_root = git_show_toplevel(git_bin)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            let project = repo_root.join(".fno/settings.yaml");
+            let project = repo_root.join(".fno/config.toml");
             if project.is_file() {
                 project
             } else {
                 let home = std::env::var("HOME").unwrap_or_default();
-                PathBuf::from(home).join(".fno/settings.yaml")
+                PathBuf::from(home).join(".fno/config.toml")
             }
         }
     };
@@ -351,37 +351,16 @@ fn resolve_has_nonclaud_agent(
         }
     };
 
-    // S3 fix: malformed YAML must NOT silently route to all-Claude. The bash
-    // shells `python3 -c 'import yaml,sys; yaml.safe_load(sys.stdin)'`; on a
-    // parse error it WARNs + returns rc=1. We reproduce this by invoking the
-    // same python3 check, so the malformed-detection boundary is byte-identical
-    // (a Rust-native YAML parser would diverge on edge cases). If python3 is
-    // absent the bash skips the check entirely (`command -v python3`), so we do
-    // too.
-    if let Some(py) = which_python3() {
-        let ok = Command::new(&py)
-            .args(["-c", "import yaml,sys; yaml.safe_load(sys.stdin)"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(content.as_bytes());
-                }
-                child.wait()
-            })
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !ok {
-            res.stderr.push_str(&format!(
-                "target: WARNING: settings.yaml unparseable; verify-event-evidence falling through to existing transcript-parser path (file: {})\n",
-                settings.display()
-            ));
-            res.code = 1;
-            return res;
-        }
+    // S3 fix: a malformed config must NOT silently route to all-Claude. Parse
+    // the flat config.toml; on a parse error, WARN + rc=1 so the caller falls
+    // through to the transcript-parser path rather than inferring all-Claude.
+    if cfg_table(&content).is_none() {
+        res.stderr.push_str(&format!(
+            "target: WARNING: config.toml unparseable; verify-event-evidence falling through to existing transcript-parser path (file: {})\n",
+            settings.display()
+        ));
+        res.code = 1;
+        return res;
     }
 
     // Parse agents_dispatched (same shape as event path, but `[[ -z ]] -> rc=1`).
@@ -447,186 +426,55 @@ fn resolve_has_nonclaud_agent(
     res
 }
 
-/// Locate python3 on PATH (mirrors `command -v python3`). None if absent.
-fn which_python3() -> Option<PathBuf> {
-    // `command -v python3` consults PATH. Use the same lookup the shell would.
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("python3");
-        if candidate.is_file() {
-            // Best-effort: assume it is executable (the bash `command -v` also
-            // only checks existence-on-PATH, not the x-bit, for builtins-vs-files
-            // in practice it returns the first PATH hit).
-            return Some(candidate);
-        }
-    }
-    None
+/// Parse a flat config.toml body into a table; None on parse error.
+fn cfg_table(content: &str) -> Option<toml::Table> {
+    content.parse::<toml::Table>().ok()
 }
 
-/// Global active provider:
-///   awk '/^[[:space:]]+active:/ { sub(...); print; exit }' | tr -d '"' / "'"
-/// The first indented `active:` value anywhere in the file. (The bash anchors
-/// on `^[[:space:]]+active:`, i.e. at least one leading space.)
+/// Global active provider: flat `providers.active`.
 fn parse_global_active(content: &str) -> Option<String> {
-    for line in content.lines() {
-        if !has_leading_ws(line) {
-            continue;
-        }
-        let trimmed = line.trim_start_matches([' ', '\t']);
-        if let Some(after) = trimmed.strip_prefix("active:") {
-            let v = after
-                .trim_start_matches([' ', '\t'])
-                .trim_end_matches([' ', '\t'])
-                .replace(['"', '\''], "");
-            return Some(v);
-        }
-    }
-    None
+    cfg_table(content)?
+        .get("providers")?
+        .as_table()?
+        .get("active")?
+        .as_str()
+        .map(str::to_string)
 }
 
-/// `config.agents.<name>.provider` via the bash awk:
-///   /^[[:space:]]+agents:/ { in_agents=1; next }
-///   in_agents && /^[[:space:]]{4}[a-zA-Z_-]/ { in_this = (key==agent); next }
-///   in_this && /^[[:space:]]+provider:/ { print; exit }
-///   in_agents && /^[a-zA-Z_]/ { exit }
+/// `agents.<name>.provider` from a flat config.toml.
 fn parse_agent_provider(content: &str, agent: &str) -> Option<String> {
-    let mut in_agents = false;
-    let mut in_this = false;
-    for line in content.lines() {
-        // `^[[:space:]]+agents:` — indented `agents:` key.
-        if has_leading_ws(line) && line.trim_start_matches([' ', '\t']).starts_with("agents:") {
-            in_agents = true;
-            continue;
-        }
-        if in_agents {
-            // `^[[:space:]]{4}[a-zA-Z_-]`: exactly 4 leading spaces then a name
-            // char -> an agent key line.
-            if has_n_leading_spaces_then_namechar(line, 4) {
-                let key = line
-                    .trim_start_matches([' ', '\t'])
-                    .split(':')
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                in_this = key == agent;
-                continue;
-            }
-            // `in_this && /^[[:space:]]+provider:/`.
-            if in_this && has_leading_ws(line) {
-                let trimmed = line.trim_start_matches([' ', '\t']);
-                if let Some(after) = trimmed.strip_prefix("provider:") {
-                    let v = after
-                        .trim_start_matches([' ', '\t'])
-                        .trim_end_matches([' ', '\t'])
-                        .replace(['"', '\''], "");
-                    return Some(v);
-                }
-            }
-            // `in_agents && /^[a-zA-Z_]/ { exit }`: a top-level key (col-0
-            // letter/_) ends the agents block.
-            if let Some(&first) = line.as_bytes().first() {
-                if first.is_ascii_alphabetic() || first == b'_' {
-                    return None;
-                }
-            }
-        }
-    }
-    None
+    cfg_table(content)?
+        .get("agents")?
+        .as_table()?
+        .get(agent)?
+        .as_table()?
+        .get("provider")?
+        .as_str()
+        .map(str::to_string)
 }
 
-/// `providers.records.<pid>.cli` via the bash awk:
-///   /^[[:space:]]+records:/ { in_records=1; next }
-///   in_records && /^[[:space:]]{6}[a-zA-Z_-]/ { in_this = (key==pid); next }
-///   in_this && /^[[:space:]]+cli:/ { print; exit }
-///   in_records && /^[[:space:]]{0,4}[a-zA-Z_]/ { in_records=0 }
+/// `cli` for the record whose `id == pid`, from a flat config.toml.
+///
+/// save_providers() serializes `providers.records` from a Python list, so it is
+/// a TOML array-of-tables (`[[providers.records]]` with an `id` field), NOT a
+/// table keyed by provider id. Reading it as a keyed table made `as_table()`
+/// return None for every real config, so codex/gemini providers went undetected
+/// and the non-Claude evidence path was skipped (codex P2).
 fn parse_provider_cli(content: &str, pid: &str) -> Option<String> {
-    let mut in_records = false;
-    let mut in_this = false;
-    for line in content.lines() {
-        if has_leading_ws(line) && line.trim_start_matches([' ', '\t']).starts_with("records:") {
-            in_records = true;
-            continue;
+    let table = cfg_table(content)?;
+    let records = table
+        .get("providers")?
+        .as_table()?
+        .get("records")?
+        .as_array()?;
+    records.iter().find_map(|rec| {
+        let t = rec.as_table()?;
+        if t.get("id").and_then(|v| v.as_str()) == Some(pid) {
+            t.get("cli").and_then(|v| v.as_str()).map(str::to_string)
+        } else {
+            None
         }
-        if in_records {
-            // `^[[:space:]]{6}[a-zA-Z_-]`: exactly 6 leading spaces then a name
-            // char -> a provider-id key line.
-            if has_n_leading_spaces_then_namechar(line, 6) {
-                let key = line
-                    .trim_start_matches([' ', '\t'])
-                    .split(':')
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                in_this = key == pid;
-                continue;
-            }
-            // `in_this && /^[[:space:]]+cli:/`.
-            if in_this && has_leading_ws(line) {
-                let trimmed = line.trim_start_matches([' ', '\t']);
-                if let Some(after) = trimmed.strip_prefix("cli:") {
-                    let v = after
-                        .trim_start_matches([' ', '\t'])
-                        .trim_end_matches([' ', '\t'])
-                        .replace(['"', '\''], "");
-                    return Some(v);
-                }
-            }
-            // `in_records && /^[[:space:]]{0,4}[a-zA-Z_]/ { in_records=0 }`:
-            // 0..=4 leading spaces then a letter/_ ends the records block.
-            // Note: this rule has NO `next`, so the bash continues to evaluate
-            // the same line afterwards — but since the only later rules are
-            // guarded by in_records (now false) or in_this, the practical effect
-            // is to end the block. We replicate by clearing in_records and
-            // continuing.
-            if has_0_to_n_leading_spaces_then_namechar(line, 4) {
-                in_records = false;
-            }
-        }
-    }
-    None
-}
-
-fn has_leading_ws(line: &str) -> bool {
-    matches!(line.as_bytes().first(), Some(b' ') | Some(b'\t'))
-}
-
-/// `^[[:space:]]{N}[a-zA-Z_-]`: exactly N leading SPACES, then a name char.
-/// The bash uses `{4}` / `{6}` with `[[:space:]]` but in practice indentation is
-/// spaces; we match exactly N spaces then the name-char class `[a-zA-Z_-]`.
-fn has_n_leading_spaces_then_namechar(line: &str, n: usize) -> bool {
-    let bytes = line.as_bytes();
-    if bytes.len() <= n {
-        return false;
-    }
-    for &b in &bytes[..n] {
-        if b != b' ' {
-            return false;
-        }
-    }
-    // The char at position n must NOT be a space (else it's deeper indent), and
-    // must be in `[a-zA-Z_-]`.
-    let c = bytes[n];
-    is_name_char(c)
-}
-
-/// `^[[:space:]]{0,4}[a-zA-Z_]`: 0..=N leading spaces, then a letter/underscore.
-fn has_0_to_n_leading_spaces_then_namechar(line: &str, n: usize) -> bool {
-    let bytes = line.as_bytes();
-    let mut spaces = 0;
-    while spaces < bytes.len() && bytes[spaces] == b' ' {
-        spaces += 1;
-    }
-    if spaces > n {
-        return false;
-    }
-    match bytes.get(spaces) {
-        Some(&c) => c.is_ascii_alphabetic() || c == b'_',
-        None => false,
-    }
-}
-
-fn is_name_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_' || c == b'-'
+    })
 }
 
 fn git_show_toplevel(git_bin: &str) -> Option<PathBuf> {
@@ -751,31 +599,23 @@ mod tests {
     }
 
     #[test]
-    fn n_leading_spaces_namechar() {
-        assert!(has_n_leading_spaces_then_namechar("    reviewer:", 4));
-        assert!(!has_n_leading_spaces_then_namechar("      reviewer:", 4)); // 6 spaces
-        assert!(!has_n_leading_spaces_then_namechar("  reviewer:", 4)); // 2 spaces
-        assert!(has_n_leading_spaces_then_namechar("      codex-prov:", 6));
-    }
-
-    #[test]
     fn global_active_extraction() {
-        let yaml = "config:\n  providers:\n    active: claude-main\n";
-        assert_eq!(parse_global_active(yaml).as_deref(), Some("claude-main"));
+        let cfg = "[providers]\nactive = \"claude-main\"\n";
+        assert_eq!(parse_global_active(cfg).as_deref(), Some("claude-main"));
     }
 
     #[test]
     fn agent_provider_and_cli_lookup() {
-        let yaml = "config:\n  agents:\n    reviewer:\n      provider: codex-prov\n  providers:\n    records:\n      codex-prov:\n        cli: codex\n    active: claude-main\n";
+        let cfg = "[agents.reviewer]\nprovider = \"codex-prov\"\n\n[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"codex-prov\"\ncli = \"codex\"\n";
         assert_eq!(
-            parse_agent_provider(yaml, "reviewer").as_deref(),
+            parse_agent_provider(cfg, "reviewer").as_deref(),
             Some("codex-prov")
         );
-        assert_eq!(parse_agent_provider(yaml, "other"), None);
+        assert_eq!(parse_agent_provider(cfg, "other"), None);
         assert_eq!(
-            parse_provider_cli(yaml, "codex-prov").as_deref(),
+            parse_provider_cli(cfg, "codex-prov").as_deref(),
             Some("codex")
         );
-        assert_eq!(parse_provider_cli(yaml, "nonexistent"), None);
+        assert_eq!(parse_provider_cli(cfg, "nonexistent"), None);
     }
 }

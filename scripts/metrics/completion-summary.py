@@ -9,8 +9,8 @@ Usage:
 
 Output path resolution (first match wins):
     1. --output CLI argument
-    2. config.completions_path in .fno/settings.yaml (project)
-    3. config.completions_path in ~/.fno/settings.yaml (global)
+    2. config.completions_path in .fno/config.toml (project)
+    3. config.completions_path in ~/.fno/config.toml (global)
     4. {plan_dir}/COMPLETION.md (fallback)
 
 Prints the generated summary path to stdout for the stop hook to capture.
@@ -107,12 +107,12 @@ def resolve_output_path(
         return Path(cli_output)
 
     # 2. Settings config (project then global)
-    for settings_path in [".fno/settings.yaml", os.path.expanduser("~/.fno/settings.yaml")]:
+    for settings_path in [".fno/config.toml", os.path.expanduser("~/.fno/config.toml")]:
         if os.path.exists(settings_path):
             try:
                 with open(settings_path) as f:
                     content = f.read()
-                match = re.search(r"^\s*completions_path:\s*(.+)", content, re.MULTILINE)
+                match = re.search(r"^\s*completions_path\s*=\s*(.+)", content, re.MULTILINE)
                 if match:
                     completions_dir = Path(match.group(1).strip().strip('"').strip("'"))
                     completions_dir.mkdir(parents=True, exist_ok=True)

@@ -52,8 +52,8 @@ When deciding whether to auto-merge, resolve in this order (first match wins):
 
 1. **CLI positional `no-merge`** - auto_merge_approved = false
 2. **CLI positional `auto-merge`** - auto_merge_approved = true
-3. **Local `.fno/settings.yaml`** - `config.auto_merge.enabled`
-4. **Global `~/.fno/settings.yaml`** - `config.auto_merge.enabled`
+3. **Local `.fno/config.toml`** - `config.auto_merge.enabled`
+4. **Global `~/.fno/config.toml`** - `config.auto_merge.enabled`
 5. **Default** - false
 
 If both CLI modifiers are set (user typed both by mistake): `no-merge` wins (safer). The resolved value is recorded in `target-state.md` as `auto_merge_approved` and is the sole signal the global git-protection hook checks.
@@ -67,8 +67,8 @@ To apply CLI modifiers, set env vars before calling `init-target-state.sh`:
 If both are set, `TARGET_NO_MERGE=1` wins. The init script writes `auto_merge_approved` + source to `target-state.md`.
 
 Log the resolved value + source at session start, e.g.:
-`target: auto_merge_approved=true (source: .fno/settings.yaml)`
+`target: auto_merge_approved=true (source: .fno/config.toml)`
 
 ## Phase 9 ship-docs invocation note
 
-**Critical for Phase 9:** MUST invoke `fno:ship-docs` via the Skill tool — do NOT write docs ad-hoc. The skill reads `settings.yaml` to discover roles (from `config.docs.roles`) and generates how-to guides for each affected role. Writing architecture docs alone is NOT sufficient — user-facing how-to guides are required for every role touched by the feature.
+**Critical for Phase 9:** MUST invoke `fno:ship-docs` via the Skill tool — do NOT write docs ad-hoc. The skill reads `config.toml` to discover roles (from `config.docs.roles`) and generates how-to guides for each affected role. Writing architecture docs alone is NOT sufficient — user-facing how-to guides are required for every role touched by the feature.

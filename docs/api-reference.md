@@ -142,7 +142,7 @@ Configuration, analysis, and operational tools.
 
 | Skill | Command | Purpose |
 |-------|---------|---------|
-| `setup` | `/fno:setup` | Interactive settings.yaml configuration wizard |
+| `setup` | `/fno:setup` | Interactive config.toml configuration wizard |
 | `codemap` | `/fno:codemap` | AST-based structural analysis with PageRank (god nodes, orphans, module boundaries) |
 | `ship-docs` | `/fno:ship-docs` | Architecture documentation generation |
 | `git-worktrees` | `/fno:git-worktrees` | Git worktree creation and management |
@@ -430,7 +430,7 @@ Task specification passed to subagents. Contains the specific task an agent shou
 
 ## Configuration
 
-### settings.yaml
+### config.toml
 
 Project-level configuration created by `/fno:setup`.
 

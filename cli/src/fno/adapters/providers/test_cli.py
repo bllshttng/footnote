@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
+import tomli_w
+import tomllib
 from typer.testing import CliRunner
 
 from fno.adapters.providers.cli import cli as providers_app
@@ -33,10 +34,27 @@ _WIDE_HELP_ENV = {
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _flatten(d: dict) -> dict:
+    cfg = d.get("config")
+    if not isinstance(cfg, dict):
+        return d
+    out = {k: v for k, v in d.items() if k != "config"}
+    out.update(cfg)
+    return out
+
+
+def _strip_none(x):
+    if isinstance(x, dict):
+        return {k: _strip_none(v) for k, v in x.items() if v is not None}
+    if isinstance(x, list):
+        return [_strip_none(v) for v in x]
+    return x
+
+
 def _write_settings(path: Path, content: dict) -> None:
-    """Write a settings.yaml file at path with content."""
+    """Write a flat config.toml at path (lifts any legacy config: wrapper)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(content, sort_keys=False), encoding="utf-8")
+    path.write_text(tomli_w.dumps(_strip_none(_flatten(content))), encoding="utf-8")
 
 
 def _invoke(args: list[str], cwd: Path, home: Path):
@@ -104,7 +122,7 @@ class TestListEmpty:
 class TestListWithRecords:
     def test_list_shows_all_records(self, tmp_path: Path):
         """fno providers list shows both records."""
-        settings_path = tmp_path / ".fno" / "settings.yaml"
+        settings_path = tmp_path / ".fno" / "config.toml"
         _write_settings(settings_path, _two_record_config())
         result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0
@@ -113,7 +131,7 @@ class TestListWithRecords:
 
     def test_list_marks_active_with_asterisk(self, tmp_path: Path):
         """fno providers list marks the active record with *."""
-        settings_path = tmp_path / ".fno" / "settings.yaml"
+        settings_path = tmp_path / ".fno" / "config.toml"
         _write_settings(settings_path, _two_record_config(active="claude-primary"))
         result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0
@@ -126,7 +144,7 @@ class TestListWithRecords:
 
     def test_list_inactive_has_no_asterisk(self, tmp_path: Path):
         """Non-active record is not marked with *."""
-        settings_path = tmp_path / ".fno" / "settings.yaml"
+        settings_path = tmp_path / ".fno" / "config.toml"
         _write_settings(settings_path, _two_record_config(active="claude-primary"))
         result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
         output_lines = result.output.splitlines()
@@ -144,7 +162,7 @@ class TestListWithRecords:
 class TestShow:
     def test_show_existing_prints_fields(self, tmp_path: Path):
         """fno providers show <id> prints all fields for the record."""
-        settings_path = tmp_path / ".fno" / "settings.yaml"
+        settings_path = tmp_path / ".fno" / "config.toml"
         _write_settings(settings_path, _two_record_config())
         result = _invoke(["show", "claude-primary"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0
@@ -281,8 +299,8 @@ class TestAtomicWrite:
         # Create a pre-existing settings.yaml and make the .fno dir read-only
         abilities_dir = tmp_path / ".fno"
         abilities_dir.mkdir(parents=True)
-        settings = abilities_dir / "settings.yaml"
-        settings.write_text("config:\n  v2_enabled: false\n", encoding="utf-8")
+        settings = abilities_dir / "config.toml"
+        settings.write_text("v2_enabled = false\n", encoding="utf-8")
         original_content = settings.read_text(encoding="utf-8")
 
         # Make the parent directory read-only so atomic_write can't create a temp file
@@ -324,7 +342,7 @@ class TestTestCommand:
 
         creds = tmp_path / ".claude"
         creds.mkdir()
-        settings_path = tmp_path / ".fno" / "settings.yaml"
+        settings_path = tmp_path / ".fno" / "config.toml"
         _write_settings(settings_path, {
             "config": {
                 "providers": {
@@ -349,7 +367,7 @@ class TestTestCommand:
         """fno providers test exits non-zero when CLI binary is not on PATH."""
         creds = tmp_path / ".claude"
         creds.mkdir()
-        settings_path = tmp_path / ".fno" / "settings.yaml"
+        settings_path = tmp_path / ".fno" / "config.toml"
         _write_settings(settings_path, {
             "config": {
                 "providers": {
@@ -377,7 +395,7 @@ class TestTestCommand:
 
     def test_test_missing_credentials_source_exits_nonzero(self, tmp_path: Path):
         """fno providers test exits non-zero when credentials_source path doesn't exist."""
-        settings_path = tmp_path / ".fno" / "settings.yaml"
+        settings_path = tmp_path / ".fno" / "config.toml"
         _write_settings(settings_path, {
             "config": {
                 "providers": {
@@ -586,7 +604,7 @@ class TestSmokeDispatchEnv:
         import subprocess as subprocess_module
 
         # Stage a fake api_key provider (api_key needs no filesystem staging).
-        settings_path = tmp_path / ".fno" / "settings.yaml"
+        settings_path = tmp_path / ".fno" / "config.toml"
         _write_settings(
             settings_path,
             {
@@ -615,13 +633,13 @@ class TestSmokeDispatchEnv:
         fake_gemini.chmod(0o755)
         monkeypatch.setenv("PATH", str(fake_bin))
 
-        # Capture the env kwarg passed to subprocess.run.
-        captured_envs: list[dict] = []
-        original_run = subprocess_module.run
+        # Capture (cmd, env) for each subprocess.run. The smoke arm makes
+        # internal `git` calls (repo-root resolution) before the CLI invocation,
+        # so key off the actual `gemini --help` run rather than the first call.
+        captured: list[tuple[list, dict]] = []
 
         def capturing_run(cmd, **kwargs):
-            captured_envs.append(dict(kwargs.get("env") or {}))
-            # Return a success result so the smoke arm continues cleanly.
+            captured.append((list(cmd), dict(kwargs.get("env") or {})))
             import subprocess
             return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -636,8 +654,9 @@ class TestSmokeDispatchEnv:
         )
 
         assert result.exit_code == 0, f"Expected exit 0, got {result.exit_code}: {result.output}"
-        assert captured_envs, "subprocess.run was not called during smoke"
-        env_used = captured_envs[0]
+        smoke_envs = [env for cmd, env in captured if cmd and cmd[0] == "gemini"]
+        assert smoke_envs, "the smoke `gemini` invocation was not run"
+        env_used = smoke_envs[0]
         assert "GEMINI_API_KEY" in env_used, (
             f"dispatch_env GEMINI_API_KEY must be injected into smoke subprocess env. "
             f"Got keys: {sorted(env_used.keys())}"
@@ -653,7 +672,7 @@ class TestSmokeDispatchEnv:
 @pytest.fixture
 def combos_cli_env(tmp_path: Path, monkeypatch):
     """Pre-seed two providers + isolate runtime_state so combos cli tests are independent."""
-    settings = tmp_path / ".fno" / "settings.yaml"
+    settings = tmp_path / ".fno" / "config.toml"
     _write_settings(settings, _two_record_config())
     monkeypatch.setenv(
         "FNO_RUNTIME_STATE_PATH",
@@ -677,10 +696,10 @@ class TestCombosAdd:
             home=combos_cli_env,
         )
         assert result.exit_code == 0, result.output
-        data = yaml.safe_load(
-            (combos_cli_env / ".fno" / "settings.yaml").read_text()
+        data = tomllib.loads(
+            (combos_cli_env / ".fno" / "config.toml").read_text()
         )
-        combos = data["config"]["providers"]["combos"]
+        combos = data["providers"]["combos"]
         assert "my-stack" in combos
         assert combos["my-stack"]["strategy"] == "round_robin"
         assert combos["my-stack"]["sticky_limit"] == 3
@@ -690,7 +709,7 @@ class TestCombosAdd:
         self, combos_cli_env: Path
     ):
         """AC4.2-ERR: unknown provider id rejected; settings.yaml unchanged."""
-        before = (combos_cli_env / ".fno" / "settings.yaml").read_text()
+        before = (combos_cli_env / ".fno" / "config.toml").read_text()
         result = _invoke(
             [
                 "combos", "add", "bad",
@@ -701,7 +720,7 @@ class TestCombosAdd:
         )
         assert result.exit_code != 0
         assert "does-not-exist" in result.output
-        after = (combos_cli_env / ".fno" / "settings.yaml").read_text()
+        after = (combos_cli_env / ".fno" / "config.toml").read_text()
         assert before == after
 
     def test_add_duplicate_name_fails(self, combos_cli_env: Path):
@@ -783,11 +802,11 @@ class TestCombosRemove:
         )
         assert result.exit_code == 0
         assert "active_combo cleared" in result.output
-        data = yaml.safe_load(
-            (combos_cli_env / ".fno" / "settings.yaml").read_text()
+        data = tomllib.loads(
+            (combos_cli_env / ".fno" / "config.toml").read_text()
         )
-        assert data["config"]["providers"].get("active_combo") is None
-        assert "my-stack" not in data["config"]["providers"].get("combos", {})
+        assert data["providers"].get("active_combo") is None
+        assert "my-stack" not in data["providers"].get("combos", {})
 
     def test_remove_unknown_combo_fails(self, combos_cli_env: Path):
         result = _invoke(
@@ -838,10 +857,10 @@ class TestCombosUse:
             cwd=combos_cli_env, home=combos_cli_env,
         )
         assert result.exit_code == 0
-        data = yaml.safe_load(
-            (combos_cli_env / ".fno" / "settings.yaml").read_text()
+        data = tomllib.loads(
+            (combos_cli_env / ".fno" / "config.toml").read_text()
         )
-        assert data["config"]["providers"]["active_combo"] == "my-stack"
+        assert data["providers"]["active_combo"] == "my-stack"
 
     def test_use_unknown_combo_fails(self, combos_cli_env: Path):
         result = _invoke(

@@ -7,7 +7,7 @@ AC6-FR (answered once, never re-asks), and the observed/malformed pass-through.
 from __future__ import annotations
 
 import pytest
-import yaml
+import tomllib
 
 from fno import paths
 from fno.agents import dispatch
@@ -63,7 +63,7 @@ def test_ac6_hp_yes_keeps_on_and_persists(tmp_path, monkeypatch):
     assert "6" in err.text() and "plan credit" in err.text()
     # AC6-FR: marker persisted + setting written.
     assert (paths.state_dir() / ".a2a-confirmed").exists()
-    assert yaml.safe_load((tmp_path / "g.yaml").read_text())["config"]["agents"]["a2a"]["auto"] is True
+    assert tomllib.loads((tmp_path / "config.toml").read_text())["agents"]["a2a"]["auto"] is True
 
 
 def test_ac6_hp_no_turns_off_and_persists(tmp_path, monkeypatch):
@@ -73,7 +73,7 @@ def test_ac6_hp_no_turns_off_and_persists(tmp_path, monkeypatch):
 
     assert dispatch._a2a_first_use_gate(True, 6) is False
     assert (paths.state_dir() / ".a2a-confirmed").exists()
-    assert yaml.safe_load((tmp_path / "g.yaml").read_text())["config"]["agents"]["a2a"]["auto"] is False
+    assert tomllib.loads((tmp_path / "config.toml").read_text())["agents"]["a2a"]["auto"] is False
 
 
 def test_ac6_hp_empty_defaults_yes(tmp_path, monkeypatch):

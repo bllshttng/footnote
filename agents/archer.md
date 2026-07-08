@@ -56,7 +56,7 @@ You are running in a **subagent context** with limited resources. Be efficient:
    the entities you'll be working with. The schema knowledge flows from config into
    the plan into your task, not discovered at execution time.
 
-   1. **Check config first (fastest path):** Read schema sources from settings.yaml:
+   1. **Check config first (fastest path):** Read schema sources from config.toml:
       ```bash
       source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/config.sh"
       TYPES_DIR=$(get_config "schema_sources.types" "")

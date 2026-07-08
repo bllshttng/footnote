@@ -236,8 +236,8 @@ exit 1
     }
 }
 
-/// Write a settings.yaml to `<cwd>/.fno/settings.yaml` so tests are
-/// isolated from the real `$HOME/.fno/settings.yaml`. Pins the standard
+/// Write a config.toml to `<cwd>/.fno/config.toml` so tests are
+/// isolated from the real `$HOME/.fno/config.toml`. Pins the standard
 /// review gate (`required_bots: [chatgpt-codex-connector]`) because the PRODUCT
 /// default is now an EMPTY required_bots list (fresh installs complete without a
 /// configured review bot). Every test that calls this helper historically ran
@@ -251,8 +251,8 @@ fn isolate_settings(cwd: &Path) {
     // effects). Idempotent set; never unset, so it is parallel-safe.
     std::env::set_var("FNO_NUDGE_DISABLED", "1");
     fs::write(
-        cwd.join(".fno/settings.yaml"),
-        "config:\n  review:\n    required_bots:\n      - chatgpt-codex-connector\n",
+        cwd.join(".fno/config.toml"),
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
     )
     .unwrap();
 }
@@ -337,7 +337,7 @@ fn fire(args: &[&str]) -> (i32, Decision) {
     // an in-process pipe simulation.  For simplicity, call via the public
     // function which returns the JSON string.
     let mut args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    // Hermeticity: never let the developer's real ~/.fno/settings.yaml
+    // Hermeticity: never let the developer's real ~/.fno/config.toml
     // merge under test-local settings (the global+local merge is exercised
     // by the bash e2e harness, which controls HOME per case).
     args_owned.push("--global-settings".to_string());
@@ -419,7 +419,7 @@ fn ac1_hp_promise_green_pr_done() {
     );
 }
 
-/// x-81d9 (c) / AC3-UI: an unparseable `.fno/settings.yaml` must emit a
+/// x-81d9 (c) / AC3-UI: an unparseable `.fno/config.toml` must emit a
 /// `loop_check_settings_unparseable` event (and fail the login gate closed),
 /// never silently zero the required bots and ship unreviewed.
 #[test]
@@ -429,8 +429,8 @@ fn ac3_ui_unparseable_settings_emits_event() {
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     // Deliberately malformed YAML (unclosed flow sequence). No isolate_settings.
     fs::write(
-        cwd.join(".fno/settings.yaml"),
-        "config:\n  review:\n    required_bots: [codex, gemini\n",
+        cwd.join(".fno/config.toml"),
+        "[review]\nrequired_bots = [\"codex\", \"gemini\"\n",
     )
     .unwrap();
 
@@ -465,7 +465,7 @@ fn ac3_ui_unparseable_settings_emits_event() {
     );
 }
 
-/// x-81d9 (c) regression (peer review): an unparseable LOCAL settings.yaml must
+/// x-81d9 (c) regression (peer review): an unparseable LOCAL config.toml must
 /// fail the gate closed even when a parseable GLOBAL file declares an empty
 /// github_apps gate. resolved_required_bots prefers github_apps over
 /// required_bots, so the fail-closed sentinel must be pinned into github_apps
@@ -478,11 +478,11 @@ fn unparseable_local_settings_not_outranked_by_global_github_apps() {
 
     // GLOBAL: a parseable, empty github_apps gate (the worst case - no bots).
     let global = cwd.join("global.yaml");
-    fs::write(&global, "config:\n  review:\n    github_apps: []\n").unwrap();
+    fs::write(&global, "[review]\ngithub_apps = []\n").unwrap();
     // LOCAL: unparseable (the exact bug this PR targets).
     fs::write(
-        cwd.join(".fno/settings.yaml"),
-        "config:\n  review:\n    github_apps: [codex\n",
+        cwd.join(".fno/config.toml"),
+        "[review]\ngithub_apps = [\"codex\"\n",
     )
     .unwrap();
 
@@ -950,8 +950,8 @@ fn ac3_hp_budget_flat_key_trips_cost() {
     fs::write(&transcript_path, transcript_empty()).unwrap();
 
     // Settings file with flat budget_cap: 0.01 (very low)
-    let settings_path = cwd.join(".fno/settings.yaml");
-    fs::write(&settings_path, "budget_cap: 0.01\n").unwrap();
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(&settings_path, "budget_cap = 0.01\n").unwrap();
 
     // Ledger with cost > 0.01 for this session
     let ledger_path = cwd.join(".fno/ledger.json");
@@ -1358,7 +1358,7 @@ fn ac5_hp_declared_no_ci_skipped() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let settings_path = cwd.join(".fno/settings.yaml");
+    let settings_path = cwd.join(".fno/config.toml");
 
     fs::write(
         &manifest_path,
@@ -1366,7 +1366,7 @@ fn ac5_hp_declared_no_ci_skipped() {
     )
     .unwrap();
     fs::write(&transcript_path, transcript_with_promise()).unwrap();
-    fs::write(&settings_path, "config:\n  ci:\n    declared_none: true\n").unwrap();
+    fs::write(&settings_path, "[ci]\ndeclared_none = true\n").unwrap();
 
     // gh: returns no checks (empty array) but we declared no-ci so it should skip
     let dir = TempDir::new().unwrap();
@@ -2006,10 +2006,10 @@ fn ac1_edge_two_bot_config_one_missing_blocks() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
-    let settings_path = cwd.join(".fno/settings.yaml");
+    let settings_path = cwd.join(".fno/config.toml");
     fs::write(
         &settings_path,
-        "config:\n  review:\n    required_bots:\n      - chatgpt-codex-connector\n      - gemini-code-assist\n",
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\", \"gemini-code-assist\"]\n",
     )
     .unwrap();
 
@@ -2371,12 +2371,8 @@ fn ac3_hp_empty_required_bots_skips_review_reads() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
-    let settings_path = cwd.join(".fno/settings.yaml");
-    fs::write(
-        &settings_path,
-        "config:\n  review:\n    required_bots: []\n",
-    )
-    .unwrap();
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(&settings_path, "[review]\nrequired_bots = []\n").unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -2431,12 +2427,8 @@ fn ac3_err_malformed_required_bots_no_gate() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
-    let settings_path = cwd.join(".fno/settings.yaml");
-    fs::write(
-        &settings_path,
-        "config:\n  review:\n    required_bots: gemini\n",
-    )
-    .unwrap();
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(&settings_path, "[review]\nrequired_bots = \"gemini\"\n").unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -2487,10 +2479,10 @@ fn ac3_edge_no_external_orthogonal_to_required_bots() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
-    let settings_path = cwd.join(".fno/settings.yaml");
+    let settings_path = cwd.join(".fno/config.toml");
     fs::write(
         &settings_path,
-        "config:\n  review:\n    required_bots:\n      - chatgpt-codex-connector\n",
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
     )
     .unwrap();
 
@@ -2541,12 +2533,8 @@ fn reviewers_gate_blocks_without_attestation() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
-    let settings_path = cwd.join(".fno/settings.yaml");
-    fs::write(
-        &settings_path,
-        "config:\n  review:\n    reviewers:\n      - sigma\n",
-    )
-    .unwrap();
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(&settings_path, "[review]\nreviewers = [\"sigma\"]\n").unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -2590,12 +2578,8 @@ fn reviewers_gate_clears_with_head_pinned_attestation() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
-    let settings_path = cwd.join(".fno/settings.yaml");
-    fs::write(
-        &settings_path,
-        "config:\n  review:\n    reviewers:\n      - sigma\n",
-    )
-    .unwrap();
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(&settings_path, "[review]\nreviewers = [\"sigma\"]\n").unwrap();
     // The attestation lands in the project events log loop-check reads.
     fs::write(
         cwd.join(".fno/events.jsonl"),
@@ -2649,12 +2633,8 @@ fn no_external_still_honors_reviewers_gate() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
-    let settings_path = cwd.join(".fno/settings.yaml");
-    fs::write(
-        &settings_path,
-        "config:\n  review:\n    reviewers:\n      - sigma\n",
-    )
-    .unwrap();
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(&settings_path, "[review]\nreviewers = [\"sigma\"]\n").unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -2713,12 +2693,8 @@ fn ac3_fr_restoring_required_bots_reenforces() {
     let mock = green_gemini_only_reviewed();
 
     // Fire 1: required_bots [] -> passes without review.
-    let empty_settings = cwd.join("empty-settings.yaml");
-    fs::write(
-        &empty_settings,
-        "config:\n  review:\n    required_bots: []\n",
-    )
-    .unwrap();
+    let empty_settings = cwd.join("empty-config.toml");
+    fs::write(&empty_settings, "[review]\nrequired_bots = []\n").unwrap();
     let (_, d1) = fire(&[
         "loop-check",
         "--state",
@@ -2739,10 +2715,10 @@ fn ac3_fr_restoring_required_bots_reenforces() {
     assert_eq!(d1.termination_reason.as_deref(), Some("DonePRGreen"));
 
     // Fire 2: operator restores the list -> gate enforces again immediately.
-    let restored_settings = cwd.join("restored-settings.yaml");
+    let restored_settings = cwd.join("restored-config.toml");
     fs::write(
         &restored_settings,
-        "config:\n  review:\n    required_bots:\n      - chatgpt-codex-connector\n",
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
     )
     .unwrap();
     let (_, d2) = fire(&[

@@ -96,7 +96,7 @@ Your task: Analyze the product decision below independently. Produce findings
 based on your expertise. Do NOT anticipate other personas' views.
 
 Context:
-- Project vision: {vision from settings.yaml}
+- Project vision: {vision from config.toml}
 - Decision: {user's question or proposal}
 - Additional context: {any user-provided context}
 
@@ -120,7 +120,7 @@ Output format:
 
 ## Project Default Personas
 
-Configure domain-specific personas in `.fno/settings.yaml` under `think_tank.default_personas`:
+Configure domain-specific personas in `.fno/config.toml` under `think_tank.default_personas`:
 
 ```yaml
 think_tank:
@@ -170,7 +170,7 @@ Custom personas replace the default set entirely. Devil's Advocate is always add
 | standard | 4 + DA | 2 | ~7 min | ~50K |
 | deep | all + DA | 3 | ~12 min | ~80K |
 
-Project default personas (from settings.yaml) are always included regardless of depth.
+Project default personas (from config.toml) are always included regardless of depth.
 Actual persona count = trimmed built-in count + project defaults + user seat + DA.
 Finding limit per persona: `ceil(24 / actual_persona_count)`.
 Time and token estimates scale linearly with additional personas.

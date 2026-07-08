@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Project config loader for target
-# Reads from settings.yaml (config: section) with global → local override
+# Reads from config.toml (flat) with global → local override
 #
 # Lookup order (local wins):
-#   1. .fno/settings.yaml          (project-local override)
-#   2. ~/.fno/settings.yaml  (global defaults)
+#   1. .fno/config.toml            (project-local override)
+#   2. ~/.fno/config.toml    (global defaults)
 #
 # Config section format (inside settings.yaml):
 #   config:
@@ -29,7 +29,7 @@ fi
 # (the ACTIVE config = the project-local file when one exists; aliasing it hid
 # every global-only key from bash consumers - ab-5d6c3d47). Honor
 # FNO_GLOBAL_SETTINGS_PATH so bash matches Python's _global_settings_path().
-GLOBAL_SETTINGS="${GLOBAL_SETTINGS:-${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/settings.yaml}}"
+GLOBAL_SETTINGS="${GLOBAL_SETTINGS:-${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/config.toml}}"
 # LOCAL_SETTINGS is the active project config. Prefer CONFIG_FILE (the stub's
 # resolved local/canonical-root path) when it names a file distinct from the
 # global one, so a linked worktree whose .fno/settings.yaml is not symlinked
@@ -38,7 +38,7 @@ if [[ -z "${LOCAL_SETTINGS:-}" ]]; then
     if [[ -n "${CONFIG_FILE:-}" && "${CONFIG_FILE}" != "${GLOBAL_SETTINGS}" ]]; then
         LOCAL_SETTINGS="$CONFIG_FILE"
     else
-        LOCAL_SETTINGS=".fno/settings.yaml"
+        LOCAL_SETTINGS=".fno/config.toml"
     fi
 fi
 LEGACY_CONFIG="${LEGACY_CONFIG:-.fno/config.yaml}"
@@ -79,7 +79,7 @@ _get_from_settings() {
     # For dotted keys like "notifications.enabled", use yq if available
     if [[ "$key" == *.* ]] && command -v yq &>/dev/null; then
         local value
-        value=$(yq ".config.${key}" "$file" 2>/dev/null)
+        value=$(yq -p toml ".${key}" "$file" 2>/dev/null)
         if [[ -n "$value" && "$value" != "null" ]]; then
             echo "$value"
             return 0
@@ -87,13 +87,10 @@ _get_from_settings() {
         return 1
     fi
 
-    # Simple keys: extract from config: block (indented by 2+ spaces)
+    # Flat config.toml: a top-level `${key} = value` line.
     local value
-    value=$(sed -n '/^config:/,/^[^ ]/{
-        /^  '"${key}"':/p
-    }' "$file" 2>/dev/null \
+    value=$(sed -n "s/^${key}[[:space:]]*=[[:space:]]*//p" "$file" 2>/dev/null \
         | head -1 \
-        | sed "s/^[[:space:]]*${key}:[[:space:]]*//" \
         | tr -d '"' | tr -d "'")
     if [[ -n "$value" ]]; then
         echo "$value"
@@ -142,8 +139,8 @@ _get_from_workspace() {
     # top-level work:/workspace: sections, so folded and un-migrated files resolve.
     if [[ "$key" == *.* ]] && command -v yq &>/dev/null; then
         local value root
-        for root in ".config.work" ".work" ".workspace"; do
-            value=$(yq "${root}.${key}" "$file" 2>/dev/null)
+        for root in ".work" ".workspace"; do
+            value=$(yq -p toml "${root}.${key}" "$file" 2>/dev/null)
             [[ -n "$value" && "$value" != "null" ]] && { echo "$value"; return 0; }
         done
         return 1
@@ -281,7 +278,7 @@ get_domain_phase() {
     if command -v yq &>/dev/null; then
         for settings_file in "$LOCAL_SETTINGS" "$GLOBAL_SETTINGS"; do
             if [[ -f "$settings_file" ]]; then
-                value=$(yq ".domains.${domain}.phases.${phase}" "$settings_file" 2>/dev/null)
+                value=$(yq -p toml ".domains.${domain}.phases.${phase}" "$settings_file" 2>/dev/null)
                 if [[ -n "$value" && "$value" != "null" ]]; then
                     echo "$value"
                     return 0

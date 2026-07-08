@@ -85,7 +85,7 @@ If `git rev-parse --git-common-dir` fails (not in a git repo), the fallback is t
 
 ## Config reference
 
-All keys live under `config.target.handoff` in `.fno/settings.yaml`. Schema: `HandoffBlock` in `cli/src/fno/config/__init__.py`. Shell consumer: `skills/target/scripts/handoff.sh` reads via `get_config "target.handoff.*"` with matching defaults (see lines ~100-106 of that file).
+All keys live under `config.target.handoff` in `.fno/config.toml`. Schema: `HandoffBlock` in `cli/src/fno/config/__init__.py`. Shell consumer: `skills/target/scripts/handoff.sh` reads via `get_config "target.handoff.*"` with matching defaults (see lines ~100-106 of that file).
 
 | Key | Default | Constraint | Description |
 |-----|---------|------------|-------------|
