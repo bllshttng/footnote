@@ -174,35 +174,43 @@ def _claim_state(claim_key: str) -> Optional[str]:
 def _manifest_liveness(manifest_raw: Optional[Dict[str, Any]]) -> tuple[str, str]:
     """``(state, reason)`` where state is ``live`` | ``dead`` | ``none``.
 
-    Claim-first (x-ba4b): a held+unexpired claim (``live``/``suspect``) outranks
-    a dead ``owner_pid`` snapshot. DEAD requires BOTH signals confirmed dead --
-    the claim absent/expired AND the owner_pid dead -- so any uncertainty (an
-    unreadable claim, an absent pid) biases LIVE and never archives a live run.
+    The node claim is the ONLY durable liveness signal (x-ba4b: session-pid
+    anchored + TTL-protected). ``owner_pid`` is the TRANSIENT ``fno target init``
+    wrapper pid (init-target-state.sh:525) that dies seconds after init, so it can
+    only ever PROVE life (a live pid), never death. DEAD is asserted solely from a
+    claim confirmed absent/expired:
+
+      * claim held (live/suspect)          -> LIVE
+      * claim absent/expired (free/stale)  -> DEAD (the durable anchor is gone)
+      * claim unreadable (corrupted/error) -> LIVE (cannot confirm death)
+      * NO claim key -> LIVE unless owner_pid still proves life
+
+    The no-claim-key bias is load-bearing: a live NON-node target (free-text or a
+    plan input writes graph_node_id:null and no claim) has a dead transient
+    owner_pid post-init, so concluding DEAD from owner_pid there would archive a
+    running session and flip /think to attended mid-run. With no durable death
+    signal we bias LIVE (a false-live costs one autonomous /think; a false-dead
+    archives a live session).
     """
     raw = manifest_raw or {}
     if not raw:
         return "none", "no manifest"
 
     claim_key = str(raw.get("target_claim_key") or "").strip()
-    claim_confirmed_dead = False
     if claim_key:
         state = _claim_state(claim_key)
         if state in {"live", "suspect"}:
             return "live", f"claim {claim_key} {state}"
         if state in {"free", "stale"}:
-            claim_confirmed_dead = True  # absent / expired
-        # corrupted / None -> claim NOT confirmed dead; fall to owner_pid, biased live
-    else:
-        claim_confirmed_dead = True  # legacy manifest: owner_pid alone decides
+            return "dead", f"claim {claim_key} {state}"
+        # corrupted / unreadable -> claim signal unavailable, cannot confirm death
+        return "live", f"claim {claim_key} unreadable (biased live)"
 
-    owner_pid = raw.get("owner_pid")
-    if _pid_alive(owner_pid):
+    # No recorded claim key: owner_pid can only PROVE life (it is transient, so a
+    # dead/absent one is not proof of death - could be a live non-node target).
+    if _pid_alive(raw.get("owner_pid")):
         return "live", "owner_pid alive"
-    have_pid = str(owner_pid or "").strip() not in ("", "null", "~")
-    if claim_confirmed_dead and have_pid:
-        why = "claim stale/expired" if claim_key else "no claim key"
-        return "dead", f"{why} + owner_pid {owner_pid} dead"
-    return "live", "uncertain (biased live)"
+    return "live", "no claim key; owner_pid transient (biased live)"
 
 
 def _attended_line(manifest_raw: Optional[Dict[str, Any]]) -> str:

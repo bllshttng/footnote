@@ -103,12 +103,16 @@ def test_manifest_liveness_dead_claim_and_dead_pid(monkeypatch) -> None:
     assert orient._manifest_liveness(raw)[0] == "dead"
 
 
-def test_manifest_liveness_legacy_no_claim_key(monkeypatch) -> None:
-    # No recorded claim key (legacy manifest) -> owner_pid alone decides.
+def test_manifest_liveness_no_claim_key_never_dead(monkeypatch) -> None:
+    # Codex P1: a live NON-node target (free-text/plan input) has NO claim key and
+    # a dead TRANSIENT owner_pid post-init. owner_pid can only PROVE life, never
+    # death - so a no-claim manifest is LIVE whether the pid is alive or dead, and
+    # the GC must never archive it.
     monkeypatch.setattr(orient, "_pid_alive", lambda _p: True)
     assert orient._manifest_liveness({"owner_pid": "123"})[0] == "live"
     monkeypatch.setattr(orient, "_pid_alive", lambda _p: False)
-    assert orient._manifest_liveness({"owner_pid": "123"})[0] == "dead"
+    assert orient._manifest_liveness({"owner_pid": "123"})[0] == "live"
+    assert orient._manifest_liveness({"graph_node_id": "null"})[0] == "live"
 
 
 def test_manifest_liveness_claim_read_error_biased_live(monkeypatch) -> None:
