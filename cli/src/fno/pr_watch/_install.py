@@ -16,11 +16,12 @@ Design constraints (locked):
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import typer
 
@@ -190,6 +191,95 @@ def _run_launchctl(*args: str) -> int:
         return -1
 
 
+# A wedged job's `launchctl kickstart` was observed to HANG indefinitely; every
+# launchctl call in the bounce is timeout-guarded so a hung fix command can't be
+# worse than no fix. 10s is generous for a local launchctl round-trip.
+_LAUNCHCTL_TIMEOUT_S = 10.0
+
+
+def _run_launchctl_timed(*args: str, timeout_s: float = _LAUNCHCTL_TIMEOUT_S) -> tuple[int, bool]:
+    """Run launchctl with a timeout. Returns ``(returncode, timed_out)``.
+
+    Separate from :func:`_run_launchctl` because the un-wedge bounce needs to
+    distinguish a HANG (report which step wedged, exit nonzero) from a normal
+    nonzero rc (tolerated for bootout).
+    """
+    try:
+        result = subprocess.run(
+            ["launchctl", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
+        )
+        return result.returncode, False
+    except subprocess.TimeoutExpired:
+        return -1, True
+    except OSError:
+        return -1, False
+
+
+def bounce(
+    *,
+    plist_path: Path,
+    label: str = _LABEL,
+    uid: Optional[int] = None,
+    run: Optional[Callable[..., tuple[int, bool]]] = None,
+    timeout_s: float = _LAUNCHCTL_TIMEOUT_S,
+) -> tuple[str, int]:
+    """bootout -> bootstrap -> kickstart to cure a wedged launchd job.
+
+    This is the ``dead``-verdict fix: the observed wedge (job loaded, state
+    ``spawn scheduled``, never spawns, `kickstart` hangs) is only curable by
+    tearing the service out of its domain (`bootout`) and re-bootstrapping it.
+    Idempotent: safe on a healthy job (restart) and on a not-loaded one
+    (bootout failure tolerated). Every call is timeout-guarded; on a hang it
+    reports the wedged step and returns a nonzero exit code. Returns
+    ``(message, exit_code)``. ``run`` is injected in tests.
+    """
+    if uid is None:
+        uid = os.getuid()
+    if run is None:
+        run = _run_launchctl_timed
+    domain = f"gui/{uid}"
+    target = f"{domain}/{label}"
+
+    # 1. bootout: a nonzero rc is EXPECTED when the job is not loaded, so only a
+    #    hang is fatal here.
+    _, timed = run("bootout", target, timeout_s=timeout_s)
+    if timed:
+        return (f"`launchctl bootout {target}` timed out after {timeout_s}s", 1)
+
+    # 2. bootstrap the plist back into the GUI domain.
+    rc, timed = run("bootstrap", domain, str(plist_path), timeout_s=timeout_s)
+    if timed:
+        return (f"`launchctl bootstrap {domain}` timed out after {timeout_s}s", 1)
+    if rc != 0:
+        return (f"`launchctl bootstrap {domain} {plist_path}` failed (rc={rc})", 1)
+
+    # 3. kickstart -k restarts if running; forces the first run so a fresh tick
+    #    confirms liveness rather than waiting a full StartInterval.
+    rc, timed = run("kickstart", "-k", target, timeout_s=timeout_s)
+    if timed:
+        return (f"`launchctl kickstart -k {target}` timed out after {timeout_s}s", 1)
+    if rc != 0:
+        return (f"`launchctl kickstart -k {target}` failed (rc={rc})", 1)
+
+    return (f"bounced {target}; awaiting first tick", 0)
+
+
+def heal_watcher(*, launch_agents_dir: Path) -> tuple[str, int]:
+    """Resolve the plist path and bounce the watcher. Doctor's --fix entrypoint.
+
+    Returns ``(message, exit_code)``; nonzero when the plist is absent (nothing
+    to bounce) or a bounce step wedged.
+    """
+    plist_path = launch_agents_dir / _PLIST_FILENAME
+    if not plist_path.exists():
+        return (f"no plist at {plist_path}; run `fno pr-watch install`", 1)
+    return bounce(plist_path=plist_path)
+
+
 def _launchctl_is_loaded() -> bool:
     """Return True when sh.fno.pr-watcher appears in launchctl list output."""
     try:
@@ -285,24 +375,22 @@ def install(
     typer.echo(f"Written: {plist_path}")
 
     if activate:
-        # Unload first so a RE-install (changed --interval / fno_binary / PATH)
-        # actually reloads the new plist. launchctl load on an already-loaded
-        # job returns nonzero and leaves the STALE agent running; the unload is
-        # best-effort (a no-op when nothing is loaded).
-        if _launchctl_is_loaded():
-            _run_launchctl("unload", str(plist_path))
-        rc = _run_launchctl("load", str(plist_path))
+        # bootout+bootstrap+kickstart, not load/unload: `launchctl load` cannot
+        # cure the observed wedge (job loaded, `spawn scheduled`, never spawns),
+        # and this is the `dead`-verdict fix command. The bounce is idempotent,
+        # so a RE-install of a healthy agent just restarts it.
+        msg, rc = bounce(plist_path=plist_path)
         if rc == 0:
-            typer.echo(f"Activated: launchctl load {plist_path}")
+            typer.echo(f"Activated: {msg}")
         else:
             # Loud, never silent: SIP/headless contexts can refuse launchctl.
             # The plist is written; doctor's liveness line is the residual guard.
             typer.echo(
-                f"WARNING: launchctl load failed (rc={rc}); load it manually: "
-                f"launchctl load {plist_path}"
+                f"WARNING: activation failed ({msg}); load it manually: "
+                f"launchctl bootstrap gui/$(id -u) {plist_path}"
             )
     else:
-        typer.echo(f"To activate: launchctl load {plist_path}")
+        typer.echo(f"To activate: launchctl bootstrap gui/$(id -u) {plist_path}")
 
     typer.echo(
         "Note: any per-repo scripts/post-merge/ watcher can now be retired "
