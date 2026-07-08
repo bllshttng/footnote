@@ -167,17 +167,11 @@ def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0):
     a.max_live = max_live
     a.min_free_gb = min_free_gb
 
-    class _C:
-        pass
-
-    c = _C()
-    c.agents = a
-
     class _S:
         pass
 
     s = _S()
-    s.config = c
+    s.agents = a
     monkeypatch.setattr("fno.config.load_settings", lambda: s)
 
 

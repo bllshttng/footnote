@@ -205,7 +205,7 @@ def test_cli_lane_fill_defaults_max_from_config(monkeypatch):
 
     monkeypatch.setattr(advance, "select_lane_fill", fake_select)
     fake_settings = SimpleNamespace(
-        config=SimpleNamespace(parallel=SimpleNamespace(max_lanes=2))
+        parallel=SimpleNamespace(max_lanes=2)
     )
     monkeypatch.setattr("fno.config.load_settings", lambda: fake_settings)
 

@@ -100,7 +100,7 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
         settings = SettingsModel()
     else:
         settings = load_settings()
-    cfg = settings.config
+    cfg = settings
 
     lines = [
         "#!/usr/bin/env bash",

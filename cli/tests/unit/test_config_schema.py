@@ -143,7 +143,7 @@ def test_default_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     from fno.config import load_settings
 
     result = load_settings()
-    assert result.config.state_dir == "~/.fno/"
+    assert result.state_dir == "~/.fno/"
 
 
 def test_default_plans_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,7 +158,7 @@ def test_default_plans_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     from fno.config import load_settings
 
     result = load_settings()
-    assert result.config.plans_dir == ".fno/plans/"
+    assert result.plans_dir == ".fno/plans/"
 
 
 def test_schema_version_defaults_to_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,7 +188,7 @@ def test_obsidian_disabled_by_default(tmp_path: Path, monkeypatch: pytest.Monkey
     from fno.config import load_settings
 
     result = load_settings()
-    assert result.config.obsidian.enabled is False
+    assert result.obsidian.enabled is False
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +246,7 @@ def test_top_level_project_id_logs_deprecation_warning(
         from fno.config import load_settings
         result = load_settings()
 
-    assert result.config.project.id == "my-top-level-project"
+    assert result.project.id == "my-top-level-project"
     assert any(
         "deprecated" in record.message.lower() or "config.project" in record.message
         for record in caplog.records
@@ -271,7 +271,7 @@ def test_config_project_id_no_warning(
         from fno.config import load_settings
         result = load_settings()
 
-    assert result.config.project.id == "my-project"
+    assert result.project.id == "my-project"
     assert not any(
         "deprecated" in record.message.lower()
         for record in caplog.records
@@ -340,7 +340,7 @@ def test_double_brace_escape_not_rejected_as_vault(
 
     # Must NOT raise; {{vault}} is a literal escape, not a {vault} template reference
     result = load_settings()
-    assert result.config.plans_dir == "{{vault}}/plans"
+    assert result.plans_dir == "{{vault}}/plans"
 
 
 # ---------------------------------------------------------------------------
@@ -401,9 +401,9 @@ def test_load_settings_falls_through_on_corrupt_project_local(
     from fno.config import load_settings
 
     result = load_settings()
-    assert result.config.state_dir == "/custom-from-global/", (
+    assert result.state_dir == "/custom-from-global/", (
         f"Expected global settings fallback (state_dir=/custom-from-global/), "
-        f"got: {result.config.state_dir!r}"
+        f"got: {result.state_dir!r}"
     )
 
 
@@ -457,7 +457,7 @@ def test_corrupt_yaml_returns_defaults_and_logs_warning(
         result = load_settings()
 
     # Returns defaults (not raising)
-    assert result.config.state_dir == "~/.fno/"
+    assert result.state_dir == "~/.fno/"
     # Must have logged a warning
     assert any(
         "failed to parse" in record.message or "YAMLError" in record.message or "parse" in record.message
@@ -505,8 +505,8 @@ def test_project_local_settings_anchored_to_repo_root_not_cwd(
     from fno.config import load_settings
 
     result = load_settings()
-    assert result.config.state_dir == "/custom/from-repo-root/", (
-        f"Should have loaded repo-root settings, got state_dir={result.config.state_dir!r}"
+    assert result.state_dir == "/custom/from-repo-root/", (
+        f"Should have loaded repo-root settings, got state_dir={result.state_dir!r}"
     )
 
 
@@ -526,7 +526,7 @@ def test_env_var_takes_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     from fno.config import load_settings
 
     result = load_settings()
-    assert result.config.state_dir == "/custom/env/path/"
+    assert result.state_dir == "/custom/env/path/"
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +626,7 @@ def test_blueprint_max_prs_per_epic_default(
     config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     settings = config_mod.load_settings()
-    assert settings.config.blueprint.max_prs_per_epic == 4
+    assert settings.blueprint.max_prs_per_epic == 4
 
 
 def test_blueprint_max_prs_per_epic_override(
@@ -644,7 +644,7 @@ def test_blueprint_max_prs_per_epic_override(
     config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     settings = config_mod.load_settings()
-    assert settings.config.blueprint.max_prs_per_epic == 7
+    assert settings.blueprint.max_prs_per_epic == 7
 
 
 def test_blueprint_max_prs_per_epic_rejects_non_positive(

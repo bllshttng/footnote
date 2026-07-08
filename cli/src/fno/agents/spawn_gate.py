@@ -419,7 +419,7 @@ def run_gate(
     try:
         from fno.config import load_settings
 
-        agents_cfg = load_settings().config.agents
+        agents_cfg = load_settings().agents
         cap = int(agents_cfg.max_live)
         floor_gb = float(agents_cfg.min_free_gb)
     except Exception:
@@ -499,7 +499,7 @@ def _qos_enabled() -> bool:
     try:
         from fno.config import load_settings
 
-        return load_settings().config.agents.worker_qos != "off"
+        return load_settings().agents.worker_qos != "off"
     except Exception:
         return True
 

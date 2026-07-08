@@ -335,11 +335,9 @@ class TestCliTickIntegration:
             mock_cfg_review = MagicMock()
             mock_cfg_review.github_apps = []  # canonical field (required_bots aliases it)
             mock_cfg_review.required_bots = []
-            mock_cfg = MagicMock()
-            mock_cfg.pr_watch = mock_cfg_pr_watch
-            mock_cfg.review = mock_cfg_review
             mock_settings = MagicMock()
-            mock_settings.config = mock_cfg
+            mock_settings.pr_watch = mock_cfg_pr_watch
+            mock_settings.review = mock_cfg_review
             mock_load_settings.return_value = mock_settings
 
             from fno.pr_watch._dispatch import tick as _dispatch_tick

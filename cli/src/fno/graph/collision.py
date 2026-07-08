@@ -215,7 +215,7 @@ def _load_thresholds(
     """Resolve severity thresholds from the model.
 
     Single source of truth is the Pydantic ``CollisionThresholdsBlock`` read via
-    ``load_settings().config.collision.severity_thresholds``; a malformed or
+    ``load_settings().collision.severity_thresholds``; a malformed or
     negative per-key value degrades to the model default (with a WARNING) inside
     the model's own sanitizer, so this can never break the load. Returns a fresh
     dict each call so callers can mutate freely.
@@ -229,10 +229,10 @@ def _load_thresholds(
 
     try:
         if project_settings is None and user_settings is None:
-            block = load_settings().config.collision.severity_thresholds
+            block = load_settings().collision.severity_thresholds
         else:
             explicit = [p for p in (project_settings, user_settings) if p is not None]
-            block = settings_from_files(explicit).config.collision.severity_thresholds
+            block = settings_from_files(explicit).collision.severity_thresholds
         return dict(block.model_dump())
     except Exception as exc:
         # Fail-open: a malformed UNRELATED setting must not abort collision

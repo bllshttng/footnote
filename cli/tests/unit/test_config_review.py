@@ -45,7 +45,7 @@ def _load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str):
 def test_review_defaults_to_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Absent block -> required_bots is None (code default applies Rust-side)."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.review.required_bots is None
+    assert settings.review.required_bots is None
 
 
 def test_review_required_bots_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,7 +55,7 @@ def test_review_required_bots_list(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         "schema_version: 1\nconfig:\n  review:\n    required_bots:\n"
         "      - chatgpt-codex-connector\n      - gemini-code-assist\n",
     )
-    assert settings.config.review.required_bots == [
+    assert settings.review.required_bots == [
         "chatgpt-codex-connector",
         "gemini-code-assist",
     ]
@@ -70,7 +70,7 @@ def test_review_required_bots_explicit_empty(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    required_bots: []\n",
     )
-    assert settings.config.review.required_bots == []
+    assert settings.review.required_bots == []
 
 
 def test_review_required_bots_scalar_is_singleton(
@@ -83,8 +83,8 @@ def test_review_required_bots_scalar_is_singleton(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    required_bots: gemini\n",
     )
-    assert settings.config.review.required_bots == ["gemini"]
-    assert settings.config.review.github_apps == ["gemini"]
+    assert settings.review.required_bots == ["gemini"]
+    assert settings.review.github_apps == ["gemini"]
 
 
 def test_review_bare_key_fails_closed(
@@ -96,7 +96,7 @@ def test_review_bare_key_fails_closed(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    required_bots:\n",
     )
-    assert settings.config.review.required_bots is None
+    assert settings.review.required_bots is None
 
 
 # --- Cross-model review panel: agent_providers + cross_model (ab-6c8f4c61) ---
@@ -107,7 +107,7 @@ def test_review_agent_providers_defaults_empty(
 ) -> None:
     """Absent block -> agent_providers is an empty dict (faithful empty map)."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.review.agent_providers == {}
+    assert settings.review.agent_providers == {}
 
 
 def test_review_agent_providers_mapping(
@@ -120,7 +120,7 @@ def test_review_agent_providers_mapping(
         "schema_version: 1\nconfig:\n  review:\n    agent_providers:\n"
         "      ux_flow_tester: gemini\n      type_design_analyzer: gemini\n",
     )
-    assert settings.config.review.agent_providers == {
+    assert settings.review.agent_providers == {
         "ux_flow_tester": "gemini",
         "type_design_analyzer": "gemini",
     }
@@ -135,7 +135,7 @@ def test_review_agent_providers_scalar_fails_safe(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    agent_providers: gemini\n",
     )
-    assert settings.config.review.agent_providers == {}
+    assert settings.review.agent_providers == {}
 
 
 def test_review_cross_model_defaults_disabled(
@@ -143,7 +143,7 @@ def test_review_cross_model_defaults_disabled(
 ) -> None:
     """Absent block -> cross_model.enabled is False (existing review unchanged)."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.review.cross_model.enabled is False
+    assert settings.review.cross_model.enabled is False
 
 
 def test_review_cross_model_enabled_true(
@@ -154,7 +154,7 @@ def test_review_cross_model_enabled_true(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    cross_model:\n      enabled: true\n",
     )
-    assert settings.config.review.cross_model.enabled is True
+    assert settings.review.cross_model.enabled is True
 
 
 def test_review_cross_model_enabled_non_bool_fails_safe(
@@ -166,7 +166,7 @@ def test_review_cross_model_enabled_non_bool_fails_safe(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    cross_model:\n      enabled: banana\n",
     )
-    assert settings.config.review.cross_model.enabled is False
+    assert settings.review.cross_model.enabled is False
 
 
 def test_review_cross_model_non_mapping_fails_safe(
@@ -178,7 +178,7 @@ def test_review_cross_model_non_mapping_fails_safe(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    cross_model: 42\n",
     )
-    assert settings.config.review.cross_model.enabled is False
+    assert settings.review.cross_model.enabled is False
 
 
 # --- github_apps rename + required_bots alias (x-4baa US1) ---
@@ -194,8 +194,8 @@ def test_github_apps_canonical_list(
         "schema_version: 1\nconfig:\n  review:\n    github_apps:\n"
         "      - chatgpt-codex-connector\n",
     )
-    assert settings.config.review.github_apps == ["chatgpt-codex-connector"]
-    assert settings.config.review.required_bots == ["chatgpt-codex-connector"]
+    assert settings.review.github_apps == ["chatgpt-codex-connector"]
+    assert settings.review.required_bots == ["chatgpt-codex-connector"]
 
 
 def test_required_bots_aliases_github_apps(
@@ -208,7 +208,7 @@ def test_required_bots_aliases_github_apps(
         "schema_version: 1\nconfig:\n  review:\n    required_bots:\n"
         "      - chatgpt-codex-connector\n",
     )
-    assert settings.config.review.github_apps == ["chatgpt-codex-connector"]
+    assert settings.review.github_apps == ["chatgpt-codex-connector"]
 
 
 def test_github_apps_wins_over_required_bots(
@@ -221,8 +221,8 @@ def test_github_apps_wins_over_required_bots(
         "schema_version: 1\nconfig:\n  review:\n"
         "    github_apps: [new-bot]\n    required_bots: [old-bot]\n",
     )
-    assert settings.config.review.github_apps == ["new-bot"]
-    assert settings.config.review.required_bots == ["new-bot"]
+    assert settings.review.github_apps == ["new-bot"]
+    assert settings.review.required_bots == ["new-bot"]
 
 
 def test_github_apps_absent_is_no_gate(
@@ -230,7 +230,7 @@ def test_github_apps_absent_is_no_gate(
 ) -> None:
     """Absent -> None (no gate); the old chatgpt-codex-connector default is gone."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.review.github_apps is None
+    assert settings.review.github_apps is None
 
 
 # --- peers / peer_identity / peer_token_env (x-4baa US2) ---
@@ -245,8 +245,8 @@ def test_peers_scalar_coerces_to_list(
         "schema_version: 1\nconfig:\n  review:\n"
         "    peers: codex\n    peer_identity: fno-peer-bot\n",
     )
-    assert settings.config.review.peers == ["codex"]
-    assert settings.config.review.peer_identity == "fno-peer-bot"
+    assert settings.review.peers == ["codex"]
+    assert settings.review.peer_identity == "fno-peer-bot"
 
 
 def test_peers_list_and_identity(
@@ -259,8 +259,8 @@ def test_peers_list_and_identity(
         "    peers: [codex, gemini]\n    peer_identity: fno-peer-bot\n"
         "    peer_token_env: GH_PEER_TOKEN\n",
     )
-    assert settings.config.review.peers == ["codex", "gemini"]
-    assert settings.config.review.peer_token_env == "GH_PEER_TOKEN"
+    assert settings.review.peers == ["codex", "gemini"]
+    assert settings.review.peer_token_env == "GH_PEER_TOKEN"
 
 
 def test_peers_map_entry_with_own_identity(
@@ -273,7 +273,7 @@ def test_peers_map_entry_with_own_identity(
         "schema_version: 1\nconfig:\n  review:\n    peers:\n"
         "      - provider: codex\n        identity: fno-codex-bot\n",
     )
-    assert settings.config.review.peers == [
+    assert settings.review.peers == [
         {"provider": "codex", "identity": "fno-codex-bot"}
     ]
 
@@ -317,7 +317,7 @@ def test_peers_claude_with_model_route_loads(
         '      - provider: claude\n        model: "zai,glm-5.2"\n'
         "    peer_identity: fno-peer-bot\n",
     )
-    assert settings.config.review.peers == [
+    assert settings.review.peers == [
         {"provider": "claude", "model": "zai,glm-5.2"}
     ]
 
@@ -393,7 +393,7 @@ def test_peers_codex_with_model_key_accepted(
         '      - provider: codex\n        model: "zai,glm-5.2"\n'
         "    peer_identity: fno-peer-bot\n",
     )
-    assert settings.config.review.peers == [
+    assert settings.review.peers == [
         {"provider": "codex", "model": "zai,glm-5.2"}
     ]
 
@@ -410,7 +410,7 @@ def test_optional_apps_list(
         "schema_version: 1\nconfig:\n  review:\n    optional_apps:\n"
         "      - chatgpt-codex-connector\n",
     )
-    assert settings.config.review.optional_apps == ["chatgpt-codex-connector"]
+    assert settings.review.optional_apps == ["chatgpt-codex-connector"]
 
 
 def test_optional_apps_scalar_coerces(
@@ -421,7 +421,7 @@ def test_optional_apps_scalar_coerces(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    optional_apps: chatgpt-codex-connector\n",
     )
-    assert settings.config.review.optional_apps == ["chatgpt-codex-connector"]
+    assert settings.review.optional_apps == ["chatgpt-codex-connector"]
 
 
 def test_optional_apps_defaults_empty(
@@ -429,7 +429,7 @@ def test_optional_apps_defaults_empty(
 ) -> None:
     """Absent -> [] (no optional reviewers), independent of the required gate."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.review.optional_apps == []
+    assert settings.review.optional_apps == []
 
 
 # --- parser parity on non-string malformed values (codex P1 on #205) ---
@@ -445,7 +445,7 @@ def test_github_apps_numeric_scalar_gates_closed(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    github_apps: 123\n",
     )
-    assert settings.config.review.github_apps == ["123"]
+    assert settings.review.github_apps == ["123"]
 
 
 def test_github_apps_mapping_degrades_like_rust(
@@ -458,7 +458,7 @@ def test_github_apps_mapping_degrades_like_rust(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    github_apps: {login: codex}\n",
     )
-    assert settings.config.review.github_apps is None
+    assert settings.review.github_apps is None
 
 
 def test_optional_apps_scalar_and_mapping_parity(
@@ -469,13 +469,13 @@ def test_optional_apps_scalar_and_mapping_parity(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    optional_apps: 123\n",
     )
-    assert numeric.config.review.optional_apps == ["123"]
+    assert numeric.review.optional_apps == ["123"]
     mapping = _load(
         tmp_path,
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    optional_apps: {a: b}\n",
     )
-    assert mapping.config.review.optional_apps == []
+    assert mapping.review.optional_apps == []
 
 
 # --- reviewers: local-attestation gate (x-e703, Phase 2) ---
@@ -486,7 +486,7 @@ def test_reviewers_defaults_empty(
 ) -> None:
     """Absent -> [] (no reviewers gate)."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.review.reviewers == []
+    assert settings.review.reviewers == []
 
 
 def test_reviewers_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -496,7 +496,7 @@ def test_reviewers_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    reviewers:\n      - sigma\n",
     )
-    assert settings.config.review.reviewers == ["sigma"]
+    assert settings.review.reviewers == ["sigma"]
 
 
 def test_reviewers_scalar_coerces(
@@ -507,7 +507,7 @@ def test_reviewers_scalar_coerces(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    reviewers: sigma\n",
     )
-    assert settings.config.review.reviewers == ["sigma"]
+    assert settings.review.reviewers == ["sigma"]
 
 
 def test_reviewers_strips_leading_slash(
@@ -519,7 +519,7 @@ def test_reviewers_strips_leading_slash(
         monkeypatch,
         "schema_version: 1\nconfig:\n  review:\n    reviewers: [/code-review, declare]\n",
     )
-    assert settings.config.review.reviewers == ["code-review", "declare"]
+    assert settings.review.reviewers == ["code-review", "declare"]
 
 
 def test_reviewers_unresolvable_fails_loud(

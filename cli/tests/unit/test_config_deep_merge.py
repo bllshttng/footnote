@@ -97,10 +97,10 @@ def test_project_overrides_global_per_key_global_fills_rest(
 
     s = load_settings()
     # Project wins for the key it sets.
-    assert s.config.post_merge.parking_lot_path == "internal/web/backlog/parking-lot.md"
+    assert s.post_merge.parking_lot_path == "internal/web/backlog/parking-lot.md"
     # Global fills keys the project did not set.
-    assert s.config.obsidian.enabled is True
-    assert s.config.obsidian.vault == "myvault"
+    assert s.obsidian.enabled is True
+    assert s.obsidian.vault == "myvault"
 
 
 def test_global_only_key_resolves_when_project_omits_it(
@@ -127,8 +127,8 @@ def test_global_only_key_resolves_when_project_omits_it(
     from fno.config import load_settings
 
     s = load_settings()
-    assert s.config.obsidian.vault == "myvault"
-    assert s.config.post_merge.parking_lot_path == "internal/loci/backlog/parking-lot.md"
+    assert s.obsidian.vault == "myvault"
+    assert s.post_merge.parking_lot_path == "internal/loci/backlog/parking-lot.md"
 
 
 def test_project_scalar_overrides_global_scalar(
@@ -146,7 +146,7 @@ def test_project_scalar_overrides_global_scalar(
 
     from fno.config import load_settings
 
-    assert load_settings().config.plans_dir == "project/plans/"
+    assert load_settings().plans_dir == "project/plans/"
 
 
 def test_corrupt_project_still_merges_global(
@@ -168,7 +168,7 @@ def test_corrupt_project_still_merges_global(
 
     from fno.config import load_settings
 
-    assert load_settings().config.post_merge.parking_lot_path == "internal/etl/backlog/parking-lot.md"
+    assert load_settings().post_merge.parking_lot_path == "internal/etl/backlog/parking-lot.md"
 
 
 def test_loaded_from_is_highest_priority_file(
@@ -204,7 +204,7 @@ def test_global_only_when_no_project_file(
     from fno.config import load_settings, loaded_from
 
     s = load_settings()
-    assert s.config.obsidian.vault == "myvault"
+    assert s.obsidian.vault == "myvault"
     assert loaded_from() == global_file.resolve()
 
 

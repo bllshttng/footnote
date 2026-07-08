@@ -126,11 +126,8 @@ def test_run_gate_passes_under_cap_despite_large_roster(tmp_path, monkeypatch, c
         max_live = 15
         min_free_gb = 0.0
 
-    class _C:
-        agents = _A()
-
     class _S:
-        config = _C()
+        agents = _A()
 
     monkeypatch.setattr("fno.config.load_settings", lambda: _S())
     guard = spawn_gate.run_gate("newcomer", "bg")

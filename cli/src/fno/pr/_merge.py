@@ -71,7 +71,7 @@ def _git(args: Sequence[str], cwd: str):
 def _load_auto_merge():
     from fno.config import load_settings
 
-    return load_settings().config.auto_merge
+    return load_settings().auto_merge
 
 
 def _repo_state_dir(cwd: str) -> str:

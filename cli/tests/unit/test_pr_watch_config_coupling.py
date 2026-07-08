@@ -74,7 +74,7 @@ def test_activation_failure_is_loud_and_keeps_config(tmp_home, monkeypatch):
     # Config value stuck despite the activation failure.
     from fno.config import load_settings
     load_settings.cache_clear()
-    assert load_settings().config.pr_watch.enabled is True
+    assert load_settings().pr_watch.enabled is True
 
 
 def test_disable_unload_failure_is_loud(tmp_home, monkeypatch):

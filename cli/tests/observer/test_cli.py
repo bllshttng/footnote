@@ -92,7 +92,7 @@ def test_observer_dir_rejects_traversal_project_id(monkeypatch, tmp_path):
     not escape internal/<project>/ - it falls back to the configured id."""
     import fno.paths as paths
 
-    class _Cfg:
+    class _S:
         class paths:
             observer_reports_dir = None
 
@@ -102,9 +102,6 @@ def test_observer_dir_rejects_traversal_project_id(monkeypatch, tmp_path):
         class obsidian:
             enabled = False
             vault = None
-
-    class _S:
-        config = _Cfg()
 
     monkeypatch.setattr(paths, "_settings", lambda: _S())
     monkeypatch.setattr(paths, "state_dir", lambda: tmp_path)
