@@ -66,8 +66,13 @@ gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }
 # auth_wall (980) so a numbered trust menu wins over a bare wall if both ever
 # match; in practice they don't (auth_wall's 3-line region never holds the "Do
 # you trust" line, which sits above the options). Gated on the trust question AND
-# a numbered line so a "1." typed into the composer can't fake it. A bare auth
-# wall (no menu) fails the numbered-line clause and stays auth_wall/focus-only.
+# a MARKED numbered line: the gate's line_regex REQUIRES the "›" selector glyph
+# before the digit (unlike the answer regex below, which keeps it optional to
+# extract every option). A live menu always draws the selector on its current
+# choice; a model reply that merely prints "Do you trust …" plus a plain "1./2."
+# list in scrollback has no "›" before those digits, so it can't fake the gate
+# and get its own list turned into answer-queue choices that inject "1"/"2" into
+# the idle composer (codex review P2). A bare auth wall keeps its auth_wall fallback.
 [[rule]]
 id = "trust_prompt"
 state = "blocked"
@@ -75,7 +80,7 @@ priority = 985
 region = "bottom_non_empty_lines(10)"
 gate = { all = [
   { any = [ { contains = "Do you trust" }, { contains = "do you trust" } ] },
-  { line_regex = '^\s*\x{203a}?\s*[0-9]\.\s' },
+  { line_regex = '^\s*\x{203a}\s*[0-9]\.\s' },
 ] }
 [rule.answer]
 option = '^\s*\x{203a}?\s*(?P<idx>[0-9])\.\s+(?P<label>.+?)\s*$'

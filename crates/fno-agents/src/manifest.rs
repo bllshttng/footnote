@@ -1816,6 +1816,23 @@ mod tests {
         assert_eq!(ans.options[1].keystroke, b"2");
     }
 
+    // x-5103 (codex review P2): a model reply that PRINTS "Do you trust …" plus a
+    // plain numbered list while idle must NOT become answerable - only a live menu
+    // draws the "›" selector before a digit. The gate's required marker is what
+    // stops the response list from injecting "1"/"2" into the idle composer.
+    #[test]
+    fn x5103_codex_model_printed_list_is_not_a_false_trust_prompt() {
+        let m = bundled("codex");
+        let screen = "The permission flow. Do you trust the folder? Options:\n\
+            1. Yes, it loads config\n  2. No, sandboxed\n\u{203a} ";
+        let (v, ans) = m.evaluate_answerable(&view(screen)).unwrap();
+        assert_ne!(
+            v.rule_id, "trust_prompt",
+            "a printed list without the › selector must not fire trust_prompt"
+        );
+        assert!(ans.is_none(), "no live menu -> not answerable");
+    }
+
     // x-5103: the bundled gemini trust_prompt is answerable on a real (validated)
     // BOXED radio ("│ ● 1. Trust folder … │"); the option regex consumes the box
     // border (│ U+2502) + radio marker (● U+25CF) and the trailing border.

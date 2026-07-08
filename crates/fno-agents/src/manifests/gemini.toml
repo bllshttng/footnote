@@ -59,7 +59,12 @@ gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }
 # as non-empty, pushing the "Do you trust" question further up the window. The
 # option regex consumes the optional border + radio marker before the digit and
 # an optional trailing border after the label. Gated on the trust question AND a
-# numbered line; a bare auth wall keeps its focus-only auth_wall fallback.
+# MARKED numbered line: the gate's line_regex REQUIRES the "●" radio glyph before
+# the digit (the answer regex below keeps it optional to extract every option). A
+# live radio always draws "●" on its current choice; a model reply printing "Do
+# you trust …" plus a plain numbered list has no "●" before those digits, so it
+# can't fake the gate and inject a digit into the composer (codex review P2). A
+# bare auth wall keeps its focus-only auth_wall fallback.
 [[rule]]
 id = "trust_prompt"
 state = "blocked"
@@ -67,7 +72,7 @@ priority = 985
 region = "bottom_non_empty_lines(12)"
 gate = { all = [
   { any = [ { contains = "Do you trust" }, { contains = "do you trust" } ] },
-  { line_regex = '^\s*\x{2502}?\s*\x{25cf}?\s*[0-9]\.\s' },
+  { line_regex = '^\s*\x{2502}?\s*\x{25cf}\s*[0-9]\.\s' },
 ] }
 [rule.answer]
 option = '^\s*\x{2502}?\s*\x{25cf}?\s*(?P<idx>[0-9])\.\s+(?P<label>.+?)\s*\x{2502}?\s*$'
