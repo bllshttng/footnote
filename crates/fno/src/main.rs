@@ -236,7 +236,8 @@ fn main() {
         }
         Role::MuxUsage => {
             eprintln!(
-                "usage: fno [--session <name>] | fno mux server [--session <name>] \
+                "usage: fno [--session <name>] | fno version [--json] \
+                 | fno mux server [--session <name>] \
                  | fno mux ls [--json] | fno mux attach <name> \
                  | fno mux kill-server [<name>] [--json] \
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
