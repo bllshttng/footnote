@@ -21,6 +21,7 @@ import json
 from typing import Any, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
+from fno.pr._reviews import read_optional_review_state
 
 # Rollup states that count as a pass (jq parity with _verify._PASS_STATES).
 _PASS_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -91,8 +92,14 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     return ("green", 0, counts)
 
 
-def run_status(pr: str, cwd: Optional[str] = None) -> int:
-    """Print a one-line JSON verdict for PR `pr`; return the exit code."""
+def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
+    """Print a one-line JSON verdict for PR `pr`; return the exit code.
+
+    The exit code is ALWAYS the CI verdict's code (0/1/2/3/4/127) - the review
+    fields are additive and advisory (optional stays advisory; an unresolved
+    optional finding on a green PR still exits 0). ``review_reader`` is injectable
+    for tests; it defaults to the real time-boxed read.
+    """
     import sys
 
     pr_json = _fetch(pr, cwd)
@@ -105,15 +112,32 @@ def run_status(pr: str, cwd: Optional[str] = None) -> int:
 
     rollup = pr_json.get("statusCheckRollup") or []
     verdict, code, counts = verdict_for(rollup)
+    green = verdict == "green"
+
+    # Additive review signal (x-705b): computed AFTER the authoritative CI verdict
+    # so a slow/failed review read can never delay or corrupt it. Any failure
+    # degrades to "unknown"/None and leaves the CI verdict + exit code untouched.
+    reader = review_reader or read_optional_review_state
+    try:
+        reviews = reader(pr, cwd)
+    except Exception:
+        reviews = {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+    unresolved = reviews.get("optional_reviews_unresolved")
+
     sys.stdout.write(
         json.dumps(
             {
                 "pr": pr,
                 "verdict": verdict,
                 "settled": verdict in ("green", "red"),
-                "green": verdict == "green",
+                "green": green,
                 "pr_state": pr_json.get("state"),
                 "checks": counts,
+                "optional_reviews": reviews.get("optional_reviews", "unknown"),
+                "optional_reviews_unresolved": unresolved,
+                # The obvious "read this, not green": ready iff CI is green AND no
+                # optional finding is unresolved. Advisory - never the exit code.
+                "ready": green and unresolved == 0,
             }
         )
         + "\n"
