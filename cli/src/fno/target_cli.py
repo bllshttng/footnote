@@ -617,26 +617,22 @@ def _resolve_node_model(
     (the same precedence ``advance.py`` uses), so tier resolution lives in exactly
     ONE place. An explicit ``-m`` wins without loading the node. ``provider`` scopes
     tier resolution to the spawn harness so a tier never yields a cross-harness
-    pick; None resolves the effective spawn harness (harness-inferred > ``claude``,
-    the incident default lane -- Locked 3) and scopes by it. ``model`` is None ->
-    the spawn path uses the provider default. Strictly non-fatal: any error
-    degrades to the explicit value or the provider default, so a dispatch never
-    fails because of the routing layer (inherited Locked 10).
+    pick; None defaults to ``claude`` (the bg spawn default -- a bg worker is
+    always claude regardless of the invoking harness, so scoping by the ambient
+    harness would mis-resolve; Locked 3 intent is the incident bg-default lane).
+    ``model`` is None -> the spawn path uses the provider default. Strictly
+    non-fatal: any error degrades to the explicit value or the provider default,
+    so a dispatch never fails because of the routing layer (inherited Locked 10).
     """
     try:
         from fno import route_resolve
 
-        eff_provider = provider
-        if eff_provider is None:
-            from fno.agents.provider_resolve import resolve_dispatch_provider
-
-            eff_provider = resolve_dispatch_provider(None)[0]
         node = None if explicit else _find_node(node_id)
         model, source, _chain = route_resolve.resolve_dispatch_model(
             explicit=explicit,
             task_model=(node or {}).get("model"),
             task_tier=(node or {}).get("model_tier"),
-            provider=eff_provider,
+            provider=provider or "claude",
         )
         return model, source
     except Exception:  # noqa: BLE001 - routing degrades, never blocks a dispatch

@@ -168,24 +168,22 @@ def node_model(
     the precedence with an optional dispatch-time ``explicit`` override.
     ``provider`` scopes tier resolution to the spawn harness so a tier never yields
     a cross-harness ``<provider> --model <foreign>`` pick. When ``provider`` is
-    None the effective spawn harness is resolved (harness-inferred > ``claude``,
-    the incident default lane -- Locked Decision 3) and used to scope, never "no
-    filter". Strictly non-fatal: any resolution error (including provider
-    defaulting) degrades to the explicit override or the node's raw ``model`` pin
-    so a routing hiccup never breaks a spawn (Locked Decision 10).
+    None it defaults to ``claude`` -- the bg substrate's own spawn default (see
+    ``advance._spawn_worker``: ``(provider or "").strip() or "claude"``), NOT the
+    ambient/invoking harness. A bg worker is always claude regardless of which
+    harness dispatched it, so scoping by the invoking harness would resolve a
+    codex model for a claude spawn (Locked Decision 3 intent: scope the incident
+    bg-default lane, which is claude). Strictly non-fatal: any resolution error
+    degrades to the explicit override or the node's raw ``model`` pin so a routing
+    hiccup never breaks a spawn (Locked Decision 10).
     """
     try:
-        eff_provider = provider
-        if eff_provider is None:
-            from fno.agents.provider_resolve import resolve_dispatch_provider
-
-            eff_provider = resolve_dispatch_provider(None)[0]
         model, _source, _chain = resolve_dispatch_model(
             explicit=explicit,
             task_model=node.get("model"),
             task_tier=node.get("model_tier"),
             snapshot=snapshot,
-            provider=eff_provider,
+            provider=provider or "claude",
         )
         return model
     except Exception:  # noqa: BLE001 - routing degrades, never blocks a spawn

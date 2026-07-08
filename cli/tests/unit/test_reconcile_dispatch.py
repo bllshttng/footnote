@@ -43,8 +43,9 @@ def _patch_deps(monkeypatch, deps):
 
 def _patch_spawn(monkeypatch):
     calls = []
-    def fake(node_id, node_cwd, node_slug=None, *, reconcile_manifest=None, model=None):
-        calls.append({"node": node_id, "cwd": node_cwd, "manifest": reconcile_manifest, "model": model})
+    def fake(node_id, node_cwd, node_slug=None, *, reconcile_manifest=None, model=None, provider=None):
+        calls.append({"node": node_id, "cwd": node_cwd, "manifest": reconcile_manifest,
+                      "model": model, "provider": provider})
         return "short123"
     monkeypatch.setattr(rd, "_spawn_worker", fake)
     return calls
@@ -105,6 +106,25 @@ def test_reconcile_threads_node_model_tier(iso, tmp_path, monkeypatch):
     picked = calls[0]["model"]
     assert picked is not None  # tier resolved, not dropped to None
     assert bm.reachable(picked)[0] == "claude"  # scoped to the claude lane
+    # the worker must spawn on the SAME provider the model was resolved for,
+    # else it is claude --model <foreign> (gemini HIGH / codex P2 on PR #258).
+    assert calls[0]["provider"] == "claude"
+
+
+def test_contract_dependents_copies_provider(monkeypatch, tmp_path):
+    """AC7 (x-da6e): the dep dict must carry `provider` so reconcile scopes the
+    tier and spawns on the same harness as the other dispatch paths."""
+    from fno.backlog import reconcile_dispatch as rdmod
+
+    graph = [
+        {"id": "x-blk", "_status": "done"},
+        {"id": "x-dep", "blocked_by": ["x-blk"], "dep": "contract",
+         "provider": "claude", "model_tier": "medium"},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda _p: graph)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
+    deps = rdmod._contract_dependents("x-blk")
+    assert deps and deps[0]["provider"] == "claude"
 
 
 def test_missing_manifest_writes_pending_sentinel(iso, tmp_path, monkeypatch):

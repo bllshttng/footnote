@@ -113,25 +113,23 @@ def test_node_model_pin_bypasses_filter():
     assert rr.node_model(node, snapshot={}, provider="claude") == "gpt-5.4"
 
 
-def test_node_model_none_provider_resolves_default_and_scopes(monkeypatch):
-    """Locked 3: None provider resolves the default harness, then scopes by it."""
-    monkeypatch.setattr(
-        "fno.agents.provider_resolve.resolve_dispatch_provider",
-        lambda _explicit: ("claude", "builtin-default"),
-    )
+def test_node_model_none_provider_defaults_to_claude(monkeypatch):
+    """Locked 3 intent: None provider scopes to the bg spawn default (claude), NOT
+    the ambient/invoking harness -- a bg worker is always claude, so a codex
+    ambient must not resolve a codex model for a claude spawn."""
+    # Force a codex ambient; node_model must still scope to claude, not codex.
+    monkeypatch.setenv("CODEX_SANDBOX", "1")
     node = {"model_tier": "medium"}
     assert rr.node_model(node, snapshot={}) == "claude-sonnet-5"
 
 
-def test_node_model_default_resolution_failure_degrades(monkeypatch):
-    """AC6-FR: provider defaulting raises -> degrade to the raw pin, spawn proceeds."""
+def test_node_model_degrades_on_resolver_error(monkeypatch):
+    """Non-fatal: a resolver blow-up degrades to the raw pin, spawn proceeds."""
 
-    def _boom(_explicit):
-        raise RuntimeError("provider resolve boom")
+    def _boom(**_kw):
+        raise RuntimeError("resolver boom")
 
-    monkeypatch.setattr(
-        "fno.agents.provider_resolve.resolve_dispatch_provider", _boom
-    )
+    monkeypatch.setattr(rr, "resolve_dispatch_model", _boom)
     assert rr.node_model({"model": "glm-5.2"}, snapshot={}) == "glm-5.2"
 
 
