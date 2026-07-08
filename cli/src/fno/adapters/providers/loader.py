@@ -13,7 +13,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+import tomli_w
 import pydantic
+import tomllib
 import yaml
 
 from fno import paths as _paths
@@ -27,86 +29,113 @@ from fno.state.io import atomic_write
 
 
 def _global_settings_path() -> Path:
-    """Resolve the per-user global settings.yaml path.
+    """Resolve the per-user global config.toml path.
 
-    Returns ``Path(FNO_GLOBAL_SETTINGS_PATH)`` when that environment variable
-    is set to a non-empty value (use ``/dev/null`` to disable the global
-    candidate in test isolation), otherwise the default
-    ``~/.fno/settings.yaml``. Mirrors
-    ``fno.config._global_settings_path`` so both loaders honor the same
-    override; we cannot import from ``fno.config`` here because the
-    provider loader runs during the config import path (bootstrap order).
+    Returns the config.toml sibling of ``$FNO_GLOBAL_SETTINGS_PATH`` when that
+    env var is set to a non-empty value (mirrors ``fno.config._prefer_toml``),
+    otherwise the default ``~/.fno/config.toml``. We cannot import from
+    ``fno.config`` here because the provider loader runs during the config
+    import path (bootstrap order).
 
-    Empty-string env var (e.g. ``FNO_GLOBAL_SETTINGS_PATH=``) is treated as
-    "unset" rather than ``Path("")`` (which resolves to the CWD and would
-    silently bypass the global config). An operator that genuinely wants to
-    point at the CWD must say so explicitly: ``FNO_GLOBAL_SETTINGS_PATH=.``.
+    Empty-string env var is treated as "unset" rather than ``Path("")``.
     """
     env = os.environ.get("FNO_GLOBAL_SETTINGS_PATH")
     if env:
-        return Path(env)
-    return Path.home() / ".fno" / "settings.yaml"
+        return Path(env).with_name("config.toml")
+    return Path.home() / ".fno" / "config.toml"
 
 
-def _read_yaml_safe(path: Path) -> dict[str, Any]:
-    """Read a YAML file, returning an empty dict on any error."""
-    try:
-        if not path.is_file():
-            return {}
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return data if isinstance(data, dict) else {}
-    except (OSError, yaml.YAMLError):
-        return {}
+def _read_parsed(path: Path) -> dict[str, Any]:
+    """Parse a config file by suffix (config.toml -> TOML, else YAML).
 
-
-def _read_yaml_strict(path: Path) -> dict[str, Any]:
-    """Read a YAML file for write-back operations.
-
-    Unlike _read_yaml_safe, this function distinguishes between a missing
-    file (returns {}) and a file that exists but fails to parse (raises
-    ProviderConfigError). This prevents save_providers from silently
-    overwriting all existing keys when settings.yaml is corrupt.
+    config.toml-first with a read-only settings.yaml fallback for an unmigrated
+    install (the provider loader runs at bootstrap and cannot trigger the main
+    loader's auto-migrate). Returns {} on a missing/unparseable file.
     """
-    if not path.is_file():
+    for cand in _read_candidates(path):
+        if not cand.is_file():
+            continue
+        try:
+            text = cand.read_text(encoding="utf-8")
+            if cand.suffix == ".toml":
+                data = tomllib.loads(text)
+            else:
+                data = yaml.safe_load(text) or {}
+            return data if isinstance(data, dict) else {}
+        except (OSError, yaml.YAMLError, tomllib.TOMLDecodeError):
+            return {}
+    return {}
+
+
+def _read_parsed_strict(path: Path) -> dict[str, Any]:
+    """Read for write-back: a missing file returns {}, an unparseable one raises
+    (prevents save_providers from clobbering all keys on a corrupt file)."""
+    cand = next((c for c in _read_candidates(path) if c.is_file()), None)
+    if cand is None:
         return {}
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        text = cand.read_text(encoding="utf-8")
+        data = tomllib.loads(text) if cand.suffix == ".toml" else (yaml.safe_load(text) or {})
         return data if isinstance(data, dict) else {}
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, tomllib.TOMLDecodeError) as exc:
         raise ProviderConfigError(
-            f"Cannot save: settings.yaml failed to parse ({path}): {exc}"
+            f"Cannot save: config file failed to parse ({cand}): {exc}"
         ) from exc
     except OSError as exc:
         raise ProviderConfigError(
-            f"Cannot save: settings.yaml is not readable ({path}): {exc}"
+            f"Cannot save: config file is not readable ({cand}): {exc}"
         ) from exc
 
 
+def _read_candidates(path: Path) -> list[Path]:
+    """config.toml (canonical) then its settings.yaml sibling (legacy fallback)."""
+    if path.name == "config.toml":
+        return [path, path.with_name("settings.yaml")]
+    if path.name == "settings.yaml":
+        return [path.with_name("config.toml"), path]
+    return [path]
+
+
 def _extract_providers_block(data: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the config.providers dict, or None if absent/invalid."""
-    config = data.get("config")
-    if not isinstance(config, dict):
-        return None
-    providers = config.get("providers")
+    """Return the providers dict from a flat config.toml (top-level ``providers``)
+    or a legacy wrapped file (``config.providers``); None if absent/invalid."""
+    providers = data.get("providers")
     if not isinstance(providers, dict):
-        return None
-    return providers
+        config = data.get("config")
+        providers = config.get("providers") if isinstance(config, dict) else None
+    return providers if isinstance(providers, dict) else None
 
 
 def _extract_agents_block(data: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the config.agents dict, or None if absent/invalid.
-
-    config.agents is a YAML sibling of config.providers (both live under
-    the top-level ``config`` key). Returns None when the key is absent or
-    not a mapping; callers treat None as an empty agents map.
-    """
-    config = data.get("config")
-    if not isinstance(config, dict):
-        return None
-    agents = config.get("agents")
+    """Return the agents dict (flat ``agents`` or legacy ``config.agents``); None
+    if absent/invalid. Callers treat None as an empty agents map."""
+    agents = data.get("agents")
     if not isinstance(agents, dict):
-        return None
-    return agents
+        config = data.get("config")
+        agents = config.get("agents") if isinstance(config, dict) else None
+    return agents if isinstance(agents, dict) else None
+
+
+def _flatten_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Lift a legacy ``config:`` wrapper's keys to the top level so a write-back
+    produces a single-shape flat config.toml. No-op on an already-flat dict."""
+    cfg = data.get("config")
+    if not isinstance(cfg, dict):
+        return data
+    merged = {k: v for k, v in data.items() if k != "config"}
+    merged.update(cfg)
+    return merged
+
+
+def _strip_none(data: Any) -> Any:
+    """Recursively drop None-valued keys. TOML has no null; the loader reads an
+    absent key as its default, so stripping None is lossless and keeps tomli_w
+    from choking on an unserializable value."""
+    if isinstance(data, dict):
+        return {k: _strip_none(v) for k, v in data.items() if v is not None}
+    if isinstance(data, list):
+        return [_strip_none(v) for v in data]
+    return data
 
 
 def _parse_providers_block(
@@ -232,7 +261,7 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
         repo_root = Path(os.environ.get("PWD", os.getcwd()))
 
     candidates = [
-        repo_root / ".fno" / "settings.yaml",
+        repo_root / ".fno" / "config.toml",
         # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference).
         # Honors $FNO_GLOBAL_SETTINGS_PATH so unit tests pinning repo_root=tmp_path
         # do not leak the developer's real ~/.fno/settings.yaml.
@@ -240,7 +269,7 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
     ]
 
     for path in candidates:
-        data = _read_yaml_safe(path)
+        data = _read_parsed(path)
         block = _extract_providers_block(data)
         if block is None:
             continue
@@ -309,7 +338,7 @@ def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
         repo_root = Path(os.environ.get("PWD", os.getcwd()))
 
     candidates = [
-        repo_root / ".fno" / "settings.yaml",
+        repo_root / ".fno" / "config.toml",
         # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference).
         # Honors $FNO_GLOBAL_SETTINGS_PATH so unit tests pinning repo_root=tmp_path
         # do not leak the developer's real ~/.fno/settings.yaml.
@@ -317,7 +346,7 @@ def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
     ]
 
     for path in candidates:
-        data = _read_yaml_safe(path)
+        data = _read_parsed(path)
         block = _extract_providers_block(data)
         if block is None:
             continue
@@ -340,15 +369,15 @@ def save_providers(
     Preserves all existing top-level keys and other config.* sub-keys.
     """
     if scope == "project":
-        target = Path(os.environ.get("PWD", os.getcwd())) / ".fno" / "settings.yaml"
+        target = Path(os.environ.get("PWD", os.getcwd())) / ".fno" / "config.toml"
     else:
         # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference)
-        target = Path.home() / ".fno" / "settings.yaml"
+        target = Path.home() / ".fno" / "config.toml"
 
     # Read existing file to preserve other keys.
     # Use strict variant: if the file exists but is unparseable, raise rather
     # than silently overwriting all other top-level keys with an empty dict.
-    existing = _read_yaml_strict(target)
+    existing = _read_parsed_strict(target)
 
     # Build serializable providers block from config
     records_raw = []
@@ -368,21 +397,18 @@ def save_providers(
                 cleaned[k] = v
         records_raw.append(cleaned)
 
-    providers_block = {
-        "active": config.active,
-        "records": records_raw,
-    }
+    providers_block: dict[str, Any] = {"records": records_raw}
+    if config.active is not None:
+        providers_block["active"] = config.active
 
-    # Merge into existing structure under config.providers (whole-block replace)
-    if not isinstance(existing.get("config"), dict):
-        existing["config"] = {}
-    existing["config"]["providers"] = providers_block
+    # Flat config.toml: providers lives at the top level (whole-block replace).
+    # If existing was read from a legacy wrapped file, lift its config.* keys up
+    # so the written config.toml is single-shape (never a mixed config: + flat).
+    existing = _flatten_config(existing)
+    existing["providers"] = providers_block
 
-    # Ensure target directory exists
     target.parent.mkdir(parents=True, exist_ok=True)
-
-    content = yaml.safe_dump(existing, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    atomic_write(target, content)
+    atomic_write(target, tomli_w.dumps(_strip_none(existing)))
 
 
 # ---------------------------------------------------------------------------
@@ -444,16 +470,14 @@ def atomic_mutate_settings(
     with open(lock_path, "a") as lock_f:
         fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
         try:
-            current = _read_yaml_strict(settings_path)
+            current = _read_parsed_strict(settings_path)
             updated = mutator(current)
             if not isinstance(updated, dict):
                 raise TypeError(
                     "atomic_mutate_settings: mutator must return a dict, "
                     f"got {type(updated).__name__}"
                 )
-            content = yaml.safe_dump(
-                updated, default_flow_style=False, sort_keys=False, allow_unicode=True,
-            )
+            content = tomli_w.dumps(_strip_none(_flatten_config(updated)))
             tmp_path: Path | None = None
             try:
                 with tempfile.NamedTemporaryFile(
@@ -528,7 +552,7 @@ def read_active_provider_atomic(*, settings_path: Path) -> ActiveProviderSnapsho
     with open(lock_path, "a") as lock_f:
         fcntl.flock(lock_f.fileno(), fcntl.LOCK_SH)
         try:
-            settings = _read_yaml_strict(settings_path)
+            settings = _read_parsed_strict(settings_path)
         finally:
             fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 

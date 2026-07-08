@@ -190,7 +190,7 @@ def _default_settings_path() -> Path:
     resolved, so a ValidationError from a malformed global settings.yaml
     does not prevent the project-local snapshot from being used.
     """
-    project_local = Path(os.environ.get("PWD", os.getcwd())) / ".fno" / "settings.yaml"
+    project_local = Path(os.environ.get("PWD", os.getcwd())) / ".fno" / "config.toml"
     # Check project-local FIRST to avoid resolving (and potentially raising on)
     # the global config_file() when a project-local override exists.
     if project_local.is_file():

@@ -49,9 +49,9 @@ def _get_repo_root() -> Path:
 def _settings_path_for_scope(scope: str) -> Path:
     """Return the settings.yaml path for the given scope."""
     if scope == "project":
-        return _resolve_cwd() / ".fno" / "settings.yaml"
+        return _resolve_cwd() / ".fno" / "config.toml"
     else:
-        return _resolve_home() / ".fno" / "settings.yaml"
+        return _resolve_home() / ".fno" / "config.toml"
 
 
 def _load(scope: str = "global") -> "fno.adapters.providers.model.ProvidersConfig":  # type: ignore[name-defined]
@@ -496,8 +496,7 @@ def combos_add(
     target = _combos_settings_path(scope)
 
     def mutator(data: dict) -> dict:
-        config_section = data.setdefault("config", {})
-        providers_section = config_section.setdefault("providers", {})
+        providers_section = data.setdefault("providers", {})
         combos_section = providers_section.setdefault("combos", {})
         if name in combos_section:
             raise ValueError(
@@ -593,7 +592,7 @@ def combos_remove(
 
     def mutator(data: dict) -> dict:
         nonlocal cleared_active
-        providers_section = data.get("config", {}).get("providers", {})
+        providers_section = data.get("providers", {})
         combos_section = providers_section.get("combos", {})
         if name not in combos_section:
             raise ValueError(f"combo {name!r} not found in {scope} settings")
@@ -698,8 +697,7 @@ def combos_use(
     target = _combos_settings_path(scope)
 
     def mutator(data: dict) -> dict:
-        config_section = data.setdefault("config", {})
-        providers_section = config_section.setdefault("providers", {})
+        providers_section = data.setdefault("providers", {})
         providers_section["active_combo"] = name
         return data
 

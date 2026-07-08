@@ -38,6 +38,8 @@ from fno.adapters.providers.error_taxonomy import (
     classify_error,
 )
 from fno.adapters.providers.loader import (
+    _extract_providers_block,
+    _read_parsed,
     atomic_mutate_settings,
     load_providers,
 )
@@ -201,20 +203,9 @@ def _read_max_swaps_per_phase(settings_path: Path) -> int:
     """
     if not settings_path.is_file():
         return DEFAULT_MAX_SWAPS_PER_PHASE
-    try:
-        data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        logger.warning(
-            "settings.yaml unreadable at %s for max_swaps_per_phase: %s. "
-            "Using default %d.",
-            settings_path, exc, DEFAULT_MAX_SWAPS_PER_PHASE,
-        )
-        return DEFAULT_MAX_SWAPS_PER_PHASE
-
-    block = (
-        data.get("config", {}).get("providers", {})
-        .get("failover", {})
-    )
+    data = _read_parsed(settings_path)
+    providers = _extract_providers_block(data) or {}
+    block = providers.get("failover", {})
     if not isinstance(block, dict):
         return DEFAULT_MAX_SWAPS_PER_PHASE
     raw = block.get("max_swaps_per_phase")
@@ -240,19 +231,9 @@ def _next_eligible_provider(
     """
     if not settings_path.is_file():
         return None
-    try:
-        data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        logger.warning(
-            "settings.yaml unreadable at %s during eligibility lookup: %s. "
-            "Returning no candidate.",
-            settings_path, exc,
-        )
-        return None
-
-    raw_records = (
-        data.get("config", {}).get("providers", {}).get("records") or []
-    )
+    data = _read_parsed(settings_path)
+    providers = _extract_providers_block(data) or {}
+    raw_records = providers.get("records") or []
     candidates = [
         r for r in raw_records
         if isinstance(r, dict) and r.get("id") and r["id"] not in exclude
@@ -438,9 +419,11 @@ class FailoverController:
             return SwapResult(decision=SwapDecision.QUEUE_EXHAUSTED,
                               reason="no_eligible_provider")
 
-        # Mutate settings.yaml to flip active under exclusive lock.
+        # Mutate config.toml to flip active under exclusive lock. Flat shape:
+        # providers is top-level (atomic_mutate_settings flattens any legacy
+        # wrapper on write, so mutating the flat block preserves the records).
         def _mutator(d: dict[str, Any]) -> dict[str, Any]:
-            providers_block = d.setdefault("config", {}).setdefault("providers", {})
+            providers_block = d.setdefault("providers", {})
             providers_block["active"] = candidate
             return d
 
