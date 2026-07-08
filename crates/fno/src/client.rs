@@ -195,7 +195,7 @@ fn spawn_server(path: &Path) -> Result<(), String> {
         .stdout(std::process::Stdio::null())
         .stderr(log);
     // Config->env bridge for the interactive path (x-6165). The pure-Rust mux
-    // server reads no settings.yaml, so `config.mux.shell_integration: off` was
+    // server reads no config.toml, so `config.mux.shell_integration: off` was
     // a silent no-op here (the Python spawn front-half already bridges
     // dispatched panes, x-b63b). Latch it at server birth: an explicit env
     // export wins (inherited naturally, never overwritten); otherwise a single
@@ -1923,7 +1923,7 @@ async fn attach_and_run(
         },
     );
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
-    // settings.yaml read (fail-open to on), the digest_overlay idiom.
+    // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
     let (c_rows, c_cols) = view.content_dims();
     write_msg(
@@ -3422,7 +3422,7 @@ mod tests {
 
     #[test]
     fn config_says_off_matches_only_trimmed_off() {
-        // Bridges settings.yaml -> the env the interactive server latches
+        // Bridges config.toml -> the env the interactive server latches
         // (x-6165). Must mirror `pty::integration_disabled`: exactly `off`.
         assert!(config_says_off("off"));
         assert!(config_says_off("off\n")); // config get trailing newline

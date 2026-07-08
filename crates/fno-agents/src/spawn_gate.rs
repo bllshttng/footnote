@@ -723,8 +723,8 @@ MemAvailable:    8000000 kB\n";
         std::fs::create_dir_all(&abil).unwrap();
 
         std::fs::write(
-            abil.join("settings.yaml"),
-            "config:\n  agents:\n    worker_qos: off\n",
+            abil.join("config.toml"),
+            "[agents]\nworker_qos = \"off\"\n",
         )
         .unwrap();
         // `sh` resolves on every CI platform (a non-resolving argv[0] is
@@ -733,8 +733,8 @@ MemAvailable:    8000000 kB\n";
         assert_eq!(qos_wrap(&dir, argv.clone()), argv, "off = identity");
 
         std::fs::write(
-            abil.join("settings.yaml"),
-            "config:\n  agents:\n    worker_qos: utility\n",
+            abil.join("config.toml"),
+            "[agents]\nworker_qos = \"utility\"\n",
         )
         .unwrap();
         let wrapped = qos_wrap(&dir, argv.clone());

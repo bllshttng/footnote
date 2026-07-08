@@ -102,7 +102,7 @@ fn fire_with_nonexistent_manifest(
         "2026-06-05T12:00:00Z".to_string(),
         format!("--gh-bin={}", mock.gh.display()),
         format!("--git-bin={}", mock.git.display()),
-        // Isolate from the developer's real ~/.fno/settings.yaml
+        // Isolate from the developer's real ~/.fno/config.toml
         "--global-settings".to_string(),
         "/nonexistent/global-settings.yaml".to_string(),
     ];
@@ -127,7 +127,7 @@ fn missing_manifest_allows_exit_zero() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     // Isolate settings
-    fs::write(cwd.join(".fno/settings.yaml"), "# isolated test settings\n").unwrap();
+    fs::write(cwd.join(".fno/config.toml"), "# isolated test settings\n").unwrap();
 
     // Point --state at a path that does NOT exist
     let nonexistent = cwd.join("target-state.md");
@@ -168,7 +168,7 @@ fn missing_manifest_with_absent_transcript_allows_exit() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
-    fs::write(cwd.join(".fno/settings.yaml"), "# isolated test settings\n").unwrap();
+    fs::write(cwd.join(".fno/config.toml"), "# isolated test settings\n").unwrap();
 
     let nonexistent_manifest = cwd.join("target-state.md");
     let nonexistent_transcript = cwd.join("transcript.jsonl");
