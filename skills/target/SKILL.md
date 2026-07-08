@@ -204,7 +204,7 @@ bash "${SKILL_DIR}/scripts/dispatch-node.sh" <node...|--all-ready> [--flags "<si
 ```
 
 Each line is one of `launched` / `already-running` / `parked` / `skipped-done` / `failed` / `deferred-cap`, followed by a `summary:` line; never silent. Locked semantics:
-- Under `--all-ready` only `ready` nodes dispatch. An **explicitly-named** node also dispatches when `idea`/`triage` (naming it is the human's vet; the worker runs think->blueprint->do); `blocked`/`deferred` are always **parked** (pre-planned future work), never launched. A node a live worker already holds (`node:<id>` claim) is **already-running**, never double-dispatched.
+- Under `--all-ready` only `ready` nodes dispatch. An **explicitly-named** node also dispatches when its status is `idea` (the triage pile; naming it is the human's vet, the worker runs think->blueprint->do); `blocked`/`deferred` are always **parked** (pre-planned future work), never launched. A node a live worker already holds (`node:<id>` claim) is **already-running**, never double-dispatched.
 - Each worker launches via `fno agents spawn --provider claude --substrate bg` (the detached `claude --bg` thread; Group 1 ab-8b3e4fe0 moved creation off `ask`), NEVER `--bare`/`-p` (subscription lane only). The `--substrate bg` key is load-bearing: the post-x-3ab8 default substrate is `pane` (owned-PTY), which would stall a fire-and-forget dispatch at a placement prompt (x-2c27).
 - `no-merge` is injected by default (an autonomous worker lands a PR for review, not an auto-merge); pass `--allow-merge` to opt out.
 - A dispatch failure is surfaced and leaves the node `ready`/re-dispatchable; it never reports a launch that did not happen, and never falls back to `-p`/API-credit billing.

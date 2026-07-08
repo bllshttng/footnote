@@ -42,8 +42,9 @@
 #   - Fire-and-forget: this script NEVER writes/clears the caller's
 #     .fno/target-state.md. The planning session is untouched.
 #   - Under --all-ready only `ready` nodes dispatch. An EXPLICITLY-NAMED node
-#     also dispatches when idea/triage (naming it is the human's vet; the
-#     worker runs think->blueprint->do); blocked/deferred are always parked.
+#     also dispatches when idea-status (the triage pile; there is no distinct
+#     `triage` status) - naming it is the human's vet, the worker runs
+#     think->blueprint->do; blocked/deferred are always parked.
 
 set -uo pipefail
 
@@ -154,11 +155,11 @@ for id in "${NODES[@]}"; do
       # live-claim check below reports already-running, or (stale claim => dead
       # worker) falls through to re-dispatch as recovery.
       : ;;
-    idea|triage)
-      # Explicitly naming an idea/triage node IS the human's vet: dispatch it
-      # and let the /target worker run think->blueprint->do. --all-ready stays
-      # ready-only (its enumeration never yields idea/triage; this guard makes
-      # that invariant fail-safe rather than by-construction-only).
+    idea)
+      # Explicitly naming an idea node (the triage pile is idea-status; there is
+      # no distinct `triage` status) IS the human's vet: dispatch it and let the
+      # /target worker run think->blueprint->do. --all-ready stays ready-only
+      # (its enumeration never yields idea; this guard makes that fail-safe).
       if [[ "$ALL_READY" -eq 1 ]]; then
         echo "parked $id reason=\"$status (not up-next)\""
         n_parked=$((n_parked + 1))
