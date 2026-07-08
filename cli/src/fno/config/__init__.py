@@ -2618,7 +2618,7 @@ def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
         else:
             data = yaml.safe_load(text)
         return (data if isinstance(data, dict) else {}, True)
-    except (OSError, yaml.YAMLError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, tomllib.TOMLDecodeError) as exc:
         _LOG.warning(
             "config file at %s failed to parse: %s; using defaults",
             path,

@@ -91,6 +91,11 @@ def _resolve_parent_block(
     """
     if parts and parts[0] == "config":
         parts = parts[1:]
+    if not parts:
+        # A bare `config` key (parts == ["config"]) strips to empty; there is no
+        # leaf to resolve. Return None so the caller raises a clean unknown-key
+        # error instead of an IndexError on parts[-1].
+        return None
     cls: type[BaseModel] = SettingsModel
     for part in parts[:-1]:
         fields = getattr(cls, "model_fields", {})
@@ -171,8 +176,33 @@ def _target_path(scope: str, repo_root: Optional[Path]) -> Path:
             from fno.paths import resolve_repo_root
 
             repo_root = resolve_repo_root()
-        return repo_root / ".fno" / "settings.yaml"
-    return _global_settings_path()
+        target = repo_root / ".fno" / "settings.yaml"
+    else:
+        target = _global_settings_path()
+    _refuse_if_toml_shadows(target)
+    return target
+
+
+def _refuse_if_toml_shadows(target: Path) -> None:
+    """Fail loud if a higher-priority config.toml would shadow a settings.yaml write.
+
+    The loader prefers config.toml over settings.yaml, but this writer only
+    writes YAML. If a config.toml exists at the same location, writing YAML
+    would report success while load_settings() keeps returning the TOML value -
+    a silent no-op. TOML writes land in a later migration stage; until then,
+    refuse rather than mislead (codex P2, PR #255).
+    """
+    if target.name != "settings.yaml":
+        return
+    toml_sibling = target.with_name("config.toml")
+    if toml_sibling.exists():
+        raise ConfigSetError(
+            f"a config.toml exists at {toml_sibling} and takes read priority over "
+            f"settings.yaml, so this write would be silently ignored on the next "
+            f"load. Edit {toml_sibling} directly (TOML writes are not yet "
+            f"supported by `fno config set`).",
+            1,
+        )
 
 
 def _get_nested(d: dict[str, Any], parts: list[str]) -> Optional[dict[str, Any]]:
