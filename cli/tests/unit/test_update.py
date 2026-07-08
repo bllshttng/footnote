@@ -811,8 +811,9 @@ def test_refresh_rust_bins_installs_mux_on_fresh_marker_when_absent(
 def test_refresh_rust_bins_fresh_marker_mux_present_installs_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Marker fresh AND the mux present -> the fast path stays fast: no cargo
-    install at all (the fresh-marker heal only fires when the mux is missing)."""
+    """Marker fresh AND the mux present-and-same-build (self-reports the source
+    rev) -> the fast path stays fast: no cargo install at all. The mux heal only
+    fires when the mux is missing OR stale."""
     source = tmp_path / "cli"
     source.mkdir()
     (source.parent / "crates" / "fno-agents").mkdir(parents=True)
@@ -842,6 +843,54 @@ def test_refresh_rust_bins_fresh_marker_mux_present_installs_nothing(
     result = update._refresh_rust_bins(source)
     assert result == "fresh"
     assert not [c for c in recorded if c[:2] == ["cargo", "install"]], recorded
+
+
+def test_refresh_rust_bins_fresh_marker_stale_mux_reinstalls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh triad but the PRESENT mux self-reports an OLDER crates_rev -> reinstall
+    just the mux. The mux install is best-effort, so a prior failed build can leave
+    a stale `fno` beside a fresh triad; a presence-only heal would never repair it.
+    Now that the mux bakes its own rev, `fno update` sees the stale front door."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    mux_crate = source.parent / "crates" / "fno"
+    mux_crate.mkdir(parents=True)
+    subtree_rev = "a" * 40
+    marker_file = tmp_path / "installed-rust-rev"
+    marker_file.write_text(subtree_rev + "\n", encoding="utf-8")
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
+
+    fake_bin = tmp_path / "fake-fno-agents"
+    fake_bin.write_text("x")
+    for _n in update._triad_names():
+        (tmp_path / _n).write_text("x")  # triad siblings present (fresh fast path)
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
+    fake_mux = tmp_path / "fno"
+    fake_mux.write_text("x")
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_mux)  # mux PRESENT
+
+    # The triad reports fresh; the mux (name "fno") reports an OLDER rev -> stale.
+    def _rev(b, **kw):
+        return "b" * 40 if Path(b).name == "fno" else subtree_rev
+
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", _rev)
+
+    recorded: list[list[str]] = []
+    monkeypatch.setattr(
+        update.subprocess, "run",
+        lambda cmd, **kw: (recorded.append(list(cmd)), types.SimpleNamespace(returncode=0))[1],
+    )
+
+    result = update._refresh_rust_bins(source)
+    assert result == "fresh"
+    mux_installs = [
+        c for c in recorded
+        if c[:2] == ["cargo", "install"] and str(mux_crate) in c
+    ]
+    assert mux_installs, "a present-but-stale mux must be reinstalled on the fresh path"
 
 
 # --- legacy marker-write failure is a SUCCESSFUL refresh (post-deploy verify passed) ---

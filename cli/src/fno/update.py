@@ -648,13 +648,17 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             " skipping cargo install"
         )
         # The agents bins are current, but the mux front door (crates/fno ->
-        # `fno`) can still be ABSENT at a fresh binary: the fno->fno-py rename
-        # lands fno-py while a fresh-binary `fno update` never installed the mux,
-        # stranding the front door (no `fno` on PATH). Heal it additively if
-        # missing, so `fno doctor`'s "run fno update" hint is true rather than a
-        # dead-end. No-op when there is no crates/fno source. installed_bin is
-        # non-None here (passed the `installed_bin is None and not force` gate).
-        if _cargo_installed_mux() is None:
+        # `fno`) can still be ABSENT or STALE at a fresh triad. Absent: the
+        # fno->fno-py rename lands fno-py while a fresh-binary `fno update` never
+        # installed the mux. Stale: the mux install is best-effort (a failed
+        # build warns and continues), so a prior failure can leave an OLD `fno`
+        # beside a fresh triad. Now that crates/fno bakes its own crates_rev,
+        # interrogate the installed mux and reinstall when it is missing OR its
+        # rev != source - closing the present-but-stale front-door gap a
+        # presence-only heal would miss. No-op when there is no crates/fno
+        # source. installed_bin is non-None here.
+        mux = _cargo_installed_mux()
+        if mux is None or _installed_bin_crates_rev(mux) != subtree:
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
         # Sync even on the fresh path: an interrupted prior run may have left the
         # other install locations behind (AC2-FR). The gate's fresh verdict must
