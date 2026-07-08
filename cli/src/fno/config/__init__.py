@@ -2622,6 +2622,46 @@ def _migrate_yaml_to_toml(
     return toml_path
 
 
+def run_config_migration(
+    locations: Optional[list[Path]] = None,
+) -> list[tuple[Path, str]]:
+    """Convert every legacy settings.yaml (+ its settings.local.yaml) in the
+    candidate chain to a flat config.toml, returning ``(toml_path, action)`` per
+    file for the CLI to report. ``action`` is ``migrated`` | ``already-migrated``
+    | ``absent``. The explicit ``fno setup migrate-config`` verb over the same
+    one-shot conversion the loader runs, so a deployed install converts on demand
+    (comments are NOT carried across the round-trip). Idempotent + atomic.
+    """
+    out: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for yaml_path in locations if locations is not None else _settings_yaml_locations():
+        if yaml_path.name != "settings.yaml":
+            continue
+        real = (
+            Path(os.path.realpath(yaml_path)) if yaml_path.is_symlink() else yaml_path
+        )
+        for src, toml_name in (
+            (yaml_path, "config.toml"),
+            (real.with_name("settings.local.yaml"), "config.local.toml"),
+        ):
+            toml_path = real.with_name(toml_name)
+            if str(toml_path) in seen:
+                continue
+            seen.add(str(toml_path))
+            # settings.local.yaml is a real per-worktree file; skip a symlinked one.
+            if toml_name == "config.local.toml" and (
+                not src.is_file() or src.is_symlink()
+            ):
+                continue
+            if toml_path.exists():
+                out.append((toml_path, "already-migrated"))
+            elif _migrate_yaml_to_toml(src, toml_name) is not None:
+                out.append((toml_path, "migrated"))
+            else:
+                out.append((toml_path, "absent"))
+    return out
+
+
 def _ensure_migrated(locations: list[Path]) -> None:
     """Convert every legacy settings.yaml (+ its settings.local.yaml) in
     ``locations`` to a flat config.toml, once. The load-time hard-cut safety net:

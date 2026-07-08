@@ -497,6 +497,31 @@ def migrate_paths_cmd(
     raise typer.Exit(run_migration(force=force, settings_root=_paths.state_dir()))
 
 
+@app.command("migrate-config")
+def migrate_config_cmd() -> None:
+    """Convert legacy settings.yaml -> flat config.toml (x-8526 hard cut).
+
+    Walks the settings candidate chain (worktree, canonical, global), writes an
+    equivalent flat config.toml sibling for each settings.yaml, and deletes the
+    yaml only after the toml is durably written (atomic temp+rename). Idempotent:
+    a location that already has a config.toml is left untouched. Comments in a
+    hand-tuned settings.yaml are NOT carried across the round-trip.
+    """
+    from fno.config import run_config_migration
+
+    results = run_config_migration()
+    migrated = [p for p, action in results if action == "migrated"]
+    for p, action in results:
+        if action == "migrated":
+            typer.echo(f"migrated -> {p} (comments not carried over)")
+        elif action == "already-migrated":
+            typer.echo(f"already migrated: {p}")
+    if not migrated:
+        typer.echo("nothing to migrate (already on config.toml).")
+    else:
+        typer.echo(f"migrated {len(migrated)} config file(s).")
+
+
 def scaffold_post_merge(
     repo_root: Path,
     *,
