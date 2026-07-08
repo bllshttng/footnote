@@ -250,6 +250,22 @@ out="$(bash "$DISPATCH" ab-ffff6666 ab-7777aaaa 2>&1)"
   && pass "gate: blocked + deferred nodes parked, never dispatched" \
   || fail "gate: blocked/deferred not parked: $out"
 
+# ---- gate: EXPLICITLY-NAMED idea/triage nodes dispatch (naming is the vet) ----
+reset_mock; set_status ab-8888dddd idea; set_status ab-9999eeee triage
+out="$(bash "$DISPATCH" --dry-run ab-8888dddd ab-9999eeee 2>&1)"
+[[ "$(echo "$out" | grep -c '^launched ')" -eq 2 ]] \
+  && pass "gate: explicit idea + triage nodes dispatch (think->blueprint->do)" \
+  || fail "gate: explicit idea/triage not dispatched: $out"
+
+# ---- gate: --all-ready parks an idea node even if the enumeration leaked it ----
+reset_mock
+printf '[{"id":"ab-aaaa1111"},{"id":"ab-8888dddd"}]\n' > "$MOCKSTATE/ready.json"
+set_status ab-aaaa1111 ready; set_status ab-8888dddd idea
+out="$(bash "$DISPATCH" --all-ready --dry-run 2>&1)"
+echo "$out" | grep -q '^launched ab-aaaa1111 ' && echo "$out" | grep -q '^parked ab-8888dddd ' \
+  && pass "gate: --all-ready stays ready-only (leaked idea node parked)" \
+  || fail "gate: --all-ready idea guard wrong: $out"
+
 # ---- AC5-FR: dispatch never mutates the caller's target-state.md ----
 reset_mock; set_status ab-aaaa1111 ready
 STATE="$TMP/.fno"; mkdir -p "$STATE"
