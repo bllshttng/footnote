@@ -565,7 +565,7 @@ fn nonclaude_codex_agent_rc0() {
     let settings = write(
         d,
         "config.toml",
-        "[agents.reviewer]\nprovider = \"codex-prov\"\n\n[providers]\nactive = \"claude-main\"\n\n[providers.records.codex-prov]\ncli = \"codex\"\n",
+        "[agents.reviewer]\nprovider = \"codex-prov\"\n\n[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"codex-prov\"\ncli = \"codex\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
@@ -583,7 +583,7 @@ fn nonclaude_all_claude_rc1() {
     let settings = write(
         d,
         "config.toml",
-        "[providers]\nactive = \"claude-main\"\n\n[providers.records.claude-main]\ncli = \"claude\"\n",
+        "[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"claude-main\"\ncli = \"claude\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
@@ -615,7 +615,7 @@ fn nonclaude_dangling_provider_ref_warn_skip() {
     let settings = write(
         d,
         "config.toml",
-        "[agents.reviewer]\nprovider = \"ghost\"\n\n[providers]\nactive = \"claude-main\"\n\n[providers.records.claude-main]\ncli = \"claude\"\n",
+        "[agents.reviewer]\nprovider = \"ghost\"\n\n[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"claude-main\"\ncli = \"claude\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
@@ -633,7 +633,7 @@ fn nonclaude_no_agents_dispatched_rc1() {
     let settings = write(
         d,
         "config.toml",
-        "[providers]\nactive = \"claude-main\"\n\n[providers.records.claude-main]\ncli = \"claude\"\n",
+        "[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"claude-main\"\ncli = \"claude\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
@@ -665,7 +665,7 @@ fn nonclaude_mixed_agents_one_nonclaude_rc0() {
     let settings = write(
         d,
         "config.toml",
-        "[agents.alpha]\nprovider = \"claude-main\"\n\n[agents.beta]\nprovider = \"codex-prov\"\n\n[providers]\nactive = \"claude-main\"\n\n[providers.records.claude-main]\ncli = \"claude\"\n\n[providers.records.codex-prov]\ncli = \"codex\"\n",
+        "[agents.alpha]\nprovider = \"claude-main\"\n\n[agents.beta]\nprovider = \"codex-prov\"\n\n[providers]\nactive = \"claude-main\"\n\n[[providers.records]]\nid = \"claude-main\"\ncli = \"claude\"\n\n[[providers.records]]\nid = \"codex-prov\"\ncli = \"codex\"\n",
     );
     assert_nonclaude_parity(
         artifact.to_str().unwrap(),
