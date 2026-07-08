@@ -321,9 +321,9 @@ STATE
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case C: init->verb budget coherence (Gap 2)
-# Writes settings.yaml in the config.budget.unattended.cost_cap_usd format that
-# init-target-state.sh resolves from config.sh (the nested YAML structure that
-# loopcheck.rs parse_settings() reads at indent level 6).
+# Writes config.toml in the flat budget.unattended.cost_cap_usd format that
+# init-target-state.sh resolves from config.sh and that loopcheck.rs
+# parse_settings() reads as a TOML table.
 # Session cost 0.05 > cap 0.01 -> Budget termination.
 # ─────────────────────────────────────────────────────────────────────────────
 log "Case C: budget coherence (init format -> verb reads -> Budget trip)"
@@ -333,17 +333,16 @@ log "Case C: budget coherence (init format -> verb reads -> Budget trip)"
     STUB_BIN="${TMP_DIR}/stubs"
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
 
-    # Write settings.yaml in the EXACT nested format that init reads via config.sh
-    # and that loopcheck.rs parse_settings() consumes (indent==6 under
-    # config.budget.unattended). This is the coherence assertion.
-    cat > "${TMP_DIR}/.fno/config.toml" <<'YAML'
-config:
-  budget:
-    attended:
-      cost_cap_usd: 10.0
-    unattended:
-      cost_cap_usd: 0.01
-YAML
+    # Write config.toml in the flat format that init reads via config.sh and that
+    # loopcheck.rs parse_settings() consumes (budget.unattended.cost_cap_usd, no
+    # `config:` wrapper). This is the coherence assertion.
+    cat > "${TMP_DIR}/.fno/config.toml" <<'TOML'
+[budget.attended]
+cost_cap_usd = 10.0
+
+[budget.unattended]
+cost_cap_usd = 0.01
+TOML
 
     init_git_repo "$TMP_DIR"
 
