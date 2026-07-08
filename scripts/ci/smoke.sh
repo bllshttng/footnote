@@ -220,7 +220,9 @@ fi
 # Prerequisites (only assert what the selected steps actually need).
 # ----------------------------------------------------------------------------
 _selected_cmds() { for i in "${SELECTED[@]}"; do printf '%s\n' "${STEP_CMDS[$i]}"; done; }
-need_prereq() { _selected_cmds | grep -q -- "$1"; }
+# grep, not grep -q: -q exits on first match and SIGPIPEs the upstream, which
+# under pipefail makes the pipeline return 141 (false) even on a real match.
+need_prereq() { _selected_cmds | grep -- "$1" >/dev/null; }
 
 miss() { echo "smoke: missing prerequisite: $1 ($2)" >&2; exit 2; }
 if need_prereq 'uv '; then command -v uv >/dev/null 2>&1 || miss uv "install from https://docs.astral.sh/uv"; fi
@@ -281,7 +283,7 @@ print_header() {
     local n=${#SELECTED[@]} total=${#STEP_NAMES[@]} label="FULL"
     [[ $RETRY_FAILED -eq 1 ]] && label="RETRY SUBSET"
     [[ -n "$ONLY_GLOB" ]] && label="ONLY SUBSET"
-    echo "smoke: mode=$label steps=$n/$total$( [[ $KEEP_GOING -eq 1 ]] && echo ' keep-going' )"
+    echo "smoke: mode=$label steps=$n/$total$( if [[ $KEEP_GOING -eq 1 ]]; then echo ' keep-going'; fi )"
     [[ $RETRY_FELL_BACK -eq 1 ]] && echo "smoke: no usable failure record - falling back to FULL run"
     if [[ $n -ne $total ]]; then
         echo "smoke: SUBSET run - run 'scripts/ci/smoke.sh' full before the settle-green push"

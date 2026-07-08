@@ -46,7 +46,7 @@ REPO_NAME="$(basename "$CANONICAL_ROOT")"
 # --- resolve the persistent preflight worktree path -------------------------
 # config.paths.worktrees_base if set (same knob as everything else), else the
 # harness-native .claude/worktrees. Tilde-expanded.
-WT_BASE="$(fno config get paths.worktrees_base 2>/dev/null | tail -1 | tr -d '[:space:]')"
+WT_BASE="$(fno config get paths.worktrees_base 2>/dev/null | tail -1 | tr -d '[:space:]' || true)"
 if [[ -n "$WT_BASE" && "$WT_BASE" != "null" && "$WT_BASE" != *Error* ]]; then
     WT_BASE="${WT_BASE/#\~/$HOME}"
     PREFLIGHT_WT="$WT_BASE/$REPO_NAME/preflight"
@@ -81,7 +81,7 @@ acquire_lock() {
     exit 3
 }
 acquire_lock
-printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null)" "$CANDIDATE_SHORT" > "$LOCKDIR/holder"
+printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHORT" > "$LOCKDIR/holder"
 
 TMPHOME=""
 cleanup() { rm -rf "$LOCKDIR"; [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"; }
@@ -89,7 +89,9 @@ trap cleanup EXIT INT TERM
 
 # --- ensure / reset the preflight worktree ----------------------------------
 echo "preflight: repo=$REPO_NAME candidate=$CANDIDATE_SHORT worktree=$PREFLIGHT_WT"
-is_registered() { git -C "$INVOKING_ROOT" worktree list --porcelain | grep -qxF "worktree $PREFLIGHT_WT"; }
+# grep, not grep -q: -q exits on first match and SIGPIPEs `git worktree list`,
+# which under pipefail returns 141 (false) and would falsely recreate the wt.
+is_registered() { git -C "$INVOKING_ROOT" worktree list --porcelain | grep -xF "worktree $PREFLIGHT_WT" >/dev/null; }
 
 git -C "$INVOKING_ROOT" worktree prune >/dev/null 2>&1 || true  # drop dangling admin entries from a prior rm -rf
 if is_registered; then
@@ -109,8 +111,11 @@ fi
 if ! git -C "$PREFLIGHT_WT" reset --hard "$CANDIDATE_SHA" >/dev/null 2>&1; then
     echo "preflight: git reset --hard failed in the preflight worktree" >&2; exit 1
 fi
-# clean -fdx but preserve warm caches + the failure record.
-git -C "$PREFLIGHT_WT" clean -fdx -e target -e cli/.venv -e .preflight-last-failures.txt -e .fno >/dev/null 2>&1 || {
+# clean -fdx but preserve warm caches + the failure record ONLY. Excluding all
+# of .fno would leave stale per-run state (e.g. triage-log.jsonl a smoke test
+# reads) that could mask a regression a fresh CI checkout would catch, so we
+# scope the exclusion to the single retry-record file.
+git -C "$PREFLIGHT_WT" clean -fdx -e target -e cli/.venv -e .fno/preflight-last-failures.txt >/dev/null 2>&1 || {
     echo "preflight: git clean failed in the preflight worktree" >&2; exit 1; }
 
 # --- hermetic env ------------------------------------------------------------
@@ -158,7 +163,7 @@ sreq=$?
 [[ $sreq -eq 0 ]] && record_leg "smoke suite" pass $(( SECONDS - s0 )) || { record_leg "smoke suite" fail $(( SECONDS - s0 )); FAIL=1; }
 
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
-have_pinned_fmt() { rustup toolchain list 2>/dev/null | grep -q "^$PINNED_FMT"; }
+have_pinned_fmt() { rustup toolchain list 2>/dev/null | grep "^$PINNED_FMT" >/dev/null; }
 
 run_rust_leg() { # name status-var  cwd  cmd...
     local name="$1" cwd="$2"; shift 2

@@ -34,10 +34,12 @@ push-wait-red-fix loop where each ~10-minute CI round surfaces one new failure.
 
 ```bash
 # Before the first PR push, and again before the push you expect to settle
-# green. Skip when FNO_SKIP_PREFLIGHT=1 or the diff is docs-only.
-if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" ]] && [[ -x scripts/ci/preflight.sh ]] \
-   && git diff --name-only origin/main...HEAD | grep -qvE '^(docs/|internal/|.*\.md$)'; then
-  scripts/ci/preflight.sh || { echo "preflight RED - fix before pushing"; exit 1; }
+# green. Skip when FNO_SKIP_PREFLIGHT=1 or the diff is docs-only. Capture the
+# non-docs paths into a var (|| true) rather than piping grep inside the `if`
+# condition - grep -q in a pipeline can SIGPIPE git diff under pipefail.
+non_docs="$(git diff --name-only origin/main...HEAD | grep -vE '^(docs/|internal/|.*\.md$)' || true)"
+if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" && -x scripts/ci/preflight.sh && -n "$non_docs" ]]; then
+  if ! scripts/ci/preflight.sh; then echo "preflight RED - fix before pushing"; exit 1; fi
 fi
 ```
 
