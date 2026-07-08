@@ -903,11 +903,12 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
 
 
 def config_file() -> Path:
-    """Return the path to settings.yaml.
+    """Return the path to the active config file (config.toml on a flat install;
+    a legacy settings.yaml when that is what loaded).
 
     Prefers the path that load_settings() actually used to load the file
     (Finding 3: loader and paths must agree on the settings file location).
-    Falls back to state_dir()/settings.yaml for backward compatibility when
+    Falls back to state_dir()/config.toml (the canonical flat file) when
     settings were loaded from built-in defaults (no file on disk).
 
     Triggers a settings load if not already cached, so _loaded_from is set.
@@ -918,7 +919,7 @@ def config_file() -> Path:
     actual = loaded_from()
     if actual is not None:
         return actual
-    return state_dir() / "settings.yaml"
+    return state_dir() / "config.toml"
 
 
 # ---------------------------------------------------------------------------
