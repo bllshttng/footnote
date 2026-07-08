@@ -999,7 +999,17 @@ fm = json.load(sys.stdin)
 try:
     PlanFrontmatter.model_validate(fm)
 except ValidationError as e:
-    present = [x for x in e.errors() if x["type"] != "missing"]
+    # Block only on STRUCTURAL corruption (a bad size, a garbage timestamp).
+    # A missing required field is tolerated (a plan binds its node later), and
+    # a drifted-but-recognizable `status` (planned/designed/superseded/...) is
+    # NOT a /do concern: `fno plan reconcile-status` normalizes it, and /do
+    # executes the Execution Strategy section, which does not depend on the
+    # frontmatter status. Blocking /do on status drift would refuse ~5% of real
+    # plans that run fine today.
+    present = [
+        x for x in e.errors()
+        if x["type"] != "missing" and (x["loc"][:1] != ("status",))
+    ]
     for x in present:
         loc = ".".join(str(p) for p in x["loc"]) or "<root>"
         print(f"  {loc}: {x['msg']} (got {x.get('input')!r})")
