@@ -73,7 +73,7 @@ def test_ac2_err_no_settings():
     with pytest.raises(ProjectIdentificationError) as exc_info:
         resolve_project(cwd=Path("/tmp"))
 
-    assert str(exc_info.value) == "set 'project:' in .fno/settings.yaml or pass --from"
+    assert str(exc_info.value) == "set 'project' in .fno/config.toml or pass --from"
 
 
 def test_ac2_err_exact_message(tmp_path):
@@ -83,7 +83,7 @@ def test_ac2_err_exact_message(tmp_path):
     with pytest.raises(ProjectIdentificationError) as exc_info:
         resolve_project(cwd=tmp_path)
 
-    assert str(exc_info.value) == "set 'project:' in .fno/settings.yaml or pass --from"
+    assert str(exc_info.value) == "set 'project' in .fno/config.toml or pass --from"
 
 
 # ---------------------------------------------------------------------------
