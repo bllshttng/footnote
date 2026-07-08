@@ -92,7 +92,7 @@ def _shell_integration() -> str:
     try:
         from fno.config import load_settings
 
-        return load_settings().config.mux.shell_integration
+        return load_settings().mux.shell_integration
     except Exception:
         return "mux-panes"
 

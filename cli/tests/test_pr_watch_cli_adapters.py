@@ -147,7 +147,7 @@ def test_reviewers_for_returns_required_bots(tmp_path: Path) -> None:
     from fno.pr_watch.cli import _reviewers_for
 
     fake_settings = MagicMock()
-    fake_settings.config.review.github_apps = ["codex", "gemini"]
+    fake_settings.review.github_apps = ["codex", "gemini"]
 
     with patch("fno.pr_watch.cli.load_settings_for_repo", return_value=fake_settings):
         result = _reviewers_for(tmp_path)

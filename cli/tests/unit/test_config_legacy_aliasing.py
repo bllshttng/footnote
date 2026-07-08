@@ -34,7 +34,7 @@ def test_local_legacy_beats_global_canonical(tmp_path):
     )
     # highest-priority first (project beats user)
     s = settings_from_files([local, glob])
-    assert s.config.review.external_reviewers == ["codex"]
+    assert s.review.external_reviewers == ["codex"]
 
 
 def test_local_canonical_beats_global_legacy(tmp_path):
@@ -49,7 +49,7 @@ def test_local_canonical_beats_global_legacy(tmp_path):
         "config:\n  review:\n    external_reviewers:\n      - codex\n",
     )
     s = settings_from_files([local, glob])
-    assert s.config.review.external_reviewers == ["codex"]
+    assert s.review.external_reviewers == ["codex"]
 
 
 def test_legacy_scalar_aliases_to_list(tmp_path):
@@ -57,7 +57,7 @@ def test_legacy_scalar_aliases_to_list(tmp_path):
 
     f = _write(tmp_path / "s.yaml", "config:\n  external_reviewer: gemini\n")
     s = settings_from_files([f])
-    assert s.config.review.external_reviewers == ["gemini"]
+    assert s.review.external_reviewers == ["gemini"]
 
 
 def test_top_level_project_aliases_id_and_vision(tmp_path):
@@ -66,8 +66,8 @@ def test_top_level_project_aliases_id_and_vision(tmp_path):
 
     f = _write(tmp_path / "s.yaml", 'project:\n  id: myproj\n  vision: "ship it"\n')
     s = settings_from_files([f])
-    assert s.config.project.id == "myproj"
-    assert s.config.project.vision == "ship it"
+    assert s.project.id == "myproj"
+    assert s.project.vision == "ship it"
 
 
 def test_top_level_work_aliases_to_config_work(tmp_path):
@@ -80,7 +80,7 @@ def test_top_level_work_aliases_to_config_work(tmp_path):
         "      - name: web\n        path: ~/code/web\n",
     )
     s = settings_from_files([f])
-    ws = s.config.work.workspaces.get("main")
+    ws = s.work.workspaces.get("main")
     assert ws is not None and ws.projects[0].name == "web"
 
 
@@ -95,7 +95,7 @@ def test_canonical_config_work_wins_over_legacy_top_level(tmp_path):
         "        - name: canonical\n          path: ~/y\n",
     )
     s = settings_from_files([f])
-    assert s.config.work.workspaces["main"].projects[0].name == "canonical"
+    assert s.work.workspaces["main"].projects[0].name == "canonical"
 
 
 def test_health_load_config_fail_open_on_bad_unrelated_setting(tmp_path):
@@ -130,4 +130,4 @@ def test_max_iterations_degrades_instead_of_raising(tmp_path):
 
     f = _write(tmp_path / "s.yaml", "config:\n  target:\n    defaults:\n      max_iterations: 0\n")
     s = settings_from_files([f])
-    assert s.config.target.defaults.max_iterations == 40
+    assert s.target.defaults.max_iterations == 40

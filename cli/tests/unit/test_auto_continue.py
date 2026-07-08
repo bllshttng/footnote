@@ -52,7 +52,7 @@ def _load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str):
 def test_auto_continue_default_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """AC2-HP: with no config.auto_continue block, enabled is False."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.auto_continue.enabled is False
+    assert settings.auto_continue.enabled is False
 
 
 def test_auto_continue_enabled_true_roundtrip(
@@ -63,7 +63,7 @@ def test_auto_continue_enabled_true_roundtrip(
         monkeypatch,
         "config:\n  auto_continue:\n    enabled: true\n",
     )
-    assert settings.config.auto_continue.enabled is True
+    assert settings.auto_continue.enabled is True
 
 
 def test_auto_continue_malformed_block_fails_safe(
@@ -75,7 +75,7 @@ def test_auto_continue_malformed_block_fails_safe(
         monkeypatch,
         "config:\n  auto_continue:\n    enabled: not-a-bool\n",
     )
-    assert settings.config.auto_continue.enabled is False
+    assert settings.auto_continue.enabled is False
 
 
 def test_auto_continue_malformed_whole_block_fails_safe(
@@ -87,7 +87,7 @@ def test_auto_continue_malformed_whole_block_fails_safe(
         monkeypatch,
         "config:\n  auto_continue: 42\n",
     )
-    assert settings.config.auto_continue.enabled is False
+    assert settings.auto_continue.enabled is False
 
 
 # ---------------------------------------------------------------------------

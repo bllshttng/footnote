@@ -651,7 +651,7 @@ def cmd_decompose(
     if max_prs is None:
         from fno.config import load_settings
         try:
-            max_prs = load_settings().config.blueprint.max_prs_per_epic
+            max_prs = load_settings().blueprint.max_prs_per_epic
         except Exception as e:
             emit_error(ctx, f"could not read config.blueprint.max_prs_per_epic: {e}")
             raise typer.Exit(code=1)
@@ -2083,7 +2083,7 @@ def cmd_lane_fill(
 
     if max_lanes is None:
         from fno.config import load_settings
-        max_lanes = load_settings().config.parallel.max_lanes
+        max_lanes = load_settings().parallel.max_lanes
 
     selected = select_lane_fill(max_lanes, project, mission=mission, claim=claim)
     typer.echo(json.dumps(selected, indent=2))
@@ -2136,7 +2136,7 @@ def cmd_dispatch_lanes(
 
     if max_lanes is None:
         from fno.config import load_settings
-        max_lanes = load_settings().config.parallel.max_lanes
+        max_lanes = load_settings().parallel.max_lanes
 
     receipts = dispatch_lanes(max_lanes, project, mission=mission, model=model, provider=provider)
     typer.echo(json.dumps(receipts, indent=2))
@@ -2162,7 +2162,7 @@ def cmd_lanes(
     try:
         from fno.config import load_settings
 
-        max_lanes = load_settings().config.parallel.max_lanes
+        max_lanes = load_settings().parallel.max_lanes
     except Exception:  # noqa: BLE001 - a config miss must not hide live lanes
         max_lanes = 1
 
@@ -4529,7 +4529,7 @@ def cmd_reconcile(
                     # direction) and is acceptable for a Tier-1 metric - dead-bot
                     # is the recurring escape this catches.
                     _required_bots = list(
-                        _settings.config.review.github_apps or []
+                        _settings.review.github_apps or []
                     )
                 except Exception:
                     _required_bots = []  # fail open: unresolvable config -> no emit
@@ -4781,7 +4781,7 @@ def cmd_maintain(
     try:
         from fno.config import load_settings
 
-        _maintain_cfg = load_settings().config.backlog.maintain
+        _maintain_cfg = load_settings().backlog.maintain
         staleness_days = _maintain_cfg.staleness_days
         max_failed_attempts = _maintain_cfg.max_failed_attempts
     except Exception:

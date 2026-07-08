@@ -66,7 +66,7 @@ def test_handoff_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     calls at ~line 100-102 of that file).
     """
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    handoff = settings.config.target.handoff
+    handoff = settings.target.handoff
     assert handoff.enabled is True
     assert handoff.used_pct_trigger == 50
     assert handoff.generation_cap == 4
@@ -82,7 +82,7 @@ def test_handoff_override_all_fields(tmp_path: Path, monkeypatch: pytest.MonkeyP
         "      used_pct_trigger: 75\n"
         "      generation_cap: 2\n",
     )
-    handoff = settings.config.target.handoff
+    handoff = settings.target.handoff
     assert handoff.enabled is False
     assert handoff.used_pct_trigger == 75
     assert handoff.generation_cap == 2
@@ -130,7 +130,7 @@ def test_handoff_used_pct_trigger_boundary_values_accepted(
             f"schema_version: 1\nconfig:\n  target:\n    handoff:\n"
             f"      used_pct_trigger: {val}\n",
         )
-        assert settings.config.target.handoff.used_pct_trigger == val
+        assert settings.target.handoff.used_pct_trigger == val
 
 
 def test_handoff_generation_cap_rejects_zero(
@@ -156,7 +156,7 @@ def test_handoff_generation_cap_accepts_one(
         "schema_version: 1\nconfig:\n  target:\n    handoff:\n"
         "      generation_cap: 1\n",
     )
-    assert settings.config.target.handoff.generation_cap == 1
+    assert settings.target.handoff.generation_cap == 1
 
 
 # ---------------------------------------------------------------------------

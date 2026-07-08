@@ -664,7 +664,7 @@ def _config_max_nodes(root: Path) -> int:
     try:
         from fno.config import load_settings_for_repo
 
-        return int(load_settings_for_repo(Path(root)).config.batch.max_nodes)
+        return int(load_settings_for_repo(Path(root)).batch.max_nodes)
     except Exception:  # noqa: BLE001 - default matches config coercion
         return 3
 
@@ -1139,10 +1139,10 @@ def _load_batch_enabled(root: Optional[Path] = None) -> bool:
         if root is not None:
             from fno.config import load_settings_for_repo
 
-            return bool(load_settings_for_repo(Path(root)).config.batch.enabled)
+            return bool(load_settings_for_repo(Path(root)).batch.enabled)
         from fno.config import load_settings
 
-        return bool(load_settings().config.batch.enabled)
+        return bool(load_settings().batch.enabled)
     except Exception as e:  # noqa: BLE001 - a bad/absent settings file must not enable
         # Fail-safe to disabled, but leave a trace: otherwise an explicit
         # `enabled: true` silenced by an unrelated settings error looks like a

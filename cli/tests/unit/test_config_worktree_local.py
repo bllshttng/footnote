@@ -57,16 +57,16 @@ def test_local_override_wins_for_allowlisted_keys(tmp_path, monkeypatch):
         "    id: my-worktree\n"
     )
     s = _load(tmp_path, monkeypatch, SHARED, local)
-    assert s.config.post_merge.parking_lot_path == "mine/parking-lot.md"
-    assert s.config.project.id == "my-worktree"
+    assert s.post_merge.parking_lot_path == "mine/parking-lot.md"
+    assert s.project.id == "my-worktree"
     # A shared key not in the local file is untouched.
-    assert s.config.post_merge.enabled is True
+    assert s.post_merge.enabled is True
 
 
 def test_absent_local_file_is_noop(tmp_path, monkeypatch):
     s = _load(tmp_path, monkeypatch, SHARED, None)
-    assert s.config.post_merge.parking_lot_path == "shared/parking-lot.md"
-    assert s.config.project.id == "shared-project"
+    assert s.post_merge.parking_lot_path == "shared/parking-lot.md"
+    assert s.project.id == "shared-project"
 
 
 def test_non_allowlisted_key_ignored_with_one_warning(tmp_path, monkeypatch, caplog):
@@ -80,9 +80,9 @@ def test_non_allowlisted_key_ignored_with_one_warning(tmp_path, monkeypatch, cap
     )
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         s = _load(tmp_path, monkeypatch, SHARED, local)
-    assert s.config.post_merge.parking_lot_path == "mine/parking-lot.md"
+    assert s.post_merge.parking_lot_path == "mine/parking-lot.md"
     # Non-allowlisted key kept its shared value.
-    assert s.config.post_merge.enabled is True
+    assert s.post_merge.enabled is True
     warnings = [r for r in caplog.records if "settings.local.yaml" in r.getMessage()]
     assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
     assert "config.post_merge.enabled" in warnings[0].getMessage()
@@ -105,7 +105,7 @@ def test_symlinked_local_file_is_skipped(tmp_path, monkeypatch):
 
     config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     s = config_mod.load_settings()
-    assert s.config.post_merge.parking_lot_path == "shared/parking-lot.md"
+    assert s.post_merge.parking_lot_path == "shared/parking-lot.md"
 
 
 def test_worktree_local_override_filters_pure():
@@ -146,7 +146,7 @@ def test_production_anchor_via_repo_root(tmp_path, monkeypatch):
     config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     try:
         s = config_mod.load_settings()
-        assert s.config.project.id == "from-repo-root"
+        assert s.project.id == "from-repo-root"
     finally:
         paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
@@ -165,7 +165,7 @@ def test_non_string_top_level_key_does_not_crash(tmp_path, monkeypatch, caplog):
     )
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         s = _load(tmp_path, monkeypatch, SHARED, local)
-    assert s.config.project.id == "still-works"
+    assert s.project.id == "still-works"
     warnings = [r for r in caplog.records if "settings.local.yaml" in r.getMessage()]
     assert len(warnings) == 1
     # Non-string keys are reported as their str() forms (no TypeError crash).

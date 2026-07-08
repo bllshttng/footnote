@@ -137,7 +137,7 @@ def _read_cross_model_config() -> tuple[dict[str, str], bool]:
     try:
         from fno.config import load_settings
 
-        review_cfg = load_settings().config.review
+        review_cfg = load_settings().review
         return dict(review_cfg.agent_providers or {}), bool(review_cfg.cross_model.enabled)
     except Exception as exc:  # noqa: BLE001 - never let config break review
         print(

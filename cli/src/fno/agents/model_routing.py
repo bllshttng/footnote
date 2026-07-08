@@ -473,7 +473,7 @@ def _routing_block(settings: "Optional[SettingsModel]") -> "ModelRoutingBlock":
         from fno.config import load_settings
 
         settings = load_settings()
-    return settings.config.model_routing
+    return settings.model_routing
 
 
 def _effective_roles(block: "ModelRoutingBlock") -> dict[str, str]:

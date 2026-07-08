@@ -173,7 +173,7 @@ def _required_bots(project_root: Path) -> List[str]:
     """
     from fno.config import load_settings_for_repo
 
-    bots = load_settings_for_repo(project_root).config.review.github_apps
+    bots = load_settings_for_repo(project_root).review.github_apps
     return list(bots) if bots else []
 
 
@@ -181,7 +181,7 @@ def _optional_bots(project_root: Path) -> List[str]:
     """Honored-if-present reviewer logins (config.review.optional_apps)."""
     from fno.config import load_settings_for_repo
 
-    return list(load_settings_for_repo(project_root).config.review.optional_apps)
+    return list(load_settings_for_repo(project_root).review.optional_apps)
 
 
 def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) -> str:

@@ -39,7 +39,7 @@ def _branch_prefix() -> str:
     try:
         from fno.config import load_settings
 
-        return load_settings().config.branch.prefix or "fno"
+        return load_settings().branch.prefix or "fno"
     except Exception:  # noqa: BLE001 - naming must never wedge on a settings read
         return "fno"
 
