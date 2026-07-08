@@ -628,7 +628,7 @@ this table marks it for the resolved type:
 | Overview | yes | yes | yes |
 | Schema Reconciliation (1e, DB-backed) | yes | yes | yes |
 | Architecture | yes | as "Fix approach" | optional |
-| User Stories | yes | no | no |
+| User Stories | yes | yes - the fix's discrete work items (see note) | no |
 | Multi-Perspective Findings (5) | full | Pessimist + Silent-Failure only | no (Evidence Chain replaces it) |
 | UI State Machines (6) | only if UI surface | only if UI surface | never |
 | **Failure Modes (6b)** | **yes** | **yes** | **yes** |
@@ -640,6 +640,16 @@ this table marks it for the resolved type:
 | Domain Pitfalls (7b) | yes | yes | optional |
 | Locked Decisions + Claude's Discretion | yes | yes | yes |
 | Open Questions | yes | yes | yes |
+
+**Why a bug keeps `## User Stories`.** `/blueprint` synthesizes its
+`## Execution Strategy` task list *solely* from `## User Stories`
+(`mutate_doc.py:_build_execution_strategy`); a doc with no stories degrades to a
+single empty "implement feature" task. A bug's discrete fix steps therefore live
+under `## User Stories` (framed as work items, not "As a user I can..."
+narratives) so the bug's real work survives into the plan. Dropping the section
+would silently gut blueprint's task synthesis - and the parser seam is frozen, so
+this is a think.md-side obligation, not a blueprint change. An `investigation`
+omits it because it is no-build (it never reaches `/blueprint`).
 
 **The three type-specific new sections:**
 
@@ -721,8 +731,9 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      `## Interface Contract` carrying `contract_version` and a Locked Decision
      referencing it (unless the omission is explained in Open Questions).
    - **Anti-filler check (new):** a section the resolved type EXCLUDES that is
-     present anyway - AC blocks or UI-state tables on an `investigation`, User
-     Stories on a `bug` - is flagged **for removal, not approved**. This is the
+     present anyway - AC blocks or UI-state tables on an `investigation`, an
+     `## Evidence Chain` on a `feature` or `bug` - is flagged **for removal, not
+     approved**. This is the
      x-2bf7 failure inverted: the reviewer once approved a no-build verdict's
      fabricated AC-UI sections; a type-excluded (type-excluded == filler) section
      is now a finding.
