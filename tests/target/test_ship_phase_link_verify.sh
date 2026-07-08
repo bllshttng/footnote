@@ -54,6 +54,16 @@ else
   pass "A6: stale fire-and-WARN link line removed"
 fi
 
+# The get substitutions must fail-open under set -e / pipefail (|| true): every
+# `fno backlog get ... --field pr_number` read-back line ends with `|| true`.
+readback_lines=$(grep -c 'fno backlog get .*--field pr_number' "$SHIP" || true)
+guarded_lines=$(grep -c 'fno backlog get .*--field pr_number.*|| true' "$SHIP" || true)
+if [[ "$readback_lines" -gt 0 && "$readback_lines" == "$guarded_lines" ]]; then
+  pass "A7: all $readback_lines read-back substitutions fail-open with '|| true'"
+else
+  fail "A7: $guarded_lines/$readback_lines read-back substitutions carry '|| true'"
+fi
+
 # -----------------------------------------------------------------------
 # B. Behavioral - reproduce the verify loop against a stub `fno`
 # -----------------------------------------------------------------------
@@ -150,10 +160,17 @@ fi
 # Also: pre-promise.md carries the last-line node-link assertion.
 # -----------------------------------------------------------------------
 PRE_PROMISE="$REPO_ROOT/skills/target/references/pre-promise.md"
-grep -qi 'link assertion\|pr_number.*PR\|node-bound' "$PRE_PROMISE" \
+grep -qi 'last-line assertion\|pr_number.*PR\|node-bound' "$PRE_PROMISE" \
   && grep -q -- '--field pr_number' "$PRE_PROMISE" \
   && pass "C1: pre-promise.md carries the node-link self-check" \
   || fail "C1: pre-promise.md missing the node-link self-check"
+
+# The pre-promise backstop is a real assertion: it refuses on a persistent
+# re-link failure (help emission), not a fire-and-forget re-link.
+grep -q 'pr-node-link-failed' "$PRE_PROMISE" \
+  && grep -qi 'refus' "$PRE_PROMISE" \
+  && pass "C2: pre-promise backstop refuses on persistent re-link failure" \
+  || fail "C2: pre-promise backstop does not refuse (fire-and-forget re-link)"
 
 echo ""
 echo "Results: $PASS_COUNT passed, $FAIL_COUNT failed"

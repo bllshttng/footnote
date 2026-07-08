@@ -55,7 +55,7 @@ NODE_ID=$(awk '
 ' .fno/target-state.md 2>/dev/null)
 
 if [[ -n "$NODE_ID" && "$NODE_ID" != "-" && -n "${PR_NUMBER:-}" ]]; then
-  existing=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]')
+  existing=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)
   if [[ -n "$existing" && "$existing" != "null" && "$existing" != "$PR_NUMBER" ]]; then
     # AC1-EDGE: an out-of-band authority (reconcile's merge ground truth) already
     # linked a DIFFERENT PR. Surface, do NOT overwrite - the node is linked and
@@ -66,7 +66,9 @@ if [[ -n "$NODE_ID" && "$NODE_ID" != "-" && -n "${PR_NUMBER:-}" ]]; then
     for attempt in 1 2; do
       # Idempotent: re-writing the same PR_NUMBER converges (AC2-FR crash re-run).
       fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" 2>/dev/null || true
-      got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]')
+      # `|| true`: a failing get (lock contention) must fall through to the retry
+      # and ultimately the promise blocker, never abort the shell under set -e.
+      got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)
       [[ "$got" == "$PR_NUMBER" ]] && { link_ok=1; break; }
     done
     if [[ -z "$link_ok" ]]; then

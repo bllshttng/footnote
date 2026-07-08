@@ -335,27 +335,23 @@ def ensure_activated(
     if _launchctl_is_loaded():
         return "already-running"
 
-    if not plist_path.exists():
-        try:
-            plist_text = render_plist(
-                launch_agents_dir=launch_agents_dir,
-                fno_binary=fno_binary,
-                install_path=install_path,
-                interval=interval,
-            )
-            launch_agents_dir.mkdir(parents=True, exist_ok=True)
-            plist_path.write_text(plist_text, encoding="utf-8")
-        except OSError:
-            return "write-failed"
-    else:
-        # Re-enable of an existing plist: bump its mtime so doctor's
-        # healthy-pending grace (install-age < 2x interval) applies until the
-        # first fresh tick, instead of a transient false "dead" from the old
-        # tick still being stale.
-        try:
-            plist_path.touch()
-        except OSError:
-            pass
+    # Always (re-)render, whether the plist is absent or a re-enable of an
+    # existing one. We only reach here when NOT loaded (guarded above), so
+    # rewriting is safe and (a) picks up config drift - a changed
+    # interval_seconds / fno_binary / PATH since the last write - and (b)
+    # refreshes the plist mtime so doctor's healthy-pending grace applies until
+    # the first fresh tick instead of a transient false "dead".
+    try:
+        plist_text = render_plist(
+            launch_agents_dir=launch_agents_dir,
+            fno_binary=fno_binary,
+            install_path=install_path,
+            interval=interval,
+        )
+        launch_agents_dir.mkdir(parents=True, exist_ok=True)
+        plist_path.write_text(plist_text, encoding="utf-8")
+    except OSError:
+        return "write-failed"
 
     rc = _run_launchctl("load", str(plist_path))
     return "activated" if rc == 0 else "load-failed"
@@ -543,10 +539,18 @@ def liveness_report(
     if not loaded:
         return verdict("dead", "plist present but agent not loaded", "fno pr-watch install")
 
+    # A freshly (re)installed plist newer than the last tick is awaiting its
+    # first post-install tick (RunAtLoad=false, so up to one interval passes
+    # before it fires). Grace it regardless of whether an OLD tick predates the
+    # (re)install - otherwise a re-enabled watcher reads a transient false
+    # "dead" until the next tick.
+    if plist_mtime is not None and (now - plist_mtime) < threshold:
+        tick_epoch = _parse_ts(last_tick_ts)
+        if tick_epoch is None or plist_mtime > tick_epoch:
+            return verdict("healthy-pending", "installed recently; awaiting first tick")
+
     tick_epoch = _parse_ts(last_tick_ts)
     if tick_epoch is None:
-        if plist_mtime is not None and (now - plist_mtime) < threshold:
-            return verdict("healthy-pending", "installed recently; awaiting first tick")
         return verdict(
             "dead",
             f"no tick recorded and installed more than 2x interval ({threshold}s) ago",

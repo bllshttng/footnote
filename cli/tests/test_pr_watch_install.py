@@ -428,14 +428,14 @@ def test_install_reload_unloads_first_when_loaded(tmp_home, tmp_launch_agents, m
     assert verbs == ["unload", "load"], f"expected unload then load, got {verbs}"
 
 
-def test_ensure_activated_refreshes_existing_plist_mtime(tmp_home, tmp_launch_agents, monkeypatch):
-    """Re-enable of an existing plist bumps its mtime (avoids transient false 'dead')."""
+def test_ensure_activated_rerenders_existing_plist(tmp_home, tmp_launch_agents, monkeypatch):
+    """Re-enable of an existing plist re-renders it (config drift + fresh mtime)."""
     import os
     import time as _time
 
     m = _install()
     plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
-    plist.write_text("<plist/>")
+    plist.write_text("<plist/>")  # stale stub content
     old = _time.time() - 10_000
     os.utime(plist, (old, old))
     monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
@@ -447,7 +447,9 @@ def test_ensure_activated_refreshes_existing_plist_mtime(tmp_home, tmp_launch_ag
         install_path="/usr/bin:/bin",
     )
 
-    assert plist.stat().st_mtime > old + 100, "existing plist mtime should be refreshed"
+    content = plist.read_text()
+    assert "sh.fno.pr-watcher" in content, "existing plist should be re-rendered, not left stale"
+    assert plist.stat().st_mtime > old + 100, "re-render refreshes the plist mtime"
 
 
 def test_install_activation_failure_is_loud(tmp_home, tmp_launch_agents, capsys, monkeypatch):
@@ -593,4 +595,19 @@ def test_liveness_fresh_install_no_tick_is_pending():
 def test_liveness_no_tick_old_install_is_dead():
     # No tick and plist installed long ago (> 2x interval) -> dead (AC1-FR class)
     v = _live(last_tick_ts=None, plist_mtime=0.0, now=5000.0)
+    assert v["verdict"] == "dead"
+
+
+def test_liveness_reenabled_plist_newer_than_old_tick_is_pending():
+    # Re-enable case: an OLD tick exists, but the plist was re-rendered just now
+    # (newer than the tick, within grace) -> healthy-pending, not a false dead.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    v = _live(last_tick_ts="2026-06-14T01:00:00Z", plist_mtime=tick + 5000, now=tick + 5100)
+    assert v["verdict"] == "healthy-pending"
+
+
+def test_liveness_old_tick_and_old_plist_still_dead():
+    # Old tick AND old plist (not freshly reinstalled) -> genuinely dead.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    v = _live(last_tick_ts="2026-06-14T01:00:00Z", plist_mtime=tick, now=tick + 5000)
     assert v["verdict"] == "dead"

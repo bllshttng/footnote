@@ -92,18 +92,24 @@ Before outputting `<promise>`, verify the pipeline actually completed: sigma-rev
 **PR→node link assertion (x-e106).** When this session is node-bound (a
 `graph_node_id` other than `null` in the manifest body) and a PR was created,
 confirm `node.pr_number` equals the PR you are about to promise - the last-line
-guard for any ship that reached pre-promise through a path that skipped the
-ship-phase link step. This is a cheap read; on mismatch, re-link before
-promising (an unlinked node re-dispatches as duplicate work). loop-check then
-verifies the world independently, so this backstop re-links but does not need to
-re-read - the ship-phase step already owns the verified retry:
+assertion for any ship that reached pre-promise through a path that skipped the
+ship-phase link step. On mismatch, re-link, **read back**, and refuse to promise
+if it still did not stick - a silently-unlinked node re-dispatches as duplicate
+work, so this backstop is a real assertion, not a fire-and-forget re-link:
 
 ```bash
 if [[ -n "${NODE_ID:-}" && "$NODE_ID" != "null" && -n "${PR_NUMBER:-}" ]]; then
-  got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]')
+  # `|| true`: a failing get must not abort the shell under set -e; treat it as
+  # a mismatch that drives the re-link + refuse path below.
+  got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)
   if [[ "$got" != "$PR_NUMBER" ]]; then
-    echo "pre-promise: node $NODE_ID pr_number=$got != PR #$PR_NUMBER; re-linking before promise" >&2
+    echo "pre-promise: node $NODE_ID pr_number=$got != PR #$PR_NUMBER; re-linking" >&2
     fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" 2>/dev/null || true
+    got=$(fno backlog get "$NODE_ID" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)
+    if [[ "$got" != "$PR_NUMBER" ]]; then
+      echo "<help reason=\"pr-node-link-failed\" evidence=\"node $NODE_ID pr_number=${got:-<none>} expected=$PR_NUMBER\">pre-promise re-link did not stick; refusing to promise. Fix: fno backlog update $NODE_ID --pr-number $PR_NUMBER --pr-url $PR_URL</help>"
+      exit 1
+    fi
   fi
 fi
 ```
