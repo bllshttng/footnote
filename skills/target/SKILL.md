@@ -90,6 +90,8 @@ Drain reviews FIRST - as early as they post, not after CI goes green. A finding 
 
 Run tests with `fno test [paths...]` (pins worktree `PYTHONPATH`, bypasses rtk, returns the real exit code) and read a PR's CI with `fno pr status <n>` (one `green|red|pending|unknown` verdict) - not bare `pytest` or hand-rolled `jq`. To cancel: `touch .fno/.target-cancelled`.
 
+**Preflight before every push (existence-guarded).** When `scripts/ci/preflight.sh` exists, the ship phase and fix loop run it before pushing - a hermetic worktree runs exactly what CI runs (smoke registry + rust legs) so a local green means a green PR, killing the push-wait-red-fix loop. Full run before the first PR push and the settle-green push; `--retry-failed` between fix commits. Skips on `FNO_SKIP_PREFLIGHT=1` or a docs-only diff. Full contract: [references/ship-phase.md](references/ship-phase.md) and the repo-root `docs/preflight.md`.
+
 Completion is decided by `fno-agents loop-check` from external truth (PR + CI + review), not from any file you write - you cannot self-authorize. The full machinery (immutable manifest, stop-hook shim, `done()` read list, fingerprint backstop, `TerminationReason`, degraded modes) is one Read hop away in **[references/completion-model.md](references/completion-model.md)**.
 
 ## The Full Pipeline
