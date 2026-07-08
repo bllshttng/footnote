@@ -1066,6 +1066,18 @@ def resolve_node_project_and_cwd(
     return (project, node_cwd, fm)
 
 
+def normalize_size(value: object) -> Optional[str]:
+    """Coerce a plan-frontmatter size to the canonical S|M|L, else None.
+
+    Sizes are declared lowercase or uppercase in plan frontmatter; the graph
+    stores them uppercase. Anything outside {S,M,L} is dropped (never stored).
+    """
+    if not value:
+        return None
+    s = str(value).strip().upper()
+    return s if s in {"S", "M", "L"} else None
+
+
 def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     from datetime import datetime, timezone
 
@@ -1111,7 +1123,10 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "roadmap_id": spec["roadmap_id"],
         "vision_path": None,
         "details": None,
-        "size": None,
+        # Size flows doc->graph at intake: the plan frontmatter is where size is
+        # declared, and the graph never captured it before (7.3% fill). null when
+        # the plan omits it or declares a non-S/M/L value.
+        "size": normalize_size(fm.get("size")),
         "batch": None,
         "cost_usd": None,
         "cost_sessions": [],

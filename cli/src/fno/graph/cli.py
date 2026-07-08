@@ -1469,6 +1469,23 @@ def cmd_update(
 
     projected_node: list = [None]
 
+    # Size flows doc->graph when a plan is (re)linked and the node has no size
+    # yet (Wave 2.2). Read the linked plan's frontmatter size best-effort,
+    # outside the lock; an explicit --size still wins (applied later in-mutator).
+    linked_size: Optional[str] = None
+    if plan_path is not None:
+        try:
+            from fno.graph._intake import normalize_size, repo_root
+            from fno.plan._stamp import read_plan_file
+
+            pp = Path(plan_path)
+            if not pp.is_absolute():
+                pp = Path(repo_root()) / pp
+            _, fm, _ = read_plan_file(pp)
+            linked_size = normalize_size(fm.get("size"))
+        except Exception:
+            linked_size = None
+
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
@@ -1498,6 +1515,8 @@ def cmd_update(
             node["has_brief"] = has_brief.lower() == "true"
         if plan_path is not None:
             node["plan_path"] = plan_path
+            if linked_size and not node.get("size"):
+                node["size"] = linked_size
         if pr_number is not None:
             node["pr_number"] = int(pr_number)
         if pr_url is not None:
@@ -4218,6 +4237,17 @@ def cmd_done(
     plan_path_out: list = [None]
     already_holder: list = [False]
 
+    # Cost stamp (Wave 2.2): the ledger has per-plan cost the node never captured
+    # (2-3 fills). Aggregate it outside the lock; ledger absent/rowless -> null,
+    # never blocks the close. Reuses the same rollup `fno done` uses.
+    cost_rollup: dict = {}
+    try:
+        from fno.done.cli import _rollup_from_ledger
+
+        cost_rollup = _rollup_from_ledger(node.get("plan_path"))
+    except Exception:
+        cost_rollup = {}
+
     def mutator(entries):
         n = _find_node(entries, task_id)
         if not n:
@@ -4229,6 +4259,10 @@ def cmd_done(
             already_holder[0] = True
             return entries
         _apply_completion_fields(n)
+        if cost_rollup.get("cost_usd") is not None:
+            n["cost_usd"] = cost_rollup["cost_usd"]
+        if cost_rollup.get("cost_sessions"):
+            n["cost_sessions"] = cost_rollup["cost_sessions"]
         # Close any now-all-done ancestor epic (x-33b2): the box is done when its
         # children are, and it carries no PR of its own to close it explicitly.
         _cascade_close_parents(entries, task_id)
