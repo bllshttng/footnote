@@ -720,22 +720,19 @@ def _emit_human(
         else:
             out(f"fno doctor: rust fno-agents binary: {bin_label} rust revision unknown.")
 
-    # Informational: the rev the binary self-reports (ab-24a59d50), independent
-    # of the installed-rust-rev marker. A non-git build reports None and is
-    # silently skipped. Surfaced for visibility; the verdict still keys on the
-    # marker, so this line never changes the exit code.
+    # Build provenance ONLY: the HEAD (git_rev) the binary was built at
+    # (ab-24a59d50). This is a DIFFERENT quantity from the crates/ subtree rev the
+    # freshness verdict compares, so it must never be framed as a source mismatch:
+    # a python-only commit advancing HEAD past the last crates/ change would
+    # otherwise print a bogus "(source crates/ rev ...)" line beside a "rust bins
+    # fresh" verdict - the exact self-contradiction from the stale-deploy incident.
+    # Freshness is decided solely by crates_rev vs crates_rev above.
     binary_rev = rust.get("binary_rev")
     if binary_rev is not None:
-        src_rev = result.get("rust_source_rev")
-        if src_rev is not None and binary_rev == src_rev:
-            out(f"fno doctor: rust fno-agents binary self-reports rev {binary_rev[:12]} (matches source).")
-        elif src_rev is not None:
-            out(
-                f"fno doctor: rust fno-agents binary self-reports rev {binary_rev[:12]} "
-                f"(source crates/ rev {src_rev[:12]})."
-            )
-        else:
-            out(f"fno doctor: rust fno-agents binary self-reports rev {binary_rev[:12]}.")
+        out(
+            f"fno doctor: rust fno-agents binary built at HEAD {binary_rev[:12]} "
+            "(build provenance)."
+        )
 
     # Mux front-door health (x-c267): does bare `fno` launch the mux? Advisory.
     fd_state = result.get("mux_front_door")

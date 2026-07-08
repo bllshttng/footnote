@@ -1001,20 +1001,38 @@ def test_binary_crates_rev_none_when_no_binary() -> None:
     assert doctor._binary_crates_rev(None) is None
 
 
-def test_emit_human_surfaces_binary_rev_match(capsys: pytest.CaptureFixture[str]) -> None:
+def test_emit_human_binary_rev_shown_as_build_provenance(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC1-UI + AC1-EDGE: git_rev (HEAD) is build provenance only, never
+    compared to the crates/ source rev. A "fresh" verdict and the HEAD line must
+    never contradict each other - even when HEAD has advanced past the last
+    crates/ commit (python-only commits since), the exact false alarm from the
+    incident where "rust bins fresh" printed beside a bogus rev mismatch.
+    """
     result = {
         "status": "fresh",
         "rust_stale": False,
-        "rust_installed_rev": "abc123abc123",
-        "rust_source_rev": "abc123abc123",
+        "rust_installed_rev": "abc123abc123",  # crates_rev drives the verdict
+        "rust_source_rev": "abc123abc123",  # crates/ subtree rev
         "missing_verbs": [],
         "python_stale": False,
     }
-    rust = {"binary": "/cargo/bin/fno-agents", "revision": "abc123abc123", "binary_rev": "abc123abc123"}
+    # binary_rev = HEAD, DELIBERATELY newer than the crates/ rev (python-only commits).
+    rust = {
+        "binary": "/cargo/bin/fno-agents",
+        "revision": "abc123abc123",
+        "binary_rev": "deadbeef9999",
+    }
     doctor._emit_human(result, Path("/src"), rust, err=False, cargo_present=True)
     out = capsys.readouterr().out
-    assert "self-reports rev abc123abc123" in out
-    assert "matches source" in out
+    # Fresh verdict AND the HEAD line coexist without contradiction.
+    assert "rust bins fresh" in out
+    assert "built at HEAD deadbeef9999" in out
+    assert "build provenance" in out
+    # The retired apples-to-oranges framing must be gone.
+    assert "source crates/ rev" not in out
+    assert "self-reports rev" not in out
 
 
 # --- x-c267: mux front-door health (advisory) ---
