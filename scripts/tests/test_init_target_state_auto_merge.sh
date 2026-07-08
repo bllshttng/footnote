@@ -27,14 +27,14 @@ assert_contains() {
 }
 
 # ---- setup helper ----
-# Creates a temp git repo with optional settings.yaml content, runs init,
+# Creates a temp git repo with optional config.toml content, runs init,
 # returns path to created state file via stdout.
 setup_repo() {
     local settings_content="$1"
     local T
     T=$(mktemp -d)
     mkdir -p "$T/.fno"
-    echo "$settings_content" > "$T/.fno/settings.yaml"
+    echo "$settings_content" > "$T/.fno/config.toml"
     git -C "$T" init -q 2>/dev/null
     git -C "$T" config user.email "test@test.com"
     git -C "$T" config user.name "Test"
@@ -60,8 +60,7 @@ run_init_in() {
 echo ""
 echo "test_auto_merge_fields_present_disabled_by_default"
 
-T=$(setup_repo "config:
-  expertise: frontend")
+T=$(setup_repo "expertise = \"frontend\"")
 
 run_in_result=$(run_init_in "$T")
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
@@ -82,9 +81,8 @@ rm -rf "$T"
 echo ""
 echo "test_auto_merge_approved_true_when_enabled"
 
-T=$(setup_repo "config:
-  auto_merge:
-    enabled: true")
+T=$(setup_repo "[auto_merge]
+enabled = true")
 
 run_init_in "$T"
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
@@ -100,9 +98,8 @@ rm -rf "$T"
 echo ""
 echo "test_target_no_merge_forces_approved_false"
 
-T=$(setup_repo "config:
-  auto_merge:
-    enabled: true")
+T=$(setup_repo "[auto_merge]
+enabled = true")
 
 run_init_in "$T" "TARGET_NO_MERGE=1"
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
@@ -116,9 +113,8 @@ rm -rf "$T"
 echo ""
 echo "test_fields_are_in_yaml_frontmatter"
 
-T=$(setup_repo "config:
-  auto_merge:
-    enabled: true")
+T=$(setup_repo "[auto_merge]
+enabled = true")
 
 run_init_in "$T"
 # Extract frontmatter only (between first --- and second ---)

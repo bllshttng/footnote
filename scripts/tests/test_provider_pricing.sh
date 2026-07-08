@@ -29,21 +29,21 @@ teardown_tmp_home() {
 
 # ---- Test 1: returns input rate when present ----
 setup_tmp_home
-cat > "$TMP_HOME/.fno/settings.yaml" <<'YAML'
-config:
-  providers:
-    active: claude-anthropic
-    records:
-      - id: claude-anthropic
-        name: Claude Direct
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
-        pricing:
-          input_per_million_usd: 15.0
-          output_per_million_usd: 75.0
-          cache_read_per_million_usd: 1.5
-          cache_write_per_million_usd: 18.75
+cat > "$TMP_HOME/.fno/config.toml" <<'YAML'
+[providers]
+active = "claude-anthropic"
+
+[[providers.records]]
+id = "claude-anthropic"
+name = "Claude Direct"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+[providers.records.pricing]
+input_per_million_usd = 15.0
+output_per_million_usd = 75.0
+cache_read_per_million_usd = 1.5
+cache_write_per_million_usd = 18.75
 YAML
 val=$(get_provider_pricing claude-anthropic input)
 [[ "$val" == "15.0" ]] && pass "input rate returned" || fail "input rate (got '$val')"
@@ -57,19 +57,19 @@ teardown_tmp_home
 
 # ---- Test 2: rc=1 when provider missing ----
 setup_tmp_home
-cat > "$TMP_HOME/.fno/settings.yaml" <<'YAML'
-config:
-  providers:
-    active: claude-anthropic
-    records:
-      - id: claude-anthropic
-        name: Claude Direct
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
-        pricing:
-          input_per_million_usd: 15.0
-          output_per_million_usd: 75.0
+cat > "$TMP_HOME/.fno/config.toml" <<'YAML'
+[providers]
+active = "claude-anthropic"
+
+[[providers.records]]
+id = "claude-anthropic"
+name = "Claude Direct"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+[providers.records.pricing]
+input_per_million_usd = 15.0
+output_per_million_usd = 75.0
 YAML
 if get_provider_pricing nonexistent input >/dev/null 2>&1; then
     fail "rc=1 expected for missing provider, got rc=0"
@@ -80,16 +80,16 @@ teardown_tmp_home
 
 # ---- Test 3: rc=1 when pricing block absent ----
 setup_tmp_home
-cat > "$TMP_HOME/.fno/settings.yaml" <<'YAML'
-config:
-  providers:
-    active: claude-anthropic
-    records:
-      - id: claude-anthropic
-        name: Claude Direct
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
+cat > "$TMP_HOME/.fno/config.toml" <<'YAML'
+[providers]
+active = "claude-anthropic"
+
+[[providers.records]]
+id = "claude-anthropic"
+name = "Claude Direct"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
 YAML
 if get_provider_pricing claude-anthropic input >/dev/null 2>&1; then
     fail "rc=1 expected when pricing absent, got rc=0"
@@ -100,17 +100,17 @@ teardown_tmp_home
 
 # ---- Test 4: unknown rate kind exits 1 with stderr ----
 setup_tmp_home
-cat > "$TMP_HOME/.fno/settings.yaml" <<'YAML'
-config:
-  providers:
-    active: x
-    records:
-      - id: x
-        name: x
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
-        pricing: {input_per_million_usd: 1.0, output_per_million_usd: 2.0}
+cat > "$TMP_HOME/.fno/config.toml" <<'YAML'
+[providers]
+active = "x"
+
+[[providers.records]]
+id = "x"
+name = "x"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+pricing = {input_per_million_usd = 1.0, output_per_million_usd = 2.0}
 YAML
 err=$(get_provider_pricing x bogus 2>&1 >/dev/null)
 rc=$?
@@ -127,19 +127,19 @@ teardown_tmp_home
 # indentation (gemini-code-assist finding on PR #208).
 if command -v yq &>/dev/null; then
     setup_tmp_home
-    cat > "$TMP_HOME/.fno/settings.yaml" <<'YAML'
-config:
-  providers:
-    active: claude-anthropic
-    records:
-    - id: claude-anthropic
-      name: Claude Direct
-      cli: claude
-      auth: oauth_dir
-      credentials_source: ~/.claude
-      pricing:
-        input_per_million_usd: 15.0
-        output_per_million_usd: 75.0
+    cat > "$TMP_HOME/.fno/config.toml" <<'YAML'
+[providers]
+active = "claude-anthropic"
+
+[[providers.records]]
+id = "claude-anthropic"
+name = "Claude Direct"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+[providers.records.pricing]
+input_per_million_usd = 15.0
+output_per_million_usd = 75.0
 YAML
     val=$(get_provider_pricing claude-anthropic input)
     [[ "$val" == "15.0" ]] && pass "yq path: 2-space indentation" || fail "yq path: 2-space indentation (got '$val')"
@@ -149,17 +149,17 @@ YAML
 
     # ---- Test 6: yq path tolerates flow-style pricing map ----
     setup_tmp_home
-    cat > "$TMP_HOME/.fno/settings.yaml" <<'YAML'
-config:
-  providers:
-    active: x
-    records:
-      - id: x
-        name: x
-        cli: claude
-        auth: oauth_dir
-        credentials_source: ~/.claude
-        pricing: {input_per_million_usd: 3.0, output_per_million_usd: 15.0}
+    cat > "$TMP_HOME/.fno/config.toml" <<'YAML'
+[providers]
+active = "x"
+
+[[providers.records]]
+id = "x"
+name = "x"
+cli = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+pricing = {input_per_million_usd = 3.0, output_per_million_usd = 15.0}
 YAML
     val=$(get_provider_pricing x input)
     [[ "$val" == "3" || "$val" == "3.0" ]] && pass "yq path: flow-style pricing" || fail "yq path: flow-style (got '$val')"

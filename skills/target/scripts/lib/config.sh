@@ -534,8 +534,8 @@ get_provider_pricing() {
         # quoted ids, flow-style maps). Fall back to awk if yq is missing -
         # the awk path assumes 4-space indentation under records[].
         if command -v yq &>/dev/null; then
-            value=$(yq -r \
-                ".config.providers.records[] | select(.id == \"$provider_id\") | .pricing.${key} // \"\"" \
+            value=$(yq -p toml -r \
+                ".providers.records[] | select(.id == \"$provider_id\") | .pricing.${key} // \"\"" \
                 "$file" 2>/dev/null)
             # yq prints "null" when a path is absent without `// \"\"`; guard anyway.
             [[ "$value" == "null" ]] && value=""
@@ -546,36 +546,20 @@ get_provider_pricing() {
             continue
         fi
         _warn_no_yq_once "providers.records[].pricing.${key}"
+        # Flat config.toml array-of-tables: each record is a [[providers.records]]
+        # block with an id, and its pricing is a [providers.records.pricing] sub-table.
         value=$(awk -v target="$provider_id" -v want="$key" '
-            /^[[:space:]]*records:/ { in_records=1; next }
-            in_records && /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/ {
-                # New record: capture its id
-                cur_id = $0
-                sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", cur_id)
-                gsub(/["'\'']/, "", cur_id)
-                gsub(/[[:space:]]/, "", cur_id)
-                in_pricing = 0
-                next
+            /^\[\[providers\.records\]\]/ { cur_id=""; in_pricing=0; next }
+            /^\[providers\.records\.pricing\]/ { in_pricing = (cur_id == target); next }
+            /^\[/ { in_pricing=0; next }
+            cur_id == "" && /^[[:space:]]*id[[:space:]]*=/ {
+                cur_id=$0; sub(/^[^=]*=[[:space:]]*/, "", cur_id)
+                gsub(/["'\'' ]/, "", cur_id); next
             }
-            in_records && /^[[:space:]]*pricing:/ {
-                if (cur_id == target) in_pricing = 1
-                next
+            in_pricing && $0 ~ ("^[[:space:]]*" want "[[:space:]]*=") {
+                v=$0; sub(/^[^=]*=[[:space:]]*/, "", v)
+                gsub(/["'\'' ]/, "", v); print v; exit
             }
-            in_pricing && cur_id == target {
-                # match "    key: value"
-                line = $0
-                if (line ~ "^[[:space:]]+" want ":") {
-                    sub("^[[:space:]]+" want ":[[:space:]]*", "", line)
-                    gsub(/["'\'']/, "", line)
-                    gsub(/[[:space:]]/, "", line)
-                    print line
-                    exit
-                }
-                # New top-level key under the record (no leading 4+ spaces) ends pricing
-                if (line ~ "^[[:space:]]{2,4}[a-zA-Z]") in_pricing = 0
-            }
-            # End of records block
-            in_records && /^[a-zA-Z]/ { in_records = 0 }
         ' "$file" 2>/dev/null)
         if [[ -n "$value" ]]; then
             echo "$value"
