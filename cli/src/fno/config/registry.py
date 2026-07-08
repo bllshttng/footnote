@@ -96,6 +96,21 @@ FIELD_META: dict[str, Meta] = {
     ),
     "post_merge.enabled": Meta("advanced", "Whether the post-merge ritual runs."),
     "post_merge.self_reap": Meta("never", "Whether a post-merge watcher self-reaps."),
+    "post_merge.sync_command": Meta(
+        "advanced",
+        "Canonical-sync incantation run via `bash -lc` after a merge (e.g. "
+        "`git checkout main && git pull && fno update && fno restart`). Unset = off.",
+    ),
+    "post_merge.sync_paths": Meta(
+        "advanced",
+        "Repo-relative fnmatch globs gating the canonical sync (empty = always "
+        "run; e.g. `[\"cli/**\", \"crates/**\"]` skips a docs-only merge).",
+    ),
+    "post_merge.auto_run": Meta(
+        "advanced",
+        "Let merge-detection auto-dispatch the /fno:pr merged ritual for a "
+        "newly-merged PR (opt-in; default off).",
+    ),
     # --- config.research.* ---
     "research.output_dir": Meta(
         "advanced",
