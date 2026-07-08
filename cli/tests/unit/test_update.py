@@ -670,6 +670,53 @@ def test_ac1_hp_refresh_rust_bins_refreshed(
     assert marker_file.read_text(encoding="utf-8").strip() == subtree_rev
 
 
+def test_ac1_err_stale_daemon_forces_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """AC1-ERR: a PRESENT daemon self-reporting a different (older) crates_rev
+    than the fresh client is NOT same-build, so the fresh fast path is skipped
+    and cargo rebuilds the whole triad. This is the stale-present-sibling gap the
+    daemon/worker version verb closes -- a presence-only check would miss it."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    crate_dir = source.parent / "crates" / "fno-agents"
+    crate_dir.mkdir(parents=True)
+    marker_file = tmp_path / "installed-rust-rev"
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
+
+    fake_bin = tmp_path / "fno-agents"
+    fake_bin.write_text("x")
+    for _n in update._triad_names():
+        (tmp_path / _n).write_text("x")  # all three PRESENT (presence check would pass)
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    subtree_rev = "a" * 40
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
+
+    state = {"built": False}
+    cargo_calls: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):
+        if cmd and cmd[0] == "cargo":
+            cargo_calls.append(list(cmd))
+            state["built"] = True
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(update.subprocess, "run", _fake_run)
+
+    def _fake_rev(b, **kw):
+        # Post-rebuild the whole triad reports the source rev (verify passes);
+        # pre-rebuild the daemon sibling is stale (None) while client + worker are fresh.
+        if state["built"]:
+            return subtree_rev
+        return None if b.name.endswith("-daemon") else subtree_rev
+
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", _fake_rev)
+
+    result = update._refresh_rust_bins(source)
+    assert result == "refreshed"
+    assert len(cargo_calls) >= 1, "stale daemon must force a cargo rebuild, not the fresh path"
+
+
 def test_refresh_rust_bins_also_installs_mux_front_door(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
@@ -1672,9 +1719,14 @@ def test_fresh_path_missing_daemon_sibling_rebuilds(
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    # The client reports fresh even before the rebuild - that is the split: a
-    # current client next to a vanished daemon. The gate must still rebuild.
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree)
+    # Same-build semantics: a bin reports its rev only if present. The client +
+    # worker report fresh; the vanished daemon returns None (real
+    # _installed_bin_crates_rev on a missing binary), so _triad_same_build fails
+    # and the gate rebuilds. After cargo writes the triad, verify sees fresh.
+    monkeypatch.setattr(
+        update, "_installed_bin_crates_rev",
+        lambda b, **kw: subtree if Path(b).is_file() else None,
+    )
 
     result = update._refresh_rust_bins(source)
     assert result == "refreshed", "a missing daemon must force a rebuild, not 'fresh'"
