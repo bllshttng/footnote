@@ -1574,6 +1574,33 @@ def test_sync_triad_unwritable_location_halts_loud(
     assert "triad sync FAILED" in capsys.readouterr().err
 
 
+def test_sync_triad_cleans_temp_on_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy2 that wrote the temp followed by a failing os.replace must not leave
+    the .tmp orphaned in the destination dir (filesystem hygiene, matches the
+    atomic-write cleanup in _write_rust_marker)."""
+    names = update._triad_names()
+    cargo = tmp_path / "cargo" / "bin"
+    cargo.mkdir(parents=True)
+    for n in names:
+        (cargo / n).write_text("new")
+    dest = tmp_path / "dest" / "bin"
+    dest.mkdir(parents=True)
+    (dest / names[0]).write_text("old")  # eligible; content differs -> will copy
+    monkeypatch.setattr(update, "_triad_install_dirs", lambda: [dest])
+
+    # copy2 runs for real (writes dest/.<name>.<pid>.tmp), then os.replace fails.
+    def _replace_boom(src, dst):
+        raise OSError("replace failed mid-swap")
+
+    monkeypatch.setattr(update.os, "replace", _replace_boom)
+    with pytest.raises(typer.Exit):
+        update._sync_triad(cargo)
+    leftover = [p.name for p in dest.iterdir() if p.name.endswith(".tmp")]
+    assert leftover == [], f"temp file leaked: {leftover}"
+
+
 def test_sync_triad_incomplete_cargo_root_is_noop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -546,13 +546,23 @@ def _sync_triad(cargo_bin_dir: Path, *, dry_run: bool = False) -> None:
             typer.echo(f"Would sync fno-agents triad -> {dest}")
             continue
         copied: list[str] = []
+        tmp: Optional[Path] = None
         try:
             for n in names:
                 tmp = dest / f".{n}.{os.getpid()}.tmp"
                 shutil.copy2(sources[n], tmp)
-                os.replace(tmp, dest / n)
+                os.replace(tmp, dest / n)  # consumes tmp; leaves nothing behind
+                tmp = None
                 copied.append(n)
         except OSError as exc:
+            # A copy2 that wrote a partial temp, or an os.replace that failed,
+            # leaves the last tmp orphaned in dest - unlink it (same atomic-write
+            # cleanup as _write_rust_marker) before failing.
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
             typer.echo(
                 f"fno update: ERROR: triad sync FAILED at {dest} ({exc}). "
                 f"Copied {copied or 'none'} before the failure; this location may now "
