@@ -513,7 +513,7 @@ def _maybe_dispatch_work_start() -> None:
         except Exception:  # noqa: BLE001 - fail-safe to disabled
             return
 
-        from fno.paths import graph_json, resolve_repo_root
+        from fno.paths import resolve_repo_root
 
         repo_root = resolve_repo_root()
         manifest = repo_root / ".fno" / "target-state.md"
@@ -525,15 +525,9 @@ def _maybe_dispatch_work_start() -> None:
         if not node_id or node_id == "null":
             return
 
-        from fno.graph.load import load_graph
         from fno.provenance.spawn_think import on_node_work_start
 
-        graph_data = load_graph(graph_json())
-        entries = graph_data if isinstance(graph_data, list) else []
-        node = next(
-            (e for e in entries if isinstance(e, dict) and e.get("id") == node_id),
-            None,
-        )
+        node = _find_node(node_id)
         if node is not None:
             # Carry the session's persisted dispatch pins into the work-start
             # /think spawn. maybe_spawn_think reads node["model"]/node["provider"]
@@ -593,6 +587,96 @@ def _resolve_node_id(node: str) -> str:
     except Exception:  # noqa: BLE001 - best-effort; the raw arg still works
         pass
     return node
+
+
+def _find_node(node_id: str) -> Optional[dict]:
+    """The graph node dict for an exact id, or None (best-effort, never raises)."""
+    try:
+        from fno.graph.load import load_graph
+        from fno.paths import graph_json
+
+        data = load_graph(graph_json())
+        return next(
+            (
+                e
+                for e in (data if isinstance(data, list) else [])
+                if isinstance(e, dict) and e.get("id") == node_id
+            ),
+            None,
+        )
+    except Exception:  # noqa: BLE001 - best-effort; caller degrades to default
+        return None
+
+
+def _resolve_node_model(
+    node_id: str, *, explicit: Optional[str] = None
+) -> tuple[Optional[str], str]:
+    """``(model, decision_source)`` for a node's ``model`` pin / ``model_tier``.
+
+    The single Python projection of ``route_resolve`` at the ``target start`` seam
+    (the same precedence ``advance.py`` uses), so tier resolution lives in exactly
+    ONE place. An explicit ``-m`` wins without loading the node. ``model`` is None
+    -> the spawn path uses the provider default. Strictly non-fatal: any error
+    degrades to the explicit value or the provider default, so a dispatch never
+    fails because of the routing layer (inherited Locked 10).
+    """
+    try:
+        from fno import route_resolve
+
+        node = None if explicit else _find_node(node_id)
+        model, source, _chain = route_resolve.resolve_dispatch_model(
+            explicit=explicit,
+            task_model=(node or {}).get("model"),
+            task_tier=(node or {}).get("model_tier"),
+        )
+        return model, source
+    except Exception:  # noqa: BLE001 - routing degrades, never blocks a dispatch
+        return explicit, "explicit" if explicit else "provider-default"
+
+
+def _model_reachable_by(model: str, provider: str) -> bool:
+    """True if ``model`` maps to the ``provider`` harness (per the benchmark map).
+
+    A tier resolves the cheapest model clearing its floor across ALL harnesses, so
+    it can pick a model mapped to a different provider than the spawn lane uses.
+    Best-effort: an unknown model or any lookup error is treated as reachable so
+    the guard only ever DROPS a confirmed cross-harness pick, never a valid one.
+    """
+    try:
+        from fno.adapters.providers import benchmarks as bm
+
+        reach = bm.reachable(model)
+        return reach is None or reach[0] == provider
+    except Exception:  # noqa: BLE001 - never block a dispatch on a lookup error
+        return True
+
+
+@target_app.command("resolve-model")
+def resolve_model(
+    node: str = typer.Argument(..., help="Backlog node id/slug."),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="Only print the model if it is reachable by this harness. A tier "
+        "can resolve to a model mapped to another provider (e.g. a codex gpt-*); "
+        "a single-provider spawn lane (bg is claude-only) passes its provider "
+        "here so a cross-harness pick degrades to the provider default instead "
+        "of an invalid `<provider> --model <foreign-model>` spawn.",
+    ),
+) -> None:
+    """Print the dispatch model a node resolves to (its ``model`` pin / ``model_tier``).
+
+    The one Python projection of ``route_resolve`` for bash dispatchers
+    (``dispatch-node.sh``), so a tiered node's worker spawns on the tier model
+    without bash ever reimplementing resolution. Prints the resolved model on
+    stdout, or nothing when the node has no pin/tier (the caller uses the provider
+    default). Never fails a dispatch: any error prints nothing.
+    """
+    model, _source = _resolve_node_model(_resolve_node_id(node))
+    if model and provider and not _model_reachable_by(model, provider):
+        return  # cross-harness pick on a single-provider lane -> provider default
+    if model:
+        typer.echo(model)
 
 
 def _resolve_fno_cmd() -> list[str]:
@@ -739,6 +823,12 @@ def start(
         )
         return
 
+    # Project the node's model pin / tier into init's dispatch pin so a bare
+    # start on a tiered node carries the resolved model (x-d7a7). An explicit -m
+    # wins (precedence, resolved inside the helper); no pin/tier -> None ->
+    # nothing forwarded, byte-identical to pre-change. Never blocks (Locked 10).
+    model, decision_source = _resolve_node_model(node, explicit=model)
+
     # 3. Init the session FROM the worktree (binds owner_cwd, claims the node
     #    exactly once - preserve the existing one-call claim).
     init_cmd = fno + ["target", "init", "--input", node]
@@ -759,8 +849,11 @@ def start(
         )
         raise typer.Exit(code=init.returncode)
 
-    # 4. Receipt - one parse-friendly line a memory-less agent acts on.
+    # 4. Receipt - one parse-friendly line a memory-less agent acts on. When a
+    #    model was resolved, record it + its decision_source so the dispatch is
+    #    auditable (x-d7a7); absent -> today's line, byte-identical.
+    model_note = f"  model={model} ({decision_source})" if model else ""
     typer.echo(
-        f"worktree={wt_path}  .fno={fno_state}  base=origin/main  node=claimed"
+        f"worktree={wt_path}  .fno={fno_state}  base=origin/main  node=claimed{model_note}"
     )
     typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)

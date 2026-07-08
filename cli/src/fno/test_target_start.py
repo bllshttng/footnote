@@ -182,3 +182,186 @@ def test_ensure_failure_is_loud_and_skips_init(monkeypatch, tmp_path):
     result = runner.invoke(target_app, ["start", "x-d91b"])
     assert result.exit_code == 1
     assert init_calls == []  # never proceed past a failed ensure
+
+
+# --------------------------- tier projection (x-d7a7) --------------------- #
+def _wire_start(monkeypatch, wt: Path):
+    """Stub the four seams `start` shells so only model threading is exercised.
+
+    Returns the list `start` builds as the `fno target init` argv (captured).
+    """
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *a: "/canonical/repo")
+    monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda r, w: (0, ""))
+    init_args: list[str] = []
+
+    def fake_run(args, **kwargs):
+        if "ensure" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=str(wt), stderr="")
+        if "init" in args:
+            init_args.extend(args)
+            return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    return init_args
+
+
+def test_start_bare_tiered_node_threads_resolved_model(monkeypatch, tmp_path):
+    """AC1-HP: bare start on a tiered node carries the resolved model + source."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    init_args = _wire_start(monkeypatch, wt)
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda nid, explicit=None: ("claude-sonnet-5", "task-tier(medium)"),
+    )
+    result = runner.invoke(target_app, ["start", "x-d7a7"])
+    assert result.exit_code == 0, result.stdout
+    assert init_args[init_args.index("--model") + 1] == "claude-sonnet-5"
+    assert "model=claude-sonnet-5 (task-tier(medium))" in result.stdout
+
+
+def test_start_explicit_model_wins_over_tier(monkeypatch, tmp_path):
+    """AC1-EDGE: an explicit -m wins and the node is never loaded to read a tier."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    init_args = _wire_start(monkeypatch, wt)
+
+    def _boom(nid):  # node lookup must NOT run when -m is explicit (short-circuit)
+        raise AssertionError("node loaded despite explicit -m")
+
+    monkeypatch.setattr(target_cli, "_find_node", _boom)
+    result = runner.invoke(target_app, ["start", "x-d7a7", "-m", "glm-4.7"])
+    assert result.exit_code == 0, result.stdout
+    assert init_args[init_args.index("--model") + 1] == "glm-4.7"
+    assert "model=glm-4.7 (explicit)" in result.stdout
+
+
+def test_start_untiered_node_forwards_no_model(monkeypatch, tmp_path):
+    """Invariant: a node with no pin/tier -> no --model, receipt byte-identical."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    init_args = _wire_start(monkeypatch, wt)
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda nid, explicit=None: (None, "provider-default"),
+    )
+    result = runner.invoke(target_app, ["start", "x-d7a7"])
+    assert result.exit_code == 0, result.stdout
+    assert "--model" not in init_args
+    assert "model=" not in result.stdout
+    assert result.stdout.rstrip().endswith("node=claimed")
+
+
+def test_resolve_node_model_degrades_on_error(monkeypatch):
+    """AC1-ERR: any load/resolve error -> (None, provider-default), never raises."""
+
+    def _raise(_p):
+        raise RuntimeError("snapshot unreadable")
+
+    monkeypatch.setattr("fno.graph.load.load_graph", _raise)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
+    assert target_cli._resolve_node_model("x-d7a7") == (None, "provider-default")
+
+
+def test_resolve_node_model_error_preserves_explicit(monkeypatch):
+    """A resolve error with an explicit -m degrades to that value, not the default."""
+
+    def _raise(**_kw):
+        raise RuntimeError("router boom")
+
+    monkeypatch.setattr("fno.route_resolve.resolve_dispatch_model", _raise)
+    assert target_cli._resolve_node_model("x-d7a7", explicit="glm-4.7") == (
+        "glm-4.7",
+        "explicit",
+    )
+
+
+def test_resolve_node_model_uses_route_resolve(monkeypatch):
+    """The helper reads the node's model/model_tier and defers to route_resolve."""
+    monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda p: [{"id": "x-d7a7", "model_tier": "high"}],
+    )
+    seen = {}
+
+    def fake_resolve(*, task_model, task_tier, **_kw):
+        seen["task_model"] = task_model
+        seen["task_tier"] = task_tier
+        return "high-model", "task-tier(high)", ["tier(high)"]
+
+    monkeypatch.setattr(
+        "fno.route_resolve.resolve_dispatch_model", fake_resolve
+    )
+    assert target_cli._resolve_node_model("x-d7a7") == ("high-model", "task-tier(high)")
+    assert seen == {"task_model": None, "task_tier": "high"}
+
+
+def test_resolve_model_command_prints_model(monkeypatch):
+    """`fno target resolve-model` prints the resolved model for bash dispatchers."""
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda nid, explicit=None: ("claude-sonnet-5", "task-tier(medium)"),
+    )
+    result = runner.invoke(target_app, ["resolve-model", "x-d7a7"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "claude-sonnet-5"
+
+
+def test_resolve_model_command_empty_when_no_model(monkeypatch):
+    """No pin/tier -> prints nothing (caller uses the provider default)."""
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda nid, explicit=None: (None, "provider-default"),
+    )
+    result = runner.invoke(target_app, ["resolve-model", "x-d7a7"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == ""
+
+
+def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
+    """--provider claude drops a tier that resolved to a codex model (bg is claude-only)."""
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda nid, explicit=None: ("gpt-5.4", "task-tier(medium)"),
+    )
+    # gpt-5.4 maps to the codex harness in the real REACHABILITY table.
+    result = runner.invoke(
+        target_app, ["resolve-model", "x-d7a7", "--provider", "claude"]
+    )
+    assert result.exit_code == 0
+    assert result.stdout.strip() == ""  # dropped -> caller uses the provider default
+
+
+def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
+    """--provider claude keeps a claude-reachable tier model."""
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda nid, explicit=None: ("claude-sonnet-5", "task-tier(medium)"),
+    )
+    result = runner.invoke(
+        target_app, ["resolve-model", "x-d7a7", "--provider", "claude"]
+    )
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "claude-sonnet-5"
+
+
+def test_model_reachable_by_conservative_on_unknown(monkeypatch):
+    """An unknown model is treated as reachable (guard only drops CONFIRMED mismatches)."""
+    assert target_cli._model_reachable_by("gpt-5.4", "claude") is False
+    assert target_cli._model_reachable_by("claude-sonnet-5", "claude") is True
+    assert target_cli._model_reachable_by("some-unmapped-model", "claude") is True
