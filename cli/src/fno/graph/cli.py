@@ -1199,6 +1199,23 @@ def _intake_impl(
         # path must not surface as if the intake itself failed.
         sys.stderr.write(f"warning: post-intake project check failed: {e}\n")
 
+    # Mirror the graph-authoritative navigation fields onto the plan doc the
+    # node just linked. Non-fatal: a missing/unreadable plan never fails intake.
+    if new_id_holder[0]:
+        try:
+            from fno.graph._intake import _find_node, repo_root
+            from fno.plan._project import project_node_to_plan
+
+            landed = _find_node(read_graph(_graph_path()), new_id_holder[0])
+            pp = landed.get("plan_path") if landed else None
+            if landed and pp:
+                p = Path(pp)
+                if not p.is_absolute():
+                    p = Path(repo_root()) / p
+                project_node_to_plan(landed, p)
+        except Exception as e:  # noqa: BLE001 - additive; never wedge the intake
+            sys.stderr.write(f"warning: post-intake plan projection failed: {e}\n")
+
     # Born-with-why (v2 A1): route the intaked node through the shared birth hook
     # for uniformity across birth paths. Independent of the project-warning block
     # above so a warn failure never drops the dispatch. Most intake nodes are
@@ -1450,11 +1467,14 @@ def cmd_update(
         )
         raise typer.Exit(code=2)
 
+    projected_node: list = [None]
+
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
+        projected_node[0] = node
 
         if has_blocker_edit:
             if blocked_by is not None:
@@ -1614,6 +1634,25 @@ def cmd_update(
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"Updated {task_id}")
+
+    # Mirror the graph-authoritative navigation fields onto the plan doc when a
+    # mirrored field (or the plan link itself) changed. Best-effort: a missing
+    # or unreadable plan never fails the graph mutation.
+    node = projected_node[0]
+    if node and node.get("plan_path") and (
+        priority is not None
+        or project is not None
+        or type_ is not None
+        or has_blocker_edit
+        or plan_path is not None
+    ):
+        from fno.graph._intake import repo_root
+        from fno.plan._project import project_node_to_plan
+
+        p = Path(node["plan_path"])
+        if not p.is_absolute():
+            p = Path(repo_root()) / p
+        project_node_to_plan(node, p)
 
 
 # -- unclaim / release --

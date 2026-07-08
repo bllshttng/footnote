@@ -56,6 +56,12 @@ class PlanFrontmatter(BaseModel):
     title: str | None = None
     size: Literal["S", "M", "L"] | None = None
     type: str | None = None
+    # Mirror fields: a PROJECTION of the graph node, written only by fno verbs
+    # (intake + backlog update), never hand-edited. They give the Obsidian Bases
+    # the navigation columns the graph already has (order "Next up" by priority).
+    priority: str | None = None
+    blocked_by: list[str] = []
+    project: str | None = None
     executor: str | None = None
     model_tier: str | None = None
     kind: str | None = None
