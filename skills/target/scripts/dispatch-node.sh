@@ -199,6 +199,13 @@ for id in "${NODES[@]}"; do
   # error (the same trap the --cwd branches below avoid). Empty pin -> zero args =
   # byte-identical to today; fail-open on a bad read since jq // empty yields "".
   model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null || true)"
+  # x-d7a7: no exact `.model` pin? resolve the node's `model_tier` via the single
+  # Python projection (`fno target resolve-model` -> route_resolve) so a tiered
+  # node's worker spawns on the tier model too - bash never resolves. Empty output
+  # (no pin/tier, or any resolve error) -> zero args = byte-identical to today.
+  if [[ -z "$model_pin" ]]; then
+    model_pin="$(fno target resolve-model "$id" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+  fi
   model_args=()
   [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")
 
