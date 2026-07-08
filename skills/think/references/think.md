@@ -708,8 +708,26 @@ not as "we'll figure it out at implementation time":
 
 After saving the design document, spawn a Haiku reviewer subagent to critique it:
 
-1. Dispatch reviewer with the full design doc text
-2. Reviewer checks for: missing error states, incomplete acceptance criteria, contradictions between sections, vague implementation details, **a missing `## Failure Modes` heading** (hard fail), and missing sub-bullets (Boundaries / Errors / Invariants / Concurrency). For cross-repo features it also verifies a `## Interface Contract` section carrying `contract_version` and a Locked Decision referencing it (hard fail when the feature spans repos but pins no contract and does not explain the omission in Open Questions)
+1. Dispatch reviewer with the full design doc text **plus `deliverable_type` and
+   the type's required-section list from the Step 8 contract table.** The
+   reviewer judges the doc against ITS type's contract, not the uniform one.
+2. Reviewer checks:
+   - **Hard-fail (all types):** a missing `## Failure Modes` heading or any
+     missing bold label (Boundaries / Errors / Invariants / Concurrency) - the
+     frozen `/blueprint` parser seam. Unchanged.
+   - **Hard-fail (per type):** a type-required section is absent - a `bug`
+     without `## Repro`; an `investigation` without `## Evidence Chain` or
+     `## Re-open Conditions`; a cross-repo feature/bug without a
+     `## Interface Contract` carrying `contract_version` and a Locked Decision
+     referencing it (unless the omission is explained in Open Questions).
+   - **Anti-filler check (new):** a section the resolved type EXCLUDES that is
+     present anyway - AC blocks or UI-state tables on an `investigation`, User
+     Stories on a `bug` - is flagged **for removal, not approved**. This is the
+     x-2bf7 failure inverted: the reviewer once approved a no-build verdict's
+     fabricated AC-UI sections; a type-excluded (type-excluded == filler) section
+     is now a finding.
+   - General quality: missing error states, contradictions between sections,
+     vague implementation details.
 3. If issues found: fix them, re-dispatch reviewer (max 3 iterations)
 4. If approved (or 3 iterations reached): present to user
 
