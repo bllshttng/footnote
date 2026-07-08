@@ -356,6 +356,19 @@ def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optiona
     return rev
 
 
+def _triad_same_build(bindir: Path, subtree: str) -> bool:
+    """True iff all three triad bins in ``bindir`` self-report ``crates_rev ==
+    subtree`` (and are not dirty). Now that daemon + worker carry a ``version``
+    verb too, the fresh fast path can verify the whole triad is the SAME build,
+    not merely present: a stale-but-present sibling reports a different (or
+    unparseable -> None) rev and forces a rebuild. ``_installed_bin_crates_rev``
+    already fails toward rebuild for every error mode, so no extra guarding here.
+    """
+    return all(
+        _installed_bin_crates_rev(bindir / n) == subtree for n in _triad_names()
+    )
+
+
 def _cargo_installed_mux() -> Optional[Path]:
     """Return the path to the cargo-installed mux front-door binary (`fno`), or
     None if absent. Same `$CARGO_HOME/bin` location as the fno-agents bins - the
@@ -617,30 +630,35 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # skip cargo only when that rev matches source AND the build is not dirty.
     # A marker could advance past a stale/out-of-band binary and lie "fresh".
     installed_rev = None if installed_bin is None else _installed_bin_crates_rev(installed_bin)
-    # The fresh fast path also requires the daemon + worker siblings to be present
-    # beside the fresh client. A fresh client next to a MISSING daemon is the exact
-    # split this change repairs (resolve_daemon_bin -> DaemonBinMissing): taking the
-    # fresh path there would skip the rebuild AND hand _sync_triad an incomplete
-    # source it silently no-ops on, so the split would never heal. Any absent
-    # sibling -> fall through to cargo, which rebuilds the whole triad coherently.
-    # (daemon/worker carry no version verb, so presence is the checkable signal;
-    # cargo installs all three together, so a present sibling is the same build.)
-    triad_present = installed_bin is not None and all(
-        (installed_bin.parent / n).is_file() for n in _triad_names()
-    )
-    if not force and installed_rev is not None and installed_rev == subtree and triad_present:
+    # The fresh fast path also requires the daemon + worker siblings to be the
+    # SAME build as the fresh client, not merely present. All three bins now
+    # carry a `version --json` verb, so _triad_same_build interrogates each one's
+    # crates_rev: a MISSING or STALE sibling (different/unparseable rev -> None)
+    # falls through to cargo, which rebuilds the whole triad coherently. This
+    # closes the residual gap where a manually-replaced older sibling beside a
+    # fresh client passed a presence-only check and skipped the rebuild.
+    if (
+        not force
+        and installed_bin is not None
+        and installed_rev == subtree
+        and _triad_same_build(installed_bin.parent, subtree)
+    ):
         typer.echo(
             f"fno update: rust bins fresh (rev {installed_rev[:12]} from binary);"
             " skipping cargo install"
         )
         # The agents bins are current, but the mux front door (crates/fno ->
-        # `fno`) can still be ABSENT at a fresh binary: the fno->fno-py rename
-        # lands fno-py while a fresh-binary `fno update` never installed the mux,
-        # stranding the front door (no `fno` on PATH). Heal it additively if
-        # missing, so `fno doctor`'s "run fno update" hint is true rather than a
-        # dead-end. No-op when there is no crates/fno source. installed_bin is
-        # non-None here (passed the `installed_bin is None and not force` gate).
-        if _cargo_installed_mux() is None:
+        # `fno`) can still be ABSENT or STALE at a fresh triad. Absent: the
+        # fno->fno-py rename lands fno-py while a fresh-binary `fno update` never
+        # installed the mux. Stale: the mux install is best-effort (a failed
+        # build warns and continues), so a prior failure can leave an OLD `fno`
+        # beside a fresh triad. Now that crates/fno bakes its own crates_rev,
+        # interrogate the installed mux and reinstall when it is missing OR its
+        # rev != source - closing the present-but-stale front-door gap a
+        # presence-only heal would miss. No-op when there is no crates/fno
+        # source. installed_bin is non-None here.
+        mux = _cargo_installed_mux()
+        if mux is None or _installed_bin_crates_rev(mux) != subtree:
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
         # Sync even on the fresh path: an interrupted prior run may have left the
         # other install locations behind (AC2-FR). The gate's fresh verdict must

@@ -50,7 +50,7 @@ async fn run(args: Vec<String>) -> i32 {
     // parity guard (test_rust_client_verbs_match_client_rs) does not see it.
     if matches!(verb, "version" | "-V" | "--version") {
         let json = args[1..].iter().any(|a| a == "--json");
-        print_version(json);
+        fno_agents::version::print_version(json);
         return 0;
     }
 
@@ -2042,67 +2042,11 @@ fn print_help() {
     );
 }
 
-/// Print the binary's embedded version: package version + the source git rev it
-/// was built from + a dirty flag, all baked in by `build.rs` (ab-24a59d50). The
-/// `--json` form is the machine surface `fno doctor` reads off the resolved
-/// binary to decide Rust-side staleness without an external marker.
-/// The machine-readable version payload `fno doctor` reads off the resolved
-/// binary (`version --json`). `crates_rev` is the crates/ subtree rev the
-/// rust-staleness verdict keys on (ab-716cd330) -- the same quantity Python's
-/// `update._rust_subtree_rev` computes, so the comparison is apples-to-apples.
-/// `git_rev` stays the full HEAD the binary was built from (identity).
-fn version_json() -> serde_json::Value {
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    json!({
-        "package": env!("CARGO_PKG_VERSION"),
-        "git_rev": env!("FNO_AGENTS_GIT_REV"),       // full sha, or the literal "unknown"
-        "crates_rev": env!("FNO_AGENTS_CRATES_REV"), // crates/ subtree rev, or "unknown"
-        "dirty": env!("FNO_AGENTS_GIT_DIRTY") == "1",
-        "profile": profile,
-    })
-}
-
-fn print_version(json_out: bool) {
-    let pkg = env!("CARGO_PKG_VERSION");
-    let rev = env!("FNO_AGENTS_GIT_REV"); // full sha, or the literal "unknown"
-    let dirty = env!("FNO_AGENTS_GIT_DIRTY") == "1";
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    if json_out {
-        println!("{}", version_json());
-    } else {
-        let short = if rev.len() >= 12 { &rev[..12] } else { rev };
-        let suffix = if dirty { "-dirty" } else { "" };
-        println!("fno-agents {pkg} ({short}{suffix}, {profile})");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use fno_agents::{emit_schema_json, state::AgentState, AgentStatus, KNOWN_EVENT_KINDS};
     use std::path::Path;
-
-    // -----------------------------------------------------------------------
-    // ab-716cd330: version --json carries the crates/ subtree rev fno doctor reads
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn version_json_carries_crates_rev_and_git_rev() {
-        // build.rs always sets both env vars (falling back to "unknown"), so the
-        // keys are present for `fno doctor` to read the rust-staleness signal
-        // off the resolved binary without an external marker.
-        let v = version_json();
-        assert!(v.get("crates_rev").and_then(|x| x.as_str()).is_some());
-        assert!(v.get("git_rev").and_then(|x| x.as_str()).is_some());
-    }
 
     // -----------------------------------------------------------------------
     // ab-351427cb: --help parity (top-level verb list + per-verb usage)

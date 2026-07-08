@@ -56,6 +56,11 @@ enum Role {
     /// read-only web bridge (x-6a14). Attaches to a session as an observer and
     /// serves its frame stream to browsers over HTTP+WebSocket. No TTY needed.
     MuxWeb(fno::web::WebArgs),
+    /// `version [--json]`: report the mux binary's own baked-in build rev so
+    /// `fno update` can detect a present-but-stale front door. The bool is
+    /// `--json`. Additive: `fno version` had no Python command (it errored), so
+    /// intercepting it here breaks nothing; `fno --version` still forwards.
+    MuxVersion(bool),
     /// A malformed mux/server invocation: print usage, exit 2.
     MuxUsage,
     /// Any other args: the Python-CLI forwarding path.
@@ -202,6 +207,13 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             },
             _ => Role::MuxUsage,
         },
+        // `version [--json]`: the mux self-report gate surface. Takes no
+        // positional, an optional `--json` (same shape as ls/doctor). `fno
+        // --version` is NOT this - it stays a Python-forwarded callback.
+        Some(Some("version")) => match split_json(&args[1..]) {
+            Some((pos, json)) if pos.is_empty() => Role::MuxVersion(json),
+            _ => Role::MuxUsage,
+        },
         // Every other invocation (including a non-UTF-8 first arg) is the
         // existing CLI surface: forward it untouched.
         Some(_) => Role::Forward,
@@ -224,7 +236,8 @@ fn main() {
         }
         Role::MuxUsage => {
             eprintln!(
-                "usage: fno [--session <name>] | fno mux server [--session <name>] \
+                "usage: fno [--session <name>] | fno version [--json] \
+                 | fno mux server [--session <name>] \
                  | fno mux ls [--json] | fno mux attach <name> \
                  | fno mux kill-server [<name>] [--json] \
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
@@ -234,6 +247,7 @@ fn main() {
             );
             std::process::exit(2);
         }
+        Role::MuxVersion(json) => fno::version::print_version(json),
         Role::MuxLs(json) => std::process::exit(mux_cli::ls(json)),
         Role::MuxKill(name, json) => {
             let session = mux_cli::resolve_session(name.as_deref(), env_session.as_deref());
@@ -428,6 +442,23 @@ mod tests {
     fn proto_role_subcommands_forward_to_python_cli() {
         assert_eq!(decide_role(&os(&["backlog", "list"]), true), Role::Forward);
         assert_eq!(decide_role(&os(&["--help"]), false), Role::Forward);
+        // `fno --version` is a Python-forwarded callback, NOT the mux self-report.
+        assert_eq!(decide_role(&os(&["--version"]), false), Role::Forward);
+    }
+
+    #[test]
+    fn proto_role_version_is_mux_self_report() {
+        // `version [--json]` reports the mux binary's own rev (no TTY needed);
+        // a trailing positional is usage, never a silent forward.
+        assert_eq!(
+            decide_role(&os(&["version"]), false),
+            Role::MuxVersion(false)
+        );
+        assert_eq!(
+            decide_role(&os(&["version", "--json"]), true),
+            Role::MuxVersion(true)
+        );
+        assert_eq!(decide_role(&os(&["version", "x"]), false), Role::MuxUsage);
     }
 
     #[test]
