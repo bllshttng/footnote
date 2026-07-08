@@ -43,6 +43,13 @@ gate = { any = [
     ] },
   ] },
 ] }
+# No [rule.answer] (x-5103): validated from opencode source
+# (packages/tui/src/routes/session/permission.tsx) - the permission dialog is a
+# horizontal Allow once / Allow always / Reject button row navigated with
+# left/right (or vim h/l) + Enter, NOT a numbered-digit menu. Like agy, that is
+# arrow-only and stays focus-only (the Open Q1 no-op); only codex/gemini got a
+# digit grammar. The footer markers above already prove this ("↑↓ select" /
+# "⇆ tab"). Author one here only if opencode ever ships a numbered-digit prompt.
 
 [[rule]]
 id = "interrupt_hint_working"
