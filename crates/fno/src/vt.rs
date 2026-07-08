@@ -107,10 +107,11 @@ pub struct Pane {
     /// The block seq the keyboard block-selection walk (leader+v) rests on.
     /// Cleared whenever the selection itself clears.
     selected_block: Option<u64>,
-    /// (v12, x-e780) The active in-scrollback search, or `None`. A snapshot: the
-    /// match list is captured at `search_open` and not re-scanned until the next
-    /// submit (Locked 1). Shared per-pane (Locked 2) - every co-viewer sees the
-    /// jump + highlight; only the initiator gets the `[i/n]` counter.
+    /// (v12, x-e780) The active in-scrollback search, or `None`. Each step
+    /// re-scans against the live grid (x-1e67: a frozen snapshot's `abs_row`
+    /// anchors drift once scrollback saturates, landing the highlight on the
+    /// wrong row). Shared per-pane (Locked 2) - every co-viewer sees the jump +
+    /// highlight; only the initiator gets the `[i/n]` counter.
     search: Option<SearchState>,
 }
 
@@ -140,7 +141,11 @@ struct SearchMatch {
 /// The per-pane active search (see [`Pane::search`]).
 #[derive(Debug, Clone)]
 struct SearchState {
-    /// Match snapshot, ascending `abs_row` (oldest -> newest).
+    /// The query, kept so each step re-scans (anchors drift once scrollback
+    /// saturates, so a frozen snapshot highlights the wrong row - x-1e67).
+    needle: Vec<char>,
+    /// Matches for the current position, ascending `abs_row` (oldest -> newest).
+    /// Rebuilt against the live grid on every step, so `abs_row` is always fresh.
     matches: Vec<SearchMatch>,
     /// Index into `matches` of the current (highlighted) match.
     current: usize,
@@ -574,29 +579,65 @@ impl Pane {
             .rposition(|m| m.abs_row <= top)
             .unwrap_or(matches.len() - 1);
         let total = matches.len() as u32;
-        self.search = Some(SearchState { matches, current });
+        self.search = Some(SearchState {
+            needle,
+            matches,
+            current,
+        });
         self.apply_current_match();
         (total, current as u32 + 1)
     }
 
-    /// Walk the active search's snapshot: `Prev` toward older (smaller `abs_row`),
-    /// `Next` toward newer, resting at the ends (AC2-EDGE locked default). Re-jumps
-    /// and re-highlights. `None` when no search is active (the server replies a
-    /// no-op `Notice`, never a panic - AC "Errors").
+    /// Walk the active search: `Prev` toward older (smaller `abs_row`), `Next`
+    /// toward newer, resting at the ends (AC2-EDGE locked default). Re-scans the
+    /// live grid first (x-1e67: stored anchors drift once scrollback saturates,
+    /// so the frozen list would re-highlight the wrong row), then re-jumps and
+    /// re-highlights. `None` only when no search is active. If every match has
+    /// aged out of retained scrollback, the query now matches nothing: drop the
+    /// highlight and report `(0, 0)` - the SAME zero-match reply as a no-match
+    /// open, so the initiator hears "no matches" and the cleared highlight
+    /// repaints (returning `None` here would leave a stale highlight - the
+    /// server's no-active-search arm does not broadcast).
     pub fn search_step(&mut self, dir: BlockDir) -> Option<(u32, u32)> {
-        let s = self.search.as_mut()?;
-        if s.matches.is_empty() {
-            return None;
+        let cur = self.search.as_ref()?.current;
+        let needle = self.search.as_ref()?.needle.clone();
+        // Fresh anchor of the currently-highlighted match: the live selection
+        // tracks it across eviction (alacritty rotates it), so its start row is
+        // the match's row in the re-scanned list. Re-anchor the walk to it, else
+        // a stale ordinal skips matches that aged out from the front of the list
+        // (gemini/codex review): on B in [A,B,C,D], A evicting leaves [B,C,D] but
+        // `cur` still 1, so `Next` would jump to D and skip C.
+        let anchor_abs = self
+            .term
+            .selection
+            .as_ref()
+            .and_then(|s| s.to_range(&self.term))
+            .map(|r| r.start.line.0 as i64 + self.term.grid().history_size() as i64);
+        let matches = self.scan_matches(&needle);
+        if matches.is_empty() {
+            self.search_clear();
+            return Some((0, 0));
         }
-        let last = s.matches.len() - 1;
-        s.current = match dir {
-            BlockDir::Prev => s.current.saturating_sub(1),
-            BlockDir::Next => (s.current + 1).min(last),
+        let last = matches.len() - 1;
+        // Locate the current match in the fresh list by its live anchor; fall
+        // back to the clamped ordinal if it aged out. An unchanged list (the pane
+        // was not streaming) resolves to `cur`, so the walk is byte-identical to
+        // the old snapshot behavior.
+        let base = anchor_abs
+            .and_then(|a| matches.iter().position(|m| m.abs_row == a))
+            .unwrap_or(cur.min(last));
+        let current = match dir {
+            BlockDir::Prev => base.saturating_sub(1),
+            BlockDir::Next => (base + 1).min(last),
         };
-        let total = s.matches.len() as u32;
-        let current = s.current as u32 + 1;
+        let total = matches.len() as u32;
+        self.search = Some(SearchState {
+            needle,
+            matches,
+            current,
+        });
         self.apply_current_match();
-        Some((total, current))
+        Some((total, current as u32 + 1))
     }
 
     /// Drop the active search: clear the highlight and the snapshot. Idempotent
@@ -2511,5 +2552,92 @@ mod tests {
         assert!(!pane.has_search(), "resize drops the search snapshot");
         assert!(!pane.has_selection());
         assert_eq!(pane.search_step(BlockDir::Next), None);
+    }
+
+    #[test]
+    fn search_step_re_highlights_the_right_row_after_saturation() {
+        // x-1e67 (AC edge): saturate a tiny scrollback so history is already at
+        // cap, open a search, then stream output that evicts lines the match
+        // survives. A re-highlight (search_step) must land on the real match, not
+        // a row `E` away - the frozen-snapshot `abs_row` drifted by the eviction
+        // count and highlighted a filler row before the re-scan fix.
+        let mut pane = Pane::with_scrollback(3, 40, 8);
+        for i in 0..40 {
+            pane.feed(format!("filler{i}\r\n").as_bytes());
+        }
+        pane.feed(b"UNIQTOKEN here\r\n");
+        for i in 0..2 {
+            pane.feed(format!("tail{i}\r\n").as_bytes());
+        }
+        let (total, _) = pane.search_open("UNIQTOKEN");
+        assert_eq!(total, 1, "exactly one match");
+        assert_eq!(pane.selection_text().as_deref(), Some("UNIQTOKEN"));
+        // Evict 3 lines; the match is still within the retained window.
+        for i in 0..3 {
+            pane.feed(format!("more{i}\r\n").as_bytes());
+        }
+        pane.search_step(BlockDir::Prev); // single match -> re-applies the same
+        assert_eq!(
+            pane.selection_text().as_deref(),
+            Some("UNIQTOKEN"),
+            "highlight must track the real match, not drift to a filler row"
+        );
+    }
+
+    #[test]
+    fn search_step_re_anchors_when_older_matches_age_out() {
+        // x-1e67 (gemini/codex review): stepping must move relative to where the
+        // current match IS, not a stale ordinal. On match B in [A,B,C,D], when A
+        // ages out the fresh list is [B,C,D]; `Next` must land on C (2/3), not
+        // skip to D (3/3) by reusing the old index 1.
+        let mut pane = Pane::with_scrollback(3, 40, 8);
+        for i in 0..30 {
+            pane.feed(format!("filler{i}\r\n").as_bytes());
+        }
+        // Newest-last: A, sep, B, sep, C, sep, D. A is the 7th-newest line.
+        for m in ["MARK A", "sep", "MARK B", "sep", "MARK C", "sep", "MARK D"] {
+            pane.feed(format!("{m}\r\n").as_bytes());
+        }
+        assert_eq!(pane.search_open("MARK").0, 4, "four matches");
+        // Land deterministically on B (index 1): walk to the oldest, then one Next.
+        for _ in 0..8 {
+            pane.search_step(BlockDir::Prev);
+        }
+        assert_eq!(pane.search_step(BlockDir::Next), Some((4, 2)), "on B");
+        // Evict exactly A (7th-newest -> past the 11-line window); B,C,D stay.
+        for i in 0..5 {
+            pane.feed(format!("more{i}\r\n").as_bytes());
+        }
+        assert_eq!(
+            pane.search_step(BlockDir::Next),
+            Some((3, 2)),
+            "re-anchored to B, stepped to C - not skipped to D (3/3)"
+        );
+    }
+
+    #[test]
+    fn search_step_drops_search_when_all_matches_age_out() {
+        // Boundary: if every match scrolls out of retained scrollback between
+        // steps, the re-scan finds nothing. The query now matches nothing, so the
+        // step drops the highlight and reports the zero-match reply (0, 0) - the
+        // same signal as a no-match open - rather than walking stale anchors or
+        // returning None (which the server would not broadcast, leaving a stale
+        // highlight). `None` stays reserved for "no active search".
+        let mut pane = Pane::with_scrollback(3, 20, 6);
+        pane.feed(b"NEEDLE row\r\n");
+        assert_eq!(pane.search_open("NEEDLE"), (1, 1));
+        assert!(pane.has_search());
+        for i in 0..30 {
+            pane.feed(format!("flood{i}\r\n").as_bytes());
+        }
+        assert_eq!(
+            pane.search_step(BlockDir::Prev),
+            Some((0, 0)),
+            "aged-out matches report zero, not None"
+        );
+        assert!(!pane.has_search(), "dead search dropped");
+        assert!(!pane.has_selection(), "highlight cleared for repaint");
+        // A further step now has no active search: that is the real None case.
+        assert_eq!(pane.search_step(BlockDir::Prev), None);
     }
 }
