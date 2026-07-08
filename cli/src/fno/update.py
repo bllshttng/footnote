@@ -790,7 +790,14 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     return outcome
 
 
-def _install_then_mark(install_cmd: list[str], rev: str, *, marker: Path, pid: int) -> str:
+def _install_then_mark(
+    install_cmd: list[str],
+    rev: str,
+    *,
+    marker: Path,
+    pid: int,
+    post_install: Optional[str] = None,
+) -> str:
     """Build a shell line that installs, then writes the marker iff install succeeds.
 
     The ``&&`` gates the marker write on a zero install exit (Invariant: no
@@ -798,6 +805,13 @@ def _install_then_mark(install_cmd: list[str], rev: str, *, marker: Path, pid: i
     atomic for a concurrent ``fno doctor`` reader. Returned as a string so the
     Unix install path can ``execvp`` ``/bin/sh -c <line>`` and still let the
     installer replace this process.
+
+    ``post_install`` runs AFTER a successful install (also gated by ``&&`` on
+    the install exit), best-effort (``|| true``) so it can never override a
+    successful installer exit. Used to refresh the pr-watch daemon onto the
+    freshly-installed binary; it must run the NEW binary, which is why it is
+    chained here (after the install) rather than executed in the pre-exec
+    interpreter.
     """
     q = shlex.quote
     tmp = marker.parent / f".installed-rev.{pid}.tmp"
@@ -812,7 +826,10 @@ def _install_then_mark(install_cmd: list[str], rev: str, *, marker: Path, pid: i
         f"printf '%s\\n' {q(rev)} > {q(str(tmp))} && "
         f"mv {q(str(tmp))} {q(str(marker))}"
     )
-    return f"{shlex.join(install_cmd)} && {{ {marker_write} || true; }}"
+    line = f"{shlex.join(install_cmd)} && {{ {marker_write} || true; }}"
+    if post_install:
+        line += f" && {{ {post_install} || true; }}"
+    return line
 
 
 def update_command(
@@ -910,6 +927,23 @@ def update_command(
     # checkout; the marker is written ONLY on a successful install.
     rev = _source_rev(resolved)
 
+    # Refresh the pr-watch daemon onto the freshly-installed binary. `fno update`
+    # only replaces the binary; it never re-renders/reloads the launchd plist, so
+    # a migration-update that makes the next tick error wedges the daemon with no
+    # self-heal (observed with the config-flatten). The refresh runs the NEW
+    # `fno-py` (chained AFTER the install, best-effort) and self-gates on
+    # pr_watch.enabled, so we only append it when enabled - a disabled install
+    # gets nothing.
+    refresh_cmd: Optional[str] = None
+    try:
+        from fno.config import load_settings
+
+        if load_settings().pr_watch.enabled:
+            fno_py = shutil.which("fno-py") or "fno-py"
+            refresh_cmd = f"{shlex.quote(fno_py)} pr-watch refresh"
+    except Exception:
+        refresh_cmd = None
+
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the
         # installer as a child and terminates the parent with status 0,
@@ -919,17 +953,34 @@ def update_command(
         result = subprocess.run(cmd, check=False)
         if result.returncode == 0 and rev:
             _write_installed_rev(rev)
+        if result.returncode == 0 and refresh_cmd:
+            # Best-effort, mirroring the Unix chain: refresh the watcher onto the
+            # new binary but never let its failure change the update exit code.
+            subprocess.run(refresh_cmd, shell=True, check=False)
         raise typer.Exit(result.returncode)
 
     # On Unix, execvp replaces this Python process with the installer; uv
     # tool install is then free to replace the fno binary without racing
     # the running interpreter. Because execvp never returns, the installed-rev
-    # marker write is chained onto the installer via the shell so it runs iff
-    # the install exits 0 (marker-only-on-success without regaining control).
+    # marker write (and the best-effort pr-watch refresh) are chained onto the
+    # installer via the shell so they run iff the install exits 0.
     if rev:
         os.execvp(
             "/bin/sh",
-            ["/bin/sh", "-c", _install_then_mark(cmd, rev, marker=_INSTALLED_REV_FILE, pid=os.getpid())],
+            [
+                "/bin/sh", "-c",
+                _install_then_mark(
+                    cmd, rev, marker=_INSTALLED_REV_FILE, pid=os.getpid(),
+                    post_install=refresh_cmd,
+                ),
+            ],
+        )
+    elif refresh_cmd:
+        # No git rev (source is not a checkout), so no marker write - but still
+        # chain the refresh after a successful install via a shell.
+        os.execvp(
+            "/bin/sh",
+            ["/bin/sh", "-c", f"{shlex.join(cmd)} && {{ {refresh_cmd} || true; }}"],
         )
     else:
         os.execvp(cmd[0], cmd)

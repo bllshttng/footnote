@@ -280,6 +280,38 @@ def heal_watcher(*, launch_agents_dir: Path) -> tuple[str, int]:
     return bounce(plist_path=plist_path)
 
 
+def refresh_watcher(
+    *,
+    launch_agents_dir: Path,
+    fno_binary: str,
+    install_path: str,
+    interval: int = 600,
+) -> tuple[str, int]:
+    """Re-render the plist onto the current binary, then bounce. Post-update hook.
+
+    Unlike :func:`heal_watcher` (bounce the existing plist), this REWRITES the
+    plist first so the daemon picks up the freshly-installed binary path, a
+    fresh captured PATH, and a new mtime (so doctor's ``healthy-pending`` grace
+    applies until the next tick instead of a transient false ``dead``). Called
+    by ``fno pr-watch refresh`` at the tail of ``fno update`` so an update
+    leaves an enabled watcher running the new binary and un-wedges a job a
+    mid-tick reinstall may have broken. Returns ``(message, exit_code)``.
+    """
+    plist_path = launch_agents_dir / _PLIST_FILENAME
+    try:
+        plist_text = render_plist(
+            launch_agents_dir=launch_agents_dir,
+            fno_binary=fno_binary,
+            install_path=install_path,
+            interval=interval,
+        )
+        launch_agents_dir.mkdir(parents=True, exist_ok=True)
+        plist_path.write_text(plist_text, encoding="utf-8")
+    except OSError as exc:
+        return (f"failed to write plist {plist_path}: {exc}", 1)
+    return bounce(plist_path=plist_path)
+
+
 def _launchctl_is_loaded() -> bool:
     """Return True when sh.fno.pr-watcher appears in launchctl list output."""
     try:

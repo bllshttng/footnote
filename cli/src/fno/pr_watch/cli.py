@@ -258,6 +258,33 @@ def install(
     )
 
 
+@cli.command()
+def refresh() -> None:
+    """Re-render the plist onto the current binary and bounce the watcher.
+
+    Non-interactive, no confirm prompt: this is the tail of ``fno update`` (so
+    an update leaves an enabled watcher running the freshly-installed binary),
+    and is safe to run by hand. A no-op when ``pr_watch.enabled`` is false, so
+    an install that does not use the watcher gets nothing. Never fails loud:
+    the update chain calls it best-effort and a refresh failure must not fail
+    the update.
+    """
+    from fno.pr_watch import _install as m
+
+    settings = load_settings()
+    if not settings.pr_watch.enabled:
+        typer.echo("pr-watch: disabled; nothing to refresh.")
+        return
+
+    msg, _rc = m.refresh_watcher(
+        launch_agents_dir=_LAUNCH_AGENTS_DIR,
+        fno_binary=_resolve_fno_binary(),
+        install_path=os.environ.get("PATH", "/usr/bin:/bin"),
+        interval=settings.pr_watch.interval_seconds,
+    )
+    typer.echo(f"pr-watch refresh: {msg}")
+
+
 # ---------------------------------------------------------------------------
 # Activation coupling entrypoints (called by `fno config set pr_watch.enabled`)
 # ---------------------------------------------------------------------------
