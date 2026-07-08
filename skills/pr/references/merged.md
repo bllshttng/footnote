@@ -199,6 +199,27 @@ the backstop for a missed merge-trigger; both key idempotency on the
 per PR. Non-fatal: a re-eval failure leaves the PR detectable as un-closed for
 the next tick and never blocks the rest of the ritual.
 
+## Step 3d: Canonical sync (bring the local env up to the merged HEAD)
+
+Sync the CANONICAL checkout + installed tooling to the merged HEAD so the local
+env is never left stale after a merge (the manual `git checkout main && git pull
+&& fno update && fno restart` becomes a ritual step). Opt-in and self-deduping:
+
+```bash
+fno pr sync-canonical --pr "$PR" \
+  || echo "post-merge: canonical sync returned non-zero (non-fatal) - record in report" >&2
+```
+
+**Opt-in, non-fatal, exactly-once.** A no-op unless `config.post_merge.sync_command`
+is set (prints `not configured` and exits 0). It ALWAYS targets the canonical
+checkout even when this ritual runs from a worktree (a worktree cannot
+`git checkout main` without hijacking its branch). It gates on
+`config.post_merge.sync_paths` (a docs-only merge skips the sync) and dedups on a
+`.fno/post-merge-synced/<merge-sha>` marker, so running it here AND from a
+merge-detection auto-dispatch for the same merge runs `sync_command` at most
+once. A failure withholds the marker (visible retry next reconcile) and never
+blocks the rest of the ritual.
+
 ## Step 4: Best-effort worktree archive
 
 After the mechanical triage steps complete, archive the feature's worktree so
