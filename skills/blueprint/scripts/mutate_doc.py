@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from collections import OrderedDict
@@ -526,6 +528,72 @@ def _append_sections_to_body(body: str, new_sections: dict[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+_VALIDATE_SNIPPET = r"""
+import json, sys
+from pydantic import ValidationError
+from fno.plan.schema import PlanFrontmatter
+fm = json.load(sys.stdin)
+try:
+    PlanFrontmatter.model_validate(fm)
+except ValidationError as e:
+    # Only present-but-invalid fields block; a missing required field (e.g.
+    # `node`, absent on many design docs until they bind) is tolerated here.
+    present = [x for x in e.errors() if x["type"] != "missing"]
+    for x in present:
+        loc = ".".join(str(p) for p in x["loc"]) or "<root>"
+        print(f"  {loc}: {x['msg']} (got {x.get('input')!r})")
+    if present:
+        sys.exit(7)
+"""
+
+
+def _pydantic_python() -> str | None:
+    """A python that can import pydantic + fno.plan.schema, or None.
+
+    The ambient python3 that /blueprint uses lacks pydantic, so prefer the
+    repo's cli/.venv (same interpreter finalize.rs resolves). Fall back to the
+    current interpreter when it already has pydantic (tests under `uv run`).
+    """
+    venv = _REPO_ROOT / "cli" / ".venv" / "bin" / "python"
+    if venv.exists():
+        return str(venv)
+    try:
+        import pydantic  # noqa: F401
+
+        return sys.executable
+    except ImportError:
+        return None
+
+
+def _validate_proposed_frontmatter(new_fm: dict[str, Any]) -> str | None:
+    """Return a refusal message if the proposed frontmatter is invalid, else None.
+
+    Validates the PROPOSED frontmatter against fno.plan.schema.PlanFrontmatter,
+    refusing only on present-but-invalid fields (a bad `size`, a malformed
+    timestamp, an off-vocabulary status). Best-effort defense-in-depth: if no
+    pydantic-capable interpreter is found, skip rather than block the save (the
+    validate verb and finalize's post-stamp check also guard the schema).
+    """
+    py = _pydantic_python()
+    if py is None:
+        return None
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(_CLI_SRC), env.get("PYTHONPATH", "")]))
+    try:
+        proc = subprocess.run(
+            [py, "-c", _VALIDATE_SNIPPET],
+            input=json.dumps(new_fm, default=str),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except OSError:
+        return None  # interpreter vanished mid-run - degrade, don't block
+    if proc.returncode == 7:
+        return "proposed frontmatter fails schema validation:\n" + proc.stdout.rstrip("\n")
+    return None  # rc 0 = valid; any other rc (e.g. import failure) = degrade to skip
+
+
 def mutate(
     doc_path: Path,
     mode: str = "auto",
@@ -669,6 +737,20 @@ def mutate(
             return 3, str(exc)
         new_fm["status"] = "ready"
     # If current_status == "ready" and rewrite=True, keep "ready" (identity ok for rewrite)
+
+    # --- Validate the proposed frontmatter against the canonical schema ---
+    # Refuse to write a plan whose PROPOSED frontmatter fails PlanFrontmatter,
+    # naming each bad field, so /do's read weeks later never trips on it (US1).
+    # Only present-but-invalid fields block (a bad `size`, a malformed
+    # timestamp, an off-vocabulary status); MISSING required fields are NOT
+    # enforced here - a design doc legitimately carries no `node` until it binds
+    # to a backlog node (half of real design docs have none at this point).
+    # Best-effort defense-in-depth (the verb and finalize also validate): if the
+    # schema deps are unavailable in the ambient interpreter, skip rather than
+    # block the save.
+    schema_err = _validate_proposed_frontmatter(new_fm)
+    if schema_err is not None:
+        return 3, schema_err
 
     # --- Reconstruct doc ---
     original_text = resolved.read_text(encoding="utf-8")

@@ -14,6 +14,7 @@ import sys
 import re
 import os
 import json
+import subprocess
 from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -986,6 +987,71 @@ def handle_blocked_task(
         path.write_text(updated)
 
 
+# Self-contained frontmatter-schema check. Duplicated (not shared) with
+# skills/blueprint: driver skills are CI-enforced self-contained and cannot
+# cross-import. Validation runs under a pydantic-capable python because /do's
+# ambient python3 lacks pydantic (same reason finalize.rs shells the cli venv).
+_VALIDATE_SNIPPET = r"""
+import json, sys
+from pydantic import ValidationError
+from fno.plan.schema import PlanFrontmatter
+fm = json.load(sys.stdin)
+try:
+    PlanFrontmatter.model_validate(fm)
+except ValidationError as e:
+    # Block only on STRUCTURAL corruption (a bad size, a garbage timestamp).
+    # A missing required field is tolerated (a plan binds its node later), and
+    # a drifted-but-recognizable `status` (planned/designed/superseded/...) is
+    # NOT a /do concern: `fno plan reconcile-status` normalizes it, and /do
+    # executes the Execution Strategy section, which does not depend on the
+    # frontmatter status. Blocking /do on status drift would refuse ~5% of real
+    # plans that run fine today.
+    present = [
+        x for x in e.errors()
+        if x["type"] != "missing" and (x["loc"][:1] != ("status",))
+    ]
+    for x in present:
+        loc = ".".join(str(p) for p in x["loc"]) or "<root>"
+        print(f"  {loc}: {x['msg']} (got {x.get('input')!r})")
+    if present:
+        sys.exit(7)
+"""
+
+
+def _validate_frontmatter_via_schema(fm: Dict) -> Optional[str]:
+    """Return a per-field refusal report if *fm* is invalid, else None.
+
+    Refuses only on present-but-invalid fields (missing required fields are
+    tolerated). Best-effort: prefers cli/.venv's python, falls back to the
+    current interpreter when it has pydantic, and skips if neither is found.
+    """
+    venv = _CLI_SRC.parent / ".venv" / "bin" / "python"
+    if venv.exists():
+        py: str = str(venv)
+    else:
+        try:
+            import pydantic  # noqa: F401
+        except ImportError:
+            return None
+        py = sys.executable
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(_CLI_SRC), env.get("PYTHONPATH", "")]))
+    try:
+        proc = subprocess.run(
+            [py, "-c", _VALIDATE_SNIPPET],
+            input=json.dumps(fm, default=str),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except OSError:
+        return None
+    if proc.returncode == 7:
+        return proc.stdout.rstrip("\n")
+    return None
+
+
 def load_plan_strategy(
     plan_input: str,
 ) -> Optional[ExecutionStrategy]:
@@ -1019,6 +1085,20 @@ def load_plan_strategy(
     except Exception as exc:
         print(
             f"Error: malformed plan doc (Execution Strategy YAML): {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    # Validate the plan's frontmatter against the canonical schema at the moment
+    # it starts driving execution (US2). A present-but-invalid field (a bad
+    # status, size, or timestamp) refuses loudly with a per-field report - not a
+    # half-run. Missing required fields are tolerated (a plan may bind its node
+    # later). Best-effort defense-in-depth; the blueprint save and finalize's
+    # post-stamp check also guard the schema.
+    schema_report = _validate_frontmatter_via_schema(doc.frontmatter)
+    if schema_report is not None:
+        print(
+            f"BLOCKED blocked_reason=plan_frontmatter_invalid: {plan_path}\n{schema_report}",
             file=sys.stderr,
         )
         return None
