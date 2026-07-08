@@ -10,6 +10,7 @@ Logic lives in _install.py; this module stays thin (Typer glue only).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -309,8 +310,17 @@ def uninstall() -> None:
 
 
 @cli.command()
-def status() -> None:
+def status(
+    json_out: bool = typer.Option(
+        False,
+        "--json", "-J",
+        help="Emit the liveness verdict as one JSON object (for hooks/scripts).",
+    ),
+) -> None:
     """Report watcher status: loaded, last tick time, open-PR count, parked PRs."""
     from fno.pr_watch import _install as m
 
+    if json_out:
+        typer.echo(json.dumps(m.liveness_report_live()))
+        return
     m.status(launch_agents_dir=_LAUNCH_AGENTS_DIR)

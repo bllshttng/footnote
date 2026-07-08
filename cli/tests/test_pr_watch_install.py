@@ -310,6 +310,23 @@ def test_ac3ui_status_reports_last_tick_and_parked(tmp_home, tmp_launch_agents, 
     assert "owner/repo#42" in out or "42" in out, "parked PR should appear"
 
 
+def test_status_json_emits_liveness_verdict(monkeypatch):
+    """`pr-watch status --json` emits the liveness verdict for hooks to parse."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(
+        m, "liveness_report_live",
+        lambda: {"enabled": True, "verdict": "dead", "detail": "no tick",
+                 "fix": "fno pr-watch install", "loaded": True, "last_tick": None},
+    )
+    result = CliRunner().invoke(app, ["pr-watch", "status", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout.strip())
+    assert payload["verdict"] == "dead" and payload["enabled"] is True
+
+
 # ---------------------------------------------------------------------------
 # Config: PrWatchBlock schema
 # ---------------------------------------------------------------------------

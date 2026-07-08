@@ -866,6 +866,17 @@ def doctor_command(
 
     # Report BEFORE delegating: `fno update` execs/replaces this process.
     if fix:
+        # Heal a dead pr-watch first: the verdict's own fix is the bounce, and a
+        # python_stale --fix execs `fno update` below and never returns, so act
+        # on it here. Advisory - never changes doctor's exit code (a dead
+        # watcher and a stale binary are distinct concerns).
+        pw = result.get("pr_watch") or {}
+        if pw.get("verdict") == "dead" and not json_out:
+            from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher
+
+            hmsg, _ = heal_watcher(launch_agents_dir=_LAUNCH_AGENTS_DIR)
+            typer.echo(f"fno doctor: --fix pr-watch heal: {hmsg}", err=True)
+
         if json_out:
             # Preserve the single-JSON-object stdout contract: any repair
             # operation prints to stdout, so skip under --json. Covers both
