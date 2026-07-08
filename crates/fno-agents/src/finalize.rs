@@ -1094,14 +1094,45 @@ fn repo_project_name(cwd: &Path) -> String {
         .unwrap_or_else(|| "project".into())
 }
 
-/// Resolve the `{project}` path token. Prefers `config.project.id` from
-/// project-local then global settings.yaml (matching the Python resolver
-/// `fno.paths._resolve`, paths.py:293-303, which reads project.id first and the
-/// repo basename only as a fallback), then falls back to the git main-worktree
-/// basename via `repo_project_name`. Non-fatal: a missing or malformed settings
-/// file or an unset/`null` project.id degrades to the basename, so unconfigured
-/// installs are unchanged. Uses the SAME project-then-global candidate order the
-/// callers already use for `config.paths.*_dir`.
+/// Last path segment of a git remote URL, one trailing `.git` stripped. Mirrors
+/// the Python `_remote_url_to_slug` (paths.py): takes the last `/`-or-`:` segment
+/// so scp-like (`git@host:org/repo.git`), https, and local-path remotes all
+/// resolve. Returns None for an empty URL or a degenerate segment that would
+/// escape `internal/<project>/`.
+fn slug_from_remote_url(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        return None;
+    }
+    let tail = url.rsplit(['/', ':']).next()?;
+    let tail = tail.strip_suffix(".git").unwrap_or(tail);
+    // A Windows-style/local remote (`C:\repos\foo.git`) leaves backslashes in the
+    // tail; reject any separator so the slug can never become a stray path
+    // segment, matching the Python `_remote_url_to_slug` (paths.py).
+    if tail.is_empty() || tail == "." || tail == ".." || tail.contains(['/', '\\']) {
+        return None;
+    }
+    Some(tail.to_string())
+}
+
+/// `remote.origin.url` slug for `cwd` - stable across worktrees and clones.
+/// Best-effort: any git failure or missing remote returns None so the caller
+/// falls through to the basename.
+fn slug_from_git_remote(cwd: &Path) -> Option<String> {
+    let url = git_capture(cwd, &["config", "--get", "remote.origin.url"])?;
+    slug_from_remote_url(&url)
+}
+
+/// Resolve the `{project}` path token, matching the Python resolver
+/// `fno.paths._project_name`: `config.project.id` (project-local then global
+/// settings.yaml) -> git-remote slug (stable across worktrees/clones) ->
+/// git main-worktree basename via `repo_project_name`. The remote-slug tier is
+/// load-bearing for parity: the Python side writes `internal/<remote-slug>/` for
+/// an id-unset repo, so this terminal handoff writer must agree or it recreates
+/// the very `internal/<basename>/` strays the Python change removes. Non-fatal:
+/// a missing/malformed settings file, an unset/`null` id, or no remote degrades
+/// to the basename, so unconfigured installs never break. Uses the SAME
+/// project-then-global candidate order the callers use for `config.paths.*_dir`.
 fn resolve_project_name(
     settings_override: Option<&Path>,
     home: Option<&Path>,
@@ -1119,6 +1150,9 @@ fn resolve_project_name(
         if let Some(id) = read_project_id(&sp) {
             return id;
         }
+    }
+    if let Some(slug) = slug_from_git_remote(cwd) {
+        return slug;
     }
     repo_project_name(cwd)
 }
@@ -2071,6 +2105,47 @@ mod tests {
             resolve_project_name(None, Some(&home), &cwd),
             "regready-ccld-pipeline"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slug_from_remote_url_variants() {
+        // Mirrors the Python _remote_url_to_slug parity cases (paths.py).
+        for (url, want) in [
+            ("git@github.com:org/footnote.git", Some("footnote")),
+            ("https://github.com/org/footnote.git", Some("footnote")),
+            ("https://github.com/org/footnote", Some("footnote")),
+            ("/srv/git/repo.git", Some("repo")),
+            ("git@github.com:org/footnote.git/", Some("footnote")),
+            (r"C:\repos\footnote.git", None), // backslash tail -> reject
+            ("", None),
+            ("   ", None),
+        ] {
+            assert_eq!(slug_from_remote_url(url).as_deref(), want, "url={url:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_project_name_prefers_git_remote_slug_over_basename() {
+        // id-unset repo whose checkout is named differently from its remote:
+        // the remote slug must win so this writer agrees with the Python side
+        // (else it recreates internal/<basename>/ strays).
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("fin-rpn-slug-{}", std::process::id()));
+        let cwd = dir.join("athens");
+        let _ = fs::create_dir_all(&cwd);
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&home);
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&cwd)
+                .output()
+                .expect("git")
+        };
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "git@github.com:org/footnote.git"]);
+        assert_eq!(resolve_project_name(None, Some(&home), &cwd), "footnote");
         let _ = fs::remove_dir_all(&dir);
     }
 
