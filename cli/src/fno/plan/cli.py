@@ -6,6 +6,7 @@ Verbs:
     brief             - generate a scoped task brief from a single-doc plan
     migrate-folder    - relocate a folder plan into a single-doc plan (archive folder)
     reconcile-status  - normalize drifted plan frontmatter status in place
+    folder-audit      - count folder plans owned by a non-terminal graph node
 
 stamp and graduate forward all unknown args + propagate exit codes from the
 in-package ``fno.plan._stamp`` module. brief is implemented in fno.plan.brief.
@@ -232,6 +233,56 @@ def migrate_folder(
         raise typer.Exit(code=_EXIT.get(exc.kind, 3))
 
     typer.echo(res.message)
+
+
+@plan_app.command(
+    "folder-audit",
+    help=(
+        "Count folder plans (00-INDEX.md dirs) owned by a non-terminal graph "
+        "node (basename-joined plan_path, not frontmatter status). "
+        "--non-terminal exits nonzero when the count is > 0. Fails toward "
+        "defer (nonzero) on an unreadable graph or an unscannable plans dir."
+    ),
+)
+def folder_audit(
+    non_terminal: bool = typer.Option(
+        False, "--non-terminal", help="Exit nonzero when the count is > 0."
+    ),
+    plans_dir_opt: Optional[str] = typer.Option(
+        None, "--plans-dir", help="Plans dir to scan (default: resolved plans-content dir)."
+    ),
+) -> None:
+    from fno.graph._constants import GRAPH_JSON
+    from fno.graph.statuses import recompute_statuses
+    from fno.graph.store import GraphCorruptError, _apply_graph_defaults, _read_json
+    from fno.paths import plans_content_dir
+    from fno.plan._folder_audit import scan
+
+    plans_root = Path(plans_dir_opt) if plans_dir_opt else plans_content_dir()
+
+    try:
+        entries = recompute_statuses(_apply_graph_defaults(_read_json(GRAPH_JSON)))
+    except (GraphCorruptError, OSError) as exc:
+        typer.echo(
+            f"fno plan folder-audit: graph.json unreadable ({exc}) - failing toward defer",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    owners = scan(plans_root, entries)
+    if owners is None:
+        typer.echo(
+            f"fno plan folder-audit: cannot scan plans dir {plans_root} - failing toward defer",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    for o in owners:
+        typer.echo(f"  {o.node_id} ({o.status}): {o.folder}")
+    typer.echo(f"non-terminal folder-plan owners: {len(owners)}")
+
+    if non_terminal and len(owners) > 0:
+        raise typer.Exit(code=1)
 
 
 @plan_app.command(
