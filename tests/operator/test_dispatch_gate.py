@@ -64,7 +64,7 @@ def test_ac1_hp_product_md_present_dispatch_proceeds(tmp_path, capsys):
     _make_product_md(tmp_path, "X" * 500)
     result = check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="plan/00-INDEX.md",
+        plan_path="plan.md",
         stages=["craft", "critique", "harden"],
     )
     captured = capsys.readouterr()
@@ -80,7 +80,7 @@ def test_ac2_err_product_md_missing_emits_help(tmp_path, capsys):
     """AC2-ERR: PRODUCT.md missing -> emits <help reason='missing-product-md'>, returns False."""
     result = check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="plan/00-INDEX.md",
+        plan_path="plan.md",
         stages=["craft", "critique"],
     )
     captured = capsys.readouterr()
@@ -99,7 +99,7 @@ def test_ac3_edge_product_md_stale_treated_as_missing(tmp_path, capsys):
     _make_product_md(tmp_path, "[TODO] fill this in later")
     result = check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="plan/00-INDEX.md",
+        plan_path="plan.md",
         stages=["craft"],
     )
     captured = capsys.readouterr()
@@ -139,7 +139,7 @@ def test_ac4_edge_product_md_fallback_agents_context(tmp_path, capsys):
     _make_product_md(tmp_path, "B" * 300, location=".agents/context")
     result = check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="plan/00-INDEX.md",
+        plan_path="plan.md",
         stages=["craft", "harden"],
     )
     captured = capsys.readouterr()
@@ -180,11 +180,11 @@ def test_help_message_includes_plan_path_in_evidence(tmp_path, capsys):
     """The <help> evidence attribute must include the plan path."""
     result = check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="myplan/00-INDEX.md",
+        plan_path="myplan.md",
         stages=["craft"],
     )
     captured = capsys.readouterr()
-    assert "myplan/00-INDEX.md" in captured.out, (
+    assert "myplan.md" in captured.out, (
         "Evidence attribute must include the plan path"
     )
 
@@ -193,7 +193,7 @@ def test_help_message_includes_stages_in_evidence(tmp_path, capsys):
     """The <help> evidence attribute must include the stage list."""
     check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="plan/00-INDEX.md",
+        plan_path="plan.md",
         stages=["craft", "harden"],
     )
     captured = capsys.readouterr()
@@ -219,7 +219,7 @@ def test_ac3_edge_product_md_deleted_between_spec_and_dispatch(tmp_path, capsys)
     # Verify it would pass (as /spec would have seen it).
     result_before = check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="plan/00-INDEX.md",
+        plan_path="plan.md",
         stages=["craft", "critique", "harden"],
     )
     assert result_before is True, "PRODUCT.md present - dispatch should proceed"
@@ -231,7 +231,7 @@ def test_ac3_edge_product_md_deleted_between_spec_and_dispatch(tmp_path, capsys)
     # Dispatch gate must re-check and catch the deletion.
     result_after = check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="plan/00-INDEX.md",
+        plan_path="plan.md",
         stages=["craft", "critique", "harden"],
     )
     captured = capsys.readouterr()
@@ -265,7 +265,7 @@ def test_ac5_edge_unicode_product_md_passes_byte_gate(tmp_path, capsys):
 
     result = check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="plan/00-INDEX.md",
+        plan_path="plan.md",
         stages=["craft"],
     )
     captured = capsys.readouterr()
@@ -288,7 +288,7 @@ def test_ac6_err_product_md_unreadable_emits_help(tmp_path, capsys):
     try:
         result = check_product_md_for_dispatch(
             repo_root=tmp_path,
-            plan_path="plan/00-INDEX.md",
+            plan_path="plan.md",
             stages=["craft"],
         )
         captured = capsys.readouterr()

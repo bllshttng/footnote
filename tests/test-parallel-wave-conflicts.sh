@@ -7,9 +7,7 @@ cd "$ROOT_DIR"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-mkdir -p "$TMP_DIR/conflict-plan" "$TMP_DIR/safe-plan"
-
-cat > "$TMP_DIR/conflict-plan/00-INDEX.md" <<'EOF'
+cat > "$TMP_DIR/conflict-plan.md" <<'EOF'
 ## Execution Strategy
 ```yaml
 execution_mode: mixed
@@ -20,9 +18,7 @@ waves:
     tasks: [1.1, 1.2]
     reason: "Generated agent artifacts collide under .codex/agents"
 ```
-EOF
 
-cat > "$TMP_DIR/conflict-plan/01-phase.md" <<'EOF'
 ### Task 1.1: Generate one agent file
 **Files:**
 - Create: `.codex/agents/target.toml`
@@ -32,7 +28,7 @@ cat > "$TMP_DIR/conflict-plan/01-phase.md" <<'EOF'
 - Create: `.codex/agents/reviewer.toml`
 EOF
 
-cat > "$TMP_DIR/safe-plan/00-INDEX.md" <<'EOF'
+cat > "$TMP_DIR/safe-plan.md" <<'EOF'
 ## Execution Strategy
 ```yaml
 execution_mode: mixed
@@ -43,9 +39,7 @@ waves:
     tasks: [1.1, 1.2]
     reason: "Independent files stay parallel"
 ```
-EOF
 
-cat > "$TMP_DIR/safe-plan/01-phase.md" <<'EOF'
 ### Task 1.1: Update one provider doc
 **Files:**
 - Modify: `providers/codex/skills/codex-do/SKILL.md`
@@ -68,11 +62,11 @@ module = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
 spec.loader.exec_module(module)
 
-conflict_strategy = module.parse_execution_strategy(str(tmp_dir / "conflict-plan" / "00-INDEX.md"))
-safe_strategy = module.parse_execution_strategy(str(tmp_dir / "safe-plan" / "00-INDEX.md"))
+conflict_strategy = module.parse_execution_strategy(str(tmp_dir / "conflict-plan.md"))
+safe_strategy = module.parse_execution_strategy(str(tmp_dir / "safe-plan.md"))
 
-conflict_decision = module.resolve_wave_execution_mode(conflict_strategy.waves[0], str(tmp_dir / "conflict-plan"), "codex")
-safe_decision = module.resolve_wave_execution_mode(safe_strategy.waves[0], str(tmp_dir / "safe-plan"), "codex")
+conflict_decision = module.resolve_wave_execution_mode(conflict_strategy.waves[0], str(tmp_dir / "conflict-plan.md"), "codex")
+safe_decision = module.resolve_wave_execution_mode(safe_strategy.waves[0], str(tmp_dir / "safe-plan.md"), "codex")
 
 if conflict_decision["effective_mode"] != "sequential":
     raise SystemExit(f"expected hidden output conflict to downgrade wave, got {conflict_decision}")
@@ -83,7 +77,7 @@ if safe_decision["effective_mode"] != "parallel":
 
 # Gemini cannot spawn concurrent Task-tool subagents, so a conflict-free
 # parallel wave still downgrades to sequential main-thread (codex review, PR #426).
-gemini_decision = module.resolve_wave_execution_mode(safe_strategy.waves[0], str(tmp_dir / "safe-plan"), "gemini")
+gemini_decision = module.resolve_wave_execution_mode(safe_strategy.waves[0], str(tmp_dir / "safe-plan.md"), "gemini")
 if gemini_decision["effective_mode"] != "sequential":
     raise SystemExit(f"expected gemini to downgrade conflict-free parallel wave to sequential, got {gemini_decision}")
 if gemini_decision["dispatch"] != "main-thread":
