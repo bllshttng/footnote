@@ -3275,11 +3275,10 @@ async fn answer_keys(
                 }
             }
             b'\r' | b'\n' => {
-                // Focus affordance (AC1-EDGE, best-effort v1): navigate to the
-                // pane's squad, then close. Pinning focus to the exact pane needs
-                // a FocusPane(id) primitive that does not exist yet (carveout).
-                if let Some(squad) = blocked[cur].squad {
-                    write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(squad)))
+                // Focus the exact blocked pane: the server selects its squad/tab
+                // and pins focus. A row with no pane_id just closes (AC1-EDGE).
+                if let Some(pane) = blocked[cur].pane_id {
+                    write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pane)))
                         .await
                         .map_err(|e| format!("command send failed: {e}"))?;
                 }
@@ -5199,6 +5198,37 @@ mod tests {
             buf.is_empty(),
             "cycling and closing send nothing to the pane"
         );
+    }
+
+    // x-dcff AC (happy): Enter on a blocked row focuses that exact pane, not just
+    // its squad; the overlay closes.
+    #[tokio::test]
+    async fn xdcff_answer_keys_enter_focuses_the_exact_pane() {
+        let mut v = view_with_agents(vec![blocked_row("peer", 4, None)]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        match msg {
+            ClientMsg::Command(Command::FocusPane(pane)) => assert_eq!(pane, 4),
+            other => panic!("expected FocusPane(4), got {other:?}"),
+        }
+        assert_eq!(v.answers, None, "Enter closes the overlay");
+    }
+
+    // x-dcff AC (edge): a blocked row with no pane_id sends nothing on Enter and
+    // still closes.
+    #[tokio::test]
+    async fn xdcff_answer_keys_enter_no_pane_id_sends_nothing() {
+        let mut row = blocked_row("peer", 4, None);
+        row.pane_id = None;
+        let mut v = view_with_agents(vec![row]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "no pane_id -> nothing sent (AC1-EDGE)");
+        assert_eq!(v.answers, None, "Enter still closes the overlay");
     }
 
     #[tokio::test]
