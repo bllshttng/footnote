@@ -313,7 +313,7 @@ Detect the surface with the same helper Step 6.5 uses, then decide:
 
 ```bash
 HELPER="${SKILL_DIR}/references/detect-surface.sh"
-SURFACE=$(printf '%s' "$DESIGN_TEXT" | bash "$HELPER" 2>/dev/null || echo "")
+SURFACE=$(printf '%s' "$DESIGN_TEXT" | bash "$HELPER" 2>/dev/null || true)
 # SURFACE is one of: frontend-touching | backend-only | mixed | unknown (empty on detector failure)
 ```
 
