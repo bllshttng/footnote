@@ -502,7 +502,7 @@ def test_emit_paths_sh_use_defaults_machine_stable(
 def test_emit_paths_sh_use_defaults_config_file_uses_state_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC1-MACHINE-STABLE: use_defaults=True emits CONFIG_FILE=$STATE_DIR/settings.yaml.
+    """AC1-MACHINE-STABLE: use_defaults=True emits CONFIG_FILE=$STATE_DIR/config.toml.
 
     The checked-in paths.sh must not embed any machine-specific absolute path
     for CONFIG_FILE. It should use a $STATE_DIR-relative derivation instead.
@@ -529,8 +529,8 @@ def test_emit_paths_sh_use_defaults_config_file_uses_state_dir(
         f"use_defaults=True must not embed user settings path {custom_settings!r}:\n{stub}"
     )
     # CONFIG_FILE must be $STATE_DIR-relative (machine-stable)
-    assert "$STATE_DIR/settings.yaml" in stub or 'STATE_DIR/settings.yaml' in stub, (
-        f"use_defaults=True must emit CONFIG_FILE as $STATE_DIR/settings.yaml:\n{stub}"
+    assert "$STATE_DIR/config.toml" in stub or 'STATE_DIR/config.toml' in stub, (
+        f"use_defaults=True must emit CONFIG_FILE as $STATE_DIR/config.toml:\n{stub}"
     )
 
 

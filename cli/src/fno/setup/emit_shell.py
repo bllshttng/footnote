@@ -214,9 +214,9 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
     # CONFIG_FILE: in defaults mode, emit a $STATE_DIR-relative path so the
     # checked-in stub has no machine-specific absolute paths. In live mode,
     # use the actual path that load_settings() loaded from so shell consumers
-    # get the real location (e.g. project-local .fno/settings.yaml).
+    # get the real location (e.g. project-local .fno/config.toml).
     if use_defaults:
-        config_file_tmpl = "$STATE_DIR/settings.yaml"
+        config_file_tmpl = "$STATE_DIR/config.toml"
         lines.append(f"export CONFIG_FILE={_bash_quote(config_file_tmpl)}")
     else:
         from fno.paths import config_file as _config_file
