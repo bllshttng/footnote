@@ -55,40 +55,22 @@ def worktree_base() -> Path:
 
 
 def _read_settings_project_id(repo_root: Path) -> str | None:
-    settings_path = repo_root / ".fno" / "settings.yaml"
+    from fno.config import read_config_flat
+
+    fno_dir = repo_root / ".fno"
+    settings_path = fno_dir / "config.toml"
+    if not settings_path.exists():
+        settings_path = fno_dir / "settings.yaml"
     if not settings_path.exists():
         return None
-    try:
-        import yaml
-    except ImportError:  # pragma: no cover - PyYAML is a hard CLI dep
-        return None
-    # Narrow exception to YAMLError so a corrupt settings.yaml surfaces
-    # via os/permission errors instead of silently flipping the
-    # project_id resolution to the git-remote fallback (silent-failure-
-    # hunter finding HIGH-5: corrupt YAML used to drift project_id with
-    # no operator-visible signal).
-    try:
-        data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    # config.project.id is canonical; the top-level project.id is the deprecated
-    # alias kept for back-compat. Prefer config.project.id, matching the
-    # resolution used everywhere else (fno.paths, inbox.store,
-    # setup.emit_shell all read `config.project.id or project.id`). This was the
-    # last reader still bound to the top-level key only.
-    config = data.get("config")
-    config_project = config.get("project") if isinstance(config, dict) else None
-    for container in (config_project, data.get("project")):
-        # Legacy bare-string shorthand: `project: <id>` (or `config:\n  project: <id>`),
-        # which Pydantic's ProjectBlock.coerce_string_shorthand turns into {id: <id>}.
-        # _read_settings_project_id bypasses Pydantic, so handle the shorthand
-        # explicitly to stay consistent with the canonical loader (Gemini HIGH, PR #409).
-        if isinstance(container, str) and container:
-            return container
-        if not isinstance(container, dict):
-            continue
+    # read_config_flat parses config.toml (or a legacy settings.yaml) into the
+    # FLAT dict, so project is top-level (config.project.id and the deprecated
+    # top-level project.id both resolve to project.id after unwrap).
+    container = read_config_flat(settings_path).get("project")
+    # Legacy bare-string shorthand: `project = "<id>"` -> the id itself.
+    if isinstance(container, str) and container:
+        return container
+    if isinstance(container, dict):
         pid = container.get("id")
         if isinstance(pid, str) and pid:
             return pid

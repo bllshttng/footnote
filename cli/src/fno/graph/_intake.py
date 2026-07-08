@@ -328,15 +328,17 @@ def _settings_candidate_paths() -> list[Path]:
     # $FNO_GLOBAL_SETTINGS_PATH redirect (config_file() / state_dir() do NOT
     # follow it), so a redirected global work-map is still consulted (codex P2
     # on PR #419).
-    from fno.config import _global_settings_path
+    from fno.config import _global_settings_path, config_read_candidates
 
     out: list[Path] = []
     seen: set[str] = set()
-    for path in (
+    # config.toml-first: each settings.yaml location also yields its config.toml
+    # sibling as a higher-priority candidate (flat hard cut, x-8526).
+    for path in config_read_candidates([
         Path(".fno/settings.yaml"),
         _paths.config_file(),
         _global_settings_path(),
-    ):
+    ]):
         # abspath (not normpath) so the cwd-relative candidate and an absolute
         # config_file() pointing at the SAME project-local file dedup to one
         # read (gemini MEDIUM on PR #419); normpath leaves one relative + one
@@ -381,37 +383,15 @@ def detect_project_from_settings(cwd_path: str | None = None) -> str | None:
     # stored as ~ / absolute, so a relative target would never match.
     target = os.path.abspath(os.path.expanduser(cwd_path)) if cwd_path else os.getcwd()
 
-    try:
-        import yaml
-    except ImportError:
-        # PyYAML is a hard dependency of the CLI (see pyproject.toml). If it
-        # is genuinely absent, project auto-detection cannot work; surface
-        # this once rather than swallowing it inside every candidate loop.
-        sys.stderr.write(
-            "warning: PyYAML missing - settings-based project detection disabled\n"
-        )
-        return None
+    from fno.config import read_config_flat
 
     for path in _settings_candidate_paths():
         if not path.exists():
             continue
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except OSError as e:
-            # File is present but unreadable (permissions, disk error). The
-            # plan asks for silent failure on missing/no-match, but a config
-            # the user CREATED that we cannot read is worth surfacing once.
-            sys.stderr.write(f"warning: could not read {path}: {e}\n")
-            continue
-        except yaml.YAMLError as e:
-            # File is present but malformed. Distinguish from "no match"
-            # so the user knows their config is broken instead of silently
-            # creating nodes with project=null.
-            sys.stderr.write(f"warning: could not parse {path}: {e}\n")
-            continue
-        if not isinstance(data, dict):
-            continue
-        work = (data.get("config") or {}).get("work") or data.get("work")
+        # read_config_flat parses config.toml (or a legacy settings.yaml) and
+        # returns the FLAT dict; work is top-level. A missing/unparseable file
+        # contributes nothing (best-effort, per the silent-failure contract).
+        work = read_config_flat(path).get("work")
         if not isinstance(work, dict):
             continue
 
@@ -604,22 +584,14 @@ def _list_known_projects() -> set[str]:
     Used by the post-resolution sanity check that warns when an intake
     routes to a project the orchestrator has never heard of.
     """
-    try:
-        import yaml
-    except ImportError:
-        return set()
+    from fno.config import read_config_flat
 
     known: set[str] = set()
     for path in _settings_candidate_paths():
         if not path.exists():
             continue
-        try:
-            data = yaml.safe_load(path.read_text())
-        except (OSError, yaml.YAMLError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        work = (data.get("config") or {}).get("work") or data.get("work")
+        # config.toml (or legacy settings.yaml) -> flat dict; work is top-level.
+        work = read_config_flat(path).get("work")
         if not isinstance(work, dict):
             continue
 

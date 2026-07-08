@@ -2662,6 +2662,24 @@ def run_config_migration(
     return out
 
 
+def read_config_flat(path: Path) -> dict[str, object]:
+    """Read a single config file (config.toml -> TOML by suffix, else YAML) and
+    return its FLAT dict (a legacy ``config:`` wrapper unwrapped). Returns {} on a
+    missing or unparseable file. For the handful of consumers that read the
+    config file DIRECTLY - the work.workspaces topology map, project detection -
+    instead of through the cached ``load_settings`` (they need global-only reads,
+    no per-process cache, or run at bootstrap).
+    """
+    data, ok = _load_raw(path)
+    return _unwrap_config_dict(data) if ok else {}
+
+
+def config_read_candidates(paths: list[Path]) -> list[Path]:
+    """config.toml-first read candidates for a list of settings.yaml locations
+    (public alias of ``_prefer_toml`` for direct-file readers)."""
+    return _prefer_toml(paths)
+
+
 def _ensure_migrated(locations: list[Path]) -> None:
     """Convert every legacy settings.yaml (+ its settings.local.yaml) in
     ``locations`` to a flat config.toml, once. The load-time hard-cut safety net:

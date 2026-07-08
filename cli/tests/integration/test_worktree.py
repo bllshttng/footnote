@@ -55,8 +55,8 @@ def tmp_git_repo(tmp_path: Path, monkeypatch):
     # Declare a stable project id so worktree path resolution is deterministic.
     abilities_dir = tmp_path / ".fno"
     abilities_dir.mkdir(exist_ok=True)
-    (abilities_dir / "settings.yaml").write_text(
-        f"project:\n  id: {_PROJECT_ID}\n", encoding="utf-8",
+    (abilities_dir / "config.toml").write_text(
+        f'[project]\nid = "{_PROJECT_ID}"\n', encoding="utf-8",
     )
     return tmp_path
 

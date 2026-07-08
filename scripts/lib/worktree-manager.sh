@@ -132,11 +132,11 @@ _wtm_yq_project_field() {
     local raw="" settings
     while IFS= read -r settings; do
         [[ -n "$settings" ]] || continue
-        raw=$(_wtm_p="$project" _wtm_f="$field" yq -r \
+        raw=$(_wtm_p="$project" _wtm_f="$field" yq -p toml -r \
               '.work.workspaces[].projects[]? | select(.name == env(_wtm_p)) | .[env(_wtm_f)] // ""' \
               "$settings" 2>/dev/null | head -1)
         if [[ -z "$raw" || "$raw" == "null" ]]; then
-            raw=$(_wtm_p="$project" _wtm_f="$field" yq -r \
+            raw=$(_wtm_p="$project" _wtm_f="$field" yq -p toml -r \
                   '.work.projects[]? | select(.name == env(_wtm_p)) | .[env(_wtm_f)] // ""' \
                   "$settings" 2>/dev/null | head -1)
         fi

@@ -54,15 +54,12 @@ def _load_obsidian_vault() -> str | None:
     is a global artifact, so the source of truth must be the global file.
     """
     try:
-        import yaml
-        from fno.config import _global_settings_path
+        from fno.config import _global_settings_path, read_config_flat
         path = _global_settings_path()
         if not path.is_file():
             return None
-        with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        obs = (data.get("config") or {}).get("obsidian") or {}
-        if not obs.get("enabled"):
+        obs = read_config_flat(path).get("obsidian") or {}
+        if not isinstance(obs, dict) or not obs.get("enabled"):
             return None
         vault = obs.get("vault")
         if isinstance(vault, str) and vault.strip():
@@ -92,14 +89,11 @@ def _load_wip_caps() -> dict[str, int]:
     - non-int / <=0 / bool    -> that column is uncapped (omitted), never raised
     """
     try:
-        import yaml
-        from fno.config import _global_settings_path
+        from fno.config import _global_settings_path, read_config_flat
         path = _global_settings_path()
         if not path.is_file():
             return dict(_DEFAULT_WIP_CAPS)
-        with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        kanban = (data.get("config") or {}).get("kanban")
+        kanban = read_config_flat(path).get("kanban")
         if not isinstance(kanban, dict) or "wip_caps" not in kanban:
             return dict(_DEFAULT_WIP_CAPS)
         raw = kanban.get("wip_caps")

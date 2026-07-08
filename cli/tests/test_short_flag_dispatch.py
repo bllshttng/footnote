@@ -139,7 +139,7 @@ def test_providers_add_short_flags_match_long(tmp_path, monkeypatch) -> None:
     assert long_res.exit_code == 0, long_res.output
     assert short_res.stdout == long_res.stdout
 
-    short_yaml = (short_dir / ".fno" / "settings.yaml").read_text()
-    long_yaml = (long_dir / ".fno" / "settings.yaml").read_text()
+    short_yaml = (short_dir / ".fno" / "config.toml").read_text()
+    long_yaml = (long_dir / ".fno" / "config.toml").read_text()
     assert short_yaml == long_yaml
     assert "prov-x" in short_yaml

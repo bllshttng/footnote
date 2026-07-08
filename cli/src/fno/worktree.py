@@ -127,47 +127,31 @@ def _use_conductor_canonical(repo_root: Path) -> bool:
     settings loader's caching/cwd behavior (the walker invokes this from
     arbitrary cwds).
     """
-    settings_path = repo_root / ".fno" / "settings.yaml"
+    from fno.config import read_config_flat
+
+    fno_dir = repo_root / ".fno"
+    settings_path = fno_dir / "config.toml"
+    if not settings_path.exists():
+        settings_path = fno_dir / "settings.yaml"
     if not settings_path.exists():
         return False
-    try:
-        import yaml  # type: ignore[import-untyped]
-        data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return False
-    if not isinstance(data, dict):
-        return False
-    # Read the flag from BOTH config.worktree (nested) and top-level worktree:
-    # the bash hook's wt_config reads the top-level block, while real settings.yaml
-    # stores it top-level - so a config.worktree-only read made the walker disagree
-    # with the hook for the same file (codex P1 on PR #67). Either location wins.
-    config = data.get("config")
-    for container in (
-        config.get("worktree") if isinstance(config, dict) else None,
-        data.get("worktree"),
-    ):
-        if isinstance(container, dict) and bool(container.get("use_conductor_canonical", False)):
-            return True
-    return False
+    # Flat config.toml (or legacy settings.yaml): the worktree block is top-level.
+    container = read_config_flat(settings_path).get("worktree")
+    return isinstance(container, dict) and bool(
+        container.get("use_conductor_canonical", False)
+    )
 
 
 def _read_worktrees_base_from(settings_path: Path) -> Optional[str]:
-    """Return config.paths.worktrees_base from one settings file, or None.
-
-    Every intermediate key is isinstance-checked so a malformed settings.yaml
-    (e.g. ``config:`` set to a string) returns None instead of raising.
+    """Return paths.worktrees_base from one flat config.toml (or legacy
+    settings.yaml), or None. Every intermediate key is isinstance-checked so a
+    malformed file returns None instead of raising.
     """
     if not settings_path.exists():
         return None
-    try:
-        import yaml  # type: ignore[import-untyped]
-        data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    config = data.get("config")
-    paths = config.get("paths") if isinstance(config, dict) else None
+    from fno.config import read_config_flat
+
+    paths = read_config_flat(settings_path).get("paths")
     base = paths.get("worktrees_base") if isinstance(paths, dict) else None
     return base if isinstance(base, str) and base else None
 
@@ -185,12 +169,13 @@ def _worktrees_base_override(repo_root: Path) -> Optional[Path]:
     not depend on the loader's cwd/caching. A leading ``~`` is expanded; any
     load/parse failure falls through to None.
     """
-    from fno.config import _global_settings_path
+    from fno.config import _global_settings_path, config_read_candidates
 
-    for settings_path in (
+    # config.toml-first per location, with a legacy settings.yaml fallback.
+    for settings_path in config_read_candidates([
         repo_root / ".fno" / "settings.yaml",
         _global_settings_path(),
-    ):
+    ]):
         base = _read_worktrees_base_from(settings_path)
         if base is not None:
             return Path(os.path.expanduser(base))
