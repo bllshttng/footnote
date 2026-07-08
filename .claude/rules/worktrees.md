@@ -13,8 +13,14 @@ The single place that says where git worktrees go for this repo and what to do a
 After `git worktree add`, run the canonical setup script (substitute your own `worktrees_base` for the example path, or use the harness-native default when unset):
 
 ```bash
-git worktree add <worktrees_base>/<repo>/<name> <branch>   # or <repo>/.claude/worktrees/<name> when unset
+# worktrees_base set (e.g. this repo's ~/conductor/workspaces):
+git worktree add <worktrees_base>/<repo>/<name> <branch>
 cd <worktrees_base>/<repo>/<name>
+
+# unset (harness-native default) - run from the repo root; the path is repo-root-relative:
+git worktree add .claude/worktrees/<name> <branch>
+cd .claude/worktrees/<name>
+
 bash scripts/setup/setup-worktree.sh
 ```
 
