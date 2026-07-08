@@ -4,17 +4,6 @@ from pathlib import Path
 import pytest
 
 
-def test_reads_index_md_from_folder(tmp_path):
-    from fno.graph._intake import _read_plan_frontmatter
-    plan = tmp_path / "plan-X"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text(
-        "---\nproject: foo\ncwd: /some/path\n---\n# title\nbody\n"
-    )
-    fm = _read_plan_frontmatter(str(plan))
-    assert fm == {"project": "foo", "cwd": "/some/path"}
-
-
 def test_reads_single_file_plan(tmp_path):
     from fno.graph._intake import _read_plan_frontmatter
     plan = tmp_path / "plan-Y.md"
@@ -33,14 +22,13 @@ def test_missing_index_returns_empty(tmp_path):
 
 def test_malformed_yaml_returns_empty_with_warning(tmp_path, capsys):
     from fno.graph._intake import _read_plan_frontmatter
-    plan = tmp_path / "plan-bad"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text("---\n: : :\n---\nbody\n")
+    plan = tmp_path / "plan-bad.md"
+    plan.write_text("---\n: : :\n---\nbody\n")
     fm = _read_plan_frontmatter(str(plan))
     assert fm == {}
     err = capsys.readouterr().err
     assert "could not parse" in err
-    assert str(plan / "00-INDEX.md") in err
+    assert str(plan) in err
 
 
 def test_no_frontmatter_returns_empty(tmp_path, capsys):

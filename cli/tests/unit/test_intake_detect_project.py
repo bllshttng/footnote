@@ -92,9 +92,8 @@ def test_frontmatter_project_beats_cwd(tmp_path, monkeypatch):
     """Frontmatter project takes precedence over git-root-basename inference."""
     from fno.graph._intake import _build_intake_node
 
-    plan = tmp_path / "plan-Z"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text(
+    plan = tmp_path / "plan-Z.md"
+    plan.write_text(
         "---\nproject: example-pipeline\n---\n# title\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -106,9 +105,8 @@ def test_cli_project_beats_frontmatter(tmp_path, monkeypatch):
     """``cli_project`` on the spec wins over frontmatter."""
     from fno.graph._intake import _build_intake_node
 
-    plan = tmp_path / "plan-W"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text("---\nproject: foo\n---\n")
+    plan = tmp_path / "plan-W.md"
+    plan.write_text("---\nproject: foo\n---\n")
     monkeypatch.chdir(tmp_path)
     node = _build_intake_node(_build_spec(str(plan), cli_project="bar"), [])
     assert node["project"] == "bar"
@@ -118,9 +116,8 @@ def test_frontmatter_cwd_overrides_canonical_root(tmp_path, monkeypatch):
     """Frontmatter cwd field replaces git-root-derived canonical_root."""
     from fno.graph._intake import _build_intake_node
 
-    plan = tmp_path / "plan-V"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text(
+    plan = tmp_path / "plan-V.md"
+    plan.write_text(
         "---\nproject: foo\ncwd: /home/user/code/foo\n---\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -132,9 +129,8 @@ def test_frontmatter_cwd_expands_tilde(tmp_path, monkeypatch):
     """``~`` in frontmatter cwd is expanded via os.path.expanduser."""
     from fno.graph._intake import _build_intake_node
 
-    plan = tmp_path / "plan-Vt"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text("---\nproject: foo\ncwd: ~/code/foo\n---\n")
+    plan = tmp_path / "plan-Vt.md"
+    plan.write_text("---\nproject: foo\ncwd: ~/code/foo\n---\n")
     monkeypatch.setenv("HOME", "/Users/testuser")
     monkeypatch.chdir(tmp_path)
     node = _build_intake_node(_build_spec(str(plan)), [])
@@ -156,9 +152,8 @@ def test_frontmatter_project_non_string_falls_through(tmp_path, monkeypatch, cap
     """If frontmatter project is not a non-empty string, fall through and warn."""
     from fno.graph._intake import _build_intake_node
 
-    plan = tmp_path / "plan-T"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text("---\nproject: 123\n---\n")
+    plan = tmp_path / "plan-T.md"
+    plan.write_text("---\nproject: 123\n---\n")
     monkeypatch.chdir(tmp_path)
     node = _build_intake_node(_build_spec(str(plan)), [])
     err = capsys.readouterr().err
@@ -170,9 +165,8 @@ def test_frontmatter_cwd_non_string_falls_through(tmp_path, monkeypatch, capsys)
     """If frontmatter cwd is not a non-empty string, fall through and warn."""
     from fno.graph._intake import _build_intake_node
 
-    plan = tmp_path / "plan-Tc"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text("---\nproject: foo\ncwd: 42\n---\n")
+    plan = tmp_path / "plan-Tc.md"
+    plan.write_text("---\nproject: foo\ncwd: 42\n---\n")
     monkeypatch.chdir(tmp_path)
     node = _build_intake_node(_build_spec(str(plan)), [])
     err = capsys.readouterr().err
@@ -207,9 +201,8 @@ def test_resolve_node_explicit_cli_project_derives_cwd_from_workmap(tmp_path, mo
               path: {work_root}
     """))
 
-    plan = tmp_path / "plan-X"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text("---\ntitle: test\n---\n")
+    plan = tmp_path / "plan-X.md"
+    plan.write_text("---\ntitle: test\n---\n")
     monkeypatch.chdir(tmp_path)
 
     with _patch_candidates_unit(settings_path):
@@ -234,9 +227,8 @@ def test_resolve_node_fm_project_derives_cwd_from_workmap(tmp_path, monkeypatch)
               path: {work_root}
     """))
 
-    plan = tmp_path / "plan-fm"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text("---\nproject: fm-proj\n---\n")
+    plan = tmp_path / "plan-fm.md"
+    plan.write_text("---\nproject: fm-proj\n---\n")
     monkeypatch.chdir(tmp_path)
 
     with _patch_candidates_unit(settings_path):
@@ -261,9 +253,8 @@ def test_resolve_node_fm_cwd_wins_over_workmap(tmp_path, monkeypatch):
               path: {work_root}
     """))
 
-    plan = tmp_path / "plan-fmcwd"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text(
+    plan = tmp_path / "plan-fmcwd.md"
+    plan.write_text(
         "---\nproject: fm-proj2\ncwd: /explicit/fm/cwd\n---\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -288,9 +279,8 @@ def test_resolve_node_detected_project_cwd_unchanged(tmp_path, monkeypatch):
               path: /workmap/detected
     """))
 
-    plan = tmp_path / "plan-det"
-    plan.mkdir()
-    (plan / "00-INDEX.md").write_text("---\ntitle: test\n---\n")
+    plan = tmp_path / "plan-det.md"
+    plan.write_text("---\ntitle: test\n---\n")
     monkeypatch.chdir(tmp_path)
 
     # entries has a node matching cwd -> project detection path
