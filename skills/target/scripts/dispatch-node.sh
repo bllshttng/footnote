@@ -201,10 +201,13 @@ for id in "${NODES[@]}"; do
   model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null || true)"
   # x-d7a7: no exact `.model` pin? resolve the node's `model_tier` via the single
   # Python projection (`fno target resolve-model` -> route_resolve) so a tiered
-  # node's worker spawns on the tier model too - bash never resolves. Empty output
-  # (no pin/tier, or any resolve error) -> zero args = byte-identical to today.
+  # node's worker spawns on the tier model too - bash never resolves. `--provider
+  # claude` scopes the pick to THIS lane (bg is claude-only): a tier that resolves
+  # to a codex/gemini model is dropped to the provider default rather than passed
+  # as an invalid `claude --model <foreign>`. Empty output (no pin/tier, cross-
+  # harness pick, or any resolve error) -> zero args = byte-identical to today.
   if [[ -z "$model_pin" ]]; then
-    model_pin="$(fno target resolve-model "$id" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    model_pin="$(fno target resolve-model "$id" --provider claude 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
   fi
   model_args=()
   [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")

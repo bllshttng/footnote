@@ -634,9 +634,35 @@ def _resolve_node_model(
         return explicit, "explicit" if explicit else "provider-default"
 
 
+def _model_reachable_by(model: str, provider: str) -> bool:
+    """True if ``model`` maps to the ``provider`` harness (per the benchmark map).
+
+    A tier resolves the cheapest model clearing its floor across ALL harnesses, so
+    it can pick a model mapped to a different provider than the spawn lane uses.
+    Best-effort: an unknown model or any lookup error is treated as reachable so
+    the guard only ever DROPS a confirmed cross-harness pick, never a valid one.
+    """
+    try:
+        from fno.adapters.providers import benchmarks as bm
+
+        reach = bm.reachable(model)
+        return reach is None or reach[0] == provider
+    except Exception:  # noqa: BLE001 - never block a dispatch on a lookup error
+        return True
+
+
 @target_app.command("resolve-model")
 def resolve_model(
     node: str = typer.Argument(..., help="Backlog node id/slug."),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="Only print the model if it is reachable by this harness. A tier "
+        "can resolve to a model mapped to another provider (e.g. a codex gpt-*); "
+        "a single-provider spawn lane (bg is claude-only) passes its provider "
+        "here so a cross-harness pick degrades to the provider default instead "
+        "of an invalid `<provider> --model <foreign-model>` spawn.",
+    ),
 ) -> None:
     """Print the dispatch model a node resolves to (its ``model`` pin / ``model_tier``).
 
@@ -647,6 +673,8 @@ def resolve_model(
     default). Never fails a dispatch: any error prints nothing.
     """
     model, _source = _resolve_node_model(_resolve_node_id(node))
+    if model and provider and not _model_reachable_by(model, provider):
+        return  # cross-harness pick on a single-provider lane -> provider default
     if model:
         typer.echo(model)
 

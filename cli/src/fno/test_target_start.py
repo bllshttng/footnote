@@ -327,3 +327,41 @@ def test_resolve_model_command_empty_when_no_model(monkeypatch):
     result = runner.invoke(target_app, ["resolve-model", "x-d7a7"])
     assert result.exit_code == 0
     assert result.stdout.strip() == ""
+
+
+def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
+    """--provider claude drops a tier that resolved to a codex model (bg is claude-only)."""
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda nid, explicit=None: ("gpt-5.4", "task-tier(medium)"),
+    )
+    # gpt-5.4 maps to the codex harness in the real REACHABILITY table.
+    result = runner.invoke(
+        target_app, ["resolve-model", "x-d7a7", "--provider", "claude"]
+    )
+    assert result.exit_code == 0
+    assert result.stdout.strip() == ""  # dropped -> caller uses the provider default
+
+
+def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
+    """--provider claude keeps a claude-reachable tier model."""
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda nid, explicit=None: ("claude-sonnet-5", "task-tier(medium)"),
+    )
+    result = runner.invoke(
+        target_app, ["resolve-model", "x-d7a7", "--provider", "claude"]
+    )
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "claude-sonnet-5"
+
+
+def test_model_reachable_by_conservative_on_unknown(monkeypatch):
+    """An unknown model is treated as reachable (guard only drops CONFIRMED mismatches)."""
+    assert target_cli._model_reachable_by("gpt-5.4", "claude") is False
+    assert target_cli._model_reachable_by("claude-sonnet-5", "claude") is True
+    assert target_cli._model_reachable_by("some-unmapped-model", "claude") is True
