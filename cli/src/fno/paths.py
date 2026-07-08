@@ -241,6 +241,87 @@ def _settings() -> "SettingsModel":
 # Matches {word} but NOT {{ or }} (escape sequences)
 _TEMPLATE_VAR = re.compile(r"(?<!\{)\{([^{}]+)\}(?!\})")
 
+# Names that would let internal/<project>/ escape its subtree.
+_UNSAFE_PROJECT_NAMES = ("", ".", "..")
+
+# Process-once flag for the unset-project.id nudge: a bg loop writes many
+# handoffs and must not warn per write.
+_warned_unset_project_id = False
+
+
+def _remote_url_to_slug(url: str) -> Optional[str]:
+    """Last path segment of a git remote URL, one trailing ``.git`` stripped.
+
+    Handles scp-like (``git@host:org/repo.git``), https, and local-path
+    remotes by taking the last ``/``-or-``:`` segment. Pure (no git call) so
+    the parser is unit-testable on its own. ``None`` for an empty URL.
+    """
+    url = url.strip().rstrip("/")
+    if not url:
+        return None
+    tail = re.split(r"[/:]", url)[-1]
+    if tail.endswith(".git"):
+        tail = tail[:-4]
+    return tail or None
+
+
+def _slug_from_git_remote(project_root: Optional[Path]) -> Optional[str]:
+    """``remote.origin.url`` slug for ``project_root`` - stable across worktrees.
+
+    Best-effort: any git failure or missing remote returns ``None`` so path
+    resolution never breaks (mirrors :func:`resolve_repo_root`'s posture).
+    Uses ``git -C <root>`` so a worktree resolves its own remote, not cwd's.
+    """
+    root = project_root or resolve_repo_root()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    return _remote_url_to_slug(getattr(result, "stdout", "") or "")
+
+
+def _warn_unset_project_id_once(name: str) -> None:
+    """One-time nudge toward the durable fix when project.id is unset."""
+    global _warned_unset_project_id
+    if _warned_unset_project_id:
+        return
+    _warned_unset_project_id = True
+    print(
+        f"fno: warning: config.project.id is unset; internal/ paths derive an "
+        f"unstable folder name ({name!r}) from the git remote or checkout dir. "
+        f"Set config.project.id to pin it and stop stray internal/<name>/ folders.",
+        file=sys.stderr,
+    )
+
+
+def _project_name(project_root: Optional[Path] = None, *, for_vault: bool = False) -> str:
+    """Stable project-folder name for ``internal/<project>/`` paths.
+
+    ``config.project.id`` (canonical) -> git-remote slug (stable across
+    worktrees/clones) -> checkout basename (last resort). Sanitized so the
+    result can never escape ``internal/<project>/`` - covers a mangled
+    ``project.id`` and a derived name alike, at one site.
+    """
+    pid = _settings().config.project.id
+    name = (
+        pid
+        or _slug_from_git_remote(project_root)
+        or (project_root or resolve_repo_root()).name
+    )
+    if "/" in name or "\\" in name or name in _UNSAFE_PROJECT_NAMES:
+        raise ValueError(f"unsafe project name for internal/ path: {name!r}")
+    if for_vault and not pid:
+        _warn_unset_project_id_once(name)
+    return name
+
 
 def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
     """Expand ~, $VAR, {vault}, {project}; absolutize via .resolve().
@@ -291,16 +372,10 @@ def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
                 )
             return str(vroot)
         elif var == "project":
-            # config.project.id is canonical (the loader aliases a legacy
-            # top-level project.id into it, so this covers old files too).
-            pid = settings.config.project.id
-            if pid:
-                return pid
-            # Use the repo root's directory basename as the project name.
-            # resolve_repo_root() already ran git rev-parse so root IS the toplevel;
-            # a redundant git call here is unnecessary.
-            root = project_root or resolve_repo_root()
-            return root.name
+            # project.id -> git-remote slug -> checkout basename, sanitized.
+            return _project_name(
+                project_root, for_vault=settings.config.obsidian.enabled
+            )
         else:
             raise ValueError(
                 f"Unknown template variable {{{var}}} in path {raw!r}. "
@@ -424,12 +499,14 @@ def observer_reports_dir(
         return _resolve(override, project_root=project_root)
     if project_id and ("/" in project_id or ".." in project_id):
         project_id = None  # a caller-supplied id must not escape internal/<project>/
-    pid = project_id or settings.config.project.id
-    if pid:
-        project_name = pid
+    # A caller-supplied owner id (skill-namespace keying, PR #245) still wins;
+    # only the id-unset fallback routes through the shared stable-name helper.
+    if project_id:
+        project_name = project_id
     else:
-        root = project_root or resolve_repo_root()
-        project_name = root.name
+        project_name = _project_name(
+            project_root, for_vault=settings.config.obsidian.enabled
+        )
     if settings.config.obsidian.enabled and settings.config.obsidian.vault:
         vroot = vault_root()
         if vroot is not None:
@@ -540,12 +617,9 @@ def handoffs_dir(project_root: Optional[Path] = None) -> Path:
     override = settings.config.paths.handoffs_dir
     if override is not None:
         return _resolve(override, project_root=project_root)
-    pid = settings.config.project.id
-    if pid:
-        project_name = pid
-    else:
-        root = project_root or resolve_repo_root()
-        project_name = root.name
+    project_name = _project_name(
+        project_root, for_vault=settings.config.obsidian.enabled
+    )
     if settings.config.obsidian.enabled and settings.config.obsidian.vault:
         vroot = vault_root()
         if vroot is not None:

@@ -1011,3 +1011,177 @@ def test_handoffs_dir_bare_vault_name_anchors_at_home(
     assert not str(result).startswith(str(worktree)), (
         "handoffs_dir must never anchor inside the worktree"
     )
+
+
+# ---------------------------------------------------------------------------
+# x-2e75: stable project-folder identity for internal/<project>/ paths.
+# When config.project.id is unset, derive the folder name from the git remote
+# (stable across worktrees/clones) instead of the checkout basename, which
+# sprawls N stray internal/<name>/ folders in a shared vault. Sanitized so a
+# derived or configured name can never escape internal/<project>/.
+# ---------------------------------------------------------------------------
+
+
+def _git_init_with_remote(d: Path, url: str | None) -> None:
+    """Init a git repo at ``d`` with an optional origin remote."""
+    import subprocess
+
+    d.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=d, check=True)
+    if url is not None:
+        subprocess.run(["git", "remote", "add", "origin", url], cwd=d, check=True)
+
+
+_VAULT_SETTINGS = (
+    "schema_version: 1\nconfig:\n"
+    "  obsidian:\n    enabled: true\n    vault: '{vault}'\n"
+)
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("git@github.com:org/footnote.git", "footnote"),
+        ("https://github.com/org/footnote.git", "footnote"),
+        ("https://github.com/org/footnote", "footnote"),
+        ("/srv/git/repo.git", "repo"),
+        ("git@github.com:org/footnote.git/", "footnote"),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_remote_url_to_slug(url: str, expected: str | None) -> None:
+    """Parser takes the last '/'-or-':' segment and strips one trailing .git."""
+    from fno.paths import _remote_url_to_slug
+
+    assert _remote_url_to_slug(url) == expected
+
+
+def test_handoffs_dir_uses_git_remote_slug_not_basename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scenario 1: git remote drives the folder name, not the checkout basename."""
+    checkout = tmp_path / "fno-attest-placement"
+    _git_init_with_remote(checkout, "git@github.com:org/footnote.git")
+    vault = tmp_path / "vault"
+    _set_settings(monkeypatch, tmp_path, _VAULT_SETTINGS.format(vault=vault))
+    monkeypatch.setattr("fno.paths._warned_unset_project_id", False, raising=False)
+
+    from fno.paths import handoffs_dir
+
+    result = handoffs_dir(project_root=checkout)
+    assert str(result).endswith("internal/footnote/handoffs")
+    assert "fno-attest-placement" not in str(result)
+
+
+def test_two_worktrees_same_remote_share_one_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scenario 2: two differently-named worktrees of one repo share one folder."""
+    athens = tmp_path / "athens"
+    milan = tmp_path / "milan-v1"
+    _git_init_with_remote(athens, "git@github.com:org/footnote.git")
+    _git_init_with_remote(milan, "git@github.com:org/footnote.git")
+    vault = tmp_path / "vault"
+    _set_settings(monkeypatch, tmp_path, _VAULT_SETTINGS.format(vault=vault))
+    monkeypatch.setattr("fno.paths._warned_unset_project_id", False, raising=False)
+
+    from fno.paths import observer_reports_dir
+
+    ra = observer_reports_dir(project_root=athens)
+    rb = observer_reports_dir(project_root=milan)
+    assert ra == rb
+    assert str(ra).endswith("internal/footnote/observer-reports")
+
+
+def test_no_remote_falls_back_to_basename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scenario 3: no origin remote falls back to basename without crashing."""
+    checkout = tmp_path / "scratch"
+    _git_init_with_remote(checkout, None)  # no remote
+    _set_settings(
+        monkeypatch,
+        tmp_path,
+        "schema_version: 1\nconfig:\n  plans_dir: '.fno/plans/{project}'\n",
+    )
+
+    from fno.paths import plans_dir
+
+    result = plans_dir(project_root=checkout)
+    assert result.name == "scratch"
+
+
+def test_traversal_project_id_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scenario 4: a traversal-bearing config.project.id is rejected (raises)."""
+    vault = tmp_path / "vault"
+    _set_settings(
+        monkeypatch,
+        tmp_path,
+        _VAULT_SETTINGS.format(vault=vault) + "  project:\n    id: '../../etc'\n",
+    )
+
+    from fno.paths import handoffs_dir
+
+    with pytest.raises(ValueError):
+        handoffs_dir(project_root=tmp_path)
+
+
+def test_configured_project_id_honored_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scenario 5: a configured project.id wins over the remote-derived slug."""
+    checkout = tmp_path / "fno-attest-placement"
+    _git_init_with_remote(checkout, "git@github.com:org/footnote.git")
+    vault = tmp_path / "vault"
+    _set_settings(
+        monkeypatch,
+        tmp_path,
+        _VAULT_SETTINGS.format(vault=vault) + "  project:\n    id: 'fno'\n",
+    )
+
+    from fno.paths import handoffs_dir
+
+    result = handoffs_dir(project_root=checkout)
+    assert str(result).endswith("internal/fno/handoffs")
+
+
+def test_unset_project_id_warns_once_per_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Scenario 6: the unset-id nudge fires at most once per process."""
+    checkout = tmp_path / "fno-attest-placement"
+    _git_init_with_remote(checkout, "git@github.com:org/footnote.git")
+    vault = tmp_path / "vault"
+    _set_settings(monkeypatch, tmp_path, _VAULT_SETTINGS.format(vault=vault))
+    monkeypatch.setattr("fno.paths._warned_unset_project_id", False, raising=False)
+
+    from fno.paths import handoffs_dir
+
+    for _ in range(3):
+        handoffs_dir(project_root=checkout)
+    err = capsys.readouterr().err
+    assert err.count("fno: warning:") == 1
+    assert "config.project.id" in err
+
+
+def test_project_template_uses_remote_slug_in_non_vault_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blast radius: {project} in a plain config.paths.* value (no vault) also
+    resolves to the stable remote slug, not the checkout basename."""
+    checkout = tmp_path / "athens"
+    _git_init_with_remote(checkout, "https://github.com/org/footnote.git")
+    _set_settings(
+        monkeypatch,
+        tmp_path,
+        "schema_version: 1\nconfig:\n  plans_dir: '.fno/plans/{project}'\n",
+    )
+
+    from fno.paths import plans_dir
+
+    result = plans_dir(project_root=checkout)
+    assert result.name == "footnote"
+    assert "athens" not in result.name
