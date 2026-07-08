@@ -116,27 +116,25 @@ git -C "$PREFLIGHT_WT" clean -fdx -e target -e cli/.venv -e .preflight-last-fail
 # --- hermetic env ------------------------------------------------------------
 REAL_HOME="$HOME"
 TMPHOME="$(mktemp -d)"
-# An empty config file pinned via FNO_CONFIG is the load-bearing isolation seam:
-# $FNO_CONFIG, when set, is the config loader's ONLY candidate, so the canonical
-# checkout's .fno/config.toml (which a worktree reaches via the shared
-# git-common-dir, NOT via HOME/cwd) can't leak worktrees_base and friends into
-# the run. Empty file => the SettingsModel defaults, which is exactly what a
-# fresh CI checkout (no committed .fno/config.toml) resolves to. This is what
-# makes the PR-#269 local-only failure class not reproduce here (AC2-HP).
-EMPTY_CONFIG="$TMPHOME/empty-config.toml"
-: > "$EMPTY_CONFIG"
 
-# Runs a command inside the preflight worktree with a scrubbed env: temp HOME,
-# no FNO_* leakage, empty pinned config, worktree-pinned PYTHONPATH.
-# Cache dirs are the documented re-export holes so builds stay warm.
+# The env deliberately mirrors a fresh CI checkout: temp HOME (no ~/.fno, no
+# ~/.claude, no ~/.gitconfig), FNO_* scrubbed, worktree-pinned PYTHONPATH, and
+# the pytest spawn-leak guard. We intentionally do NOT pin FNO_CONFIG or
+# FNO_GLOBAL_SETTINGS_PATH: pinning either one diverges from CI and breaks the
+# suite's own config-fixture tests (an empty FNO_CONFIG clobbers a test's
+# monkeypatched config; a /dev/null global path redirects config WRITES into
+# /dev/). The one class this env cannot isolate is the config candidate chain:
+# a worktree reaches the canonical checkout's .fno/config.toml via the shared
+# git-common-dir (not via HOME/cwd), so a handful of tests that assert on the
+# absence of that config stay red locally. That leak is the separately-tracked
+# root-cause fix; preflight surfaces those in --keep-going but they are the
+# known residual, not a preflight regression. See docs/preflight.md.
 run_hermetic() {
     (
         cd "$PREFLIGHT_WT" || exit 1
         local v
         for v in $(compgen -v | grep '^FNO_' || true); do unset "$v"; done
         export HOME="$TMPHOME"
-        export FNO_CONFIG="$EMPTY_CONFIG"
-        export FNO_GLOBAL_SETTINGS_PATH=/dev/null
         export FNO_THINK_SPAWN=0
         export PYTHONPATH="$PREFLIGHT_WT/cli/src"
         export CARGO_HOME="${CARGO_HOME:-$REAL_HOME/.cargo}"

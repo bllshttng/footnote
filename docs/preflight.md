@@ -49,20 +49,26 @@ One command to run before pushing. It validates the invoking checkout's
 Why a separate worktree with a scrubbed environment: the canonical checkout's
 `.fno/config.toml` otherwise leaks into the config reader's candidate chain and
 produces local-only failures, which is what pushes agents toward selective
-`-k` subset runs that then miss CI-only failures. A worktree reaches that
-canonical config through the shared git-common-dir, not through `HOME` or
-`cwd`, so scrubbing `HOME` alone is not enough. The load-bearing isolation seam
-is `FNO_CONFIG` pinned to an empty file: `$FNO_CONFIG`, when set, is the config
-loader's only candidate, so the canonical config cannot leak, and an empty file
-yields the same `SettingsModel` defaults a fresh CI checkout (no committed
-`.fno/config.toml`) resolves to. The runner also uses a temp `HOME`,
-`FNO_GLOBAL_SETTINGS_PATH=/dev/null`, no leaked `FNO_*`, and a worktree-pinned
-`PYTHONPATH`. Cache directories (`CARGO_HOME`, `RUSTUP_HOME`, `UV_CACHE_DIR`)
-are deliberately re-exported so builds stay warm; the worktree's `target/` and
-`cli/.venv` persist across runs. Hermeticity comes from environment isolation
-plus a hard reset, not from disposing the worktree. (The config candidate-chain
-leak itself is tracked as a separate root-cause fix; preflight papers over it
-until that lands.)
+`-k` subset runs that then miss CI-only failures. The runner resets a dedicated
+worktree to your HEAD and runs it with an environment that mirrors a fresh CI
+checkout: a temp `HOME` (no `~/.fno`, `~/.claude`, or `~/.gitconfig`), `FNO_*`
+scrubbed, a worktree-pinned `PYTHONPATH`, and the pytest spawn-leak guard. Cache
+directories (`CARGO_HOME`, `RUSTUP_HOME`, `UV_CACHE_DIR`) are deliberately
+re-exported so builds stay warm; the worktree's `target/` and `cli/.venv`
+persist across runs. Hermeticity comes from environment isolation plus a hard
+reset, not from disposing the worktree.
+
+**Known residual - the config candidate chain.** A worktree reaches the
+canonical checkout's `.fno/config.toml` through the shared git-common-dir, not
+through `HOME` or `cwd`, so a scrubbed environment cannot hide it. Pinning
+`FNO_CONFIG` or `FNO_GLOBAL_SETTINGS_PATH` to suppress it diverges from CI and
+breaks the suite's own config-fixture tests, so the runner deliberately does
+not. A handful of tests that assert on the absence of that config therefore
+stay red locally while passing in CI. That leak is the separately-tracked
+root-cause fix (a change to the config loader, not to preflight); until it
+lands, treat those specific failures as the known residual, not a real red.
+`smoke.sh --keep-going` names every failing step, so the residual is visible
+and distinguishable rather than hidden.
 
 Worktree location follows `config.paths.worktrees_base`
 (`<base>/<repo>/preflight`), falling back to the harness-native
