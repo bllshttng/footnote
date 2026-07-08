@@ -17,16 +17,18 @@ FAKE_HOME="$WORK/home"
 
 mkdir -p "$PROJ_A/.fno" "$PROJ_B/.fno" "$INBOX_ROOT" "$FAKE_HOME/.fno"
 
-cat > "$PROJ_A/.fno/settings.yaml" <<YAML
-project: proj-a
-project_work:
-  domain: code
-YAML
-cat > "$PROJ_B/.fno/settings.yaml" <<YAML
-project: proj-b
-project_work:
-  domain: code
-YAML
+cat > "$PROJ_A/.fno/config.toml" <<TOML
+project = "proj-a"
+
+[project_work]
+domain = "code"
+TOML
+cat > "$PROJ_B/.fno/config.toml" <<TOML
+project = "proj-b"
+
+[project_work]
+domain = "code"
+TOML
 
 # Triage stub: deterministic create_node decision.
 STUB="$WORK/triage_stub.sh"

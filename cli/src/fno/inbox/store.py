@@ -1026,23 +1026,23 @@ def resolve_project(
     cwd: Optional[Path] = None,
     override: Optional[str] = None,
 ) -> str:
-    """Resolve the local project name from ``.fno/settings.yaml``."""
+    """Resolve the local project name from ``.fno/config.toml``."""
     if override is not None:
         return override
+
+    from fno.config import read_config_flat
 
     search = cwd if cwd is not None else Path.cwd()
 
     while True:
-        candidate = search / ".fno" / "settings.yaml"
+        fno_dir = search / ".fno"
+        candidate = fno_dir / "config.toml"
+        if not candidate.is_file():
+            candidate = fno_dir / "settings.yaml"
         if candidate.is_file():
-            try:
-                data = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
-            except (OSError, yaml.YAMLError) as e:
-                print(
-                    f"warning: malformed {candidate}: {type(e).__name__}: {e}",
-                    file=sys.stderr,
-                )
-                data = {}
+            # read_config_flat parses config.toml (or a legacy settings.yaml) into
+            # the FLAT dict and degrades a malformed file to {}.
+            data = read_config_flat(candidate)
             if isinstance(data, dict):
                 pid = _project_id_from_settings(data)
                 if pid:
@@ -1054,7 +1054,7 @@ def resolve_project(
         search = parent
 
     raise ProjectIdentificationError(
-        "set 'project:' in .fno/settings.yaml or pass --from"
+        "set 'project' in .fno/config.toml or pass --from"
     )
 
 
