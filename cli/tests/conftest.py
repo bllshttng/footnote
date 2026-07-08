@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -73,6 +72,25 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     import shutil
 
     shutil.rmtree(_SESSION_HOME, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _config_search_ceiling(tmp_path_factory: pytest.TempPathFactory):
+    """Bound config resolution to the test tmpdirs.
+
+    The config candidate chain climbs to the canonical checkout via
+    ``git worktree list``, which the $HOME redirect above cannot bound (git
+    ignores $HOME). Absent this, a full-suite run from the developer's real
+    checkout reads its ~/.fno/config.toml, so local-red != CI-red. Pin the
+    ceiling to the pytest basetemp AND the redirected HOME (the two roots any
+    legitimate test config lives under); the real checkout falls outside both.
+    """
+    basetemp = tmp_path_factory.getbasetemp()
+    os.environ["FNO_CONFIG_SEARCH_ROOT"] = os.pathsep.join(
+        [str(basetemp), _SESSION_HOME]
+    )
+    yield
+    os.environ.pop("FNO_CONFIG_SEARCH_ROOT", None)
 
 
 @pytest.fixture(autouse=True, scope="session")
