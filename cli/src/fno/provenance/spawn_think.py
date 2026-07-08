@@ -1142,7 +1142,7 @@ def maybe_spawn_think(
             node_slug,
             reason,
             invocation_suffix,
-            model=_route_resolve.node_model(node),
+            model=_route_resolve.node_model(node, provider=node.get("provider")),
             provider=node.get("provider"),
         )
     except SpawnAlreadyRunning:

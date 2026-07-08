@@ -746,10 +746,11 @@ def dispatch_lanes(
         try:
             worktree = _ensure_lane_worktree(node_id, canonical_root=canonical)
             _seed_lane_local_settings(worktree, node_id, base_pid)
+            eff_provider = provider if provider is not None else node.get("provider")
             short_id = _spawn_worker(
                 node_id, str(worktree), slug,
-                model=_route_resolve.node_model(node, explicit=model),
-                provider=provider if provider is not None else node.get("provider"),
+                model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
+                provider=eff_provider,
             )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
             # Release BOTH the boot-window reservation and the dispatch-time lane
@@ -959,10 +960,11 @@ def advance(
     #    stays re-dispatchable (a later reconcile retries - AC2-FR). The release
     #    is non-raising (_safe_release) so the decision event below always lands.
     try:
+        eff_provider = provider if provider is not None else node.get("provider")
         short_id = _spawn_worker(
             node_id, node_cwd, node.get("slug") or node.get("title"),
-            model=_route_resolve.node_model(node, explicit=model),
-            provider=provider if provider is not None else node.get("provider"),
+            model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
+            provider=eff_provider,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -1193,10 +1195,11 @@ def _dispatch_one_dependent(
         return skip("claim-error", detail=str(exc))
 
     try:
+        eff_provider = provider if provider is not None else dep.get("provider")
         short_id = _spawn_worker(
             node_id, root, dep.get("slug"),
-            model=_route_resolve.node_model(dep, explicit=model),
-            provider=provider if provider is not None else dep.get("provider"),
+            model=_route_resolve.node_model(dep, explicit=model, provider=eff_provider),
+            provider=eff_provider,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)

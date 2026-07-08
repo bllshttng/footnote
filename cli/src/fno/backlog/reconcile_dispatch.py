@@ -28,6 +28,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from fno import route_resolve as _route_resolve
 from fno import stub_manifest as sm
 from fno.backlog.advance import (
     EVENT_DISPATCHED,
@@ -203,7 +204,8 @@ def _dispatch_reconcile(
     try:
         short_id = _spawn_worker(
             node_id, root, dep.get("slug"),
-            reconcile_manifest=str(manifest_path), model=dep.get("model"),
+            reconcile_manifest=str(manifest_path),
+            model=_route_resolve.node_model(dep, provider=dep.get("provider")),
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)

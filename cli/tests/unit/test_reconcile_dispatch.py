@@ -85,6 +85,28 @@ def test_reconcile_threads_node_model_pin(iso, tmp_path, monkeypatch):
     assert calls[0]["model"] == "fable"
 
 
+def test_reconcile_threads_node_model_tier(iso, tmp_path, monkeypatch):
+    # AC7 (x-da6e): a TIERED dependent (no model pin) must resolve its tier on
+    # reconcile too -- the old raw `dep.get("model")` read passed None, silently
+    # dropping the tier. Scoped to claude, the pick must map to the claude harness.
+    from fno.adapters.providers import benchmarks as bm
+
+    sm.write("x-dep", [{"stub_id": "a", "file": "f", "kind": "fn"}], tmp_path,
+             contract_test="true")
+    dep = _dep(tmp_path)
+    dep["model_tier"] = "medium"
+    dep["provider"] = "claude"
+    _patch_deps(monkeypatch, [dep])
+    calls = _patch_spawn(monkeypatch)
+
+    res = rd.dispatch_reconcile_for_blocker(closed_node_id="x-blk", events_path=iso)
+
+    assert res[0].decision == "dispatched"
+    picked = calls[0]["model"]
+    assert picked is not None  # tier resolved, not dropped to None
+    assert bm.reachable(picked)[0] == "claude"  # scoped to the claude lane
+
+
 def test_missing_manifest_writes_pending_sentinel(iso, tmp_path, monkeypatch):
     # AC8: blocker merged before the dependent's first pass wrote its manifest ->
     # a reconcile:<dep> sentinel is reserved and NOTHING is dispatched.
