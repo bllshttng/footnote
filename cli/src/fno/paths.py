@@ -951,15 +951,45 @@ def _is_plugin_root(root: Path) -> bool:
     return (root / _PLUGIN_MARKER_RELPATH).is_file()
 
 
+def _canonical_plugin_root(root: Path) -> Path:
+    """Map a linked-worktree plugin root to its canonical checkout.
+
+    A worktree path in the persisted pointer makes every OTHER worktree's
+    env-less ``fno`` resolve THIS worktree's (possibly stale) scripts.
+    ``git --git-common-dir`` is ``<canonical>/.git`` from any worktree and
+    ``<root>/.git`` from the canonical checkout itself, so the parent is the
+    canonical root either way (a no-op for a non-worktree checkout). A non-git
+    root (OSS ``--plugin-dir`` tarball) returns unchanged. Fail-open on any
+    error (missing git, timeout, permission, a stubbed run without stdout): the
+    pointer stays usable, resolution just skips canonicalization."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse",
+             "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=False, timeout=2,
+        )
+        common = (getattr(out, "stdout", "") or "").strip()
+        if getattr(out, "returncode", 1) == 0 and common.endswith("/.git"):
+            canon = Path(common[: -len("/.git")])
+            if (canon / ".claude-plugin" / "plugin.json").is_file():
+                return canon
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return root
+
+
 def _read_persisted_plugin_root() -> "Path | None":
     """Read ~/.fno/plugin-root, returning it only if it still looks like
     the plugin (marker present). A stale pointer (plugin moved/removed) returns
-    None so resolution falls through rather than handing back a dead path."""
+    None so resolution falls through rather than handing back a dead path. The
+    session-start hook writes the CURRENT (often a linked-worktree) checkout, so
+    the pointer is canonicalized to the main checkout here - the sole read point
+    - rather than shelling out in the subprocess-sensitive persist/env path."""
     try:
         pointer = _plugin_root_pointer()
         if not pointer.is_file():
             return None
-        cand = Path(pointer.read_text().strip()).expanduser()
+        cand = _canonical_plugin_root(Path(pointer.read_text().strip()).expanduser())
     except OSError:
         return None
     return cand if _is_plugin_root(cand) else None
@@ -968,8 +998,10 @@ def _read_persisted_plugin_root() -> "Path | None":
 def _persist_plugin_root(root: Path) -> None:
     """Best-effort cache of *root* to ~/.fno/plugin-root. Only writes a
     root carrying the plugin manifest (.claude-plugin/plugin.json), so an
-    env/test fake with just a stub hook can never poison the pointer. Never
-    raises - priming is an optimization, not a contract."""
+    env/test fake with just a stub hook can never poison the pointer. A
+    worktree root is canonicalized at READ time (_read_persisted_plugin_root),
+    not here, so this stays subprocess-free. Never raises - priming is an
+    optimization, not a contract."""
     try:
         if not (root / ".claude-plugin" / "plugin.json").is_file():
             return

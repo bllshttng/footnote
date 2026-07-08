@@ -13,6 +13,7 @@ monkeypatch FNO_HOME / the plugin-root env vars - nothing to clear.
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -79,5 +80,77 @@ def test_resolve_falls_to_persisted_when_env_and_pkg_miss(tmp_path, monkeypatch,
     monkeypatch.setattr(paths, "_is_plugin_root", lambda r: Path(r) == plugin)
     got = paths.resolve_plugin_script("scripts/lib/set-gate.sh")
     assert got == plugin / "scripts" / "lib" / "set-gate.sh"
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                   capture_output=True, text=True)
+
+
+def _make_worktree_plugin(tmp_path: Path) -> tuple[Path, Path]:
+    """A canonical git checkout carrying the plugin + one linked worktree that
+    also carries it (mirrors how every footnote worktree shares tracked files).
+    Returns (canonical_root, worktree_root)."""
+    canon = _make_plugin(tmp_path / "canon")
+    _git(canon, "init", "-q")
+    _git(canon, "-c", "user.email=t@t", "-c", "user.name=t",
+         "add", "-A")
+    _git(canon, "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "-m", "init")
+    wt = tmp_path / "wt"
+    _git(canon, "worktree", "add", "-q", str(wt))
+    return canon, wt
+
+
+def test_worktree_root_canonicalizes_to_main(tmp_path):
+    """The core cold-start-receipt fix (x-9d3c): a worktree plugin root maps to
+    its canonical checkout so resolution never runs a foreign worktree's script
+    (the source of Usage:/command-not-found noise). A non-worktree root is a
+    no-op."""
+    canon, wt = _make_worktree_plugin(tmp_path)
+    assert paths._canonical_plugin_root(wt).resolve() == canon.resolve()
+    assert paths._canonical_plugin_root(canon).resolve() == canon.resolve()
+    # Non-git dir returns unchanged (OSS --plugin-dir tarball).
+    plain = _make_plugin(tmp_path / "plain")
+    assert paths._canonical_plugin_root(plain) == plain
+
+
+def test_persisted_worktree_pointer_self_heals_to_canonical(tmp_path, isolated_home):
+    """The session-start hook writes the CURRENT worktree to the pointer; the
+    reader canonicalizes it so resolution runs the canonical init script and a
+    cold-start receipt stays clean. This is the sole canonicalization point."""
+    canon, wt = _make_worktree_plugin(tmp_path)
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    (isolated_home / "plugin-root").write_text(str(wt) + "\n")
+    got = paths._read_persisted_plugin_root()
+    assert got is not None and got.resolve() == canon.resolve()
+
+
+def test_canonical_fails_open_on_subprocess_error(tmp_path, monkeypatch):
+    """A hanging/failing git probe (timeout, missing git) or a stubbed run
+    without .stdout must fail open to the input root, never crash resolution."""
+    plugin = _make_plugin(tmp_path / "plugin")
+
+    def _timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=2)
+    monkeypatch.setattr(paths.subprocess, "run", _timeout)
+    assert paths._canonical_plugin_root(plugin) == plugin
+
+    class _NoStdout:
+        returncode = 0
+    monkeypatch.setattr(paths.subprocess, "run", lambda *a, **k: _NoStdout())
+    assert paths._canonical_plugin_root(plugin) == plugin
+
+
+def test_persist_stays_subprocess_free(tmp_path, isolated_home, monkeypatch):
+    """Persisting must not shell out (a git call here would trip the target-init
+    'must not shell out' guards): it stores the raw root; the reader canonicalizes."""
+    canon, wt = _make_worktree_plugin(tmp_path)  # git setup BEFORE the boom patch
+
+    def _boom(*a, **k):
+        raise AssertionError("persist must not shell out")
+    monkeypatch.setattr(paths.subprocess, "run", _boom)
+    paths._persist_plugin_root(wt)  # would raise if it shelled out
+    assert (isolated_home / "plugin-root").read_text().strip() == str(wt)
 
 
