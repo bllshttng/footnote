@@ -82,8 +82,7 @@ class Collision:
 
 # Recognized headings under which the file list lives. Plans in this repo
 # settled on "Files to Modify"; we accept a couple of synonyms in case a
-# templating tool ever drifts. Folder plans (00-INDEX.md) sometimes use
-# "Files Touched" instead.
+# templating tool ever drifts.
 _FILE_HEADINGS = (
     "files to modify",
     "files to change",
@@ -172,10 +171,6 @@ def _extract_files_from_section(text: str, heading_index: int) -> set[str]:
 def parse_files_to_modify(plan_path: Path) -> set[str]:
     """Extract file paths from the 'Files to Modify' table of a plan.
 
-    Supports:
-      - Single-file quick plans: read the plan file directly.
-      - Folder plans: read 00-INDEX.md plus every NN-*.md phase file.
-
     Returns a normalized set of repo-relative paths. Strips backticks, line
     suffixes (``:123``), parenthetical annotations, and folder slashes.
     Missing or unreadable plan files return an empty set; the caller treats
@@ -185,23 +180,7 @@ def parse_files_to_modify(plan_path: Path) -> set[str]:
     if not plan_path.exists():
         return set()
 
-    files: set[str] = set()
-    if plan_path.is_dir():
-        # Folder plan: read 00-INDEX.md + every NN-*.md file.
-        index = plan_path / "00-INDEX.md"
-        if index.exists():
-            files |= _scan_one(index)
-        for child in sorted(plan_path.iterdir()):
-            if not child.is_file() or not child.suffix == ".md":
-                continue
-            if child.name == "00-INDEX.md":
-                continue
-            if not re.match(r"^\d", child.name):
-                continue
-            files |= _scan_one(child)
-    else:
-        files |= _scan_one(plan_path)
-    return files
+    return _scan_one(plan_path)
 
 
 def _scan_one(path: Path) -> set[str]:

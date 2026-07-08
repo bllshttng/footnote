@@ -385,7 +385,7 @@ get_domain_phase() {
 
 # Resolve which domain to use via the lookup chain:
 #   1. --domain CLI flag (explicit)
-#   2. Plan's domain: field (from 00-INDEX.md)
+#   2. Plan's domain: field (from the plan doc's frontmatter)
 #   3. Settings default (config.default_domain)
 #   4. "code" (implicit default)
 # Usage: resolve_domain "$FLAG_DOMAIN" "$PLAN_DOMAIN" "$SETTINGS_DEFAULT"

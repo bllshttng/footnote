@@ -1,7 +1,7 @@
 """Integration tests for graph collision detection.
 
 Covers:
-- ``parse_files_to_modify`` for quick + folder plans
+- ``parse_files_to_modify`` for quick plans
 - ``find_collisions`` severity scoring + action inference
 - ``_load_thresholds`` layered config
 - ``fno backlog collisions check`` CLI verb
@@ -79,39 +79,6 @@ Some context.
     return path
 
 
-def _write_folder_plan(folder: Path, files_per_phase: dict[str, list[str]], title: str = "Folder plan") -> Path:
-    """Write a folder plan with 00-INDEX.md plus NN-* phase files."""
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "00-INDEX.md").write_text(
-        f"""---
-scope: feature
----
-
-# {title}
-
-## Files Touched
-
-| File | Action |
-|------|--------|
-"""
-    )
-    idx = 1
-    for phase_name, phase_files in files_per_phase.items():
-        rows = "\n".join(f"| `{f}` | edit |" for f in phase_files)
-        (folder / f"{idx:02d}-{phase_name}.md").write_text(
-            f"""# Phase {idx}: {phase_name}
-
-## Files to Modify
-
-| File | Action |
-|------|--------|
-{rows}
-"""
-        )
-        idx += 1
-    return folder
-
-
 # ---------------------------------------------------------------------------
 # parse_files_to_modify
 # ---------------------------------------------------------------------------
@@ -123,27 +90,6 @@ def test_parse_files_quick_plan(tmp_path):
     plan = _write_quick_plan(tmp_path / "p.md", ["src/a.py", "src/b.py", "src/c.py"])
     out = parse_files_to_modify(plan)
     assert out == {"src/a.py", "src/b.py", "src/c.py"}
-
-
-def test_parse_files_folder_plan(tmp_path):
-    from fno.graph.collision import parse_files_to_modify
-
-    folder = _write_folder_plan(
-        tmp_path / "plan",
-        {
-            "build": ["src/x.py", "src/y.py"],
-            "wire": ["src/cli.py"],
-            "test": ["tests/test_x.py", "tests/test_y.py"],
-        },
-    )
-    out = parse_files_to_modify(folder)
-    assert out == {
-        "src/x.py",
-        "src/y.py",
-        "src/cli.py",
-        "tests/test_x.py",
-        "tests/test_y.py",
-    }
 
 
 def test_parse_strips_parentheticals_and_line_suffixes(tmp_path):

@@ -1,50 +1,36 @@
 #!/usr/bin/env bash
 # Test suite for validate-plan.sh
-# TDD: Run this BEFORE implementing validate-plan.sh to get RED state
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VALIDATE="$SCRIPT_DIR/validate-plan.sh"
+VALIDATE="$SCRIPT_DIR/../scripts/validate-plan.sh"
 PASS=0
 FAIL=0
 
 pass() { echo "  PASS: $*"; ((PASS++)) || true; }
 fail() { echo "  FAIL: $*"; ((FAIL++)) || true; }
 
-# Create temp plan dirs
+# Create temp plan files
 TMPDIR_BASE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
 
-# --- AC1: Validates 00-INDEX.md exists and phase files exist ---
+# --- AC1: Structure checks ---
 echo "--- AC1: Structure Checks ---"
 
-# Test: missing 00-INDEX.md exits 1
-PLAN_EMPTY="$TMPDIR_BASE/empty"
-mkdir -p "$PLAN_EMPTY"
-if bash "$VALIDATE" "$PLAN_EMPTY" 2>/dev/null; then
-    fail "AC1: Should exit 1 when 00-INDEX.md missing"
+# Test: missing plan file exits 1
+PLAN_MISSING="$TMPDIR_BASE/nope.md"
+if bash "$VALIDATE" "$PLAN_MISSING" 2>/dev/null; then
+    fail "AC1: Should exit 1 when plan file missing"
 else
-    pass "AC1: Exits 1 when 00-INDEX.md missing"
-fi
-
-# Test: 00-INDEX.md exists but no phase files exits 1
-PLAN_NO_PHASES="$TMPDIR_BASE/no_phases"
-mkdir -p "$PLAN_NO_PHASES"
-echo "execution_mode: sequential" > "$PLAN_NO_PHASES/00-INDEX.md"
-if bash "$VALIDATE" "$PLAN_NO_PHASES" 2>/dev/null; then
-    fail "AC1: Should exit 1 when no phase files"
-else
-    pass "AC1: Exits 1 when no phase files found"
+    pass "AC1: Exits 1 when plan file missing"
 fi
 
 # Test: valid minimal plan exits 0
-PLAN_VALID="$TMPDIR_BASE/valid"
-mkdir -p "$PLAN_VALID"
-cat > "$PLAN_VALID/00-INDEX.md" <<'EOF'
+PLAN_VALID="$TMPDIR_BASE/valid.md"
+cat > "$PLAN_VALID" <<'EOF'
 execution_mode: sequential
-EOF
-cat > "$PLAN_VALID/01-phase.md" <<'EOF'
+
 ### Task 1.1
 Files: src/foo.ts
 Acceptance Criteria: AC1
@@ -61,10 +47,10 @@ fi
 echo ""
 echo "--- AC2: Task Completeness ---"
 
-PLAN_WARN="$TMPDIR_BASE/warn"
-mkdir -p "$PLAN_WARN"
-echo "execution_mode: sequential" > "$PLAN_WARN/00-INDEX.md"
-cat > "$PLAN_WARN/01-phase.md" <<'EOF'
+PLAN_WARN="$TMPDIR_BASE/warn.md"
+cat > "$PLAN_WARN" <<'EOF'
+execution_mode: sequential
+
 ### Task 1.1
 Just a task with no sections
 EOF
@@ -93,9 +79,8 @@ echo ""
 echo "--- AC6: Critical Path Trace (Semantic Checks) ---"
 
 # Test: feature scope with complete critical path → PASS
-PLAN_FEATURE_OK="$TMPDIR_BASE/feature_ok"
-mkdir -p "$PLAN_FEATURE_OK"
-cat > "$PLAN_FEATURE_OK/00-INDEX.md" <<'HEREDOC'
+PLAN_FEATURE_OK="$TMPDIR_BASE/feature_ok.md"
+cat > "$PLAN_FEATURE_OK" <<'HEREDOC'
 execution_mode: sequential
 
 ## Critical Path Trace
@@ -108,8 +93,7 @@ User clicks "Create" → ✅ CreateForm → 🔨 API POST /items [Task 1.1] → 
 ```yaml
 scope: feature
 ```
-HEREDOC
-cat > "$PLAN_FEATURE_OK/01-phase.md" <<'HEREDOC'
+
 ### Task 1.1
 Acceptance Criteria: AC1
 Steps:
@@ -129,9 +113,8 @@ else
 fi
 
 # Test: feature scope with unresolved stubs → ERROR (exit 1)
-PLAN_FEATURE_STUB="$TMPDIR_BASE/feature_stub"
-mkdir -p "$PLAN_FEATURE_STUB"
-cat > "$PLAN_FEATURE_STUB/00-INDEX.md" <<'HEREDOC'
+PLAN_FEATURE_STUB="$TMPDIR_BASE/feature_stub.md"
+cat > "$PLAN_FEATURE_STUB" <<'HEREDOC'
 execution_mode: sequential
 
 ## Critical Path Trace
@@ -144,8 +127,7 @@ User clicks "Create" → ⚠️ STUB PlaceholderService → ❌ NOT BUILT RealEn
 ```yaml
 scope: feature
 ```
-HEREDOC
-cat > "$PLAN_FEATURE_STUB/01-phase.md" <<'HEREDOC'
+
 ### Task 1.1
 Acceptance Criteria: AC1
 Steps:
@@ -164,9 +146,8 @@ else
 fi
 
 # Test: scaffolding scope with stubs → WARN only (exit 0)
-PLAN_SCAFFOLD_STUB="$TMPDIR_BASE/scaffold_stub"
-mkdir -p "$PLAN_SCAFFOLD_STUB"
-cat > "$PLAN_SCAFFOLD_STUB/00-INDEX.md" <<'HEREDOC'
+PLAN_SCAFFOLD_STUB="$TMPDIR_BASE/scaffold_stub.md"
+cat > "$PLAN_SCAFFOLD_STUB" <<'HEREDOC'
 execution_mode: sequential
 
 ## Critical Path Trace
@@ -179,8 +160,7 @@ Journey: Set up database schema
 ```yaml
 scope: scaffolding
 ```
-HEREDOC
-cat > "$PLAN_SCAFFOLD_STUB/01-phase.md" <<'HEREDOC'
+
 ### Task 1.1
 Acceptance Criteria: AC1
 Steps:
@@ -200,9 +180,8 @@ else
 fi
 
 # Test: poc scope with stubs → WARN only (exit 0)
-PLAN_POC_STUB="$TMPDIR_BASE/poc_stub"
-mkdir -p "$PLAN_POC_STUB"
-cat > "$PLAN_POC_STUB/00-INDEX.md" <<'HEREDOC'
+PLAN_POC_STUB="$TMPDIR_BASE/poc_stub.md"
+cat > "$PLAN_POC_STUB" <<'HEREDOC'
 execution_mode: sequential
 
 ## Critical Path Trace
@@ -216,8 +195,7 @@ Journey: Demo the concept
 ```yaml
 scope: poc
 ```
-HEREDOC
-cat > "$PLAN_POC_STUB/01-phase.md" <<'HEREDOC'
+
 ### Task 1.1
 Acceptance Criteria: AC1
 Steps:
@@ -237,12 +215,10 @@ else
 fi
 
 # Test: legacy plan without trace → WARN (exit 0)
-PLAN_LEGACY="$TMPDIR_BASE/legacy"
-mkdir -p "$PLAN_LEGACY"
-cat > "$PLAN_LEGACY/00-INDEX.md" <<'HEREDOC'
+PLAN_LEGACY="$TMPDIR_BASE/legacy.md"
+cat > "$PLAN_LEGACY" <<'HEREDOC'
 execution_mode: sequential
-HEREDOC
-cat > "$PLAN_LEGACY/01-phase.md" <<'HEREDOC'
+
 ### Task 1.1
 Acceptance Criteria: AC1
 Steps:
@@ -262,9 +238,8 @@ else
 fi
 
 # Test: new plan with scope but no trace → ERROR (exit 1)
-PLAN_SCOPE_NO_TRACE="$TMPDIR_BASE/scope_no_trace"
-mkdir -p "$PLAN_SCOPE_NO_TRACE"
-cat > "$PLAN_SCOPE_NO_TRACE/00-INDEX.md" <<'HEREDOC'
+PLAN_SCOPE_NO_TRACE="$TMPDIR_BASE/scope_no_trace.md"
+cat > "$PLAN_SCOPE_NO_TRACE" <<'HEREDOC'
 execution_mode: sequential
 
 ## Scope Classification
@@ -272,8 +247,7 @@ execution_mode: sequential
 ```yaml
 scope: feature
 ```
-HEREDOC
-cat > "$PLAN_SCOPE_NO_TRACE/01-phase.md" <<'HEREDOC'
+
 ### Task 1.1
 Acceptance Criteria: AC1
 Steps:
@@ -289,6 +263,38 @@ if echo "$OUTPUT" | grep -q "ERROR.*missing Critical Path Trace"; then
     pass "AC6e: Reports ERROR for scope without trace"
 else
     fail "AC6e: Should report ERROR for scope without trace"
+fi
+
+# Test: Critical Path Trace present but NO Scope Classification section at all
+# (gemini-code-assist PR #257 finding). Under `set -eo pipefail`, the SCOPE=
+# command substitution's grep finds no match and exits 1; without `|| true`
+# on that pipeline the whole script aborted here instead of falling back to
+# the "unknown" scope warning path.
+PLAN_TRACE_NO_SCOPE="$TMPDIR_BASE/trace_no_scope.md"
+cat > "$PLAN_TRACE_NO_SCOPE" <<'HEREDOC'
+execution_mode: sequential
+
+## Critical Path Trace
+
+Journey: User creates item
+User clicks "Create" → ✅ CreateForm → ✅ Database
+
+### Task 1.1
+Acceptance Criteria: AC1
+Steps:
+Step 1: Do thing
+HEREDOC
+OUTPUT=$(bash "$VALIDATE" "$PLAN_TRACE_NO_SCOPE" 2>&1)
+EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]]; then
+    pass "AC6g: Trace present, no Scope Classification section - degrades instead of crashing"
+else
+    fail "AC6g: Should not abort (pipefail bug) when scope classification is absent (got exit $EXIT_CODE)"
+fi
+if echo "$OUTPUT" | grep -q "No scope classification found"; then
+    pass "AC6g: Reports WARN for missing scope classification"
+else
+    fail "AC6g: Should warn about missing scope classification"
 fi
 
 # --- Summary ---

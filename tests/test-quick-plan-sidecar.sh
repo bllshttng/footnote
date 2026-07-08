@@ -81,36 +81,6 @@ bash "$REPO_ROOT/tests/helpers/drive-target-archive.sh" .fno/target-state.md
 [[ -d plans/a.md.artifacts/scratchpad-archive ]] && pass "sidecar-a scratchpad-archive survived plan B's run" \
     || fail "sidecar-a scratchpad-archive was clobbered by plan B"
 
-# Folder-plan branch: plan_path pointing at a directory should put artifacts
-# INSIDE that directory, not in a `{dir}.artifacts/` sibling. .completed/ must
-# NOT be created there either.
-mkdir -p plans/folder-plan
-cat > plans/folder-plan/00-INDEX.md <<EOF
-# Folder plan
-EOF
-mkdir -p .fno/scratchpad
-printf 'scratchpad content for folder-plan\n' > .fno/scratchpad/notes.md
-cat > .fno/target-state.md <<EOF
----
-status: COMPLETE
-input_type: plan
-plan_path: plans/folder-plan
-input: plans/folder-plan
-created_at: 2026-04-20T00:00:00Z
-iteration: 1
----
-
-target-state-for-folder-plan
-EOF
-bash "$REPO_ROOT/tests/helpers/drive-target-archive.sh" .fno/target-state.md
-
-[[ ! -d plans/folder-plan/.completed ]] && pass "folder plan: no .completed/ dump inside folder" \
-    || fail "folder plan: .completed/ still being created inside folder (expected absent)"
-[[ -d plans/folder-plan/scratchpad-archive ]] && pass "folder plan: scratchpad-archive inside folder" \
-    || fail "folder plan: scratchpad-archive missing inside folder (expected present)"
-[[ ! -d plans/folder-plan.artifacts ]] && pass "folder plan: no sidecar sibling created" \
-    || fail "folder plan: unexpected sidecar at plans/folder-plan.artifacts/"
-
 echo
 echo "================================"
 echo "Results: $PASS passed, $FAIL failed"

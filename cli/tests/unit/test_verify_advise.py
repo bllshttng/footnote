@@ -32,16 +32,6 @@ def test_read_plan_acs_line_fallback(tmp_path: Path) -> None:
     assert acs is not None and "AC3-EDGE" in acs
 
 
-def test_read_plan_acs_dir_resolves_index(tmp_path: Path) -> None:
-    plan_dir = tmp_path / "plan"
-    plan_dir.mkdir()
-    (plan_dir / "00-INDEX.md").write_text(
-        "## Acceptance Criteria\n- AC1: indexed\n", encoding="utf-8"
-    )
-    acs = va.read_plan_acs(plan_dir)
-    assert acs is not None and "indexed" in acs
-
-
 def test_read_plan_acs_missing_or_bare(tmp_path: Path) -> None:
     assert va.read_plan_acs(tmp_path / "nope.md") is None
     bare = tmp_path / "bare.md"

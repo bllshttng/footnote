@@ -689,13 +689,7 @@ fn derive_expected_url_count(cwd: &Path, plan_path: &str, cross_project: bool) -
     if !cross_project {
         return None;
     }
-    // A folder plan stores the projects map in 00-INDEX.md; a file plan in itself.
-    let base = cwd.join(plan_path);
-    let doc = if base.is_dir() {
-        base.join("00-INDEX.md")
-    } else {
-        base
-    };
+    let doc = cwd.join(plan_path);
     let content = fs::read_to_string(&doc).ok()?;
 
     let mut in_fm = false;
@@ -2025,16 +2019,6 @@ mod tests {
         let nomap = dir.join("nomap.md");
         fs::write(&nomap, "---\nstatus: ready\n---\n# plan\n").unwrap();
         assert_eq!(derive_expected_url_count(&dir, "nomap.md", true), None);
-
-        // Folder plan: projects map lives in 00-INDEX.md.
-        let folder = dir.join("folderplan");
-        fs::create_dir_all(&folder).unwrap();
-        fs::write(
-            folder.join("00-INDEX.md"),
-            "---\nprojects:\n  one:\n    repo: o\n  two:\n    repo: t\n  three:\n    repo: h\n---\n",
-        )
-        .unwrap();
-        assert_eq!(derive_expected_url_count(&dir, "folderplan", true), Some(3));
 
         let _ = fs::remove_dir_all(&dir);
     }

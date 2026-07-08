@@ -3,19 +3,18 @@
 
 In-package module (formerly scripts/lib/stamp-plan.py). Invoked by target and
 megawalk after a PR ships. Updates the plan's YAML frontmatter with shipping
-metadata and writes a human-readable COMPLETION.md at the plan folder root.
+metadata.
 
 Usage:
     python3 -m fno.plan._stamp stamp \\
-        --plan-path <folder-or-file> \\
+        --plan-path <file> \\
         --session-id <id> \\
         --url <pr-url>              # may repeat
         [--expected-url-count N]   # default 1; used by cross-project graduation
-        [--completion-note "text"] # written to COMPLETION.md
         [--dry-run]
 
     python3 -m fno.plan._stamp graduate \\
-        --plan-path <folder-or-file> \\
+        --plan-path <file> \\
         [--dry-run]
 
 Frontmatter is parsed and rewritten with a minimal line-based parser that
@@ -285,14 +284,7 @@ def read_plan_file(plan_path: Path) -> tuple[Path, dict[str, Any], str]:
             if stripped.exists():
                 plan_path = stripped
 
-    if plan_path.is_dir():
-        idx = plan_path / "00-INDEX.md"
-        if not idx.exists():
-            raise FileNotFoundError(
-                f"Folder plan has no 00-INDEX.md: {plan_path}"
-            )
-        target = idx
-    elif plan_path.is_file():
+    if plan_path.is_file():
         target = plan_path
     else:
         raise FileNotFoundError(f"Plan path does not exist: {plan_path}")
@@ -373,7 +365,6 @@ def cmd_stamp(args: argparse.Namespace) -> int:
         return 2
 
     plan_path = Path(args.plan_path).expanduser().resolve()
-    is_folder_plan = plan_path.is_dir()
 
     try:
         target, fields, rest = read_plan_file(plan_path)
@@ -438,23 +429,6 @@ def cmd_stamp(args: argparse.Namespace) -> int:
 
     # Write the updated plan file
     write_plan_file(target, fields, rest, dry_run=args.dry_run)
-
-    # Write COMPLETION.md for folder plans only
-    if is_folder_plan:
-        # Resolve project artifacts dir: assume cwd is the project root
-        # (consistent with how stamp-plan.py is invoked from target). When
-        # the artifacts dir is missing, aggregate_deferred_findings is a
-        # no-op, so passing it unconditionally is safe.
-        artifacts_dir = Path.cwd() / ".fno" / "artifacts"
-        _write_completion_md(
-            plan_dir=plan_path,
-            shipped_at=fields["shipped_at"],
-            session_id=session_id,
-            urls=new_urls,
-            note=args.completion_note,
-            dry_run=args.dry_run,
-            artifacts_dir=artifacts_dir,
-        )
 
     return 0
 
@@ -540,119 +514,6 @@ def cmd_set_expected(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# COMPLETION.md writer
-# ---------------------------------------------------------------------------
-
-def aggregate_deferred_findings(artifacts_dir: Path) -> str:
-    """Walk gate artifacts and collect deferred_findings from done-with-concerns.
-
-    Returns a markdown section listing each artifact's findings, or an empty
-    string when nothing is deferred. The aggregator is invoked at ship time
-    by _write_completion_md so concerns recorded by sigma's two-bit
-    artifact (phase 04: approved:false + deferred_findings) surface to
-    humans rather than rotting in .fno/artifacts/.
-
-    The frontmatter parser here is intentionally minimal (line-based, no
-    YAML dependency) - matches the stdlib-only convention enforced
-    elsewhere in stamp-plan.py.
-    """
-    if not artifacts_dir.exists() or not artifacts_dir.is_dir():
-        return ""
-
-    sections: list[str] = []
-    for artifact_path in sorted(artifacts_dir.glob("*.md")):
-        try:
-            content = artifact_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        if not content.startswith("---"):
-            continue
-        try:
-            fm, _body_with_close, _body = parse_frontmatter(content)
-        except Exception:
-            continue
-
-        approved = fm.get("approved")
-        # Treat approved: true (or absent) as no concerns to surface.
-        if str(approved).lower() != "false":
-            continue
-        findings_raw = fm.get("deferred_findings")
-        if not findings_raw:
-            continue
-
-        # findings_raw may be a list (parsed inline-list) or a JSON-ish string.
-        # We just dump it verbatim into the output - the artifact author
-        # owns its shape, and downstream readers can parse it back if needed.
-        phase = fm.get("phase", artifact_path.stem)
-        sid = fm.get("session_id", "unknown")
-        sections.append(f"### {artifact_path.stem} (phase: {phase}, session: {sid})")
-        if isinstance(findings_raw, list):
-            for entry in findings_raw:
-                sections.append(f"- {entry}")
-        else:
-            sections.append(f"- {findings_raw}")
-        sections.append("")
-
-    if not sections:
-        return ""
-    return "\n## Deferred Findings (from done-with-concerns verdicts)\n\n" + "\n".join(sections)
-
-
-def _write_completion_md(
-    plan_dir: Path,
-    shipped_at: str,
-    session_id: str,
-    urls: list[str],
-    note: str | None,
-    dry_run: bool = False,
-    artifacts_dir: Path | None = None,
-) -> None:
-    """Write or append a ship section to COMPLETION.md at plan_dir root.
-
-    When artifacts_dir is provided, deferred_findings from gate artifacts
-    are aggregated into a separate section so concerns recorded under
-    done-with-concerns verdicts (phase 04 two-bit gate model) surface
-    here at ship time rather than rotting in .fno/artifacts/.
-    """
-    comp_path = plan_dir / "COMPLETION.md"
-
-    if comp_path.exists():
-        existing = comp_path.read_text(encoding="utf-8")
-        # Count existing Ship N headers to determine next number
-        ship_count = len(re.findall(r"^## Ship \d+", existing, re.MULTILINE))
-        next_ship = ship_count + 1
-    else:
-        existing = "# Completion Notes\n"
-        next_ship = 1
-
-    lines = [
-        f"\n## Ship {next_ship} - {shipped_at}",
-        f"Session: `{session_id}`",
-    ]
-    for url in urls:
-        lines.append(f"URL: {url}")
-
-    if note:
-        lines.append("")
-        lines.append(note)
-
-    section = "\n".join(lines) + "\n"
-
-    deferred_section = ""
-    if artifacts_dir is not None:
-        deferred_section = aggregate_deferred_findings(artifacts_dir)
-
-    new_content = existing + section + deferred_section
-
-    if dry_run:
-        print(f"[dry-run] Would write {comp_path}:")
-        print(new_content)
-        return
-
-    _atomic_write(comp_path, new_content)
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -665,7 +526,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # stamp subcommand
     stamp_p = sub.add_parser("stamp", help="Stamp a plan as shipped.")
-    stamp_p.add_argument("--plan-path", required=True, help="Path to plan folder or file.")
+    stamp_p.add_argument("--plan-path", required=True, help="Path to plan file.")
     stamp_p.add_argument("--session-id", required=True, help="Claude session ID.")
     stamp_p.add_argument(
         "--url",
@@ -680,11 +541,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of URLs expected before graduation (default: 1).",
     )
     stamp_p.add_argument(
-        "--completion-note",
-        default=None,
-        help="Prose note written verbatim to COMPLETION.md.",
-    )
-    stamp_p.add_argument(
         "--dry-run",
         action="store_true",
         help="Print what would change without writing.",
@@ -694,7 +550,7 @@ def build_parser() -> argparse.ArgumentParser:
     grad_p = sub.add_parser(
         "graduate", help="Graduate a shipped plan to done when URL count is met."
     )
-    grad_p.add_argument("--plan-path", required=True, help="Path to plan folder or file.")
+    grad_p.add_argument("--plan-path", required=True, help="Path to plan file.")
     grad_p.add_argument(
         "--dry-run",
         action="store_true",
@@ -706,7 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
         "set-expected",
         help="Authoritatively set expected_url_count (count-only; used by decompose).",
     )
-    se_p.add_argument("--plan-path", required=True, help="Path to plan folder or file.")
+    se_p.add_argument("--plan-path", required=True, help="Path to plan file.")
     se_p.add_argument(
         "--count", required=True, type=int, help="Expected URL count (must be >= 1)."
     )

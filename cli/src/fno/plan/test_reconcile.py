@@ -75,19 +75,6 @@ def test_absolute_path_does_not_bypass_repo_root(tmp_path: Path) -> None:
     assert delta.stale == 1 and delta.present == 0
 
 
-def test_folder_plan_reads_index(tmp_path: Path) -> None:
-    # A folder plan (dir + 00-INDEX.md) must reconcile its index, not degrade
-    # to "Is a directory".
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "live.py").write_text("x = 1\n", encoding="utf-8")
-    folder = tmp_path / "myplan"
-    folder.mkdir()
-    (folder / "00-INDEX.md").write_text("touches `src/live.py`\n", encoding="utf-8")
-    delta = reconcile_plan(folder, tmp_path)
-    assert delta.note is None
-    assert delta.present == 1
-
-
 def test_self_check_runs() -> None:
     # The module ships a runnable assert-based self-check.
     from fno.plan import reconcile

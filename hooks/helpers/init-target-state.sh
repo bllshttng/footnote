@@ -321,8 +321,6 @@ elif [[ -n "${INITIAL_PLAN_PATH:-}" ]]; then
   _plan_file="${INITIAL_PLAN_PATH%%#*}"
   if [[ -f "$_plan_file" ]]; then
     _plan_gates=$(sed -n 's/^gates:[[:space:]]*//p' "$_plan_file" 2>/dev/null | head -1 | tr -d '"' | tr -d "'" | xargs)
-  elif [[ -d "$_plan_file" && -f "$_plan_file/00-INDEX.md" ]]; then
-    _plan_gates=$(sed -n 's/^gates:[[:space:]]*//p' "$_plan_file/00-INDEX.md" 2>/dev/null | head -1 | tr -d '"' | tr -d "'" | xargs)
   fi
   if [[ "${_plan_gates:-}" == "advisory" ]]; then
     _advisory="true"
