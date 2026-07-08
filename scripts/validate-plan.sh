@@ -304,14 +304,16 @@ validate_kill_criteria_block() {
             gsub(/^["\x27]|["\x27]$/, "", s)
             return s
         }
-        # Any new list item starts with "  - " (YAML flow)
-        /^[[:space:]]+-[[:space:]]/ {
+        # A new list item marker "- " - accept it indented ("  - ", hand-written)
+        # or at column 0 ("- ", the PyYAML default block-sequence dump from
+        # mutate_doc.py). Both are valid YAML under kill_criteria.
+        /^[[:space:]]*-[[:space:]]/ {
             flush_entry()
             idx++
             in_entry=1
             # Strip the leading "- " marker so the remainder looks like a
             # normal "key: value" line and falls through to the key handlers.
-            sub(/^[[:space:]]+-[[:space:]]+/, "  ", $0)
+            sub(/^[[:space:]]*-[[:space:]]+/, "  ", $0)
         }
         in_entry && /^[[:space:]]+name:[[:space:]]*/ {
             line=$0

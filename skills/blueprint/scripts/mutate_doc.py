@@ -66,11 +66,20 @@ _BLUEPRINT_INPUT_STATUSES = frozenset({"design", "ready"})
 # Statuses where the plan is past blueprint phase (cannot mutate even with --rewrite)
 _PAST_BLUEPRINT_STATUSES = frozenset({"in_progress", "reviewing", "shipping", "shipped"})
 
-# Default kill_criteria entries
+# Default kill_criteria entries. Canonical {name, predicate, reason} shape - the
+# predicate engine and validate-plan.sh both read these fields; the old flat
+# one-key maps ({iteration_ceiling: 20}) were invisible to both.
 _DEFAULT_KILL_CRITERIA = [
-    {"iteration_ceiling": 20},
-    {"stuck_test": "no new commits in 3 consecutive iterations"},
-    {"files_outside": []},
+    {
+        "name": "iteration_ceiling",
+        "predicate": "iteration > 15",
+        "reason": "Too many iterations - planning likely wrong",
+    },
+    {
+        "name": "stuck_test",
+        "predicate": "same_test_failing_for >= 3",
+        "reason": "Same test failing 3+ iterations - root cause unclear",
+    },
 ]
 
 
