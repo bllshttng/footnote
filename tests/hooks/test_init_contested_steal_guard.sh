@@ -53,7 +53,7 @@ make_repo() {
     git init -q
     git config user.email t@t && git config user.name t
     mkdir -p .fno claims-root
-    printf '# isolated\n' > .fno/settings.yaml
+    printf '# isolated\n' > .fno/config.toml
     printf 'work\n' > work.txt
     git add work.txt && git commit -qm init
     # A valid prior-session manifest (NO terminal status so the reap decision

@@ -45,8 +45,8 @@ make_repo() {
   _dir="$(mktemp -d -t init-claim.XXXXXX)" || fail "mktemp failed"
   eval "${_varname}=\"\${_dir}\""
   (cd "$_dir" && git init -q && mkdir -p .fno home/.fno) || fail "repo setup failed in $_dir"
-  printf '# isolated\n' > "${_dir}/.fno/settings.yaml"
-  printf '# isolated global\n' > "${_dir}/home/.fno/settings.yaml"
+  printf '# isolated\n' > "${_dir}/.fno/config.toml"
+  printf '# isolated global\n' > "${_dir}/home/.fno/config.toml"
 }
 
 graph_node_id_of() {  # $1 = state file

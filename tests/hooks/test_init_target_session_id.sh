@@ -43,9 +43,9 @@ make_repo() {
   _dir="$(mktemp -d -t init-session-id.XXXXXX)" || fail "mktemp failed"
   eval "${_varname}=\"\${_dir}\""
   (cd "$_dir" && git init -q && mkdir -p .fno) || fail "repo setup failed in $_dir"
-  printf '# isolated\n' > "${_dir}/.fno/settings.yaml"
+  printf '# isolated\n' > "${_dir}/.fno/config.toml"
   mkdir -p "${_dir}/home/.fno"
-  printf '# isolated global\n' > "${_dir}/home/.fno/settings.yaml"
+  printf '# isolated global\n' > "${_dir}/home/.fno/config.toml"
 }
 
 # ── (a) TARGET_SESSION_ID preset is written verbatim ─────────────────

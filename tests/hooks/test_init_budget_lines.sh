@@ -42,16 +42,16 @@ make_repo() {
   eval "${_varname}=\"\${_dir}\""
   (cd "$_dir" && git init -q && mkdir -p .fno) || fail "repo setup failed in $_dir"
   if [[ -n "$_settings" ]]; then
-    printf '%s\n' "$_settings" > "${_dir}/.fno/settings.yaml"
+    printf '%s\n' "$_settings" > "${_dir}/.fno/config.toml"
   else
-    printf '# isolated - no budget config\n' > "${_dir}/.fno/settings.yaml"
+    printf '# isolated - no budget config\n' > "${_dir}/.fno/config.toml"
   fi
-  # Isolated home dir: no ~/.fno/settings.yaml budget leakage
+  # Isolated home dir: no ~/.fno/config.toml budget leakage
   mkdir -p "${_dir}/home" || fail "mkdir home failed in $_dir"
 }
 
 # HOME is the effective isolation: init-target-state.sh sets
-# GLOBAL_SETTINGS="${HOME}/.fno/settings.yaml" unconditionally (line 126),
+# GLOBAL_SETTINGS="${HOME}/.fno/config.toml" unconditionally (line 126),
 # clobbering any exported GLOBAL_SETTINGS. Each bash "$INIT" invocation sets
 # HOME to the per-scenario home dir so init reads the isolated blank settings.
 # The GLOBAL_SETTINGS exports below are retained for documentation; they are
@@ -66,21 +66,19 @@ trap 'rm -rf "${_ALL_TMPS[@]}"' EXIT
 log "AC1-HP: both caps configured => two complete budget lines + comment on own line"
 
 _BOTH_SETTINGS=$(cat << 'YAML'
-config:
-  budget:
-    attended:
-      wall_clock_cap_minutes: 90
-      cost_cap_usd: 42
-    unattended:
-      wall_clock_cap_minutes: 90
-      cost_cap_usd: 42
+[budget.attended]
+wall_clock_cap_minutes = 90
+cost_cap_usd = 42
+[budget.unattended]
+wall_clock_cap_minutes = 90
+cost_cap_usd = 42
 YAML
 )
 
 make_repo TMP_HP "$_BOTH_SETTINGS"
 _ALL_TMPS+=("$TMP_HP")
 # write blank global settings
-_BLANK_HP="${TMP_HP}/home/.fno/settings.yaml"
+_BLANK_HP="${TMP_HP}/home/.fno/config.toml"
 mkdir -p "${TMP_HP}/home/.fno"
 printf '# isolated\n' > "$_BLANK_HP"
 
@@ -137,7 +135,7 @@ log "AC1-ERR: no caps configured => no budget_* keys, comment still on own line"
 make_repo TMP_ERR ""
 _ALL_TMPS+=("$TMP_ERR")
 mkdir -p "${TMP_ERR}/home/.fno"
-_BLANK_ERR="${TMP_ERR}/home/.fno/settings.yaml"
+_BLANK_ERR="${TMP_ERR}/home/.fno/config.toml"
 printf '# isolated\n' > "$_BLANK_ERR"
 
 (cd "$TMP_ERR" && \
@@ -181,19 +179,17 @@ pass "AC1-ERR: YAML parses correctly with no budget keys"
 log "AC1-EDGE-A: only wall_clock_cap_minutes set => wall-clock line present, no cost line"
 
 _WALL_ONLY_SETTINGS=$(cat << 'YAML'
-config:
-  budget:
-    attended:
-      wall_clock_cap_minutes: 90
-    unattended:
-      wall_clock_cap_minutes: 90
+[budget.attended]
+wall_clock_cap_minutes = 90
+[budget.unattended]
+wall_clock_cap_minutes = 90
 YAML
 )
 
 make_repo TMP_WALL "$_WALL_ONLY_SETTINGS"
 _ALL_TMPS+=("$TMP_WALL")
 mkdir -p "${TMP_WALL}/home/.fno"
-_BLANK_WALL="${TMP_WALL}/home/.fno/settings.yaml"
+_BLANK_WALL="${TMP_WALL}/home/.fno/config.toml"
 printf '# isolated\n' > "$_BLANK_WALL"
 
 (cd "$TMP_WALL" && \
@@ -223,19 +219,17 @@ pass "AC1-EDGE-A: comment on its own line"
 log "AC1-EDGE-B: only cost_cap_usd set => cost line present, no wall-clock line"
 
 _COST_ONLY_SETTINGS=$(cat << 'YAML'
-config:
-  budget:
-    attended:
-      cost_cap_usd: 42
-    unattended:
-      cost_cap_usd: 42
+[budget.attended]
+cost_cap_usd = 42
+[budget.unattended]
+cost_cap_usd = 42
 YAML
 )
 
 make_repo TMP_COST "$_COST_ONLY_SETTINGS"
 _ALL_TMPS+=("$TMP_COST")
 mkdir -p "${TMP_COST}/home/.fno"
-_BLANK_COST="${TMP_COST}/home/.fno/settings.yaml"
+_BLANK_COST="${TMP_COST}/home/.fno/config.toml"
 printf '# isolated\n' > "$_BLANK_COST"
 
 (cd "$TMP_COST" && \

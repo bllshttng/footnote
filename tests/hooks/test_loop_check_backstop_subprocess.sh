@@ -86,8 +86,8 @@ EVENTS_FILE="${TMP_DIR}/.fno/events.jsonl"
 
 mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
 
-# Isolated settings so the binary never reads the real $HOME/.fno/settings.yaml
-printf '# isolated\n' > "${TMP_DIR}/.fno/settings.yaml"
+# Isolated settings so the binary never reads the real $HOME/.fno/config.toml
+printf '# isolated\n' > "${TMP_DIR}/.fno/config.toml"
 
 MANIFEST="${TMP_DIR}/state.md"
 TRANSCRIPT="${TMP_DIR}/transcript.jsonl"

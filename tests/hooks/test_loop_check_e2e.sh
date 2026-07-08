@@ -147,7 +147,7 @@ log "Case A: green path (real binary + shim)"
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
 
     # Write an isolated settings.yaml so the binary doesn't read $HOME
-    printf '# isolated\n' > "${TMP_DIR}/.fno/settings.yaml"
+    printf '# isolated\n' > "${TMP_DIR}/.fno/config.toml"
 
     # Init a real git repo on a feature branch so the shim's git call works
     init_git_repo "$TMP_DIR"
@@ -243,7 +243,7 @@ log "Case B: block path (no PR, no promise)"
     STUB_BIN="${TMP_DIR}/stubs"
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
 
-    printf '# isolated\n' > "${TMP_DIR}/.fno/settings.yaml"
+    printf '# isolated\n' > "${TMP_DIR}/.fno/config.toml"
     init_git_repo "$TMP_DIR"
 
     UUID="bbbb-e2e-case-b"
@@ -336,7 +336,7 @@ log "Case C: budget coherence (init format -> verb reads -> Budget trip)"
     # Write settings.yaml in the EXACT nested format that init reads via config.sh
     # and that loopcheck.rs parse_settings() consumes (indent==6 under
     # config.budget.unattended). This is the coherence assertion.
-    cat > "${TMP_DIR}/.fno/settings.yaml" <<'YAML'
+    cat > "${TMP_DIR}/.fno/config.toml" <<'YAML'
 config:
   budget:
     attended:

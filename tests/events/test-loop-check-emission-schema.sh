@@ -167,7 +167,7 @@ log "S1: block-no-PR emission"
     STUB_BIN="${TMP_DIR}/stubs"
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
 
-    printf '# isolated\n' > "${TMP_DIR}/.fno/settings.yaml"
+    printf '# isolated\n' > "${TMP_DIR}/.fno/config.toml"
 
     MANIFEST="${TMP_DIR}/state.md"
     write_manifest "$MANIFEST" "schema-sess-s1" "true"
@@ -206,7 +206,7 @@ log "S2: termination-DonePRGreen emission"
     STUB_BIN="${TMP_DIR}/stubs"
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
 
-    printf '# isolated\n' > "${TMP_DIR}/.fno/settings.yaml"
+    printf '# isolated\n' > "${TMP_DIR}/.fno/config.toml"
 
     MANIFEST="${TMP_DIR}/state.md"
     write_manifest "$MANIFEST" "schema-sess-s2" "true"
@@ -244,7 +244,7 @@ log "S3: advisory-mode (gh absent)"
     HOME_DIR="${TMP_DIR}/home"
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno"
 
-    printf '# isolated\n' > "${TMP_DIR}/.fno/settings.yaml"
+    printf '# isolated\n' > "${TMP_DIR}/.fno/config.toml"
 
     MANIFEST="${TMP_DIR}/state.md"
     write_manifest "$MANIFEST" "schema-sess-s3" "true"
@@ -283,7 +283,7 @@ log "S4: legacy-manifest (status: COMPLETE)"
     STUB_BIN="${TMP_DIR}/stubs"
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
 
-    printf '# isolated\n' > "${TMP_DIR}/.fno/settings.yaml"
+    printf '# isolated\n' > "${TMP_DIR}/.fno/config.toml"
 
     MANIFEST="${TMP_DIR}/state.md"
     # Legacy manifest: has status: COMPLETE instead of attended field
