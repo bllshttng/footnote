@@ -930,11 +930,18 @@ def _dispatch_marker(canonical: Path, key: str) -> Path:
     return canonical / ".fno" / _POST_MERGE_DISPATCH_SUBDIR / key
 
 
+# Single-flight dispatch-lock TTL: covers the spawn round-trip with margin, so a
+# reconcile killed mid-spawn self-heals (the persistent marker is written only on
+# success, and the lock recovers on TTL expiry) instead of wedging the ritual.
+_POST_MERGE_DISPATCH_TTL_MS = 15 * 60 * 1000
+
+
 def dispatch_post_merge_ritual(
     pr_number: int,
     *,
     dedup_key: Optional[str] = None,
     auto_run: bool = False,
+    node_cwd: Optional[str] = None,
     canonical_root: Optional[Path] = None,
     spawn: Optional[Callable[[int, str], str]] = None,
 ) -> PostMergeDispatchResult:
@@ -942,41 +949,81 @@ def dispatch_post_merge_ritual(
 
     ``dedup_key`` is the merge SHA when known (reconcile threads it from
     ``mergeCommit.oid``); it falls back to ``pr-<n>`` for a reverse-mapped
-    record that has no SHA. ``auto_run`` gates the whole thing (opt-in). The
-    ``spawn`` seam is injected in tests so no real ``fno agents spawn`` fires.
+    record that has no SHA. ``auto_run`` gates the whole thing (opt-in).
+
+    ``node_cwd`` is the closed node's recorded root: the canonical of THAT repo
+    is resolved from it, so a full-graph reconcile run from project A that closes
+    a project-B node still dispatches into B (both the dedup marker and the
+    worker's ``--cwd`` target B's canonical, never A's). ``canonical_root``
+    overrides the resolution outright (tests). The ``spawn`` seam is injected in
+    tests so no real ``fno agents spawn`` fires.
+
+    Exactly-once at two layers, both under the target repo's canonical: a
+    persistent ``.fno/post-merge-dispatched/<key>`` marker (cross-session /
+    cross-trigger) written ONLY after a successful spawn, guarded by a TTL
+    single-flight claim (concurrent detections) that self-heals a crash.
     """
     if not auto_run:
         return PostMergeDispatchResult("disabled", pr_number)
 
     if canonical_root is None:
-        from fno.paths import resolve_canonical_repo_root
+        from fno.paths import (
+            resolve_canonical_repo_root,
+            resolve_canonical_worktree,
+        )
 
-        canonical_root = resolve_canonical_repo_root()
+        if node_cwd:
+            wt = resolve_canonical_worktree(cwd=Path(node_cwd))
+            canonical_root = Path(wt) if wt is not None else Path(node_cwd)
+        else:
+            canonical_root = resolve_canonical_repo_root()
     canonical = Path(canonical_root)
 
     key = re.sub(r"[^A-Za-z0-9._-]", "_", dedup_key or f"pr-{pr_number}")
     marker = _dispatch_marker(canonical, key)
-    marker.parent.mkdir(parents=True, exist_ok=True)
 
-    from fno.claims.io import atomic_create_exclusive, ClaimAlreadyHeld
-
-    try:
-        atomic_create_exclusive(marker, "")
-    except ClaimAlreadyHeld:
+    # Cross-session / cross-trigger dedup: a persisted marker means the ritual
+    # already ran for this merge SHA.
+    if marker.exists():
         return PostMergeDispatchResult("already-dispatched", pr_number)
 
-    if spawn is None:
-        spawn = _spawn_post_merge_worker
-    try:
-        short_id = spawn(pr_number, str(canonical))
-    except Exception as exc:  # noqa: BLE001 - non-fatal; allow a later retry
-        try:
-            marker.unlink()
-        except OSError:
-            pass
-        return PostMergeDispatchResult("spawn-failed", pr_number, detail=str(exc)[:200])
+    from fno import claims
 
-    return PostMergeDispatchResult("dispatched", pr_number, short_id=short_id)
+    lock_key = f"post-merge-ritual:{key}"
+    holder = f"reconcile-dispatch:{pr_number}"
+    try:
+        # Scope the claim to the target canonical (like the marker) so a
+        # concurrent detection in the same repo - via reconcile OR the pr_watch
+        # fast-follow - contends on the SAME lock.
+        claims.acquire_claim(
+            lock_key, holder, ttl_ms=_POST_MERGE_DISPATCH_TTL_MS,
+            reason="post-merge ritual dispatch", root=canonical,
+        )
+    except claims.ClaimHeldByOther:
+        return PostMergeDispatchResult("already-dispatched", pr_number)
+
+    try:
+        if marker.exists():  # re-check under the lock (double-checked)
+            return PostMergeDispatchResult("already-dispatched", pr_number)
+        if spawn is None:
+            spawn = _spawn_post_merge_worker
+        try:
+            short_id = spawn(pr_number, str(canonical))
+        except Exception as exc:  # noqa: BLE001 - non-fatal; allow a later retry
+            return PostMergeDispatchResult("spawn-failed", pr_number, detail=str(exc)[:200])
+        # Persist the cross-session marker ONLY after the spawn succeeds, so a
+        # crash before this point leaves no marker and the next reconcile retries.
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch(exist_ok=True)
+        except OSError:
+            pass  # best-effort; a missing marker only re-dispatches (idempotent ritual)
+        return PostMergeDispatchResult("dispatched", pr_number, short_id=short_id)
+    finally:
+        try:
+            claims.release_claim(lock_key, holder, root=canonical)
+        except Exception:
+            pass  # lock is TTL-bounded; a failed release recovers on its own
 
 
 def _spawn_post_merge_worker(pr_number: int, cwd: str) -> str:

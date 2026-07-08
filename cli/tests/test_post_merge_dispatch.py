@@ -108,6 +108,26 @@ def test_missing_sha_falls_back_to_pr_key(tmp_path):
 # --- task 2.3: location - dispatch marker lands under canonical ----------
 
 
+def test_node_cwd_resolves_target_canonical(tmp_path, monkeypatch):
+    """P1 regression: a full-graph reconcile closing a foreign-repo node must
+    resolve THAT repo's canonical from node_cwd, not the caller's cwd."""
+    import fno.paths as paths
+
+    target_canonical = tmp_path / "repoB"
+    target_canonical.mkdir()
+    monkeypatch.setattr(paths, "resolve_canonical_worktree", lambda cwd=None: target_canonical)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+    spawn = _Spawn()
+    res = dispatch_post_merge_ritual(
+        7, dedup_key="shaG", auto_run=True, node_cwd=str(tmp_path / "repoB-worktree"), spawn=spawn
+    )
+    assert res.outcome == "dispatched"
+    # marker + spawn cwd both land under the RESOLVED target canonical, not cwd
+    assert (target_canonical / ".fno" / "post-merge-dispatched" / "shaG").exists()
+    assert spawn.calls[0][1] == str(target_canonical)
+
+
 def test_marker_under_provided_canonical_not_cwd(tmp_path):
     """The dispatch always targets the canonical root it is given, never the
     caller's cwd (a worktree run must still mark the canonical)."""

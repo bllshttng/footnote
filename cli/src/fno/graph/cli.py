@@ -4596,14 +4596,18 @@ def cmd_reconcile(
             # per merge SHA, strictly non-fatal, and the posture is never silent.
             try:
                 _pm_auto = False
+                _pm_cfg_err: Optional[str] = None
                 if record.cwd:
                     try:
                         from fno.config import load_settings_for_repo
                         _pm_auto = bool(
                             load_settings_for_repo(Path(record.cwd)).post_merge.auto_run
                         )
-                    except Exception:
-                        _pm_auto = False  # fail open: unresolvable config -> no dispatch
+                    except Exception as _cfg_exc:  # noqa: BLE001
+                        # Fail open (no dispatch) but do NOT misreport a real
+                        # config-load error as "auto_run off" - an opted-in
+                        # operator would be pointed at the wrong cause.
+                        _pm_cfg_err = str(_cfg_exc)[:160]
                 # Echoes are guarded on `not json_out`: CliRunner (and the real
                 # --json consumer) folds stderr into stdout, so any prose here
                 # would corrupt the JSON payload (x-4d9d). The dispatch itself
@@ -4613,6 +4617,7 @@ def cmd_reconcile(
                     _pm = dispatch_post_merge_ritual(
                         record.pr_number,
                         dedup_key=record.merge_sha,
+                        node_cwd=record.cwd,
                         auto_run=True,
                     )
                     if not json_out:
@@ -4633,11 +4638,19 @@ def cmd_reconcile(
                                 err=True,
                             )
                 elif not json_out:
-                    typer.echo(
-                        f"post-merge: auto_run off; not dispatching ritual for PR "
-                        f"#{record.pr_number}",
-                        err=True,
-                    )
+                    if _pm_cfg_err is not None:
+                        typer.echo(
+                            f"post-merge: could not resolve config for "
+                            f"{record.cwd} ({_pm_cfg_err}); not dispatching ritual "
+                            f"for PR #{record.pr_number}",
+                            err=True,
+                        )
+                    else:
+                        typer.echo(
+                            f"post-merge: auto_run off; not dispatching ritual for PR "
+                            f"#{record.pr_number}",
+                            err=True,
+                        )
             except Exception as _pm_exc:  # noqa: BLE001 - never abort the sweep
                 if not json_out:
                     typer.echo(

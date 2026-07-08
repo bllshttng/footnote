@@ -159,6 +159,13 @@ def run_sync_canonical(
         return 0
 
     try:
+        # Re-check under the lock (double-checked): a loser that read the marker
+        # as absent before the winner wrote it must not re-run sync_command
+        # after the winner releases.
+        if marker.exists():
+            typer.echo(f"post-merge sync: already synced {sha[:12]}")
+            return 0
+
         # 6. Path-gate (globs computed from the GitHub file list, not local git).
         files = [f.get("path", "") for f in (row.get("files") or []) if isinstance(f, dict)]
         globs = list(pm.sync_paths or [])
@@ -195,13 +202,19 @@ def _any_match(files: list[str], globs: list[str]) -> bool:
 
 
 def _write_marker(marker: Path) -> None:
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    # Idempotent + exclusive-ish: a concurrent winner may have created it; that
-    # is fine - the content is empty and the presence is all that matters.
+    # Best-effort: the sync already ran, so a marker failure only makes the next
+    # sweep re-run (safe direction). mkdir is inside the guard too, keeping the
+    # whole write fail-open rather than letting an ENOENT/EACCES escape. A
+    # failure is signalled so the operator can see WHY the sync re-runs each
+    # sweep (a persistently-unwritable .fno) rather than it looking like normal.
     try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch(exist_ok=True)
-    except OSError:
-        pass  # best-effort; the sync already ran, a marker failure only re-runs
+    except OSError as exc:
+        typer.echo(
+            f"post-merge sync: marker write failed ({exc}); will re-run next sweep",
+            err=True,
+        )
 
 
 _PR_URL_SLUG_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/\d+")
