@@ -104,9 +104,15 @@ def read_triage_settings(cwd: Optional[Path] = None) -> TriageSettings:
         if isinstance(data, dict):
             inbox = data.get("inbox")
             triage_cfg = (inbox.get("triage") if isinstance(inbox, dict) else None) or {}
+            try:
+                timeout_sec = int(triage_cfg.get("timeout_sec", 60))
+            except (ValueError, TypeError):
+                # A malformed timeout_sec must fail safe to the default, not
+                # crash the reader (gemini review).
+                timeout_sec = 60
             return TriageSettings(
                 model=triage_cfg.get("model", None),
-                timeout_sec=int(triage_cfg.get("timeout_sec", 60)),
+                timeout_sec=timeout_sec,
                 log_decisions=bool(triage_cfg.get("log_decisions", True)),
             )
 

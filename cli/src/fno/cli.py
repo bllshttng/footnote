@@ -113,22 +113,24 @@ def _load_v2_config_flag(repo_root: Path) -> bool:
     """
     from fno.config import config_read_candidates, read_config_flat
 
+    def _flag_set(path: Path) -> bool:
+        try:
+            return path.is_file() and read_config_flat(path).get("v2_enabled") is True
+        except Exception:
+            return False
+
+    # Project-local candidates first - resolving them never raises - so a local
+    # config.toml wins even when the global fallback is malformed. config_file()
+    # is resolved only after, and guarded, since it can raise on a bad global
+    # config; that must fail open (return False), never shadow the local file.
+    if any(_flag_set(p) for p in config_read_candidates([repo_root / ".fno" / "settings.yaml"])):
+        return True
     try:
         from fno import paths as _paths
-        candidates = config_read_candidates(
-            [repo_root / ".fno" / "settings.yaml", _paths.config_file()]
-        )
+        fallback = config_read_candidates([_paths.config_file()])
     except Exception:
-        # Fail open: a malformed global config that makes config_file() raise
-        # must not propagate - v2 is strictly opt-in (Finding 6, P2).
         return False
-    for path in candidates:
-        try:
-            if path.is_file() and read_config_flat(path).get("v2_enabled") is True:
-                return True
-        except Exception:
-            continue
-    return False
+    return any(_flag_set(p) for p in fallback)
 
 
 def _warn_deprecated_alias_if_needed() -> None:
