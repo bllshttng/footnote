@@ -310,6 +310,23 @@ def test_ac3ui_status_reports_last_tick_and_parked(tmp_home, tmp_launch_agents, 
     assert "owner/repo#42" in out or "42" in out, "parked PR should appear"
 
 
+def test_status_json_emits_liveness_verdict(monkeypatch):
+    """`pr-watch status --json` emits the liveness verdict for hooks to parse."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(
+        m, "liveness_report_live",
+        lambda: {"enabled": True, "verdict": "dead", "detail": "no tick",
+                 "fix": "fno pr-watch install", "loaded": True, "last_tick": None},
+    )
+    result = CliRunner().invoke(app, ["pr-watch", "status", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout.strip())
+    assert payload["verdict"] == "dead" and payload["enabled"] is True
+
+
 # ---------------------------------------------------------------------------
 # Config: PrWatchBlock schema
 # ---------------------------------------------------------------------------
@@ -369,12 +386,13 @@ def test_config_pr_watch_null_degrades_to_defaults():
 
 
 def test_install_activates_by_default(tmp_home, tmp_launch_agents, capsys, monkeypatch):
-    """install(activate=True) runs launchctl load and reports activation."""
+    """install(activate=True) bounces the agent and reports activation."""
     m = _install()
     monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
-    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
     calls: list[tuple] = []
-    monkeypatch.setattr(m, "_run_launchctl", lambda *a: calls.append(a) or 0)
+    monkeypatch.setattr(
+        m, "_run_launchctl_timed", lambda *a, **kw: (calls.append(a) or 0, False)
+    )
 
     m.install(
         launch_agents_dir=tmp_launch_agents,
@@ -384,7 +402,8 @@ def test_install_activates_by_default(tmp_home, tmp_launch_agents, capsys, monke
         activate=True,
     )
 
-    assert any(a and a[0] == "load" for a in calls), "launchctl load must be called"
+    verbs = [a[0] for a in calls]
+    assert verbs == ["bootout", "bootstrap", "kickstart"], f"got {verbs}"
     assert "Activated" in capsys.readouterr().out
 
 
@@ -408,13 +427,14 @@ def test_install_no_activate_skips_load(tmp_home, tmp_launch_agents, capsys, mon
     assert "To activate" in out
 
 
-def test_install_reload_unloads_first_when_loaded(tmp_home, tmp_launch_agents, monkeypatch):
-    """A re-install of an already-loaded agent unloads before loading (stale-plist fix)."""
+def test_install_reload_bounces_when_loaded(tmp_home, tmp_launch_agents, monkeypatch):
+    """A re-install boots the (possibly wedged) agent out before re-bootstrapping."""
     m = _install()
     monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
-    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
     calls: list[tuple] = []
-    monkeypatch.setattr(m, "_run_launchctl", lambda *a: calls.append(a) or 0)
+    monkeypatch.setattr(
+        m, "_run_launchctl_timed", lambda *a, **kw: (calls.append(a) or 0, False)
+    )
 
     m.install(
         launch_agents_dir=tmp_launch_agents,
@@ -425,7 +445,7 @@ def test_install_reload_unloads_first_when_loaded(tmp_home, tmp_launch_agents, m
     )
 
     verbs = [a[0] for a in calls]
-    assert verbs == ["unload", "load"], f"expected unload then load, got {verbs}"
+    assert verbs == ["bootout", "bootstrap", "kickstart"], f"got {verbs}"
 
 
 def test_ensure_activated_rerenders_existing_plist(tmp_home, tmp_launch_agents, monkeypatch):
@@ -453,11 +473,15 @@ def test_ensure_activated_rerenders_existing_plist(tmp_home, tmp_launch_agents, 
 
 
 def test_install_activation_failure_is_loud(tmp_home, tmp_launch_agents, capsys, monkeypatch):
-    """A failing launchctl load prints a loud WARNING but still writes the plist (AC1-ERR)."""
+    """A failing bounce prints a loud WARNING but still writes the plist (AC1-ERR)."""
     m = _install()
     monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
-    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
-    monkeypatch.setattr(m, "_run_launchctl", lambda *a: 1)
+
+    # bootout ok, bootstrap fails (rc=1) -> bounce reports failure, plist stays.
+    def _fail_bootstrap(*a, **kw):
+        return (0 if a[0] == "bootout" else 1, False)
+
+    monkeypatch.setattr(m, "_run_launchctl_timed", _fail_bootstrap)
 
     m.install(
         launch_agents_dir=tmp_launch_agents,
@@ -468,8 +492,111 @@ def test_install_activation_failure_is_loud(tmp_home, tmp_launch_agents, capsys,
     )
 
     out = capsys.readouterr().out
-    assert "WARNING" in out and "launchctl load failed" in out
+    assert "WARNING" in out and "activation failed" in out
     assert (tmp_launch_agents / "sh.fno.pr-watcher.plist").exists()
+
+
+# ---------------------------------------------------------------------------
+# x-8c3b: bounce (bootout -> bootstrap -> kickstart) cures a wedged launchd job
+# ---------------------------------------------------------------------------
+
+
+def _record_runner(calls, *, rc_by_verb=None, timeout_verb=None):
+    """A _run_launchctl_timed stub that records calls and can inject rc/timeout."""
+    rc_by_verb = rc_by_verb or {}
+
+    def _run(*args, timeout_s=0):
+        calls.append(args)
+        verb = args[0]
+        if verb == timeout_verb:
+            return (-1, True)
+        return (rc_by_verb.get(verb, 0), False)
+
+    return _run
+
+
+def test_bounce_order_is_bootout_bootstrap_kickstart(tmp_launch_agents):
+    m = _install()
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_record_runner(calls),
+    )
+    assert rc == 0
+    assert [c[0] for c in calls] == ["bootout", "bootstrap", "kickstart"]
+    assert calls[0] == ("bootout", "gui/501/sh.fno.pr-watcher")
+    assert calls[1] == ("bootstrap", "gui/501", str(tmp_launch_agents / "x.plist"))
+    assert calls[2] == ("kickstart", "-k", "gui/501/sh.fno.pr-watcher")
+
+
+def test_bounce_tolerates_bootout_failure_when_not_loaded(tmp_launch_agents):
+    """bootout returns nonzero for a not-loaded job; the bounce proceeds anyway."""
+    m = _install()
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_record_runner(calls, rc_by_verb={"bootout": 1}),
+    )
+    assert rc == 0  # bootout nonzero is expected, not fatal
+    assert [c[0] for c in calls] == ["bootout", "bootstrap", "kickstart"]
+
+
+def test_bounce_bootstrap_failure_is_reported(tmp_launch_agents):
+    m = _install()
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_record_runner(calls, rc_by_verb={"bootstrap": 5}),
+    )
+    assert rc == 1 and "bootstrap" in msg
+    assert [c[0] for c in calls] == ["bootout", "bootstrap"]  # never kickstarts
+
+
+def test_bounce_kickstart_hang_names_the_wedged_step(tmp_launch_agents):
+    """A HANG (not a nonzero rc) on kickstart is fatal and names the step."""
+    m = _install()
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_record_runner(calls, timeout_verb="kickstart"),
+    )
+    assert rc == 1 and "kickstart" in msg and "timed out" in msg
+
+
+def test_bounce_bootout_hang_is_fatal(tmp_launch_agents):
+    """Even bootout, whose nonzero rc is tolerated, is fatal on a HANG."""
+    m = _install()
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_record_runner(calls, timeout_verb="bootout"),
+    )
+    assert rc == 1 and "bootout" in msg and "timed out" in msg
+    assert [c[0] for c in calls] == ["bootout"]  # stops at the hang
+
+
+def test_heal_watcher_missing_plist_is_error(tmp_launch_agents, monkeypatch):
+    m = _install()
+    monkeypatch.setattr(m, "bounce", lambda **kw: pytest.fail("must not bounce"))
+    msg, rc = m.heal_watcher(launch_agents_dir=tmp_launch_agents)
+    assert rc == 1 and "no plist" in msg
+
+
+def test_heal_watcher_bounces_when_plist_present(tmp_launch_agents):
+    m = _install()
+    (tmp_launch_agents / "sh.fno.pr-watcher.plist").write_text("<plist/>")
+    calls: list[tuple] = []
+    monkeypatch_run = _record_runner(calls)
+    # heal_watcher -> bounce uses the module default runner; stub via monkeypatch.
+    import fno.pr_watch._install as mod
+    orig = mod._run_launchctl_timed
+    mod._run_launchctl_timed = monkeypatch_run
+    try:
+        msg, rc = m.heal_watcher(launch_agents_dir=tmp_launch_agents)
+    finally:
+        mod._run_launchctl_timed = orig
+    assert rc == 0
+    assert [c[0] for c in calls] == ["bootout", "bootstrap", "kickstart"]
 
 
 # ---------------------------------------------------------------------------

@@ -616,6 +616,64 @@ def test_ac2_fr_rust_only_fix_exits_zero_and_followup_is_fresh(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# x-8c3b: --fix acts on a dead pr-watch verdict (advisory, never flips exit)
+# ---------------------------------------------------------------------------
+
+
+def _dead_pr_watch(monkeypatch) -> None:
+    monkeypatch.setattr(
+        doctor,
+        "_pr_watch_liveness",
+        lambda: {
+            "enabled": True, "verdict": "dead", "detail": "no tick recorded",
+            "fix": "fno pr-watch install", "loaded": True, "last_tick": None,
+        },
+    )
+
+
+def test_fix_heals_dead_pr_watch_on_fresh_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh binary with a dead watcher still heals it under --fix, exit 0."""
+    _stub_signals(monkeypatch, src=Path("/src"), source_rev="abc", marker="abc",
+                  capture_present="present")
+    _dead_pr_watch(monkeypatch)
+    import fno.pr_watch._install as pw
+    heal_calls: list = []
+    monkeypatch.setattr(pw, "heal_watcher", lambda **kw: heal_calls.append(kw) or ("bounced x", 0))
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+    assert result.exit_code == 0  # advisory: a dead watcher never flips the exit
+    assert len(heal_calls) == 1
+    assert "pr-watch heal" in result.stderr
+
+
+def test_fix_json_skips_pr_watch_heal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--json preserves the single-JSON-object stdout contract: no heal side-effect."""
+    _stub_signals(monkeypatch, src=Path("/src"), source_rev="abc", marker="abc",
+                  capture_present="present")
+    _dead_pr_watch(monkeypatch)
+    import fno.pr_watch._install as pw
+    monkeypatch.setattr(pw, "heal_watcher", lambda **kw: pytest.fail("must not heal under --json"))
+
+    result = runner.invoke(app, ["doctor", "--json", "--fix"])
+    assert result.exit_code == 0
+    # stdout is exactly one JSON object.
+    json.loads(result.stdout.strip())
+
+
+def test_no_fix_never_heals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain `doctor` (no --fix) reports but never runs the bounce."""
+    _stub_signals(monkeypatch, src=Path("/src"), source_rev="abc", marker="abc",
+                  capture_present="present")
+    _dead_pr_watch(monkeypatch)
+    import fno.pr_watch._install as pw
+    monkeypatch.setattr(pw, "heal_watcher", lambda **kw: pytest.fail("must not heal without --fix"))
+
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "pr-watch enabled but not running" in result.stdout
+
+
 def test_ac3_hp_fix_delegates_to_update(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC3-HP: --fix on a stale Python install delegates to `fno update`."""
     _stub_signals(
