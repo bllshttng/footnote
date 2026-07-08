@@ -2300,6 +2300,30 @@ event_types:
           type: [number, "null"]
           description: "fail_count(before) - fail_count(after) on the top dimension; null until run_id_after lands. STRUCTURAL only on replay pairs (Review Amendment A1)."
 
+  - name: gate_escape
+    description: "A human resolved what a gate should have (an oob-merge past an unmet required-bot gate, a spawn-cap bypass, a hand-rebase, a wedge unblock). The autonomy-debt counter (x-f894): retro ranks escapes by reason so the roadmap knows which reliability fix pays first. Telemetry fails OPEN - a failed emit never blocks the host op. Tier-1 (reconcile auto) emits reason=dead-bot; the manual catch-all is `fno event emit --type gate_escape --data '{\"reason\":\"other\",\"detail\":\"...\"}'`."
+    sources: [backlog, target, daemon, hook, test]
+    data:
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [dead-bot, flake, stale-base, wedge, spawn-cap, other]
+          description: "Which intervention. Small, summable enum; fail-closed on unknown so a typo is loud, not a silent 'other'."
+        pr:
+          type: integer
+          description: "PR the escape rode on (attribution; optional). Dedup key with reason."
+        graph_node_id:
+          type: string
+          description: "Node the escape rode on (attribution; optional)."
+        detail:
+          type: string
+          description: "Free text, especially for reason=other; retro flags an empty detail as low-signal (optional)."
+        dedup_key:
+          type: string
+          description: "PR-less dedup bucket (reason:session:day) for a spawn-cap/manual escape with no `pr`. Collapses a looped intervention to one count (x-91b5); not consumed by retro (optional)."
+    consumers: [fno retro run]
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

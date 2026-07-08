@@ -130,11 +130,12 @@ def child_plan_path(base: str, slug: str) -> str:
 def separate_plan_path(base: str, slug: str) -> str:
     """Self-contained per-child plan path: `<dir>/<stem>.group-<slug>.md`.
 
-    The `separate` packaging mode (vs the default `fragment` `<base>#group-<slug>`)
-    points a child at its own quick-plan file - what a fresh-context bg `/target`
-    builder reads best. Pure string derivation so the same slug maps to the same
-    path on every run (idempotency), whether applied to the verbatim base (the
-    stored plan_path) or the resolved-on-disk base (the file to scaffold).
+    The `separate` packaging (the only packaging; the legacy `fragment`
+    `<base>#group-<slug>` is no longer authored) points a child at its own
+    quick-plan file - one plan == one PR == one node. Pure string derivation so
+    the same slug maps to the same path on every run (idempotency), whether
+    applied to the verbatim base (the stored plan_path) or the resolved-on-disk
+    base (the file to scaffold).
     """
     p = Path(base)
     stem = p.stem if p.name.endswith(".md") else p.name

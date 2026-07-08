@@ -112,7 +112,9 @@ class TestAC1HPGreenfield:
         assert _has_section(doc, "Execution Strategy"), "## Execution Strategy missing from doc"
 
     def test_kill_criteria_in_frontmatter(self, tmp_path):
-        """AC1-HP: kill_criteria list with 3 entries is written to frontmatter."""
+        """AC1-HP: the default kill_criteria list is written to frontmatter in the
+        canonical {name, predicate, reason} shape the engine + validate-plan.sh
+        both read (the legacy flat one-key maps were invisible to both)."""
         doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
         result = _run_mutate(doc, "--mode", "greenfield")
         assert result.returncode == 0, result.stderr
@@ -120,7 +122,11 @@ class TestAC1HPGreenfield:
         kc = fm.get("kill_criteria")
         assert kc is not None, "kill_criteria missing from frontmatter"
         assert isinstance(kc, list), f"kill_criteria should be a list, got {type(kc)}"
-        assert len(kc) == 3, f"Expected 3 kill_criteria entries, got {len(kc)}"
+        assert len(kc) == 2, f"Expected 2 default kill_criteria entries, got {len(kc)}"
+        for entry in kc:
+            assert {"name", "predicate", "reason"} <= entry.keys(), (
+                f"entry missing required fields: {entry}"
+            )
 
     def test_greenfield_no_file_ownership_map(self, tmp_path):
         """AC1-HP: greenfield mode does NOT add File Ownership Map."""

@@ -1,50 +1,30 @@
-# Focused Plan Template
+# Quick Plan Template
 
-Single flat markdown file for bugs, focused features, and single-session work. No YAML execution strategy, no folder structure. Frontmatter is optional — add it only when you need auto-adopt to wire dependency edges on the graph.
+Single flat markdown file for bugs, focused features, and single-session work. One `.md` == one PR == one node; no folder, no `00-INDEX.md`, no phase files. Frontmatter is **mandatory** on every plan (quick or not): `status`, `kind`, `kill_criteria` always ride in it - the markdown-heading form of kill_criteria is invisible to the stamp/validate parser and is not used.
 
 ---
 
 ```markdown
 ---
-# Optional frontmatter. Omit entirely if you don't need any field.
-# claims: ab-XXXXXXXX             # Optional. When set, `fno backlog intake`
-#                                 # updates this idea-state node in place
-#                                 # instead of creating a duplicate. /blueprint
-#                                 # writes this automatically when the input
-#                                 # was an ab-id; do not hand-author it
-#                                 # except to repair a prior dangling node.
-#                                 # See skills/blueprint/SKILL.md "Plan Claims
-#                                 # Ingestion" for the full contract.
-# Per-plan executor lock - transcribed from /think's Locked Decision when one
-# was recorded. Acceptable values: do | impeccable | mixed. Omit to let the
-# runtime surface inference choose per task. /blueprint writes this automatically
-# when it sees a `## Locked Decisions` entry containing executor routing; do
-# not hand-author it unless you know the design doc disagrees. See:
-#   skills/think/references/executor-routing-prompt.md
-# executor: do
+status: ready
+kind: quick-plan
+# claims: ab-XXXXXXXX             # Only when the input was an ab-id. When set,
+#                                 # `fno backlog intake` updates that idea-state
+#                                 # node in place instead of creating a duplicate.
+#                                 # /blueprint writes this automatically; do not
+#                                 # hand-author it except to repair a dangling
+#                                 # node. See SKILL.md "Plan Claims Ingestion".
+# executor: do                    # Plan-level executor (default 'do' = archer / TDD).
+#                                 # Transcribed from a /think Locked Decision when
+#                                 # one records executor routing (do | impeccable |
+#                                 # mixed). Omit to let runtime surface inference
+#                                 # choose per task. See docs/guides/per-task-executors.md.
 # depends_on:                     # Graph edges wired at auto-adopt time
 #   - ../2026-04-19-sibling-slug  # sibling plan (resolved against graph.plan_path)
 #   - ab-d359579e                 # or an existing graph node ID
-# executor: do                    # Plan-level executor (default 'do' = archer / TDD).
-#                                 # Set to 'impeccable' for design-aware frontend work
-#                                 # (frontend-executor + /impeccable craft+critique loop).
-#                                 # See docs/guides/per-task-executors.md.
-# Stamp fields (populated by /target ship gate - do not fill manually):
-# status: shipped | done
-# shipped_at: <UTC ISO8601>
-# urls: []
-# session_ids: []
----
-
-# [Title — descriptive, not generic]
-
-## Kill Criteria
-
-Conditions that abort the run cleanly (emits `<aborted reason="...">`,
-stop hook exits, ledger records the reason). Omit this section entirely
-to inherit engine defaults (`iteration_ceiling: 15`, `stuck_test: 3`).
-
-```yaml
+# kill_criteria: abort conditions target/do evaluate at wave + iteration boundaries.
+# Emit these defaults unless the plan overrides them (see SKILL.md "Kill Criteria
+# Declaration"). They live HERE in frontmatter, never under a `## Kill Criteria` heading.
 kill_criteria:
   - name: iteration_ceiling
     predicate: iteration > 15
@@ -52,7 +32,13 @@ kill_criteria:
   - name: stuck_test
     predicate: same_test_failing_for >= 3
     reason: "Same test failing 3+ iterations - root cause unclear"
-```
+# Stamp fields (populated by /target ship gate - do not fill manually):
+# shipped_at: <UTC ISO8601>
+# urls: []
+# session_ids: []
+---
+
+# [Title — descriptive, not generic]
 
 ## Context
 
@@ -125,7 +111,7 @@ _Optional — omit this section entirely if no relevant patterns exist._
 
 ## Guidelines
 
-**Length:** 50-100 lines. If your plan exceeds 150 lines, consider using the default full mode (`/blueprint` without `quick`) instead.
+**Length:** 50-100 lines. A larger multi-wave feature still stays one `.md` - use the design-doc mutation path (`/blueprint <design-doc>` after `/think`), which appends an `## Execution Strategy` waves block. Drop `quick` for the fuller section set on an idea input.
 
 **Changes:** Number them. Each change should target 1-3 files. If a single change touches 5+ files, break it into smaller changes. Each change gets 1-2 BDD acceptance criteria (happy path + primary error case) in the `**Acceptance:**` field.
 

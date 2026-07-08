@@ -1,7 +1,7 @@
 ---
 name: blueprint
-description: "Create implementation blueprints (plans). Default: multi-phase BDD folder plan with waves and parallel execution. Use 'quick' for flat single-file plans for bugs and 1-session work. Use when: 'create plan', 'implementation blueprint', 'break this down', 'how should we build'."
-argument-hint: "[quick] [group N | no-group] [--plans fragment|separate] [no-adopt] [no-collision-check] <feature-description> [--no-linear] [--no-collision-check]"
+description: "Create implementation blueprints (plans) as a single .md doc. Given a /think design doc, mutate it in place; given an idea, create one. 'quick' scales the sections down for bugs and 1-session work; every plan is one .md == one PR == one node. Use when: 'create plan', 'implementation blueprint', 'break this down', 'how should we build'."
+argument-hint: "[quick] [group N | no-group] [no-adopt] [no-collision-check] <design-doc-path | feature-description> [--no-linear]"
 ---
 
 # Abilities Plan
@@ -45,27 +45,18 @@ node's title plus details directly. The classifier below sees a raw
 description (no slashes, no `.md`) and skips the failure-mode grep.
 
 **Render `claims:` into the plan frontmatter.** When `CLAIMS_ID` is non-
-empty, both quick mode and full mode MUST write a literal `claims: $CLAIMS_ID`
-line at the top of the rendered frontmatter (above `created:`). The line is
-load-bearing for the post-write refusal below; the templates' `claims:`
-comment is a doc note, not a substitute.
+empty, the rendered plan MUST write a literal `claims: $CLAIMS_ID` line at the
+top of the frontmatter (above `created:`) - the single `.md` is the only plan
+shape. The line is load-bearing for the post-write refusal below; the
+template's `claims:` comment is a doc note, not a substitute.
 
-For quick mode the line lands in the single `.md` file's frontmatter; for
-full mode it lands in `00-INDEX.md`'s frontmatter. The plan body otherwise
-follows its template as usual.
-
-**Post-write refusal.** After the plan file (or folder) is written but
-BEFORE the collision-check + auto-intake steps (3a / 11a), verify the
-claim made it into the frontmatter. If not, halt:
+**Post-write refusal.** After the plan file is written but BEFORE the
+collision-check + auto-intake steps (3a / 3b), verify the claim made it into
+the frontmatter. If not, halt:
 
 ```bash
 if [[ -n "$CLAIMS_ID" ]]; then
-  if [[ -f "$PLAN_PATH" ]]; then
-    CLAIMS_FILE="$PLAN_PATH"
-  else
-    CLAIMS_FILE="$PLAN_PATH/00-INDEX.md"
-  fi
-  if ! grep -qE "^claims:[[:space:]]+$CLAIMS_ID\$" "$CLAIMS_FILE" 2>/dev/null; then
+  if ! grep -qE "^claims:[[:space:]]+$CLAIMS_ID\$" "$PLAN_PATH" 2>/dev/null; then
     echo "Error: input was an ab-id ($CLAIMS_ID) but the rendered plan does not declare 'claims: $CLAIMS_ID' in frontmatter. Refusing to adopt." >&2
     exit 1
   fi
@@ -77,10 +68,10 @@ graph. If you encounter the refusal in practice, hand-edit the frontmatter
 to add `claims: $CLAIMS_ID` and rerun, or invoke `/blueprint` with a raw
 description if the ab-id was passed by mistake.
 
-**Pass-through to intake.** The auto-intake step (3b / 11b) does not need
-to be told about the claim - `fno backlog intake` reads the frontmatter
-directly. When you want to override the frontmatter at intake time (e.g.
-repairing a past mistake), use `fno backlog intake plan/ --claims ab-XXX`.
+**Pass-through to intake.** The auto-intake step (3b) does not need to be told
+about the claim - `fno backlog intake` reads the frontmatter directly. When you
+want to override the frontmatter at intake time (e.g. repairing a past
+mistake), use `fno backlog intake <plan>.md --claims ab-XXX`.
 
 ## Failure Mode Ingestion (MANDATORY when a design doc is supplied)
 
@@ -146,15 +137,11 @@ dash-bullet list; match the label exactly and collect the bullets until the
 next bold label or the next `##` heading. Preserve the original bullet
 wording so the AC4-EDGE seeds can cite the source by name.
 
-**Seed AC4-EDGE criteria per mode:**
-
-- **Full mode.** For each phase file, emit one `AC4-EDGE` acceptance
-  criterion per failure-mode bullet that is relevant to that phase's
-  surface area. Each seed MUST cite the source bullet by a short name taken
-  from the design doc (e.g. `Cites "Double-submit" from design doc`).
-- **Quick mode.** Emit seeds inline under the relevant `### N. [Change]`
-  in the Changes section, preserving the same citation format. Do not
-  enumerate failure modes that have no touchpoint in the plan.
+**Seed AC4-EDGE criteria.** Emit seeds inline under the relevant
+`### N. [Change]` in the Changes section (or against the design doc's Execution
+Strategy waves on the mutation path), one `AC4-EDGE` per failure-mode bullet
+with a code touchpoint. Each seed MUST cite the source bullet by a short name
+taken from the design doc (e.g. `Cites "Double-submit" from design doc`).
 Irrelevant bullets (no code surface changes this plan) are skipped rather
 than padded: AC4-EDGE citations should map to actual implementation
 touchpoints, not decorate the plan with unrelated concerns.
@@ -230,10 +217,9 @@ LOCKED_VALUE=$(python3 -m fno.executor._locked < "$DESIGN_DOC_PATH")
 
 Then:
 
-- **`do` or `impeccable`** - write `executor: <value>` to the plan
-  frontmatter. For full mode, that is the top of `00-INDEX.md`. For quick
-  mode, the top of the single `.md` file. Replace any existing `# executor:`
-  comment from the template; never duplicate the key.
+- **`do` or `impeccable`** - write `executor: <value>` to the plan `.md`
+  frontmatter (the single doc is the only plan shape). Replace any existing
+  `# executor:` comment from the template; never duplicate the key.
 - **`mixed`** - write `executor: do` at plan level (the safe default), then
   emit `executor: impeccable` task blocks for any task whose file list
   matches the operator's locked surface-inference patterns
@@ -354,7 +340,7 @@ and auto-intake:
 
 ```bash
 SPEC_SCRIPTS="${SKILL_DIR}/scripts"
-bash "$SPEC_SCRIPTS/check-product-md.sh" "$PLAN_PATH_OR_FOLDER"
+bash "$SPEC_SCRIPTS/check-product-md.sh" "$PLAN_PATH"
 ```
 
 The script:
@@ -365,8 +351,7 @@ The script:
 3. Validates the found file is non-empty AND >= 200 chars (filters `[TODO]`
    stubs per /impeccable's loader contract).
 4. If missing or stale:
-   - Writes a `prerequisites:` block to the plan's `00-INDEX.md` frontmatter
-     (quick mode: the single `.md` file's frontmatter):
+   - Writes a `prerequisites:` block to the plan `.md`'s frontmatter:
      ```yaml
      prerequisites:
        - kind: file
@@ -418,8 +403,8 @@ Rules for valid pins:
 - Pin-only treatments listed here are valid; they are not "wrong" for being
   pin-only.
 
-The `validate-plan.sh` script enforces these rules at `/blueprint` validation time
-(step 11 / full mode), so errors surface before auto-intake.
+The `validate-plan.sh` script enforces these rules at `/blueprint` validation
+time (the validate step), so errors surface before auto-intake.
 
 ## Kill Criteria Declaration (MANDATORY)
 
@@ -441,10 +426,10 @@ kill_criteria:
     reason: "Same test failing 3+ iterations - root cause unclear"
 ```
 
-**Placement.** Full mode: add the block to the top-level frontmatter of
-`00-INDEX.md` (alongside `created:`, `depends_on:`, etc.). Quick mode: add
-a `## Kill Criteria` heading with a fenced YAML block right after the
-title. Keep the syntax identical across modes so tooling is consistent.
+**Placement.** ALWAYS in the plan `.md`'s frontmatter (alongside `created:`,
+`claims:`, `executor:`, etc.) - including quick plans. The markdown-heading form
+(`## Kill Criteria`) is invisible to the stamp/validate parser, so it is not
+used; frontmatter is the single source of truth across every plan.
 
 **Schema per entry:** `name` (string, identifier-style), `predicate`
 (string, from the known vocabulary below), `reason` (string, shown to the
@@ -472,20 +457,30 @@ block is absent, and only the engine-wide defaults (if any) apply.
 
 ---
 
-## Modes
+## One output shape: a single `.md`
 
-| Mode | Subcommand | Output | Best For | Executor |
-|------|------------|--------|----------|----------|
-| **Full** (default) | _(none)_ | Folder with INDEX + phases | Multi-day features, parallel waves | `/do waves` or `/target` |
-| **Focused** | `quick` | Single `.md` file | Bugs, quick features, 1-session work | `/do` |
+Every `/blueprint` invocation produces **one** plan `.md` - never a folder. The
+input decides which path runs; the output shape is always the same (`plan == PR
+== node`):
+
+| Input | Path | What happens |
+|-------|------|--------------|
+| A `/think` design-doc path | **[Single-doc mutation](#single-doc-mutation-design-doc-input)** | Mutate the doc in place (append Execution Strategy + File Ownership + kill_criteria) |
+| A raw idea / feature description | **[Single-doc creation](#single-doc-creation-idea-input)** | Write a fresh single `.md` with full frontmatter |
+
+`quick` is a **size knob** on either path (fewer sections, single task), not a
+separate mode - a quick plan still carries full frontmatter (`kill_criteria`,
+`claims`, `executor`, `status`). Waves live in the doc's `## Execution Strategy`
+block; there is no `00-INDEX.md` and no phase files.
 
 ---
 
-## Focused Mode (`quick`)
+## Single-doc creation (idea input)
 
-Single flat plan file. No folder structure, no YAML. Includes lightweight BDD
-acceptance criteria per change (1-2 Given/When/Then per change for happy path
-and primary error case).
+When the argument is a raw idea / feature description (not a design-doc path),
+write one flat plan `.md`. Includes lightweight BDD acceptance criteria per
+change (1-2 Given/When/Then per change for happy path and primary error case)
+and always carries full frontmatter (see [Kill Criteria Declaration](#kill-criteria-declaration-mandatory)).
 
 ### Plan Save Location
 
@@ -558,8 +553,8 @@ fi
    proceeds; it does not block.
 2b. **Discovery gate** - After structural context but before writing the plan,
    surface unknowns. Load `references/discovery-gate.md` for the protocol.
-   - In quick mode: 3 questions max (keep it lightweight)
-   - In full mode: up to 5 questions
+   - With `quick`: 3 questions max (keep it lightweight)
+   - Otherwise (default): up to 5 questions
    - **Skip if** /think already ran and produced a design doc with a
      `## Discovery` or `## Assumptions` section (questions were already answered)
    - Detection: check if the user's input references a design doc path, and if
@@ -718,9 +713,23 @@ fi
 
 ### Template
 
-Load [references/quick-template.md](references/quick-template.md) for the full template. The structure:
+Load [references/quick-template.md](references/quick-template.md) for the full template. The structure (frontmatter is MANDATORY - every plan carries it, quick or not):
 
 ```markdown
+---
+status: ready
+kind: quick-plan
+# claims: ab-XXXXXXXX      # only when the input was an ab-id
+# executor: do             # transcribed from a Locked Decision, if any
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "Too many iterations - planning likely wrong"
+  - name: stuck_test
+    predicate: same_test_failing_for >= 3
+    reason: "Same test failing 3+ iterations - root cause unclear"
+---
+
 # [Title]
 
 ## Context
@@ -786,13 +795,13 @@ Include the adopted ID only when adopt succeeded. On failure, omit the
 
 ### Opting out of auto-adopt
 
-Both modes call `roadmap-tasks.py intake` after writing the plan so it
-appears on the graph kanban. To skip that step:
+Every plan calls `fno backlog intake` after being written so it appears on the
+graph kanban. To skip that step:
 
 ```bash
 /blueprint quick no-adopt "feature X"        # positional modifier
 /blueprint quick "feature X" --no-adopt      # flag form
-/blueprint no-adopt "feature X"              # full mode, positional
+/blueprint no-adopt "feature X"              # default (non-quick), positional
 ```
 
 Use this for throwaway specs, exploratory scratchpads, or when you want
@@ -800,14 +809,13 @@ to curate the graph manually.
 
 ### Opting out of the collision check
 
-Both modes run `fno backlog collisions check` between writing the plan and
-auto-intake (steps 3a / 11a). To skip when you know the collision is
-intentional:
+Every plan runs `fno backlog collisions check` between writing the plan and
+auto-intake (step 3a). To skip when you know the collision is intentional:
 
 ```bash
 /blueprint quick no-collision-check "feature X"        # positional modifier
 /blueprint quick "feature X" --no-collision-check      # flag form
-/blueprint no-collision-check "feature X"              # full mode, positional
+/blueprint no-collision-check "feature X"              # default (non-quick), positional
 ```
 
 A skipped check still records `collisions_acknowledged: ["__skipped_check__"]`
@@ -816,193 +824,11 @@ from "I never checked at all."
 
 ---
 
-## Full Mode (Default)
-
-Multi-phase folder plan for`/do waves` and `/target` execution.
-
-### Plan Save Location
-
-Same lookup as quick mode (see above). Uses `plansDirectory` from `.claude/settings.json` or `config.plans.full_path` from settings.yaml.
-
-### Output Format
-
-```
-{full_path}/YYYY-MM-DD-feature-name/
-├── 00-INDEX.md              # Overview, execution strategy (~200 lines)
-├── 01-database.md           # Phase 1 tasks
-├── 02-core-api.md           # Phase 2 tasks
-├── 02b-webhooks.md          # Phase 2b (parallel with 02)
-├── 03-ui-components.md      # Phase 3 (depends on 01, 02)
-└── 04-tests-docs.md         # Phase 4 (depends on all)
-```
-
-### Reference Materials
-
-| Reference | Load When |
-|-----------|-----------|
-| [references/index-template.md](references/index-template.md) | Creating INDEX.md |
-| [references/phase-template.md](references/phase-template.md) | Writing phase files |
-| [references/dependency-detection.md](references/dependency-detection.md) | Determining parallel vs sequential |
-| [references/linear-integration.md](references/linear-integration.md) | Creating Linear tickets |
-
-### Prerequisites
-
-- Design document from `/think` OR clear feature description
-- If no design doc exists, run `/think` first
-
-### Process
-
-1. **Load Design Context.** Read design doc or extract user stories from
-   description. When a design-doc file is supplied, run the **Failure Mode
-   Ingestion** check (top of this file) FIRST: refuse with the verbatim
-   message when `## Failure Modes` is missing; otherwise parse its four
-   sub-sections (Boundaries / Errors / Invariants / Concurrency) so phase
-   files can emit AC4-EDGE citations per source bullet.
-1b. **Structural Context (AUTO)** — Generate fresh codemap for module awareness:
-   ```bash
-   REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-   # The `.env` clause widens detection to repos whose connection lives only
-   # in a dev .env file (the case `db-schema.py` now discovers).
-   db_env_found=""
-   for ef in .env.local .env.development.local .env.development .env; do
-     if [ -f "$REPO_ROOT/$ef" ] && grep -qE '^(export[[:space:]]+)?(DATABASE_URL|POSTGRES_URL|SUPABASE_DB_URL|DIRECT_URL)=' "$REPO_ROOT/$ef"; then
-       db_env_found=1; break
-     fi
-   done
-   # Reuse-or-regenerate: a fresh (<24h) codemap plus a `## Schema Reconciliation`
-   # section in the design doc means /think already grounded the schema - skip
-   # regeneration (mirrors the `## Discovery` skip in step 1c).
-   schema_reused=""
-   if [ -n "${DESIGN_DOC_PATH:-}" ] && grep -q '^## Schema Reconciliation$' "$DESIGN_DOC_PATH" 2>/dev/null \
-      && [ -f "$REPO_ROOT/.fno/codemap.md" ] && [ -z "$(find "$REPO_ROOT/.fno/codemap.md" -mmin +1440 2>/dev/null)" ]; then
-     schema_reused=1
-   fi
-   if [ -z "$schema_reused" ] && { [ -d "$REPO_ROOT/supabase" ] || [ -f "$REPO_ROOT/prisma/schema.prisma" ] || [ -f "$REPO_ROOT/drizzle/schema.ts" ] || [ -n "$DATABASE_URL" ] || [ -n "$db_env_found" ]; }; then
-     fno codemap --tokens 2048 --db-schema 2>/dev/null || true
-   elif [ -z "$schema_reused" ]; then
-     fno codemap --tokens 2048 2>/dev/null || true
-   fi
-   ```
-   If `fno` is unavailable or codemap's deps are missing, skip silently. Read `.fno/codemap.md` if present. Use god nodes to identify phases needing extra care, module boundaries to inform phase splits, and dependency flow to determine wave ordering.
-1c. **Discovery gate** - Surface unknowns before planning. Load
-   `references/discovery-gate.md` for the protocol (up to 5 questions in full mode).
-   Skip if /think already produced a `## Discovery` or `## Assumptions` section.
-2. **Identify Phases** — Break into logical phases with dependency patterns
-3. **Cross-Project Decomposition** — If phases touch >1 project from work config in settings.yaml, do NOT set `scope: cross-project` (removed). A plan is single-project from the executing session's view. Decompose into one backlog node per project, linked by `blocked_by`, each carrying its own `project`/`cwd` and its own `plan_path` (or a `#fragment` of this shared design doc per `references/section-headers.md`):
-   - `fno backlog decompose <epic> --groups <json>` mints the per-group child nodes (`parent`/`blocked_by`/per-node `#fragment`). Give each group that belongs to a *different* repo a `project` (cwd is resolved from the settings work-map) or an explicit `cwd`; a group with neither inherits the epic's repo. An unmapped `project` is refused, so foreign work is never silently recorded under the current repo.
-   - Each node then ships its own PR in its own repo; spawn-into-project carries the cross-repo handoff.
-4. **Execution Strategy** — Load [dependency-detection.md](references/dependency-detection.md) for the algorithm
-5. **Create INDEX.md** — Load [index-template.md](references/index-template.md). Keep ~200 lines.
-
-5b. **Transcribe executor lock** (when a design doc was supplied). Run the
-   **Executor Lock Transcription** step (top of this file) after writing the
-   INDEX so the transcribed `executor:` frontmatter line lands without
-   disturbing any other frontmatter field. For `mixed` results, walk each
-   phase file and emit `executor: impeccable` task blocks on tasks whose
-   file lists match the locked surface-inference patterns. Phase files
-   without matching tasks inherit the plan default (`executor: do`).
-6. **Goal Alignment** (if goals exist in settings.yaml) — Map tasks → goals
-7. **Critical Path Trace** (MANDATORY) — Trace every user journey through the system
-8. **Scope Classification** — `feature` | `scaffolding` | `poc` (a multi-repo feature is decomposed into per-project nodes in step 3, not classified `cross-project`)
-9. **Create Phase Files** — Load [phase-template.md](references/phase-template.md) for task format
-10. **Linear Ticket** — Only if `config.linear.enabled: true` in settings.yaml. Read team prefix from `config.linear.team`. If Linear is not configured, skip this step entirely.
-11. **Validate** — Run `bash ${SKILL_DIR}/scripts/validate-plan.sh <plan-folder>`
-
-11-schema. **Schema citation gate** — When the codemap has a `## Database
-   Schema` section, run the **Schema Citation Gate** (top of this file) against
-   the phase files' File Ownership Maps and task bodies. Full / large plans
-   FAIL CLOSED: refuse with the named-task-plus-candidates message and halt
-   before adopt if any DB-touching task cites no real schema identifier. With
-   no schema section the gate does not fire (AC3-FR).
-
-11a. **Collision check** (skip if `no-collision-check` modifier or `--no-collision-check` flag)
-
-    Mirrors quick-mode step 3a, but checks the folder plan instead of a single
-    file. The collision primitive walks `00-INDEX.md` plus every numbered phase
-    file and unions their Files-to-Modify tables:
-
-    ```bash
-    fno backlog collisions check "$PLAN_FOLDER" --json > /tmp/collisions.json
-    ```
-
-    On any high-severity entry, run the same AskUserQuestion flow described
-    in step 3a (proceed / modify / supersede / cancel). Apply the user's
-    choice via `fno backlog update --acknowledge-collisions` or
-    `fno backlog supersede` after adopt.
-
-    `no-collision-check` (or `--no-collision-check`) skips the step;
-    audit-trail handling matches quick mode.
-
-11a-bis. **Cross-project peer heads-up** (Files-to-Modify intersection)
-
-    Mirrors quick-mode step 3a-bis, but unions Files-to-Modify across
-    `00-INDEX.md` and every numbered phase file before doing the surface
-    intersection. Same readers, same anti-patterns, same fire-and-forget
-    sends. After sending, append each notified peer to `messaged_peers:`
-    in `00-INDEX.md`'s frontmatter so /target's ship recap dedups against
-    folder-mode plans the same way it does quick-mode plans.
-
-    Skip silently when no `peers` block is configured, when no surface
-    pattern matches any Files-to-Modify row across the folder, or when the
-    same peer is already in `messaged_peers:` (e.g. /think already sent
-    for a Locked Decision affecting the same surface).
-
-11b. **Auto-intake to backlog** (skip if `no-adopt` modifier or `--no-adopt` flag)
-
-    Same invocation as quick mode, passing the plan folder path rather than a
-    single file:
-
-    ```bash
-    if command -v fno >/dev/null 2>&1; then
-      fno backlog intake "$PLAN_FOLDER" --title "$TITLE" 2>&1 \
-        || echo "Warning: auto-intake failed (plan folder still saved)" >&2
-    else
-      echo "Warning: fno CLI not found on PATH; skipping auto-intake. Install the footnote plugin to enable." >&2
-    fi
-    ```
-
-    Non-blocking: the plan folder is already on disk before this runs.
-
-12. **Handoff** — Present execution options
-
-### Required Skills (Full Mode Only)
-
-- **`/bdd-acceptance-criteria`** — Use patterns from [references/common-criteria.md](references/common-criteria.md)
-- **`/linear`** — Create Linear ticket (only if `config.linear.enabled`)
-
-### Key Principles (Full Mode)
-
-- INDEX.md stays small (~200 lines)
-- Phase files have all implementation detail
-- Dependency graph in INDEX (visual + table)
-- Naming encodes parallelism (same prefix = parallel)
-- Every phase gets frontmatter
-- Every story gets 4 AC types (HP, ERR, UI, EDGE)
-- Tests verify DATABASE outcomes, not just UI
-- File ownership map MANDATORY in INDEX.md
-- Bite-sized tasks (2-5 min each)
-
-### Handoff (Full Mode)
-
-> "Plan complete with N phases, adopted to the backlog as `ab-xxxxxxxx`.
-> Linear ticket ID is in the plan's INDEX.md if created.
->
-> **Execution options:**
-> 1. `/target {plan-folder}/` — full pipeline
-> 2.`/do waves {plan-folder}/` — wave orchestration only
-> 3. `/target {plan-folder}/02-core-api.md` — single phase
->
-> Parallel phases 02 and 02b can run simultaneously in separate terminals.
-> Pass `no-adopt` on next invocation to skip auto-adopt."
-
-Include the adopted ID only when adopt succeeded. On failure, omit that
-clause and note the adopt warning.
-
 ## Session Cost Tracking (AUTO — enforced by stop hook)
 
 Cost is automatically registered by the stop hook when the session exits. The stop hook scans the transcript for `fno:plan` Skill tool invocations, calculates cost via `session-cost.py`, and appends to `ledger.json` via `register-task.py`. No manual action needed.
 
-## Single-doc mutation behavior (lean default)
+## Single-doc mutation (design-doc input)
 
 When the input to `/blueprint` is a path to an existing design doc (produced by `/think`), the skill mutates that doc in place rather than creating a folder plan. The doc grows through /think -> /blueprint -> /do -> /review -> /ship; the single file is the canonical artifact.
 
@@ -1114,7 +940,7 @@ it in `## Delivery Groups`, never force a split). Reject `group 0` / negative
 `N` with a non-zero exit and the message `group N must be >= 1` (AC1-ERR),
 creating nothing.
 
-**Procedure** (after the epic node is intaken in step 9 / 11b, so `EPIC_ID`
+**Procedure** (after the epic node is intaken in step 3b, so `EPIC_ID`
 is known):
 
 1. Read the `## Execution Strategy` waves from the doc.
@@ -1173,14 +999,14 @@ is known):
    fno backlog decompose "$EPIC_ID" --max-prs "$N" --groups "@/tmp/groups-$$.json"
    rm -f /tmp/groups-$$.json
    ```
-   The verb creates one child node per group (`parent=$EPIC_ID`,
-   `plan_path=<doc>#group-<slug>`, `blocked_by` resolved from
+   The verb creates one child node per group (`parent=$EPIC_ID`, its own
+   self-contained `<stem>.group-<slug>.md` plan, `blocked_by` resolved from
    `blocked_by_groups`), prints the epic id and each child id with its wave
    range, and is idempotent: re-running `/blueprint group N` on an
-   already-decomposed plan updates the same children in place (keyed on
-   `#group-<slug>`) rather than duplicating (US4). A bad spec leaves the
+   already-decomposed plan updates the same children in place (keyed on the
+   group slug) rather than duplicating (US4). A bad spec leaves the
    graph untouched (AC1-FR) because the whole decomposition lands in one
-   locked mutation. If a re-decomposition drops a `#group-` slug that already
+   locked mutation. If a re-decomposition drops a slug that already
    shipped a PR, the verb refuses (exit 2) unless you pass `--force`; unshipped
    dropped groups are left in place and reported as a warning.
 
@@ -1188,34 +1014,23 @@ is known):
 holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
 (`auth-flow`) are fine as long as they do not change between runs.
 
-**Packaging choice: `fragment` (default) vs `separate`.** Decompose can attach
-two kinds of per-child plan; pass `--plans` to pick (the skill surfaces the
-tradeoff so the operator chooses deliberately instead of hand-rolling it):
+**Packaging: `separate` only.** Every child gets its own self-contained
+quick-plan file - `plan == PR == node` for children too. Decompose scaffolds a
+stub per child (Context / Changes / Files to Modify / Verification, seeded from
+the group's waves + a pointer to the epic's File Ownership Map) and points each
+child's `plan_path` at its own `<stem>.group-<slug>.md`. This is what a
+fresh-context bg `/target` builder reads best, and there is no shared-doc
+fragment to clobber. It is the default (and only) packaging - `--plans` need not
+be passed; `--plans fragment` is a removed value that errors.
 
-- **`fragment` (default, lean):** `plan_path = <doc>#group-<slug>`, a fragment of
-  the shared epic doc. One source of truth, thinner per-child detail. Best when
-  the children are built in the same context that holds the epic doc.
-- **`separate`:** after decompose, scaffold a self-contained quick-plan stub per
-  child (Context / Changes / Files to Modify / Verification, seeded from the
-  group's waves + a pointer to the epic's File Ownership Map) and repoint each
-  child's `plan_path` to its own `<stem>.group-<slug>.md` file. Best for a
-  fresh-context bg `/target` builder, which reads a self-contained plan better
-  than a fragment of a larger doc.
-
-  ```bash
-  fno backlog decompose "$EPIC_ID" --max-prs "$N" --plans separate --groups "@/tmp/groups-$$.json"
-  ```
-
-  `separate` is idempotent on the slug just like `fragment` (re-running upserts
-  the same children, and an existing scaffolded file is never clobbered, so a
-  builder's edits survive a re-decompose). Switching modes on an
-  already-decomposed epic repoints the same children rather than duplicating.
-  When in doubt, default to `fragment`; reach for `separate` when you are about
-  to hand the children to fresh-context builders.
+Scaffolding is idempotent on the slug: re-running upserts the same children, an
+existing scaffolded file is never clobbered (a builder's edits survive a
+re-decompose), and a child still on the legacy `<doc>#group-<slug>` fragment
+form (from a pre-removal decompose) is repointed to its separate file in place.
 
 ## Ready-gated auto-launch (opt-in, default OFF) — Phase 2 / US6
 
-After a plan is written AND its claimed backlog node is intaked (the final step of every mode — Focused, Full, and single-doc lean), run the auto-launch gate as the LAST action:
+After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), run the auto-launch gate as the LAST action:
 
 ```bash
 bash "${SKILL_DIR}/scripts/autolaunch-on-ready.sh" "<plan-path>"

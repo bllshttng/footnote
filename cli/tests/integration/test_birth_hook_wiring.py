@@ -62,7 +62,7 @@ _GROUPS = json.dumps([
 
 def test_decompose_fires_birth_hook_per_created_child(tmp_path, monkeypatch, capture_born):
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [_EPIC]}) + "\n")
+    g.write_text(json.dumps({"entries": [{**_EPIC, "cwd": str(tmp_path)}]}) + "\n")
     _route_graph(g, tmp_path, monkeypatch)
 
     r = _invoke("backlog", "decompose", "ab-epic0001", "--groups", _GROUPS)
@@ -76,7 +76,7 @@ def test_decompose_fires_birth_hook_per_created_child(tmp_path, monkeypatch, cap
 
 def test_redecompose_update_does_not_refire_birth_hook(tmp_path, monkeypatch, capture_born):
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [_EPIC]}) + "\n")
+    g.write_text(json.dumps({"entries": [{**_EPIC, "cwd": str(tmp_path)}]}) + "\n")
     _route_graph(g, tmp_path, monkeypatch)
 
     # First pass: 2 children created -> 2 births.
