@@ -126,6 +126,22 @@ def test_persisted_worktree_pointer_self_heals_to_canonical(tmp_path, isolated_h
     assert got is not None and got.resolve() == canon.resolve()
 
 
+def test_canonical_fails_open_on_subprocess_error(tmp_path, monkeypatch):
+    """A hanging/failing git probe (timeout, missing git) or a stubbed run
+    without .stdout must fail open to the input root, never crash resolution."""
+    plugin = _make_plugin(tmp_path / "plugin")
+
+    def _timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=2)
+    monkeypatch.setattr(paths.subprocess, "run", _timeout)
+    assert paths._canonical_plugin_root(plugin) == plugin
+
+    class _NoStdout:
+        returncode = 0
+    monkeypatch.setattr(paths.subprocess, "run", lambda *a, **k: _NoStdout())
+    assert paths._canonical_plugin_root(plugin) == plugin
+
+
 def test_persist_stays_subprocess_free(tmp_path, isolated_home, monkeypatch):
     """Persisting must not shell out (a git call here would trip the target-init
     'must not shell out' guards): it stores the raw root; the reader canonicalizes."""

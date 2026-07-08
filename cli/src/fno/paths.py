@@ -958,20 +958,23 @@ def _canonical_plugin_root(root: Path) -> Path:
     ``git --git-common-dir`` is ``<canonical>/.git`` from any worktree and
     ``<root>/.git`` from the canonical checkout itself, so the parent is the
     canonical root either way (a no-op for a non-worktree checkout). A non-git
-    root (OSS ``--plugin-dir`` tarball) returns unchanged."""
+    root (OSS ``--plugin-dir`` tarball) returns unchanged. Fail-open on any
+    error (missing git, timeout, permission, a stubbed run without stdout): the
+    pointer stays usable, resolution just skips canonicalization."""
     try:
         out = subprocess.run(
             ["git", "-C", str(root), "rev-parse",
              "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=2,
         )
-    except OSError:
-        return root
-    common = out.stdout.strip()
-    if out.returncode != 0 or not common.endswith("/.git"):
-        return root
-    canon = Path(common[: -len("/.git")])
-    return canon if (canon / ".claude-plugin" / "plugin.json").is_file() else root
+        common = (getattr(out, "stdout", "") or "").strip()
+        if getattr(out, "returncode", 1) == 0 and common.endswith("/.git"):
+            canon = Path(common[: -len("/.git")])
+            if (canon / ".claude-plugin" / "plugin.json").is_file():
+                return canon
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return root
 
 
 def _read_persisted_plugin_root() -> "Path | None":
