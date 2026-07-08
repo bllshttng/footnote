@@ -2757,12 +2757,28 @@ def _apply_search_ceiling(candidates: list[Path]) -> list[Path]:
     raw = os.environ.get("FNO_CONFIG_SEARCH_ROOT")
     if not raw:
         return candidates
-    roots = [Path(r).resolve() for r in raw.split(os.pathsep) if r]
+    roots: list[Path] = []
+    for r in raw.split(os.pathsep):
+        if not r:
+            continue
+        try:
+            roots.append(Path(r).resolve())
+        except OSError:
+            pass
     if not roots:
         return candidates
-    return [
-        c for c in candidates if any(c.resolve().is_relative_to(r) for r in roots)
-    ]
+    # resolve() is filesystem I/O (symlink walk) and can raise OSError on a
+    # symlink loop / permission wall; config load is on every command's startup
+    # path, so resolve each candidate once and degrade (drop) rather than crash.
+    kept: list[Path] = []
+    for c in candidates:
+        try:
+            resolved = c.resolve()
+        except OSError:
+            continue
+        if any(resolved.is_relative_to(r) for r in roots):
+            kept.append(c)
+    return kept
 
 
 def _candidate_paths() -> list[Path]:
