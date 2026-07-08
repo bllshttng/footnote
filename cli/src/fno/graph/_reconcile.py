@@ -1009,10 +1009,18 @@ def dispatch_post_merge_ritual(
             spawn = _spawn_post_merge_worker
         try:
             short_id = spawn(pr_number, str(canonical))
-        except Exception as exc:  # noqa: BLE001 - non-fatal; allow a later retry
+        except Exception as exc:  # noqa: BLE001 - non-fatal
+            # No marker is written, so the sync stays recoverable via a later
+            # DIRECT `fno pr sync-canonical --pr <n>` (its own SHA marker is
+            # unwritten too) or a manual `/fno:pr merged <n>`. It is NOT
+            # auto-retried by a later reconcile: reconcile only scans OPEN nodes
+            # and this node is already closed, so a failed dispatch is a
+            # once-only best-effort. The caller surfaces the recovery command;
+            # robust auto-retry belongs to the pr_watch fast-follow (x-47be Q3).
             return PostMergeDispatchResult("spawn-failed", pr_number, detail=str(exc)[:200])
         # Persist the cross-session marker ONLY after the spawn succeeds, so a
-        # crash before this point leaves no marker and the next reconcile retries.
+        # crash before this point leaves no marker (the sync stays recoverable
+        # via a direct primitive call / manual ritual, per the note above).
         try:
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch(exist_ok=True)

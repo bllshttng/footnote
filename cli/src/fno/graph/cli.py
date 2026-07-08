@@ -4632,9 +4632,15 @@ def cmd_reconcile(
                                 f"#{record.pr_number}; skipping"
                             )
                         elif _pm.outcome == "spawn-failed":
+                            # Loud + recoverable: the node is already closed so a
+                            # later reconcile will NOT re-dispatch. Name the manual
+                            # recovery so the canonical sync is not silently skipped.
                             typer.echo(
                                 f"warning: post-merge ritual dispatch for PR "
-                                f"#{record.pr_number} failed: {_pm.detail}",
+                                f"#{record.pr_number} failed: {_pm.detail}. "
+                                f"Recover with `fno pr sync-canonical --pr "
+                                f"{record.pr_number}` or `/fno:pr merged "
+                                f"{record.pr_number}`.",
                                 err=True,
                             )
                 elif not json_out:
