@@ -439,6 +439,32 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
+    // ── bg worker terminal-stop marker (x-fcbf) ────────────────────────────
+    // A fire-and-forget `claude --bg` /target|/think worker parks at its idle
+    // prompt on a terminal loop decision and never exits (the stop hook allows
+    // the TURN, not the PROCESS), piling up against agents.max_live. finalize
+    // cannot self-exit (it is the worker's child), so it drops a marker the
+    // external daemon sweep consumes to `claude stop` the parked worker. Gated
+    // to footnote-SPAWNED (FNO_AGENT_SELF) + non-loop-driven (FNO_DRIVER_LIB
+    // unset) sessions so an operator's own terminal /target and loop-run
+    // children stay parked. Best-effort + log-only: never held for retry, never
+    // rolls back the ledger/stamp (mirrors verify_advise's non-wedge contract).
+    let agent_self = std::env::var_os("FNO_AGENT_SELF").is_some();
+    let driver_lib = std::env::var_os("FNO_DRIVER_LIB").is_some();
+    let mut terminal_stop_marked = false;
+    if let Some(uuid) =
+        crate::terminal_stop::should_mark(agent_self, driver_lib, m.claude_transcript_id.as_deref())
+    {
+        let agents_home = crate::paths::AgentsHome::from_env();
+        match crate::terminal_stop::write_marker(&agents_home, uuid, &reason) {
+            Ok(p) => {
+                terminal_stop_marked = true;
+                eprintln!("finalize: terminal-stop marker written: {}", p.display());
+            }
+            Err(e) => eprintln!("finalize: terminal-stop marker failed (non-fatal): {e}"),
+        }
+    }
+
     // ── emit terminal event ────────────────────────────────────────────────
     let mut data = json!({
         "session_id": session_id,
@@ -448,6 +474,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         "stamped": stamped,
         "handoff_path": handoff_path,
         "postmortem_path": postmortem_path,
+        "terminal_stop_marked": terminal_stop_marked,
         "graph_node_id": m.graph_node_id,
     });
     if failed.is_empty() {

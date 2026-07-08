@@ -84,6 +84,7 @@ pub mod stream_worker;
 pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
+pub mod terminal_stop;
 pub mod verify_evidence;
 pub mod wait;
 pub mod write_queue;
@@ -650,6 +651,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
     // live-but-unowned PID to exited); this REMOVES the row entirely.
     "agent_row_reaped",
+    // Terminal-stop sweep (daemon-emitted, x-fcbf): a fire-and-forget
+    // `claude --bg` worker that finalize marked terminal was `claude stop`ped so
+    // its slot frees instead of parking at an idle prompt forever.
+    "bg_worker_terminal_stopped",
     "agent_spawn_failed",
     "agent_stop_error",
     "agent_spawn_cwd_fallback",
