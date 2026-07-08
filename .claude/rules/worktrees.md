@@ -4,22 +4,23 @@ The single place that says where git worktrees go for this repo and what to do a
 
 ## The rule
 
-**The worktree root is config-driven via `config.paths.worktrees_base`.**
+**The worktree root is config-driven via `config.paths.worktrees_base`. Set nothing and the defaults work - no config needed.**
 
 - **Unset (OSS-neutral default):** harness-native `<repo>/.claude/worktrees/<name>`. That directory is gitignored, so `rg`/Grep already skip it. No relocation, zero config.
-- **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>`.
-- **This repo's setup:** the maintainer sets `config.paths.worktrees_base: ~/conductor/workspaces` in their **global** `~/.fno/config.toml`, so every footnote worktree lands at `~/conductor/workspaces/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`, e.g. `footnote`).
+- **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`).
 - **`worktree.use_conductor_canonical: true` is DEPRECATED:** it still works (behaves as `worktrees_base = ~/conductor/workspaces`), but prefer `config.paths.worktrees_base`. The single knob is honored by the `WorktreeCreate` hook, `cli/src/fno/worktree.py` (the megawalk walker), and `cli/src/fno/worktree_paths.py` (the agents runtime; its own neutral default is `~/.fno/worktrees/{proj}-{name}`).
 
-After `git worktree add`, run the canonical setup script (paths below assume the maintainer's `~/conductor/workspaces` base; substitute your own base or the harness-native default):
+After `git worktree add`, run the canonical setup script (substitute your own `worktrees_base` for the example path, or use the harness-native default when unset):
 
 ```bash
-git worktree add ~/conductor/workspaces/<repo>/<name> <branch>
-cd ~/conductor/workspaces/<repo>/<name>
+git worktree add <worktrees_base>/<repo>/<name> <branch>   # or <repo>/.claude/worktrees/<name> when unset
+cd <worktrees_base>/<repo>/<name>
 bash scripts/setup/setup-worktree.sh
 ```
 
 The setup script links the canonical `internal/`, the project-level `.fno/` state (settings, tasks, ledger, inbox, wake-signals, codemap), the `.claude/` subdirs (`agents`, `commands`, `skills`, `settings.local.json`, `scheduled_tasks*`), and the `.agents/` provider/agent config. It auto-resolves the canonical via `CANONICAL` env var, then `CONDUCTOR_ROOT_PATH`, then `git rev-parse --git-common-dir`, then `$HOME/code/me/abilities`. See `scripts/setup/setup-worktree.sh` for the full contract.
+
+**Enter the worktree in-session (harness step).** A footnote `/target` cold-start prints the worktree path in its `fno target start` receipt, then calls the harness **EnterWorktree** tool with `path=<that worktree>` so the session actually runs from inside the worktree - a shell `cd` does not persist across tool calls. Location-agnostic: any path in `git worktree list` is enterable on first entry, so this works identically for a configured `worktrees_base` and the harness-native default. See `skills/target/SKILL.md` for the full cold-start ritual and its caveats.
 
 To remove a worktree, use the archive script:
 
@@ -29,7 +30,9 @@ bash scripts/setup/archive-worktree.sh <name|path>
 
 It enforces strict pre-removal checks (clean working tree, no unpushed commits, no live target session), prompts before SIGTERM'ing any process rooted in the worktree path, runs `git worktree remove` + `git worktree prune`, and preserves the branch. Flags: `--force` (skip checks), `--yes` (skip process-kill prompt), `--delete-branch` (drop the branch with `git branch -D` after removal). The plain alternative is `git worktree remove <path>`; never use `rm -rf` (leaves dangling refs in `.git/worktrees/`).
 
-## Why this repo keeps the conductor location (via the knob)
+## Maintainer environment example: conductor workspaces
+
+This is one environment's concrete choice, NOT a default an OSS user inherits - set nothing and you get the harness-native `.claude/worktrees/` above. The maintainer sets `config.paths.worktrees_base: ~/conductor/workspaces` in their **global** `~/.fno/config.toml`, so every footnote worktree lands at `~/conductor/workspaces/<repo>/<name>` (e.g. `~/conductor/workspaces/footnote/<name>`). Why keep it there:
 
 - Every existing footnote worktree already lives under `~/conductor/workspaces/footnote/` (athens, davis, milan-v1, montpelier, nairobi-v1, ...). Consistency keeps `git worktree list` legible and avoids inventorying multiple roots. This is a per-environment choice set with `config.paths.worktrees_base: ~/conductor/workspaces`, not a hardcoded default - an OSS user who sets nothing gets harness-native `.claude/worktrees/`.
 - Conductor itself drops worktrees there and calls `scripts/setup/setup-worktree.sh` via `conductor.json`. Other creation paths converging on the same location means agents, Conductor, and the CLI all produce the same end state.
