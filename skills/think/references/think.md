@@ -226,11 +226,27 @@ The resolved type parameterizes the per-type contract (Step 8), the AC set
 (Step 7), and the reviewer's anti-filler check (Step 8b).
 
 ### 2. Explore the Idea (One Round at a Time)
-Ask questions to refine understanding:
-- What problem does this solve?
-- Who are the users?
-- What are the constraints?
-- What does success look like?
+
+Interview the user to refine understanding - in **batched rounds**, not one
+question at a time.
+
+- **Never ask what the repo can answer.** Step 1c's discovery gate already read
+  the code and surfaced the model's unknowns; Step 2 inherits that rule instead
+  of re-asking generic "who are the users?" boilerplate the codebase (or the
+  seeding node) already settles. Recon first, ask second.
+- **Batch related questions into one round.** Use a single `AskUserQuestion`
+  call with up to 4 questions, each leading with a recommended option. Replaces
+  "one question at a time" with **one *round* at a time**. On a CLI without
+  `AskUserQuestion`, degrade to one prose prompt listing the round's questions.
+- **Ask only user-only questions**: requirements, preferences, tradeoffs,
+  edge-case priorities, scope calls. Anything the code or docs can answer is
+  recon, not a question.
+- **Scale rounds to ambiguity.** A vague feature seed may need several rounds; a
+  focused bug with a repro needs one round or none; node-seeded work whose
+  details already lock the decisions needs zero. Stop when the open questions
+  that remain are the user's to answer and you have their answers.
+- **Fold the type confirmation in.** For a free-text seed, ride the Step 1f
+  `deliverable_type` confirmation in the FIRST batch (never a dedicated round).
 
 Prefer multiple choice when possible.
 
@@ -238,6 +254,13 @@ Prefer multiple choice when possible.
 - Propose 2-3 different approaches with trade-offs
 - Lead with recommended option and explain why
 - Get user confirmation before proceeding
+
+**Draft incrementally from here.** Once the approach is confirmed, save the doc
+skeleton (the type's required section headings from Step 8's contract table, with
+`deliverable_type` in frontmatter) and grow each section as it settles across
+Steps 4-7. This survives a mid-design crash and keeps the running design visible.
+The Step 8 save becomes a **finalize** of a doc already on disk, not the first
+write.
 
 ### 4. Present Design (200-300 word sections)
 Cover:
@@ -585,7 +608,10 @@ Document any pitfalls that could affect the implementation plan. Examples:
 - Supabase RLS: policies don't apply to service_role key
 - React state: stale closures in effects, batching behavior
 
-### 8. Save Design Document
+### 8. Finalize the Design Document
+
+Finalize the doc drafted incrementally from Step 3 (or write it now if the flow
+was short enough to skip the skeleton).
 
 Save to: `{plansDirectory}/YYYY-MM-DD-<feature-name>.md` (read from `.claude/settings.json` → `plansDirectory`, or `.fno/settings.yaml` → `config.plans.full_path`)
 
@@ -707,7 +733,7 @@ Ask: "Ready to create the implementation plan with `/blueprint`?"
 
 ## Key Principles
 
-- **One question at a time** - Don't overwhelm
+- **One round at a time** - batch related questions into a single round; never overwhelm, but never drip one question at a time either
 - **YAGNI ruthlessly** - Remove unnecessary features
 - **Test-first thinking** - Always ask "how would we verify this?"
 - **Every action needs feedback** - If a user does something and nothing visible happens, that's a design bug
