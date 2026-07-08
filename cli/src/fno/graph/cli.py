@@ -2217,6 +2217,13 @@ def cmd_get(
         help="Node ab-id, slug, or bare 8-hex (e.g. ab-ff6f96e0 | dashless-spawn | ff6f96e0)",
     ),
     field: Optional[str] = typer.Option(None, help="Print only this field"),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Exact-only resolution (id/slug/bare-hex); never fuzzy. The stable "
+        "surface the /think router seeds a design from - a miss exits 1 so a "
+        "typo'd token can never silently seed.",
+    ),
 ) -> None:
     from fno.graph.store import read_graph
     from fno.graph.fuzzy import resolve_node
@@ -2225,7 +2232,9 @@ def cmd_get(
     # Deterministic resolution tiers 1-3 (ab-f82e8083): exact ab-id, exact slug,
     # bare-8-hex re-prefix. A slug/bare-hex argument resolves to the same node
     # an ab-id would, so the spawn VALIDATE step (`fno backlog get "$node"`)
-    # accepts every exact entry form.
+    # accepts every exact entry form. `resolve_node` is already exact-only, so
+    # --strict pins that contract for the router (x-4af4): should `get` ever gain
+    # a describe-it fuzzy default, --strict stays the exact-only seed path.
     match = resolve_node(id, entries)
     if match.kind == "exact":
         e = match.candidates[0]

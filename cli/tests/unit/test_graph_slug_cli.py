@@ -87,6 +87,36 @@ def test_get_field_works_with_slug_input(tmp_graph):
     assert result.stdout.strip() == "ab-994222ee"
 
 
+# -- get --strict: the router's contract binding (x-4af4) --------------------
+
+
+def test_get_strict_resolves_exact_forms(tmp_graph):
+    # T1: --strict resolves the exact forms (id, slug, bare-hex) the router seeds
+    # a design from - identical to the default, but pinned as the stable surface.
+    _seed(tmp_graph, [
+        {"id": "ab-994222ee", "title": "Dashless spawn", "slug": "dashless-spawn",
+         "_status": "ready", "domain": "code", "project": "fno"},
+    ])
+    for token in ("ab-994222ee", "dashless-spawn", "994222ee"):
+        result = runner.invoke(app, ["backlog", "get", token, "--strict"])
+        assert result.exit_code == 0, (token, result.output)
+        assert json.loads(result.stdout)["id"] == "ab-994222ee"
+
+
+def test_get_strict_does_not_fuzzy_fall_through(tmp_graph):
+    # AC1-EDGE + kill_criteria: a token that only describe-it fuzzy matching would
+    # resolve (a mistyped mode keyword near a real slug) must NOT resolve under
+    # --strict. `find` (the fuzzy surface) DOES match it - proving strict != fuzzy.
+    _seed(tmp_graph, [
+        {"id": "ab-aaaaaaaa", "title": "panel mode debate", "slug": "panel-mode",
+         "_status": "ready", "domain": "code", "project": "p"},
+    ])
+    strict = runner.invoke(app, ["backlog", "get", "panle", "--strict"])
+    assert strict.exit_code == 1, strict.output
+    fuzzy = runner.invoke(app, ["backlog", "find", "panel"])
+    assert fuzzy.exit_code == 0 and "ab-aaaaaaaa" in fuzzy.stdout
+
+
 # -- find: high recall + handle display --------------------------------------
 
 

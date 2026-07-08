@@ -120,10 +120,109 @@ def _node_line(
     return f"fresh ({status or 'ready'})"
 
 
+# --- live-manifest predicate (x-4af4) ---------------------------------------
+#
+# ONE liveness truth, two consumers: `_attended_line` (so a DEAD manifest reads
+# attended, restoring /think's question flow) and the session-start GC hook
+# (which shells `fno target status --json` and archives a DEAD manifest). The
+# hook must NOT re-implement pid/claim logic in bash -- it reads `manifest-live`.
+
+
+def _pid_alive(pid_val: Any) -> bool:
+    """Best-effort: is ``pid_val`` a running process on THIS host?
+
+    Biased toward LIVE on any uncertainty: a false-live costs one autonomous
+    /think, a false-dead would archive a still-running session's manifest.
+    """
+    try:
+        pid = int(str(pid_val).strip())
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+
+        return bool(psutil.pid_exists(pid))
+    except Exception:  # noqa: BLE001 - psutil missing/erroring -> os.kill fallback
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except (PermissionError, OSError):
+            return True  # exists-but-not-ours / uncertain -> biased live
+
+
+def _claim_state(claim_key: str) -> Optional[str]:
+    """The claim lockfile state for ``claim_key`` (free|live|suspect|stale|
+    corrupted), or None on a read error. None means "claim signal unavailable"
+    -- the caller must NOT treat it as confirmed-dead."""
+    try:
+        from fno.claims.core import claim_status
+        from fno.claims.io import claims_root_for
+
+        # node:/dispatch:/... keys live at the GLOBAL claims root, not the
+        # per-repo default; route there (the same helper `fno claim status` uses)
+        # or a node claim always reads `free` from a worktree checkout.
+        state = claim_status(claim_key, root=claims_root_for(claim_key)).get("state")
+        return str(state or "") or None
+    except Exception:  # noqa: BLE001 - unreadable claim -> None (not confirmed dead)
+        return None
+
+
+def _manifest_liveness(manifest_raw: Optional[Dict[str, Any]]) -> tuple[str, str]:
+    """``(state, reason)`` where state is ``live`` | ``dead`` | ``none``.
+
+    The node claim is the ONLY durable liveness signal (x-ba4b: session-pid
+    anchored + TTL-protected). ``owner_pid`` is the TRANSIENT ``fno target init``
+    wrapper pid (init-target-state.sh:525) that dies seconds after init, so it can
+    only ever PROVE life (a live pid), never death. DEAD is asserted solely from a
+    claim confirmed absent/expired:
+
+      * claim held (live/suspect)          -> LIVE
+      * claim absent/expired (free/stale)  -> DEAD (the durable anchor is gone)
+      * claim unreadable (corrupted/error) -> LIVE (cannot confirm death)
+      * NO claim key -> LIVE unless owner_pid still proves life
+
+    The no-claim-key bias is load-bearing: a live NON-node target (free-text or a
+    plan input writes graph_node_id:null and no claim) has a dead transient
+    owner_pid post-init, so concluding DEAD from owner_pid there would archive a
+    running session and flip /think to attended mid-run. With no durable death
+    signal we bias LIVE (a false-live costs one autonomous /think; a false-dead
+    archives a live session).
+    """
+    raw = manifest_raw or {}
+    if not raw:
+        return "none", "no manifest"
+
+    claim_key = str(raw.get("target_claim_key") or "").strip()
+    if claim_key:
+        state = _claim_state(claim_key)
+        if state in {"live", "suspect"}:
+            return "live", f"claim {claim_key} {state}"
+        if state in {"free", "stale"}:
+            return "dead", f"claim {claim_key} {state}"
+        # corrupted / unreadable -> claim signal unavailable, cannot confirm death
+        return "live", f"claim {claim_key} unreadable (biased live)"
+
+    # No recorded claim key: owner_pid can only PROVE life (it is transient, so a
+    # dead/absent one is not proof of death - could be a live non-node target).
+    if _pid_alive(raw.get("owner_pid")):
+        return "live", "owner_pid alive"
+    return "live", "no claim key; owner_pid transient (biased live)"
+
+
 def _attended_line(manifest_raw: Optional[Dict[str, Any]]) -> str:
+    state, reason = _manifest_liveness(manifest_raw)
+    # A DEAD manifest (x-4af4) means the owning session is gone -- resolve to
+    # ATTENDED regardless of the stale stamped value, and NAME it so the posture
+    # is not silently changed (the original bug was a silent autonomous switch).
+    if state == "dead":
+        return f"true (dead manifest: {reason}; attended)"
     if manifest_raw and "attended" in manifest_raw:
         val = str(manifest_raw["attended"]).strip().lower()
-        return f"{val} (manifest)"
+        return f"{val} (manifest, live: {reason})"
     # No manifest yet: resolve from the substrate, mirroring init-target-state.sh
     # and the spawn_think precedent -- FNO_AGENT_SELF (injected into EVERY spawned
     # worker) is the reliable "not an operator at the keyboard" signal.
@@ -134,6 +233,21 @@ def _attended_line(manifest_raw: Optional[Dict[str, Any]]) -> str:
     ):
         return "false (substrate: spawned/bg worker)"
     return "true (substrate: operator session)"
+
+
+def _manifest_live_line(manifest_raw: Optional[Dict[str, Any]]) -> str:
+    """The machine-read liveness field the session-start GC keys on. A ``dead``
+    value carries the archive command (the module's "unknown line names its one
+    resolving command" idiom)."""
+    state, reason = _manifest_liveness(manifest_raw)
+    if state == "dead":
+        return (
+            f"dead ({reason}) | archive: "
+            "fno state archive --path .fno/target-state.md --type target"
+        )
+    if state == "none":
+        return "none (no manifest)"
+    return f"live ({reason})"
 
 
 def _worktree_line(project_root: Path, node_id: Optional[str]) -> str:
@@ -281,6 +395,7 @@ def build_report(
         OrientLine("tests", _tests_line(project_root)),
         OrientLine("plan", _plan_line(plan_path, project_root)),
         OrientLine("boundary-reconcile", _boundary_line(node_id, plan_path, project_root)),
+        OrientLine("manifest-live", _manifest_live_line(manifest_raw)),
         OrientLine("done-when", _done_when_line(manifest_raw, project_root)),
     ]
 
@@ -368,11 +483,12 @@ def _self_check() -> None:
         lines = build_report(root, node_id=None, plan_path=None, manifest_raw=None)
         assert [ln.label for ln in lines] == [
             "node", "attended", "worktree", "tests", "plan",
-            "boundary-reconcile", "done-when",
+            "boundary-reconcile", "manifest-live", "done-when",
         ], lines
         by = {ln.label: ln.value for ln in lines}
         assert by["node"].startswith("fresh"), by
         assert by["attended"].startswith("true"), by
+        assert by["manifest-live"].startswith("none"), by
         assert "fno target start" in by["worktree"], by
         out = render(lines)
         assert "node:" in out and "done-when:" in out, out

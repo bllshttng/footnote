@@ -78,6 +78,94 @@ def test_attended_line_substrate(monkeypatch) -> None:
     assert orient._attended_line(None).startswith("false")
 
 
+# --- T2: live-manifest predicate (x-4af4) -----------------------------------
+
+
+def test_manifest_liveness_none_when_no_manifest() -> None:
+    assert orient._manifest_liveness(None)[0] == "none"
+    assert orient._manifest_liveness({})[0] == "none"
+
+
+def test_manifest_liveness_live_claim_beats_dead_pid(monkeypatch) -> None:
+    # AC2-EDGE: a dead owner_pid but a held+unexpired claim is LIVE. Claim-first
+    # (x-ba4b): the manifest pid snapshot lies after a supervisor respawn.
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "suspect")
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: False)
+    raw = {"target_claim_key": "node:x-1", "owner_pid": "999999"}
+    assert orient._manifest_liveness(raw)[0] == "live"
+
+
+def test_manifest_liveness_dead_claim_and_dead_pid(monkeypatch) -> None:
+    # AC2-HP: claim expired AND owner_pid dead -> DEAD (both signals required).
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: "stale")
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: False)
+    raw = {"target_claim_key": "node:x-1", "owner_pid": "999999"}
+    assert orient._manifest_liveness(raw)[0] == "dead"
+
+
+def test_manifest_liveness_no_claim_key_never_dead(monkeypatch) -> None:
+    # Codex P1: a live NON-node target (free-text/plan input) has NO claim key and
+    # a dead TRANSIENT owner_pid post-init. owner_pid can only PROVE life, never
+    # death - so a no-claim manifest is LIVE whether the pid is alive or dead, and
+    # the GC must never archive it.
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: True)
+    assert orient._manifest_liveness({"owner_pid": "123"})[0] == "live"
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: False)
+    assert orient._manifest_liveness({"owner_pid": "123"})[0] == "live"
+    assert orient._manifest_liveness({"graph_node_id": "null"})[0] == "live"
+
+
+def test_manifest_liveness_claim_read_error_biased_live(monkeypatch) -> None:
+    # A claim read error means the claim signal is NOT confirmed-dead, so
+    # both-signals-dead can never hold -> LIVE (never archive a maybe-live run).
+    monkeypatch.setattr(orient, "_claim_state", lambda _k: None)
+    monkeypatch.setattr(orient, "_pid_alive", lambda _p: False)
+    raw = {"target_claim_key": "node:x-1", "owner_pid": "999999"}
+    assert orient._manifest_liveness(raw)[0] == "live"
+
+
+def test_claim_state_routes_to_global_node_root(monkeypatch) -> None:
+    # Regression: a node:/dispatch: claim lives at the GLOBAL claims root, not the
+    # per-repo default. Without routing, _claim_state reads `free` from every
+    # worktree and marks a LIVE session dead (would archive its manifest).
+    from fno.claims.io import claims_root_for
+
+    captured = {}
+
+    def _fake_status(key, root=None):
+        captured["root"] = root
+        return {"state": "live"}
+
+    monkeypatch.setattr("fno.claims.core.claim_status", _fake_status)
+    assert orient._claim_state("node:x-1") == "live"
+    assert captured["root"] == claims_root_for("node:x-1")
+
+
+def test_attended_line_dead_manifest_is_attended(monkeypatch) -> None:
+    # AC2-HP: a dead manifest stamped attended:false STILL resolves to attended,
+    # and names the dead manifest so the posture change is not silent.
+    monkeypatch.setattr(
+        orient, "_manifest_liveness", lambda _r: ("dead", "claim stale + owner_pid dead")
+    )
+    line = orient._attended_line({"attended": False, "owner_pid": "9"})
+    assert line.startswith("true") and "dead manifest" in line
+
+
+def test_attended_line_live_manifest_keeps_stamp(monkeypatch) -> None:
+    # AC1-UI: a live manifest keeps its stamped posture; the note names it live.
+    monkeypatch.setattr(orient, "_manifest_liveness", lambda _r: ("live", "claim node:x-1 live"))
+    assert orient._attended_line({"attended": False}).startswith("false")
+    assert orient._attended_line({"attended": True}).startswith("true")
+
+
+def test_manifest_live_line_shapes(monkeypatch) -> None:
+    monkeypatch.setattr(orient, "_manifest_liveness", lambda _r: ("dead", "why"))
+    dead = orient._manifest_live_line({"attended": False})
+    assert dead.startswith("dead") and "fno state archive" in dead
+    monkeypatch.setattr(orient, "_manifest_liveness", lambda _r: ("none", "no manifest"))
+    assert orient._manifest_live_line(None).startswith("none")
+
+
 def test_worktree_line(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(orient, "_is_linked_worktree", lambda _: False)
     line = orient._worktree_line(tmp_path, "x-9")
@@ -117,13 +205,13 @@ def test_plan_line(tmp_path) -> None:
     assert "stale-reference" in orient._plan_line(str(plan), tmp_path)
 
 
-def test_build_report_is_read_only_seven_lines(monkeypatch, tmp_path) -> None:
+def test_build_report_is_read_only_eight_lines(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(orient, "_graph_entry", lambda *_: None)
     lines = orient.build_report(tmp_path, node_id="x-1", plan_path=None, manifest_raw={})
     labels = [ln.label for ln in lines]
     assert labels == [
         "node", "attended", "worktree", "tests", "plan",
-        "boundary-reconcile", "done-when",
+        "boundary-reconcile", "manifest-live", "done-when",
     ]
 
 
