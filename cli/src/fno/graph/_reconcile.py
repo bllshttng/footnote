@@ -73,6 +73,9 @@ class PrMergeState:
     state: PrStateLiteral
     url: Optional[str]
     merged_at: Optional[str]
+    # mergeCommit.oid - the dedup key for post-merge-ritual auto-dispatch
+    # (x-47be). Optional: absent on a non-merged PR or when gh omits it.
+    merge_sha: Optional[str] = None
 
 
 @dataclass
@@ -97,6 +100,11 @@ class MergeDriftRecord:
     # been intaken without a session (session_id null) or without a cwd.
     session_id: Optional[str] = None
     cwd: Optional[str] = None
+    # mergeCommit.oid for the closed PR - the exactly-once dedup key for the
+    # post-merge-ritual auto-dispatch (x-47be). None on a reverse-mapped record
+    # (branch-name match has no SHA); the dispatcher falls back to a pr-number
+    # key there.
+    merge_sha: Optional[str] = None
 
     @property
     def closeable(self) -> bool:
@@ -162,7 +170,7 @@ def query_pr_merge_state(
     cmd = ["gh", "pr", "view", str(pr_number)]
     if repo:
         cmd += ["--repo", repo]
-    cmd += ["--json", "number,state,url,mergedAt"]
+    cmd += ["--json", "number,state,url,mergedAt,mergeCommit"]
     try:
         result = runner(
             cmd,
@@ -195,6 +203,7 @@ def query_pr_merge_state(
         state=row.get("state", "UNKNOWN"),
         url=row.get("url"),
         merged_at=row.get("mergedAt"),
+        merge_sha=(row.get("mergeCommit") or {}).get("oid"),
     )
 
 
@@ -521,6 +530,7 @@ def scan_merge_drift(
                     merged_at=merged.merged_at,
                     session_id=node.get("session_id"),
                     cwd=cwd,
+                    merge_sha=merged.merge_sha,
                 )
             )
         elif first_error is not None:
@@ -889,3 +899,114 @@ def emit_gate_escape_for_record(
         )
         _record_gate_escape_emit_failure(fail_log, record.node_id, reason, exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Post-merge-ritual auto-dispatch (x-47be, task 2.1 + 2.2)
+# ---------------------------------------------------------------------------
+#
+# When ``config.post_merge.auto_run`` is armed, a merge detected by reconcile
+# (and, fast-follow, pr_watch) dispatches ONE background ``/fno:pr merged <n>``
+# worker for the merged PR - the same subscription-lane bg substrate ``/target
+# bg`` uses, never ``-p``. That worker runs the full ritual, including the
+# canonical-sync step. Exactly-once per merge SHA via an atomic-exclusive
+# dispatch marker under the canonical ``.fno/post-merge-dispatched/<key>``, so
+# overlapping reconciles / pr_watch spawn at most one worker (AC1-FR). Strictly
+# non-fatal: a spawn failure drops the marker (a later reconcile retries) and
+# never fails the caller.
+
+_POST_MERGE_DISPATCH_SUBDIR = "post-merge-dispatched"
+
+
+@dataclass
+class PostMergeDispatchResult:
+    outcome: Literal["dispatched", "already-dispatched", "disabled", "spawn-failed"]
+    pr_number: int
+    short_id: Optional[str] = None
+    detail: Optional[str] = None
+
+
+def _dispatch_marker(canonical: Path, key: str) -> Path:
+    return canonical / ".fno" / _POST_MERGE_DISPATCH_SUBDIR / key
+
+
+def dispatch_post_merge_ritual(
+    pr_number: int,
+    *,
+    dedup_key: Optional[str] = None,
+    auto_run: bool = False,
+    canonical_root: Optional[Path] = None,
+    spawn: Optional[Callable[[int, str], str]] = None,
+) -> PostMergeDispatchResult:
+    """Dispatch a bg ``/fno:pr merged <n>`` worker at most once per merge.
+
+    ``dedup_key`` is the merge SHA when known (reconcile threads it from
+    ``mergeCommit.oid``); it falls back to ``pr-<n>`` for a reverse-mapped
+    record that has no SHA. ``auto_run`` gates the whole thing (opt-in). The
+    ``spawn`` seam is injected in tests so no real ``fno agents spawn`` fires.
+    """
+    if not auto_run:
+        return PostMergeDispatchResult("disabled", pr_number)
+
+    if canonical_root is None:
+        from fno.paths import resolve_canonical_repo_root
+
+        canonical_root = resolve_canonical_repo_root()
+    canonical = Path(canonical_root)
+
+    key = re.sub(r"[^A-Za-z0-9._-]", "_", dedup_key or f"pr-{pr_number}")
+    marker = _dispatch_marker(canonical, key)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+
+    from fno.claims.io import atomic_create_exclusive, ClaimAlreadyHeld
+
+    try:
+        atomic_create_exclusive(marker, "")
+    except ClaimAlreadyHeld:
+        return PostMergeDispatchResult("already-dispatched", pr_number)
+
+    if spawn is None:
+        spawn = _spawn_post_merge_worker
+    try:
+        short_id = spawn(pr_number, str(canonical))
+    except Exception as exc:  # noqa: BLE001 - non-fatal; allow a later retry
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        return PostMergeDispatchResult("spawn-failed", pr_number, detail=str(exc)[:200])
+
+    return PostMergeDispatchResult("dispatched", pr_number, short_id=short_id)
+
+
+def _spawn_post_merge_worker(pr_number: int, cwd: str) -> str:
+    """Launch a detached ``claude --bg`` ``/fno:pr merged <n>`` worker.
+
+    Mirrors advance's ``_spawn_worker``: the ``--substrate bg`` key is
+    load-bearing (the post-x-3ab8 default ``pane`` substrate would stall a
+    fire-and-forget dispatch at a placement prompt), and ``bg`` is claude-only.
+    Returns the spawn receipt's short_id; raises on a non-zero spawn.
+    """
+    from fno import _subprocess_util
+
+    name = f"pr-merged-{pr_number}"
+    cmd = [
+        *_subprocess_util.fno_py_cmd(), "agents", "spawn",
+        "--provider", "claude", "--substrate", "bg", "--cwd", cwd,
+        name, f"/fno:pr merged {pr_number}",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"fno agents spawn exited {proc.returncode}: "
+            f"{(proc.stderr or proc.stdout or '').strip()[:200]}"
+        )
+    for line in (proc.stdout or "").splitlines():
+        if '"short_id"' in line:
+            try:
+                sid = str(json.loads(line).get("short_id", "") or "")
+            except json.JSONDecodeError:
+                continue
+            if sid:
+                return sid
+    return "unknown"

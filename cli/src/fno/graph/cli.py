@@ -4589,6 +4589,63 @@ def cmd_reconcile(
                     err=True,
                 )
 
+            # Post-merge-ritual auto-dispatch (x-47be / task 2.1): when
+            # config.post_merge.auto_run is armed for the closed node's repo,
+            # spawn ONE bg /fno:pr merged worker for the merged PR (it runs
+            # reconcile + retro + parking-lot + canonical-sync). Opt-in, deduped
+            # per merge SHA, strictly non-fatal, and the posture is never silent.
+            try:
+                _pm_auto = False
+                if record.cwd:
+                    try:
+                        from fno.config import load_settings_for_repo
+                        _pm_auto = bool(
+                            load_settings_for_repo(Path(record.cwd)).post_merge.auto_run
+                        )
+                    except Exception:
+                        _pm_auto = False  # fail open: unresolvable config -> no dispatch
+                # Echoes are guarded on `not json_out`: CliRunner (and the real
+                # --json consumer) folds stderr into stdout, so any prose here
+                # would corrupt the JSON payload (x-4d9d). The dispatch itself
+                # still fires in JSON mode - only the human line is suppressed.
+                if _pm_auto:
+                    from fno.graph._reconcile import dispatch_post_merge_ritual
+                    _pm = dispatch_post_merge_ritual(
+                        record.pr_number,
+                        dedup_key=record.merge_sha,
+                        auto_run=True,
+                    )
+                    if not json_out:
+                        if _pm.outcome == "dispatched":
+                            typer.echo(
+                                f"post-merge: dispatched /fno:pr merged "
+                                f"{record.pr_number} (short_id={_pm.short_id})"
+                            )
+                        elif _pm.outcome == "already-dispatched":
+                            typer.echo(
+                                f"post-merge: ritual already dispatched for PR "
+                                f"#{record.pr_number}; skipping"
+                            )
+                        elif _pm.outcome == "spawn-failed":
+                            typer.echo(
+                                f"warning: post-merge ritual dispatch for PR "
+                                f"#{record.pr_number} failed: {_pm.detail}",
+                                err=True,
+                            )
+                elif not json_out:
+                    typer.echo(
+                        f"post-merge: auto_run off; not dispatching ritual for PR "
+                        f"#{record.pr_number}",
+                        err=True,
+                    )
+            except Exception as _pm_exc:  # noqa: BLE001 - never abort the sweep
+                if not json_out:
+                    typer.echo(
+                        f"warning: post-merge ritual dispatch after closing "
+                        f"{record.node_id} failed: {_pm_exc}",
+                        err=True,
+                    )
+
         # x-33b2: a cascade-closed parent epic unblocks its OWN dependents (a node
         # blocked_by the epic). The per-record loop above only dispatched the
         # directly-closed children, so run the same auto-continue for each
