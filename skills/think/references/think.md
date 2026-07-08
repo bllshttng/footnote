@@ -8,8 +8,17 @@ Enhanced brainstorming workflow that generates testable acceptance criteria alon
 Initialize session state for cost tracking (replaces the PreToolUse hook for portability):
 ```bash
 mkdir -p .fno
-# Don't overwrite if target is running (it has its own state)
-if [[ ! -f .fno/target-state.md ]]; then
+# Only a LIVE target session owns the manifest and should suppress our write.
+# A DEAD manifest must NOT (x-4af4: a stale target-state.md once auto-locked
+# attended /think for ~10 days). Liveness = the ONE predicate in `fno target
+# status` (claim-first); read its machine `manifest-live` field, never file
+# existence. Degrade conservatively: if the verb can't answer, assume live.
+target_live=0
+if [[ -f .fno/target-state.md ]]; then
+  ml="$(fno target status --json 2>/dev/null | grep -o '"manifest-live":[^,}]*' || true)"
+  if [[ -z "$ml" || "$ml" == *'"live'* ]]; then target_live=1; fi
+fi
+if [[ "$target_live" != 1 ]]; then
   rm -f .fno/.session-registered
   TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   cat > .fno/session-state.md << STEOF
@@ -449,12 +458,19 @@ for the full rule set, prompt template, and decision-capture format.
    (the contract `/target M --executor <value>` uses to plumb intent into
    /think), write that value to Locked Decisions with provenance
    `(cli-flag)` and skip detection entirely.
-2. **Target autonomous auto-locks.** If `.fno/target-state.md` exists,
-   /think is running inside an autonomous target session that cannot block
-   on user input. Apply the detection result and lock without prompting.
-   Provenance: `(auto-detected)`. Pure-backend sessions (and `unknown`)
-   never lock; the absence of a lock IS the signal, and surface inference
-   handles backend correctly at runtime.
+2. **Target autonomous auto-locks (LIVE manifest only).** Consult
+   `fno target status --json`: if `attended` is `false` on a **live**
+   manifest (`manifest-live` starts with `live`), /think is running inside
+   an autonomous target session that cannot block on user input - apply the
+   detection result and lock without prompting. Provenance: `(auto-detected)`.
+   Key on the liveness verdict, NOT on `.fno/target-state.md` existing: a
+   **dead** manifest (`manifest-live` starts with `dead`) is a defunct prior
+   session (x-4af4 - one auto-locked attended /think for ~10 days), so do NOT
+   lock; run fully attended and print one line naming it
+   (`note: dead target manifest (.fno/target-state.md) ignored; running attended`)
+   so the posture is visible, never silent. Pure-backend sessions (and
+   `unknown`) never lock; the absence of a lock IS the signal, and surface
+   inference handles backend correctly at runtime.
 3. **Standalone interactive prompts.** No CLI flag, no target context. If
    the detection result is `frontend-touching` or `mixed`, fire the prompt
    from the reference doc and capture the user's choice with provenance
@@ -600,7 +616,7 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
 
 ### 9. Output for Target Pipeline
 
-When invoked as part of a pipeline (check if `.fno/target-state.md` exists - this works standalone without it),
+When invoked as part of a pipeline (a **live** target manifest - `fno target status --json` reports `manifest-live` starting with `live`; this works standalone without one, and a dead manifest counts as standalone),
 structure your output with clear sections:
 - **Design Decisions** - with rationale
 - **Constraints Discovered** - technical limits found during exploration
