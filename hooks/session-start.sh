@@ -216,6 +216,11 @@ append_section "$whoami_content"
 append_section "$hygiene_content"
 append_section "$nudge_content"
 
+# Self-heal a defunct target manifest (x-4af4) before anything reads it, so a
+# dead target-state.md can no longer auto-lock an attended /think. Advisory.
+gc_helper="${SCRIPT_DIR}/helpers/gc-dead-target-manifest.sh"
+[[ -f "$gc_helper" ]] && bash "$gc_helper" "$STATE_FILE" || true
+
 hydrate_state_provider_context
 
 # No context to inject — exit silently
