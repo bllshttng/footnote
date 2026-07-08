@@ -49,13 +49,20 @@ One command to run before pushing. It validates the invoking checkout's
 Why a separate worktree with a scrubbed environment: the canonical checkout's
 `.fno/config.toml` otherwise leaks into the config reader's candidate chain and
 produces local-only failures, which is what pushes agents toward selective
-`-k` subset runs that then miss CI-only failures. The runner isolates by
-resetting a dedicated worktree to your HEAD and running with a temp `HOME`,
+`-k` subset runs that then miss CI-only failures. A worktree reaches that
+canonical config through the shared git-common-dir, not through `HOME` or
+`cwd`, so scrubbing `HOME` alone is not enough. The load-bearing isolation seam
+is `FNO_CONFIG` pinned to an empty file: `$FNO_CONFIG`, when set, is the config
+loader's only candidate, so the canonical config cannot leak, and an empty file
+yields the same `SettingsModel` defaults a fresh CI checkout (no committed
+`.fno/config.toml`) resolves to. The runner also uses a temp `HOME`,
 `FNO_GLOBAL_SETTINGS_PATH=/dev/null`, no leaked `FNO_*`, and a worktree-pinned
 `PYTHONPATH`. Cache directories (`CARGO_HOME`, `RUSTUP_HOME`, `UV_CACHE_DIR`)
 are deliberately re-exported so builds stay warm; the worktree's `target/` and
 `cli/.venv` persist across runs. Hermeticity comes from environment isolation
-plus a hard reset, not from disposing the worktree.
+plus a hard reset, not from disposing the worktree. (The config candidate-chain
+leak itself is tracked as a separate root-cause fix; preflight papers over it
+until that lands.)
 
 Worktree location follows `config.paths.worktrees_base`
 (`<base>/<repo>/preflight`), falling back to the harness-native
@@ -85,7 +92,7 @@ script exists in the repo (see `skills/target/references/ship-phase.md`):
 The trigger is an existence guard (`[[ -x scripts/ci/preflight.sh ]]`), so it
 no-ops in any repo that does not ship the script - a repo-neutral convention,
 not a footnote hardcode. Skips are explicit and auditable:
-`FNO_SKIP_PREFLIGHT=1`, or a docs-only diff (only `docs/`, `internal/`, `*.md`).
+`FNO_SKIP_PREFLIGHT=1`, or a docs-only diff (only documentation, the vault dir, and `*.md` files).
 The scripts never self-skip; the skip decision lives in the caller.
 
 ## Running it yourself
