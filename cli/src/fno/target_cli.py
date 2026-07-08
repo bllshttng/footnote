@@ -124,7 +124,7 @@ def _load_blast_cfg():
     try:
         from fno.config import load_settings
 
-        return load_settings().config.target.blast
+        return load_settings().target.blast
     except Exception:
         return BlastConfig()
 
@@ -508,7 +508,7 @@ def _maybe_dispatch_work_start() -> None:
         # settings read and returns - NO git rev-parse, NO graph load, NO manifest
         # read. The wrapper re-checks the sub-flag authoritatively below.
         try:
-            if not load_settings().config.think_spawn.on_work_start:
+            if not load_settings().think_spawn.on_work_start:
                 return
         except Exception:  # noqa: BLE001 - fail-safe to disabled
             return

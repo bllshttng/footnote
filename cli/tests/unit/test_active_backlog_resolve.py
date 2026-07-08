@@ -17,11 +17,8 @@ def _patch(monkeypatch, *, enabled, interval="5m", failure_limit=3, mission=None
         enabled=enabled, interval=interval, failure_limit=failure_limit, mission=mission
     )
 
-    class _Cfg:
-        active_backlog = cfg
-
     class _Settings:
-        config = _Cfg()
+        active_backlog = cfg
 
     monkeypatch.setattr(ab, "_workspace_paths", lambda: paths)
     # load_settings is imported inside resolve_drain_targets; patch at source.
@@ -129,11 +126,8 @@ def test_as_dicts_reads_configured_max_lanes(monkeypatch):
     class _Parallel:
         max_lanes = 3
 
-    class _Config:
-        parallel = _Parallel()
-
     class _Settings:
-        config = _Config()
+        parallel = _Parallel()
 
     _patch(monkeypatch, enabled={"footnote": True}, paths={"footnote": "/repo/footnote"})
     monkeypatch.setattr(cfgmod, "load_settings_for_repo", lambda _p: _Settings())

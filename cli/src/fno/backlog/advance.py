@@ -92,7 +92,7 @@ def auto_continue_enabled(
     try:
         from fno.config import load_settings
 
-        return bool(load_settings().config.auto_continue.enabled)
+        return bool(load_settings().auto_continue.enabled)
     except Exception as exc:  # noqa: BLE001 - fail-safe to disabled (AC2-ERR)
         # Diagnosable without changing the safety posture: false-disabled is
         # strictly safer than false-enabled for a background dispatcher, but a
@@ -531,7 +531,7 @@ def _base_project_id(canonical_root: Path) -> str:
     try:
         from fno.config import load_settings
 
-        pid = load_settings().config.project.id
+        pid = load_settings().project.id
         if pid:
             return pid
     except Exception:  # noqa: BLE001 - a settings read error must not crash dispatch

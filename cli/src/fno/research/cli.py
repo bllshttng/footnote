@@ -31,7 +31,7 @@ def _output_dir() -> "str | None":
     try:
         from fno.config import load_settings
 
-        return load_settings().config.research.output_dir
+        return load_settings().research.output_dir
     except Exception:
         return None
 

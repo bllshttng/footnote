@@ -50,7 +50,7 @@ def test_default_prefix_is_fno(monkeypatch):
 def test_config_branch_prefix_default():
     from fno.config import load_settings
 
-    assert load_settings().config.branch.prefix == "fno"
+    assert load_settings().branch.prefix == "fno"
 
 
 def test_config_branch_prefix_rejects_unsafe():

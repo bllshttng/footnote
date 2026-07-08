@@ -638,10 +638,9 @@ def test_enabled_honors_project_root(monkeypatch, tmp_path):
     seen = []
 
     class _S:
-        class config:
-            class think_spawn:
-                enabled = True
-                max_per_run = 7
+        class think_spawn:
+            enabled = True
+            max_per_run = 7
 
     monkeypatch.setattr(
         "fno.config.load_settings_for_repo",

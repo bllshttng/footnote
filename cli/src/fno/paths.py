@@ -315,7 +315,7 @@ def _project_name(project_root: Optional[Path] = None, *, for_vault: bool = Fals
     result can never escape ``internal/<project>/`` - covers a mangled
     ``project.id`` and a derived name alike, at one site.
     """
-    pid = _settings().config.project.id
+    pid = _settings().project.id
     name = (
         pid
         or _slug_from_git_remote(project_root)
@@ -353,12 +353,12 @@ def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
     def _substitute(match: re.Match[str]) -> str:
         var = match.group(1)
         if var == "vault":
-            if not settings.config.obsidian.enabled:
+            if not settings.obsidian.enabled:
                 raise ValueError(
                     "Path template uses {vault} but obsidian.enabled is false. "
                     "Either set obsidian.enabled: true or rewrite the path."
                 )
-            vault = settings.config.obsidian.vault
+            vault = settings.obsidian.vault
             if not vault:
                 raise ValueError(
                     "Path template uses {vault} but obsidian.vault is not set."
@@ -379,7 +379,7 @@ def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
         elif var == "project":
             # project.id -> git-remote slug -> checkout basename, sanitized.
             return _project_name(
-                project_root, for_vault=settings.config.obsidian.enabled
+                project_root, for_vault=settings.obsidian.enabled
             )
         else:
             raise ValueError(
@@ -410,13 +410,13 @@ def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
 def state_dir() -> Path:
     """Return the state directory (default: ~/.fno/)."""
     settings = _settings()
-    return _resolve(settings.config.state_dir)
+    return _resolve(settings.state_dir)
 
 
 def graph_json() -> Path:
     """Return the path to graph.json."""
     settings = _settings()
-    override = settings.config.paths.graph_json
+    override = settings.paths.graph_json
     if override is not None:
         return _resolve(override)
     return state_dir() / "graph.json"
@@ -435,10 +435,10 @@ def ledger_json() -> Path:
     user-global ``~/.fno`` instead.
     """
     settings = _settings()
-    override = settings.config.paths.ledger_json
+    override = settings.paths.ledger_json
     if override is not None:
         return _resolve(override)
-    raw = os.path.expanduser(os.path.expandvars(settings.config.state_dir))
+    raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
         return state_dir() / "ledger.json"
     return _resolve("~/.fno/") / "ledger.json"
@@ -455,7 +455,7 @@ def benchmarks_json() -> Path:
     to the benchmarks module (the refresh/show/load functions all accept one).
     """
     settings = _settings()
-    raw = os.path.expanduser(os.path.expandvars(settings.config.state_dir))
+    raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
         return state_dir() / "benchmarks.json"
     return _resolve("~/.fno/") / "benchmarks.json"
@@ -473,7 +473,7 @@ def loops_paused_json() -> Path:
     every loop tick checks, across every repo, so it is pinned unconditionally.
     """
     settings = _settings()
-    override = settings.config.paths.loops_paused_json
+    override = settings.paths.loops_paused_json
     if override is not None:
         return _resolve(override)
     return _resolve("~/.fno/") / "loops-paused.json"
@@ -499,7 +499,7 @@ def observer_reports_dir(
     under ``internal/<owner>/`` instead of the ambient checkout's basename.
     """
     settings = _settings()
-    override = settings.config.paths.observer_reports_dir
+    override = settings.paths.observer_reports_dir
     if override is not None:
         return _resolve(override, project_root=project_root)
     if project_id and ("/" in project_id or ".." in project_id):
@@ -510,9 +510,9 @@ def observer_reports_dir(
         project_name = project_id
     else:
         project_name = _project_name(
-            project_root, for_vault=settings.config.obsidian.enabled
+            project_root, for_vault=settings.obsidian.enabled
         )
-    if settings.config.obsidian.enabled and settings.config.obsidian.vault:
+    if settings.obsidian.enabled and settings.obsidian.vault:
         vroot = vault_root()
         if vroot is not None:
             return vroot / "internal" / project_name / "observer-reports"
@@ -541,7 +541,7 @@ def bus_dir() -> Path:
     if inbox_root:
         return Path(inbox_root) / ".bus"
     settings = _settings()
-    override = settings.config.paths.bus_dir
+    override = settings.paths.bus_dir
     if override is not None:
         return _resolve(override)
     return state_dir() / "bus"
@@ -554,7 +554,7 @@ def plans_dir(project_root: Optional[Path] = None) -> Path:
     When project_root is None, falls back to resolve_repo_root().
     """
     settings = _settings()
-    raw = settings.config.plans_dir
+    raw = settings.plans_dir
     root = project_root or resolve_repo_root()
 
     # Detect whether the raw value is a "plain relative" path:
@@ -619,13 +619,13 @@ def handoffs_dir(project_root: Optional[Path] = None) -> Path:
          (survives worktree archive; lives in the global state dir).
     """
     settings = _settings()
-    override = settings.config.paths.handoffs_dir
+    override = settings.paths.handoffs_dir
     if override is not None:
         return _resolve(override, project_root=project_root)
     project_name = _project_name(
-        project_root, for_vault=settings.config.obsidian.enabled
+        project_root, for_vault=settings.obsidian.enabled
     )
-    if settings.config.obsidian.enabled and settings.config.obsidian.vault:
+    if settings.obsidian.enabled and settings.obsidian.vault:
         vroot = vault_root()
         if vroot is not None:
             return vroot / "internal" / project_name / "handoffs"
@@ -635,7 +635,7 @@ def handoffs_dir(project_root: Optional[Path] = None) -> Path:
 def briefs_dir() -> Path:
     """Return the briefs directory."""
     settings = _settings()
-    override = settings.config.paths.briefs_dir
+    override = settings.paths.briefs_dir
     if override is not None:
         return _resolve(override)
     return state_dir() / "briefs"
@@ -644,7 +644,7 @@ def briefs_dir() -> Path:
 def fleet_dir() -> Path:
     """Return the fleet directory."""
     settings = _settings()
-    override = settings.config.paths.fleet_dir
+    override = settings.paths.fleet_dir
     if override is not None:
         return _resolve(override)
     return state_dir() / "fleet"
@@ -653,7 +653,7 @@ def fleet_dir() -> Path:
 def postmortems_dir() -> Path:
     """Return the postmortems directory."""
     settings = _settings()
-    override = settings.config.paths.postmortems_dir
+    override = settings.paths.postmortems_dir
     if override is not None:
         return _resolve(override)
     return state_dir() / "postmortems"
@@ -662,7 +662,7 @@ def postmortems_dir() -> Path:
 def worktrees_base() -> Path:
     """Return the worktrees base directory."""
     settings = _settings()
-    override = settings.config.paths.worktrees_base
+    override = settings.paths.worktrees_base
     if override is not None:
         return _resolve(override)
     return state_dir() / "worktrees"
@@ -671,7 +671,7 @@ def worktrees_base() -> Path:
 def memory_dir() -> Path:
     """Return the memory directory."""
     settings = _settings()
-    override = settings.config.paths.memory_dir
+    override = settings.paths.memory_dir
     if override is not None:
         return _resolve(override)
     return state_dir() / "memory"
@@ -685,7 +685,7 @@ def retro_pending_dir() -> Path:
     the judgment half (follow-up capture) without reconcile automating it.
     """
     settings = _settings()
-    override = settings.config.paths.retro_pending_dir
+    override = settings.paths.retro_pending_dir
     if override is not None:
         return _resolve(override)
     return state_dir() / "retro-pending"
@@ -694,7 +694,7 @@ def retro_pending_dir() -> Path:
 def hook_logs_dir() -> Path:
     """Return the hook logs directory."""
     settings = _settings()
-    override = settings.config.paths.hook_logs_dir
+    override = settings.paths.hook_logs_dir
     if override is not None:
         return _resolve(override)
     return state_dir() / "hook-logs"
@@ -703,7 +703,7 @@ def hook_logs_dir() -> Path:
 def agents_registry_path() -> Path:
     """Return the path to the agents registry JSON file."""
     settings = _settings()
-    override = settings.config.paths.agents_registry_path
+    override = settings.paths.agents_registry_path
     if override is not None:
         return _resolve(override)
     return state_dir() / "agents" / "registry.json"
@@ -715,7 +715,7 @@ def inbox_dir(project_root: Optional[Path] = None) -> Path:
     Default is project-relative: <project_root>/.fno/inbox/.
     """
     settings = _settings()
-    override = settings.config.paths.inbox_dir
+    override = settings.paths.inbox_dir
     if override is not None:
         return _resolve(override, project_root=project_root)
     root = project_root or resolve_repo_root()
@@ -751,7 +751,7 @@ def vault_root() -> Optional[Path]:
     ``~``-prefixed is honored as-is.
     """
     settings = _settings()
-    obs = settings.config.obsidian
+    obs = settings.obsidian
     if not (obs.enabled and obs.vault):
         return None
     expanded = Path(os.path.expanduser(obs.vault))
@@ -814,7 +814,7 @@ def inbox_root_for(project_name: str) -> Path:
             f"project name must match {_INBOX_PROJECT_NAME_RE.pattern}: {project_name!r}"
         )
     settings = _settings()
-    override = settings.config.paths.inbox_dir
+    override = settings.paths.inbox_dir
     if override is not None:
         # Substitute {project} explicitly with project_name BEFORE handing
         # off to _resolve, so the standard {project}-from-config-or-cwd
@@ -864,14 +864,14 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
     no-vault default mirrors the optional-vault seam in ``handoffs_dir()``.
     """
     settings = _settings()
-    override = settings.config.paths.inbox_path
-    post_merge_parking_lot = settings.config.post_merge.parking_lot_path
+    override = settings.paths.inbox_path
+    post_merge_parking_lot = settings.post_merge.parking_lot_path
     root = project_root or resolve_repo_root()
     if override is not None:
         raw = override
     elif post_merge_parking_lot is not None:
         raw = post_merge_parking_lot
-    elif settings.config.obsidian.enabled:
+    elif settings.obsidian.enabled:
         # Canonical default is parking-lot.md; a legacy inbox.md that
         # already exists wins so old captures still resolve (back-compat).
         if (root / "internal/fno/backlog/inbox.md").exists():

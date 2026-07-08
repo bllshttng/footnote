@@ -205,7 +205,7 @@ def think_spawn_enabled(
         return override.strip().lower() in _TRUTHY
 
     try:
-        return bool(_settings_for(project_root).config.think_spawn.enabled)
+        return bool(_settings_for(project_root).think_spawn.enabled)
     except Exception as exc:  # noqa: BLE001 - fail-safe to disabled (AC4-ERR)
         _LOG.debug("think_spawn_enabled: settings read failed, defaulting off: %s", exc)
         return False
@@ -214,7 +214,7 @@ def think_spawn_enabled(
 def _max_per_run(project_root: Optional[Path]) -> int:
     """The blast-radius cap from the node's repo config, fail-safe to 5."""
     try:
-        return int(_settings_for(project_root).config.think_spawn.max_per_run)
+        return int(_settings_for(project_root).think_spawn.max_per_run)
     except Exception:  # noqa: BLE001
         return 5
 
@@ -222,7 +222,7 @@ def _max_per_run(project_root: Optional[Path]) -> int:
 def _daily_cap(project_root: Optional[Path]) -> int:
     """The per-install per-day ceiling from config, fail-safe to 20 (0 = off)."""
     try:
-        return int(_settings_for(project_root).config.think_spawn.daily_cap)
+        return int(_settings_for(project_root).think_spawn.daily_cap)
     except Exception:  # noqa: BLE001
         return 20
 
@@ -305,7 +305,7 @@ def _attended_mode(
     if override is not None:
         return "spawn" if override.strip().lower() == "spawn" else "offer"
     try:
-        val = str(_settings_for(project_root).config.think_spawn.attended).strip().lower()
+        val = str(_settings_for(project_root).think_spawn.attended).strip().lower()
         return "spawn" if val == "spawn" else "offer"
     except Exception:  # noqa: BLE001 - fail-safe to the offer default
         return "offer"
@@ -840,7 +840,7 @@ def _subflag_on(name: str, project_root: Optional[Path]) -> bool:
     explicitly armed). Any settings-read error degrades to off.
     """
     try:
-        return bool(getattr(_settings_for(project_root).config.think_spawn, name))
+        return bool(getattr(_settings_for(project_root).think_spawn, name))
     except Exception:  # noqa: BLE001 - fail-safe to disabled
         return False
 

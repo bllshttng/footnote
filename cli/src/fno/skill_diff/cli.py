@@ -110,7 +110,7 @@ def _project_names() -> list[str]:
     """Every project name in the workspace work-map (redaction guard input, A3)."""
     names: list[str] = []
     try:
-        work = load_settings().config.work
+        work = load_settings().work
         for ws in work.workspaces.values():
             for proj in ws.projects:
                 if proj.name:

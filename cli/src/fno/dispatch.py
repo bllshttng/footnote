@@ -138,7 +138,7 @@ def _dispatch_one(
     #    no lane, no spawn (AC-edge). max_lanes 0 would forbid every manual grab,
     #    so a deliberate keystroke floors it to one slot. Free the reservation on
     #    a full cap so the node stays re-dispatchable.
-    max_lanes = max(1, load_settings().config.parallel.max_lanes or 1)
+    max_lanes = max(1, load_settings().parallel.max_lanes or 1)
     slot = acquire_lane_slot(max_lanes, node_id)
     if slot is None:
         release_claim(dispatch_key, dispatch_holder, root=dispatch_root)

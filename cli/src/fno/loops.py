@@ -38,7 +38,7 @@ def loop_level(name: str) -> str:
     "report" (observe only), the safest default for a loop that hasn't
     graduated yet.
     """
-    entry = load_settings().config.loops.get(name)
+    entry = load_settings().loops.get(name)
     return entry.level if entry is not None else "report"
 
 
@@ -216,7 +216,7 @@ def cmd_status() -> None:
 def cmd_ls() -> None:
     """List configured loops, their level, and last-tick timestamp."""
     settings = load_settings()
-    names = sorted(settings.config.loops)
+    names = sorted(settings.loops)
     if not names:
         typer.echo("no loops configured")
         return

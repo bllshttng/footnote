@@ -70,7 +70,7 @@ def test_worktree_reads_canonical_settings(
     from fno.config import load_settings
 
     settings = load_settings()
-    assert settings.config.post_merge.parking_lot_path == "internal/etl/backlog/parking-lot.md"
+    assert settings.post_merge.parking_lot_path == "internal/etl/backlog/parking-lot.md"
 
 
 def test_worktree_local_settings_win_over_canonical(
@@ -87,7 +87,7 @@ def test_worktree_local_settings_win_over_canonical(
     from fno.config import load_settings
 
     settings = load_settings()
-    assert settings.config.post_merge.parking_lot_path == "internal/worktree/parking-lot.md"
+    assert settings.post_merge.parking_lot_path == "internal/worktree/parking-lot.md"
 
 
 def test_candidate_paths_include_canonical_in_worktree(

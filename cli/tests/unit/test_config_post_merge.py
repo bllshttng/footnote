@@ -65,8 +65,8 @@ def test_post_merge_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     fails loud rather than writing to the wrong queue.
     """
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.post_merge.parking_lot_path is None
-    assert settings.config.post_merge.enabled is True
+    assert settings.post_merge.parking_lot_path is None
+    assert settings.post_merge.enabled is True
 
 
 def test_post_merge_parking_lot_path_set(
@@ -80,10 +80,10 @@ def test_post_merge_parking_lot_path_set(
         "    parking_lot_path: internal/etl/backlog/parking-lot.md\n",
     )
     assert (
-        settings.config.post_merge.parking_lot_path
+        settings.post_merge.parking_lot_path
         == "internal/etl/backlog/parking-lot.md"
     )
-    assert settings.config.post_merge.enabled is True
+    assert settings.post_merge.enabled is True
 
 
 def test_post_merge_enabled_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,10 +96,10 @@ def test_post_merge_enabled_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         "    enabled: false\n",
     )
     assert (
-        settings.config.post_merge.parking_lot_path
+        settings.post_merge.parking_lot_path
         == "internal/web/backlog/parking-lot.md"
     )
-    assert settings.config.post_merge.enabled is False
+    assert settings.post_merge.enabled is False
 
 
 def test_post_merge_parking_lot_path_rejects_glob(
@@ -214,7 +214,7 @@ def test_post_merge_self_reap_defaults_false(
     """No config: self_reap is False so finished workers print the reap command,
     never auto-remove their row (the safe default after the over-reap incident)."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.post_merge.self_reap is False
+    assert settings.post_merge.self_reap is False
 
 
 def test_post_merge_self_reap_true(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,7 +226,7 @@ def test_post_merge_self_reap_true(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         "    parking_lot_path: internal/fno/backlog/parking-lot.md\n"
         "    self_reap: true\n",
     )
-    assert settings.config.post_merge.self_reap is True
+    assert settings.post_merge.self_reap is True
 
 
 def test_post_merge_self_reap_typo_coerces_false(
@@ -239,7 +239,7 @@ def test_post_merge_self_reap_typo_coerces_false(
         monkeypatch,
         "schema_version: 1\nconfig:\n  post_merge:\n    self_reap: banana\n",
     )
-    assert settings.config.post_merge.self_reap is False
+    assert settings.post_merge.self_reap is False
 
 
 def test_config_get_self_reap_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

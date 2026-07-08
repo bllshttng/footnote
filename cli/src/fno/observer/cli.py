@@ -720,7 +720,7 @@ def _replay_cost_cap() -> float:
     try:
         from fno.config import load_settings
 
-        entry = load_settings().config.loops.get("observer_harness")
+        entry = load_settings().loops.get("observer_harness")
         budget = entry.budget_usd_per_run if entry is not None else None
     except Exception:
         budget = None

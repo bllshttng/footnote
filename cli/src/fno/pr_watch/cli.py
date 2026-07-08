@@ -106,7 +106,7 @@ def _reviewers_for(repo_dir: Path) -> list[str]:
     """
     try:
         s = load_settings_for_repo(repo_dir)
-        bots = s.config.review.github_apps
+        bots = s.review.github_apps
         return list(bots) if bots else []
     except Exception as exc:
         log.warning(
@@ -187,7 +187,7 @@ def tick() -> None:
     from fno.pr_watch._dispatch import tick as _tick
 
     settings = load_settings()
-    cfg = settings.config.pr_watch
+    cfg = settings.pr_watch
 
     result = _tick(
         claim=ClaimAdapter(),
@@ -208,11 +208,11 @@ def tick() -> None:
     # that resumes footnote-launched bg sessions which went idle-but-incomplete
     # after an abnormal turn termination. Gated by config.recovery.enabled and
     # wrapped non-fatally so a recovery failure never breaks the PR-watch tick.
-    if settings.config.recovery.enabled:
+    if settings.recovery.enabled:
         try:
             from fno.recovery import run_recovery_sweep
 
-            n = run_recovery_sweep(settings.config.recovery, emit=_emit_event)
+            n = run_recovery_sweep(settings.recovery, emit=_emit_event)
             typer.echo(f"recovery sweep: candidates={n}")
         except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
             log.warning("pr-watch: recovery sweep failed: %s", exc)
@@ -243,7 +243,7 @@ def install(
     from fno.pr_watch import _install as m
 
     settings = load_settings()
-    cfg = settings.config.pr_watch
+    cfg = settings.pr_watch
 
     _interval = interval if interval > 0 else cfg.interval_seconds
 
@@ -275,7 +275,7 @@ def ensure_watcher_activated() -> str:
         launch_agents_dir=_LAUNCH_AGENTS_DIR,
         fno_binary=_resolve_fno_binary(),
         install_path=os.environ.get("PATH", "/usr/bin:/bin"),
-        interval=load_settings().config.pr_watch.interval_seconds,
+        interval=load_settings().pr_watch.interval_seconds,
     )
 
 

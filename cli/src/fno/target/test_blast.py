@@ -277,4 +277,4 @@ def test_malformed_blast_block_fails_safe_to_disabled():
     model = SettingsModel.model_validate(
         {"config": {"target": {"blast": "garbage"}}}
     )
-    assert model.config.target.blast.enabled is False
+    assert model.target.blast.enabled is False

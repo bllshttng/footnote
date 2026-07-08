@@ -106,11 +106,11 @@ def _build_detected_dict(detected: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": model.schema_version,
         "config": {
-            "state_dir": model.config.state_dir,
-            "plans_dir": model.config.plans_dir,
-            "paths": {k: v for k, v in model.config.paths.model_dump().items()},
-            "obsidian": model.config.obsidian.model_dump(),
-            "project": model.config.project.model_dump(),
+            "state_dir": model.state_dir,
+            "plans_dir": model.plans_dir,
+            "paths": {k: v for k, v in model.paths.model_dump().items()},
+            "obsidian": model.obsidian.model_dump(),
+            "project": model.project.model_dump(),
         },
     }
 

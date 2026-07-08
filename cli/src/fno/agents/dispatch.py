@@ -3354,7 +3354,7 @@ def _load_a2a_settings() -> tuple[bool, int]:
     try:
         from fno.config import load_settings
 
-        a2a = load_settings().config.agents.a2a
+        a2a = load_settings().agents.a2a
         return bool(a2a.auto), max(1, int(a2a.turn_ceiling))
     except Exception:
         return (False, 6)

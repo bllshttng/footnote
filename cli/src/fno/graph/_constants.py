@@ -193,7 +193,7 @@ def node_id_prefix() -> str:
     """
     try:
         from fno.config import load_settings
-        p = load_settings().config.backlog.id_prefix
+        p = load_settings().backlog.id_prefix
         return p if p else LEGACY_PREFIX
     except Exception:
         return LEGACY_PREFIX
@@ -207,7 +207,7 @@ def node_id_hex_width() -> int:
     """
     try:
         from fno.config import load_settings
-        return int(load_settings().config.backlog.id_hex_width)
+        return int(load_settings().backlog.id_hex_width)
     except Exception:
         return LEGACY_HEX
 

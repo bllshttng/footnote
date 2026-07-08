@@ -272,7 +272,7 @@ def _conflict_resolution() -> str:
     try:
         from fno.config import load_settings
 
-        return load_settings().config.auto_merge.conflict_resolution
+        return load_settings().auto_merge.conflict_resolution
     except Exception:
         # Settings unreadable -> bash default ("opus", auto-resolve attempted).
         return "opus"

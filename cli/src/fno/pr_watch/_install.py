@@ -571,7 +571,7 @@ def liveness_report_live() -> dict:
     """Gather ground truth (config, launchd, tick, plist mtime) and judge liveness."""
     from fno.config import load_settings
 
-    cfg = load_settings().config.pr_watch
+    cfg = load_settings().pr_watch
     plist_path = _LAUNCH_AGENTS_DIR / _PLIST_FILENAME
     plist_exists = plist_path.exists()
     plist_mtime = plist_path.stat().st_mtime if plist_exists else None
