@@ -4,6 +4,7 @@ Verbs:
     stamp             - mark a plan's frontmatter with ship metadata (status:shipped)
     graduate          - flip a stamped plan from status:shipped to status:done
     brief             - generate a scoped task brief from a single-doc plan
+    validate          - validate a plan's frontmatter against fno.plan.schema (read-only)
     reconcile-status  - normalize drifted plan frontmatter status in place
     folder-audit      - count folder plans owned by a non-terminal graph node
 
@@ -201,6 +202,81 @@ def brief(
         typer.echo(json.dumps(result.to_json_dict(), indent=2))
     else:
         typer.echo(result.to_markdown())
+
+
+@plan_app.command(
+    "validate",
+    help=(
+        "Validate a single-doc plan's frontmatter against fno.plan.schema "
+        "(read-only). Exit 0 + 'valid' on a clean plan; exit 1 with a "
+        "per-field report otherwise. A load failure (unreadable / missing / "
+        "malformed YAML) reports distinctly from a schema violation."
+    ),
+)
+def validate(
+    plan_path: str = typer.Argument(..., help="Path to the plan markdown file"),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
+) -> None:
+    """Report every frontmatter schema violation in one read-only pass."""
+    from pydantic import ValidationError
+
+    from fno.plan._doc import FrontmatterError, ParseError, load_plan
+    from fno.plan.schema import PlanFrontmatter
+
+    # Same repo-root resolution as `brief`: try repo-relative, fall back to bare.
+    def _resolve(p: Path) -> Path:
+        if p.is_absolute():
+            return p
+        try:
+            candidate = resolve_repo_root() / p
+            if candidate.exists():
+                return candidate
+        except (RuntimeError, OSError):
+            pass
+        return p
+
+    resolved = _resolve(Path(plan_path))
+    # Epic-decomposition group nodes carry a `<doc>#group-<slug>` plan_path; the
+    # fragment is not a real filesystem path. Strip it when the literal is absent
+    # and the stripped path exists (mirrors _stamp.py read_plan_file, so finalize's
+    # post-stamp validate of a group node doesn't spuriously fail to load).
+    if not resolved.exists() and "#group-" in resolved.name:
+        base = resolved.name.rpartition("#group-")[0]
+        if base:
+            stripped = _resolve(resolved.with_name(base))
+            if stripped.exists():
+                resolved = stripped
+
+    # Load errors (can't read this file) are reported distinctly from schema
+    # violations (this file's frontmatter is invalid). FileNotFoundError is an
+    # OSError subclass, so the one handler covers missing + unreadable + IO.
+    try:
+        doc = load_plan(resolved)
+    except (FrontmatterError, ParseError, OSError) as exc:
+        msg = f"cannot load plan {plan_path}: {exc}"
+        typer.echo(json.dumps({"loaded": False, "error": msg}) if json_out else msg, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        PlanFrontmatter.model_validate(doc.frontmatter)
+    except ValidationError as exc:
+        errors = exc.errors()
+        if json_out:
+            typer.echo(json.dumps({"valid": False, "path": str(resolved), "violations": [
+                {"field": ".".join(str(p) for p in e["loc"]), "message": e["msg"], "got": e.get("input")}
+                for e in errors
+            ]}, default=str))
+        else:
+            typer.echo(f"invalid: {resolved} ({len(errors)} violation(s))", err=True)
+            for e in errors:
+                field = ".".join(str(p) for p in e["loc"]) or "<root>"
+                # A "missing" error's input is the whole parent dict - noise; show
+                # the offending value only when the field was actually present.
+                got = "" if e["type"] == "missing" else f" (got {e.get('input')!r})"
+                typer.echo(f"  {field}: {e['msg']}{got}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(json.dumps({"valid": True, "path": str(resolved)}) if json_out else f"valid: {resolved}")
 
 
 @plan_app.command(

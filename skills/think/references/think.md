@@ -201,12 +201,52 @@ that shapes the design. If the live DB was unreachable and the schema came
 from the migration parser, flag the section "(parsed from migrations, no live
 DB)" so the reader knows it may be incomplete (AC1-FR).
 
-### 2. Explore the Idea (One Question at a Time)
-Ask questions to refine understanding:
-- What problem does this solve?
-- Who are the users?
-- What are the constraints?
-- What does success look like?
+### 1f. Deliverable Type Resolution
+
+Classify the work into one of three deliverable types - **feature**, **bug**, or
+**investigation** - and record the result as `deliverable_type:` in the saved
+doc's frontmatter. The type drives which sections the contract (Step 8) requires,
+so resolve it before the Step 2 interview: a free-text seed folds its type
+confirmation into the first question batch.
+
+**Resolution order (first match wins):**
+
+1. **Graph type wins.** A node-seeded invocation (`/think <node-id>`) carries a
+   graph `type` field: `bug -> bug`; `feature | task | epic -> feature` (an
+   `epic` additionally trips the Step 1b decomposition check). No question asked.
+2. **Seed inference.** For a free-text seed, classify from the seed text and fold
+   a one-line confirmation into the FIRST interview batch (Step 2) - never a
+   dedicated extra round. Investigation signals: "audit", "verify",
+   "investigate", "why does", "root-cause", "is it true that". Absent any signal,
+   default to **feature** (the full contract - the conservative direction).
+3. **User override wins.** An explicit user correction at any point outranks a
+   graph type and a seed inference alike.
+
+The resolved type parameterizes the per-type contract (Step 8), the AC set
+(Step 7), and the reviewer's anti-filler check (Step 8b).
+
+### 2. Explore the Idea (One Round at a Time)
+
+Interview the user to refine understanding - in **batched rounds**, not one
+question at a time.
+
+- **Never ask what the repo can answer.** Step 1c's discovery gate already read
+  the code and surfaced the model's unknowns; Step 2 inherits that rule instead
+  of re-asking generic "who are the users?" boilerplate the codebase (or the
+  seeding node) already settles. Recon first, ask second.
+- **Batch related questions into one round.** Use a single `AskUserQuestion`
+  call with up to 4 questions, each leading with a recommended option. Replaces
+  "one question at a time" with **one *round* at a time**. On a CLI without
+  `AskUserQuestion`, degrade to one prose prompt listing the round's questions.
+- **Ask only user-only questions**: requirements, preferences, tradeoffs,
+  edge-case priorities, scope calls. Anything the code or docs can answer is
+  recon, not a question.
+- **Scale rounds to ambiguity.** A vague feature seed may need several rounds; a
+  focused bug with a repro needs one round or none; node-seeded work whose
+  details already lock the decisions needs zero. Stop when the open questions
+  that remain are the user's to answer and you have their answers.
+- **Fold the type confirmation in.** For a free-text seed, ride the Step 1f
+  `deliverable_type` confirmation in the FIRST batch (never a dedicated round).
 
 Prefer multiple choice when possible.
 
@@ -214,6 +254,13 @@ Prefer multiple choice when possible.
 - Propose 2-3 different approaches with trade-offs
 - Lead with recommended option and explain why
 - Get user confirmation before proceeding
+
+**Draft incrementally from here.** Once the approach is confirmed, save the doc
+skeleton (the type's required section headings from Step 8's contract table, with
+`deliverable_type` in frontmatter) and grow each section as it settles across
+Steps 4-7. This survives a mid-design crash and keeps the running design visible.
+The Step 8 save becomes a **finalize** of a doc already on disk, not the first
+write.
 
 ### 4. Present Design (200-300 word sections)
 Cover:
@@ -225,6 +272,8 @@ Cover:
 **Check after each section**: "Does this look right so far?"
 
 ### 5. Multi-Perspective Challenge
+
+**Applies to:** feature (all three perspectives) · bug (Pessimist + Silent-Failure Hunter only) · investigation (skip - the Evidence Chain section replaces it).
 
 Before finalizing the design, stress-test it from three angles. Present findings to the user for each:
 
@@ -256,7 +305,24 @@ Present a summary table:
 | Session expires mid-form | ??? | Lost work, no feedback |
 ```
 
-### 6. CRITICAL: UI State Machine Audit
+### 6. CRITICAL: UI State Machine Audit (gated on UI surface)
+
+**Applies to:** feature / bug **only when a UI surface is present** · investigation (skip unconditionally).
+
+Detect the surface with the same helper Step 6.5 uses, then decide:
+
+```bash
+HELPER="${SKILL_DIR}/references/detect-surface.sh"
+SURFACE=$(printf '%s' "$DESIGN_TEXT" | bash "$HELPER" 2>/dev/null || true)
+# SURFACE is one of: frontend-touching | backend-only | mixed | unknown (empty on detector failure)
+```
+
+- `frontend-touching` / `mixed` -> run this section.
+- `backend-only` -> skip (no interactive surface).
+- `unknown`, empty, or detector missing/errored on non-investigation work -> **KEEP this section** and note "surface unknown - detector failed" in the doc. Fail toward coverage; never silently drop a UI section on an unknown surface.
+- investigation type -> skip regardless of the detector.
+
+When the section runs:
 
 **For EVERY interactive element in the design**, enumerate its states. No element gets a pass.
 
@@ -492,19 +558,21 @@ tasks while the plan default stays `executor: do`.
 
 ### 7. Generate BDD Acceptance Criteria
 
+**Applies to:** feature (all 5 types) · bug (AC-HP + AC-ERR + AC-FR + AC-EDGE; AC-UI only when the Step 6 gate found a UI surface) · investigation (skip - a verdict has no ACs; the Evidence Chain and Re-open Conditions sections carry its rigor).
+
 **Load the `/bdd-acceptance-criteria` skill** for comprehensive patterns.
 
 For each testable behavior, write Given/When/Then using patterns from `bdd-acceptance-criteria/references/common-criteria.md`.
 
-**MANDATORY: Every user story gets all 5 AC types:**
+**The required AC types per deliverable type:**
 
-| Type | Code | Tests | Required? |
-|------|------|-------|-----------|
-| Happy path | AC-HP | Expected behavior works | Always |
-| Error/validation | AC-ERR | Invalid input, API errors | Always |
-| UI state changes | AC-UI | Loading, disabled, feedback | Always |
-| Edge cases | AC-EDGE | Boundaries, empty state, concurrency | Always |
-| **Failure recovery** | **AC-FR** | **Silent failures, state recovery, interrupted operations** | **Always** |
+| Type | Code | Tests | feature | bug | investigation |
+|------|------|-------|---------|-----|---------------|
+| Happy path | AC-HP | Expected behavior works (bug: the repro now passes) | yes | yes | none |
+| Error/validation | AC-ERR | Invalid input, API errors | yes | yes | none |
+| UI state changes | AC-UI | Loading, disabled, feedback | yes | only if UI surface | none |
+| Edge cases | AC-EDGE | Boundaries, empty state, concurrency | yes | yes | none |
+| **Failure recovery** | **AC-FR** | **Silent failures, state recovery, interrupted operations** | yes | yes | none |
 
 The AC-FR type is new and catches the bugs that slip through:
 
@@ -540,30 +608,73 @@ Document any pitfalls that could affect the implementation plan. Examples:
 - Supabase RLS: policies don't apply to service_role key
 - React state: stale closures in effects, batching behavior
 
-### 8. Save Design Document
+### 8. Finalize the Design Document
+
+Finalize the doc drafted incrementally from Step 3 (or write it now if the flow
+was short enough to skip the skeleton).
 
 Save to: `{plansDirectory}/YYYY-MM-DD-<feature-name>.md` (read from `.claude/settings.json` → `plansDirectory`, or `.fno/config.toml` → `config.plans.full_path`)
 
-Include:
-1. Overview
-2. Architecture
-3. User Stories
-4. **Multi-Perspective Findings** (from Step 5)
-5. **UI State Machines** (from Step 6)
-6. **Failure Modes** (from Step 6b, MANDATORY `## Failure Modes` heading)
-7. **Acceptance Criteria** (BDD format, all 5 types)
-8. **Locked Decisions** (DO NOT revisit in planning/execution)
-9. **Claude's Discretion** (areas open for implementing agent to decide)
-10. **Domain Pitfalls** (from Step 7b)
-11. Open Questions
-12. **Schema Reconciliation** (from Step 1e, when the repo is DB-backed; a
-    top-level `## Schema Reconciliation` heading carrying the touched
-    tables/enums and the dedup verdict)
-13. **Interface Contract** (from Step 6c, cross-repo features that pin a contract;
-    a top-level `## Interface Contract` heading carrying `contract_version` and the
-    pinned schema/API/type surface. A cross-repo feature that cannot pin a contract
-    yet omits this section and records why in Open Questions instead - do not add a
-    placeholder `contract_version`.)
+Stamp the resolved type into the doc's frontmatter as
+`deliverable_type: feature | bug | investigation` (Step 1f).
+
+**The required sections scale to `deliverable_type`.** The uniform 12-section
+contract manufactured filler on non-feature work (an investigation verdict was
+forced to fabricate AC-UI and UI-state sections). Include a section only where
+this table marks it for the resolved type:
+
+| Section | feature | bug | investigation |
+|---|---|---|---|
+| Overview | yes | yes | yes |
+| Schema Reconciliation (1e, DB-backed) | yes | yes | yes |
+| Architecture | yes | as "Fix approach" | optional |
+| User Stories | yes | yes - the fix's discrete work items (see note) | no |
+| Multi-Perspective Findings (5) | full | Pessimist + Silent-Failure only | no (Evidence Chain replaces it) |
+| UI State Machines (6) | only if UI surface | only if UI surface | never |
+| **Failure Modes (6b)** | **yes** | **yes** | **yes** |
+| Interface Contract (6c) | if cross-repo | if cross-repo | never |
+| Repro (new) | no | **yes** - commands/steps that reproduce the bug | no |
+| Acceptance Criteria (7) | all 5 types | AC-HP/ERR/FR/EDGE; AC-UI only if UI surface | none |
+| Evidence Chain (new) | no | no | **yes** - each claim pinned to a source |
+| Re-open Conditions (new) | no | no | **yes** - the observation that would invalidate the verdict |
+| Domain Pitfalls (7b) | yes | yes | optional |
+| Locked Decisions + Claude's Discretion | yes | yes | yes |
+| Open Questions | yes | yes | yes |
+
+**Why a bug keeps `## User Stories`.** `/blueprint` synthesizes its
+`## Execution Strategy` task list *solely* from `## User Stories`
+(`mutate_doc.py:_build_execution_strategy`); a doc with no stories degrades to a
+single empty "implement feature" task. A bug's discrete fix steps therefore live
+under `## User Stories` (framed as work items, not "As a user I can..."
+narratives) so the bug's real work survives into the plan. Dropping the section
+would silently gut blueprint's task synthesis - and the parser seam is frozen, so
+this is a think.md-side obligation, not a blueprint change. An `investigation`
+omits it because it is no-build (it never reaches `/blueprint`).
+
+**The three type-specific new sections:**
+
+- `## Repro` (bug) - the exact commands or steps that surface the bug today, so
+  AC-HP can assert "the repro now passes" against a concrete starting point.
+- `## Evidence Chain` (investigation) - each claim in the verdict on its own
+  bullet, pinned to a source (file:line, command output, PR, doc). An
+  investigation's rigor lives here in place of BDD ACs.
+- `## Re-open Conditions` (investigation) - the concrete observation(s) that
+  would invalidate the verdict and warrant re-opening the question.
+
+**`## Failure Modes` stays mandatory for all three types** with all four bold
+labels (Boundaries / Errors / Invariants / Concurrency), using the "Not
+applicable: <reason>" bullet rule where a label genuinely does not apply. The
+`/blueprint` parser seam is frozen: it greps for exactly `^## Failure Modes$` and
+the four labels, so this section never scales away.
+
+**The UI-surface gate (Step 6) decides the UI rows.** Reuse
+`references/detect-surface.sh`; a detector failure or `unknown` surface on
+non-investigation work KEEPS the UI sections (fail toward coverage).
+
+`## Schema Reconciliation` (all types, when DB-backed) and `## Interface Contract`
+(cross-repo only, feature/bug) keep their exact literal headings - `/blueprint`
+greps for both. A cross-repo feature that cannot pin a contract yet omits the
+section and records why in Open Questions (no placeholder `contract_version`).
 
 ### Locked Decisions Section (MANDATORY)
 
@@ -607,8 +718,27 @@ not as "we'll figure it out at implementation time":
 
 After saving the design document, spawn a Haiku reviewer subagent to critique it:
 
-1. Dispatch reviewer with the full design doc text
-2. Reviewer checks for: missing error states, incomplete acceptance criteria, contradictions between sections, vague implementation details, **a missing `## Failure Modes` heading** (hard fail), and missing sub-bullets (Boundaries / Errors / Invariants / Concurrency). For cross-repo features it also verifies a `## Interface Contract` section carrying `contract_version` and a Locked Decision referencing it (hard fail when the feature spans repos but pins no contract and does not explain the omission in Open Questions)
+1. Dispatch reviewer with the full design doc text **plus `deliverable_type` and
+   the type's required-section list from the Step 8 contract table.** The
+   reviewer judges the doc against ITS type's contract, not the uniform one.
+2. Reviewer checks:
+   - **Hard-fail (all types):** a missing `## Failure Modes` heading or any
+     missing bold label (Boundaries / Errors / Invariants / Concurrency) - the
+     frozen `/blueprint` parser seam. Unchanged.
+   - **Hard-fail (per type):** a type-required section is absent - a `bug`
+     without `## Repro`; an `investigation` without `## Evidence Chain` or
+     `## Re-open Conditions`; a cross-repo feature/bug without a
+     `## Interface Contract` carrying `contract_version` and a Locked Decision
+     referencing it (unless the omission is explained in Open Questions).
+   - **Anti-filler check (new):** a section the resolved type EXCLUDES that is
+     present anyway - AC blocks or UI-state tables on an `investigation`, an
+     `## Evidence Chain` on a `feature` or `bug` - is flagged **for removal, not
+     approved**. This is the
+     x-2bf7 failure inverted: the reviewer once approved a no-build verdict's
+     fabricated AC-UI sections; a type-excluded (type-excluded == filler) section
+     is now a finding.
+   - General quality: missing error states, contradictions between sections,
+     vague implementation details.
 3. If issues found: fix them, re-dispatch reviewer (max 3 iterations)
 4. If approved (or 3 iterations reached): present to user
 
@@ -632,7 +762,7 @@ Ask: "Ready to create the implementation plan with `/blueprint`?"
 
 ## Key Principles
 
-- **One question at a time** - Don't overwhelm
+- **One round at a time** - batch related questions into a single round; never overwhelm, but never drip one question at a time either
 - **YAGNI ruthlessly** - Remove unnecessary features
 - **Test-first thinking** - Always ask "how would we verify this?"
 - **Every action needs feedback** - If a user does something and nothing visible happens, that's a design bug
