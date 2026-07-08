@@ -350,6 +350,7 @@ enum CoreMsg {
     PaneSend {
         pane: u64,
         bytes: Vec<u8>,
+        guarded: bool,
         reply: ControlReply,
     },
     PaneWait {
@@ -2002,6 +2003,58 @@ impl Core {
         rerun_allowed(&self.agents, &self.session_name, pane)
     }
 
+    /// Write `bytes` to `pane`'s PTY. When `guarded`, apply the same authority
+    /// as the block-rerun path (idle badge FIRST, then the writer-claim
+    /// interlock) immediately before the write - and because the core loop is
+    /// serial, the check and the inject are atomic: no other input for this
+    /// pane interleaves between them, so the target cannot flip idle->busy in
+    /// the gap. This is what lets the block-pipe porcelain drop its client-side
+    /// registry read (which raced the send and could read a stale/absent
+    /// registry when the client's HOME differed from the server's). Raw
+    /// `PaneSend` (`guarded == false`) is the writer-claim holder's own channel
+    /// and stays unguarded.
+    fn pane_send(&mut self, pane: u64, bytes: &[u8], guarded: bool) -> ServerMsg {
+        if !self.panes.contains_key(&pane) {
+            return dead_pane(pane);
+        }
+        if guarded {
+            if let Err(reason) = rerun_allowed(&self.agents, &self.session_name, pane) {
+                return ServerMsg::Err {
+                    code: err_code::TARGET_NOT_IDLE,
+                    msg: reason.to_string(),
+                };
+            }
+            // A live relay holds the pane mid-write: bounce rather than
+            // interleave bytes into its burst. A dead holder releases here so
+            // the send resumes (mirrors the rerun-path interlock).
+            if let Some(&holder) = self.claims.get(&pane) {
+                if pid_alive(holder) {
+                    return ServerMsg::Err {
+                        code: err_code::TARGET_NOT_IDLE,
+                        msg: "busy: relay".to_string(),
+                    };
+                }
+                self.claims.remove(&pane);
+            }
+        }
+        match self
+            .panes
+            .get(&pane)
+            .expect("pane presence checked above; core loop is serial")
+            .pty
+            .write_input(bytes)
+        {
+            Ok(()) => ServerMsg::Ok,
+            // A dead/wedged pane fails closed: the child exited (BrokenPipe) or
+            // stopped reading (WouldBlock). The send did not land - never a
+            // silent Ok.
+            Err(e) => ServerMsg::Err {
+                code: err_code::DEAD_PANE,
+                msg: format!("pane {pane} send failed: {e}"),
+            },
+        }
+    }
+
     /// Answer a blocked prompt without focusing the pane (x-c929). The freshness
     /// contract: re-read the pane's live bottom-N region, re-hash, and inject the
     /// daemon-pinned `keystroke` ONLY when the hash matches the `fingerprint` the
@@ -3030,20 +3083,13 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
-            CoreMsg::PaneSend { pane, bytes, reply } => {
-                let msg = match self.panes.get(&pane) {
-                    None => dead_pane(pane),
-                    Some(entry) => match entry.pty.write_input(&bytes) {
-                        Ok(()) => ServerMsg::Ok,
-                        // A dead/wedged pane fails closed (AC4-ERR): the child
-                        // exited (BrokenPipe) or stopped reading (WouldBlock).
-                        // Either way the send did not land - never a silent Ok.
-                        Err(e) => ServerMsg::Err {
-                            code: err_code::DEAD_PANE,
-                            msg: format!("pane {pane} send failed: {e}"),
-                        },
-                    },
-                };
+            CoreMsg::PaneSend {
+                pane,
+                bytes,
+                guarded,
+                reply,
+            } => {
+                let msg = self.pane_send(pane, &bytes, guarded);
                 let _ = reply.send(msg);
                 Flow::Continue
             }
@@ -3768,11 +3814,16 @@ async fn handle_control(
                 })
                 .await
         }
-        ControlVerb::PaneSend { pane, bytes } => {
+        ControlVerb::PaneSend {
+            pane,
+            bytes,
+            guarded,
+        } => {
             core_tx
                 .send(CoreMsg::PaneSend {
                     pane,
                     bytes,
+                    guarded,
                     reply: reply_tx,
                 })
                 .await

@@ -30,10 +30,9 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::agents_view::{derive_rows, registry_path, RegistryAgent};
 use crate::proto::{
-    self, err_code, read_msg_sync, write_msg_sync, AgentBadge, BlockSel, ClientMsg, ControlVerb,
-    ServerMsg, WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
+    self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, ServerMsg,
+    WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
 };
 
 /// Bound every probe: a wedged server counts as alive-but-unqueryable, never
@@ -1381,7 +1380,14 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     buf
                 }
             };
-            (ControlVerb::PaneSend { pane, bytes }, CONTROL_TIMEOUT)
+            (
+                ControlVerb::PaneSend {
+                    pane,
+                    bytes,
+                    guarded: false,
+                },
+                CONTROL_TIMEOUT,
+            )
         }
         PaneCmd::Wait {
             pane,
@@ -1666,61 +1672,6 @@ fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
     })
 }
 
-/// The receive-side idle guard (x-fe8f): never inject into a working agent's
-/// composer. Same cell-for-cell policy as the server's block-rerun guard
-/// (`rerun_allowed`), decided client-side from the registry rows
-/// [`derive_rows`] folds (in-TTL hook > fresh screen > liveness), scoped to
-/// THIS mux session - pane ids collide across sessions.
-///
-/// - `rows: None` (malformed registry) -> refuse: the target's state is
-///   unknown and the default fails closed.
-/// - no row for (session, pane) -> proceed: a plain shell pane is not an
-///   agent; the guard protects agents' composers, not shells.
-/// - exited row -> proceed: the agent is gone, there is no composer left.
-/// - `Done` badge -> proceed: a finished agent sitting at its composer is a
-///   valid pipe target (the point of the verb).
-/// - `Working`/`Blocked` badge -> refuse (busy).
-/// - no live badge on an agent row (liveness-only) -> refuse: not provably
-///   idle, and false-ready is the forbidden direction.
-fn pipe_guard(rows: Option<&[RegistryAgent]>, session: &str, pane: u64) -> Result<(), String> {
-    let Some(rows) = rows else {
-        return Err("agents registry unreadable - target agent state unknown".to_string());
-    };
-    let Some(row) = rows.iter().find(|r| {
-        r.mux
-            .as_ref()
-            .is_some_and(|(s, p)| s == session && *p == pane)
-    }) else {
-        return Ok(());
-    };
-    if row.exited {
-        return Ok(());
-    }
-    match row.badge {
-        Some(AgentBadge::Done) => Ok(()),
-        Some(badge @ (AgentBadge::Working | AgentBadge::Blocked)) => {
-            let state = if badge == AgentBadge::Working {
-                "working"
-            } else {
-                "blocked"
-            };
-            let hint = row
-                .reason
-                .as_deref()
-                .map(|r| format!(": {r}"))
-                .unwrap_or_default();
-            Err(format!(
-                "target pane {pane} busy (agent {name:?} {state}{hint})",
-                name = row.name
-            ))
-        }
-        None => Err(format!(
-            "target pane {pane} state unknown (agent {name:?} has no fresh report)",
-            name = row.name
-        )),
-    }
-}
-
 /// Data-integrity gate on the source block's metadata: an open (still
 /// running) or byte-cap-truncated block must never pipe - partial text is
 /// worse than no pipe (the verb's contract). Distinct from the idle guard:
@@ -1823,30 +1774,14 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
     }
     let seq = meta.as_ref().and_then(|m| m.seq);
 
-    // 2. Receive-side idle guard. A missing registry FILE means no daemon and
-    //    no agents (proceed); an unreadable/malformed one means unknown state
-    //    (refuse). `--force` is the human override; the default fails closed.
+    // 2. Land the text via the server-side atomic guarded send. The idle check
+    //    (agent-busy + writer-claim interlock) now runs on the server under the
+    //    pane lock immediately before the write, so there is no client-side
+    //    read->send TOCTOU and no dependence on the client and server agreeing
+    //    on HOME/registry path. `--force` sends the raw unguarded PaneSend.
     if parsed.force {
         eprintln!("fno mux block: --force: skipping the receive-side idle guard");
-    } else {
-        let verdict = match std::fs::read_to_string(registry_path()) {
-            Ok(raw) => pipe_guard(
-                derive_rows(&raw, epoch_secs()).as_deref(),
-                &session,
-                parsed.to,
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!(
-                "agents registry unreadable ({e}) - target agent state unknown"
-            )),
-        };
-        if let Err(why) = verdict {
-            eprintln!("fno mux block: {why} - rerun with --force to override");
-            return EXIT_TARGET_NOT_IDLE;
-        }
     }
-
-    // 3. Land the text in the target's input.
     let bytes = text.trim_end_matches(['\r', '\n']).as_bytes().to_vec();
     let sent = bytes.len();
     match control_roundtrip(
@@ -1855,9 +1790,14 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
         ControlVerb::PaneSend {
             pane: parsed.to,
             bytes,
+            guarded: !parsed.force,
         },
     ) {
         Ok(ServerMsg::Ok) => {}
+        Ok(ServerMsg::Err { code, msg }) if code == err_code::TARGET_NOT_IDLE => {
+            eprintln!("fno mux block: {msg} - rerun with --force to override");
+            return EXIT_TARGET_NOT_IDLE;
+        }
         Ok(ServerMsg::Err { msg, .. }) => {
             eprintln!("fno mux block: {msg}");
             return EXIT_ERROR;
@@ -1891,15 +1831,6 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
         );
     }
     EXIT_OK
-}
-
-/// Wall-clock epoch seconds for the guard's TTL fold (matches the sideline
-/// reader's `now_secs` feeding [`derive_rows`]).
-fn epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -2491,72 +2422,6 @@ mod tests {
         assert!(parse_block_args(&os(&["pipe", "--from", "x", "--to", "2"])).is_err());
     }
 
-    /// A registry row fixture for the guard matrix.
-    fn agent_row(
-        name: &str,
-        mux: Option<(&str, u64)>,
-        badge: Option<AgentBadge>,
-        exited: bool,
-    ) -> RegistryAgent {
-        RegistryAgent {
-            name: name.into(),
-            cwd: "/w".into(),
-            exited,
-            badge,
-            reason: (badge == Some(AgentBadge::Working)).then(|| "building".into()),
-            mux: mux.map(|(s, p)| (s.to_string(), p)),
-            answerable: None,
-            attach_id: None,
-            external: false,
-        }
-    }
-
-    #[test]
-    fn block_pipe_guard_refuses_busy_and_unknown() {
-        // AC-ERR: a working/blocked target refuses (busy)...
-        for badge in [AgentBadge::Working, AgentBadge::Blocked] {
-            let rows = [agent_row("a", Some(("main", 2)), Some(badge), false)];
-            let err = pipe_guard(Some(&rows), "main", 2).unwrap_err();
-            assert!(err.contains("busy"), "{badge:?}: {err}");
-        }
-        // ...naming the state and the reason hint when present.
-        let rows = [agent_row(
-            "a",
-            Some(("main", 2)),
-            Some(AgentBadge::Working),
-            false,
-        )];
-        let err = pipe_guard(Some(&rows), "main", 2).unwrap_err();
-        assert!(err.contains("working: building"), "{err}");
-        // An agent row with NO live badge is not provably idle: refuse
-        // fail-closed, the same cell as the server's rerun guard.
-        let rows = [agent_row("a", Some(("main", 2)), None, false)];
-        let err = pipe_guard(Some(&rows), "main", 2).unwrap_err();
-        assert!(err.contains("unknown"), "{err}");
-    }
-
-    #[test]
-    fn block_pipe_guard_passes_done_shell_and_exited() {
-        // A done agent sits at its composer - the intended pipe target.
-        let rows = [agent_row(
-            "a",
-            Some(("main", 2)),
-            Some(AgentBadge::Done),
-            false,
-        )];
-        assert_eq!(pipe_guard(Some(&rows), "main", 2), Ok(()));
-        // AC-EDGE: no registry row for the pane -> a plain shell pane, send.
-        assert_eq!(pipe_guard(Some(&[]), "main", 2), Ok(()));
-        // An exited agent left no composer to protect -> send.
-        let rows = [agent_row(
-            "a",
-            Some(("main", 2)),
-            Some(AgentBadge::Working),
-            true,
-        )];
-        assert_eq!(pipe_guard(Some(&rows), "main", 2), Ok(()));
-    }
-
     #[test]
     fn block_pipe_gate_refuses_open_truncated_and_implicit_blocks() {
         let meta =
@@ -2583,24 +2448,5 @@ mod tests {
         // mid-command) is refused: block pipe is a typed-block verb.
         let err = pipe_block_gate(Some(&meta(None, true, false, true))).unwrap_err();
         assert!(err.contains("no command markers"), "{err}");
-    }
-
-    #[test]
-    fn block_pipe_guard_is_session_scoped() {
-        // Pane ids collide across sessions (the x-38c4 rerun-guard lesson):
-        // a working agent on pane 2 of ANOTHER session must not veto this one.
-        let rows = [agent_row(
-            "a",
-            Some(("other", 2)),
-            Some(AgentBadge::Working),
-            false,
-        )];
-        assert_eq!(pipe_guard(Some(&rows), "main", 2), Ok(()));
-    }
-
-    #[test]
-    fn block_pipe_guard_fails_closed_on_malformed_registry() {
-        // derive_rows(None) == a torn/malformed document: state unknown, refuse.
-        assert!(pipe_guard(None, "main", 2).is_err());
     }
 }

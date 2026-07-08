@@ -47,6 +47,7 @@ fn pane_send(scratch: &Scratch, pane: u64, bytes: &[u8]) {
             verb: ControlVerb::PaneSend {
                 pane,
                 bytes: bytes.to_vec(),
+                guarded: false,
             },
         },
     )

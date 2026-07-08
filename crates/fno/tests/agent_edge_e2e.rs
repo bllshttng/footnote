@@ -360,6 +360,16 @@ fn agent_edge_block_pipe_reads_guards_and_lands() {
                                 "received_at":"2026-07-02T00:00:00Z"}}}}"#
         ),
     );
+    // The guard is server-side now: it reads the server's own `self.agents`,
+    // refreshed from the registry on an interval. Sync on the server observing
+    // the busy badge (via an attached client's layout) before piping, else the
+    // send can beat the ingest tick and land in the not-yet-busy pane.
+    let to_id: u64 = to.parse().unwrap();
+    let mut client = FakeClient::attach(&scratch.main_sock(), 30, 100, &dir);
+    wait_agents(&mut client, 10, "server observes busy target", |a| {
+        a.iter()
+            .any(|r| r.pane_id == Some(to_id) && r.badge == Some(AgentBadge::Working))
+    });
     let refused = block(&scratch, &["pipe", "--from", &from, "--to", &to]);
     assert_eq!(refused.status.code(), Some(15), "guard refuses busy target");
     let err = String::from_utf8_lossy(&refused.stderr);
@@ -376,6 +386,7 @@ fn agent_edge_block_pipe_reads_guards_and_lands() {
         String::from_utf8_lossy(&forced.stderr)
     );
 
+    client.detach();
     kill_server(&scratch);
 }
 
