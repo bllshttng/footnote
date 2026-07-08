@@ -35,14 +35,12 @@ SPAWN_TIMEOUT_S = 90
 
 
 def read_plan_acs(plan_path: Path) -> Optional[str]:
-    """Extract the acceptance-criteria text from a plan (dir -> 00-INDEX.md,
-    else the file itself - same resolution finalize uses). None = no plan / no
-    ACs. An exists-but-unreadable doc raises OSError so the caller records
-    verdict `error`, not a false `not_applicable` (sigma P3)."""
-    doc = plan_path / "00-INDEX.md" if plan_path.is_dir() else plan_path
-    if not doc.exists():
+    """Extract the acceptance-criteria text from a plan file. None = no plan
+    / no ACs. An exists-but-unreadable doc raises OSError so the caller
+    records verdict `error`, not a false `not_applicable` (sigma P3)."""
+    if not plan_path.exists():
         return None
-    content = doc.read_text(encoding="utf-8")
+    content = plan_path.read_text(encoding="utf-8")
     # Prefer the dedicated section; fall back to any AC-labelled lines.
     m = re.search(
         r"^#{2,4}\s*Acceptance [Cc]riteria.*?$(.*?)(?=^#{1,2}\s|\Z)",
