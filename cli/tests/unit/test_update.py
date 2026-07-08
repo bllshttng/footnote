@@ -348,6 +348,62 @@ def test_install_then_mark_marker_failure_preserves_success(tmp_path: Path) -> N
     assert not marker.exists()
 
 
+def test_install_then_mark_post_install_runs_after_success(tmp_path: Path) -> None:
+    """post_install runs after a successful install; its output proves ordering."""
+    import subprocess as _sp
+
+    marker = tmp_path / "state" / "installed-rev"
+    sentinel = tmp_path / "refreshed"
+    line = update._install_then_mark(
+        ["true"], "feedface", marker=marker, pid=1,
+        post_install=f"touch {sentinel}",
+    )
+    _sp.run(["/bin/sh", "-c", line], check=True)
+    assert marker.read_text().strip() == "feedface"
+    assert sentinel.exists(), "post_install must run after the install"
+
+
+def test_install_then_mark_post_install_skipped_on_install_failure(tmp_path: Path) -> None:
+    """A failed install short-circuits before post_install (never refresh onto a
+    failed update) and still propagates the failure."""
+    import subprocess as _sp
+
+    marker = tmp_path / "state" / "installed-rev"
+    sentinel = tmp_path / "refreshed"
+    line = update._install_then_mark(
+        ["false"], "feedface", marker=marker, pid=2,
+        post_install=f"touch {sentinel}",
+    )
+    result = _sp.run(["/bin/sh", "-c", line], check=False)
+    assert result.returncode != 0
+    assert not sentinel.exists(), "post_install must not run when install fails"
+
+
+def test_install_then_mark_post_install_failure_preserves_success(tmp_path: Path) -> None:
+    """A post_install failure is best-effort (|| true): a successful install
+    still exits 0 even when the refresh command fails."""
+    import subprocess as _sp
+
+    marker = tmp_path / "state" / "installed-rev"
+    line = update._install_then_mark(
+        ["true"], "feedface", marker=marker, pid=3,
+        post_install="false",
+    )
+    result = _sp.run(["/bin/sh", "-c", line], check=False)
+    assert result.returncode == 0, "a refresh failure must not fail the update"
+    assert marker.read_text().strip() == "feedface"
+
+
+def test_install_then_mark_omits_post_install_when_none(tmp_path: Path) -> None:
+    """No post_install -> the line is byte-identical to the pre-feature shape."""
+    marker = tmp_path / "state" / "installed-rev"
+    base = update._install_then_mark(["true"], "r", marker=marker, pid=5)
+    with_none = update._install_then_mark(
+        ["true"], "r", marker=marker, pid=5, post_install=None
+    )
+    assert base == with_none
+
+
 def test_write_installed_rev_cleans_temp_on_replace_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

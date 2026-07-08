@@ -327,6 +327,48 @@ def test_status_json_emits_liveness_verdict(monkeypatch):
     assert payload["verdict"] == "dead" and payload["enabled"] is True
 
 
+def _settings_with_pr_watch(enabled: bool):
+    class _PW:
+        def __init__(self):
+            self.enabled = enabled
+            self.interval_seconds = 600
+    class _S:
+        pr_watch = _PW()
+    return _S()
+
+
+def test_refresh_verb_noop_when_disabled(monkeypatch):
+    """`pr-watch refresh` is a no-op (never touches launchd) when disabled."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(False))
+    import fno.pr_watch._install as m
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: pytest.fail("must not refresh when disabled"))
+
+    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
+    assert result.exit_code == 0
+    assert "disabled" in result.stdout
+
+
+def test_refresh_verb_refreshes_when_enabled(monkeypatch):
+    """`pr-watch refresh` calls refresh_watcher when enabled and reports the msg."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
+    import fno.pr_watch._install as m
+    calls: list = []
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: calls.append(kw) or ("bounced x; awaiting first tick", 0))
+
+    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert calls[0]["fno_binary"] == "/x/fno-py"
+    assert "pr-watch refresh:" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # Config: PrWatchBlock schema
 # ---------------------------------------------------------------------------
@@ -573,6 +615,44 @@ def test_bounce_bootout_hang_is_fatal(tmp_launch_agents):
     )
     assert rc == 1 and "bootout" in msg and "timed out" in msg
     assert [c[0] for c in calls] == ["bootout"]  # stops at the hang
+
+
+def test_refresh_watcher_rerenders_then_bounces(tmp_launch_agents):
+    """refresh_watcher rewrites the plist onto the given binary, then bounces."""
+    m = _install()
+    calls: list[tuple] = []
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist/>")  # stale stub -> must be overwritten
+    import fno.pr_watch._install as mod
+    orig = mod._run_launchctl_timed
+    mod._run_launchctl_timed = _record_runner(calls)
+    try:
+        msg, rc = m.refresh_watcher(
+            launch_agents_dir=tmp_launch_agents,
+            fno_binary="/fresh/bin/fno-py",
+            install_path="/usr/bin:/bin",
+        )
+    finally:
+        mod._run_launchctl_timed = orig
+    assert rc == 0
+    content = plist.read_text()
+    assert "/fresh/bin/fno-py" in content, "plist re-rendered onto the fresh binary"
+    assert [c[0] for c in calls] == ["bootout", "bootstrap", "kickstart"]
+
+
+def test_refresh_watcher_write_failure_is_error(tmp_path, monkeypatch):
+    """A plist write failure returns nonzero and never reaches the bounce."""
+    m = _install()
+    # A regular file where the LaunchAgents dir should be -> mkdir/write fails.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a dir")
+    monkeypatch.setattr(m, "bounce", lambda **kw: pytest.fail("must not bounce on write failure"))
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=blocker / "LaunchAgents",
+        fno_binary="/x/fno-py",
+        install_path="/usr/bin:/bin",
+    )
+    assert rc == 1 and "failed to write plist" in msg
 
 
 def test_heal_watcher_missing_plist_is_error(tmp_launch_agents, monkeypatch):

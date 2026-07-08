@@ -225,7 +225,12 @@ def test_successful_update_chains_marker_write(
 def test_update_without_source_rev_skips_marker_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the source rev is undeterminable, exec the plain install (no marker chain)."""
+    """When the source rev is undeterminable, no installed-rev marker is written.
+
+    The pr-watch refresh still chains after the install (via /bin/sh, since
+    there is a command to run post-install), but the marker-write chain must be
+    absent - there is no rev to record.
+    """
     import fno.update as update_mod
 
     monkeypatch.setattr(update_mod, "_source_rev", lambda src: None)
@@ -240,8 +245,40 @@ def test_update_without_source_rev_skips_marker_chain(
 
     result = runner.invoke(app, ["update"])
     assert result.exit_code == 0
-    # Plain install: first arg is the installer (uv/pip), NOT /bin/sh.
-    assert captured["file"] != "/bin/sh"
+    # The marker-write chain (printf rev > tmp && mv) must be absent with no rev.
+    joined = " ".join(captured.get("args") or [])
+    assert "installed-rev" not in joined
+    assert "printf" not in joined
+    # The pr-watch refresh still rides the successful install (best-effort).
+    assert "pr-watch refresh" in joined
+
+
+def test_update_without_source_rev_execs_plain_install_when_no_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no rev AND no refresh resolvable, exec the plain installer directly
+    (no /bin/sh wrapper) - the original no-rev fast path."""
+    import fno.update as update_mod
+
+    monkeypatch.setattr(update_mod, "_source_rev", lambda src: None)
+    # Force refresh resolution to fail so refresh_argv stays None.
+    import fno.pr_watch.cli as pw_cli
+    monkeypatch.setattr(
+        pw_cli, "_resolve_fno_binary",
+        lambda: (_ for _ in ()).throw(RuntimeError("no binary")),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_execvp(file: str, args: list[str]) -> None:
+        captured["file"] = file
+        captured["args"] = args
+
+    monkeypatch.setattr(update_mod.os, "execvp", _fake_execvp)
+
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 0
+    assert captured["file"] != "/bin/sh"  # plain installer, no shell wrapper
 
 
 # ---------------------------------------------------------------------------
