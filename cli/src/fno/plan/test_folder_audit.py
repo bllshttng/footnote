@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from typer.testing import CliRunner
+
+from fno.cli import app
 from fno.plan._folder_audit import scan
+
+runner = CliRunner()
 
 
 def _make_folder_plan(plans_root: Path, name: str) -> Path:
@@ -52,3 +57,54 @@ def test_unscannable_plans_root_returns_none(tmp_path: Path) -> None:
     missing = tmp_path / "does-not-exist"
     owners = scan(missing, [{"id": "ab-5", "_status": "ready", "plan_path": "x"}])
     assert owners is None
+
+
+# ---------------------------------------------------------------------------
+# CLI-level: `fno plan folder-audit` fail-toward-defer paths
+# ---------------------------------------------------------------------------
+
+
+def test_cli_folder_audit_unreadable_graph_exits_1(tmp_path: Path, monkeypatch) -> None:
+    from fno.graph import _constants
+
+    bad_graph = tmp_path / "graph.json"
+    bad_graph.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(_constants, "GRAPH_JSON", bad_graph)
+
+    result = runner.invoke(
+        app, ["plan", "folder-audit", "--non-terminal", "--plans-dir", str(tmp_path)]
+    )
+    assert result.exit_code == 1
+    assert "failing toward defer" in result.output
+
+
+def test_cli_folder_audit_unscannable_plans_dir_exits_1(tmp_path: Path, monkeypatch) -> None:
+    from fno.graph import _constants
+
+    good_graph = tmp_path / "graph.json"
+    good_graph.write_text('{"entries": []}', encoding="utf-8")
+    monkeypatch.setattr(_constants, "GRAPH_JSON", good_graph)
+
+    missing_plans_dir = tmp_path / "does-not-exist"
+    result = runner.invoke(
+        app,
+        ["plan", "folder-audit", "--non-terminal", "--plans-dir", str(missing_plans_dir)],
+    )
+    assert result.exit_code == 1
+    assert "failing toward defer" in result.output
+
+
+def test_cli_folder_audit_clean_vault_exits_0(tmp_path: Path, monkeypatch) -> None:
+    from fno.graph import _constants
+
+    good_graph = tmp_path / "graph.json"
+    good_graph.write_text('{"entries": []}', encoding="utf-8")
+    monkeypatch.setattr(_constants, "GRAPH_JSON", good_graph)
+
+    plans_dir = tmp_path / "plans"
+    plans_dir.mkdir()
+    result = runner.invoke(
+        app, ["plan", "folder-audit", "--non-terminal", "--plans-dir", str(plans_dir)]
+    )
+    assert result.exit_code == 0
+    assert "non-terminal folder-plan owners: 0" in result.output

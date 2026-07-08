@@ -1030,7 +1030,6 @@ def _intake_impl(
     args.points = points
     args.force_new_roadmap = force_new_roadmap
     args.dry_run = dry_run
-    args.batch = False
     args.from_list = from_list
     args.plan_paths = plan_paths or []
     args.project = project
