@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Plan pre-check validator for target
-# Usage: validate-plan.sh <plan.md>
+# Usage: validate-plan.sh <plan-directory>
 # Exit: 0 = valid (may have warnings), 1 = errors found
 
 set -euo pipefail
 
-PLAN_DIR="${1:?Usage: validate-plan.sh <plan.md>}"
+PLAN_DIR="${1:?Usage: validate-plan.sh <plan-directory>}"
 ERRORS=0
 WARNINGS=0
 TMPDIR_BASE_VAL="$(mktemp -d)"
@@ -23,8 +23,9 @@ echo ""
 # -------------------------------------------------------------------
 echo "--- Structure ---"
 
-# The only authored plan shape is a single .md (G1); folder reading is
-# removed (G3).
+# The only authored plan shape is a single .md (G1). A directory is a legacy
+# folder plan still on disk (folder READING is removed in G3); validate its
+# 00-INDEX + phase files for now. A single file skips the folder checks.
 if [[ -f "$PLAN_DIR" ]]; then
     if [[ "$PLAN_DIR" == *.md ]]; then
         ok "single-doc plan: $(basename "$PLAN_DIR")"
@@ -37,8 +38,28 @@ if [[ -f "$PLAN_DIR" ]]; then
     else
         error "not a .md plan file: $PLAN_DIR"
     fi
+elif [[ -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    ok "00-INDEX.md exists"
+    # Scope the project-field check to the frontmatter block (between
+    # the first two --- fences). A bare grep on the whole file would
+    # false-pass on body text whose lines start with "project:".
+    if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR/00-INDEX.md" \
+            | grep -qE '^[[:space:]]*project:'; then
+        ok "00-INDEX.md: has 'project:' field"
+    else
+        warn "00-INDEX.md: missing 'project:' field in frontmatter (intake will fall back to cwd-based inference)"
+    fi
 else
-    error "Plan file not found: $PLAN_DIR"
+    error "Missing 00-INDEX.md"
+fi
+
+if [[ -d "$PLAN_DIR" ]]; then
+    PHASE_COUNT=$(find "$PLAN_DIR" -maxdepth 1 -name '[0-9][0-9]*.md' ! -name '00-INDEX.md' 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$PHASE_COUNT" -gt 0 ]]; then
+        ok "$PHASE_COUNT phase file(s) found"
+    else
+        error "No phase files found (expected files like 01-*.md)"
+    fi
 fi
 
 # -------------------------------------------------------------------
@@ -47,28 +68,20 @@ fi
 echo ""
 echo "--- Execution Strategy ---"
 
-# execution_mode lives in the plan doc's frontmatter. A single-doc quick
-# plan legitimately omits it (no waves).
-if [[ -f "$PLAN_DIR" ]] && grep -q "execution_mode:" "$PLAN_DIR" 2>/dev/null; then
+# execution_mode lives in a single doc's frontmatter or a folder's 00-INDEX.md.
+# A single-doc quick plan legitimately omits it (no waves), so only warn for a
+# folder plan that lacks it.
+if [[ -f "$PLAN_DIR" ]]; then
+    if grep -q "execution_mode:" "$PLAN_DIR" 2>/dev/null; then
+        ok "execution_mode defined"
+    else
+        ok "no execution_mode (single-task / quick plan)"
+    fi
+elif [[ -f "$PLAN_DIR/00-INDEX.md" ]] && grep -q "execution_mode:" "$PLAN_DIR/00-INDEX.md" 2>/dev/null; then
     ok "execution_mode defined"
 else
-    ok "no execution_mode (single-task / quick plan)"
+    warn "No execution_mode in 00-INDEX.md"
 fi
-
-# -------------------------------------------------------------------
-# Task-block helper: extract the text of a "### Task N.M" section, bounded
-# by the next "### Task" heading or the next "## " (2-hash) section heading,
-# whichever comes first, or EOF.
-# -------------------------------------------------------------------
-
-_task_block() {
-    local start_line="$1"
-    awk -v start="$start_line" '
-        NR == start { capture=1; next }
-        capture && (/^### Task/ || /^## /) { exit }
-        capture { print }
-    ' "$PLAN_DIR"
-}
 
 # -------------------------------------------------------------------
 # Check 3: Task completeness
@@ -76,38 +89,35 @@ _task_block() {
 echo ""
 echo "--- Task Completeness ---"
 
-TASK_HEADINGS_RAW=""
-if [[ -f "$PLAN_DIR" ]]; then
-    TASK_HEADINGS_RAW=$(grep -n '^### Task' "$PLAN_DIR" 2>/dev/null || true)
-fi
+for phase_file in "$PLAN_DIR"/[0-9][0-9]*.md; do
+    [[ -f "$phase_file" ]] || continue
+    [[ "$(basename "$phase_file")" == "00-INDEX.md" ]] && continue
 
-if [[ -z "$TASK_HEADINGS_RAW" ]]; then
-    warn "no tasks found (no '### Task' headings)"
-else
-    while IFS=: read -r lineno heading_rest; do
-        [[ -z "$lineno" ]] && continue
-        task_name="${heading_rest# }"
-        block=$(_task_block "$lineno")
+    phase_name=$(basename "$phase_file")
 
-        if ! echo "$block" | grep -q "Acceptance Criteria"; then
-            warn "$task_name: missing Acceptance Criteria section"
-        else
-            ok "$task_name: has Acceptance Criteria"
-        fi
+    if ! grep -q "### Task" "$phase_file" 2>/dev/null; then
+        warn "$phase_name: no tasks found (no '### Task' headings)"
+        continue
+    fi
 
-        if ! echo "$block" | grep -qE "(Steps:|Step 1:)"; then
-            warn "$task_name: missing Steps section"
-        else
-            ok "$task_name: has Steps"
-        fi
+    if ! grep -q "Acceptance Criteria" "$phase_file" 2>/dev/null; then
+        warn "$phase_name: missing Acceptance Criteria section"
+    else
+        ok "$phase_name: has Acceptance Criteria"
+    fi
 
-        if ! echo "$block" | grep -qiE "^(Files?:|## Files?)"; then
-            warn "$task_name: missing Files section"
-        else
-            ok "$task_name: has Files section"
-        fi
-    done <<< "$TASK_HEADINGS_RAW"
-fi
+    if ! grep -qE "(Steps:|Step 1:)" "$phase_file" 2>/dev/null; then
+        warn "$phase_name: missing Steps section"
+    else
+        ok "$phase_name: has Steps"
+    fi
+
+    if ! grep -qiE "^(Files?:|## Files?)" "$phase_file" 2>/dev/null; then
+        warn "$phase_name: missing Files section"
+    else
+        ok "$phase_name: has Files section"
+    fi
+done
 
 # -------------------------------------------------------------------
 # Check 4: Parallel wave file conflicts
@@ -115,10 +125,10 @@ fi
 echo ""
 echo "--- Parallel Conflict Check ---"
 
-if [[ -f "$PLAN_DIR" ]]; then
-    # Find parallel waves in the Execution Strategy YAML: lines like
-    # "mode: parallel" followed by tasks. Strategy: extract task IDs listed
-    # in parallel waves, then check their Files sections for duplicates.
+if [[ -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    # Find parallel waves in INDEX: lines like "mode: parallel" followed by tasks
+    # Strategy: extract task IDs listed in parallel waves, then check their Files
+    # sections in phase files for duplicates.
 
     # Collect all parallel wave task groups
     # We look for blocks: "mode: parallel" then "tasks: [...]"
@@ -132,7 +142,7 @@ if [[ -f "$PLAN_DIR" ]]; then
             in_parallel=0
         }
         /mode:/ { in_parallel=0 }
-    ' "$PLAN_DIR")
+    ' "$PLAN_DIR/00-INDEX.md")
 
     if [[ -z "$PARALLEL_TASKS_RAW" ]]; then
         ok "No parallel waves detected — skipping conflict check"
@@ -149,17 +159,21 @@ if [[ -f "$PLAN_DIR" ]]; then
                 task_id=$(echo "$task_id" | tr -d ' ')
                 [[ -z "$task_id" ]] && continue
 
-                # Find this task's own "### Task X.Y" heading and scan its
-                # block for file paths.
-                task_lineno=$(grep -nE "^### Task ${task_id}([^0-9]|$)" "$PLAN_DIR" | head -1 | cut -d: -f1 || true)
-                [[ -z "$task_lineno" ]] && continue
+                # Find the file section for this task across phase files
+                # Task IDs look like "1.1", "2.3" etc
+                # Find them in phase files via "### Task X.Y" headings
+                for pf in "$PLAN_DIR"/[0-9][0-9]*.md; do
+                    [[ -f "$pf" ]] || continue
+                    [[ "$(basename "$pf")" == "00-INDEX.md" ]] && continue
 
-                _task_block "$task_lineno" \
-                    | awk '
-                        /^(Files?:|## Files?)/ { collecting=1; next }
+                    awk -v tid="$task_id" '
+                        $0 ~ ("### Task " tid "([^0-9]|$)") { in_task=1; next }
+                        in_task && /^### Task/ { in_task=0 }
+                        in_task && /^(Files?:|## Files?)/ { collecting=1; next }
                         collecting && /^(#|---|\*\*|AC|Step|Acceptance)/ { collecting=0 }
                         collecting && /\.ts|\.tsx|\.js|\.py|\.sh|\.md/ { print $0 }
-                    ' | sed 's/^[-* ]*//' | tr -d ' ' >> "$all_files_tmp"
+                    ' "$pf" | sed 's/^[-* ]*//' | tr -d ' ' >> "$all_files_tmp"
+                done
             done
 
             # Check for duplicates
@@ -183,7 +197,7 @@ fi
 echo ""
 echo "--- Dependency Check ---"
 
-if [[ -f "$PLAN_DIR" ]]; then
+if [[ -f "$PLAN_DIR/00-INDEX.md" ]]; then
     # Extract dependency edges: look for "depends_on:" or "Depends on wave"
     # Simple check: ensure wave numbers in depends_on are always lower
     DEP_ERRORS=0
@@ -196,7 +210,7 @@ if [[ -f "$PLAN_DIR" ]]; then
                 DEP_ERRORS=1
             fi
         fi
-    done < "$PLAN_DIR"
+    done < "$PLAN_DIR/00-INDEX.md"
     [[ $DEP_ERRORS -eq 0 ]] && ok "No circular dependencies detected"
 fi
 
@@ -206,14 +220,14 @@ fi
 echo ""
 echo "--- Critical Path Trace ---"
 
-if [[ -f "$PLAN_DIR" ]]; then
-    if grep -q "^## Critical Path Trace" "$PLAN_DIR" 2>/dev/null; then
+if [[ -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    if grep -q "^## Critical Path Trace" "$PLAN_DIR/00-INDEX.md" 2>/dev/null; then
         ok "Critical Path Trace section found"
 
         # Check for scope classification
         # Extract scope from the Scope Classification section only (not the whole file)
         # Note: scope value lives INSIDE a YAML code fence by design, so don't filter fences here
-        SCOPE=$(awk '/^## Scope Classification/{found=1; next} found && /^## /{exit} found{print}' "$PLAN_DIR" | grep -oE 'scope: (feature|scaffolding|poc)' | head -1 | awk '{print $2}' || true)
+        SCOPE=$(awk '/^## Scope Classification/{found=1; next} found && /^## /{exit} found{print}' "$PLAN_DIR/00-INDEX.md" | grep -oE 'scope: (feature|scaffolding|poc)' | head -1 | awk '{print $2}')
         if [[ -z "$SCOPE" ]]; then
             warn "No scope classification found (add 'scope: feature|scaffolding|poc')"
             SCOPE="unknown"
@@ -225,7 +239,7 @@ if [[ -f "$PLAN_DIR" ]]; then
         # Only scan lines between "## Critical Path Trace" and the next "## " heading
         # Extract trace section, excluding content inside code fences (avoid false positives from template examples)
         # Match both arrow traces and short stub-only trace lines used by scaffolding/POC plans.
-        TRACE_SECTION=$(awk '/^## Critical Path Trace/{found=1; next} found && /^## /{exit} found && /^```/{skip=!skip; next} found && !skip{print}' "$PLAN_DIR")
+        TRACE_SECTION=$(awk '/^## Critical Path Trace/{found=1; next} found && /^## /{exit} found && /^```/{skip=!skip; next} found && !skip{print}' "$PLAN_DIR/00-INDEX.md")
         STUB_LINES=""
         if [[ -n "$TRACE_SECTION" ]]; then
             STUB_LINES=$(echo "$TRACE_SECTION" | awk '(/→/ || /^[[:space:]]*[⚠️❌]/ || /STUB|NOT BUILT/) && /⚠️|❌|STUB|NOT BUILT/')
@@ -257,7 +271,7 @@ if [[ -f "$PLAN_DIR" ]]; then
         fi
     else
         # Is this a new-style plan (has scope) or legacy?
-        if grep -qE '^scope: ' "$PLAN_DIR" 2>/dev/null; then
+        if grep -qE '^scope: ' "$PLAN_DIR/00-INDEX.md" 2>/dev/null; then
             error "Has scope classification but missing Critical Path Trace section"
         else
             warn "No Critical Path Trace found (legacy plan — consider adding one)"
@@ -378,9 +392,17 @@ check_kill_criteria_file() {
     ok "$label: kill_criteria has $count entr$([[ $count -eq 1 ]] && echo y || echo ies)"
 }
 
-# kill_criteria always lives in the single-doc plan's own frontmatter (the
-# heading form is no longer authored - G1).
-if [[ -f "$PLAN_DIR" ]]; then
+# Legacy folder plans still on disk carry kill_criteria in 00-INDEX.md
+# frontmatter; validate it there too (folder reading is removed in G3).
+if [[ -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    check_kill_criteria_file "$PLAN_DIR/00-INDEX.md" "00-INDEX.md"
+fi
+
+# Check single-doc plans (the only authored shape): any *.md that carries
+# kill_criteria in its frontmatter. Quick and full single-doc plans alike keep
+# kill_criteria in frontmatter - the `## Kill Criteria` heading form is invisible
+# to the stamp/validate parser and is no longer authored (G1).
+if [[ -f "$PLAN_DIR" && "$PLAN_DIR" != *00-INDEX.md ]]; then
     check_kill_criteria_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
 fi
 
@@ -391,9 +413,9 @@ echo ""
 echo "--- Wave Section Headers ---"
 
 validate_wave_section_headers() {
-    local index_file="$PLAN_DIR"
+    local index_file="$PLAN_DIR/00-INDEX.md"
     if [[ ! -f "$index_file" ]]; then
-        ok "Plan doc not found — header check skipped"
+        ok "No 00-INDEX.md — header check skipped (quick or non-standard plan)"
         return 0
     fi
 
@@ -507,7 +529,7 @@ validate_wave_section_headers() {
         fi
     done <<< "$header_waves"
 
-    # Transitional severity: existing plans authored before this
+    # Transitional severity: existing folder plans authored before this
     # convention adopt have YAML waves but zero `## Wave N:` headers.
     # Surfacing them as ERROR would block every running `/target` pipeline
     # at init the moment this lands. Until `/blueprint` itself is updated
@@ -658,15 +680,19 @@ _check_impeccable_stages_in_file() {
 }
 
 STAGES_CHECKED=0
-if [[ -f "$PLAN_DIR" ]] && grep -qE '^[[:space:]]*impeccable_stages:' "$PLAN_DIR" 2>/dev/null; then
-    _check_impeccable_stages_in_file "$PLAN_DIR"
-    STAGES_CHECKED=1
-fi
+for phase_file in "$PLAN_DIR"/[0-9][0-9]*.md; do
+    [[ -f "$phase_file" ]] || continue
+    [[ "$(basename "$phase_file")" == "00-INDEX.md" ]] && continue
+    if grep -qE '^[[:space:]]*impeccable_stages:' "$phase_file" 2>/dev/null; then
+        _check_impeccable_stages_in_file "$phase_file"
+        STAGES_CHECKED=$((STAGES_CHECKED + 1))
+    fi
+done
 
 if [[ $STAGES_CHECKED -eq 0 ]]; then
     ok "No impeccable_stages pins found (opt-in field)"
 else
-    ok "Validated impeccable_stages in the plan doc"
+    ok "Validated impeccable_stages in $STAGES_CHECKED phase file(s)"
 fi
 
 # -------------------------------------------------------------------
@@ -677,8 +703,12 @@ echo "--- Stamp Fields ---"
 
 # Stamp fields (status, shipped_at, urls, session_ids) are written by the
 # /target ship gate - they are always valid and never flagged as unknown.
+# Folder plans store the stamp on 00-INDEX.md; quick (single-file) plans
+# store it on the plan file itself. Both shapes get the same check.
 target_file=""
-if [[ -f "$PLAN_DIR" && "$PLAN_DIR" == *.md ]]; then
+if [[ -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    target_file="$PLAN_DIR/00-INDEX.md"
+elif [[ -f "$PLAN_DIR" && "$PLAN_DIR" == *.md ]]; then
     target_file="$PLAN_DIR"
 fi
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # check-product-md.sh - PRODUCT.md prereq check for /blueprint (Phase 02.1)
 #
-# Usage: check-product-md.sh <plan.md>
+# Usage: check-product-md.sh <plan.md | plan-dir>
 #
-# Checks whether the plan doc uses executor: impeccable (plan-level or
-# per-task). If so, searches for a valid PRODUCT.md in the project root and
-# fallback locations. If missing or stale, writes a prerequisites: block to
-# the plan doc's frontmatter and warns on stderr. Plan still ships.
+# Checks whether the plan (a single .md - the only authored shape - or a legacy
+# folder) uses executor: impeccable (plan-level or per-task). If so, searches for
+# a valid PRODUCT.md in the project root and fallback locations. If missing or
+# stale, writes a prerequisites: block to the plan doc's frontmatter (the file
+# itself, or 00-INDEX.md for a folder) and warns on stderr. Plan still ships.
 #
 # Exit: always 0 (this is heads-up only; the hard-block lives in operator at
 # dispatch time per Phase 03).
@@ -15,9 +16,16 @@ set -euo pipefail
 # Cleanup tempfiles and lock dir on any exit path (including set -e failures)
 trap 'rm -f "${OUTFILE:-}" "${PREREQ_TMP:-}"; rm -rf "${LOCK_DIR:-}"' EXIT
 
-PLAN_DIR="${1:?Usage: check-product-md.sh <plan.md>}"
-INDEX_FILE="$PLAN_DIR"
-PLAN_TMP_DIR="$(dirname "$PLAN_DIR")"
+PLAN_DIR="${1:?Usage: check-product-md.sh <plan.md | plan-dir>}"
+# The plan is a single .md (the only authored shape) or a legacy folder. Resolve
+# the doc to read/write and the on-filesystem dir for temp files + git root.
+if [[ -f "$PLAN_DIR" ]]; then
+    INDEX_FILE="$PLAN_DIR"
+    PLAN_TMP_DIR="$(dirname "$PLAN_DIR")"
+else
+    INDEX_FILE="$PLAN_DIR/00-INDEX.md"
+    PLAN_TMP_DIR="$PLAN_DIR"
+fi
 REPO_ROOT="${REPO_ROOT:-$(git -C "$PLAN_TMP_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)}"
 # Lock dir variable - initialized empty; set only if the lock is acquired below.
 LOCK_DIR=""
@@ -27,13 +35,24 @@ LOCK_DIR=""
 # -------------------------------------------------------------------
 
 _uses_impeccable() {
-    # Plan-level executor: impeccable in the doc frontmatter.
+    # Plan-level executor: impeccable in the doc/index frontmatter.
     if [[ -f "$INDEX_FILE" ]]; then
         if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$INDEX_FILE" \
                 | grep -qE '^executor:[[:space:]]*impeccable[[:space:]]*$'; then
             return 0
         fi
-        # Per-task overrides live in task blocks in the doc body.
+    fi
+    if [[ -d "$PLAN_DIR" ]]; then
+        # Legacy folder plan: per-task overrides live in numbered phase files.
+        for phase_file in "$PLAN_DIR"/[0-9][0-9]*.md; do
+            [[ -f "$phase_file" ]] || continue
+            [[ "$(basename "$phase_file")" == "00-INDEX.md" ]] && continue
+            if grep -qE '^[[:space:]]*executor:[[:space:]]*impeccable[[:space:]]*$' "$phase_file" 2>/dev/null; then
+                return 0
+            fi
+        done
+    elif [[ -f "$INDEX_FILE" ]]; then
+        # Single-doc plan: per-task overrides live in task blocks in the doc body.
         if grep -qE '^[[:space:]]*executor:[[:space:]]*impeccable[[:space:]]*$' "$INDEX_FILE" 2>/dev/null; then
             return 0
         fi
@@ -100,7 +119,7 @@ fi
 echo "warning: this plan locks executor: impeccable but no PRODUCT.md was found." >&2
 echo "Run /impeccable teach before /target dispatch, or /do waves will hard-block." >&2
 
-# Write prerequisites: block to the plan doc's frontmatter
+# Write prerequisites: block to 00-INDEX.md frontmatter
 # We inject it after the first --- line (opening fence), before the closing ---.
 # If prerequisites: already present, skip to avoid duplication.
 if [[ ! -f "$INDEX_FILE" ]]; then

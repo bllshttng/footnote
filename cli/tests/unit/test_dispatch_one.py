@@ -33,7 +33,7 @@ def _wire(monkeypatch, tmp_path, *, next_node=None, spawn=None, max_lanes=1):
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(
         dispatch, "load_settings",
-        lambda: SimpleNamespace(config=SimpleNamespace(parallel=SimpleNamespace(max_lanes=max_lanes))),
+        lambda: SimpleNamespace(parallel=SimpleNamespace(max_lanes=max_lanes)),
     )
     monkeypatch.setattr(dispatch, "_next_node", lambda project: next_node)
     monkeypatch.setattr(dispatch, "_worker_agent_name", lambda nid, slug: f"target-{nid}")

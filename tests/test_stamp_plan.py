@@ -33,7 +33,7 @@ def _stamp_env():
 
 
 # Realistic kill_criteria block, exact shape used by
-# internal/fno/plans/2026-04-27-autocorrect.md.
+# internal/fno/plans/2026-04-27-autocorrect/00-INDEX.md.
 FRONTMATTER_WITH_KILL_CRITERIA = """---
 title: Autocorrect
 slug: autocorrect
@@ -135,7 +135,9 @@ status: shipped
 def test_stamp_subcommand_against_plan_with_kill_criteria():
     """End-to-end: cmd_stamp on a real plan-shaped file with kill_criteria."""
     with tempfile.TemporaryDirectory() as td:
-        plan_file = Path(td) / "plan.md"
+        plan_dir = Path(td) / "test-plan"
+        plan_dir.mkdir()
+        plan_file = plan_dir / "00-INDEX.md"
         plan_file.write_text(FRONTMATTER_WITH_KILL_CRITERIA)
 
         result = subprocess.run(
@@ -143,7 +145,7 @@ def test_stamp_subcommand_against_plan_with_kill_criteria():
                 *STAMP_MODULE_ARGS,
                 "stamp",
                 "--plan-path",
-                str(plan_file),
+                str(plan_dir),
                 "--session-id",
                 "test-session-id-12345",
                 "--url",
@@ -174,7 +176,7 @@ def test_stamp_subcommand_against_plan_with_kill_criteria():
 def test_block_mapping_of_mappings_projects_shape():
     """The cross-project plans use a block-mapping-of-mappings under `projects:`.
 
-    Real example: internal/fno/plans/2026-04-27-feels-active-influence-and-derivatives.md.
+    Real example: internal/fno/plans/2026-04-27-feels-active-influence-and-derivatives/00-INDEX.md.
     Shape: a bare key followed by indented sub-keys, each with their own indented children:
 
         projects:
@@ -227,8 +229,9 @@ def test_graduate_preserves_kill_criteria():
     cmd_graduate's parse->serialize cycle drops or corrupts the RawBlock.
     """
     with tempfile.TemporaryDirectory() as td:
-        plan_file = Path(td) / "plan.md"
-        plan_file.write_text(FRONTMATTER_WITH_KILL_CRITERIA)
+        plan_dir = Path(td) / "p"
+        plan_dir.mkdir()
+        (plan_dir / "00-INDEX.md").write_text(FRONTMATTER_WITH_KILL_CRITERIA)
 
         # Stamp first (this is the 38d9559-fixed path)
         r = subprocess.run(
@@ -236,7 +239,7 @@ def test_graduate_preserves_kill_criteria():
                 *STAMP_MODULE_ARGS,
                 "stamp",
                 "--plan-path",
-                str(plan_file),
+                str(plan_dir),
                 "--session-id",
                 "s1",
                 "--url",
@@ -254,7 +257,7 @@ def test_graduate_preserves_kill_criteria():
                 *STAMP_MODULE_ARGS,
                 "graduate",
                 "--plan-path",
-                str(plan_file),
+                str(plan_dir),
             ],
             capture_output=True,
             text=True,
@@ -262,7 +265,7 @@ def test_graduate_preserves_kill_criteria():
         )
         assert r.returncode == 0, f"graduate failed: {r.stderr}"
 
-        text = plan_file.read_text()
+        text = (plan_dir / "00-INDEX.md").read_text()
         assert "iteration_ceiling" in text, "kill_criteria lost during graduate"
         assert "scope_creep" in text, "kill_criteria second item lost during graduate"
         assert "files_outside(plan_path) > 12" in text, "kill_criteria predicate lost"

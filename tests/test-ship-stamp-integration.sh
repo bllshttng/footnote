@@ -2,12 +2,11 @@
 # test-ship-stamp-integration.sh -- end-to-end integration tests for the plan
 # completion stamp pipeline.
 #
-# A plan is always a single .md file (the old folder-plan layout was
-# removed). Covers five scenarios:
-#   1. Single-project plan: stamp once, graduate, confirm status: done
-#   2. Single-project quick plan: stamp, confirm no .completed/, graduate,
-#      confirm done
-#   3. Cross-project plan (expected_url_count: 2): stamp twice across two
+# Covers five scenarios:
+#   1. Single-project folder plan: stamp once, graduate, confirm status: done
+#   2. Single-project quick plan (single file): stamp, confirm no COMPLETION.md,
+#      no .completed/, graduate, confirm done
+#   3. Cross-project folder plan (expected_url_count: 2): stamp twice across two
 #      sessions, graduate after each, confirm shipped then done
 #   4. Idempotent re-stamp: identical (session, url) produces no duplicates
 #   5. Backfill path: simulate stop-hook backfill via direct stamp-plan.py call
@@ -56,10 +55,11 @@ scenario_end() {
 # Helpers
 # ---------------------------------------------------------------------------
 
-make_plan() {
-    # $1 = filename under $TMP (e.g. plan.md)
-    local fpath="$TMP/$1"
-    cat > "$fpath" <<'EOF'
+make_folder_plan() {
+    # $1 = subdir name under $TMP
+    local dir="$TMP/$1"
+    mkdir -p "$dir"
+    cat > "$dir/00-INDEX.md" <<'EOF'
 ---
 created: 2026-04-21T10:00:00Z
 scope: feature
@@ -67,7 +67,7 @@ scope: feature
 
 # Integration Test Plan
 EOF
-    echo "$fpath"
+    echo "$dir"
 }
 
 make_quick_plan() {
@@ -150,42 +150,47 @@ PYEOF
 # ---------------------------------------------------------------------------
 # Scenario 1: Single-project folder plan
 # ---------------------------------------------------------------------------
-scenario_start 1 "Single-project plan: stamp once, graduate, confirm done"
+scenario_start 1 "Single-project folder plan: stamp once, graduate, confirm done"
 S1_FAIL_BEFORE="$FAIL"
 
-S1_FILE=$(make_plan "s1-plan.md")
+S1_DIR=$(make_folder_plan "s1-folder")
+S1_INDEX="$S1_DIR/00-INDEX.md"
 
 "${STAMP_PY[@]}" stamp \
-    --plan-path "$S1_FILE" \
+    --plan-path "$S1_DIR" \
     --session-id "SID1" \
     --url "http://example.com/pull/1" \
+    --completion-note "Scenario 1 completion" \
     2>/dev/null
 
-STATUS=$(frontmatter_value "$S1_FILE" "status")
+STATUS=$(frontmatter_value "$S1_INDEX" "status")
 [[ "$STATUS" == "shipped" ]] && pass "s1: status is 'shipped' after stamp" \
     || fail "s1: expected status=shipped, got '$STATUS'"
 
-URL_COUNT=$(frontmatter_list_count "$S1_FILE" "urls")
+URL_COUNT=$(frontmatter_list_count "$S1_INDEX" "urls")
 [[ "$URL_COUNT" -eq 1 ]] && pass "s1: urls has 1 entry" \
     || fail "s1: expected 1 url, got $URL_COUNT"
 
-frontmatter_contains "$S1_FILE" "SID1" && pass "s1: session_ids contains SID1" \
+frontmatter_contains "$S1_INDEX" "SID1" && pass "s1: session_ids contains SID1" \
     || fail "s1: session_ids missing SID1"
 
-SHIPPED_AT=$(frontmatter_value "$S1_FILE" "shipped_at")
+SHIPPED_AT=$(frontmatter_value "$S1_INDEX" "shipped_at")
 [[ -n "$SHIPPED_AT" ]] && pass "s1: shipped_at is present" \
     || fail "s1: shipped_at is missing"
 
-"${STAMP_PY[@]}" graduate --plan-path "$S1_FILE" 2>/dev/null
+[[ -f "$S1_DIR/COMPLETION.md" ]] && pass "s1: COMPLETION.md exists at folder root" \
+    || fail "s1: COMPLETION.md missing"
 
-STATUS=$(frontmatter_value "$S1_FILE" "status")
+"${STAMP_PY[@]}" graduate --plan-path "$S1_DIR" 2>/dev/null
+
+STATUS=$(frontmatter_value "$S1_INDEX" "status")
 [[ "$STATUS" == "done" ]] && pass "s1: status is 'done' after graduate" \
     || fail "s1: expected status=done after graduate, got '$STATUS'"
 
 # Other fields must survive graduation
-frontmatter_contains "$S1_FILE" "SID1" && pass "s1: session_ids unchanged after graduate" \
+frontmatter_contains "$S1_INDEX" "SID1" && pass "s1: session_ids unchanged after graduate" \
     || fail "s1: session_ids lost after graduate"
-SHIPPED_AT2=$(frontmatter_value "$S1_FILE" "shipped_at")
+SHIPPED_AT2=$(frontmatter_value "$S1_INDEX" "shipped_at")
 [[ "$SHIPPED_AT2" == "$SHIPPED_AT" ]] && pass "s1: shipped_at unchanged after graduate" \
     || fail "s1: shipped_at changed after graduate"
 
@@ -194,7 +199,7 @@ scenario_end 1 "$S1_FAIL_BEFORE"
 # ---------------------------------------------------------------------------
 # Scenario 2: Single-project quick plan (single file)
 # ---------------------------------------------------------------------------
-scenario_start 2 "Quick plan (single file): stamp, no .completed/, graduate"
+scenario_start 2 "Quick plan (single file): stamp, no COMPLETION.md, no .completed/, graduate"
 S2_FAIL_BEFORE="$FAIL"
 
 S2_FILE=$(make_quick_plan "s2-quick.md")
@@ -208,6 +213,11 @@ S2_FILE=$(make_quick_plan "s2-quick.md")
 STATUS=$(frontmatter_value "$S2_FILE" "status")
 [[ "$STATUS" == "shipped" ]] && pass "s2: quick plan frontmatter stamped (status=shipped)" \
     || fail "s2: expected status=shipped in quick plan, got '$STATUS'"
+
+# No COMPLETION.md sibling for quick plans
+COMPLETION_SIBLING="$(dirname "$S2_FILE")/COMPLETION.md"
+[[ ! -f "$COMPLETION_SIBLING" ]] && pass "s2: no COMPLETION.md sibling" \
+    || fail "s2: unexpected COMPLETION.md sibling for quick plan"
 
 # No .completed/ anywhere in the temp dir
 COMPLETED_DIRS=$(find "$TMP" -name ".completed" -type d 2>/dev/null | wc -l | tr -d ' ')
@@ -225,53 +235,54 @@ scenario_end 2 "$S2_FAIL_BEFORE"
 # ---------------------------------------------------------------------------
 # Scenario 3: Cross-project folder plan (expected_url_count: 2)
 # ---------------------------------------------------------------------------
-scenario_start 3 "Cross-project plan (2 expected URLs): two stamps, graduate each"
+scenario_start 3 "Cross-project folder plan (2 expected URLs): two stamps, graduate each"
 S3_FAIL_BEFORE="$FAIL"
 
-S3_FILE=$(make_plan "s3-cross.md")
+S3_DIR=$(make_folder_plan "s3-cross")
+S3_INDEX="$S3_DIR/00-INDEX.md"
 
 # First stamp: one of two expected URLs
 "${STAMP_PY[@]}" stamp \
-    --plan-path "$S3_FILE" \
+    --plan-path "$S3_DIR" \
     --session-id "SID3A" \
     --url "http://example.com/repo1/pull/10" \
     --expected-url-count 2 \
     2>/dev/null
 
-STATUS=$(frontmatter_value "$S3_FILE" "status")
+STATUS=$(frontmatter_value "$S3_INDEX" "status")
 [[ "$STATUS" == "shipped" ]] && pass "s3: status=shipped after first stamp" \
     || fail "s3: expected status=shipped after first stamp, got '$STATUS'"
 
-URL_COUNT=$(frontmatter_list_count "$S3_FILE" "urls")
+URL_COUNT=$(frontmatter_list_count "$S3_INDEX" "urls")
 [[ "$URL_COUNT" -eq 1 ]] && pass "s3: urls has 1 entry after first stamp" \
     || fail "s3: expected 1 url after first stamp, got $URL_COUNT"
 
 # Graduate after first stamp - should stay shipped (not enough URLs)
-"${STAMP_PY[@]}" graduate --plan-path "$S3_FILE" 2>/dev/null
+"${STAMP_PY[@]}" graduate --plan-path "$S3_DIR" 2>/dev/null
 
-STATUS=$(frontmatter_value "$S3_FILE" "status")
+STATUS=$(frontmatter_value "$S3_INDEX" "status")
 [[ "$STATUS" == "shipped" ]] && pass "s3: status remains 'shipped' after graduate with 1/2 URLs" \
     || fail "s3: expected status=shipped (not done) after first graduate, got '$STATUS'"
 
 # Second stamp: second URL
 "${STAMP_PY[@]}" stamp \
-    --plan-path "$S3_FILE" \
+    --plan-path "$S3_DIR" \
     --session-id "SID3B" \
     --url "http://example.com/repo2/pull/11" \
     --expected-url-count 2 \
     2>/dev/null
 
-URL_COUNT=$(frontmatter_list_count "$S3_FILE" "urls")
+URL_COUNT=$(frontmatter_list_count "$S3_INDEX" "urls")
 [[ "$URL_COUNT" -eq 2 ]] && pass "s3: urls has 2 entries after second stamp" \
     || fail "s3: expected 2 urls after second stamp, got $URL_COUNT"
 
-frontmatter_contains "$S3_FILE" "SID3B" && pass "s3: session_ids contains SID3B" \
+frontmatter_contains "$S3_INDEX" "SID3B" && pass "s3: session_ids contains SID3B" \
     || fail "s3: session_ids missing SID3B"
 
 # Graduate after second stamp - now should be done
-"${STAMP_PY[@]}" graduate --plan-path "$S3_FILE" 2>/dev/null
+"${STAMP_PY[@]}" graduate --plan-path "$S3_DIR" 2>/dev/null
 
-STATUS=$(frontmatter_value "$S3_FILE" "status")
+STATUS=$(frontmatter_value "$S3_INDEX" "status")
 [[ "$STATUS" == "done" ]] && pass "s3: status=done after graduate with 2/2 URLs" \
     || fail "s3: expected status=done after second graduate, got '$STATUS'"
 
@@ -283,19 +294,20 @@ scenario_end 3 "$S3_FAIL_BEFORE"
 scenario_start 4 "Idempotent re-stamp: identical (session, url) produces no duplicates"
 S4_FAIL_BEFORE="$FAIL"
 
-S4_FILE=$(make_plan "s4-idem.md")
+S4_DIR=$(make_folder_plan "s4-idem")
+S4_INDEX="$S4_DIR/00-INDEX.md"
 
 "${STAMP_PY[@]}" stamp \
-    --plan-path "$S4_FILE" \
+    --plan-path "$S4_DIR" \
     --session-id "SID4" \
     --url "http://example.com/pull/4" \
     2>/dev/null
 
-SHIPPED_AT_FIRST=$(frontmatter_value "$S4_FILE" "shipped_at")
+SHIPPED_AT_FIRST=$(frontmatter_value "$S4_INDEX" "shipped_at")
 
 # Stamp again with the same session + url
 "${STAMP_PY[@]}" stamp \
-    --plan-path "$S4_FILE" \
+    --plan-path "$S4_DIR" \
     --session-id "SID4" \
     --url "http://example.com/pull/4" \
     2>/dev/null
@@ -304,11 +316,11 @@ EXIT_CODE=$?
 [[ "$EXIT_CODE" -eq 0 ]] && pass "s4: re-stamp exits 0" \
     || fail "s4: re-stamp exited non-zero ($EXIT_CODE)"
 
-URL_COUNT=$(frontmatter_list_count "$S4_FILE" "urls")
+URL_COUNT=$(frontmatter_list_count "$S4_INDEX" "urls")
 [[ "$URL_COUNT" -eq 1 ]] && pass "s4: no duplicate URL entries" \
     || fail "s4: expected 1 url entry, got $URL_COUNT (idempotency broken)"
 
-SID_COUNT=$(python3 - "$S4_FILE" "SID4" <<'PYEOF'
+SID_COUNT=$(python3 - "$S4_INDEX" "SID4" <<'PYEOF'
 import sys, re
 path, sid = sys.argv[1], sys.argv[2]
 text = open(path).read()
@@ -320,7 +332,7 @@ PYEOF
 [[ "$SID_COUNT" -eq 1 ]] && pass "s4: no duplicate session_id entries" \
     || fail "s4: expected 1 session_id entry, got $SID_COUNT (idempotency broken)"
 
-SHIPPED_AT_SECOND=$(frontmatter_value "$S4_FILE" "shipped_at")
+SHIPPED_AT_SECOND=$(frontmatter_value "$S4_INDEX" "shipped_at")
 [[ "$SHIPPED_AT_SECOND" == "$SHIPPED_AT_FIRST" ]] && pass "s4: shipped_at unchanged after re-stamp" \
     || fail "s4: shipped_at was overwritten (should be immutable)"
 
@@ -351,10 +363,10 @@ S5_FAIL_BEFORE="$FAIL"
 
 S5_REPO="$TMP/s5-repo"
 mkdir -p "$S5_REPO/.fno/artifacts"
-mkdir -p "$S5_REPO/plans"
+mkdir -p "$S5_REPO/plans/my-plan"
 
-# Unstamped plan
-cat > "$S5_REPO/plans/my-plan.md" <<'EOF'
+# Unstamped folder plan
+cat > "$S5_REPO/plans/my-plan/00-INDEX.md" <<'EOF'
 ---
 created: 2026-04-21T10:00:00Z
 scope: feature
@@ -371,7 +383,7 @@ cat > "$S5_REPO/.fno/target-state.md" <<EOF
 ---
 status: COMPLETE
 input_type: plan
-plan_path: plans/my-plan.md
+plan_path: plans/my-plan
 pr_url: $S5_PR_URL
 session_id: $S5_SESSION
 iteration: 1
@@ -388,45 +400,39 @@ EOF
 # The hook reads plan_path, resolves it relative to REPO_ROOT, and calls:
 #   python3 stamp-plan.py stamp --plan-path <abs_plan> --session-id <sid> --url <pr_url>
 # We replicate that exact invocation here.
-ABS_PLAN="$S5_REPO/plans/my-plan.md"
+ABS_PLAN="$S5_REPO/plans/my-plan"
 "${STAMP_PY[@]}" stamp \
     --plan-path "$ABS_PLAN" \
     --session-id "$S5_SESSION" \
     --url "$S5_PR_URL" \
+    --completion-note "$(cat "$S5_REPO/.fno/artifacts/ship-${S5_SESSION}.md")" \
     2>/dev/null
 
-S5_FILE="$ABS_PLAN"
+S5_INDEX="$ABS_PLAN/00-INDEX.md"
 
-STATUS=$(frontmatter_value "$S5_FILE" "status")
+STATUS=$(frontmatter_value "$S5_INDEX" "status")
 [[ "$STATUS" == "shipped" ]] && pass "s5: backfill stamps plan with status=shipped" \
     || fail "s5: expected status=shipped after backfill, got '$STATUS'"
 
-frontmatter_contains "$S5_FILE" "$S5_SESSION" && pass "s5: backfill includes session_id" \
+frontmatter_contains "$S5_INDEX" "$S5_SESSION" && pass "s5: backfill includes session_id" \
     || fail "s5: backfill missing session_id"
 
-frontmatter_contains "$S5_FILE" "$S5_PR_URL" && pass "s5: backfill includes pr_url" \
+frontmatter_contains "$S5_INDEX" "$S5_PR_URL" && pass "s5: backfill includes pr_url" \
     || fail "s5: backfill missing pr_url"
 
-# Structural check: assert the stop hook wiring that triggers stamp/graduate.
-# Stamping no longer lives inline in the shell hook - it moved into the Rust
-# finalize WRITER (crates/fno-agents/src/finalize.rs's stamp_and_graduate,
-# invoked via `"$BIN" finalize` on every terminal-allow), so the checks below
-# target the current wiring: the hook's finalize invocation, and finalize.rs's
-# own call into fno.plan._stamp.
+# Structural check: assert the stop hook contains the backfill wiring
 HOOK_FILE="$REPO_ROOT/hooks/target-stop-hook.sh"
-FINALIZE_RS="$REPO_ROOT/crates/fno-agents/src/finalize.rs"
+grep -q "Backfill plan stamp" "$HOOK_FILE" 2>/dev/null \
+    && pass "s5: hook contains 'Backfill plan stamp' log line (wiring present)" \
+    || fail "s5: hook missing backfill wiring (grep for 'Backfill plan stamp' failed)"
 
-grep -q '"\$BIN" finalize' "$HOOK_FILE" 2>/dev/null \
-    && pass "s5: hook invokes the finalize writer on terminal-allow (wiring present)" \
-    || fail "s5: hook missing finalize invocation (grep for '\"\$BIN\" finalize' failed)"
+grep -q 'stamp-plan.py\|stamp_script.*stamp\|"$stamp_script" stamp' "$HOOK_FILE" 2>/dev/null \
+    && pass "s5: hook invokes stamp-plan.py (call site present)" \
+    || fail "s5: hook missing stamp-plan.py invocation"
 
-grep -q 'fno\.plan\._stamp' "$FINALIZE_RS" 2>/dev/null \
-    && pass "s5: finalize.rs invokes fno.plan._stamp (call site present)" \
-    || fail "s5: finalize.rs missing fno.plan._stamp invocation"
-
-grep -q 'gh_pr_url' "$FINALIZE_RS" 2>/dev/null \
-    && pass "s5: finalize.rs resolves the PR URL before stamping (trigger condition present)" \
-    || fail "s5: finalize.rs missing PR URL resolution"
+grep -q "ship_artifact\|ship-\${session_id}" "$HOOK_FILE" 2>/dev/null \
+    && pass "s5: hook references ship artifact path (trigger condition present)" \
+    || fail "s5: hook missing ship artifact path reference"
 
 scenario_end 5 "$S5_FAIL_BEFORE"
 

@@ -177,7 +177,7 @@ def _parse_inline_yaml_list(src: str) -> list[str] | None:
 
 
 def _collect_frontmatter_depends(plan_path: str) -> tuple[list[str], Path]:
-    """Read depends_on from a plan file's frontmatter.
+    """Read depends_on from a plan file or a folder's 00-INDEX.md.
 
     Returns (raw_values, plan_dir) where plan_dir is the directory used as
     the base for resolving relative dependency paths.
@@ -195,6 +195,10 @@ def _collect_frontmatter_depends(plan_path: str) -> tuple[list[str], Path]:
     if p.is_file():
         fm = _parse_frontmatter(p)
         plan_dir = p.parent
+    elif p.is_dir():
+        idx = p / "00-INDEX.md"
+        fm = _parse_frontmatter(idx) if idx.exists() else None
+        plan_dir = p
     else:
         return [], Path(plan_path).parent
     if not fm:
@@ -274,8 +278,8 @@ def _resolve_depends_on(
         if slug and slug not in by_slug:
             by_slug[slug] = eid
         # Parent-folder indexing lets users write `depends_on: 2026-04-19-foo`
-        # and have it resolve against a plan nested under `plans/2026-04-19-foo/`.
-        # But for flat-file layouts the parent is often a generic container name
+        # and have it resolve against `plans/2026-04-19-foo/00-INDEX.md`. But
+        # for flat-file layouts the parent is often a generic container name
         # like `plans/` or `specs/`, which would collide across every node
         # and make `depends_on: plans` spuriously match the first intaked
         # plan. Require a hyphen in the parent slug so the heuristic fires

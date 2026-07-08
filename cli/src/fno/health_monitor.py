@@ -107,7 +107,7 @@ def load_config(
     """Load merged ``config.health_monitor`` config as a dict.
 
     Single source of truth is the Pydantic ``HealthMonitorBlock``: this reads
-    ``load_settings().config.health_monitor`` (the standard cached,
+    ``load_settings().health_monitor`` (the standard cached,
     layered loader) and returns its ``model_dump()`` so every key the old
     DEFAULT_CONFIG carried is present and the dict shape is unchanged for
     downstream consumers (``evaluate_thresholds`` etc.).
@@ -121,9 +121,9 @@ def load_config(
 
     try:
         if project_settings is None and user_settings is None:
-            return load_settings().config.health_monitor.model_dump()
+            return load_settings().health_monitor.model_dump()
         explicit = [p for p in (project_settings, user_settings) if p is not None]
-        return settings_from_files(explicit).config.health_monitor.model_dump()
+        return settings_from_files(explicit).health_monitor.model_dump()
     except Exception as exc:
         # Fail-open: a malformed UNRELATED setting (e.g. a bad state_dir glob)
         # makes full-model validation raise; health checks must still run with

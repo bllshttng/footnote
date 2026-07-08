@@ -15,13 +15,13 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-VALIDATOR = REPO_ROOT / "scripts" / "validate-plan.sh"
+VALIDATOR = REPO_ROOT / "skills" / "spec" / "scripts" / "validate-plan.sh"
 
 
-def _make_plan(plan_path: Path, stage_lines: str = "") -> None:
-    """Write a minimal valid single-doc plan for the validator."""
-    plan_path.write_text(
-        textwrap.dedent(f"""\
+def _make_plan(plan_dir: Path, stage_lines: str = "") -> None:
+    """Write a minimal valid plan folder for the validator."""
+    (plan_dir / "00-INDEX.md").write_text(
+        textwrap.dedent("""\
         ---
         title: Test Plan
         scope: feature
@@ -44,25 +44,35 @@ def _make_plan(plan_path: Path, stage_lines: str = "") -> None:
         ```yaml
         scope: feature
         ```
-
-        ### Task 1.1: Build Component
-
-        **Files:** `src/components/Foo.tsx`
-
-        Steps:
-        1. Implement component
-
-        Acceptance Criteria:
-        - AC1-HP: Given..., when..., then...
-
-        {stage_lines}
         """)
     )
+    # Write a phase file that includes the impeccable_stages entry under test
+    phase_content = textwrap.dedent(f"""\
+    ---
+    phase: 1
+    title: Implementation
+    ---
+
+    # Phase 1
+
+    ### Task 1.1: Build Component
+
+    **Files:** `src/components/Foo.tsx`
+
+    Steps:
+    1. Implement component
+
+    Acceptance Criteria:
+    - AC1-HP: Given..., when..., then...
+
+    {stage_lines}
+    """)
+    (plan_dir / "01-implementation.md").write_text(phase_content)
 
 
-def _run_validator(plan_path: Path) -> subprocess.CompletedProcess:
+def _run_validator(plan_dir: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["bash", str(VALIDATOR), str(plan_path)],
+        ["bash", str(VALIDATOR), str(plan_dir)],
         capture_output=True,
         text=True,
     )
@@ -71,10 +81,11 @@ def _run_validator(plan_path: Path) -> subprocess.CompletedProcess:
 def test_ac1_hp_valid_standard_stages():
     """AC1-HP: [craft, critique, harden] -> validator passes."""
     with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
-        _make_plan(plan_path, "impeccable_stages: [craft, critique, harden]")
+        plan_dir = Path(tmp) / "my-plan"
+        plan_dir.mkdir()
+        _make_plan(plan_dir, "impeccable_stages: [craft, critique, harden]")
 
-        result = _run_validator(plan_path)
+        result = _run_validator(plan_dir)
 
         assert result.returncode == 0, (
             f"Expected exit 0 for valid stages.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -86,10 +97,11 @@ def test_ac1_hp_valid_standard_stages():
 def test_ac2_hp_pin_only_stages_pass():
     """AC2-HP: [delight, layout] (pin-only treatments) -> passes."""
     with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
-        _make_plan(plan_path, "impeccable_stages: [delight, layout]")
+        plan_dir = Path(tmp) / "my-plan"
+        plan_dir.mkdir()
+        _make_plan(plan_dir, "impeccable_stages: [delight, layout]")
 
-        result = _run_validator(plan_path)
+        result = _run_validator(plan_dir)
 
         assert result.returncode == 0, (
             f"Expected exit 0 for pin-only stages.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -99,10 +111,11 @@ def test_ac2_hp_pin_only_stages_pass():
 def test_ac3_err_unknown_stage_exits_1():
     """AC3-ERR: [craft, foo, harden] -> exit 1, message names 'foo'."""
     with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
-        _make_plan(plan_path, "impeccable_stages: [craft, foo, harden]")
+        plan_dir = Path(tmp) / "my-plan"
+        plan_dir.mkdir()
+        _make_plan(plan_dir, "impeccable_stages: [craft, foo, harden]")
 
-        result = _run_validator(plan_path)
+        result = _run_validator(plan_dir)
 
         assert result.returncode == 1, (
             f"Expected exit 1 for unknown stage.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -114,10 +127,11 @@ def test_ac3_err_unknown_stage_exits_1():
 def test_ac4_edge_empty_stages_exits_1():
     """AC4-EDGE: impeccable_stages: [] -> exit 1 with 'empty list' message."""
     with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
-        _make_plan(plan_path, "impeccable_stages: []")
+        plan_dir = Path(tmp) / "my-plan"
+        plan_dir.mkdir()
+        _make_plan(plan_dir, "impeccable_stages: []")
 
-        result = _run_validator(plan_path)
+        result = _run_validator(plan_dir)
 
         assert result.returncode == 1, (
             f"Expected exit 1 for empty stages list.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -129,10 +143,11 @@ def test_ac4_edge_empty_stages_exits_1():
 def test_no_impeccable_stages_field_passes():
     """Tasks without impeccable_stages field pass silently (opt-in field)."""
     with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
-        _make_plan(plan_path, "")  # no impeccable_stages at all
+        plan_dir = Path(tmp) / "my-plan"
+        plan_dir.mkdir()
+        _make_plan(plan_dir, "")  # no impeccable_stages at all
 
-        result = _run_validator(plan_path)
+        result = _run_validator(plan_dir)
 
         assert result.returncode == 0, (
             f"Expected exit 0 when impeccable_stages absent.\nstdout:\n{result.stdout}"
@@ -142,21 +157,22 @@ def test_no_impeccable_stages_field_passes():
 def test_ac5_block_list_unknown_stage_exits_1():
     """AC5-ERR: block-list form with unknown stage -> exit 1, message names the unknown stage.
 
-    NOTE: stage_lines is indented with 10 spaces so that after textwrap.dedent (which strips
-    the 8-space common indent of the _make_plan template) the block-list items land with
+    NOTE: stage_lines is indented with 6 spaces so that after textwrap.dedent (which strips
+    the 4-space common indent of the _make_plan template) the block-list items land with
     2-space indent under the key, producing valid YAML:
         impeccable_stages:
           - craft
           - foo
     """
     with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
+        plan_dir = Path(tmp) / "my-plan"
+        plan_dir.mkdir()
         _make_plan(
-            plan_path,
-            "impeccable_stages:\n          - craft\n          - foo",
+            plan_dir,
+            "impeccable_stages:\n      - craft\n      - foo",
         )
 
-        result = _run_validator(plan_path)
+        result = _run_validator(plan_dir)
 
         assert result.returncode == 1, (
             f"Expected exit 1 for unknown stage in block-list form.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -176,10 +192,11 @@ def test_all_known_stages_pass():
         "distill, extract, adapt, shape, teach"
     )
     with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
-        _make_plan(plan_path, f"impeccable_stages: [{all_stages}]")
+        plan_dir = Path(tmp) / "my-plan"
+        plan_dir.mkdir()
+        _make_plan(plan_dir, f"impeccable_stages: [{all_stages}]")
 
-        result = _run_validator(plan_path)
+        result = _run_validator(plan_dir)
 
         assert result.returncode == 0, (
             f"Expected exit 0 for all known stages.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -192,10 +209,11 @@ def test_inline_with_trailing_comment_passes():
     would leave the comment text in stages_raw and the comment's words would
     be tokenized as 'unknown stages'."""
     with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
-        _make_plan(plan_path, "impeccable_stages: [craft, harden]  # default + close")
+        plan_dir = Path(tmp) / "my-plan"
+        plan_dir.mkdir()
+        _make_plan(plan_dir, "impeccable_stages: [craft, harden]  # default + close")
 
-        result = _run_validator(plan_path)
+        result = _run_validator(plan_dir)
 
         assert result.returncode == 0, (
             f"Expected exit 0 for inline list with trailing comment.\n"
@@ -211,10 +229,11 @@ def test_inline_with_trailing_comment_passes():
 def test_inline_with_trailing_comment_still_catches_unknown():
     """Trailing comment must not LET unknown stages slip through either."""
     with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
-        _make_plan(plan_path, "impeccable_stages: [craft, foo]  # has a typo")
+        plan_dir = Path(tmp) / "my-plan"
+        plan_dir.mkdir()
+        _make_plan(plan_dir, "impeccable_stages: [craft, foo]  # has a typo")
 
-        result = _run_validator(plan_path)
+        result = _run_validator(plan_dir)
 
         assert result.returncode == 1, (
             f"Expected exit 1 - unknown 'foo' in inline list with trailing comment.\n"

@@ -544,7 +544,10 @@ def project_root_from_settings(project: str | None) -> str | None:
 
 
 def _read_plan_frontmatter(plan_path: str) -> dict:
-    """Parse YAML frontmatter from a single-file plan.
+    """Parse YAML frontmatter from a plan's INDEX.md or single-file plan.
+
+    Folder plans: read ``{plan_path}/00-INDEX.md``.
+    Single-file plans: read the .md file directly.
 
     Returns the parsed frontmatter as a dict. Returns ``{}`` on every
     failure mode (missing file, malformed YAML, no frontmatter, missing
@@ -554,7 +557,14 @@ def _read_plan_frontmatter(plan_path: str) -> dict:
     silent because the caller's chain already handles "no frontmatter
     declared" as a valid state.
     """
-    target = Path(plan_path)
+    p = Path(plan_path)
+    if p.is_dir():
+        target = p / "00-INDEX.md"
+    elif p.is_file():
+        target = p
+    else:
+        return {}
+
     if not target.exists() or not target.is_file():
         return {}
 
@@ -773,6 +783,41 @@ def _lookup_ledger_entry(plan_path: str) -> dict | None:
         if ep and os.path.normpath(ep) == target:
             return entry
     return None
+
+
+# -- Plan file pattern helpers --
+
+_PLAN_FILE_RE = re.compile(r"^\d{2}[a-zA-Z]?-.+\.md$")
+
+
+def _is_batch_plan_file(name: str) -> bool:
+    if not _PLAN_FILE_RE.match(name):
+        return False
+    return not name.startswith("00")
+
+
+def _numbered_plan_files_fn(plan_dir: Path) -> list[Path]:
+    return sorted(
+        p for p in plan_dir.iterdir()
+        if p.is_file() and _is_batch_plan_file(p.name)
+    )
+
+
+def _folder_is_single_feature_plan_fn(plan_dir: Path) -> bool:
+    idx = plan_dir / "00-INDEX.md"
+    if not idx.exists():
+        return False
+    try:
+        text = idx.read_text()
+    except OSError:
+        return False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## Execution Strategy"):
+            return True
+        if stripped.startswith("execution_mode:") or stripped.startswith("waves:"):
+            return True
+    return False
 
 
 def _match_plan_in_graph(

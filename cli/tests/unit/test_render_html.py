@@ -167,23 +167,27 @@ def test_obsidian_url_returns_none_for_non_internal_paths():
 
 
 def test_obsidian_url_normalizes_tilde_and_absolute_prefixes():
-    """Vault-relative form is recovered regardless of how plan_path was stored."""
+    """Vault-relative form is recovered regardless of how plan_path was stored.
+
+    These fixture paths have no .md extension, so each resolves to its
+    folder's 00-INDEX (which is the convention for folder plans).
+    """
     from fno.graph.render_html import _obsidian_url
     expected = (
         "obsidian://open?vault=myvault"
-        "&file=internal/etl/plans/2026-04-23-ny-records-scraper"
+        "&file=internal/etl/plans/2026-04-23-ny-records-scraper/00-INDEX"
     )
     # tilde prefix
-    assert _obsidian_url("myvault", "~/myvault/internal/etl/plans/2026-04-23-ny-records-scraper.md") == expected
+    assert _obsidian_url("myvault", "~/myvault/internal/etl/plans/2026-04-23-ny-records-scraper") == expected
     # absolute prefix
-    assert _obsidian_url("myvault", "/Users/me/myvault/internal/etl/plans/2026-04-23-ny-records-scraper.md") == expected
+    assert _obsidian_url("myvault", "/Users/me/myvault/internal/etl/plans/2026-04-23-ny-records-scraper") == expected
     # worktree prefix
     assert _obsidian_url(
         "myvault",
-        "~/conductor/workspaces/example-pipeline/tyler-v1/internal/etl/plans/2026-04-23-ny-records-scraper.md",
+        "~/conductor/workspaces/example-pipeline/tyler-v1/internal/etl/plans/2026-04-23-ny-records-scraper/",
     ) == expected
     # already-canonical (no change)
-    assert _obsidian_url("myvault", "internal/etl/plans/2026-04-23-ny-records-scraper.md") == expected
+    assert _obsidian_url("myvault", "internal/etl/plans/2026-04-23-ny-records-scraper") == expected
 
 
 def test_canonicalize_plan_path():
@@ -217,18 +221,26 @@ def test_render_html_emits_copy_button_with_data_copy_attr(tmp_path: Path):
     assert ".eid[data-copy]" in text
 
 
-def test_obsidian_url_non_markdown_path_returns_none():
-    """A directory or non-.md path has nothing addressable; returns None."""
+def test_obsidian_url_handles_folder_plans_via_index():
+    """Folder plans deep-link to their 00-INDEX since Obsidian can't open a dir."""
     from fno.graph.render_html import _obsidian_url
-    assert _obsidian_url("myvault", "internal/fno/plans/2026-05-08-feature/") is None
-    assert _obsidian_url("myvault", "internal/fno/plans/2026-05-08-feature") is None
+    # trailing slash variant
+    url = _obsidian_url("myvault", "internal/fno/plans/2026-05-08-feature/")
+    assert url == (
+        "obsidian://open?vault=myvault"
+        "&file=internal/fno/plans/2026-05-08-feature/00-INDEX"
+    )
+    # no trailing slash variant (same intent)
+    url2 = _obsidian_url("myvault", "internal/fno/plans/2026-05-08-feature")
+    assert url2 == url
 
 
-def test_obsidian_url_file_plan_drops_md():
-    """File plans drop the .md extension for the obsidian file param."""
+def test_obsidian_url_file_plan_drops_md_no_index_appended():
+    """File plans drop .md; do NOT append /00-INDEX."""
     from fno.graph.render_html import _obsidian_url
     url = _obsidian_url("myvault", "internal/fno/plans/2026-05-12-quick.md")
     assert url == "obsidian://open?vault=myvault&file=internal/fno/plans/2026-05-12-quick"
+    assert "00-INDEX" not in url
 
 
 def test_render_html_renders_obsidian_link_when_vault_set(tmp_path: Path, monkeypatch):

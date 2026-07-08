@@ -331,9 +331,7 @@ def _arm_work_start(monkeypatch):
     from fno import config as _config
 
     fake = types.SimpleNamespace(
-        config=types.SimpleNamespace(
-            think_spawn=types.SimpleNamespace(on_work_start=True)
-        )
+        think_spawn=types.SimpleNamespace(on_work_start=True)
     )
     monkeypatch.setattr(_config, "load_settings", lambda *a, **k: fake)
 

@@ -242,7 +242,7 @@ def _record_merge(state_file: str, pr: str, merged_at: str) -> bool:
 def _auto_merge():
     from fno.config import load_settings
 
-    return load_settings().config.auto_merge
+    return load_settings().auto_merge
 
 
 # ---------------------------------------------------------------------------

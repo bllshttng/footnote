@@ -17,8 +17,8 @@
 //!     Rust port reproduces that side-effect faithfully.
 //!
 //! Inputs:
-//!   - positional `plan_path` (a single plan `*.md` file, full-mode or
-//!     quick-plan).
+//!   - positional `plan_path` (folder containing `00-INDEX.md`, a `00-INDEX.md`
+//!     file, or a quick-plan `*.md` file).
 //!   - env `STATE_FILE` (override for target-state.md, else
 //!     `<git-root>/.fno/target-state.md`). `--state-file` is also accepted so a
 //!     caller / test can pin it explicitly without an env var.
@@ -197,11 +197,16 @@ fn utc_timestamp() -> String {
 /// Returns None when the plan path doesn't resolve OR no block is present.
 fn read_plan_block(plan_path: &str) -> Option<String> {
     let plan = Path::new(plan_path);
-    if !plan.is_file() {
+    let index = plan.join("00-INDEX.md");
+    let target: PathBuf = if plan.is_dir() && index.is_file() {
+        index
+    } else if plan.is_file() {
+        plan.to_path_buf()
+    } else {
         return None;
-    }
+    };
 
-    let content = std::fs::read_to_string(plan).ok()?;
+    let content = std::fs::read_to_string(&target).ok()?;
 
     // Full-mode: frontmatter (between the first two `---` lines) -> the
     // kill_criteria: block.

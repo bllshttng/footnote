@@ -175,16 +175,24 @@ def _obsidian_url(vault: str, plan_path: str) -> str | None:
     """Build an ``obsidian://open?vault=...&file=...`` deep link.
 
     Returns None when the plan_path has no recognizable vault-relative
-    segment, or does not point at a markdown file (the ``file`` param
-    can only address a file, not a directory).
+    segment.
+
+    File vs folder targeting: Obsidian's ``file`` param can only address
+    a specific markdown file, not a directory. The convention in this
+    project is that folder plans contain a ``00-INDEX.md`` entry doc,
+    so a folder path is linked to ``<folder>/00-INDEX``. File-plans
+    drop the trailing ``.md`` (the ``file`` param wants no extension).
     """
     canonical = _canonicalize_plan_path(plan_path, vault=vault)
     if canonical is None:
         return None
     p = canonical.rstrip("/")
-    if not p.endswith(".md"):
-        return None
-    target = p[:-3]  # the `file` param wants no extension
+    if p.endswith(".md"):
+        target = p[:-3]
+    else:
+        # Folder plan: deep-link to its 00-INDEX since deep links can't
+        # open a directory directly.
+        target = f"{p}/00-INDEX"
     return (
         f"obsidian://open?vault={urllib.parse.quote(vault, safe='')}"
         f"&file={urllib.parse.quote(target, safe='/')}"

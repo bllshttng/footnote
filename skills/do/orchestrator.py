@@ -3,7 +3,7 @@
 Wave orchestration logic for /fno:do waves
 
 Handles:
-- Parsing execution strategy from the plan doc
+- Parsing execution strategy from 00-INDEX.md
 - Determining wave execution order
 - Tracking wave completion status
 - Resume from STATE.md
@@ -21,7 +21,7 @@ from typing import List, Optional, Dict
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
-# Single-doc plan support imports (fno.plan._doc)
+# Single-doc plan support imports (fno.plan._locate and _doc)
 # ---------------------------------------------------------------------------
 
 # Lazily resolve the CLI src directory relative to this file's canonical
@@ -337,32 +337,37 @@ def _extract_task_section(phase_file: Path, task_id: str) -> List[str]:
     return section
 
 
-def get_task_file_targets(plan_path: str, task_id: str) -> List[str]:
+def get_task_file_targets(plan_dir: str, task_id: str) -> List[str]:
     """Return normalized file targets from a task's Files section."""
     targets: List[str] = []
-    section = _extract_task_section(Path(plan_path), task_id)
-    if not section:
-        return targets
-
-    collecting = False
-    for raw_line in section:
-        line = raw_line.strip()
-        if not collecting and re.match(r"^(\*\*Files?:\*\*|Files?:|## Files?)", line):
-            collecting = True
+    for phase_file in sorted(Path(plan_dir).glob("[0-9][0-9]*.md")):
+        if phase_file.name == "00-INDEX.md":
             continue
-        if collecting and (
-            line.startswith("**Acceptance Criteria")
-            or line.startswith("Acceptance Criteria")
-            or line.startswith("**Steps:")
-            or line.startswith("Steps:")
-            or line.startswith("---")
-        ):
-            break
-        if collecting and line.startswith(("- ", "* ")):
-            target = re.sub(r"^(Create|Modify|Update|Delete):\s*", "", line[2:]).strip()
-            target = target.strip("`")
-            if target:
-                targets.append(target)
+        section = _extract_task_section(phase_file, task_id)
+        if not section:
+            continue
+
+        collecting = False
+        for raw_line in section:
+            line = raw_line.strip()
+            if not collecting and re.match(r"^(\*\*Files?:\*\*|Files?:|## Files?)", line):
+                collecting = True
+                continue
+            if collecting and (
+                line.startswith("**Acceptance Criteria")
+                or line.startswith("Acceptance Criteria")
+                or line.startswith("**Steps:")
+                or line.startswith("Steps:")
+                or line.startswith("---")
+            ):
+                break
+            if collecting and line.startswith(("- ", "* ")):
+                target = re.sub(r"^(Create|Modify|Update|Delete):\s*", "", line[2:]).strip()
+                target = target.strip("`")
+                if target:
+                    targets.append(target)
+        if targets:
+            return targets
     return targets
 
 
@@ -375,7 +380,7 @@ def _shared_output_root(path: str) -> Optional[str]:
     return None
 
 
-def detect_hidden_output_conflicts(plan_path: str, task_ids: List[str]) -> Dict[str, List[str]]:
+def detect_hidden_output_conflicts(plan_dir: str, task_ids: List[str]) -> Dict[str, List[str]]:
     """Detect explicit file conflicts and shared-output-root collisions for parallel tasks."""
     by_file: Dict[str, List[str]] = {}
     by_root: Dict[str, List[str]] = {}
@@ -383,7 +388,7 @@ def detect_hidden_output_conflicts(plan_path: str, task_ids: List[str]) -> Dict[
     root_conflicts: List[str] = []
 
     for task_id in task_ids:
-        for target in get_task_file_targets(plan_path, task_id):
+        for target in get_task_file_targets(plan_dir, task_id):
             owners = by_file.setdefault(target, [])
             owners.append(task_id)
             if len(owners) == 2:
@@ -413,7 +418,7 @@ SEQUENTIAL_FALLBACK_PROVIDERS = frozenset({"gemini"})
 
 def resolve_wave_execution_mode(
     wave: Wave,
-    plan_path: str,
+    plan_dir: str,
     provider: Optional[str] = None,
 ) -> Dict[str, object]:
     """Resolve effective wave mode from requested mode and hidden file/shared-output conflicts."""
@@ -432,7 +437,7 @@ def resolve_wave_execution_mode(
     if wave.mode != "parallel":
         return decision
 
-    conflicts = detect_hidden_output_conflicts(plan_path, wave.tasks)
+    conflicts = detect_hidden_output_conflicts(plan_dir, wave.tasks)
     decision["conflicts"] = conflicts
     if conflicts["file_conflicts"] or conflicts["shared_output_conflicts"]:
         decision["effective_mode"] = "sequential"
@@ -456,7 +461,7 @@ def resolve_wave_execution_mode(
 
 
 def parse_execution_strategy(index_path: str) -> Optional[ExecutionStrategy]:
-    """Parse execution strategy YAML from a plan doc without PyYAML."""
+    """Parse execution strategy YAML from 00-INDEX.md without PyYAML."""
     path = Path(index_path)
     if not path.exists():
         print(f"Warning: Index file not found: {index_path}", file=sys.stderr)
@@ -664,7 +669,7 @@ def format_state_update(
 
 def print_wave_summary(
     strategy: ExecutionStrategy,
-    plan_path: Optional[str] = None,
+    plan_dir: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> None:
     """Print a summary of the execution strategy"""
@@ -679,8 +684,8 @@ def print_wave_summary(
         print(f"  Reason: {wave.reason}")
         if wave.mode == 'parallel':
             print(f"  Parallelism: {task_count} concurrent")
-            if plan_path:
-                decision = resolve_wave_execution_mode(wave, plan_path, provider)
+            if plan_dir:
+                decision = resolve_wave_execution_mode(wave, plan_dir, provider)
                 print(f"  Effective mode: {decision['effective_mode']}")
                 print(f"  Dispatch: {decision['dispatch']}")
                 print(f"  Decision: {decision['reason']}")
@@ -989,19 +994,63 @@ def handle_blocked_task(
 def load_plan_strategy(
     plan_input: str,
 ) -> Optional[ExecutionStrategy]:
-    """Resolve *plan_input* (a single-doc plan file) to an ExecutionStrategy.
+    """Resolve *plan_input* to an ExecutionStrategy regardless of plan shape.
 
-    Returns ``None`` (and emits a diagnostic to stderr) on a missing/unreadable
-    plan file or a missing/malformed ``## Execution Strategy`` section.
+    Accepts both folder plans (directory containing ``00-INDEX.md``) and
+    single-doc plans (``.md`` files).  Folder plan support preserves existing
+    behavior; single-doc support is new.
+
+    Folder plans emit a deprecation warning to stderr pointing users at
+    ``fno plan migrate-folder``.
+
+    Returns ``None`` (and emits a diagnostic to stderr) on:
+    - missing or unreadable ``00-INDEX.md`` for folder plans
+    - missing or malformed ``## Execution Strategy`` for single-doc plans
 
     Args:
-        plan_input: Path string to a plan ``.md`` file.
+        plan_input: Path string to a plan directory or ``.md`` file.
 
     Returns:
         Parsed :class:`ExecutionStrategy` or ``None`` on any failure.
     """
-    plan_path = Path(plan_input)
+    try:
+        from fno.plan._locate import PlanNotFound, locate_plan
+    except ImportError as exc:
+        print(f"Warning: fno.plan._locate not importable: {exc}", file=sys.stderr)
+        # Fall back to legacy folder-only parsing
+        path = Path(plan_input)
+        if path.is_dir():
+            index_path = path / "00-INDEX.md"
+            return parse_execution_strategy(str(index_path))
+        return parse_execution_strategy(plan_input)
 
+    try:
+        resolved = locate_plan(plan_input)
+    except PlanNotFound as exc:
+        print(
+            f"BLOCKED blocked_reason=plan_unreadable: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    if resolved.kind == "folder":
+        # Deprecation warning per AC4-EDGE
+        print(
+            f"Warning: folder plan format deprecated; run "
+            f"`fno plan migrate-folder {resolved.root_path}` to convert it to a single-doc plan",
+            file=sys.stderr,
+        )
+        assert resolved.index_path is not None
+        try:
+            return parse_execution_strategy(str(resolved.index_path))
+        except OSError as exc:
+            print(
+                f"BLOCKED blocked_reason=plan_unreadable: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
+    # Single-doc plan
     try:
         from fno.plan._doc import load_plan
     except ImportError as exc:
@@ -1009,7 +1058,7 @@ def load_plan_strategy(
         return None
 
     try:
-        doc = load_plan(plan_path)
+        doc = load_plan(resolved.root_path)
     except OSError as exc:
         print(
             f"BLOCKED blocked_reason=plan_unreadable: {exc}",
@@ -1026,7 +1075,7 @@ def load_plan_strategy(
     strategy_body = doc.get_section("Execution Strategy")
     if strategy_body is None:
         print(
-            f"Warning: No execution strategy section found in {plan_path}",
+            f"Warning: No execution strategy section found in {resolved.root_path}",
             file=sys.stderr,
         )
         return None
@@ -1054,7 +1103,7 @@ def load_plan_strategy(
         raw = _brief_parse_strategy(strategy_body)
     except BriefParseError as exc:
         print(
-            f"Error: malformed Execution Strategy YAML in {plan_path}: {exc}",
+            f"Error: malformed Execution Strategy YAML in {resolved.root_path}: {exc}",
             file=sys.stderr,
         )
         return None
@@ -1083,7 +1132,7 @@ def load_plan_strategy(
 
     if not waves:
         print(
-            f"Error: No valid waves found in Execution Strategy of {plan_path}",
+            f"Error: No valid waves found in Execution Strategy of {resolved.root_path}",
             file=sys.stderr,
         )
         return None
@@ -1102,7 +1151,7 @@ if __name__ == "__main__":
     import json
 
     if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'):
-        print("Usage: orchestrator.py <path-to-plan.md> [--state <STATE.md>]")
+        print("Usage: orchestrator.py <path-to-00-INDEX.md> [--state <STATE.md>]")
         print()
         print("Commands:")
         print("  orchestrator.py <index>                  Parse and display execution strategy")
@@ -1177,7 +1226,7 @@ if __name__ == "__main__":
         if not wave:
             print(f"Error: wave {wave_number} not found", file=sys.stderr)
             sys.exit(1)
-        decision = resolve_wave_execution_mode(wave, index_path, provider)
+        decision = resolve_wave_execution_mode(wave, str(Path(index_path).parent), provider)
         print(json.dumps(decision, indent=2))
     elif "--next" in sys.argv:
         next_wave = get_next_wave(strategy, completed_tasks)
@@ -1189,4 +1238,4 @@ if __name__ == "__main__":
         else:
             print("All waves complete!")
     else:
-        print_wave_summary(strategy, index_path, provider)
+        print_wave_summary(strategy, str(Path(index_path).parent), provider)

@@ -48,7 +48,7 @@ def _config_get(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, conte
 def test_research_output_dir_defaults_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No config.research block: output_dir is None so the ship step fails loud."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.config.research.output_dir is None
+    assert settings.research.output_dir is None
 
 
 def test_research_output_dir_set_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,7 +59,7 @@ def test_research_output_dir_set_absolute(tmp_path: Path, monkeypatch: pytest.Mo
         "schema_version: 1\nconfig:\n  research:\n"
         "    output_dir: ~/c3po/raw/readyrule\n",
     )
-    assert settings.config.research.output_dir == "~/c3po/raw/readyrule"
+    assert settings.research.output_dir == "~/c3po/raw/readyrule"
 
 
 def test_research_output_dir_rejects_glob(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

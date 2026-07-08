@@ -28,9 +28,9 @@ export REPO_ROOT="$WORK/repo"
 mkdir -p "$REPO_ROOT/.fno/artifacts"
 mkdir -p "$REPO_ROOT/.fno/scratchpad/execution"
 
-PLAN_FILE="$WORK/plan.md"
-echo "# plan" > "$PLAN_FILE"
-PLAN_DIR="${PLAN_FILE}.artifacts"
+PLAN_DIR="$WORK/plan-folder"
+mkdir -p "$PLAN_DIR"
+echo "# plan" > "$PLAN_DIR/00-INDEX.md"
 
 CURRENT_SID=20260509T220000Z-22222-deadbe
 OLD_SID_A=20260508T100000Z-99999-fedcba
@@ -40,7 +40,7 @@ cat > "$REPO_ROOT/.fno/target-state.md" <<EOF
 ---
 status: COMPLETE
 session_id: ${CURRENT_SID}
-plan_path: ${PLAN_FILE}
+plan_path: ${PLAN_DIR}
 created_at: 2026-05-09T22:00:00Z
 ---
 EOF
@@ -157,14 +157,14 @@ WORK3=$(mktemp -d -t archive-session-collision-XXXXXX)
 export REPO_ROOT="$WORK3/repo"
 mkdir -p "$REPO_ROOT/.fno/artifacts"
 mkdir -p "$REPO_ROOT/.fno/scratchpad"
-PLAN_FILE3="$WORK3/plan.md"
-echo "# plan" > "$PLAN_FILE3"
-PLAN_DIR3="${PLAN_FILE3}.artifacts"
+PLAN_DIR3="$WORK3/plan"
+mkdir -p "$PLAN_DIR3"
+echo "# plan" > "$PLAN_DIR3/00-INDEX.md"
 cat > "$REPO_ROOT/.fno/target-state.md" <<EOF
 ---
 status: COMPLETE
 session_id: ${CURRENT_SID}
-plan_path: ${PLAN_FILE3}
+plan_path: ${PLAN_DIR3}
 created_at: 2026-05-09T22:00:00Z
 ---
 EOF

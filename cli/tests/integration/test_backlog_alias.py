@@ -261,8 +261,9 @@ def test_ac1_hp_triage_validate_passes_clean_proposal(tmp_graph, tmp_path):
 
 def test_intake_project_flag_overrides_frontmatter(tmp_graph, tmp_path):
     """--project beats frontmatter beats cwd inference."""
-    plan = tmp_path / "plan-A.md"
-    plan.write_text(
+    plan = tmp_path / "plan-A"
+    plan.mkdir()
+    (plan / "00-INDEX.md").write_text(
         "---\nproject: from-frontmatter\n---\n# title\nbody\n"
     )
     r = _invoke("--json", "backlog", "intake", str(plan), "--project", "from-flag")
@@ -276,8 +277,9 @@ def test_intake_project_flag_overrides_frontmatter(tmp_graph, tmp_path):
 
 def test_intake_warns_when_project_not_in_settings(tmp_graph, tmp_path, monkeypatch):
     """Resolved project not in any settings workspace -> stderr warning, exit 0."""
-    plan = tmp_path / "plan-B.md"
-    plan.write_text(
+    plan = tmp_path / "plan-B"
+    plan.mkdir()
+    (plan / "00-INDEX.md").write_text(
         "---\nproject: brand-new-project\n---\n# title\n"
     )
 
@@ -304,8 +306,9 @@ def test_intake_warns_when_project_not_in_settings(tmp_graph, tmp_path, monkeypa
 
 def test_intake_empty_project_flag_errors(tmp_graph, tmp_path):
     """--project '' is rejected with exit 1."""
-    plan = tmp_path / "plan-C.md"
-    plan.write_text("---\nproject: foo\n---\n")
+    plan = tmp_path / "plan-C"
+    plan.mkdir()
+    (plan / "00-INDEX.md").write_text("---\nproject: foo\n---\n")
 
     r = _invoke("backlog", "intake", str(plan), "--project", "")
     assert r.exit_code == 1, r.output
@@ -403,13 +406,14 @@ def test_cmd_update_project_on_missing_node_errors(tmp_graph):
 def test_intake_routes_to_frontmatter_project_end_to_end(tmp_graph, tmp_path, monkeypatch):
     """Journey 1: shared-vault intake routes to frontmatter project regardless of cwd.
 
-    Without --project, a plan whose frontmatter declares project: foo must
+    Without --project, a plan whose 00-INDEX.md declares project: foo must
     land in graph.json with project=foo even when cwd resolves to a different
     git repo. This is the core bug the plan fixes.
     """
     # Plan declares project: from-frontmatter
-    plan = tmp_path / "plan-shared-vault.md"
-    plan.write_text(
+    plan = tmp_path / "plan-shared-vault"
+    plan.mkdir()
+    (plan / "00-INDEX.md").write_text(
         "---\nproject: from-frontmatter\n---\n# title\nbody\n"
     )
     # Isolate from any settings.yaml that would emit a workspace warning

@@ -1,9 +1,12 @@
 """Integration tests for orchestrator single-doc plan support.
 
 Covers:
+- AC4-HP: folder plan reads correctly (no behavior change)
+- AC4-EDGE (deprecation warning): folder plan emits stderr warning containing
+  "deprecated" and "migrate-folder"
 - AC4-EDGE (single-doc): single-doc plan with ## Execution Strategy YAML
-  parses to the expected wave/task structure
-- AC4-FR: missing/unreadable plan file -> structured failure with blocked_reason
+  parses to same wave/task structure as folder plan
+- AC4-FR: unreadable 00-INDEX.md -> structured failure with blocked_reason
 - Malformed Execution Strategy YAML -> exit 3 with line/section info
 """
 from __future__ import annotations
@@ -57,6 +60,29 @@ MULTI_WAVE_YAML = dedent("""\
 """)
 
 
+def _make_folder_plan(tmp_path: Path, strategy_yaml: str = MINIMAL_STRATEGY_YAML) -> Path:
+    """Create a minimal folder plan with 00-INDEX.md."""
+    plan_dir = tmp_path / "my-feature"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    index = plan_dir / "00-INDEX.md"
+    index.write_text(
+        "---\n"
+        "title: Test Feature\n"
+        "status: ready\n"
+        "execution_mode: sequential\n"
+        "---\n"
+        "\n"
+        "# Test Feature\n"
+        "\n"
+        "## Execution Strategy\n"
+        "\n"
+        "```yaml\n"
+        f"{strategy_yaml}"
+        "```\n"
+    )
+    return plan_dir
+
+
 def _make_single_doc_plan(tmp_path: Path, strategy_yaml: str = MINIMAL_STRATEGY_YAML) -> Path:
     """Create a minimal single-doc plan with ## Execution Strategy section."""
     plan_file = tmp_path / "my-feature.md"
@@ -82,12 +108,60 @@ def _make_single_doc_plan(tmp_path: Path, strategy_yaml: str = MINIMAL_STRATEGY_
 
 
 # ---------------------------------------------------------------------------
-# AC4-EDGE: single-doc plan parses correctly
+# AC4-HP: folder plan reads correctly (no behavior change)
+# ---------------------------------------------------------------------------
+
+
+def test_AC4_HP_folder_plan_parses_correctly(tmp_path: Path) -> None:
+    """Folder plan with 00-INDEX.md produces a valid ExecutionStrategy."""
+    plan_dir = _make_folder_plan(tmp_path)
+
+    strategy = load_plan_strategy(str(plan_dir))
+
+    assert strategy is not None
+    assert isinstance(strategy, ExecutionStrategy)
+    assert len(strategy.waves) == 1
+    assert strategy.waves[0].number == 1
+    assert strategy.waves[0].mode == "sequential"
+    assert strategy.waves[0].tasks == ["1.1"]
+
+
+def test_AC4_HP_folder_multi_wave_plan(tmp_path: Path) -> None:
+    """Folder plan with multiple waves parses all waves correctly."""
+    plan_dir = _make_folder_plan(tmp_path, MULTI_WAVE_YAML)
+
+    strategy = load_plan_strategy(str(plan_dir))
+
+    assert strategy is not None
+    assert len(strategy.waves) == 2
+    assert strategy.waves[1].tasks == ["2.1", "2.2"]
+
+
+# ---------------------------------------------------------------------------
+# AC4-EDGE: folder plan emits deprecation warning on stderr
+# ---------------------------------------------------------------------------
+
+
+def test_AC4_EDGE_folder_plan_emits_deprecation_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """load_plan_strategy warns about deprecated folder format when reading a folder plan."""
+    plan_dir = _make_folder_plan(tmp_path)
+
+    load_plan_strategy(str(plan_dir))
+
+    _, err = capsys.readouterr()
+    assert "deprecated" in err.lower()
+    assert "migrate-folder" in err
+
+
+# ---------------------------------------------------------------------------
+# AC4-EDGE: single-doc plan parses to same structure as folder plan
 # ---------------------------------------------------------------------------
 
 
 def test_AC4_EDGE_single_doc_plan_parses_correctly(tmp_path: Path) -> None:
-    """Single-doc plan produces a valid ExecutionStrategy."""
+    """Single-doc plan produces a valid ExecutionStrategy equivalent to folder plan."""
     plan_file = _make_single_doc_plan(tmp_path)
 
     strategy = load_plan_strategy(str(plan_file))
@@ -100,44 +174,60 @@ def test_AC4_EDGE_single_doc_plan_parses_correctly(tmp_path: Path) -> None:
     assert strategy.waves[0].tasks == ["1.1"]
 
 
-def test_single_doc_multi_wave_plan(tmp_path: Path) -> None:
-    """Single-doc plan with multiple waves parses all waves correctly."""
-    plan_file = _make_single_doc_plan(tmp_path, MULTI_WAVE_YAML)
+def test_single_doc_multi_wave_matches_folder_structure(tmp_path: Path) -> None:
+    """Single-doc multi-wave plan produces same structure as equivalent folder plan."""
+    folder_root = tmp_path / "folder"
+    folder_root.mkdir()
+    single_root = tmp_path / "single"
+    single_root.mkdir()
+    folder_plan = _make_folder_plan(folder_root, MULTI_WAVE_YAML)
+    single_doc = _make_single_doc_plan(single_root, MULTI_WAVE_YAML)
 
-    strategy = load_plan_strategy(str(plan_file))
+    folder_strategy = load_plan_strategy(str(folder_plan))
+    single_strategy = load_plan_strategy(str(single_doc))
 
-    assert strategy is not None
-    assert len(strategy.waves) == 2
-    assert strategy.waves[1].tasks == ["2.1", "2.2"]
+    assert folder_strategy is not None
+    assert single_strategy is not None
+    assert len(folder_strategy.waves) == len(single_strategy.waves)
+    for fw, sw in zip(folder_strategy.waves, single_strategy.waves):
+        assert fw.number == sw.number
+        assert fw.mode == sw.mode
+        assert fw.tasks == sw.tasks
 
 
 # ---------------------------------------------------------------------------
-# AC4-FR: missing/unreadable plan file -> blocked result
+# AC4-FR: unreadable 00-INDEX.md -> blocked result
 # ---------------------------------------------------------------------------
 
 
-def test_AC4_FR_missing_plan_file_returns_none(tmp_path: Path) -> None:
-    """When the plan file doesn't exist, load_plan_strategy returns None (blocked)."""
-    result = load_plan_strategy(str(tmp_path / "does-not-exist.md"))
+def test_AC4_FR_missing_index_returns_none_or_raises(tmp_path: Path) -> None:
+    """When 00-INDEX.md is deleted, load_plan_strategy returns None (blocked)."""
+    plan_dir = tmp_path / "broken-plan"
+    plan_dir.mkdir()
+    # Don't create 00-INDEX.md - directory without index
+
+    result = load_plan_strategy(str(plan_dir))
 
     assert result is None
 
 
-def test_AC4_FR_unreadable_plan_file_returns_none(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-    """When the plan file exists but is unreadable, load_plan_strategy returns None."""
+def test_AC4_FR_unreadable_index_returns_none(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """When 00-INDEX.md exists but is unreadable, load_plan_strategy returns None."""
     import os
-    plan_file = tmp_path / "locked-plan.md"
-    plan_file.write_text("# plan\n")
+    plan_dir = tmp_path / "locked-plan"
+    plan_dir.mkdir()
+    index = plan_dir / "00-INDEX.md"
+    index.write_text("# plan\n")
     # Make the file unreadable
-    os.chmod(str(plan_file), 0o000)
+    os.chmod(str(index), 0o000)
 
     try:
-        result = load_plan_strategy(str(plan_file))
+        result = load_plan_strategy(str(plan_dir))
         assert result is None
         _, err = capsys.readouterr()
         assert "plan_unreadable" in err or "blocked" in err.lower() or "unreadable" in err.lower()
     finally:
-        os.chmod(str(plan_file), 0o644)
+        os.chmod(str(index), 0o644)
 
 
 # ---------------------------------------------------------------------------

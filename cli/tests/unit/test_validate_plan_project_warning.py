@@ -1,4 +1,4 @@
-"""Validator emits a WARN line when a plan doc has no `project:` field.
+"""Validator emits a WARN line when 00-INDEX.md has no `project:` field.
 
 The validator stays warn-only on first ship; tighten to error in a follow-on.
 """
@@ -30,22 +30,26 @@ _INDEX_TEMPLATE = (
 )
 
 
-def _plan_minus_project(tmp_path: Path) -> Path:
-    plan = tmp_path / "plan-no-project.md"
-    plan.write_text(_INDEX_TEMPLATE.format(project_line=""))
+def _full_index_minus_project(tmp_path: Path) -> Path:
+    plan = tmp_path / "plan-no-project"
+    plan.mkdir()
+    (plan / "00-INDEX.md").write_text(_INDEX_TEMPLATE.format(project_line=""))
+    (plan / "01-step.md").write_text("# step\n")
     return plan
 
 
-def _plan_with_project(tmp_path: Path) -> Path:
-    plan = tmp_path / "plan-with-project.md"
-    plan.write_text(
+def _full_index_with_project(tmp_path: Path) -> Path:
+    plan = tmp_path / "plan-with-project"
+    plan.mkdir()
+    (plan / "00-INDEX.md").write_text(
         _INDEX_TEMPLATE.format(project_line="project: example-pipeline\n")
     )
+    (plan / "01-step.md").write_text("# step\n")
     return plan
 
 
 def test_validate_plan_warns_on_missing_project_field(tmp_path):
-    plan = _plan_minus_project(tmp_path)
+    plan = _full_index_minus_project(tmp_path)
     result = subprocess.run(
         ["bash", str(VALIDATOR), str(plan)],
         capture_output=True, text=True, cwd=str(REPO_ROOT),
@@ -56,7 +60,7 @@ def test_validate_plan_warns_on_missing_project_field(tmp_path):
 
 
 def test_validate_plan_ok_on_present_project_field(tmp_path):
-    plan = _plan_with_project(tmp_path)
+    plan = _full_index_with_project(tmp_path)
     result = subprocess.run(
         ["bash", str(VALIDATOR), str(plan)],
         capture_output=True, text=True, cwd=str(REPO_ROOT),

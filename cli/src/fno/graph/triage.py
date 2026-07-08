@@ -83,6 +83,12 @@ def _read_plan_excerpt(plan_path: Optional[str], max_lines: int = 150) -> str:
         return ""
     try:
         p = Path(plan_path)
+        if p.is_dir():
+            index = p / "00-INDEX.md"
+            if index.exists():
+                p = index
+            else:
+                return ""
         if not p.exists():
             return ""
         with p.open() as f:

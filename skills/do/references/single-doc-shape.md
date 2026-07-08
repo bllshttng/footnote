@@ -1,41 +1,56 @@
 # Single-Doc Plan Detection and Dispatch
 
-Reference for how `/do waves` reads plans. Architectural overview: `docs/architecture/lean-blueprint.md`.
+Reference for how `/do waves` reads single-doc plans. Architectural overview: `docs/architecture/lean-blueprint.md`.
 
-A plan is always a single `.md` file (G1 blocks authoring new folder plans; G3 removed folder-plan *reading* entirely). There is no shape detection step anymore - callers pass a file path directly.
+## `locate_plan(input)` API
 
-## `load_plan_strategy(plan_input: str)` API
+`fno.plan._locate.locate_plan(input: str) -> ResolvedPlan` resolves the user's argument to a typed plan descriptor.
 
-`skills/do/orchestrator.py`'s `load_plan_strategy` is the dispatcher `/do waves` calls. It:
+```python
+@dataclass
+class ResolvedPlan:
+    kind: Literal["folder", "single"]
+    root_path: Path       # directory (folder) or parent dir (single)
+    index_path: Path      # 00-INDEX.md (folder) or the .md file itself (single)
+```
 
-1. Calls `fno.plan._doc.load_plan(Path(plan_input))` to parse frontmatter and sections.
-2. Extracts the `## Execution Strategy` section via `doc.get_section("Execution Strategy")`.
-3. Delegates the fenced YAML body to `fno.plan.brief.parse_execution_strategy` (the canonical Execution Strategy parser - single source of truth, shared with `fno plan brief`) to get `execution_mode` / `scope` / `projects` / `waves`.
-4. Builds and returns an `ExecutionStrategy` dataclass (`waves: List[Wave]`, `scope`, `project_tasks`).
+Detection priority:
 
-`orchestrator.py` also has a lower-level `parse_execution_strategy(index_path: str)` - a self-contained, stdlib-only regex parser used directly by `main()`'s CLI entry point (`orchestrator.py <path-to-plan.md>`). It reads the same `## Execution Strategy` fenced YAML block from any single file; it does not go through `fno.plan._doc`.
+1. If `input` resolves to a directory containing `00-INDEX.md`: `kind="folder"`, `root_path=input`, `index_path=<dir>/00-INDEX.md`.
+2. If `input` resolves to a `.md` file: `kind="single"`, `root_path=<file>.parent`, `index_path=<file>`.
+3. Otherwise: raises `PlanNotFound` with the input and a suggestion to check the path.
 
-## Failure surfaces (`load_plan_strategy`)
+`load_plan_strategy(input: str)` is the higher-level dispatcher. It calls `locate_plan`, then routes to the appropriate reader:
 
-| Condition | Result | Detail |
-|-----------|--------|--------|
-| `fno.plan._doc` not importable | Returns `None` | Warning to stderr |
-| Plan file missing / unreadable (`OSError`) | Returns `None` | `BLOCKED blocked_reason=plan_unreadable: <exc>` to stderr |
-| Plan doc malformed (frontmatter parse failure) | Returns `None` | `Error: malformed plan doc (Execution Strategy YAML): <exc>` to stderr |
-| `## Execution Strategy` section absent | Returns `None` | `Warning: No execution strategy section found in <path>` to stderr |
-| `fno.plan.brief` not importable | Returns `None` | Warning to stderr |
-| Execution Strategy YAML malformed (`BriefParseError`) | Returns `None` | `Error: malformed Execution Strategy YAML in <path>: <exc>` to stderr |
-| No valid waves parsed | Returns `None` | `Error: No valid waves found in Execution Strategy of <path>` |
+- `kind="folder"`: reads `00-INDEX.md` for frontmatter and wave/task structure (existing behavior, unchanged).
+- `kind="single"`: calls `fno.plan._doc.load_plan(index_path)` to parse frontmatter and sections, then extracts the `## Execution Strategy` fenced YAML block to build the wave/task structure.
 
-Every failure mode returns `None` and prints a diagnostic to stderr - never raises past this function, never returns a partially-built `ExecutionStrategy`.
+## Folder deprecation warning
 
-## Task-scoped file targets
+When `load_plan_strategy` resolves a folder plan, it emits a deprecation warning to stderr:
 
-`get_task_file_targets(plan_path, task_id)` extracts a single task's `Files:` section for parallel-wave conflict detection (`detect_hidden_output_conflicts`, `resolve_wave_execution_mode`). Since a plan is one file, this scans that file for the `### Task <task_id>` heading via `_extract_task_section` - no directory globbing.
+```
+folder plan format deprecated; run `fno plan migrate-folder` to convert
+```
+
+Behavior is otherwise unchanged. The warning is active starting in PR2. In PR1, folder plans load silently with no warning.
+
+## Failure surfaces
+
+| Condition | Exception / exit | Detail |
+|-----------|-----------------|--------|
+| Input path does not exist | `PlanNotFound` | Includes input string and path-check suggestion |
+| `00-INDEX.md` missing from directory | `PlanNotFound` | Folder exists but is not a valid folder plan |
+| `.md` file unreadable (permissions) | `PlanNotFound` | OS error wrapped; original error in `__cause__` |
+| Frontmatter YAML invalid | `MalformedPlan` (exit 3) | Line number and offending field in stderr |
+| `## Execution Strategy` section absent | `MalformedPlan` (exit 2) | Names the missing section; suggests re-running `/blueprint` |
+| Execution Strategy YAML block invalid | `MalformedPlan` (exit 3) | Line number within the fenced block |
+
+`PlanNotFound` and `MalformedPlan` both carry a `hint` field that the operator prints to stderr before propagating the error to the caller.
 
 ## See also
 
+- `cli/src/fno/plan/_locate.py` - `locate_plan`, `ResolvedPlan`, `load_plan_strategy`
 - `cli/src/fno/plan/_doc.py` - `load_plan`, `PlanDoc`
-- `cli/src/fno/plan/brief.py` - `parse_execution_strategy` (the canonical Execution Strategy YAML parser)
-- `skills/do/orchestrator.py` - `load_plan_strategy`, `parse_execution_strategy`, `get_task_file_targets`
+- `skills/do/orchestrator.py` - caller site for `load_plan_strategy`
 - `skills/blueprint/references/single-doc-spec.md` - mutation contract and section ownership

@@ -126,13 +126,14 @@ fn cwd_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Build a full-mode plan file carrying the given kill_criteria YAML list
-/// body (already indented list items).
+/// Build a full-mode plan folder with a `00-INDEX.md` carrying the given
+/// kill_criteria YAML list body (already indented list items).
 fn write_full_plan(repo: &Path, criteria_body: &str) -> String {
-    let plan = repo.join("plan.md");
+    let plan = repo.join("plan");
+    fs::create_dir_all(&plan).unwrap();
     let content =
         format!("---\ntitle: test\nkill_criteria:\n{criteria_body}status: ready\n---\n# body\n");
-    fs::write(&plan, content).unwrap();
+    fs::write(plan.join("00-INDEX.md"), content).unwrap();
     plan.to_string_lossy().into_owned()
 }
 
@@ -330,7 +331,7 @@ fn files_outside_under() {
 }
 
 #[test]
-fn files_outside_excludes_plan_path_itself() {
+fn files_outside_excludes_plan_folder_contents() {
     let tmp = tempfile::TempDir::new().unwrap();
     let repo = tmp.path();
     init_repo(repo);
@@ -338,13 +339,14 @@ fn files_outside_excludes_plan_path_itself() {
         repo,
         "  - name: scope\n    predicate: files_outside(plan_path) > 0\n    reason: scope creep\n",
     );
-    // The plan's own file should be excluded from its diff; nothing else
-    // staged -> count 0, not > 0.
-    run_git(repo, &["add", "plan.md"]);
+    // A file INSIDE the plan folder should be excluded; nothing outside ->
+    // count 0, not > 0. (Stage the plan's own index + an inside file.)
+    fs::write(Path::new(&plan).join("extra.md"), "x").unwrap();
+    run_git(repo, &["add", "plan"]);
     assert_golden(
         repo,
         &plan,
-        "files_outside > 0 (only the plan itself -> no fire)",
+        "files_outside > 0 (only inside-plan -> no fire)",
     );
 }
 
@@ -430,8 +432,13 @@ fn no_kill_criteria_block_exits_zero() {
     let repo = tmp.path();
     init_repo(repo);
     // Plan with NO kill_criteria block -> exit 0 immediately, empty stdout.
-    let plan = repo.join("plan.md");
-    fs::write(&plan, "---\ntitle: test\nstatus: ready\n---\n# body\n").unwrap();
+    let plan = repo.join("plan");
+    fs::create_dir_all(&plan).unwrap();
+    fs::write(
+        plan.join("00-INDEX.md"),
+        "---\ntitle: test\nstatus: ready\n---\n# body\n",
+    )
+    .unwrap();
     assert_golden(
         repo,
         &plan.to_string_lossy(),

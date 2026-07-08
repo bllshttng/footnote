@@ -82,7 +82,8 @@ class Collision:
 
 # Recognized headings under which the file list lives. Plans in this repo
 # settled on "Files to Modify"; we accept a couple of synonyms in case a
-# templating tool ever drifts.
+# templating tool ever drifts. Folder plans (00-INDEX.md) sometimes use
+# "Files Touched" instead.
 _FILE_HEADINGS = (
     "files to modify",
     "files to change",
@@ -171,6 +172,10 @@ def _extract_files_from_section(text: str, heading_index: int) -> set[str]:
 def parse_files_to_modify(plan_path: Path) -> set[str]:
     """Extract file paths from the 'Files to Modify' table of a plan.
 
+    Supports:
+      - Single-file quick plans: read the plan file directly.
+      - Folder plans: read 00-INDEX.md plus every NN-*.md phase file.
+
     Returns a normalized set of repo-relative paths. Strips backticks, line
     suffixes (``:123``), parenthetical annotations, and folder slashes.
     Missing or unreadable plan files return an empty set; the caller treats
@@ -180,7 +185,23 @@ def parse_files_to_modify(plan_path: Path) -> set[str]:
     if not plan_path.exists():
         return set()
 
-    return _scan_one(plan_path)
+    files: set[str] = set()
+    if plan_path.is_dir():
+        # Folder plan: read 00-INDEX.md + every NN-*.md file.
+        index = plan_path / "00-INDEX.md"
+        if index.exists():
+            files |= _scan_one(index)
+        for child in sorted(plan_path.iterdir()):
+            if not child.is_file() or not child.suffix == ".md":
+                continue
+            if child.name == "00-INDEX.md":
+                continue
+            if not re.match(r"^\d", child.name):
+                continue
+            files |= _scan_one(child)
+    else:
+        files |= _scan_one(plan_path)
+    return files
 
 
 def _scan_one(path: Path) -> set[str]:
@@ -215,7 +236,7 @@ def _load_thresholds(
     """Resolve severity thresholds from the model.
 
     Single source of truth is the Pydantic ``CollisionThresholdsBlock`` read via
-    ``load_settings().config.collision.severity_thresholds``; a malformed or
+    ``load_settings().collision.severity_thresholds``; a malformed or
     negative per-key value degrades to the model default (with a WARNING) inside
     the model's own sanitizer, so this can never break the load. Returns a fresh
     dict each call so callers can mutate freely.
@@ -229,10 +250,10 @@ def _load_thresholds(
 
     try:
         if project_settings is None and user_settings is None:
-            block = load_settings().config.collision.severity_thresholds
+            block = load_settings().collision.severity_thresholds
         else:
             explicit = [p for p in (project_settings, user_settings) if p is not None]
-            block = settings_from_files(explicit).config.collision.severity_thresholds
+            block = settings_from_files(explicit).collision.severity_thresholds
         return dict(block.model_dump())
     except Exception as exc:
         # Fail-open: a malformed UNRELATED setting must not abort collision

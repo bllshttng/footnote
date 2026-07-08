@@ -111,12 +111,13 @@ def _repo_from_pr_url(pr_url: Optional[str]) -> Optional[str]:
 
 
 def _read_plan_text(item: dict, node: Optional[dict], gh_runner) -> Optional[str]:
-    """Plan text for a blueprint corpus item: on-disk plan file first, then
-    ``gh pr diff <n>`` fallback (AC1-EDGE), else None -> the item is excluded
-    and counted in the coverage gap."""
+    """Plan text for a blueprint corpus item: on-disk plan file first (dir ->
+    00-INDEX.md, else the file), then ``gh pr diff <n>`` fallback (AC1-EDGE),
+    else None -> the item is excluded and counted in the coverage gap."""
     plan_path = item.get("plan_path")
     if plan_path:
-        doc = Path(plan_path)
+        p = Path(plan_path)
+        doc = p / "00-INDEX.md" if p.is_dir() else p
         try:
             if doc.exists():
                 return doc.read_text(encoding="utf-8")
@@ -720,7 +721,7 @@ def _replay_cost_cap() -> float:
     try:
         from fno.config import load_settings
 
-        entry = load_settings().config.loops.get("observer_harness")
+        entry = load_settings().loops.get("observer_harness")
         budget = entry.budget_usd_per_run if entry is not None else None
     except Exception:
         budget = None

@@ -181,10 +181,12 @@ def test_ac1_hp_collect_frontmatter_depends_empty_list(tmp_path):
     assert raw == []
 
 
-def test_ac2_collect_frontmatter_depends_directory_returns_empty(tmp_path):
-    """AC2: a directory plan_path (folder plans no longer exist) returns empty deps, no crash."""
+def test_ac1_hp_collect_frontmatter_depends_folder_with_index(tmp_path):
+    """AC1-HP: _collect_frontmatter_depends reads 00-INDEX.md for folders."""
     plan_dir = tmp_path / "feature"
     plan_dir.mkdir()
+    idx = plan_dir / "00-INDEX.md"
+    idx.write_text("---\ntitle: Feature\ndepends_on:\n  - ab-aaaabbbb\n---\n")
     raw, resolved_dir = _collect_frontmatter_depends(str(plan_dir))
-    assert raw == []
-    assert resolved_dir == plan_dir.parent
+    assert raw == ["ab-aaaabbbb"]
+    assert resolved_dir == plan_dir
