@@ -24,6 +24,17 @@ fn main() {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
 
+    // `version [--json]`: report the baked-in build rev so `fno update` can
+    // verify this bin is the SAME build as its triad siblings. Checked BEFORE
+    // the --stream gate so `version` is not rejected as "not --stream".
+    if matches!(
+        args.first().map(String::as_str),
+        Some("version" | "-V" | "--version")
+    ) {
+        fno_agents::version::print_version(args.iter().any(|a| a == "--json"));
+        return;
+    }
+
     // Post-G4 (x-f54c): the PTY worker lane retired with daemon PTY hosting. The
     // only surviving lane is `--stream` (claude stream-json adoption), launched
     // by the daemon's spawn_claude_stream_lane.

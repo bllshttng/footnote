@@ -86,6 +86,7 @@ pub mod subscribe;
 pub mod supervisor;
 pub mod terminal_stop;
 pub mod verify_evidence;
+pub mod version;
 pub mod wait;
 pub mod write_queue;
 

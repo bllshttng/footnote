@@ -13,6 +13,18 @@ use fno_agents::paths::AgentsHome;
 use std::time::Duration;
 
 fn main() {
+    // `version [--json]`: report the baked-in build rev so `fno update` can
+    // verify this bin is the SAME build as its triad siblings, not just present.
+    // Execs cheaply and returns without touching a running daemon or the runtime.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("version" | "-V" | "--version")
+    ) {
+        fno_agents::version::print_version(args.iter().any(|a| a == "--json"));
+        return;
+    }
+
     // A failed daemon must surface a non-zero exit and a clear stderr line; it
     // must never panic silently (Silent-Failure-Hunter posture).
     let rt = match tokio::runtime::Builder::new_multi_thread()
